@@ -1,0 +1,352 @@
+// The per-receiver fine stage: mix, filter and resample, one receiver per
+// dispatch.
+//
+// Written from published mathematics only, per docs/clean-room.md. The
+// polyphase arbitrary resampler is Crochiere and Rabiner, "Multirate Digital
+// Signal Processing", chapter 3 (the polyphase decomposition) and chapter 6
+// (fractional sample rate conversion by a rational L/M through a single
+// interpolating prototype); the band-shifted-filter identity below is the
+// modulation theorem, Oppenheim and Schafer, "Discrete-Time Signal
+// Processing", chapter 2. No GPL implementation was read, fetched or
+// consulted while writing this file.
+//
+// WHY THIS STAGE IS CHEAP, which is the reason the whole architecture works.
+//
+// core/shaders/pfb_branch.comp and core/shaders/pfb_fft.comp already produced
+// M channels on a uniform grid, once, for every receiver in the machine. A
+// receiver attaches to the nearest grid channel and undoes only the
+// difference: the residual offset between what it asked for and where the grid
+// put the channel, the bandwidth it actually wants, and the audio rate it has
+// to land on. Everything expensive is upstream and shared. This kernel's cost
+// is T complex multiply-accumulates per output sample at the demodulation
+// rate, so two hundred receivers cost roughly what two cost.
+//
+// THE THREE OPERATIONS, AND WHY THEY COME OUT IN THIS ORDER.
+//
+// The obvious order is mix, then filter, then resample. Written that way the
+// mixer runs at the CHANNEL rate and every filter tap needs its own phasor: T
+// table lookups and T complex multiplies per output sample instead of one.
+//
+// The modulation theorem lets the mix move past the filter. With
+// x~[m] = x[m]*exp(-j*w_o*m) the mixed channel stream, g_c the continuous
+// prototype, t_j the output instant in channel samples and n_j = floor(t_j):
+//
+//     y[j] = sum_k g_c(t_j - n_j + k) * x~[n_j - k]
+//          = exp(-j*w_o*t_j) * sum_k [ g_c(v_k) * exp(+j*w_t*v_k) ] * x[n_j-k]
+//
+// with v_k = (t_j - n_j) + k, PROVIDED the tap table carries the exponential.
+// So the host hands down ONE complex tap table, which is the real prototype
+// modulated to the filter's centre frequency f_t, and the kernel applies ONE
+// output rotation per sample, at the frequency f_o being translated to DC.
+//
+// Keeping f_t and f_o separate is not generality for its own sake. Four of the
+// eight demodulators need them different:
+//
+//   AM, NFM, WFM, DSB, Raw   f_t = residual,          f_o = residual
+//   USB                      f_t = residual + bw/2,   f_o = residual
+//   LSB                      f_t = residual - bw/2,   f_o = residual
+//   CW                       f_t = residual,          f_o = residual - pitch
+//
+// USB and LSB are an asymmetric passband and nothing else, and CW is an
+// ordinary translation that lands the carrier on the operator's pitch. The
+// demodulator kernel then takes a real part for all four and does not know
+// which one it is looking at. See core/dsp/vrx_reference.h, design_fine_taps.
+//
+// THE NCO, WHICH IS THE PART THAT GOES WRONG QUIETLY.
+//
+// A receiver runs for hours. `phase += increment` in float32 drifts: the
+// increment is rounded once and then that rounding is added n times, so the
+// phase error grows linearly with n and reads downstream as a slow frequency
+// error, which looks exactly like a mistuned transmitter and is attributed to
+// one. Measured against the exact phase, a float32 accumulator at 2500 Hz on a
+// 48 kHz stream is 0.26 radian out after four million samples, which is 83
+// seconds.
+//
+// So the phase is never accumulated in floating point, and it is not
+// accumulated across blocks at all. It is a function of the ABSOLUTE output
+// index, in exact integer arithmetic:
+//
+//   phi(j) = (j * D) mod 2^64,   D = round(2^64 * f_o / Fd)
+//
+// where f_o is the exact rational a/b hertz being translated to DC and Fd is
+// the integer demodulation rate, so D is formed once by integer long division
+// of 2^64*a by b*Fd with no floating point anywhere. A turn is modulo one and
+// a 0.64 fixed-point turn wraps modulo 2^64, so the wrap IS the reduction
+// rather than an overflow to be avoided.
+//
+// Two properties follow, and the second is the one that costs a day to find
+// if it is missing.
+//
+//   The phase does not drift. D is rounded once, which makes the oscillator's
+//   frequency differ from the request by at most Fd*2^-65, and relative to
+//   that frequency the phase error is exactly zero at every index forever. At
+//   48 kHz that offset is 1.3e-15 Hz, so after an hour the phase is out by
+//   3e-11 radian. Measured against exact rational arithmetic, the phase at
+//   sample 1e9 of a 2500 Hz mixer is 1.1e-10 radian from the true value.
+//
+//   phi(j) depends on j and on nothing else, so rendering a stream in one
+//   dispatch and rendering it in blocks of seven produce identical bits. An
+//   earlier version of this kernel carried the exactly-reduced phase at the
+//   block's first output and accumulated a 0.32 increment from there, which
+//   is accurate and is NOT this: the increment's rounding accumulated inside
+//   the block, and a third of the outputs changed when the block size did,
+//   because the table index straddles a boundary at exactly the phases a
+//   rational frequency keeps landing on. Retroactive decode and
+//   faster-than-realtime replay both re-enter the stream at an arbitrary
+//   index, so an output that depends on where the blocks fell is not usable
+//   for either.
+//
+// GLSL has no 64-bit integer here, so the host passes the phase and the
+// increment as two 32-bit words each and the kernel does the arithmetic with
+// umulExtended and uaddCarry, which are exact integer operations. Only the
+// high word reaches the table, so the low word exists to carry.
+//
+// The phasor itself is a host-built table lookup, never sin or cos in the
+// shader. GLSL permits several units in the last place on those and each
+// vendor spends them differently, which would end bit-exactness before
+// accumulation order was even in question. core/shaders/pfb_fft.comp makes the
+// same trade for the same reason.
+//
+// THE RESAMPLER, which is also a pure function of the absolute index.
+//
+// The channel rate Fc and the demodulation rate Fd are both integers and their
+// ratio is rarely one. Output j is taken at input instant t_j = j*Fc/Fd, so
+//
+//     n_j   = floor(j*Fc/Fd)          integer part, an input sample index
+//     frac  = (j*Fc) mod Fd           fractional part, over Fd
+//
+// and the polyphase table holds P phases of the prototype, phase p being the
+// prototype sampled at a fractional delay of p/P. The kernel picks the two
+// phases bracketing frac/Fd and interpolates linearly between them, which
+// turns the phase quantization from a timing jitter of 1/(2P) input samples
+// into a second-order term and buys about 40 dB of image rejection for one
+// extra multiply-add per tap.
+//
+// Nothing here is carried between blocks. A resampler with hidden phase state
+// produces a different answer depending on how the caller chose to block the
+// stream, which makes retroactive decode and faster-than-realtime replay
+// impossible: both re-enter the stream at an arbitrary index. The recurrence
+// below is seeded from the absolute index by the host and derived per
+// invocation from i alone.
+//
+// The CPU twin is reference_vrx_fine in core/dsp/vrx_reference.cpp, and it is
+// bit-identical rather than close. It transcribes this loop: the same
+// ascending k, the same lerp-then-multiply-accumulate shape, the same integer
+// recurrence including its wraps.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation so one module runs on a
+// device with a 64-invocation limit and on one with 1024. Id 0 is the
+// project-wide convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// Taps per phase, T. Specialized rather than pushed so the inner loop unrolls
+// and so the tap count is visibly a property of the pipeline: changing it
+// means a different filter, which means a different tap table, which means a
+// rebuild anyway.
+layout(constant_id = 1) const uint kTaps = 32;
+
+// Phases in the polyphase table, P, a power of two by convention but not by
+// requirement: nothing below masks by it.
+layout(constant_id = 2) const uint kPhases = 256;
+
+// log2 of the NCO table length. 16 gives a phase quantization of 2*pi/65536
+// and a spur floor near -96 dBc, at 512 KiB for a table every receiver on the
+// device shares. Specialized so a device short of memory can trade spurs for
+// space without touching this file.
+layout(constant_id = 3) const uint kNcoLog2 = 16;
+
+// One channel's time series out of core/shaders/pfb_fft.comp. That kernel
+// writes channel-major, k * out_ring_blocks + (m & out_ring_mask), so a
+// receiver's reads are contiguous and the scatter was paid once upstream.
+layout(std430, binding = 0) readonly buffer ChannelRing {
+    vec2 values[];
+} chan;
+
+// The polyphase tap table, kPhases * kTaps + 1 complex entries.
+//
+// The one extra entry is not padding. Linear interpolation between phase p and
+// phase p+1 reaches index p + 1 + (kTaps-1)*kPhases, which at p = kPhases-1 is
+// kPhases*kTaps. That index is the prototype one whole input sample further
+// out, which is outside its support, so the host writes zero there and the
+// arithmetic needs no special case at the last phase.
+layout(std430, binding = 1) readonly buffer FineTaps {
+    vec2 h[];
+} taps;
+
+// exp(-j*2*pi*i/K) for K = 1 << kNcoLog2, built on the host from the first
+// octant and reflected so the four quadrature entries are exactly (1,0),
+// (0,-1), (-1,0) and (0,1). Shared by every receiver.
+layout(std430, binding = 2) readonly buffer NcoTable {
+    vec2 w[];
+} nco;
+
+// This receiver's complex baseband at the demodulation rate, a ring so the
+// demodulator stage can reach back for the history its detector needs: one
+// sample for the FM discriminator, the DC-removal window for AM, the audio
+// decimation filter's support for WFM.
+layout(std430, binding = 3) writeonly buffer FineRing {
+    vec2 values[];
+} fine;
+
+layout(push_constant) uniform Params {
+    // Origin of this receiver's channel inside the channel ring, which is
+    // channel_index * out_ring_blocks. Kept as one number so this kernel does
+    // not need to know the grid.
+    uint chan_base;
+
+    // Per-channel ring capacity in blocks minus one. A power of two minus one,
+    // which is what makes the wrap below exact rather than approximately
+    // right.
+    uint chan_mask;
+
+    // Ring offset of channel sample n_0, the integer part of this block's
+    // first output instant.
+    //
+    // A ring offset and not a SampleIndex. SampleIndex is uint64 and GLSL has
+    // no 64-bit integer here, so the host owns the absolute index and passes
+    // the 32-bit offset. core/shaders/pfb_branch.comp makes the same trade.
+    uint in_offset;
+
+    // Ring offset of this block's first output sample, and the output ring's
+    // mask.
+    uint out_offset;
+    uint out_mask;
+
+    // Output samples this dispatch produces. One invocation each.
+    uint count;
+
+    // The resampler recurrence, all exact integers. step_whole is Fc / Fd and
+    // step_rem is Fc mod Fd, so that
+    //
+    //     n_rel = i*step_whole + (frac0 + i*step_rem) / out_rate
+    //     frac  = (frac0 + i*step_rem) mod out_rate
+    //
+    // reproduces floor(j*Fc/Fd) and (j*Fc) mod Fd for j = j_0 + i without ever
+    // forming j*Fc, which would not fit. frac0 is (j_0*Fc) mod Fd and is below
+    // out_rate by construction. The host bounds count so that
+    // frac0 + count*step_rem stays inside 32 bits.
+    uint step_whole;
+    uint step_rem;
+    uint out_rate;
+    uint frac0;
+
+    // The output NCO's phase at this block's first output, and its per-output
+    // increment, as unsigned 0.64 fixed-point turns split into two 32-bit
+    // words each. See the header comment: the phase is (j * delta) mod 2^64
+    // computed by the host in exact integer arithmetic, so it is a function
+    // of the absolute index and of nothing else.
+    uint nco_phase_high;
+    uint nco_phase_low;
+    uint nco_delta_high;
+    uint nco_delta_low;
+
+    // 1.0f / out_rate, computed on the host so the kernel never divides.
+    // Vulkan permits OpFDiv 2.5 units in the last place and requires OpFMul to
+    // be correctly rounded, so a divide here could not be refereed by a CPU
+    // twin at all while a multiply by a shared float can. core/dsp/convert.h
+    // carries the same argument at length.
+    float inv_out_rate;
+} params;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+
+    // The dispatch rounds the group count up, so the final workgroup runs past
+    // the end of the work; every kernel bounds-checks rather than requiring
+    // callers to pad their buffers.
+    if (i >= params.count) {
+        return;
+    }
+
+    // Where in the input this output is taken from. Integer arithmetic only,
+    // so it is exact, and it depends on i alone rather than on anything
+    // carried from the previous output.
+    const uint accumulated = params.frac0 + i * params.step_rem;
+    const uint carry = accumulated / params.out_rate;
+    const uint frac = accumulated - carry * params.out_rate;
+    const uint n_rel = i * params.step_whole + carry;
+
+    // Which two polyphase branches bracket this fractional delay, and how far
+    // between them. frac/out_rate is the delay in input samples; scaling by
+    // kPhases and splitting gives the branch and the remainder. The host
+    // bounds out_rate * kPhases inside 32 bits.
+    const uint scaled = frac * kPhases;
+    const uint phase = scaled / params.out_rate;
+    const uint blend_num = scaled - phase * params.out_rate;
+
+    // `precise` is load-bearing throughout, not decoration. Every expression
+    // below is the shape a shader compiler fuses into a fused multiply-add,
+    // and a fused multiply-add keeps full precision on the product and rounds
+    // once where separate operations round twice. Whether the fusion happens
+    // is a decision each vendor makes for itself, so left alone this kernel
+    // gives one answer on NVIDIA and another on AMD, both plausible and
+    // neither flagged. The qualifier forbids fusion and reassociation of
+    // everything contributing to the value, and the twin compiles under the
+    // matching discipline with the same ascending k.
+    precise float blend = float(blend_num) * params.inv_out_rate;
+    precise float blend_complement = 1.0 - blend;
+
+    const uint base = params.in_offset + n_rel;
+
+    precise float acc_real = 0.0;
+    precise float acc_imag = 0.0;
+
+    for (uint k = 0u; k < kTaps; ++k) {
+        const uint slot = phase + k * kPhases;
+
+        // The two bracketing phases, blended into one effective tap. Doing the
+        // blend on the coefficient rather than running two whole filters costs
+        // one extra multiply-add per tap instead of doubling the work.
+        const vec2 g0 = taps.h[slot];
+        const vec2 g1 = taps.h[slot + 1u];
+
+        precise float tap_real = g0.x * blend_complement + g1.x * blend;
+        precise float tap_imag = g0.y * blend_complement + g1.y * blend;
+
+        // (base - k) & chan_mask looks like an unsigned underflow bug and is
+        // not. When k exceeds base the subtraction wraps modulo 2^32, and the
+        // ring capacity is a power of two dividing 2^32, so reducing that
+        // wrapped value by the mask lands on exactly the sample the unwrapped
+        // arithmetic would have named. This is the ordinary case, not an edge
+        // case: the first outputs after a receiver is placed all take it.
+        const vec2 s = chan.values[params.chan_base + ((base - k) & params.chan_mask)];
+
+        acc_real = acc_real + (s.x * tap_real - s.y * tap_imag);
+        acc_imag = acc_imag + (s.x * tap_imag + s.y * tap_real);
+    }
+
+    // The output rotation, phi = (phase0 + i*delta) in 0.64 fixed-point turns.
+    // Both words wrap modulo 2^32 and the pair wraps modulo 2^64, which is the
+    // reduction modulo one turn rather than an overflow to avoid. Every
+    // operation here is exact integer arithmetic, so this is the same value
+    // the host computes in uint64 and the same value at a given absolute
+    // index however the stream was blocked.
+    uint product_high;
+    uint product_low;
+    umulExtended(i, params.nco_delta_low, product_high, product_low);
+
+    uint phase_carry;
+    const uint phase_low = uaddCarry(params.nco_phase_low, product_low, phase_carry);
+
+    // phase_low is not read again. Only the high word indexes the table; the
+    // low word exists so that the carry out of it is right, which is what
+    // keeps the sequence exact rather than drifting by a count of samples.
+    const uint phase_high =
+        params.nco_phase_high + i * params.nco_delta_high + product_high + phase_carry;
+
+    // The shift is guarded for the degenerate kNcoLog2 == 0 table, where a
+    // shift by 32 would be undefined; kNcoLog2 is a specialization constant,
+    // so the driver folds the select away.
+    const uint nco_index = (kNcoLog2 == 0u) ? 0u : (phase_high >> (32u - kNcoLog2));
+    const vec2 rotation = nco.w[nco_index];
+
+    // Literally core/shaders/cmul.comp, the kernel this project already proved
+    // bit-exact on both devices: two multiplies and a subtract, two multiplies
+    // and an add.
+    precise float out_real = acc_real * rotation.x - acc_imag * rotation.y;
+    precise float out_imag = acc_real * rotation.y + acc_imag * rotation.x;
+
+    fine.values[(params.out_offset + i) & params.out_mask] = vec2(out_real, out_imag);
+}

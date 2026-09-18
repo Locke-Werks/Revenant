@@ -1,0 +1,419 @@
+// The demodulators, selected by a specialization constant.
+//
+// Written from published mathematics and published channel plans only, per
+// docs/clean-room.md. The envelope, discriminator and product detectors are
+// textbook (Carlson, "Communication Systems", chapters 4 and 5; Oppenheim and
+// Schafer, "Discrete-Time Signal Processing", chapter 2 for the analytic
+// signal argument that makes a real part a product detector at complex
+// baseband). The deviation-to-bandwidth ratios quoted below are channel
+// plans, cited where they are used. No GPL implementation was read, fetched
+// or consulted while writing this file.
+//
+// Input is this receiver's complex baseband out of core/shaders/vrx_fine.comp,
+// already mixed to DC, already limited to the requested bandwidth and already
+// resampled to the demodulation rate Fd. Output is real audio at Fa = Fd / R,
+// except for the raw tap, which hands out the complex baseband unchanged.
+//
+// WHAT THE MODE CONSTANT ACTUALLY SELECTS.
+//
+// kMode is the value of revenant::engine::Demod, so there is no mapping table
+// between the enum and the pipeline and nothing to get out of step. Each
+// pipeline folds to one mode at creation and every other branch disappears,
+// which is why a switch that looks expensive here costs nothing at runtime.
+//
+// Four of the eight modes reach the same line. USB, LSB, DSB and CW are all a
+// product detector, which at complex baseband is a real part and nothing else.
+// What distinguishes them is entirely upstream: USB and LSB are an asymmetric
+// passband, CW is a translation that puts the carrier on the operator's pitch,
+// DSB is the symmetric case. core/shaders/vrx_fine.comp carries the table.
+// Writing them as one line here rather than four is the honest description of
+// what the arithmetic is.
+//
+// DETERMINISTIC TRANSCENDENTALS, WHICH ARE NOT OPTIONAL HERE.
+//
+// A demodulator needs a magnitude and an argument, and Vulkan specifies
+// neither tightly enough to referee. The precision guarantees are: OpFAdd,
+// OpFSub and OpFMul correctly rounded, OpFDiv 2.5 units in the last place,
+// Sqrt 3 ULP, Atan 4096 ULP. A kernel calling sqrt() and atan() therefore
+// produces different bits on NVIDIA and on AMD, and no CPU twin can be
+// bit-exact against either, so the project's central rule would be unenforced
+// exactly where the arithmetic is hardest to eyeball.
+//
+// So this file builds sqrt, reciprocal and atan2 out of the three operations
+// that ARE correctly rounded, plus integer bit manipulation, which is exact by
+// definition. The seeds are the standard exponent-halving and
+// exponent-negating bit tricks and the refinements are Newton iterations,
+// which are multiplies and adds only:
+//
+//   rsqrt   r <- r * (1.5 - (a/2) * r * r)     converges quadratically
+//   recip   r <- r * (2.0 - a * r)             converges quadratically
+//   atan    an odd polynomial in t^2 on [0, 1]
+//
+// Four iterations of each saturate float32 from the seeds' ~3 percent and
+// ~0.4 percent starting errors. The atan polynomial's coefficients were fitted
+// by least squares against long-double atan over [0, 1] and its worst error
+// evaluated in float32 is 9.6e-08 radian, which is the float evaluation floor
+// rather than the fit's: atan(1) is 0.785 and 0.785 * 2^-23 is 9.4e-08.
+//
+// The point is not that these are faster or more accurate than the built-ins.
+// They are neither. The point is that they are SPECIFIED: the twin in
+// core/dsp/vrx_reference.cpp performs the same operations in the same order
+// and gets the same bits, on every driver, which is the only way a
+// demodulator can be held to the project's bit-exactness rule at all.
+//
+// AUDIO SCALING, STATED ONCE SO MODES ARE COMPARABLE.
+//
+// The convention: a unit-amplitude signal fully modulating its own mode
+// produces audio that swings to exactly +/-1.0. The per-mode gain is computed
+// on the host and arrives as one float, so the convention lives in one place
+// (vrx_demod_gain in core/dsp/vrx_reference.cpp) rather than as a magic number
+// per branch here.
+//
+//   Raw   passthrough, gain 1. Unit input is unit output.
+//   AM    envelope with DC removed, gain 1. A carrier of amplitude 1 at 100
+//         percent modulation gives audio +/-1. Note that such a signal has a
+//         peak envelope of 2, so an AM transmission that must stay inside
+//         full scale carries a 0.5 carrier and reaches -6 dBFS audio.
+//   NFM   arg(z[m] * conj(z[m-1])) * Fd / (2*pi*deviation), so audio is +/-1
+//   WFM   at peak deviation and is independent of signal amplitude, which is
+//         what a limiting discriminator is for. Deviation is taken from the
+//         requested bandwidth by the channel plan the mode belongs to: 5 kHz
+//         in 25 kHz for land mobile NFM, so deviation = bandwidth/5; 75 kHz in
+//         200 kHz for FM broadcast, so deviation = 3*bandwidth/8.
+//   USB   Re(z), gain 1. A unit-amplitude tone in the passband gives audio
+//   LSB   +/-1, which is the same peak-envelope reference AM uses, so a
+//   CW    voice peak at full scale sounds the same loudness in every one of
+//         these modes and in AM. Measured: 0.99995 and 1.00000.
+//   DSB   Re(z), gain 1, WITH A CAVEAT that is physics rather than an
+//         implementation gap. USB, LSB and CW carry their audio as a rotating
+//         phasor, so a constant phase offset moves the audio's phase and not
+//         its amplitude. A double-sideband suppressed-carrier signal does
+//         not: its complex envelope is real and in phase with a carrier that
+//         is not being transmitted, so a product detector with no carrier
+//         recovery scales the audio by cos(theta), where theta is the
+//         residual phase between the receiver's oscillator and the
+//         suppressed carrier. Here theta is fixed by the fine filter's group
+//         delay times the mix frequency and by the NCO's phase, so it is
+//         deterministic and tuning-dependent rather than noise, and the
+//         measured 0.743 at theta = -0.733 rad is exactly cos(theta). Closing
+//         that needs a carrier recovery loop, which is carried state and so
+//         is not a demodulator kernel's business; it belongs above this
+//         layer, and M1 does not have one.
+//
+// The CPU twin is reference_vrx_demod in core/dsp/vrx_reference.cpp, and it is
+// bit-identical rather than close: the same Newton iterations, the same Horner
+// order, the same ascending tap index.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation. Id 0 is the project-wide
+// convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// revenant::engine::Demod's value. Not a private numbering: the twin static
+// asserts that these eight constants equal the enumerators.
+layout(constant_id = 1) const uint kMode = 2;  // Demod::Nfm
+
+// Fd / Fa. One for every mode whose demodulation rate already is the audio
+// rate, which is all of them except wideband FM, where the signal needs a few
+// hundred kilohertz to exist in and the audio does not.
+layout(constant_id = 2) const uint kDecimation = 1;
+
+// Length of the audio decimation filter, applied to the DETECTOR output
+// rather than to the complex baseband, because for FM the detector is where
+// the bandwidth collapses from the channel width to the audio width. One tap
+// with unit weight when kDecimation is 1, which folds the loop away.
+layout(constant_id = 3) const uint kAudioTaps = 1;
+
+// Length of the AM DC-removal window. Only the AM branch reads it.
+layout(constant_id = 4) const uint kDcTaps = 256;
+
+const uint kModeRaw = 0u;
+const uint kModeAm = 1u;
+const uint kModeNfm = 2u;
+const uint kModeWfm = 3u;
+const uint kModeUsb = 4u;
+const uint kModeLsb = 5u;
+const uint kModeDsb = 6u;
+const uint kModeCw = 7u;
+
+// Fitted against long-double atan over [0, 1] by least squares on the odd
+// basis t*(c0 + c1*u + ... + c9*u^9), u = t*t. Worst float32 error 9.6e-08
+// radian over the interval. core/dsp/vrx_reference.cpp declares the same ten
+// decimal literals, and both sides round them to the same float.
+const float kAtanC0 = 0.9999999998;
+const float kAtanC1 = -0.3333331929;
+const float kAtanC2 = 0.1999923872;
+const float kAtanC3 = -0.1427217912;
+const float kAtanC4 = 0.1099615976;
+const float kAtanC5 = -0.0853800324;
+const float kAtanC6 = 0.0603537785;
+const float kAtanC7 = -0.0336503503;
+const float kAtanC8 = 0.0122847765;
+const float kAtanC9 = -0.0021090222;
+
+// Rounded to float once, here and in the twin, from the same decimal.
+const float kHalfPi = 1.57079632679489661923;
+const float kPi = 3.14159265358979323846;
+
+layout(std430, binding = 0) readonly buffer FineRing {
+    vec2 values[];
+} fine;
+
+// The audio decimation taps first, kAudioTaps of them, then the AM DC-removal
+// weights, kDcTaps of them. One buffer rather than two so a pipeline that
+// needs neither still binds something valid; the host supplies a single unit
+// tap and a single dummy weight in that case.
+layout(std430, binding = 1) readonly buffer Weights {
+    float values[];
+} weights;
+
+// Real audio, one float per sample, except for the raw tap which writes an
+// interleaved complex pair. Linear rather than a ring: this is the buffer that
+// leaves the device, and audio PCM crossing the bus is one of the three things
+// core/engine/engine.h permits to come back.
+layout(std430, binding = 2) writeonly buffer AudioOut {
+    float values[];
+} audio;
+
+layout(push_constant) uniform Params {
+    // Fine ring capacity minus one, a power of two minus one.
+    uint in_mask;
+
+    // Ring offset of the fine sample that audio output 0 detects at. History
+    // below it is read by the detector and by the decimation filter, and the
+    // host guarantees it is still live.
+    uint in_offset;
+
+    // Audio samples this dispatch produces. One invocation each.
+    uint count;
+
+    // The mode's audio scale. See the header comment: one number, computed on
+    // the host from the deviation and the rate, so the convention is not
+    // spread across eight branches here.
+    float gain;
+} params;
+
+// 1 / sqrt(value) for value > 0, deterministically.
+//
+// Seed from the exponent-halving bit trick, then four Newton iterations of
+// r <- r*(1.5 - (a/2)*r*r). The seed constant is the usual one for float32 and
+// gives about 3.4 percent; the iterations take that to 0.17 percent, 4.4e-06,
+// 2.9e-11 and then below float resolution. Every step is a correctly-rounded
+// multiply or add, and the bit manipulation is exact, so two implementations
+// running this sequence agree bit for bit.
+//
+// Valid for roughly 2^-100 to 2^100. Outside that the intermediate r*r
+// overflows or falls into the denormals that this project flushes to zero. A
+// receiver's |z|^2 lives near unity, so the bound is a statement about the
+// domain rather than a limitation in use.
+float det_rsqrt(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x5F375A86u - (bits >> 1u));
+
+    precise float half_value = 0.5 * value;
+    precise float r1 = seed * (1.5 - half_value * (seed * seed));
+    precise float r2 = r1 * (1.5 - half_value * (r1 * r1));
+    precise float r3 = r2 * (1.5 - half_value * (r2 * r2));
+    precise float r4 = r3 * (1.5 - half_value * (r3 * r3));
+    return r4;
+}
+
+// sqrt(value), deterministically, as value * rsqrt(value).
+//
+// The guard is written !(value > 0.0) rather than value <= 0.0 so that a NaN,
+// for which every comparison is false, takes the zero branch instead of
+// falling into the iteration and propagating.
+float det_sqrt(float value) {
+    if (!(value > 0.0)) {
+        return 0.0;
+    }
+    precise float result = value * det_rsqrt(value);
+    return result;
+}
+
+// 1 / value for value > 0, deterministically.
+//
+// Seed from the exponent-negating bit trick, then four Newton iterations of
+// r <- r*(2 - a*r). Callers must have reduced to a positive argument; det_atan2
+// below does that with abs and max before it divides, which is also what keeps
+// the quotient inside [0, 1].
+float det_recip(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x7EF311C3u - bits);
+
+    precise float r1 = seed * (2.0 - value * seed);
+    precise float r2 = r1 * (2.0 - value * r1);
+    precise float r3 = r2 * (2.0 - value * r2);
+    precise float r4 = r3 * (2.0 - value * r3);
+    return r4;
+}
+
+// atan(t) for t in [0, 1]. Horner, descending, which is the order the twin
+// also uses; a different association of the same polynomial is a different
+// rounding.
+float det_atan_unit(float t) {
+    precise float u = t * t;
+    precise float p = kAtanC9;
+    p = p * u + kAtanC8;
+    p = p * u + kAtanC7;
+    p = p * u + kAtanC6;
+    p = p * u + kAtanC5;
+    p = p * u + kAtanC4;
+    p = p * u + kAtanC3;
+    p = p * u + kAtanC2;
+    p = p * u + kAtanC1;
+    p = p * u + kAtanC0;
+    precise float result = t * p;
+    return result;
+}
+
+// atan2(y, x) in (-pi, pi], deterministically.
+//
+// Octant reduction first, so the polynomial only ever sees [0, 1] and the one
+// division is min over max, which cannot exceed one and cannot divide by zero
+// unless both inputs are zero. abs, min and max are bit selections and
+// comparisons, so they are exact.
+//
+// atan2(-0.0, x) for negative x returns +pi here where the IEEE function
+// returns -pi. The signed zero is the only input on which the two disagree and
+// nothing upstream produces one: the discriminator's argument is a product of
+// two samples.
+float det_atan2(float y, float x) {
+    const float ay = abs(y);
+    const float ax = abs(x);
+
+    if (ay == 0.0 && ax == 0.0) {
+        return 0.0;
+    }
+
+    const float numerator = min(ay, ax);
+    const float denominator = max(ay, ax);
+
+    precise float ratio = numerator * det_recip(denominator);
+    float angle = det_atan_unit(ratio);
+
+    // Reflect out of the lower half-octant, then out of the right half-plane.
+    // Neither subtraction cancels: angle is in [0, pi/4] at the first and
+    // [0, pi/2] at the second.
+    if (ay > ax) {
+        precise float reflected = kHalfPi - angle;
+        angle = reflected;
+    }
+    if (x < 0.0) {
+        precise float reflected = kPi - angle;
+        angle = reflected;
+    }
+
+    return (y < 0.0) ? -angle : angle;
+}
+
+vec2 sample_at(uint index) {
+    // The mask is the reduction, and the subtraction that produced index is
+    // allowed to wrap modulo 2^32: the ring capacity is a power of two
+    // dividing 2^32, so the mask names the slot the unwrapped arithmetic
+    // would have.
+    return fine.values[index & params.in_mask];
+}
+
+float magnitude_at(uint index) {
+    const vec2 z = sample_at(index);
+    precise float square = z.x * z.x + z.y * z.y;
+    return det_sqrt(square);
+}
+
+// The detector, at the demodulation rate, before any audio decimation.
+float detect(uint index) {
+    if (kMode == kModeAm) {
+        // Envelope with DC removed. The DC estimate is a fixed weighted mean
+        // of the last kDcTaps envelope samples, which makes the removal a
+        // plain FIR highpass: a pure function of the absolute index, with no
+        // state carried between blocks and therefore usable for retroactive
+        // decode. A one-pole highpass would be cheaper and would not be.
+        //
+        // The weights are a normalised Hann window rather than a boxcar. Both
+        // null DC exactly, since both sum to one and the direct term is one,
+        // but a boxcar's first sidelobe is -13 dB, which leaves up to 1.9 dB
+        // of ripple in the audio passband just above the corner. Hann is
+        // -31 dB and leaves about 0.25 dB. Same cost.
+        //
+        // The subtracted term is delayed by half the window while the direct
+        // term is not, so the highpass is not linear phase. In the passband
+        // the subtracted term is small and the group delay is very close to
+        // zero, which is the behaviour wanted; the phase wobble is confined to
+        // the corner region, which is the stopband.
+        precise float dc = 0.0;
+        for (uint w = 0u; w < kDcTaps; ++w) {
+            precise float term = magnitude_at(index - w) * weights.values[kAudioTaps + w];
+            dc = dc + term;
+        }
+        precise float detected = magnitude_at(index) - dc;
+        return detected;
+    }
+
+    if (kMode == kModeNfm || kMode == kModeWfm) {
+        // The phase advance between consecutive samples, which is the
+        // instantaneous frequency times 2*pi/Fd. Computed as the argument of
+        // z[m] * conj(z[m-1]) rather than as a difference of two arguments,
+        // because the difference of two principal values needs an unwrap and
+        // the product does not: the product's argument is already the
+        // difference reduced into (-pi, pi], which is exactly the range a
+        // discriminator wants.
+        const vec2 z = sample_at(index);
+        const vec2 previous = sample_at(index - 1u);
+
+        precise float product_real = z.x * previous.x + z.y * previous.y;
+        precise float product_imag = z.y * previous.x - z.x * previous.y;
+
+        return det_atan2(product_imag, product_real);
+    }
+
+    if (kMode == kModeRaw) {
+        // Unreachable: the raw tap is handled in main() because it writes two
+        // components. Present so every mode has a defined value here.
+        return sample_at(index).x;
+    }
+
+    // USB, LSB, DSB and CW. A product detector at complex baseband is a real
+    // part; the mode's identity is the fine stage's passband and mix, not
+    // anything here.
+    return sample_at(index).x;
+}
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+
+    if (i >= params.count) {
+        return;
+    }
+
+    const uint index = params.in_offset + i * kDecimation;
+
+    if (kMode == kModeRaw) {
+        // The raw tap is not a demodulator. It hands out complex baseband at
+        // the receiver's bandwidth, which is what lets external tooling and
+        // the decoder framework attach before any decoder exists. See the
+        // comment on Demod in core/engine/vrx.h.
+        const vec2 z = sample_at(index);
+        precise float raw_real = z.x * params.gain;
+        precise float raw_imag = z.y * params.gain;
+        audio.values[2u * i] = raw_real;
+        audio.values[2u * i + 1u] = raw_imag;
+        return;
+    }
+
+    // Audio decimation, applied after the detector. For FM that is the only
+    // place it can go: the signal occupies the channel bandwidth and the
+    // demodulated audio does not, so decimating before the discriminator
+    // would throw away the signal and decimating after throws away nothing.
+    // kAudioTaps is 1 with a unit weight when kDecimation is 1, and the
+    // specialization constant folds the loop to a single pass.
+    precise float accumulated = 0.0;
+    for (uint t = 0u; t < kAudioTaps; ++t) {
+        precise float term = detect(index - t) * weights.values[t];
+        accumulated = accumulated + term;
+    }
+
+    precise float out_value = accumulated * params.gain;
+    audio.values[i] = out_value;
+}

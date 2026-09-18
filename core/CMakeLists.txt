@@ -17,10 +17,17 @@ add_library(revenant_core STATIC
     dsp/pfb_branch_reference.cpp
     dsp/pfb_design.cpp
     dsp/pfb_fft_reference.cpp
+    dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
     dsp/synth/modulators.cpp
     dsp/synth/wideband.cpp
+    engine/audio_egress.cpp
     engine/device_ring.cpp
+    engine/engine.cpp
+    engine/graph.cpp
+    engine/scheduler.cpp
+    engine/vrx_place.cpp
+    engine/wav_writer.cpp
     gpu/buffer.cpp
     gpu/context.cpp
     gpu/kernel.cpp
@@ -51,6 +58,8 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cu8_cf32.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cs8_cf32.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cs16_cf32.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_fine.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_demod.comp"
 )
 
 revenant_apply_warnings(revenant_core)

@@ -39,4 +39,13 @@ namespace revenant::gpu::shaders {
 [[nodiscard]] std::span<const std::uint32_t> convert_cs8_cf32();
 [[nodiscard]] std::span<const std::uint32_t> convert_cs16_cf32();
 
+// The per-receiver fine stage: mix by the residual offset, filter, resample.
+// Twin of revenant::dsp::reference_vrx_fine.
+[[nodiscard]] std::span<const std::uint32_t> vrx_fine();
+
+// The demodulators, one mode selected by a specialization constant so the
+// branch folds away at pipeline creation. Twin of
+// revenant::dsp::reference_vrx_demod.
+[[nodiscard]] std::span<const std::uint32_t> vrx_demod();
+
 }  // namespace revenant::gpu::shaders

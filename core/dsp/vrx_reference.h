@@ -1,0 +1,546 @@
+// CPU twins of core/shaders/vrx_fine.comp and core/shaders/vrx_demod.comp,
+// plus the host-side design that feeds both.
+//
+// Bit-identical to the kernels, not close to them. The twins transcribe the
+// kernels' operation order rather than their mathematical result: the same
+// ascending tap index, the same lerp-then-multiply-accumulate shape, the same
+// Newton iterations in the same sequence, the same integer recurrences
+// including their 32-bit wraps. Reordering a 32-tap complex accumulation
+// moves the result by thousands of units in the last place, so "computes the
+// same sum" is not the same claim and would not catch a kernel that had
+// drifted.
+//
+// They live in core/ rather than tests/ because a reference in the test tree
+// is a reference nobody ships, reviews or keeps current. See
+// docs/conventions.md, "Reference implementations".
+//
+// This file carries two jobs and says so rather than pretending otherwise.
+// The twins are one. The other is the design that produces what both sides
+// read: the polyphase tap table, the NCO circle, the audio decimation filter,
+// the AM DC-removal window and the per-mode gain. That code is not a twin and
+// has no operation order to match, exactly as core/dsp/pfb_design.cpp is not
+// a twin of the channelizer kernels. It is here because the design and the
+// twin have to agree about every index, and splitting them across two files
+// is how they stop agreeing.
+//
+// Written from published mathematics and published channel plans only, per
+// docs/clean-room.md. Crochiere and Rabiner, "Multirate Digital Signal
+// Processing", chapters 3 and 6, for the polyphase decomposition and
+// fractional rate conversion; Oppenheim and Schafer, "Discrete-Time Signal
+// Processing", section 7.5.3 for the Kaiser window and its order estimate and
+// chapter 2 for the modulation theorem; Abramowitz and Stegun eq. 9.6.12 for
+// the modified Bessel function; Carlson, "Communication Systems", chapters 4
+// and 5 for the detectors. No GPL implementation was read, fetched or
+// consulted.
+
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "core/dsp/pfb.h"
+#include "core/dsp/types.h"
+#include "core/engine/vrx.h"
+#include "core/error.h"
+
+namespace revenant::dsp {
+
+// ---------------------------------------------------------------------------
+// Deterministic transcendentals
+// ---------------------------------------------------------------------------
+//
+// Vulkan requires OpFAdd, OpFSub and OpFMul to be correctly rounded and then
+// allows OpFDiv 2.5 units in the last place, Sqrt 3 ULP and Atan 4096 ULP. A
+// demodulator built on the built-ins therefore produces different bits on
+// every vendor and no CPU twin can referee it, which would leave the
+// project's central rule unenforced exactly where the arithmetic is hardest
+// to eyeball.
+//
+// These four are built from the correctly-rounded operations and from integer
+// bit manipulation, which is exact. They are not faster than the built-ins and
+// not more accurate. They are SPECIFIED, which is the only property that
+// matters here. core/shaders/vrx_demod.comp carries the same sequences in the
+// same order, and these are the definition of what the kernel is allowed to
+// do.
+
+// 1/sqrt(value) for value > 0, by the exponent-halving seed plus four Newton
+// iterations. Valid for roughly 2^-100 to 2^100; outside that an intermediate
+// overflows or lands in the denormals this project flushes to zero.
+[[nodiscard]] float det_rsqrt(float value);
+
+// sqrt(value), as value * det_rsqrt(value). Returns +0 for zero, for a
+// negative argument and for a NaN.
+[[nodiscard]] float det_sqrt(float value);
+
+// 1/value for value > 0, by the exponent-negating seed plus four Newton
+// iterations. Callers reduce to a positive argument first.
+[[nodiscard]] float det_recip(float value);
+
+// atan(t) for t in [0, 1], an odd polynomial in t*t evaluated by descending
+// Horner. Worst error over the interval, evaluated in float32, is 9.6e-08
+// radian, which is the float evaluation floor rather than the fit's.
+[[nodiscard]] float det_atan_unit(float t);
+
+// atan2(y, x) in (-pi, pi]. Octant-reduced first, so the polynomial only sees
+// [0, 1] and the single division is min over max. Differs from the IEEE
+// function on exactly one class of input: atan2(-0.0, x) for negative x
+// returns +pi here.
+[[nodiscard]] float det_atan2(float y, float x);
+
+// ---------------------------------------------------------------------------
+// Exact phase, in fixed-point turns
+// ---------------------------------------------------------------------------
+//
+// The NCO never accumulates. `phase += increment` in float32 rounds the
+// increment once and then adds that rounding n times, so the error grows
+// linearly with n and reads downstream as a slow frequency error, which looks
+// like a mistuned transmitter and gets blamed on one. Measured against the
+// exact phase, a float32 accumulator at 2500 Hz on a 48 kHz stream is 0.26
+// radian out after four million samples.
+//
+// Instead the phase at an absolute index j is
+//
+//     phi(j) = (j * D) mod 2^64,   D = round(2^64 * f / rate)
+//
+// as an unsigned 0.64 fixed-point turn, so the uint64 wrap IS the reduction
+// modulo one turn. The increment D is formed once by integer long division,
+// which is where the exact rational frequency is spent: f is a/b hertz and
+// the rate is an integer, so 2^64*a over b*rate is a ratio of integers and
+// the rounding happens exactly once, at that division.
+//
+// Two properties follow.
+//
+// The phase does not drift. Rounding D once moves the oscillator's frequency
+// by at most rate*2^-65, which is 1.3e-15 Hz at 48 kHz, and relative to that
+// frequency the phase is exact at every index forever.
+//
+// phi(j) depends on j and on nothing else, so a stream rendered in one
+// dispatch and the same stream rendered in blocks of seven come out
+// bit-identical. An earlier version carried the exactly-reduced phase at each
+// block's first output and accumulated a 0.32 increment from there, which is
+// MORE accurate and is not good enough: the increment's rounding accumulated
+// inside the block and a third of the outputs changed when the block size
+// did, because the table index straddles a boundary at exactly the phases a
+// rational frequency keeps landing on. Retroactive decode and
+// faster-than-realtime replay both re-enter the stream at an arbitrary index,
+// so an output that depends on where the blocks fell is not usable for
+// either.
+
+// Largest hz_denominator * rate this arithmetic accepts. The long division
+// below shifts the remainder left by sixteen bits four times over, so the
+// denominator has to leave room inside a signed 64-bit integer. 2^31 is
+// reached only by a 2048-channel grid on a channel rate above one megahertz,
+// which is a grid that would not hold a receiver anyway.
+inline constexpr std::int64_t kMaxPhaseDenominator = std::int64_t{1} << 31;
+
+// round(2^64 * numerator / denominator) modulo 2^64, exactly, for
+// 0 <= numerator < denominator <= kMaxPhaseDenominator. Long division in four
+// base-65536 digits, because numerator << 64 does not fit anything this
+// toolchain has.
+[[nodiscard]] std::uint64_t turn_fixed64(std::int64_t numerator, std::int64_t denominator);
+
+// The per-sample phase increment for a frequency of hz_numerator/hz_denominator
+// hertz at the given rate, as a 0.64 turn. Negative frequencies wrap, which is
+// correct: exp(-j*2*pi*(-f)) and exp(-j*2*pi*(1-f)) are the same phasor.
+[[nodiscard]] Expected<std::uint64_t> nco_delta(std::int64_t hz_numerator,
+                                                std::int64_t hz_denominator,
+                                                SampleRate rate);
+
+// The phase at an absolute index. The uint64 product wraps modulo 2^64, which
+// is the reduction modulo one turn, so this is exact at any index and depends
+// on nothing else.
+[[nodiscard]] constexpr std::uint64_t nco_phase(std::uint64_t delta, SampleIndex index) {
+    return delta * index;
+}
+
+// exp(-j*2*pi*i/K) for K = 1 << log2_size, built from the first octant and
+// reflected so the four quadrature entries are exactly (1,0), (0,-1), (-1,0)
+// and (0,1). Computing W^(K/2) from cos(pi) and sin(pi) instead leaves a
+// residue in the imaginary part, which turns a free sign flip into a real
+// complex multiply and costs bit-exactness for nothing; core/dsp/pfb.h's
+// build_twiddles makes the same argument at length.
+inline constexpr std::uint32_t kMaxNcoLog2 = 24;
+[[nodiscard]] Expected<std::vector<Complex32>> build_nco_table(std::uint32_t log2_size);
+
+// ---------------------------------------------------------------------------
+// The fine stage
+// ---------------------------------------------------------------------------
+
+// The three specialization constants of core/shaders/vrx_fine.comp, at ids 1,
+// 2 and 3. Id 0 is always the workgroup size.
+struct VrxFineConfig {
+    // T, taps per polyphase branch.
+    std::uint32_t taps = 32;
+
+    // P, branches in the polyphase table. The tap buffer holds P*T + 1
+    // entries: linear interpolation between branch p and branch p+1 reaches
+    // index P*T at the last branch of the last tap, and the host writes zero
+    // there so the kernel needs no special case.
+    std::uint32_t phases = 256;
+
+    // log2 of the shared NCO table's length.
+    std::uint32_t nco_log2 = 16;
+};
+
+inline constexpr std::uint32_t kMaxFineTaps = 256;
+inline constexpr std::uint32_t kMaxFinePhases = 4096;
+
+// The thirteen values core/shaders/vrx_fine.comp takes as push constants, in
+// the order it declares them. Thirteen tightly packed 32-bit words is the
+// scalar push-constant layout of the shader's Params block, so this struct can
+// be handed to a dispatch as bytes with no repacking. The static assert below
+// is what keeps that true.
+struct VrxFineParams {
+    // channel_index * out_ring_blocks: where this receiver's channel starts
+    // in the channel-major ring core/shaders/pfb_fft.comp writes.
+    std::uint32_t chan_base = 0;
+
+    // Per-channel ring capacity in blocks minus one, a power of two minus one.
+    std::uint32_t chan_mask = 0;
+
+    // Ring offset of channel sample n_0, the integer part of this block's
+    // first output instant. A ring offset and not a SampleIndex: SampleIndex
+    // is uint64 and GLSL has no 64-bit integer here, so the host owns the
+    // absolute index. core/shaders/pfb_branch.comp makes the same trade.
+    std::uint32_t in_offset = 0;
+
+    std::uint32_t out_offset = 0;
+    std::uint32_t out_mask = 0;
+    std::uint32_t count = 0;
+
+    // The resampler recurrence: step_whole = Fc / Fd, step_rem = Fc mod Fd,
+    // out_rate = Fd, frac0 = (j_0 * Fc) mod Fd.
+    std::uint32_t step_whole = 0;
+    std::uint32_t step_rem = 0;
+    std::uint32_t out_rate = 0;
+    std::uint32_t frac0 = 0;
+
+    // The output mixer, as 0.64 turns in two 32-bit words each.
+    std::uint32_t nco_phase_high = 0;
+    std::uint32_t nco_phase_low = 0;
+    std::uint32_t nco_delta_high = 0;
+    std::uint32_t nco_delta_low = 0;
+
+    // 1.0f / out_rate, precomputed because the kernel must not divide: Vulkan
+    // permits OpFDiv 2.5 ULP and requires OpFMul to be correctly rounded, so a
+    // multiply by a shared float can be refereed and a divide cannot.
+    float inv_out_rate = 0.0F;
+};
+
+static_assert(sizeof(VrxFineParams) == 15 * sizeof(std::uint32_t),
+              "VrxFineParams must be fifteen packed 32-bit words to alias the kernel's "
+              "push constant block");
+
+// Twin of core/shaders/vrx_fine.comp.
+//
+// channel_ring is the whole channel-major ring; the twin indexes it at
+// chan_base + ((base - k) & chan_mask), exactly as the kernel does, so it
+// exercises the same wrap. taps is the P*T + 1 complex table. nco is the
+// 1 << nco_log2 entry circle. fine_ring receives the output at
+// (out_offset + i) & out_mask and nothing else is touched, so a caller can
+// zero both buffers and compare all of them.
+[[nodiscard]] Status reference_vrx_fine(const VrxFineConfig& config,
+                                        const VrxFineParams& params,
+                                        ConstComplexSpan channel_ring,
+                                        ConstComplexSpan taps,
+                                        ConstComplexSpan nco,
+                                        ComplexSpan fine_ring);
+
+// Rejects a configuration the kernel cannot run, or can run only with
+// arithmetic that overflows 32 bits on the device and not on the host. Called
+// by reference_vrx_fine and by the planner, so both reject the same thing.
+[[nodiscard]] Status validate(const VrxFineConfig& config, const VrxFineParams& params);
+
+// ---------------------------------------------------------------------------
+// The demodulators
+// ---------------------------------------------------------------------------
+
+// The specialization constant core/shaders/vrx_demod.comp selects on is the
+// value of engine::Demod, so there is no mapping table between the enum and
+// the pipeline and nothing to get out of step.
+inline constexpr std::uint32_t kDemodRaw = 0;
+inline constexpr std::uint32_t kDemodAm = 1;
+inline constexpr std::uint32_t kDemodNfm = 2;
+inline constexpr std::uint32_t kDemodWfm = 3;
+inline constexpr std::uint32_t kDemodUsb = 4;
+inline constexpr std::uint32_t kDemodLsb = 5;
+inline constexpr std::uint32_t kDemodDsb = 6;
+inline constexpr std::uint32_t kDemodCw = 7;
+
+static_assert(static_cast<std::uint32_t>(engine::Demod::Raw) == kDemodRaw);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Am) == kDemodAm);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Nfm) == kDemodNfm);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Wfm) == kDemodWfm);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Usb) == kDemodUsb);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Lsb) == kDemodLsb);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Dsb) == kDemodDsb);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Cw) == kDemodCw);
+
+inline constexpr std::uint32_t kMaxAudioTaps = 1024;
+inline constexpr std::uint32_t kMaxDcTaps = 4096;
+
+// The four specialization constants of core/shaders/vrx_demod.comp, at ids 1
+// to 4.
+struct VrxDemodConfig {
+    std::uint32_t mode = kDemodNfm;
+
+    // Fd / Fa. One for every mode whose demodulation rate already is the
+    // audio rate, which is all of them except wideband FM.
+    std::uint32_t decimation = 1;
+
+    // Length of the audio decimation filter, applied to the detector output.
+    // One, with a unit weight, when decimation is one.
+    std::uint32_t audio_taps = 1;
+
+    // Length of the AM DC-removal window. Only the AM branch reads it, but it
+    // is always at least one so the weights buffer is never empty.
+    std::uint32_t dc_taps = 1;
+};
+
+// The four values core/shaders/vrx_demod.comp takes as push constants, in the
+// order it declares them.
+struct VrxDemodParams {
+    std::uint32_t in_mask = 0;
+
+    // Ring offset of the fine sample that audio output 0 detects at. The
+    // detector and the decimation filter read below it, and the host
+    // guarantees that history is still live.
+    std::uint32_t in_offset = 0;
+
+    std::uint32_t count = 0;
+
+    // The mode's audio scale, computed by vrx_demod_gain so the convention
+    // lives in one place rather than in eight branches of the kernel.
+    float gain = 1.0F;
+};
+
+static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
+              "VrxDemodParams must be four packed 32-bit words to alias the kernel's push "
+              "constant block");
+
+// Twin of core/shaders/vrx_demod.comp.
+//
+// weights holds the audio decimation taps first, config.audio_taps of them,
+// then the AM DC-removal weights, config.dc_taps of them, which is the one
+// buffer the kernel binds. audio receives count samples, or 2*count for the
+// raw tap, which is the only mode that writes a complex pair.
+[[nodiscard]] Status reference_vrx_demod(const VrxDemodConfig& config,
+                                         const VrxDemodParams& params,
+                                         ConstComplexSpan fine_ring,
+                                         ConstRealSpan weights,
+                                         RealSpan audio);
+
+[[nodiscard]] Status validate(const VrxDemodConfig& config, const VrxDemodParams& params);
+
+// ---------------------------------------------------------------------------
+// Design
+// ---------------------------------------------------------------------------
+
+// Widest bandwidth one grid channel can deliver to a receiver placed here.
+//
+// The hard limit is the channel stream's own Nyquist. The fine stage reads
+// nothing but this one channel, so a receiver's passband has to fit inside
+// [-Fc/2, +Fc/2] measured from the CHANNEL's centre, and the receiver sits
+// |residual| away from that centre. Hence Fc - 2*|residual|, which at the
+// project's 2x-oversampled grid (D = M/2, so Fc is twice the channel spacing
+// and |residual| is at most half a spacing) is never below one full channel
+// spacing.
+//
+// This is a fit test and not a flatness test, and the difference is worth
+// stating. The prototype in core/dsp/pfb_design.cpp puts its passband edge at
+// 0.25*rate/M and its stopband edge at 0.75*rate/M, so a receiver whose band
+// reaches out towards the channel edge sees the prototype rolling off, down
+// to -6 dB where two adjacent channels cross. Nothing here corrects that
+// droop; VrxPlacement has no field to report it in, and at M1 the answer for
+// a receiver that wants a flat wide channel is a coarser grid.
+[[nodiscard]] Hertz max_channel_bandwidth(const engine::VrxPlacement& placement);
+
+// Peak deviation a mode's channel plan implies for a requested bandwidth.
+//
+// Not a free parameter and not a magic number: VrxParams carries a bandwidth
+// and no deviation, so the deviation has to come from the plan the mode
+// belongs to. Land mobile NFM is 5 kHz in a 25 kHz channel, so deviation is
+// bandwidth/5. FM broadcast is 75 kHz in 200 kHz, so deviation is
+// 3*bandwidth/8. Held as ratios rather than as constants so a narrower
+// request scales instead of silently demodulating at the wrong level.
+// Returns zero for a mode that has no deviation.
+[[nodiscard]] Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth);
+
+// Smallest demodulation rate a mode can be demodulated at.
+//
+// Three different constraints, one per family. A detector that folds the
+// spectrum needs room for what it folds: the AM envelope of a band of width B
+// carries content to B, and a product detector on a one-sided passband of
+// width B produces audio to B, so both need 2B. A discriminator produces the
+// modulating audio, which is narrower than the channel, so FM needs only the
+// channel. Every mode is then floored at 1.5B so the fine filter has a
+// transition band to live in at all: the stopband edge is Fd/2 and the
+// passband edge is B/2, so Fd = B would leave no transition and no filter.
+// CW additionally needs the pitch plus half the bandwidth to fit below Fd/2.
+[[nodiscard]] Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch);
+
+// The mode's audio scale. The convention: a unit-amplitude signal fully
+// modulating its own mode produces audio that swings to exactly +/-1.0. See
+// the header comment of core/shaders/vrx_demod.comp for what that means mode
+// by mode.
+[[nodiscard]] float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate,
+                                   Hertz deviation);
+
+// The polyphase tap table: a real Kaiser-windowed sinc lowpass of half-width
+// half_width_hz, sampled at phases samples per input sample, normalised so
+// every branch has exactly unit gain at the filter's centre, then modulated
+// to that centre. Returns phases*taps + 1 complex values, the last of them
+// zero.
+//
+// The per-branch normalisation is what removes the phase-dependent gain
+// ripple that would otherwise appear as a tone at the resampler's beat
+// frequency. It is exact at the centre and only there: a tone at the filter's
+// centre comes out of any branch at unit magnitude, because the branch's
+// modulation factor and the tone's own advance cancel term by term.
+[[nodiscard]] Expected<std::vector<Complex32>> design_fine_taps(const VrxFineConfig& config,
+                                                                SampleRate channel_rate,
+                                                                Hertz half_width_hz,
+                                                                std::int64_t centre_numerator,
+                                                                std::int64_t centre_denominator,
+                                                                double attenuation_db);
+
+// The audio decimation filter: a real Kaiser-windowed sinc lowpass at the
+// demodulation rate with its cutoff at 0.45 of the audio rate, normalised to
+// unit gain at DC. Length is forced odd so the group delay is an integer.
+[[nodiscard]] Expected<std::vector<float>> design_audio_taps(std::uint32_t taps,
+                                                             SampleRate demod_rate,
+                                                             SampleRate audio_rate,
+                                                             double attenuation_db);
+
+// The AM DC-removal window: a Hann window normalised to sum to one, so that
+// subtracting it from the direct term nulls DC exactly. Hann rather than a
+// boxcar because a boxcar's -13 dB first sidelobe leaves up to 1.9 dB of
+// ripple in the audio passband just above the corner and Hann's -31 dB leaves
+// about 0.25 dB, at identical cost.
+[[nodiscard]] std::vector<float> design_dc_weights(std::uint32_t taps);
+
+// Everything a receiver needs, derived once from its request and its
+// placement.
+//
+// Pure: it reads the grid, the rate, the request and the placement and
+// nothing else. It allocates the three tables and hands them over rather than
+// caching them, because a cache keyed on anything would make two receivers
+// with the same parameters share a buffer and make retuning one of them a
+// heisenbug in the other.
+struct VrxPlan {
+    engine::VrxPlacement placement;
+    std::uint32_t mode = kDemodNfm;
+
+    SampleRate channel_rate = 0;
+    SampleRate audio_rate = 0;
+    SampleRate demod_rate = 0;
+
+    // What actually comes out, which is the audio rate for every mode except
+    // the raw tap. The raw tap is not a demodulator: it hands out complex
+    // baseband at the receiver's bandwidth, so decimating it to 48 kHz would
+    // throw away most of what it exists to expose, and its output rate is the
+    // demodulation rate. This is the rate that belongs in an AudioChunk, and
+    // it is the rate the indices passed to demod_block are counted in.
+    SampleRate output_rate = 0;
+
+    // After clamping to what one channel can deliver.
+    Hertz bandwidth = 0;
+    bool bandwidth_clamped = false;
+
+    // Where the fine filter is centred and what the fine stage mixes to DC,
+    // both exact rationals in hertz, both in the channel's own frame. They
+    // differ for USB, LSB and CW; see core/shaders/vrx_fine.comp.
+    std::int64_t filter_numerator = 0;
+    std::int64_t filter_denominator = 1;
+    std::int64_t mix_numerator = 0;
+    std::int64_t mix_denominator = 1;
+
+    VrxFineConfig fine{};
+    std::vector<Complex32> fine_taps;
+    std::uint64_t fine_nco_delta = 0;
+
+    VrxDemodConfig demod{};
+    std::vector<float> demod_weights;
+    float demod_gain = 1.0F;
+
+    // Peak deviation the FM gain was derived from. Zero outside FM.
+    Hertz deviation = 0;
+
+    // What the design achieved, reported rather than assumed.
+    //
+    // fine_transition_hz is the transition width the chosen tap count buys,
+    // not the width that was asked for: Kaiser sets the stopband depth from
+    // the window's shape parameter and the transition from the length, so a
+    // receiver whose filter hit the tap cap gets a wider transition rather
+    // than a shallower stopband, and this is where it says so. A narrow
+    // receiver on a fast channel is the case that hits the cap, because a
+    // single-stage filter needs a tap per unit of rate over transition; the
+    // answer for one that needs more is a second filter at the demodulation
+    // rate, which M1 does not have.
+    //
+    // fine_stopband_db is the depth reached by the point the resampler folds,
+    // so it is the anti-alias figure and not the window's target when the two
+    // differ. Both come from Kaiser's order estimate, which is empirical and
+    // optimistic by one to two decibels; core/dsp/pfb_design.cpp measured
+    // exactly that against the filters it produces.
+    double fine_stopband_db = 0.0;
+    double fine_transition_hz = 0.0;
+    double audio_stopband_db = 0.0;
+
+    // Delay from the channel stream to the audio, in samples of each stage's
+    // own rate. The fine figure is the interpolated prototype's centre; the
+    // audio figure is the decimation filter's. The AM DC-removal window adds
+    // essentially nothing, because in its passband the subtracted term is
+    // small and the direct term carries no delay at all.
+    double fine_group_delay_channel_samples = 0.0;
+    double audio_group_delay_demod_samples = 0.0;
+};
+
+[[nodiscard]] Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
+                                         const engine::VrxParams& params,
+                                         const engine::VrxPlacement& placement);
+
+// ---------------------------------------------------------------------------
+// Per-block parameters
+// ---------------------------------------------------------------------------
+//
+// The exact arithmetic that turns an absolute index into the kernels' 32-bit
+// push constants. It lives here rather than in the dispatcher because getting
+// it wrong is silent: a truncated index works for three and a half minutes at
+// 20 MS/s and then does not, and a phase derived by accumulation works
+// forever and is slowly wrong.
+
+struct VrxFineBlock {
+    VrxFineParams params{};
+
+    // Absolute channel-sample index of n_0, and the oldest and newest channel
+    // samples this dispatch reads. The caller holds the ring claim across
+    // [oldest_input, newest_input] and retires below oldest_input.
+    SampleIndex first_input = 0;
+    SampleIndex oldest_input = 0;
+    SampleIndex newest_input = 0;
+};
+
+[[nodiscard]] Expected<VrxFineBlock> fine_block(const VrxPlan& plan,
+                                                std::uint32_t channel_base,
+                                                std::uint32_t channel_mask,
+                                                std::uint32_t fine_mask,
+                                                SampleIndex first_output,
+                                                std::uint32_t count);
+
+struct VrxDemodBlock {
+    VrxDemodParams params{};
+
+    // Absolute demodulation-rate index audio sample 0 detects at, and the
+    // oldest fine sample the dispatch reads.
+    SampleIndex first_fine = 0;
+    SampleIndex oldest_fine = 0;
+};
+
+[[nodiscard]] Expected<VrxDemodBlock> demod_block(const VrxPlan& plan,
+                                                  std::uint32_t fine_mask,
+                                                  SampleIndex first_audio,
+                                                  std::uint32_t count);
+
+}  // namespace revenant::dsp
