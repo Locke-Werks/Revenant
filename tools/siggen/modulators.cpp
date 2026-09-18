@@ -234,13 +234,6 @@ constexpr MorseEntry kMorseTable[] = {
     return total / static_cast<double>(samples.size());
 }
 
-[[nodiscard]] std::int64_t floor_div(std::int64_t value, std::int64_t divisor)
-{
-    const std::int64_t quotient = value / divisor;
-    const bool truncated_toward_zero = (value % divisor != 0) && ((value < 0) != (divisor < 0));
-    return truncated_toward_zero ? quotient - 1 : quotient;
-}
-
 // Lays out the repeating symbol grid. See SymbolClock in the header for why the
 // cycle has to close on an exact sample.
 [[nodiscard]] Expected<SymbolClock> build_symbol_clock(std::size_t symbols,
@@ -1417,25 +1410,50 @@ void Modulator::accumulate_psk(SampleIndex start, ComplexSpan out, double gain) 
     const ModulatorConfig& common = spec_.common;
     const double level = gain * common.amplitude;
     const double carrier_step = radians_per_sample(common.carrier_offset, common.rate);
+    const SampleIndex cycle = clock_.cycle_samples;
 
-    walk_anchored(
-        start, out.size(), kPhaseAnchorInterval,
-        [&](SampleIndex anchor) {
-            Phasor carrier;
-            carrier.anchor(common.initial_phase +
-                           exact_phase(common.carrier_offset, common.rate, anchor));
-            carrier.set_rate(carrier_step);
-            return carrier;
-        },
-        [&](const Phasor& carrier, SampleIndex index, std::size_t offset) {
-            const Complex32 envelope = psk_envelope(index);
+    // Written out rather than going through walk_anchored so the position in
+    // the payload cycle and the current symbol can be carried forward instead
+    // of recovered with two 64-bit divisions per sample. Both are integers
+    // stepped by one, so the values are identical to recomputing them, and the
+    // anchoring rule is unchanged.
+    const SampleIndex end = start + out.size();
+    SampleIndex index = start;
+
+    while (index < end) {
+        const SampleIndex anchor = index - (index % kPhaseAnchorInterval);
+        const SampleIndex stop = std::min<SampleIndex>(end, anchor + kPhaseAnchorInterval);
+
+        Phasor carrier;
+        carrier.anchor(common.initial_phase +
+                       exact_phase(common.carrier_offset, common.rate, anchor));
+        carrier.set_rate(carrier_step);
+        for (SampleIndex skipped = anchor; skipped < index; ++skipped) {
+            carrier.advance();
+        }
+
+        SampleIndex position = index % cycle;
+        std::size_t symbol = clock_.index_at(position);
+
+        for (; index < stop; ++index) {
+            const Complex32 envelope = psk_envelope(position, symbol);
             const auto in_phase = static_cast<double>(envelope.real());
             const auto quadrature = static_cast<double>(envelope.imag());
             const double re = in_phase * carrier.re - quadrature * carrier.im;
             const double im = in_phase * carrier.im + quadrature * carrier.re;
-            out[offset] += Complex32(static_cast<float>(level * re),
-                                     static_cast<float>(level * im));
-        });
+            out[static_cast<std::size_t>(index - start)] +=
+                Complex32(static_cast<float>(level * re), static_cast<float>(level * im));
+
+            carrier.advance();
+            ++position;
+            if (position >= cycle) {
+                position = 0;
+                symbol = 0;
+            } else if (position >= clock_.boundary[symbol + 1]) {
+                ++symbol;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

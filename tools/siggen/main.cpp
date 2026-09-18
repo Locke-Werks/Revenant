@@ -242,7 +242,10 @@ Status Options::reject_unused() const
 
 class Writer {
 public:
-    Writer(std::ostream& stream, Format format) : stream_(stream), format_(format) {}
+    Writer(std::ostream& stream, Format format, double full_scale)
+        : stream_(stream), format_(format), full_scale_(full_scale)
+    {
+    }
 
     [[nodiscard]] Status consume(ConstComplexSpan samples);
 
@@ -259,6 +262,7 @@ private:
 
     std::ostream& stream_;
     Format format_;
+    double full_scale_ = 1.0;
     std::vector<char> scratch_{};
     double power_sum_ = 0.0;
     double peak_square_ = 0.0;
@@ -268,7 +272,8 @@ private:
 
 std::int32_t Writer::quantise(float value)
 {
-    const auto scaled = static_cast<std::int32_t>(std::lround(static_cast<double>(value) * 127.0));
+    const auto scaled = static_cast<std::int32_t>(
+        std::lround(static_cast<double>(value) / full_scale_ * 127.0));
     if (scaled > 127) {
         ++clipped_;
         return 127;
@@ -331,8 +336,20 @@ struct CommonOptions {
     std::uint64_t seed = 0;
     SampleIndex samples = 0;
     Format format = Format::Cf32;
+
+    // The amplitude that maps to full scale when quantising to eight bits.
+    // Separate from --amplitude on purpose: it changes how the signal is
+    // written down, not what the signal is, so the cf32 and the cs8 of the
+    // same command carry the same waveform at different precision.
+    double full_scale = 1.0;
+
     std::string out_path;
-    std::size_t block = 262144;
+
+    // Large enough that a 32-thread machine can actually fill itself: the
+    // worker count is bounded by the block size, so a small block quietly
+    // serialises the render. Eight megabytes of float32 scratch is nothing
+    // against the files this writes.
+    std::size_t block = 1048576;
 };
 
 [[nodiscard]] Expected<CommonOptions> read_common(Options& options, SampleRate default_rate)
@@ -413,7 +430,16 @@ struct CommonOptions {
         return fail("--out is required");
     }
 
-    auto block = options.integer("block", 262144);
+    auto scale = options.real("scale", 1.0);
+    if (!scale) {
+        return std::unexpected(scale.error());
+    }
+    if (!std::isfinite(*scale) || *scale <= 0.0) {
+        return fail("--scale must be positive");
+    }
+    common.full_scale = *scale;
+
+    auto block = options.integer("block", 1048576);
     if (!block) {
         return std::unexpected(block.error());
     }
@@ -434,15 +460,19 @@ struct CommonOptions {
     return stream;
 }
 
-void report_buffer(const Writer& writer, double nominal_power)
+void report_buffer(const Writer& writer, double full_scale)
 {
     std::print("  samples written   {}\n", writer.written());
-    std::print("  nominal power     {:.6g}\n", nominal_power);
     std::print("  measured power    {:.6g}\n", writer.mean_power());
     std::print("  peak magnitude    {:.6g}\n", writer.peak());
     if (writer.clipped() > 0) {
-        std::print("  CLIPPED           {} of {} components hit the quantiser limit\n",
-                   writer.clipped(), writer.written() * 2);
+        // A shaped signal peaks well above its RMS: root raised cosine QPSK
+        // runs about 1.5 times, so the default full scale of 1.0 clips it
+        // hard. Say what to pass rather than leaving a quietly ruined file.
+        std::print("  CLIPPED           {} of {} components hit the eight bit limit; "
+                   "rerun with --scale {:.2f}\n",
+                   writer.clipped(), writer.written() * 2,
+                   std::max(writer.peak(), full_scale) * 1.02);
     }
 }
 
@@ -571,7 +601,7 @@ void report_buffer(const Writer& writer, double nominal_power)
         return std::unexpected(stream.error());
     }
 
-    Writer writer(*stream, common->format);
+    Writer writer(*stream, common->format, common->full_scale);
     std::vector<Complex32> buffer(common->block);
 
     SampleIndex produced = 0;
@@ -607,7 +637,11 @@ void report_buffer(const Writer& writer, double nominal_power)
         std::print("  keying            '{}' over a {} sample cycle\n",
                    modulator->text(), modulator->cycle_samples());
     }
-    report_buffer(writer, modulator->nominal_mean_power());
+    // The nominal figure is over a whole payload cycle. Measuring a partial
+    // cycle legitimately disagrees with it, which is why both are printed.
+    std::print("  nominal power     {:.6g} (over one full cycle)\n",
+               modulator->nominal_mean_power());
+    report_buffer(writer, common->full_scale);
     std::print("  wrote             {}\n", common->out_path);
     return {};
 }
@@ -727,7 +761,7 @@ void report_buffer(const Writer& writer, double nominal_power)
         return std::unexpected(stream.error());
     }
 
-    Writer writer(*stream, common->format);
+    Writer writer(*stream, common->format, common->full_scale);
     auto streamed = siggen::stream_scene(
         *scene, 0, common->samples, common->block,
         [&writer](const dsp::BlockTimestamp&, ConstComplexSpan block) {
@@ -767,7 +801,7 @@ void report_buffer(const Writer& writer, double nominal_power)
                                             spec.noise_power_full_band_dbfs,
                                             scene->noise_power_full_band())
                               : std::string("disabled"));
-    report_buffer(writer, scene->noise_power_full_band());
+    report_buffer(writer, common->full_scale);
     std::print("  wrote             {}\n", common->out_path);
     if (!truth_path->empty()) {
         std::print("  truth             {}\n", *truth_path);
@@ -800,7 +834,8 @@ void print_usage()
         "  --phase X         initial carrier phase in radians\n"
         "  --seed N          payload and scene seed\n"
         "  --format F        cf32 (default), cs8, or cu8 for RTL-SDR native\n"
-        "  --block N         streaming block size in samples (262144)\n"
+        "  --scale X         amplitude mapping to full scale when quantising (1.0)\n"
+        "  --block N         streaming block size in samples (1048576)\n"
         "  --out PATH        output file, required\n"
         "\n"
         "  cw                --wpm X --rise-ms X --text \"CQ DE REVENANT\"\n"
