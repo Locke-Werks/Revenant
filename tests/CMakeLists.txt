@@ -40,6 +40,8 @@ catch_discover_tests(revenant_reference_tests
 
 # Tool suites, added as each tool lands. Guarded so that a checkout mid-way
 # through M0 still configures.
+add_subdirectory(engine)
+
 if(REVENANT_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
     add_subdirectory(tools)
 endif()
