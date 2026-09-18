@@ -41,7 +41,7 @@ struct DeviceInfo {
 };
 
 // Enumerates every Vulkan device without keeping a context open. Used by the
-// test runner and by --list-devices.
+// test runner and by the revenant-devices tool.
 [[nodiscard]] Expected<std::vector<DeviceInfo>> enumerate_devices();
 
 class Context {

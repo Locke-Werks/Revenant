@@ -47,8 +47,15 @@ jobs:
           # A build that embeds the wall clock cannot be reproduced, and a
           # reference implementation that cannot be reproduced cannot referee a
           # GPU kernel. The version resource carries the version, not the date.
+          #
+          # res/ is in the list because it holds revenant.rc.in, and the version
+          # resource is the single most likely place for somebody to reach for
+          # __DATE__. The guard scanned core, tools, ui and tests only, so the
+          # one file the comment above is actually about was the one file it
+          # could not see. The .in suffix matters for the same reason: the
+          # template is what gets edited, the generated .rc is never committed.
           dirs=""
-          for dir in core tools ui tests; do
+          for dir in core tools ui tests res; do
             if [ -d "$dir" ]; then dirs="$dirs $dir"; fi
           done
           if [ -z "$dirs" ]; then
@@ -57,7 +64,8 @@ jobs:
           fi
           if grep -rn \
               --include='*.cpp' --include='*.h' --include='*.hpp' \
-              --include='*.comp' --include='*.glsl' --include='*.rc' \
+              --include='*.comp' --include='*.glsl' \
+              --include='*.rc' --include='*.rc.in' --include='*.in' \
               -E '__DATE__|__TIME__|__TIMESTAMP__' $dirs; then
             echo "build timestamp macros are not allowed"
             exit 1
@@ -120,8 +128,14 @@ jobs:
           fi
           version=""
           for part in MAJOR MINOR PATCH; do
+            # The || true is load-bearing. This step runs under bash -e with
+            # pipefail, so a grep that matches nothing fails the pipeline, the
+            # step dies on the assignment, and the message below never prints.
+            # A malformed version file would fail the job with no indication of
+            # which component was wrong, which is exactly what this guard exists
+            # to tell you.
             value=$(grep -oE "REVENANT_VERSION_${part}[[:space:]]+[0-9]+" "$file" \
-                    | head -1 | grep -oE '[0-9]+$')
+                    | head -1 | grep -oE '[0-9]+$' || true)
             if [ -z "$value" ]; then
               echo "$file: REVENANT_VERSION_${part} is missing or is not an integer"
               exit 1
@@ -216,7 +230,6 @@ jobs:
         with:
           name: reference-diff-${{ matrix.name }}
           path: |
-            build/ci/reference-diff/**
             build/ci/Testing/**/*.log
           if-no-files-found: warn
           retention-days: 14

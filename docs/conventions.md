@@ -257,19 +257,25 @@ What that means in practice:
 
 ## Commits
 
-Conventional Commits. `feat:`, `fix:`, `perf:`, `refactor:`, `test:`, `docs:`,
-`build:`, `ci:`, `chore:`, with an optional scope: `fix(dsp): ...`,
-`feat(gpu): ...`.
+Subject in the imperative, under 72 characters, no trailing period, no type
+prefix. Body only when the change needs explaining, and it explains why rather
+than restating the diff. No emoji and no trailers.
 
-Subject in the imperative, under 72 characters, no trailing period. Body only
-when the change needs explaining, and it explains why rather than restating the
-diff.
+This is the house style across the Locke Werks repositories and it is what
+every commit here follows. It is a deliberate departure from the handoff
+document, which specified Conventional Commits: the `feat:` and `fix:` prefixes
+earn their keep when a tool generates a changelog or computes a semantic
+version from the log, and nothing here does either. Carrying the ceremony
+without the machinery is cost with no return. If a release process later wants
+generated changelogs, this is the decision to revisit, and revisiting it means
+adopting the prefixes going forward rather than rewriting what is already
+pushed.
 
 Every commit that touches DSP or a shader names its reference-diff result in the
 body: which kernel, which devices it ran on, and the worst deviation observed.
 
 ```
-fix(dsp): correct the FIR tail on non-multiple block sizes
+Correct the FIR tail on non-multiple block sizes
 
 reference-diff: fir_decimate, nvidia-4090 and amd-igpu, max |err| 4.1e-7
 against tests/reference/fir_decimate.cpp over 2^20 samples, seed 20260918.

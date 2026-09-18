@@ -13,8 +13,11 @@ machine and what CI runs against.
 | LunarG Vulkan SDK | 1.4.350 | `VULKAN_SDK` must be set. `glslangValidator` and `spirv-val` come from here. |
 | vcpkg | at `C:\vcpkg` | `VCPKG_ROOT` must be set. Manifest mode, so dependencies come from `vcpkg.json`. |
 
-C++23, through `/std:c++latest`. `std::expected`, `std::format`, `std::mdspan`
-and `std::print` are all in use and all work on MSVC 19.44.
+C++23, through `/std:c++latest`. `std::expected`, `std::format` and
+`std::print` are in use across the engine and the tools. `std::mdspan` is the
+convention for sample buffers once there are strided views worth taking, per
+docs/conventions.md, and is not used yet. All four are available on MSVC 19.44
+under that flag.
 
 Nothing needs to be installed by hand from vcpkg. The toolchain file in the
 preset reads `vcpkg.json` and the baseline pinned in
@@ -75,6 +78,19 @@ statement. Three ways past it: open an x64 Native Tools prompt, use
 `scripts/build.ps1`, which sources `vcvars` for you, or use the `vs` preset,
 which needs neither.
 
+**A failed configure poisons the build directory, so fixing the environment is
+not enough on its own.** CMake caches the compiler check, and re-running
+`cmake --preset dev` from a correct shell reuses the cache and fails again with
+the same message, which reads as though the fix did not work. Delete the
+directory and configure again:
+
+```powershell
+Remove-Item -Recurse -Force build\dev
+.\scripts\build.ps1 -Preset dev
+```
+
+`scripts/build.ps1 -Clean` does the same thing in one step.
+
 **The only `ninja` on `PATH` also comes from Strawberry Perl.** Same directory,
 version 1.12.0. It works, and depending on a Perl distribution for the build
 tool is a trap waiting for the day somebody uninstalls Perl. Install a real
@@ -110,12 +126,20 @@ the development machine and on the CI runner, which are the same box:
 | 0 | NVIDIA GeForce RTX 4090, discrete | 1.4.351 |
 | 1 | AMD Radeon integrated graphics, Ryzen 9 7950X | 1.4.315 |
 
-To list what a machine actually has, anything that opens a GPU context takes
-`--list-devices`, which prints the same table from
-`revenant::gpu::enumerate_devices` in `core/gpu/context.h`, including each
-device's maximum workgroup size. The Vulkan SDK's `vulkaninfo --summary` shows
-the same devices in the same order and is the independent check when the index
-is in doubt.
+To list what a machine actually has, build and run `revenant-devices`:
+
+```
+build\dev\tools\devices\revenant-devices.exe
+[0] NVIDIA GeForce RTX 4090 (NVIDIA, discrete, Vulkan 1.4.351)
+[1] AMD Radeon(TM) Graphics (AMD, integrated, Vulkan 1.4.315)
+```
+
+`--verbose` adds the vendor and device ids, the driver version and each
+device's workgroup limits. It enumerates without opening a device, so it still
+answers on a machine where creating a context fails, which is when the question
+usually comes up. The Vulkan SDK's `vulkaninfo --summary` lists the same
+devices in the same order and is the independent check when an index is in
+doubt.
 
 With the variable unset, selection prefers a discrete GPU, then anything else,
 and is stable for a given machine. Nothing in CI relies on that: both

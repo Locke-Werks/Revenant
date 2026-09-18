@@ -1,0 +1,57 @@
+# Formatting, so that docs/conventions.md describes something a tool enforces
+# rather than something everyone remembers differently.
+#
+# clang-format ships with Visual Studio, so this needs nothing installed:
+#   clang-format -i <file>
+#
+# Not wired into CI as a gate. A formatting failure that blocks a correct
+# change teaches people to reformat unrelated lines to get past it, and the
+# diff noise costs more than the consistency buys. Run it on what you touched.
+
+Language: Cpp
+BasedOnStyle: Google
+
+Standard: c++20
+
+# Wider than Google's 80. The project uses long, descriptive names, and at 80
+# a call like vkGetPhysicalDeviceQueueFamilyProperties wraps three ways for no
+# gain in readability.
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+
+# Braces on their own line for functions, cuddled everywhere else. This is the
+# house style across the Locke Werks repositories.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: false
+  AfterClass: false
+  AfterStruct: false
+  AfterNamespace: false
+  AfterControlStatement: Never
+  BeforeElse: false
+  BeforeCatch: false
+  SplitEmptyFunction: false
+
+PointerAlignment: Left
+DerivePointerAlignment: false
+AlwaysBreakTemplateDeclarations: Yes
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
+FixNamespaceComments: true
+NamespaceIndentation: None
+
+# Standard headers first, then Vulkan and other external headers, then ours.
+# Keeping "core/..." last makes it obvious at a glance which dependencies a
+# file has taken on.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+
+# A comment explaining why is frequently longer than the code. Reflowing it
+# into the column limit is right; mangling a hand-drawn table or a quoted
+# specification line is not, so block comments are left alone.
+ReflowComments: true

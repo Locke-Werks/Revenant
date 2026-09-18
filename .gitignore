@@ -42,6 +42,7 @@ bench-out/
 *.cf32
 *.cs8
 *.cs16
+*.cu8
 
 # Local session notes. See docs/ for anything that should outlive a branch.
 CLAUDE.md

@@ -68,6 +68,13 @@ if ($Clean -and (Test-Path $buildDir)) {
     Remove-Item -Recurse -Force $buildDir
 }
 
+# Scoped to this script, not left behind in the caller's session. A helper that
+# silently pins the device for every later command in the same shell is worse
+# than one that does not offer the option at all: the next ctest run aims
+# somewhere nobody asked for, and the result reads as a difference between
+# devices rather than a mistake.
+$previousGpu = $env:REVENANT_GPU_INDEX
+$previousPath = $env:PATH
 if ($Gpu -ge 0) {
     $env:REVENANT_GPU_INDEX = "$Gpu"
     Write-Host "REVENANT_GPU_INDEX = $Gpu" -ForegroundColor DarkGray
@@ -81,22 +88,64 @@ if (-not $NoTest -and -not $Target) { $steps += "ctest --preset $Preset --output
 
 $chain = ($steps -join ' && ')
 
-if ($needsVcVars) {
-    $vcvars = Find-VcVars
-    # One cmd invocation so the vcvars environment survives into every step.
-    # Sourcing it per step would work and would trebled the cost for nothing.
-    & cmd /c "`"$vcvars`" >nul 2>&1 && cd /d `"$root`" && $chain"
-} else {
-    Push-Location $root
-    try {
-        foreach ($step in $steps) {
-            Write-Host "> $step" -ForegroundColor DarkGray
-            Invoke-Expression $step
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+try {
+    if ($needsVcVars) {
+        $vcvars = Find-VcVars
+
+        # Put Visual Studio's own Ninja first.
+        #
+        # vcvars appends its Ninja directory rather than prepending it, so on a
+        # machine with Strawberry Perl on PATH the build still picks up
+        # C:\Strawberry\c\bin\ninja.exe even after sourcing vcvars. That is the
+        # second trap docs/building.md documents, and sourcing vcvars alone
+        # does not escape it: verified by running `where ninja` inside a vcvars
+        # shell and seeing Strawberry's copy listed first.
+        #
+        # It works today. The problem is that the build quietly depends on a
+        # Perl distribution nobody installed for this, and stops the day
+        # somebody removes it.
+        # vcvars64.bat sits at <install>\VC\Auxiliary\Build\, so the install
+        # root is four levels up from the file itself.
+        $vsRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $vcvars)))
+        $vsNinja = Join-Path $vsRoot 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
+        if (Test-Path (Join-Path $vsNinja 'ninja.exe')) {
+            # Prepended here rather than inside the cmd chain. A `set
+            # "PATH=...;%PATH%"` in the chain looks equivalent and is not: cmd
+            # expands %PATH% when it parses the whole command line, which is
+            # before vcvars has run, so it captures the pre-vcvars PATH and
+            # then restores it over the top of vcvars' additions. The compiler
+            # disappears and the error says cl is not on PATH, which is true
+            # and deeply confusing.
+            #
+            # Setting it in the parent process instead means the child inherits
+            # it, vcvars appends its own entries after, and ours stays first.
+            $env:PATH = "$vsNinja;$env:PATH"
+        } else {
+            Write-Warning "Visual Studio's ninja was not found; falling back to whatever is on PATH."
         }
-    } finally {
-        Pop-Location
+
+        # One cmd invocation so the vcvars environment survives into every step.
+        # Sourcing it per step would work and would treble the cost for nothing.
+        & cmd /c "`"$vcvars`" >nul 2>&1 && cd /d `"$root`" && $chain"
+    } else {
+        Push-Location $root
+        try {
+            foreach ($step in $steps) {
+                Write-Host "> $step" -ForegroundColor DarkGray
+                Invoke-Expression $step
+                if ($LASTEXITCODE -ne 0) { break }
+            }
+        } finally {
+            Pop-Location
+        }
     }
+} finally {
+    if ($null -eq $previousGpu) {
+        Remove-Item Env:REVENANT_GPU_INDEX -ErrorAction SilentlyContinue
+    } else {
+        $env:REVENANT_GPU_INDEX = $previousGpu
+    }
+    $env:PATH = $previousPath
 }
 
 exit $LASTEXITCODE

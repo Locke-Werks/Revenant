@@ -1,7 +1,13 @@
 # CI
 
-Two workflows. `ci.yml` runs on every push and pull request; `nightly.yml` runs the long
-BER sweeps on a schedule.
+Two workflows. `ci.yml` runs on pushes to `main`, on version tags, and on every pull
+request; `nightly.yml` runs the long BER sweeps on a schedule.
+
+Note what that leaves out: a push to a topic branch with no pull request open runs
+nothing. That is deliberate, because the GPU legs occupy the workstation, but it means
+the first CI a branch sees is when the pull request is opened. Push early if you want
+the feedback earlier, or run `scripts/build.ps1 -Preset ci` locally, which is the same
+build the runner does.
 
 ## Why the GPU jobs are self-hosted
 
