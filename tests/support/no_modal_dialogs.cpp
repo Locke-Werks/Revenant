@@ -37,11 +37,19 @@ struct DialogSuppressor {
         // 2. assert() and the CRT's own invalid-parameter and error reports.
         //    Routed to stderr, which a CI log captures, instead of to a window
         //    nobody is watching.
+        //
+        //    Debug CRT only. Without _DEBUG these are macros that expand to a
+        //    discarded constant, so the loop body vanishes and the induction
+        //    variable is left unreferenced, which /W4 reports and /WX turns
+        //    into a failed release build. There is nothing to suppress in a
+        //    release CRT anyway: it has no report dialogs of its own.
+#ifdef _DEBUG
         const int reports[] = {_CRT_WARN, _CRT_ERROR, _CRT_ASSERT};
         for (const int report : reports) {
             _CrtSetReportMode(report, _CRTDBG_MODE_FILE);
             _CrtSetReportFile(report, _CRTDBG_FILE_STDERR);
         }
+#endif
 
         // 3. The shell's own boxes for a hard fault or a missing device.
         SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
