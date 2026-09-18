@@ -1,0 +1,214 @@
+// The M-point FFT of the polyphase channelizer, with the output phase
+// correction folded into the output write.
+//
+// Kernel 2 of two. Kernel 1, core/shaders/pfb_branch.comp, filters the M
+// polyphase branches and writes branch r into FFT input slot (M - r) mod M.
+// That reversal is the reason this file is an ordinary forward transform. The
+// channelizer sum
+//
+//     S_k[m] = sum_r u_r[m] * exp(+j*2*pi*k*r/M)
+//
+// carries a POSITIVE exponent, so it is an inverse DFT, and every FFT anyone
+// writes implements the negative one. Since exp(-j*2*pi*k*(M-r)/M) equals
+// exp(+j*2*pi*k*r/M) for integer k, the sign is absorbed into the branch
+// ordering rather than into the transform. Omit the reversal and channel k
+// comes out as channel M-k: the spectrum is mirrored, a waterfall still looks
+// entirely plausible, and a decoder fails for no visible reason. The reversal
+// belongs to kernel 1; this file depends on it having happened and does
+// nothing about it itself.
+//
+// Radix-2 decimation in time: bit-reversed on load, natural order out,
+// log2(M) stages ascending, one barrier per stage. The structure is the
+// textbook Cooley-Tukey form (Oppenheim and Schafer, Discrete-Time Signal
+// Processing, chapter 9, for the transform; harris, Multirate Signal
+// Processing for Communication Systems, chapter 6, for the channelizer it
+// sits inside). No GPL-licensed implementation was consulted; see
+// docs/clean-room.md.
+//
+// The ordering is not an implementation detail that can be revisited later.
+// The CPU twin in core/dsp/pfb_fft_reference.cpp transcribes this butterfly
+// graph stage by stage, reading the same uploaded twiddle table, because an
+// FFT's summation order determines its rounding: two legitimate orderings of
+// the same 64-point transform (decimation in time against decimation in
+// frequency) were measured 131072 ULP apart on the same input. There is no
+// useful tolerance between those, so the diff demands bit-identical output and
+// this file is the definition of what "the same computation" means.
+
+#version 450
+
+// Scheduling only. Every loop here is strided and carries no barrier inside
+// it, so a thread with nothing left to do skips the body and the barriers stay
+// in uniform control flow. Within a stage the (ia, ib) pairs are disjoint, so
+// the in-place read-modify-write needs no barrier until the stage ends. The
+// butterfly graph is a function of (M, stage, butterfly index) alone, which is
+// why the answer cannot depend on how many threads ran it.
+layout(local_size_x_id = 0) in;
+
+// Specialization rather than push constants, because these change only when
+// the sample rate changes or the user asks for a channel count beyond the
+// current grid. Specializing them lets the stage loop bound fold, lets the
+// shared array size resolve at pipeline creation, and lets the D == M case
+// fold the phase correction away entirely: the comparison below emits as
+// OpSpecConstantOp INotEqual, which the driver resolves before it compiles
+// the branch.
+layout(constant_id = 1) const uint kChannels = 64;    // M, a power of two
+layout(constant_id = 2) const uint kDecimation = 32;  // D, divides M
+layout(constant_id = 3) const uint kStages = 6;       // log2(M)
+
+// std430 gives an array of vec2 a stride of 8 bytes, which is the layout of
+// std::complex<float> on the host, so nothing is repacked on either side.
+layout(std430, binding = 0) readonly buffer BranchOutput {
+    vec2 values[];
+} branch;
+
+// W_M^j = exp(-j*2*pi*j/M), M entries, built on the host from the first octant
+// and reflected. Never sin or cos in the shader: GLSL permits several units in
+// the last place there and each vendor spends them differently, which would
+// end bit-exactness before accumulation order was even in question. The full
+// circle rather than a half because the output phase correction indexes the
+// same table.
+layout(std430, binding = 1) readonly buffer Twiddles {
+    vec2 w[];
+} tw;
+
+layout(std430, binding = 2) writeonly buffer ChannelRing {
+    vec2 values[];
+} channels;
+
+layout(push_constant) uniform Params {
+    // Absolute output block index of block 0 of this dispatch, truncated to 32
+    // bits. The host owns the 64-bit sample index; SampleIndex is uint64 and
+    // GLSL has no 64-bit integer without an extension. The truncation is
+    // benign here and only here: every use below reduces this value modulo a
+    // power of two that divides 2^32, so the wrapped value gives the same
+    // answer as the full one. Get that reasoning wrong somewhere it does not
+    // hold and the kernel works for a few minutes at 20 MS/s and then does not.
+    uint block_base;
+
+    uint block_count;
+
+    // Per-channel ring capacity in blocks, a power of two, and its mask.
+    uint out_ring_blocks;
+    uint out_ring_mask;
+} params;
+
+// One transform, resident. 8*M bytes: 32 KiB holds M = 4096 by arithmetic and
+// M = 2048 in practice once the driver has taken its own share, which is the
+// binding limit because the AMD integrated part in the conformance matrix caps
+// maxComputeSharedMemorySize at 32768 where the RTX 4090 offers 49152. The
+// host discovers the real ceiling rather than assuming it: see
+// max_fft_transform_size() in core/dsp/pfb_fft_reference.h, which is called
+// with the device's own limit. Above that bound the transform needs the
+// multi-dispatch Stockham form, ping-ponging between two device buffers, which
+// is the same butterfly graph split across dispatches and keeps the twin
+// valid.
+//
+// Sizing a shared array from a specialization constant is legal and emits
+// correctly here, and is also historically a driver-bug magnet. If a driver
+// ever rejects it, the fallback is a fixed-size array declared at the largest
+// supported M with the loops still bounded by kChannels: correct everywhere,
+// at the cost of always reserving the maximum shared allocation and so losing
+// occupancy at small M. Do not fall back by hardcoding a size, which would
+// make the kernel unlaunchable on the device with the smaller cap.
+shared vec2 scratch[kChannels];
+
+// Reverse the low kStages bits, which is the load permutation that makes a
+// decimation-in-time transform come out in natural order.
+uint reversed_index(uint index) {
+    // A permutation moves no bits of a float, so nothing here can perturb the
+    // bit-exact comparison; it is pure integer work. The guard is for the
+    // degenerate M == 1 grid, where a shift by 32 would be undefined. kStages
+    // is a specialization constant, so the driver folds the select away.
+    return (kStages == 0u) ? 0u : (bitfieldReverse(index) >> (32u - kStages));
+}
+
+void main() {
+    const uint block = gl_WorkGroupID.x;
+    if (block >= params.block_count) {
+        return;
+    }
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint threads = gl_WorkGroupSize.x;
+    const uint block_origin = block * kChannels;
+
+    for (uint i = tid; i < kChannels; i += threads) {
+        scratch[i] = branch.values[block_origin + reversed_index(i)];
+    }
+    barrier();
+
+    const uint butterflies = kChannels >> 1u;
+
+    for (uint stage = 0u; stage < kStages; ++stage) {
+        // Span between the two halves of a butterfly at this stage, and the
+        // step through the twiddle circle. Both are powers of two, so the
+        // index arithmetic below is shifts and masks with no division.
+        const uint half_span = 1u << stage;
+        const uint twiddle_step = kChannels >> (stage + 1u);
+
+        for (uint b = tid; b < butterflies; b += threads) {
+            const uint j = b & (half_span - 1u);
+            const uint ia = ((b >> stage) << (stage + 1u)) + j;
+            const uint ib = ia + half_span;
+
+            const vec2 a = scratch[ia];
+            const vec2 bv = scratch[ib];
+            const vec2 w = tw.w[j * twiddle_step];
+
+            // The twiddle multiply is literally core/shaders/cmul.comp, the
+            // kernel this project already proved bit-exact on both devices.
+            //
+            // Every line here is `precise` because each one is the shape a
+            // shader compiler wants to fuse into a fused multiply-add, and a
+            // fused multiply-add keeps full precision on the intermediate
+            // product and rounds once where separate operations round twice.
+            // Whether that fusion happens is a decision each vendor makes for
+            // itself, so left alone this butterfly gives one answer on NVIDIA
+            // and another on AMD, both plausible, neither flagged. `precise`
+            // forbids fusion and reassociation of anything contributing to the
+            // qualified value, so what is written is what executes: two
+            // multiplies and a subtract, two multiplies and an add, then four
+            // adds. The twin does the same six statements in the same order.
+            precise float vr = bv.x * w.x - bv.y * w.y;
+            precise float vi = bv.x * w.y + bv.y * w.x;
+            precise float sum_real = a.x + vr;
+            precise float sum_imag = a.y + vi;
+            precise float diff_real = a.x - vr;
+            precise float diff_imag = a.y - vi;
+
+            scratch[ia] = vec2(sum_real, sum_imag);
+            scratch[ib] = vec2(diff_real, diff_imag);
+        }
+        barrier();
+    }
+
+    // The output phase correction, exp(-j*2*pi*k*m*D/M), folded into the write
+    // rather than given its own dispatch: a separate pass would cost a full
+    // read and write of the whole channelised output to multiply by plus or
+    // minus one. It is identically 1 when D == M, and when D == M/2 it is
+    // (-1)^(k*m), a sign flip on odd channels at odd output times, which is
+    // exact in floating point and so cannot perturb a bit-exact comparison.
+    // Omit it at D < M and the answer is wrong by O(1), not by a rounding.
+    const uint m_abs = params.block_base + block;
+    const uint slot = m_abs & params.out_ring_mask;
+
+    // (m*D) mod M, computed on the already-reduced m so the product cannot
+    // overflow 32 bits. M is a power of two, so both reductions are exact.
+    const uint dm = ((m_abs & (kChannels - 1u)) * kDecimation) & (kChannels - 1u);
+
+    for (uint k = tid; k < kChannels; k += threads) {
+        vec2 v = scratch[k];
+
+        if (kDecimation != kChannels) {
+            const vec2 c = tw.w[(k * dm) & (kChannels - 1u)];
+            precise float pr = v.x * c.x - v.y * c.y;
+            precise float pi = v.x * c.y + v.y * c.x;
+            v = vec2(pr, pi);
+        }
+
+        // Channel-major: a receiver reads one channel's time series, so time
+        // is the contiguous axis and the FFT pays the scatter once rather than
+        // every consumer paying a gather.
+        channels.values[k * params.out_ring_blocks + slot] = v;
+    }
+}

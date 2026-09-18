@@ -11,6 +11,7 @@ add_executable(revenant_reference_tests
     reference/test_cmul.cpp
     reference/test_denormal_mode.cpp
     reference/test_divergence.cpp
+    reference/test_pfb.cpp
 )
 
 target_link_libraries(revenant_reference_tests PRIVATE

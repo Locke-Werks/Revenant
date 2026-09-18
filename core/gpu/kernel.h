@@ -41,6 +41,20 @@ public:
         std::uint32_t local_size_x = kDefaultLocalSizeX;
         std::uint32_t push_constant_bytes = 0;
         const char* entry_point = "main";
+
+        // Unsigned specialization constants bound to ids 1, 2, 3 and upwards,
+        // in order. Id 0 is always the workgroup size.
+        //
+        // The channelizer's grid parameters live here rather than in push
+        // constants, and the reason is not tidiness. Specializing M, D and
+        // log2(M) lets the tap loop unroll and lets the critically-sampled
+        // case fold its whole phase-correction branch away at pipeline
+        // creation, as an OpSpecConstantOp the driver resolves before the
+        // kernel ever runs. They are also exactly the parameters that must not
+        // change when a receiver is added, so putting them somewhere that
+        // requires a pipeline rebuild to change states that constraint in the
+        // type system rather than in a comment.
+        std::span<const std::uint32_t> grid_constants;
     };
 
     [[nodiscard]] static Expected<ComputePipeline> create(const Context& context,
@@ -105,6 +119,23 @@ public:
     // rather than one per buffer.
     [[nodiscard]] Status copy(std::span<const BufferCopy> copies);
 
+    struct BufferClear {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize bytes = 0;
+    };
+
+    // Zeroes device buffers.
+    //
+    // Necessary, not hygiene. A freshly allocated device buffer holds whatever
+    // was last in that memory, and a kernel that writes only part of its
+    // output leaves the rest at that value. The reference diff then compares
+    // the untouched region against a host buffer that was zero-initialised,
+    // and fails or passes depending on what the allocator handed back. That is
+    // a bit-exactness suite that reports a different answer on consecutive
+    // runs of the same binary, which is worse than no suite: it trains people
+    // to re-run until it goes green.
+    [[nodiscard]] Status clear(std::span<const BufferClear> buffers);
+
 private:
     void destroy() noexcept;
 
@@ -135,6 +166,22 @@ struct KernelInvocation {
     std::uint32_t invocations = 0;
 
     std::uint32_t local_size_x = kDefaultLocalSizeX;
+
+    // Bound to specialization constants 1, 2, 3 and upwards. See
+    // ComputePipeline::Options::grid_constants.
+    std::vector<std::uint32_t> grid_constants;
+
+    // Dispatch this many workgroups instead of deriving the count from
+    // invocations.
+    //
+    // A kernel that treats a workgroup as the unit of work rather than an
+    // invocation needs this. The FFT stage is one: it holds a whole transform
+    // in shared memory and indexes by gl_WorkGroupID, so the group count is
+    // the number of transforms and has nothing to do with how the threads
+    // within one are arranged. Deriving it from invocations would work only by
+    // arithmetic coincidence and would break the moment the thread count per
+    // transform changed.
+    std::uint32_t group_count_x = 0;
 };
 
 // Uploads the inputs, dispatches, reads the outputs back into the caller's

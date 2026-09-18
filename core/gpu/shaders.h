@@ -20,4 +20,13 @@ namespace revenant::gpu::shaders {
 // revenant::dsp::reference_cmul.
 [[nodiscard]] std::span<const std::uint32_t> cmul();
 
+// Stage one of the channelizer: the polyphase branch filters. Writes branch r
+// to FFT input slot (M - r) mod M, which is what lets stage two be an ordinary
+// forward transform. Twin of revenant::dsp::reference_pfb_branches.
+[[nodiscard]] std::span<const std::uint32_t> pfb_branch();
+
+// Stage two: the M-point transform, with the output phase correction folded
+// into the write. Twin of revenant::dsp::reference_pfb_fft.
+[[nodiscard]] std::span<const std::uint32_t> pfb_fft();
+
 }  // namespace revenant::gpu::shaders

@@ -1,0 +1,149 @@
+// Polyphase branch filter: kernel 1 of the channelizer's two dispatches.
+//
+// Written from published mathematics only, per docs/clean-room.md. The
+// polyphase decomposition is Crochiere and Rabiner, "Multirate Digital Signal
+// Processing", chapter 3; the channelizer form and the oversampled variant are
+// harris, "Multirate Signal Processing for Communication Systems", chapter 6.
+// No GPL implementation was read while writing this file.
+//
+// The definition every test referees against, with M channels, decimation D
+// dividing M, and a real prototype h of length N = M * taps_per_branch:
+//
+//     y_k[m] = sum_{n=0}^{N-1} h[n] * x[mD - n] * exp(-j*2*pi*k*(mD - n)/M)
+//
+// which reads as "mix channel k down to DC, lowpass with h, sample at mD".
+// Factoring the exponential and splitting n = qM + r makes q drop out of it
+// entirely, which is the whole trick and the reason this stage exists:
+//
+//     u_r[m] = sum_{q} h[qM + r] * x[mD - r - qM]        branch r
+//     S_k[m] = sum_{r} u_r[m] * exp(+j*2*pi*k*r/M)       an M-point transform
+//     y_k[m] = exp(-j*2*pi*k*m*D/M) * S_k[m]             phase correction
+//
+// This kernel computes u_r. The transform and the correction are kernel 2,
+// core/shaders/pfb_fft.comp.
+//
+// THE BRANCH REVERSAL, which is the off-by-one that costs a week.
+//
+// S_k has a POSITIVE exponent. That is an inverse DFT, and every FFT you will
+// write implements the negative one. Absorb the sign into the ordering rather
+// than into the transform: because exp(-j*2*pi*k*(M-r)/M) = exp(-j*2*pi*k) *
+// exp(+j*2*pi*k*r/M) and exp(-j*2*pi*k) = 1 for integer k,
+//
+//     a[(M - r) mod M] = u_r    gives    S_k = DFT_M(a)[k]
+//
+// So: the branch filter writes its result to FFT input slot (M - r) mod M, and
+// the FFT is the ordinary forward transform. Omit the reversal and every
+// channel comes out as channel M-k: the spectrum is mirrored, a waterfall looks
+// entirely plausible, and a decoder fails for no visible reason. The probe is
+// the regression: reversal on gives 4e-13 against the direct definition,
+// reversal off gives 0.35.
+//
+// THE COMMUTATOR. Branch r reads x at mD - r, mD - r - M, mD - r - 2M, ...:
+// the newest of the M samples goes to branch 0 and the index counts backwards.
+// A block at base mD depends exactly on the window x[mD-N+1 .. mD], which is
+// just the FIR support, so the kernel needs no per-branch state, only a ring
+// and an offset.
+//
+// The CPU twin is reference_pfb_branches in core/dsp/pfb_branch_reference.cpp,
+// and it is bit-identical rather than close. It transcribes this loop: the same
+// ascending q, the same accumulate-then-multiply-add shape, the same slot.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation so one module runs on a
+// device with a 64-invocation limit and on one with 1024. Id 0 is the
+// project-wide convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// The grid is specialization constants rather than push constants because M, L
+// and D change only when the sample rate changes or the user asks for a channel
+// count beyond the current grid. Specializing them lets the tap loop unroll,
+// and a receiver attaching or detaching touches none of the three, so the
+// pipeline is not rebuilt for it.
+layout(constant_id = 1) const uint kChannels = 64;       // M, a power of two
+layout(constant_id = 2) const uint kTapsPerBranch = 17;  // L + 1, delay pad included
+layout(constant_id = 3) const uint kDecimation = 32;     // D, divides M
+
+// std430 gives an array of vec2 a stride of 8 bytes, which is the layout of
+// std::complex<float> on the host, so the ring maps on with no repacking.
+layout(std430, binding = 0) readonly buffer IqRing {
+    vec2 samples[];
+} iq;
+
+layout(std430, binding = 1) readonly buffer Prototype {
+    float taps[];
+} proto;
+
+layout(std430, binding = 2) writeonly buffer BranchOutput {
+    vec2 values[];
+} branch;
+
+layout(push_constant) uniform Params {
+    // Input ring capacity minus one. The capacity is a power of two, which is
+    // what makes the masking below exact rather than approximately right.
+    uint ring_mask;
+
+    // Ring offset of x[mD] for output block 0.
+    //
+    // This kernel never sees an absolute sample index, and that is deliberate.
+    // SampleIndex is uint64 and GLSL has no 64-bit integer here without an
+    // extension, so the host owns the index and hands down a 32-bit ring
+    // offset. Pass a truncated absolute index instead and it works for three
+    // and a half minutes at 20 MS/s and then does not.
+    uint base_offset;
+
+    uint block_count;
+} params;
+
+void main() {
+    const uint id = gl_GlobalInvocationID.x;
+
+    // One invocation per (block, branch). The dispatch rounds the group count
+    // up, so the final workgroup runs past the end of the work; every kernel
+    // bounds-checks rather than requiring callers to pad their buffers.
+    if (id >= params.block_count * kChannels) {
+        return;
+    }
+
+    const uint block = id / kChannels;
+    const uint r     = id % kChannels;
+    const uint base  = params.base_offset + block * kDecimation;
+
+    // `precise` is load-bearing, not decoration. An accumulate-multiply is
+    // exactly the shape a compiler fuses into an FMA, which keeps full
+    // precision on the product and rounds once where separate operations round
+    // twice. Whether the fusion happens is a decision each vendor's shader
+    // compiler makes for itself, so left alone this loop gives one answer on
+    // NVIDIA and another on AMD, both plausible and neither flagged. The
+    // qualifier forbids fusion and reassociation of everything contributing to
+    // the value, and the twin compiles under the matching discipline with the
+    // same ascending q. Verified: this file emits 4 NoContraction decorations,
+    // one per arithmetic site below.
+    precise float acc_real = 0.0;
+    precise float acc_imag = 0.0;
+
+    for (uint q = 0u; q < kTapsPerBranch; ++q) {
+        const uint n = q * kChannels + r;
+
+        // (base - n) & ring_mask looks like an unsigned underflow bug and is
+        // not. When n exceeds base the subtraction wraps modulo 2^32, and the
+        // ring capacity is a power of two dividing 2^32, so reducing that
+        // wrapped value by the mask lands on exactly the sample the unwrapped
+        // arithmetic would have named. This is the ordinary case, not an edge
+        // case: the first blocks after a stream starts all take it.
+        const vec2  s = iq.samples[(base - n) & params.ring_mask];
+        const float c = proto.taps[n];
+
+        acc_real = acc_real + s.x * c;
+        acc_imag = acc_imag + s.y * c;
+    }
+
+    // The branch reversal. See the header comment for the derivation; this is
+    // the one line that carries it. kChannels is a power of two, so the mask is
+    // the modulo and slot 0 stays slot 0.
+    const uint slot = (kChannels - r) & (kChannels - 1u);
+
+    // Block-major, so one transform's M inputs are contiguous, which is what
+    // the FFT's load wants.
+    branch.values[block * kChannels + slot] = vec2(acc_real, acc_imag);
+}

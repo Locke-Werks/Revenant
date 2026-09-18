@@ -4,6 +4,9 @@
 add_library(revenant_core STATIC
     dsp/complex_ops.cpp
     dsp/denormal_mode.cpp
+    dsp/pfb_branch_reference.cpp
+    dsp/pfb_design.cpp
+    dsp/pfb_fft_reference.cpp
     gpu/buffer.cpp
     gpu/context.cpp
     gpu/kernel.cpp
@@ -23,6 +26,8 @@ revenant_add_shaders(revenant_core
     SHADERS
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/identity.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cmul.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pfb_branch.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pfb_fft.comp"
 )
 
 revenant_apply_warnings(revenant_core)

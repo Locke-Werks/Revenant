@@ -101,17 +101,31 @@ Expected<ComputePipeline> ComputePipeline::create(const Context& context,
 
     // The workgroup size is specialized here rather than written into the
     // shader, so one SPIR-V module runs at whatever size the device and the
-    // workload want.
-    VkSpecializationMapEntry entry{};
-    entry.constantID = kLocalSizeXConstantId;
-    entry.offset = 0;
-    entry.size = sizeof(std::uint32_t);
+    // workload want. Grid constants follow it at ids 1 upwards.
+    //
+    // All of them are packed into one contiguous block because
+    // VkSpecializationInfo takes a single pData and offsets into it, so the
+    // values have to outlive the struct and sit next to each other.
+    std::vector<std::uint32_t> constant_values;
+    constant_values.reserve(1 + options.grid_constants.size());
+    constant_values.push_back(pipeline.local_size_x_);
+    constant_values.insert(constant_values.end(), options.grid_constants.begin(),
+                           options.grid_constants.end());
+
+    std::vector<VkSpecializationMapEntry> entries(constant_values.size());
+    for (std::size_t i = 0; i < constant_values.size(); ++i) {
+        entries[i].constantID = static_cast<std::uint32_t>(i);
+        entries[i].offset = static_cast<std::uint32_t>(i * sizeof(std::uint32_t));
+        entries[i].size = sizeof(std::uint32_t);
+    }
+    static_assert(kLocalSizeXConstantId == 0,
+                  "the packing above assumes the workgroup size is constant id 0");
 
     VkSpecializationInfo spec{};
-    spec.mapEntryCount = 1;
-    spec.pMapEntries = &entry;
-    spec.dataSize = sizeof(std::uint32_t);
-    spec.pData = &pipeline.local_size_x_;
+    spec.mapEntryCount = static_cast<std::uint32_t>(entries.size());
+    spec.pMapEntries = entries.data();
+    spec.dataSize = constant_values.size() * sizeof(std::uint32_t);
+    spec.pData = constant_values.data();
 
     VkPipelineShaderStageCreateInfo stage{};
     stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -368,6 +382,38 @@ Status CommandRunner::copy(std::span<const BufferCopy> copies) {
     return submit_and_wait();
 }
 
+Status CommandRunner::clear(std::span<const BufferClear> buffers) {
+    if (context_ == nullptr) {
+        return fail("CommandRunner::clear called without a context");
+    }
+    if (buffers.empty()) {
+        return {};
+    }
+
+    if (auto began = begin_recording(); !began) {
+        return began;
+    }
+
+    for (const auto& target : buffers) {
+        if (target.buffer == VK_NULL_HANDLE || target.bytes == 0) {
+            return fail("CommandRunner::clear was given an incomplete target");
+        }
+        vkCmdFillBuffer(command_buffer_, target.buffer, 0, target.bytes, 0U);
+    }
+
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                            VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         1, &barrier, 0, nullptr, 0, nullptr);
+
+    return submit_and_wait();
+}
+
 Status CommandRunner::begin_recording() {
     VkResult result = vkResetCommandBuffer(command_buffer_, 0);
     if (result != VK_SUCCESS) {
@@ -500,6 +546,7 @@ Status run_kernel(const Context& context, const KernelInvocation& invocation) {
                      .push_constant_bytes =
                          static_cast<std::uint32_t>(invocation.push_constants.size()),
                      .entry_point = "main",
+                     .grid_constants = invocation.grid_constants,
                  });
     if (!pipeline) {
         return std::unexpected(with_context(pipeline.error(), "run_kernel"));
@@ -577,6 +624,24 @@ Status run_kernel(const Context& context, const KernelInvocation& invocation) {
                                                     .bytes = device_buffers[i].size()});
     }
 
+    // Zero the outputs before dispatching.
+    //
+    // A kernel that writes only part of its output, which the channelizer's
+    // FFT stage does because its ring is larger than one dispatch, would
+    // otherwise leave the rest holding whatever the allocator last had there.
+    // The diff would compare that against a zero-initialised host buffer and
+    // return a different verdict on consecutive runs of the same binary. This
+    // cost one flaky failure to find and is cheap to prevent.
+    std::vector<CommandRunner::BufferClear> clears;
+    clears.reserve(invocation.outputs.size());
+    for (std::size_t i = first_output; i < device_buffers.size(); ++i) {
+        clears.push_back(CommandRunner::BufferClear{.buffer = device_buffers[i].handle(),
+                                                    .bytes = device_buffers[i].size()});
+    }
+    if (auto cleared = runner->clear(clears); !cleared) {
+        return std::unexpected(with_context(cleared.error(), "run_kernel clear"));
+    }
+
     if (auto copied = runner->copy(uploads); !copied) {
         return std::unexpected(with_context(copied.error(), "run_kernel upload"));
     }
@@ -584,7 +649,9 @@ Status run_kernel(const Context& context, const KernelInvocation& invocation) {
     CommandRunner::Dispatch dispatch{};
     dispatch.pipeline = &*pipeline;
     dispatch.buffers = handles;
-    dispatch.group_count_x = group_count(invocation.invocations, invocation.local_size_x);
+    dispatch.group_count_x = invocation.group_count_x != 0
+                                 ? invocation.group_count_x
+                                 : group_count(invocation.invocations, invocation.local_size_x);
     dispatch.push_constants = invocation.push_constants;
 
     if (auto ran = runner->run(dispatch); !ran) {
