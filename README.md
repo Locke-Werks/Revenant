@@ -147,6 +147,8 @@ that backs it up.
 - [docs/clean-room.md](docs/clean-room.md), the licensing position
 - [docs/snr-convention.md](docs/snr-convention.md), how SNR is reported and why it
   matters that everyone means the same thing by it
+- [docs/fft.md](docs/fft.md), why the FFT is written here rather than taken from
+  a library, with the measurements that decided it
 - [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
   what it does not
 

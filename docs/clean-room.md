@@ -241,6 +241,42 @@ than settled quietly at build time, because the triplet is the kind of setting
 that gets changed for an unrelated reason by someone who does not know a licence
 depends on it.
 
+## Disclosure log
+
+Every exposure gets recorded here, with what was seen, when, and what was done
+about it. A clean-room claim with no disclosure log is either a claim nobody
+tested or a claim somebody is not telling you about. Two entries so far, and
+both were self-reported by the person who did it, which is the behaviour the
+practice needs to keep producing.
+
+**2026-09-18, polyphase channelizer design.** While verifying the licences of
+candidate reference implementations, the first 1200 bytes of GNU Radio's
+`gr-filter/lib/pfb_channelizer_ccf_impl.cc` were fetched to read its SPDX
+identifier, and the fetch over-ran the identifier. What was seen: the copyright
+header, the SPDX line, the include block, the factory function signature and
+the opening of the constructor's initialiser list. No algorithm: nothing about
+the commutator, the branch ordering, the transform or the phase correction, and
+nothing further was read. That file is GPL-3.0-or-later.
+
+The channelizer design was complete and numerically verified before the fetch,
+and the probe results that verify it precede it in the record.
+
+Resolution: the design stands, and the implementation was handed to sessions
+that had never seen the disclosure or the fetched content, working from a brief
+with this entry removed. So no one who wrote the channelizer code had any
+exposure to that file, which is the property the claim actually needs. The cost
+of doing it that way was close to nothing, which is the reason to prefer it
+over assessing one's own exposure and deciding it was probably fine.
+
+**2026-09-18, RTL-SDR prior-art survey.** Seven candidate implementations were
+examined to see whether any permissively licensed prior art could lawfully be
+read. All seven were disqualified, most of them by reading only a licence file,
+a README or an attribution line. The recurring pattern is a repository
+declaring MIT or Apache while carrying relabelled GPL source or crediting a GPL
+project for its register values. No implementation source was read. The
+conclusion, recorded above, is that there is no usable permissive prior art for
+this hardware and the backend comes from the datasheets.
+
 ## If a question comes up later
 
 The evidence that this practice was followed is in the repository, not in this
