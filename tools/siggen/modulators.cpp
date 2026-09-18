@@ -908,6 +908,15 @@ Expected<Modulator> Modulator::create(ModulatorSpec spec)
                               : modulator.spec_.payload_bits;
 
         const std::size_t symbols = modulator.bits_.size() / bits_per_symbol;
+        if (psk.span_symbols >= symbols) {
+            // The pulse wrap in psk_envelope assumes a tail crosses the cycle
+            // boundary at most once, which is what lets it resolve without a
+            // division. A payload shorter than the pulse would break that, and
+            // a payload that short is not a useful test signal anyway.
+            return fail(std::format("a {} symbol pulse needs a payload longer than {} symbols",
+                                    psk.span_symbols, psk.span_symbols));
+        }
+
         auto clock = build_symbol_clock(symbols, common.rate, psk.symbol_rate);
         if (!clock) {
             return std::unexpected(with_context(clock.error(), "siggen PSK"));
@@ -946,14 +955,30 @@ Expected<Modulator> Modulator::create(ModulatorSpec spec)
             modulator.rrc_[i] = static_cast<float>(root_raised_cosine(t, psk.rolloff));
         }
 
+        const double samples_per_symbol = static_cast<double>(modulator.clock_.cycle_samples) /
+                                          static_cast<double>(modulator.clock_.symbol_count);
+
+        // Fold the whole sample-position-to-table-step conversion into one
+        // multiply and one add, so the inner loop over seventeen neighbouring
+        // pulses has no division in it.
+        modulator.rrc_scale_ =
+            static_cast<double>(kRrcStepsPerSymbol) / samples_per_symbol;
+        modulator.rrc_base_ =
+            static_cast<double>(psk.span_symbols) * static_cast<double>(kRrcStepsPerSymbol);
+        modulator.rrc_limit_ = static_cast<double>(table_size - 1);
+        modulator.cycle_span_ = static_cast<double>(modulator.clock_.cycle_samples);
+        modulator.boundary_seconds_.resize(symbols);
+        for (std::size_t k = 0; k < symbols; ++k) {
+            modulator.boundary_seconds_[k] =
+                static_cast<double>(modulator.clock_.boundary[k]);
+        }
+
         // Scale so an independent unit-power symbol stream leaves at unit mean
         // power, which is what makes ModulatorConfig::amplitude mean RMS here.
         // The mean power of the pulse train is the sum of h^2 over the output
         // sample grid divided by the samples per symbol. The sum is taken
         // through the same table the renderer uses, so the calibration matches
         // what actually comes out rather than the ideal it was built from.
-        const double samples_per_symbol = static_cast<double>(modulator.clock_.cycle_samples) /
-                                          static_cast<double>(modulator.clock_.symbol_count);
         const auto reach = static_cast<std::int64_t>(
             std::ceil(static_cast<double>(psk.span_symbols) * samples_per_symbol));
         double energy = 0.0;
@@ -1042,51 +1067,59 @@ double Modulator::cw_envelope(SampleIndex index, std::size_t& cursor) const
     return envelope;
 }
 
-double Modulator::rrc_lookup(double symbol_offset) const
+double Modulator::rrc_tap_at(double table_position) const
 {
-    if (rrc_.size() < 2) {
+    if (table_position <= 0.0 || table_position >= rrc_limit_) {
         return 0.0;
     }
-    const double position =
-        (symbol_offset + static_cast<double>(spec_.psk.span_symbols)) *
-        static_cast<double>(kRrcStepsPerSymbol);
-    if (position <= 0.0 || position >= static_cast<double>(rrc_.size() - 1)) {
-        return 0.0;
-    }
-    const auto lower = static_cast<std::size_t>(position);
-    const double fraction = position - static_cast<double>(lower);
+    const auto lower = static_cast<std::size_t>(table_position);
+    const double fraction = table_position - static_cast<double>(lower);
     const auto a = static_cast<double>(rrc_[lower]);
     const auto b = static_cast<double>(rrc_[lower + 1]);
     return a + fraction * (b - a);
 }
 
-Complex32 Modulator::psk_envelope(SampleIndex index) const
+double Modulator::rrc_lookup(double symbol_offset) const
 {
-    const SampleIndex cycle = clock_.cycle_samples;
+    if (rrc_.size() < 2) {
+        return 0.0;
+    }
+    return rrc_tap_at(symbol_offset * static_cast<double>(kRrcStepsPerSymbol) + rrc_base_);
+}
+
+Complex32 Modulator::psk_envelope(SampleIndex position_in_cycle, std::size_t symbol) const
+{
     const auto symbols = static_cast<std::int64_t>(clock_.symbol_count);
-    const SampleIndex position = index % cycle;
-    const auto centre_symbol = static_cast<std::int64_t>(clock_.index_at(position));
-    const double samples_per_symbol =
-        static_cast<double>(cycle) / static_cast<double>(clock_.symbol_count);
     const auto span = static_cast<std::int64_t>(spec_.psk.span_symbols);
+    const auto centre_symbol = static_cast<std::int64_t>(symbol);
+    const auto position = static_cast<double>(position_in_cycle);
 
     double in_phase = 0.0;
     double quadrature = 0.0;
     for (std::int64_t offset = -span; offset <= span; ++offset) {
-        const std::int64_t symbol = centre_symbol + offset;
-        // The payload repeats, so a pulse tail that runs off one end of the
-        // cycle arrives at the other. Wrapping it is what makes the signal
-        // genuinely periodic rather than glitching once per repeat.
-        const std::int64_t repeat = floor_div(symbol, symbols);
-        const std::int64_t wrapped = symbol - repeat * symbols;
-        const double centre = static_cast<double>(clock_.boundary[static_cast<std::size_t>(wrapped)]) +
-                              static_cast<double>(repeat) * static_cast<double>(cycle);
-        const double tap =
-            rrc_lookup((static_cast<double>(position) - centre) / samples_per_symbol);
+        std::int64_t wrapped = centre_symbol + offset;
+        double shift = 0.0;
+
+        // The payload repeats, so a pulse tail running off one end of the cycle
+        // arrives at the other, which is what makes the signal genuinely
+        // periodic instead of glitching once per repeat. create() guarantees
+        // the span is shorter than the payload, so the wrap is never more than
+        // one cycle and needs no division to resolve.
+        if (wrapped < 0) {
+            wrapped += symbols;
+            shift = -cycle_span_;
+        } else if (wrapped >= symbols) {
+            wrapped -= symbols;
+            shift = cycle_span_;
+        }
+
+        const auto slot = static_cast<std::size_t>(wrapped);
+        const double centre = boundary_seconds_[slot] + shift;
+        const double tap = rrc_tap_at((position - centre) * rrc_scale_ + rrc_base_);
         if (tap == 0.0) {
             continue;
         }
-        const Complex32& value = symbols_[static_cast<std::size_t>(wrapped)];
+        const Complex32& value = symbols_[slot];
         in_phase += static_cast<double>(value.real()) * tap;
         quadrature += static_cast<double>(value.imag()) * tap;
     }

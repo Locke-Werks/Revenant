@@ -13,14 +13,17 @@
 // What this deliberately does NOT do is read tuner registers, and the reason
 // matters more than the code.
 //
-// Revenant's licensing position rests on a clean-room claim: no GPL source is
-// read, ported or consulted while implementing a corresponding component. See
-// docs/clean-room.md. The RTL2832U's vendor control protocol and the R820T2's
-// register map are both obtainable from datasheets, and both are also sitting
-// in librtlsdr, which is GPL-2.0. Writing register pokes from recollection
-// would produce code that looks clean-room and is not, and a provenance claim
-// that cannot be traced to a document is worth nothing precisely when it is
-// challenged.
+// Revenant's licensing position rests on a clean-room claim: no copyleft
+// source is read, ported or consulted while implementing a corresponding
+// component. docs/clean-room.md states the rule, names the libraries it
+// applies to and records their licences.
+//
+// The RTL2832U's vendor control protocol and the R820T2's register map are
+// both obtainable from datasheets, and both also sit in a copyleft host
+// library that anyone working here has probably seen. Writing register pokes
+// from recollection would produce code that looks clean-room and is not, and a
+// provenance claim that cannot be traced to a document is worth nothing
+// precisely when it is challenged.
 //
 // So tuner access waits for M1, when the datasheets are in hand and every
 // register write can carry a comment naming the document and table it came

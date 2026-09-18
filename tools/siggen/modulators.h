@@ -338,8 +338,14 @@ private:
 
     [[nodiscard]] double audio_at(SampleIndex index) const;
     [[nodiscard]] double cw_envelope(SampleIndex index, std::size_t& cursor) const;
+
+    // Interpolates the tabulated pulse at a position already expressed in
+    // table steps. The render works in table steps directly so that the hot
+    // loop has no division in it at all.
+    [[nodiscard]] double rrc_tap_at(double table_position) const;
     [[nodiscard]] double rrc_lookup(double symbol_offset) const;
-    [[nodiscard]] Complex32 psk_envelope(SampleIndex index) const;
+
+    [[nodiscard]] Complex32 psk_envelope(SampleIndex position_in_cycle, std::size_t symbol) const;
     [[nodiscard]] double nfm_phase_at(SampleIndex index, double tone_sine) const;
     [[nodiscard]] double hilbert_at(SampleIndex index) const;
 
@@ -395,6 +401,20 @@ private:
     // orders of magnitude off what streaming needs.
     std::vector<float> rrc_{};
     double rrc_gain_ = 1.0;
+
+    // Everything the pulse-shaping loop needs precomputed into multiplies.
+    //
+    // This is the only hot loop in the file that touches more than one value
+    // per output sample, seventeen of them, and the obvious way to write it
+    // puts an integer division and a floating point division inside that inner
+    // loop. Measured on a wideband scene it made PSK forty times the cost of
+    // every other mode and put the synthesizer under realtime on its own.
+    // Converting the sample position straight into table steps removes both.
+    std::vector<double> boundary_seconds_{};
+    double rrc_scale_ = 0.0;   // sample offset to table steps
+    double rrc_base_ = 0.0;    // table step of the pulse centre
+    double rrc_limit_ = 0.0;   // one past the last interpolable step
+    double cycle_span_ = 0.0;  // cycle length as a double, for the pulse wrap
 };
 
 // What a one-shot generate() hands back: the samples plus everything a test
