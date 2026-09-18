@@ -1,13 +1,16 @@
-# The signal generator and the channel simulator.
+# The signal generator: modulators, the wideband scene synthesizer, and the
+# channel simulator, plus the CLI that drives them.
 #
-# A library so tests and the BER harness can drive it directly, and a thin CLI
-# so a person can produce a capture by hand.
-#
-# This is also the wideband source Revenant is actually developed against. The
-# only radio available sustains about 2.4 MS/s of 8-bit IQ; the channelizer,
-# the fifty-VRX exit criterion and the 40 MB/s capture path all assume roughly
-# twenty megahertz. The generator is what covers that gap, so it is a first
-# class part of the build rather than a test fixture.
+# This is a test instrument, not part of the sample path, so it is built with
+# the reference floating point settings rather than for speed. See
+# cmake/CompilerFlags.cmake: contraction is off so the generator produces the
+# same bits on every host compiler, which is the whole point of generating a
+# signal whose ground truth is known.
+
+# wideband.cpp renders a block across several workers. MSVC needs nothing for
+# that, but a GCC or Clang build fails at link without -pthread, and
+# CompilerFlags.cmake already contemplates both.
+find_package(Threads REQUIRED)
 
 add_library(revenant_siggen STATIC
     modulators.cpp
@@ -15,14 +18,9 @@ add_library(revenant_siggen STATIC
     channel.cpp
 )
 
-target_link_libraries(revenant_siggen PUBLIC revenant_core)
-target_include_directories(revenant_siggen PUBLIC "${CMAKE_SOURCE_DIR}")
-
+target_link_libraries(revenant_siggen PUBLIC revenant_core Threads::Threads)
+target_include_directories(revenant_siggen PUBLIC ${CMAKE_SOURCE_DIR})
 revenant_apply_warnings(revenant_siggen)
-
-# Generated signals and calibrated impairments are the reference the decoders
-# are scored against. A curve that shifts because the optimiser reassociated
-# the noise generator is a curve that cannot be regressed against.
 revenant_apply_reference_fp(revenant_siggen)
 
 add_executable(siggen main.cpp)
