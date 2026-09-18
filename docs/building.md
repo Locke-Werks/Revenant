@@ -39,6 +39,17 @@ ctest --preset vs          # test
 Each preset builds into `build/<preset>/`, so they do not collide and you can
 keep more than one alive.
 
+`scripts/build.ps1` runs any of them from any shell. It finds `vcvars` itself,
+checks `VCPKG_ROOT` and `VULKAN_SDK` are set before it starts rather than
+failing halfway through with an unrelated message, and takes a device index:
+
+```powershell
+.\scripts\build.ps1                    # configure, build and test dev
+.\scripts\build.ps1 -Preset ci         # the same for ci
+.\scripts\build.ps1 -Gpu 1             # run the suite against the second device
+.\scripts\build.ps1 -Clean -NoTest     # rebuild from scratch, skip the tests
+```
+
 The `vs` preset deliberately does not pin a Visual Studio generator version.
 dockedconsole pinned one and broke the day a runner moved to a newer Visual
 Studio.
@@ -60,8 +71,9 @@ like a dependency problem.
 
 The `dev`, `ci` and `headless` presets pin `CMAKE_CXX_COMPILER` to `cl` so this
 now fails immediately, saying it cannot find the compiler, which is the true
-statement. Either open an x64 Native Tools prompt, or use the `vs` preset, which
-does not need one.
+statement. Three ways past it: open an x64 Native Tools prompt, use
+`scripts/build.ps1`, which sources `vcvars` for you, or use the `vs` preset,
+which needs neither.
 
 **The only `ninja` on `PATH` also comes from Strawberry Perl.** Same directory,
 version 1.12.0. It works, and depending on a Perl distribution for the build
