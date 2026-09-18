@@ -6,7 +6,7 @@
 
 **Samples land in GPU memory once, and the whole radio runs there.**
 
-[![license](https://img.shields.io/badge/license-undecided-d6262a?style=flat-square)](#license)
+[![license](https://img.shields.io/badge/license-all%20rights%20reserved-d6262a?style=flat-square)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-Windows%2011-d6262a?style=flat-square)](#requirements)
 
 </div>
@@ -132,7 +132,8 @@ or consulted while implementing the corresponding component.
 
 That is not an aesthetic position. The obvious host libraries for this hardware
 are copyleft, inherited copyleft cannot be removed once it is in the tree, and
-this project's own licence is deliberately still open. Backends go over libusb,
+every licence this project might later adopt is still reachable only because
+nothing has answered the question by accident. Backends go over libusb,
 constants carry a citation to the document they came from, and CI greps for
 vendored licence text.
 
@@ -151,19 +152,18 @@ that backs it up.
 
 ## License
 
-Undecided.
+All rights reserved. See [LICENSE](LICENSE).
 
-This is a deliberate position, not an oversight. The choice between permissive
-and copyleft is one a project makes once, and making it early, before there is a
-release or a contributor or a downstream user, means making it with the least
-information anyone will ever have about what this turns into.
+Proprietary for now, and "for now" is doing real work in that sentence. The
+choice between permissive, copyleft, dual and source-available is one a project
+makes once, and making it before there is a release, a contributor or a
+downstream user means making it with the least information anyone will ever
+have about what this becomes. Reserving everything keeps all four available.
 
-What the absence of a licence means in the meantime is the default: no rights
-are granted. Until a `LICENSE` file exists, treat this as source you can read
-and not as source you can ship.
-
-The clean-room discipline above is what keeps the choice open. A single GPL
-library linked in would decide it by accident, and nobody would notice until it
-mattered.
+What keeps them available in practice is the clean-room discipline above. Every
+line is written from published specifications, so there is no inherited
+copyleft anywhere in the tree. A single GPL library linked in would settle the
+question by accident, in one direction, permanently, and nobody would notice
+until it mattered.
 
 Copyright (c) 2026 Locke Werks.

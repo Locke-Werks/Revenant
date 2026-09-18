@@ -1,0 +1,18 @@
+Copyright (c) 2026 Locke Werks. All rights reserved.
+
+This software and its source code are proprietary and confidential.
+
+No licence is granted, expressly or by implication, to use, copy, modify, merge,
+publish, distribute, sublicense, or sell any part of this software. No right to
+create derivative works is granted. Possession of a copy conveys no rights
+beyond those separately agreed in writing with Locke Werks.
+
+This is the present position and not necessarily the final one. Every line here
+is written from published specifications, with no inherited copyleft anywhere in
+the tree, which is what leaves the choice open: a later release under a
+permissive licence, a copyleft licence, a dual arrangement, or a
+source-available tier all remain possible. See docs/clean-room.md for the
+discipline that keeps them possible and why it cannot be applied retroactively.
+
+Third-party dependencies carry their own licences and are not covered by this
+notice. They are resolved through vcpkg from the manifest in vcpkg.json.

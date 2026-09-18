@@ -38,9 +38,15 @@ and linked dynamically.
 The reason for the care is asymmetry. Copyleft, once inherited, cannot be taken
 back out: there is no rewrite that launders a file somebody ported, and the
 remedy for "we read their driver" is that a different person implements that
-component from scratch, having never seen it. Revenant's own licence is
-deliberately still an open question, and it stays open only while nothing in the
-tree has already answered it.
+component from scratch, having never seen it.
+
+Revenant is currently all rights reserved, which is a starting position rather
+than a destination: permissive, copyleft, dual and source-available all remain
+reachable from here. They remain reachable only while nothing in the tree has
+already answered the question. Note which direction the asymmetry runs.
+Proprietary today does not prevent going permissive tomorrow, because relaxing
+your own terms costs nothing. Inheriting copyleft by accident does prevent it,
+because you cannot relax someone else's.
 
 This is also why the document exists in this shape. If the licensing position is
 ever questioned, the answer has to be a practice with evidence in the
