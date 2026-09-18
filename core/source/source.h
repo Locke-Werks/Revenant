@@ -55,7 +55,7 @@ struct SourceBlock {
 
 // Returning an error stops the stream, and the error is handed back through
 // Source::stop(). This is the same shape as the BlockSink already in
-// tools/siggen/wideband.h, deliberately: one idiom for streamed blocks.
+// core/dsp/synth/wideband.h, deliberately: one idiom for streamed blocks.
 using BlockSink = std::function<Status(const SourceBlock&)>;
 
 struct StreamOptions {

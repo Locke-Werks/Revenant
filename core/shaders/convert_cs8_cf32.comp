@@ -1,0 +1,115 @@
+// Widen packed cs8 I/Q into the device ring's canonical Complex32.
+//
+// Sibling of core/shaders/convert_cu8_cf32.comp, which carries the full
+// argument for why the conversion happens on the device at all and why the
+// scale is a multiply rather than a divide. Read that file first; this one
+// states only what differs.
+//
+// THE FULL-SCALE CHOICE, 128 rather than 127, which is a real decision.
+//
+// cs8 is two's complement, so its codes run -128 to +127: one more negative
+// code than positive. That asymmetry belongs to the format and no scaling
+// makes it go away. There are two defensible choices and they trade different
+// things.
+//
+//   Scale by 1/128, which is what this kernel does. Code 0 is exactly +0.0,
+//   code -128 is exactly -1.0, code +127 is +0.9921875. Every one of the 256
+//   codes converts with ZERO rounding error, because 1/128 is 2^-7, a power of
+//   two, and multiplying a float by a power of two is exact. The mapping is
+//   linear through the origin with no bias, the result never leaves [-1, +1],
+//   and the whole conversion is reversible.
+//
+//   Scale by 1/127. Codes +/-127 land on exactly +/-1.0, which is the symmetry
+//   argument for it, but code -128 then maps to -1.00787401, outside the unit
+//   interval. Every downstream stage that assumes |x| <= 1, and a headroom
+//   calculation or a fixed-point stage will, is then wrong on one code in 256
+//   rather than never. 1/127 is also not exactly representable, so every
+//   sample would round where this rounds none.
+//
+// This kernel takes 1/128. Full scale positive being one LSB short of +1.0 is
+// a property of two's complement that the conversion reports rather than
+// hides, and exactness across the whole range is worth more than a symmetric
+// endpoint. core/shaders/convert_cs16_cf32.comp takes the same rule at 1/32768
+// so that the behaviour does not change with bit depth.
+//
+// Unlike cu8 there is no bias term. A signed format's zero IS code 0, so the
+// conversion introduces no DC offset and no centre spur, and there is no
+// negative zero anywhere in the table: code 0 gives +0.0.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation. Id 0 is the project-wide
+// convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// 2^-7, exactly representable, so every multiply below is exact rather than
+// correctly rounded. core/dsp/convert.h declares the same number as kCs8Scale.
+const float kCs8Scale = 0.0078125;
+
+// Read as 32-bit words rather than as bytes: 8-bit access needs
+// VK_KHR_8bit_storage and the storageBuffer8BitAccess feature, which
+// core/gpu/context.cpp does not request. Byte 0 of a word is its least
+// significant eight bits, which is the host's ordering on every
+// implementation Vulkan runs on.
+layout(std430, binding = 0) readonly buffer PackedSource {
+    uint words[];
+} src;
+
+layout(std430, binding = 1) writeonly buffer IqRing {
+    vec2 samples[];
+} ring;
+
+layout(push_constant) uniform Params {
+    // Ring capacity minus one; the capacity is a power of two.
+    uint ring_mask;
+
+    // Ring offset of converted sample 0, or equivalently the low 32 bits of
+    // its absolute sample index. The mask makes them the same thing.
+    uint dst_offset;
+
+    // Index of the first packed sample in the source buffer, in samples.
+    uint src_offset;
+
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+
+    if (index >= params.count) {
+        return;
+    }
+
+    const uint src_index = params.src_offset + index;
+
+    // Two bytes per sample, four per word, so a pair never straddles a word.
+    // The caller must bind at least ceil((src_offset + count) / 2) words; an
+    // odd sample count leaves the last word half padding and a buffer sized to
+    // exactly the sample bytes is two short. core/dsp/convert.cpp rejects that
+    // rather than letting it become an out-of-bounds read.
+    const int word = int(src.words[src_index >> 1u]);
+    const int shift = int((src_index & 1u) << 4u);
+
+    // Signed extraction. bitfieldExtract replicates the extracted field's top
+    // bit when the operand is an int, which is the sign extension two's
+    // complement needs; the unsigned overload would zero extend and turn every
+    // negative sample into a large positive one.
+    const int i_code = bitfieldExtract(word, shift, 8);
+    const int q_code = bitfieldExtract(word, shift + 8, 8);
+
+    // `precise` forbids fusion and reassociation of everything contributing to
+    // the value. There is no add to fuse with here, but the qualifier is what
+    // the project asserts on and what keeps the decoration in place if the
+    // expression ever grows a term. Verified: this file emits 3 NoContraction
+    // decorations, two on the multiplies below and one glslang propagates back
+    // onto the integer add that feeds the load. A decoration on an integer op
+    // has no effect and spirv-val accepts it; it is counted here so the
+    // expected number is the number a reader will actually see.
+    precise float i_value = float(i_code) * kCs8Scale;
+    precise float q_value = float(q_code) * kCs8Scale;
+
+    // dst_offset + index may wrap modulo 2^32, which is not a bug: the
+    // capacity is a power of two dividing 2^32, so the mask lands on exactly
+    // the slot the unwrapped arithmetic names.
+    ring.samples[(params.dst_offset + index) & params.ring_mask] = vec2(i_value, q_value);
+}

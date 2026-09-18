@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "core/dsp/types.h"
-#include "tools/siggen/channel.h"
+#include "core/dsp/synth/channel.h"
 
 using namespace revenant;
 using Catch::Approx;

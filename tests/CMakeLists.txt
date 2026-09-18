@@ -9,6 +9,7 @@ add_executable(revenant_reference_tests
     reference/gpu_fixture.cpp
     reference/test_context.cpp
     reference/test_cmul.cpp
+    reference/test_convert.cpp
     reference/test_denormal_mode.cpp
     reference/test_divergence.cpp
     reference/test_pfb.cpp

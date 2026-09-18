@@ -1,7 +1,7 @@
 // Reference floating point discipline, before anything else in the file.
 #include "core/dsp/reference_fp.h"
 
-#include "tools/siggen/wideband.h"
+#include "core/dsp/synth/wideband.h"
 
 #include <algorithm>
 #include <cmath>

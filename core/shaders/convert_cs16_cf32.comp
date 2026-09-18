@@ -1,0 +1,106 @@
+// Widen packed cs16 I/Q into the device ring's canonical Complex32.
+//
+// Sibling of core/shaders/convert_cu8_cf32.comp, which carries the full
+// argument for why the conversion happens on the device and why the scale is
+// a multiply rather than a divide. Read that file first; this one states only
+// what differs.
+//
+// THE FULL-SCALE CHOICE, 32768 rather than 32767.
+//
+// The same decision core/shaders/convert_cs8_cf32.comp makes at 8 bits, made
+// the same way and for the same reasons, so that a stage's behaviour does not
+// change when a source's bit depth does.
+//
+//   Scale by 1/32768, which is what this kernel does. 2^-15 is a power of two,
+//   so every one of the 65536 codes converts with ZERO rounding error. Code 0
+//   is exactly +0.0, code -32768 is exactly -1.0, code +32767 is
+//   +0.999969482421875. Nothing leaves [-1, +1].
+//
+//   Scale by 1/32767. Codes +/-32767 land on exactly +/-1.0, but -32768 maps to
+//   -1.00003052, outside the unit interval, and the reciprocal is inexact so
+//   every sample rounds.
+//
+// Full scale positive being one LSB short of +1.0 is a property of two's
+// complement, which has one more negative code than positive. The conversion
+// reports that rather than hiding it.
+//
+// Nothing here has a bias term. A signed format's zero IS code 0, so the
+// conversion introduces no DC offset and no centre spur, and code 0 gives
+// +0.0 rather than -0.0.
+//
+// Note that cs16 is the one format of the three where the samples are already
+// wider than the bus saving: 4 bytes per sample against 8 for cf32. The
+// conversion still belongs here rather than on the host, because it halves
+// what crosses the bus and removes a full CPU pass over every sample, but the
+// factor is two rather than four.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation. Id 0 is the project-wide
+// convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// 2^-15, exactly representable, so every multiply below is exact rather than
+// correctly rounded. core/dsp/convert.h declares the same number as
+// kCs16Scale.
+const float kCs16Scale = 0.000030517578125;
+
+// Read as 32-bit words. 16-bit access in a shader needs
+// VK_KHR_16bit_storage and the storageBuffer16BitAccess feature, which
+// core/gpu/context.cpp does not request; unpacking from uint needs no feature
+// at all. Bits 0 to 15 of a word are the first of its two halves in memory,
+// which is the host's ordering on every implementation Vulkan runs on.
+layout(std430, binding = 0) readonly buffer PackedSource {
+    uint words[];
+} src;
+
+layout(std430, binding = 1) writeonly buffer IqRing {
+    vec2 samples[];
+} ring;
+
+layout(push_constant) uniform Params {
+    // Ring capacity minus one; the capacity is a power of two.
+    uint ring_mask;
+
+    // Ring offset of converted sample 0, or equivalently the low 32 bits of
+    // its absolute sample index. The mask makes them the same thing.
+    uint dst_offset;
+
+    // Index of the first packed sample in the source buffer, in samples.
+    uint src_offset;
+
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+
+    if (index >= params.count) {
+        return;
+    }
+
+    // Four bytes per sample and four per word, so one sample is exactly one
+    // word and there is no trailing partial word to size around, unlike the
+    // two 8-bit kernels. The caller binds src_offset + count words.
+    const int word = int(src.words[params.src_offset + index]);
+
+    // Signed extraction. bitfieldExtract replicates the extracted field's top
+    // bit when the operand is an int, which is the sign extension two's
+    // complement needs; the unsigned overload would zero extend and turn every
+    // negative sample into a large positive one.
+    const int i_code = bitfieldExtract(word, 0, 16);
+    const int q_code = bitfieldExtract(word, 16, 16);
+
+    // `precise` forbids fusion and reassociation of everything contributing to
+    // the value. There is no add to fuse with here, but the qualifier is what
+    // the project asserts on and what keeps the decoration in place if the
+    // expression ever grows a term. Verified: this file emits 2 NoContraction
+    // decorations, one per multiply.
+    precise float i_value = float(i_code) * kCs16Scale;
+    precise float q_value = float(q_code) * kCs16Scale;
+
+    // dst_offset + index may wrap modulo 2^32, which is not a bug: the
+    // capacity is a power of two dividing 2^32, so the mask lands on exactly
+    // the slot the unwrapped arithmetic names.
+    ring.samples[(params.dst_offset + index) & params.ring_mask] = vec2(i_value, q_value);
+}

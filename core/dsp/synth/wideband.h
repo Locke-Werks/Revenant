@@ -43,7 +43,7 @@
 
 #include "core/dsp/types.h"
 #include "core/error.h"
-#include "tools/siggen/modulators.h"
+#include "core/dsp/synth/modulators.h"
 
 namespace revenant::siggen {
 

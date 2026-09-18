@@ -29,4 +29,14 @@ namespace revenant::gpu::shaders {
 // into the write. Twin of revenant::dsp::reference_pfb_fft.
 [[nodiscard]] std::span<const std::uint32_t> pfb_fft();
 
+// Native source formats widened into the ring's canonical Complex32.
+//
+// These run as part of the upload rather than on the host. An RTL-SDR delivers
+// unsigned 8-bit pairs, and converting host-side would put a pass over every
+// sample back on the CPU and quadruple what crosses the bus: at 20 MS/s that
+// is 40 MB/s against 160. Twins in core/dsp/convert.h.
+[[nodiscard]] std::span<const std::uint32_t> convert_cu8_cf32();
+[[nodiscard]] std::span<const std::uint32_t> convert_cs8_cf32();
+[[nodiscard]] std::span<const std::uint32_t> convert_cs16_cf32();
+
 }  // namespace revenant::gpu::shaders

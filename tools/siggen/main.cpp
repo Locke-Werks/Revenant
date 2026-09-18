@@ -29,8 +29,8 @@
 
 #include "core/dsp/types.h"
 #include "core/error.h"
-#include "tools/siggen/modulators.h"
-#include "tools/siggen/wideband.h"
+#include "core/dsp/synth/modulators.h"
+#include "core/dsp/synth/wideband.h"
 
 namespace {
 

@@ -1,0 +1,178 @@
+// Widen packed cu8 I/Q into the device ring's canonical Complex32.
+//
+// This kernel is why the ring exists in the shape it does. An RTL-SDR puts
+// unsigned 8-bit pairs on the bus. Converting them on the host would put a
+// pass over every sample back on the CPU and would quadruple what crosses the
+// bus: at 20 MS/s that is 40 MB/s against 160 MB/s, and zero CPU passes
+// against one. So the native bytes cross once, land in a staging buffer, and
+// this kernel widens them into the ring as part of the upload.
+//
+// THE CONVERSION, which is the part a reader will otherwise assume.
+//
+// cu8 is OFFSET BINARY. The ADC's zero is not code 0 and it is not code 128
+// either: it sits halfway between codes 127 and 128, at 127.5. The conversion
+// is therefore
+//
+//     x = (code - 127.5) * (1 / 127.5)
+//
+// and the 127.5 is the whole point. It centres the code range so that code 0
+// maps to exactly -1.0 and code 255 to exactly +1.0, and so that the finished
+// table is antisymmetric: f(255 - v) is the exact bitwise negation of f(v) for
+// every one of the 256 codes. A uniformly distributed code stream therefore
+// has exactly zero mean.
+//
+// Biasing by 128 instead, which is the obvious thing to write, maps 0 to -1.0
+// and 255 to +0.9921875. The range is lopsided by one LSB and the mean of the
+// mapped range is -1/256, half an LSB. In an SDR that half-LSB is a DC term,
+// and a DC term at complex baseband is a spur sitting exactly at the centre of
+// the displayed spectrum, at -48.2 dBFS. It is one of the best known artefacts
+// in the field, it looks like a real carrier on the tuned frequency, and it is
+// produced entirely by the conversion. Hence 127.5.
+//
+// MULTIPLY, NOT DIVIDE, and the reason is not speed.
+//
+// Vulkan requires OpFMul to be correctly rounded and allows OpFDiv 2.5 ULP of
+// error (the precision tables in the Vulkan specification's appendix on SPIR-V
+// instruction operation). A division in this kernel could therefore return a
+// different float on NVIDIA than on AMD, legally, and no CPU twin could match
+// both. A multiply by a float constant is exact to the last bit on every
+// conformant implementation, so the kernel multiplies and the twin in
+// core/dsp/convert.cpp multiplies by the identical constant. The two agree by
+// construction rather than by luck.
+//
+// 1 / 127.5 is not exactly representable in binary: it is 2/255, and 255 is
+// not a power of two. That matters less than it looks. Both sides perform the
+// same correctly-rounded multiply by the same float, so the results are
+// bit-identical regardless of the reciprocal's own error. What the inexact
+// reciprocal costs is a departure from the mathematically exact ratio: 126 of
+// the 256 codes land one step away from the correctly-rounded ideal, worst
+// case 7.41e-08 absolute, which is 1.25 ULP at that code's own magnitude and
+// 0.62 ULP measured against full scale. Nothing downstream can see a
+// difference thirty decibels below the quantisation step of an 8-bit ADC.
+//
+// The constant below is the float nearest to 2/255, and that choice is forced
+// rather than free: it is the only float of the three adjacent candidates for
+// which both endpoints land on exactly +/-1.0. One ULP low gives 0.99999994
+// and one ULP high gives 1.00000012.
+//
+// The scale is a literal here and a literal in the twin rather than a
+// specialization constant. A host that could pass a different scale could make
+// the two disagree, and the two agreeing is the only thing this kernel is
+// verified on.
+//
+// No code maps to zero, of either sign, because 127.5 is not a code. The
+// nearest are codes 127 and 128 at -/+0.5/127.5.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation so one module runs on a
+// device with a 64-invocation limit and on one with 1024. Id 0 is the
+// project-wide convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// The float nearest 2/255. See the header comment for why this exact value and
+// no neighbour of it. core/dsp/convert.h declares the same number as
+// kCu8Scale and the two are asserted equal by the reference diff.
+const float kCu8Scale = 0.00784313772;
+
+// Exactly representable: 255/2 needs nine significand bits. Every one of the
+// 256 subtractions below is therefore exact, and the single multiply is the
+// only rounding in the whole conversion.
+const float kCu8Bias = 127.5;
+
+// The staging buffer, read as 32-bit words rather than as bytes.
+//
+// 8-bit access in a shader needs VK_KHR_8bit_storage and the
+// storageBuffer8BitAccess feature enabled at device creation, which
+// core/gpu/context.cpp does not request. Unpacking from uint costs a shift and
+// a mask per component and needs no feature at all, so the kernel runs on a
+// device that offers nothing beyond core Vulkan 1.3.
+//
+// Byte 0 of a word is its least significant eight bits. Every implementation
+// Vulkan runs on is little-endian, so that ordering is the host's, and a host
+// memcpy into this buffer needs no repacking.
+layout(std430, binding = 0) readonly buffer PackedSource {
+    uint words[];
+} src;
+
+// The device ring. std430 gives an array of vec2 a stride of 8 bytes, which is
+// the layout of std::complex<float> on the host, so every other consumer reads
+// it with no repacking either.
+layout(std430, binding = 1) writeonly buffer IqRing {
+    vec2 samples[];
+} ring;
+
+layout(push_constant) uniform Params {
+    // Ring capacity minus one. The capacity is a power of two, which is what
+    // makes the masking below exact rather than approximately right.
+    uint ring_mask;
+
+    // Where converted sample 0 goes. A ring offset, or equivalently the low 32
+    // bits of its absolute sample index: the two are the same thing under the
+    // mask, because the capacity is a power of two dividing 2^32. The kernel
+    // never sees a 64-bit index, deliberately. SampleIndex is uint64 and GLSL
+    // has no 64-bit integer here without an extension, so the host owns the
+    // index. See core/shaders/pfb_branch.comp, which makes the same trade for
+    // the same reason.
+    uint dst_offset;
+
+    // Index of the first packed sample in the source buffer, IN SAMPLES and
+    // not in bytes. A block rarely starts at the front of a reused staging
+    // buffer, and binding the buffer at a byte offset instead is not available
+    // here: minStorageBufferOffsetAlignment is 16 bytes on the discrete card
+    // and an arbitrary sample boundary is 2.
+    uint src_offset;
+
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+
+    // The dispatch rounds the group count up, so the final workgroup runs past
+    // the end of the work; every kernel bounds-checks rather than requiring
+    // callers to pad their buffers.
+    if (index >= params.count) {
+        return;
+    }
+
+    const uint src_index = params.src_offset + index;
+
+    // Two bytes per sample and four bytes per word, so a sample's I/Q pair
+    // never straddles a word boundary and one load serves both components.
+    // An odd sample sits in the upper half of its word.
+    //
+    // The caller must bind at least ceil((src_offset + count) / 2) words. When
+    // the sample count is odd the last word is half padding, and a buffer
+    // sized to exactly 2*(src_offset + count) bytes is two bytes short of what
+    // this load reads. core/dsp/convert.cpp rejects that case rather than
+    // letting it become an out-of-bounds read that only misbehaves on one
+    // driver.
+    const uint word = src.words[src_index >> 1u];
+    const int shift = int((src_index & 1u) << 4u);
+
+    // Unsigned extraction: zero extended, which is what offset binary wants.
+    const uint i_code = bitfieldExtract(word, shift, 8);
+    const uint q_code = bitfieldExtract(word, shift + 8, 8);
+
+    // `precise` is load-bearing, not decoration. A subtract feeding a multiply
+    // is exactly the shape a compiler fuses into an FMA, which keeps full
+    // precision on the intermediate and rounds once where separate operations
+    // round twice. Whether the fusion happens is a decision each vendor's
+    // shader compiler makes for itself, so left alone this would give one
+    // answer on NVIDIA and another on AMD, both plausible and neither flagged.
+    // The qualifier forbids fusion and reassociation of everything
+    // contributing to the value, and the twin compiles under the matching
+    // discipline. Verified: this file emits 5 NoContraction decorations, four
+    // on the float arithmetic below and one glslang propagates back onto the
+    // integer add that feeds the load. A decoration on an integer op has no
+    // effect and spirv-val accepts it; it is counted here so the expected
+    // number is the number a reader will actually see.
+    precise float i_value = (float(i_code) - kCu8Bias) * kCu8Scale;
+    precise float q_value = (float(q_code) - kCu8Bias) * kCu8Scale;
+
+    // dst_offset + index may wrap modulo 2^32 and that is not a bug. The ring
+    // capacity is a power of two dividing 2^32, so reducing the wrapped value
+    // by the mask lands on exactly the slot the unwrapped arithmetic names.
+    ring.samples[(params.dst_offset + index) & params.ring_mask] = vec2(i_value, q_value);
+}

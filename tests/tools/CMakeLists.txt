@@ -1,14 +1,14 @@
 # Tests for the M0 tooling. Guarded on the targets existing so that a checkout
 # part-way through M0 still configures and the rest of the suite still runs.
 
-if(TARGET revenant_siggen)
+if(TARGET revenant_core)
     add_executable(revenant_tool_tests
         ../support/no_modal_dialogs.cpp
         test_channel.cpp
     )
 
     target_link_libraries(revenant_tool_tests PRIVATE
-        revenant_siggen
+        revenant_core
         Catch2::Catch2WithMain
     )
     target_include_directories(revenant_tool_tests PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -22,7 +22,7 @@ if(TARGET revenant_siggen)
             TIMEOUT 300
     )
 else()
-    message(STATUS "revenant_siggen is not present yet, skipping the channel tests")
+    message(STATUS "revenant_core is not present yet, skipping the channel tests")
 endif()
 
 # The BER harness against closed-form theory.

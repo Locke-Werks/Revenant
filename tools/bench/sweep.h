@@ -51,7 +51,7 @@ using Subject = std::function<TrialResult(dsp::ConstComplexSpan, std::span<const
 // Produces the impaired baseband for one trial: modulate the payload, apply the
 // channel at the given SNR, using only the supplied seed for randomness.
 //
-// This is the seam where tools/siggen/modulators.h and tools/siggen/channel.h
+// This is the seam where core/dsp/synth/modulators.h and core/dsp/synth/channel.h
 // plug in once they exist. Until then the in-tree reference generator below
 // fills it. Called concurrently, so it must be pure.
 using Generator = std::function<std::vector<dsp::Complex32>(std::span<const std::uint8_t> payload,
@@ -162,7 +162,7 @@ using ProgressFn = std::function<void(std::size_t point_index, const SweepPoint&
 // ---------------------------------------------------------------------------
 // TEMPORARY, and the only part of this file that is.
 //
-// tools/siggen/modulators.h and tools/siggen/channel.h own signal generation
+// core/dsp/synth/modulators.h and core/dsp/synth/channel.h own signal generation
 // and the channel model. Neither exists yet. Rather than stub the harness, the
 // BPSK waveform and the AWGN are generated here so the harness can be run and
 // validated against theory today. At integration this block is deleted and

@@ -9,7 +9,7 @@
 
 #include "core/dsp/reference_fp.h"
 
-#include "tools/siggen/channel.h"
+#include "core/dsp/synth/channel.h"
 
 #include <algorithm>
 #include <array>

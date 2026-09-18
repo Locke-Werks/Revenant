@@ -8,6 +8,9 @@
 #include "shaders/cmul_comp.h"
 #include "shaders/pfb_branch_comp.h"
 #include "shaders/pfb_fft_comp.h"
+#include "shaders/convert_cu8_cf32_comp.h"
+#include "shaders/convert_cs8_cf32_comp.h"
+#include "shaders/convert_cs16_cf32_comp.h"
 
 namespace revenant::gpu::shaders {
 
@@ -25,6 +28,21 @@ std::span<const std::uint32_t> pfb_branch() {
 
 std::span<const std::uint32_t> pfb_fft() {
     return std::span<const std::uint32_t>(pfb_fft_comp_spv, std::size(pfb_fft_comp_spv));
+}
+
+std::span<const std::uint32_t> convert_cu8_cf32() {
+    return std::span<const std::uint32_t>(convert_cu8_cf32_comp_spv,
+                                          std::size(convert_cu8_cf32_comp_spv));
+}
+
+std::span<const std::uint32_t> convert_cs8_cf32() {
+    return std::span<const std::uint32_t>(convert_cs8_cf32_comp_spv,
+                                          std::size(convert_cs8_cf32_comp_spv));
+}
+
+std::span<const std::uint32_t> convert_cs16_cf32() {
+    return std::span<const std::uint32_t>(convert_cs16_cf32_comp_spv,
+                                          std::size(convert_cs16_cf32_comp_spv));
 }
 
 }  // namespace revenant::gpu::shaders
