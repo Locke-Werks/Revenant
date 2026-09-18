@@ -1,0 +1,6 @@
+The rolling capture: device ring, segment writer and seek index.
+
+Segments are independently readable, which is what makes the ring trivial
+(delete the oldest) and extraction a file copy.
+
+Arrives: M5, the time machine.

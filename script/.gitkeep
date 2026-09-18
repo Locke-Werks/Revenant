@@ -1,0 +1,6 @@
+Lua bindings over VRXs, the graph and the record bus, through sol3.
+
+This substitutes for a plugin ABI and is what reveals the real extension points,
+which is why a stable plugin ABI is deliberately not designed before it exists.
+
+Arrives: M6.
