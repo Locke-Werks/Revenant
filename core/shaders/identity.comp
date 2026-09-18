@@ -1,0 +1,37 @@
+// The smallest possible real kernel: copy in to out.
+//
+// It exists so that a failure in the Vulkan plumbing, in buffer staging, in
+// descriptor binding or in the dispatch itself is distinguishable from a
+// failure in arithmetic. When a real kernel disagrees with its CPU twin, the
+// first question is whether the data arrived at all, and this answers it.
+
+#version 450
+
+// Never hardcoded. The size is specialized at pipeline creation so one module
+// runs on a device with a 64-invocation limit and on one with 1024.
+layout(local_size_x_id = 0) in;
+
+layout(std430, binding = 0) readonly buffer InputBuffer {
+    float values[];
+} src;
+
+layout(std430, binding = 1) writeonly buffer OutputBuffer {
+    float values[];
+} dst;
+
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+
+    // The dispatch rounds the group count up, so the final workgroup runs past
+    // the end of the data. Every kernel bounds-checks rather than requiring
+    // callers to pad their buffers to a multiple of the workgroup size.
+    if (index >= params.count) {
+        return;
+    }
+
+    dst.values[index] = src.values[index];
+}

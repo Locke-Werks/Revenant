@@ -1,0 +1,48 @@
+// A deliberately broken complex multiply, used only by the test that proves
+// the reference diff actually catches a bad kernel.
+//
+// A test suite that has never been shown to fail is not evidence. This kernel
+// is core/shaders/cmul.comp with the sign of the real part's second term
+// flipped: it computes a*conj(b) rather than a*b. The output is entirely
+// finite, entirely plausible, and entirely wrong, which is exactly the failure
+// mode the whole reference-diff apparatus exists to catch. If the harness ever
+// passes this, the harness is broken and every green run before it meant
+// nothing.
+//
+// It lives under tests/ and is never linked into the engine.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, binding = 0) readonly buffer LeftBuffer {
+    vec2 values[];
+} lhs;
+
+layout(std430, binding = 1) readonly buffer RightBuffer {
+    vec2 values[];
+} rhs;
+
+layout(std430, binding = 2) writeonly buffer OutputBuffer {
+    vec2 values[];
+} dst;
+
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= params.count) {
+        return;
+    }
+
+    const vec2 a = lhs.values[index];
+    const vec2 b = rhs.values[index];
+
+    // The bug: this should be a subtraction.
+    precise float real = a.x * b.x + a.y * b.y;
+    precise float imaginary = a.x * b.y + a.y * b.x;
+
+    dst.values[index] = vec2(real, imaginary);
+}

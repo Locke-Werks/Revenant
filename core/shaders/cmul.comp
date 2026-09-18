@@ -1,0 +1,59 @@
+// Element-wise complex multiply.
+//
+// This is the inner operation of the per-VRX fine-tune mixer: baseband samples
+// times a phasor. It is the first kernel in the project that does arithmetic
+// worth disagreeing about, and it was chosen as M0's reference-diff subject for
+// exactly that reason.
+//
+// The two products in each component form a multiply-add, which is precisely
+// the shape a compiler wants to fuse into an FMA. A fused multiply-add keeps
+// full precision on the intermediate product and rounds once; separate
+// operations round twice. The two give different float32 results, and whether
+// the fusion happens is a decision each vendor's shader compiler makes for
+// itself. Left alone, this kernel would produce one answer on NVIDIA and
+// another on AMD, both plausible, neither flagged.
+//
+// The `precise` qualifier forbids both fusion and reassociation of any
+// operation contributing to the qualified value, so the sequence below is the
+// sequence that executes: two multiplies, then one subtract. The CPU twin in
+// core/dsp/complex_ops.cpp compiles under the matching discipline, which is
+// what makes bit-exact comparison between the two meaningful rather than
+// aspirational.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+// std430 gives an array of vec2 a stride of 8 bytes, which is the layout of
+// std::complex<float> on the host. The buffer is uploaded and read back with no
+// repacking on either side.
+layout(std430, binding = 0) readonly buffer LeftBuffer {
+    vec2 values[];
+} lhs;
+
+layout(std430, binding = 1) readonly buffer RightBuffer {
+    vec2 values[];
+} rhs;
+
+layout(std430, binding = 2) writeonly buffer OutputBuffer {
+    vec2 values[];
+} dst;
+
+layout(push_constant) uniform Params {
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= params.count) {
+        return;
+    }
+
+    const vec2 a = lhs.values[index];
+    const vec2 b = rhs.values[index];
+
+    precise float real = a.x * b.x - a.y * b.y;
+    precise float imaginary = a.x * b.y + a.y * b.x;
+
+    dst.values[index] = vec2(real, imaginary);
+}
