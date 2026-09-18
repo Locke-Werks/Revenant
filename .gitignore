@@ -1,0 +1,51 @@
+build/
+out/
+cmake-build-*/
+CMakeUserPresets.json
+.vs/
+.vscode/
+*.user
+
+# vcpkg manifest mode installs here, per binary dir and at the root.
+vcpkg_installed/
+_deps/
+compile_commands.json
+
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.idb
+
+# Generated from metadata.json.in plus signing.env, so the certificate profile
+# lives in exactly one place. CI fails the build if the generated file is ever
+# committed, which is how it stays that way.
+signing/metadata.json
+signing/*.local.env
+*.pfx
+*.snk
+
+# Forged installers and staged payloads. Outputs, never inputs.
+dist/
+stage/
+*-Setup.exe
+
+# BER/SNR curves written by a local sweep. The committed baselines live in
+# tests/baselines/ and are updated deliberately, never by a stray run.
+bench-out/
+
+# Captured IQ. The real-signal corpus is versioned outside this repository and
+# a stray multi-gigabyte capture must never be committable by accident.
+*.sigmf-data
+*.sigmf-meta
+*.cf32
+*.cs8
+*.cs16
+
+# Local session notes. See docs/ for anything that should outlive a branch.
+CLAUDE.md
+.claude/
+
+Thumbs.db
+desktop.ini

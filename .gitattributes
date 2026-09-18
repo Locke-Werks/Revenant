@@ -1,0 +1,28 @@
+# Normalise line endings in the repository to LF.
+#
+# Revenant targets Windows, Linux and macOS. Without this, a file committed
+# from a Windows checkout carries CRLF into the tree, and the failures that
+# causes are all in awkward places: a shell script that will not execute on a
+# runner, a shader whose hash differs between platforms so the reference diff
+# suite compares two different SPIR-V modules and blames the GPU.
+#
+# Working copies still get native endings on checkout. This only governs what
+# is stored.
+
+* text=auto eol=lf
+
+# Windows-only, and cmd and some tooling are happier with CRLF on disk.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.rc   text eol=crlf
+*.rc.in text eol=crlf
+
+# Binary, never touched.
+*.ico  binary
+*.png  binary
+*.webp binary
+*.spv  binary
+*.cf32 binary
+*.cs8  binary
+*.cu8  binary
+*.sigmf-data binary

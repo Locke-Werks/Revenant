@@ -1,0 +1,13 @@
+# Single source of truth for the version. Everything else derives from it:
+# project(), the VERSIONINFO resource, and installer.toml when there is one.
+set(REVENANT_VERSION_MAJOR 0)
+set(REVENANT_VERSION_MINOR 1)
+set(REVENANT_VERSION_PATCH 0)
+
+set(REVENANT_VERSION "${REVENANT_VERSION_MAJOR}.${REVENANT_VERSION_MINOR}.${REVENANT_VERSION_PATCH}")
+set(REVENANT_VERSION_RC "${REVENANT_VERSION_MAJOR},${REVENANT_VERSION_MINOR},${REVENANT_VERSION_PATCH},0")
+set(REVENANT_VERSION_RC_STR "${REVENANT_VERSION}.0")
+
+set(REVENANT_PRODUCT   "Revenant")
+set(REVENANT_COMPANY   "Locke Werks")
+set(REVENANT_COPYRIGHT "Copyright (c) 2026 Locke Werks")

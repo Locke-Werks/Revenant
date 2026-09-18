@@ -1,0 +1,92 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "installDir": "${sourceDir}/build/${presetName}/install",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "VCPKG_HOST_TRIPLET": "x64-windows-static",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "ninja-msvc",
+      "hidden": true,
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "vs",
+      "displayName": "Visual Studio x64",
+      "description": "Works from any shell. No vcvars needed. Use this if in doubt. The generator is deliberately unpinned: dockedconsole pinned it and broke when a runner moved to a newer Visual Studio.",
+      "inherits": "base",
+      "architecture": "x64"
+    },
+    {
+      "name": "dev",
+      "displayName": "Ninja debug",
+      "description": "Requires an x64 Native Tools prompt, or run scripts/build.ps1.",
+      "inherits": "ninja-msvc",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "ci",
+      "displayName": "Ninja RelWithDebInfo, warnings are errors",
+      "inherits": "ninja-msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "REVENANT_WERROR": "ON"
+      }
+    },
+    {
+      "name": "headless",
+      "displayName": "core only, Qt must not be findable",
+      "description": "The check that keeps the headless requirement honest. Configures with the UI tree excluded and fails if anything in core reaches for Qt.",
+      "inherits": "ninja-msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "REVENANT_BUILD_UI": "OFF",
+        "REVENANT_ASSERT_NO_QT": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "vs", "configurePreset": "vs", "configuration": "Debug" },
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "ci", "configurePreset": "ci" },
+    { "name": "headless", "configurePreset": "headless" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "vs",
+      "configurePreset": "vs",
+      "configuration": "Debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "headless",
+      "configurePreset": "headless",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

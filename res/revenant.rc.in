@@ -1,0 +1,41 @@
+#include <windows.h>
+
+// IDI_APPICON is declared first and with the lowest numeric id on purpose.
+// Explorer picks the lowest-numbered icon resource as the file's icon, so a
+// second icon added later with a smaller id would silently take over the
+// shell's representation of the binary.
+#define IDI_APPICON 1
+IDI_APPICON ICON "@REVENANT_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+    FILEVERSION    @REVENANT_VERSION_RC@
+    PRODUCTVERSION @REVENANT_VERSION_RC@
+    FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+    FILEFLAGS      VS_FF_DEBUG
+#else
+    FILEFLAGS      0x0L
+#endif
+    FILEOS         VOS_NT_WINDOWS32
+    FILETYPE       VFT_APP
+    FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "@REVENANT_COMPANY@"
+            VALUE "FileDescription",  "@REVENANT_RC_DESCRIPTION@"
+            VALUE "FileVersion",      "@REVENANT_VERSION_RC_STR@"
+            VALUE "InternalName",     "@REVENANT_RC_INTERNAL_NAME@"
+            VALUE "LegalCopyright",   "@REVENANT_COPYRIGHT@"
+            VALUE "OriginalFilename", "@REVENANT_RC_ORIGINAL_FILENAME@"
+            VALUE "ProductName",      "@REVENANT_PRODUCT@"
+            VALUE "ProductVersion",   "@REVENANT_VERSION_RC_STR@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
