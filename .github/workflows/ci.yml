@@ -156,6 +156,12 @@ jobs:
       # The engine reads its device from the environment rather than a flag, so
       # a leg is a variable and nothing in the build has to know about CI.
       REVENANT_GPU_INDEX: ${{ matrix.gpu_index }}
+      # The GPU cases skip when there is no device, so that a developer without
+      # Vulkan still gets the CPU-side suite. That would let a runner whose
+      # driver had quietly died report a green build having tested nothing on
+      # the GPU at all. Here the device is the entire point, so its absence is
+      # a failure with a reason rather than a skip.
+      REVENANT_REQUIRE_GPU: "1"
       # Nothing here is hosted, so the GitHub Actions cache backend is the wrong
       # store: it would upload to GitHub and download again on the same machine
       # that built the packages. A directory on the runner's own disk, outside

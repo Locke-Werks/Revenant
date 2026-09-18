@@ -5,6 +5,7 @@ include(Catch)
 # stands between a kernel that computes the wrong thing and six months of
 # confident garbage.
 add_executable(revenant_reference_tests
+    support/no_modal_dialogs.cpp
     reference/gpu_fixture.cpp
     reference/test_context.cpp
     reference/test_cmul.cpp

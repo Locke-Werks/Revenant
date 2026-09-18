@@ -72,6 +72,8 @@ TEST_CASE("identical buffers compare identical", "[reference][m0.2]") {
 }
 
 TEST_CASE("a deliberately wrong kernel fails the diff", "[gpu][reference][m0.2]") {
+    REVENANT_NEEDS_GPU();
+
     auto& context = test::shared_context();
     INFO("running on " << test::shared_context_description());
 

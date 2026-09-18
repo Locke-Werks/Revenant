@@ -61,6 +61,8 @@ std::vector<dsp::Complex32> run_cmul_on_cpu(std::span<const dsp::Complex32> lhs,
 }  // namespace
 
 TEST_CASE("cmul matches its CPU reference bit-exactly on uniform input", "[gpu][reference][m0.2]") {
+    REVENANT_NEEDS_GPU();
+
     INFO("running on " << test::shared_context_description());
 
     constexpr std::uint64_t kSeed = 0x434D554C00000001ULL;
@@ -81,6 +83,8 @@ TEST_CASE("cmul matches its CPU reference bit-exactly on uniform input", "[gpu][
 
 TEST_CASE("cmul matches its CPU reference on values chosen to provoke rounding",
           "[gpu][reference][m0.2]") {
+    REVENANT_NEEDS_GPU();
+
     INFO("running on " << test::shared_context_description());
 
     // Uniform random input in [-1, 1] almost never distinguishes a fused
@@ -106,6 +110,8 @@ TEST_CASE("cmul matches its CPU reference on values chosen to provoke rounding",
 }
 
 TEST_CASE("cmul is bit-exact at every workgroup size", "[gpu][reference][m0.2]") {
+    REVENANT_NEEDS_GPU();
+
     auto& context = test::shared_context();
     INFO("running on " << test::shared_context_description());
 

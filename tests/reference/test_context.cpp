@@ -16,6 +16,8 @@
 using namespace revenant;
 
 TEST_CASE("a Vulkan device is present and can be described", "[gpu][m0.1]") {
+    REVENANT_NEEDS_GPU();
+
     auto devices = gpu::enumerate_devices();
     REQUIRE(devices.has_value());
     REQUIRE_FALSE(devices->empty());
@@ -35,6 +37,8 @@ TEST_CASE("a Vulkan device is present and can be described", "[gpu][m0.1]") {
 }
 
 TEST_CASE("the shared context selects a device and exposes a compute queue", "[gpu][m0.1]") {
+    REVENANT_NEEDS_GPU();
+
     auto& context = test::shared_context();
     INFO("running on " << test::shared_context_description());
 
@@ -46,6 +50,8 @@ TEST_CASE("the shared context selects a device and exposes a compute queue", "[g
 }
 
 TEST_CASE("a buffer survives a round trip through device memory", "[gpu][m0.1]") {
+    REVENANT_NEEDS_GPU();
+
     auto& context = test::shared_context();
     INFO("running on " << test::shared_context_description());
 
@@ -81,6 +87,8 @@ TEST_CASE("a buffer survives a round trip through device memory", "[gpu][m0.1]")
 }
 
 TEST_CASE("the workgroup size is specializable rather than baked in", "[gpu][m0.1]") {
+    REVENANT_NEEDS_GPU();
+
     auto& context = test::shared_context();
     INFO("running on " << test::shared_context_description());
 
@@ -128,6 +136,8 @@ TEST_CASE("the workgroup size is specializable rather than baked in", "[gpu][m0.
 }
 
 TEST_CASE("an oversized workgroup is refused rather than clamped", "[gpu][m0.1]") {
+    REVENANT_NEEDS_GPU();
+
     auto& context = test::shared_context();
 
     gpu::ComputePipeline::Options options;
