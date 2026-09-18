@@ -1,0 +1,1088 @@
+// The per-receiver fine stage and the eight demodulators, GPU against CPU.
+//
+// These two kernels were written, compiled and validated and then never
+// dispatched, which made their bit-exactness a claim rather than a
+// measurement. It was the one hole in the project's central correctness
+// argument, and it sat exactly where the arithmetic is hardest to eyeball:
+// core/shaders/vrx_demod.comp builds its own sqrt, reciprocal and atan2 out of
+// Newton iterations precisely because Vulkan's built-ins are specified too
+// loosely to referee, and until this file ran nothing had checked that the
+// sequence on the device is the sequence in the twin.
+//
+// Three kinds of case, and they catch different things.
+//
+//   The host cases check the deterministic transcendentals and the NCO
+//   against their own stated properties. A twin and a kernel can agree bit
+//   for bit on an atan2 that is simply wrong, and only a comparison against
+//   the real function notices.
+//
+//   The bit-exact cases run each kernel against its twin and demand identical
+//   bits. They are what the conformance matrix runs on every device.
+//
+//   The behavioural cases put a known signal through and check what comes
+//   out: a tone at the receiver's centre arrives at DC at unit magnitude, a
+//   USB receiver rejects the sideband it is not listening to, and each
+//   detector recovers its own modulation at the level the audio convention
+//   promises. This is the class that catches a kernel that is bit-exact
+//   against a twin implementing the wrong convention.
+
+#include <catch2/catch_approx.hpp>
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "core/dsp/pfb.h"
+#include "core/dsp/types.h"
+#include "core/dsp/vrx_reference.h"
+#include "core/engine/vrx.h"
+#include "core/gpu/kernel.h"
+#include "core/gpu/shaders.h"
+#include "tests/reference/gpu_fixture.h"
+#include "tests/reference/reference_diff.h"
+
+using namespace revenant;
+using Catch::Approx;
+
+namespace {
+
+constexpr double kTwoPi = 6.283185307179586476925286766559;
+
+constexpr dsp::SampleRate kSourceRate = 2'400'000;
+
+// The canonical grid, the same one core/engine and tests/reference/test_pfb
+// use: 64 channels, 2x oversampled, so the channel rate is 75 kS/s and the
+// spacing is 37.5 kHz.
+constexpr dsp::GridParams kGrid{
+    .channels = 64,
+    .taps_per_branch = 17,
+    .decimation = 32,
+};
+
+// A coarser grid for wideband FM. A 200 kHz broadcast channel does not fit
+// inside a 75 kS/s channel stream, and clamping it to what fits would test the
+// clamp rather than the demodulator. Sixteen channels give 300 kS/s, which
+// holds the signal with room for the fine filter's transition.
+constexpr dsp::GridParams kWideGrid{
+    .channels = 16,
+    .taps_per_branch = 17,
+    .decimation = 8,
+};
+
+// Rings for the bit-exact cases. Powers of two, as the kernels' mask
+// arithmetic requires.
+constexpr std::uint32_t kChanCapacity = 1U << 12;
+constexpr std::uint32_t kChanMask = kChanCapacity - 1U;
+
+// The channel ring is channel-major, so a receiver's chan_base is a non-zero
+// origin inside a larger buffer. Using channel 3 rather than channel 0 means a
+// kernel that ignored chan_base would read the wrong channel and the diff
+// would say so.
+constexpr std::uint32_t kChanIndex = 3;
+constexpr std::uint32_t kChanBase = kChanIndex * kChanCapacity;
+
+constexpr std::uint32_t kFineCapacity = 1U << 12;
+constexpr std::uint32_t kFineMask = kFineCapacity - 1U;
+
+// ---------------------------------------------------------------------------
+// Plans and dispatches
+// ---------------------------------------------------------------------------
+
+dsp::VrxPlan make_plan(engine::Demod mode, dsp::Hertz centre, dsp::Hertz bandwidth,
+                       const dsp::GridParams& grid) {
+    engine::VrxParams params;
+    params.center = centre;
+    params.bandwidth = bandwidth;
+    params.demod = mode;
+
+    auto placed = engine::place(grid, kSourceRate, params);
+    INFO(test::message_of(placed));
+    REQUIRE(placed.has_value());
+
+    auto planned = dsp::plan_vrx(grid, kSourceRate, params, *placed);
+    INFO(test::message_of(planned));
+    REQUIRE(planned.has_value());
+    return *planned;
+}
+
+std::vector<dsp::Complex32> make_nco(const dsp::VrxPlan& plan) {
+    auto built = dsp::build_nco_table(plan.fine.nco_log2);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+    return *built;
+}
+
+std::vector<dsp::Complex32> run_fine_on_gpu(const dsp::VrxFineConfig& config,
+                                            const dsp::VrxFineParams& params,
+                                            std::span<const dsp::Complex32> channel_ring,
+                                            std::span<const dsp::Complex32> taps,
+                                            std::span<const dsp::Complex32> nco,
+                                            std::uint32_t local_size) {
+    auto& context = test::shared_context();
+
+    std::vector<dsp::Complex32> out(static_cast<std::size_t>(params.out_mask) + 1U,
+                                    dsp::Complex32{});
+
+    const std::uint32_t grid_constants[] = {config.taps, config.phases, config.nco_log2};
+
+    gpu::KernelInvocation invocation;
+    invocation.spirv = gpu::shaders::vrx_fine();
+    invocation.inputs = {std::as_bytes(channel_ring), std::as_bytes(taps), std::as_bytes(nco)};
+    invocation.outputs = {std::as_writable_bytes(std::span<dsp::Complex32>(out))};
+    invocation.push_constants = std::as_bytes(std::span<const dsp::VrxFineParams>(&params, 1));
+    invocation.invocations = params.count;
+    invocation.local_size_x = local_size;
+    invocation.grid_constants.assign(std::begin(grid_constants), std::end(grid_constants));
+
+    const auto ran = gpu::run_kernel(context, invocation);
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+    return out;
+}
+
+std::vector<float> run_demod_on_gpu(const dsp::VrxDemodConfig& config,
+                                    const dsp::VrxDemodParams& params,
+                                    std::span<const dsp::Complex32> fine_ring,
+                                    std::span<const float> weights,
+                                    std::uint32_t local_size) {
+    auto& context = test::shared_context();
+
+    const std::size_t components = (config.mode == dsp::kDemodRaw) ? 2U : 1U;
+    std::vector<float> out(static_cast<std::size_t>(params.count) * components, 0.0F);
+
+    const std::uint32_t grid_constants[] = {config.mode, config.decimation, config.audio_taps,
+                                            config.dc_taps};
+
+    gpu::KernelInvocation invocation;
+    invocation.spirv = gpu::shaders::vrx_demod();
+    invocation.inputs = {std::as_bytes(fine_ring), std::as_bytes(weights)};
+    invocation.outputs = {std::as_writable_bytes(std::span<float>(out))};
+    invocation.push_constants = std::as_bytes(std::span<const dsp::VrxDemodParams>(&params, 1));
+    invocation.invocations = params.count;
+    invocation.local_size_x = local_size;
+    invocation.grid_constants.assign(std::begin(grid_constants), std::end(grid_constants));
+
+    const auto ran = gpu::run_kernel(context, invocation);
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+    return out;
+}
+
+// Push constants built by hand rather than by fine_block, so the case can put
+// the read window exactly where it wants it. Both sides get the same struct,
+// so what fine_block would have produced is not what these cases are about;
+// where the ring wraps is.
+dsp::VrxFineParams fine_params(const dsp::VrxPlan& plan, std::uint32_t in_offset,
+                               std::uint32_t count, dsp::SampleIndex phase_index) {
+    const auto channel_rate = static_cast<std::uint32_t>(plan.channel_rate);
+    const auto demod_rate = static_cast<std::uint32_t>(plan.demod_rate);
+
+    dsp::VrxFineParams params;
+    params.chan_base = kChanBase;
+    params.chan_mask = kChanMask;
+    params.in_offset = in_offset;
+    params.out_offset = 17;
+    params.out_mask = kFineMask;
+    params.count = count;
+    params.step_whole = channel_rate / demod_rate;
+    params.step_rem = channel_rate % demod_rate;
+    params.out_rate = demod_rate;
+    params.frac0 = 12'345 % demod_rate;
+
+    const std::uint64_t phase = dsp::nco_phase(plan.fine_nco_delta, phase_index);
+    params.nco_phase_high = static_cast<std::uint32_t>(phase >> 32U);
+    params.nco_phase_low = static_cast<std::uint32_t>(phase);
+    params.nco_delta_high = static_cast<std::uint32_t>(plan.fine_nco_delta >> 32U);
+    params.nco_delta_low = static_cast<std::uint32_t>(plan.fine_nco_delta);
+    params.inv_out_rate = 1.0F / static_cast<float>(demod_rate);
+    return params;
+}
+
+// The most audio samples a dispatch can ask for out of a ring of this
+// capacity, which is the same bound core/dsp/vrx_reference.cpp's validate
+// enforces. Computed rather than guessed because it differs by an order of
+// magnitude between AM, which reaches back over its whole DC-removal window,
+// and a product detector, which reaches back not at all.
+std::uint32_t demod_count(const dsp::VrxDemodConfig& config, std::uint32_t capacity,
+                          std::uint32_t desired) {
+    const std::uint32_t detector_history =
+        (config.mode == dsp::kDemodAm) ? config.dc_taps - 1U
+        : (config.mode == dsp::kDemodNfm || config.mode == dsp::kDemodWfm) ? 1U
+                                                                           : 0U;
+    const std::uint32_t overhead = (config.audio_taps - 1U) + detector_history + 1U;
+    REQUIRE(capacity > overhead);
+    const std::uint32_t bound = (capacity - overhead) / config.decimation + 1U;
+    return std::min(desired, bound);
+}
+
+dsp::VrxDemodParams demod_params(const dsp::VrxPlan& plan, std::uint32_t in_offset,
+                                 std::uint32_t count) {
+    dsp::VrxDemodParams params;
+    params.in_mask = kFineMask;
+    params.in_offset = in_offset;
+    params.count = count;
+    params.gain = plan.demod_gain;
+    return params;
+}
+
+// ---------------------------------------------------------------------------
+// Measurement
+// ---------------------------------------------------------------------------
+
+// A bit-exact diff of two buffers that are both entirely zero passes, and so
+// does a diff of two kernels that both did nothing. Every bit-exact case below
+// asserts that something was actually computed before it asserts the two
+// agree.
+template <class T>
+std::size_t nonzero_count(std::span<const T> values) {
+    return static_cast<std::size_t>(
+        std::count_if(values.begin(), values.end(), [](const T& v) { return v != T{}; }));
+}
+
+struct ToneFit {
+    double magnitude = 0.0;
+    double frequency_hz = 0.0;
+};
+
+// Root-mean-square magnitude and the frequency implied by the mean phase
+// advance, which is exact for a pure tone and needs no transform.
+ToneFit measure_complex_tone(std::span<const dsp::Complex32> samples, double rate) {
+    REQUIRE(samples.size() > 1);
+
+    std::complex<double> product{0.0, 0.0};
+    double power = 0.0;
+    for (std::size_t i = 1; i < samples.size(); ++i) {
+        const std::complex<double> current(samples[i]);
+        const std::complex<double> previous(samples[i - 1]);
+        product += current * std::conj(previous);
+        power += std::norm(current);
+    }
+
+    ToneFit fit;
+    fit.magnitude = std::sqrt(power / static_cast<double>(samples.size() - 1));
+    fit.frequency_hz = std::arg(product) * rate / kTwoPi;
+    return fit;
+}
+
+struct AudioFit {
+    // Peak amplitude of the component at the frequency asked about.
+    double amplitude = 0.0;
+
+    // That component's share of the total power. A detector that recovered
+    // the right amplitude at the right frequency and also produced a pile of
+    // harmonics would pass an amplitude check alone; this is what notices.
+    double purity = 0.0;
+};
+
+AudioFit measure_audio_tone(std::span<const float> audio, double rate, double frequency_hz) {
+    REQUIRE(!audio.empty());
+
+    double cosine = 0.0;
+    double sine = 0.0;
+    double power = 0.0;
+    for (std::size_t i = 0; i < audio.size(); ++i) {
+        const double turns =
+            std::fmod(frequency_hz * static_cast<double>(i) / rate, 1.0);
+        const double angle = kTwoPi * turns;
+        cosine += static_cast<double>(audio[i]) * std::cos(angle);
+        sine += static_cast<double>(audio[i]) * std::sin(angle);
+        power += static_cast<double>(audio[i]) * static_cast<double>(audio[i]);
+    }
+
+    const auto n = static_cast<double>(audio.size());
+    AudioFit fit;
+    fit.amplitude = 2.0 * std::sqrt(cosine * cosine + sine * sine) / n;
+    const double mean_power = power / n;
+    fit.purity = (mean_power > 0.0) ? (0.5 * fit.amplitude * fit.amplitude) / mean_power : 0.0;
+    return fit;
+}
+
+// A complex exponential at an absolute sample index, with the phase reduced
+// before it reaches the transcendentals so a long ring does not lose
+// precision to a large argument.
+dsp::Complex32 tone_at(double frequency_hz, double rate, std::size_t index) {
+    const double turns =
+        std::fmod(frequency_hz * static_cast<double>(index) / rate, 1.0);
+    const double angle = kTwoPi * turns;
+    return dsp::Complex32{static_cast<float>(std::cos(angle)),
+                          static_cast<float>(std::sin(angle))};
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// The deterministic transcendentals, no GPU needed
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the deterministic transcendentals agree with the real functions", "[vrx][m1]") {
+    // Bit-exactness against a twin says the device computes what the twin
+    // computes. It says nothing about whether either computes atan2. These
+    // four are built from Newton iterations and a fitted polynomial precisely
+    // so they can be refereed, and this is the case that referees them.
+
+    double worst_sqrt = 0.0;
+    for (int i = -60; i <= 60; ++i) {
+        const auto value = static_cast<float>(std::pow(2.0, i * 0.5) * 1.3);
+        const double expected = std::sqrt(static_cast<double>(value));
+        const double got = dsp::det_sqrt(value);
+        worst_sqrt = std::max(worst_sqrt, std::abs(got - expected) / expected);
+    }
+    INFO("worst relative sqrt error " << worst_sqrt);
+    CHECK(worst_sqrt < 1.0e-6);
+
+    double worst_recip = 0.0;
+    for (int i = -60; i <= 60; ++i) {
+        const auto value = static_cast<float>(std::pow(2.0, i * 0.5) * 1.3);
+        const double expected = 1.0 / static_cast<double>(value);
+        const double got = dsp::det_recip(value);
+        worst_recip = std::max(worst_recip, std::abs(got - expected) / expected);
+    }
+    INFO("worst relative reciprocal error " << worst_recip);
+    CHECK(worst_recip < 1.0e-6);
+
+    // The header claims 9.6e-08 radian over [0, 1], which it calls the float
+    // evaluation floor rather than the fit's. Checked at twice that so the
+    // case reports a changed polynomial rather than a rounding difference.
+    double worst_atan = 0.0;
+    for (int i = 0; i <= 2048; ++i) {
+        const auto t = static_cast<float>(i) / 2048.0F;
+        worst_atan = std::max(worst_atan, std::abs(static_cast<double>(dsp::det_atan_unit(t)) -
+                                                   std::atan(static_cast<double>(t))));
+    }
+    INFO("worst atan error over [0, 1] " << worst_atan << " radian");
+    CHECK(worst_atan < 2.0e-7);
+
+    // Every octant, which is what the reflections exist for. A sign error in
+    // one of them is a demodulator that works on half the waveform.
+    double worst_atan2 = 0.0;
+    for (int i = 0; i < 719; ++i) {
+        const double angle = -3.14159265358979323846 + kTwoPi * static_cast<double>(i) / 719.0;
+        const auto y = static_cast<float>(std::sin(angle) * 1.7);
+        const auto x = static_cast<float>(std::cos(angle) * 1.7);
+        const double expected = std::atan2(static_cast<double>(y), static_cast<double>(x));
+        worst_atan2 =
+            std::max(worst_atan2, std::abs(static_cast<double>(dsp::det_atan2(y, x)) - expected));
+    }
+    INFO("worst atan2 error over the full circle " << worst_atan2 << " radian");
+    CHECK(worst_atan2 < 5.0e-7);
+
+    // Both inputs zero is the one case with no angle to return.
+    CHECK(dsp::det_atan2(0.0F, 0.0F) == 0.0F);
+
+    // And the one documented disagreement with the IEEE function, asserted so
+    // that it stays a decision rather than becoming a surprise.
+    CHECK(dsp::det_atan2(-0.0F, -1.0F) > 3.0F);
+}
+
+TEST_CASE("the NCO table has exact quadrature entries and the phase does not drift",
+          "[vrx][m1]") {
+    constexpr std::uint32_t kLog2 = 12;
+    constexpr std::uint32_t kSize = 1U << kLog2;
+
+    auto built = dsp::build_nco_table(kLog2);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+    const auto& table = *built;
+    REQUIRE(table.size() == kSize);
+
+    // The same argument core/dsp/pfb.h makes for the twiddle table: a residue
+    // in the imaginary part of the half-turn entry turns a free sign flip into
+    // a real complex multiply and costs bit-exactness for nothing.
+    CHECK(table[0] == dsp::Complex32{1.0F, 0.0F});
+    CHECK(table[kSize / 4] == dsp::Complex32{0.0F, -1.0F});
+    CHECK(table[kSize / 2] == dsp::Complex32{-1.0F, 0.0F});
+    CHECK(table[3 * kSize / 4] == dsp::Complex32{0.0F, 1.0F});
+
+    double worst = 0.0;
+    for (const auto& entry : table) {
+        worst = std::max(worst, std::abs(std::abs(std::complex<double>(entry)) - 1.0));
+    }
+    INFO("worst |W| deviation " << worst);
+    CHECK(worst < 1.0e-7);
+
+    // The claim the fixed-point phase exists for: at a billion samples the
+    // phase is still where exact rational arithmetic says it should be. A
+    // float32 accumulator is 0.26 radian out after four million.
+    constexpr std::int64_t kFrequency = 2500;
+    constexpr dsp::SampleRate kRate = 48'000;
+    auto delta = dsp::nco_delta(kFrequency, 1, kRate);
+    INFO(test::message_of(delta));
+    REQUIRE(delta.has_value());
+
+    constexpr dsp::SampleIndex kIndex = 1'000'000'000;
+    const std::uint64_t got = dsp::nco_phase(*delta, kIndex);
+
+    // The exact phase in turns is (index * f / rate) mod 1. Reducing the index
+    // modulo the rate first keeps every product inside 64 bits without
+    // changing the answer.
+    const auto rate = static_cast<std::int64_t>(kRate);
+    const auto reduced = static_cast<std::int64_t>(kIndex % static_cast<dsp::SampleIndex>(rate));
+    const std::int64_t numerator = (reduced * kFrequency) % rate;
+    const std::uint64_t exact = dsp::turn_fixed64(numerator, rate);
+
+    const std::uint64_t difference = (got > exact) ? got - exact : exact - got;
+    const double turns = static_cast<double>(difference) / std::pow(2.0, 64);
+    INFO("phase error at sample " << kIndex << " is " << turns * kTwoPi << " radian");
+    CHECK(turns * kTwoPi < 1.0e-8);
+}
+
+// ---------------------------------------------------------------------------
+// The fine stage, bit for bit
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the fine stage matches its CPU twin bit-exactly", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    constexpr std::uint64_t kSeed = 0x5652580000000001ULL;
+
+    // Deliberately off the channel centre, so the residual is non-zero and
+    // the output mixer does real work. A receiver placed exactly on a grid
+    // centre has an NCO delta of zero, and the rotation is then the table's
+    // first entry forever, which tests nothing.
+    const auto plan = make_plan(engine::Demod::Nfm, 196'500, 12'000, kGrid);
+    INFO("taps " << plan.fine.taps << ", phases " << plan.fine.phases << ", channel rate "
+                 << plan.channel_rate << ", demod rate " << plan.demod_rate);
+
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+
+    // Close to the top of the ring, so every read crosses the wrap. The
+    // (base - k) & chan_mask line is the most suspicious-looking arithmetic in
+    // the kernel and the one most worth exercising on a real driver.
+    const auto params = fine_params(plan, kChanCapacity - 40U, 1024, 7'654'321);
+
+    const auto gpu_result =
+        run_fine_on_gpu(plan.fine, params, channel_ring, plan.fine_taps, nco, 64);
+
+    std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+    const auto computed = dsp::reference_vrx_fine(plan.fine, params, channel_ring,
+                                                  plan.fine_taps, nco, cpu_result);
+    INFO(test::message_of(computed));
+    REQUIRE(computed.has_value());
+
+    INFO("gpu wrote " << nonzero_count(std::span<const dsp::Complex32>(gpu_result))
+                      << " non-zero samples, cpu "
+                      << nonzero_count(std::span<const dsp::Complex32>(cpu_result)) << " of "
+                      << params.count << " outputs");
+    REQUIRE(nonzero_count(std::span<const dsp::Complex32>(cpu_result)) > params.count / 2);
+    REQUIRE(nonzero_count(std::span<const dsp::Complex32>(gpu_result)) > params.count / 2);
+
+    const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+    INFO(comparison.report);
+    CHECK(comparison.identical);
+    CHECK(comparison.max_ulp_error == 0);
+}
+
+TEST_CASE("the fine stage is bit-exact on values chosen to provoke rounding",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The tap loop is a complex multiply-accumulate, which is exactly the
+    // shape a shader compiler fuses. Uniform input in [-1, 1] rarely
+    // distinguishes a fused multiply-add from two separate operations; these
+    // values do. The `precise` qualifiers in the kernel are what has to hold
+    // here, and nothing else in the suite tests them on this kernel.
+    constexpr std::uint64_t kSeed = 0x5652580000000002ULL;
+
+    const auto plan = make_plan(engine::Demod::Nfm, 196'500, 12'000, kGrid);
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.adversarial_complexes(kChanBase + kChanCapacity);
+
+    // A small in_offset, so base - k underflows and wraps from the bottom of
+    // the ring rather than over the top. Between this case and the one above,
+    // both directions of the wrap are covered.
+    const auto params = fine_params(plan, 7, 1024, 7'654'321);
+
+    const auto gpu_result =
+        run_fine_on_gpu(plan.fine, params, channel_ring, plan.fine_taps, nco, 64);
+
+    std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+    REQUIRE(dsp::reference_vrx_fine(plan.fine, params, channel_ring, plan.fine_taps, nco,
+                                    cpu_result)
+                .has_value());
+
+    const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+    INFO(comparison.report);
+    CHECK(comparison.identical);
+}
+
+TEST_CASE("the fine stage is bit-exact at every workgroup size", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    auto& context = test::shared_context();
+    INFO("running on " << test::shared_context_description());
+
+    constexpr std::uint64_t kSeed = 0x5652580000000003ULL;
+
+    const auto plan = make_plan(engine::Demod::Usb, 196'500, 3'000, kGrid);
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+    const auto params = fine_params(plan, kChanCapacity - 40U, 512, 11);
+
+    std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+    REQUIRE(dsp::reference_vrx_fine(plan.fine, params, channel_ring, plan.fine_taps, nco,
+                                    cpu_result)
+                .has_value());
+
+    // The workgroup size is a scheduling decision and must not change the
+    // answer. A kernel whose output depends on it has a race or a benign-
+    // looking out-of-bounds read.
+    for (const std::uint32_t local_size : {32U, 64U, 128U, 256U}) {
+        if (local_size > context.info().max_workgroup_size_x) {
+            continue;
+        }
+        const auto gpu_result =
+            run_fine_on_gpu(plan.fine, params, channel_ring, plan.fine_taps, nco, local_size);
+        const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+        INFO("local_size_x = " << local_size);
+        INFO(comparison.report);
+        CHECK(comparison.identical);
+    }
+}
+
+TEST_CASE("the fine stage gives the same samples however the stream is blocked",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The property the whole fixed-point NCO and the stateless resampler
+    // recurrence exist for. An earlier version of the kernel accumulated a
+    // 0.32 increment from the block's first output, which is more accurate
+    // and is not this: a third of the outputs changed when the block size
+    // did. Retroactive decode and faster-than-realtime replay both re-enter
+    // the stream at an arbitrary index, so an output that depends on where
+    // the blocks fell is not usable for either.
+    constexpr std::uint64_t kSeed = 0x5652580000000004ULL;
+    constexpr dsp::SampleIndex kFirstOutput = 5'000'000'011ULL;
+    constexpr std::uint32_t kTotal = 768;
+    constexpr std::uint32_t kPiece = 256;
+
+    const auto plan = make_plan(engine::Demod::Nfm, 196'500, 12'000, kGrid);
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+
+    auto whole_block =
+        dsp::fine_block(plan, kChanBase, kChanMask, kFineMask, kFirstOutput, kTotal);
+    INFO(test::message_of(whole_block));
+    REQUIRE(whole_block.has_value());
+
+    const auto whole = run_fine_on_gpu(plan.fine, whole_block->params, channel_ring,
+                                       plan.fine_taps, nco, 64);
+
+    for (std::uint32_t piece = 0; piece < kTotal / kPiece; ++piece) {
+        auto part = dsp::fine_block(plan, kChanBase, kChanMask, kFineMask,
+                                    kFirstOutput + piece * kPiece, kPiece);
+        INFO(test::message_of(part));
+        REQUIRE(part.has_value());
+
+        const auto partial = run_fine_on_gpu(plan.fine, part->params, channel_ring,
+                                             plan.fine_taps, nco, 64);
+
+        // Both dispatches write output j to slot j & out_mask, so the slots
+        // line up without any bookkeeping here.
+        for (std::uint32_t i = 0; i < kPiece; ++i) {
+            const std::uint32_t slot = (part->params.out_offset + i) & kFineMask;
+            INFO("piece " << piece << " sample " << i << " at ring slot " << slot);
+            CHECK(partial[slot] == whole[slot]);
+        }
+    }
+}
+
+TEST_CASE("the fine stage is bit-exact three hours into a stream", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The case a 32-bit truncation survives for three and a half minutes at
+    // 20 MS/s and then does not. Every push constant the kernel reads is 32
+    // bits; the absolute index is 64 and stays on the host, so this is the
+    // case that checks the seam between them rather than the kernel alone.
+    constexpr std::uint64_t kSeed = 0x5652580000000005ULL;
+    constexpr dsp::SampleIndex kThreeHours = 48'000ULL * 3600ULL * 3ULL;
+
+    const auto plan = make_plan(engine::Demod::Am, 196'500, 10'000, kGrid);
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+
+    auto block = dsp::fine_block(plan, kChanBase, kChanMask, kFineMask, kThreeHours, 1024);
+    INFO(test::message_of(block));
+    REQUIRE(block.has_value());
+    INFO("first input " << block->first_input << ", in_offset " << block->params.in_offset
+                        << ", frac0 " << block->params.frac0);
+
+    const auto gpu_result =
+        run_fine_on_gpu(plan.fine, block->params, channel_ring, plan.fine_taps, nco, 64);
+
+    std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+    REQUIRE(dsp::reference_vrx_fine(plan.fine, block->params, channel_ring, plan.fine_taps,
+                                    nco, cpu_result)
+                .has_value());
+
+    const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+    INFO(comparison.report);
+    CHECK(comparison.identical);
+}
+
+// ---------------------------------------------------------------------------
+// The demodulators, bit for bit
+// ---------------------------------------------------------------------------
+
+TEST_CASE("every demodulator matches its CPU twin bit-exactly", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    constexpr std::uint64_t kSeed = 0x5652580000000006ULL;
+
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz bandwidth;
+        const dsp::GridParams* grid;
+    };
+
+    const Case cases[] = {
+        {engine::Demod::Raw, 12'000, &kGrid},   {engine::Demod::Am, 10'000, &kGrid},
+        {engine::Demod::Nfm, 12'000, &kGrid},   {engine::Demod::Wfm, 200'000, &kWideGrid},
+        {engine::Demod::Usb, 3'000, &kGrid},    {engine::Demod::Lsb, 3'000, &kGrid},
+        {engine::Demod::Dsb, 6'000, &kGrid},    {engine::Demod::Cw, 500, &kGrid},
+    };
+
+    test::SeededInput input(kSeed);
+    const auto fine_ring = input.complexes(kFineCapacity);
+
+    for (const auto& item : cases) {
+        const dsp::Hertz centre = (item.grid == &kWideGrid) ? 160'000 : 196'500;
+        const auto plan = make_plan(item.mode, centre, item.bandwidth, *item.grid);
+
+        const std::uint32_t count = demod_count(plan.demod, kFineCapacity, 2048);
+
+        // A small in_offset, so the detector's history reads and the audio
+        // decimation filter's both underflow and wrap. AM reaches back over a
+        // whole DC-removal window, which is hundreds of samples, so this is
+        // not a corner case for that mode: it is every sample.
+        const auto params = demod_params(plan, 7, count);
+
+        INFO("mode " << engine::demod_name(item.mode) << ", decimation "
+                     << plan.demod.decimation << ", audio taps " << plan.demod.audio_taps
+                     << ", dc taps " << plan.demod.dc_taps << ", gain " << plan.demod_gain
+                     << ", " << count << " audio samples");
+
+        const auto gpu_result =
+            run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
+
+        const std::size_t components = (plan.demod.mode == dsp::kDemodRaw) ? 2U : 1U;
+        std::vector<float> cpu_result(static_cast<std::size_t>(count) * components, 0.0F);
+        const auto computed = dsp::reference_vrx_demod(plan.demod, params, fine_ring,
+                                                       plan.demod_weights, cpu_result);
+        INFO(test::message_of(computed));
+        REQUIRE(computed.has_value());
+
+        INFO("gpu wrote " << nonzero_count(std::span<const float>(gpu_result))
+                          << " non-zero values, cpu "
+                          << nonzero_count(std::span<const float>(cpu_result)) << " of "
+                          << cpu_result.size());
+        REQUIRE(nonzero_count(std::span<const float>(cpu_result)) > cpu_result.size() / 2);
+        REQUIRE(nonzero_count(std::span<const float>(gpu_result)) > gpu_result.size() / 2);
+
+        const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+        INFO(comparison.report);
+        CHECK(comparison.identical);
+        CHECK(comparison.max_ulp_error == 0);
+    }
+}
+
+TEST_CASE("the demodulators are bit-exact at every workgroup size", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    auto& context = test::shared_context();
+    INFO("running on " << test::shared_context_description());
+
+    constexpr std::uint64_t kSeed = 0x5652580000000007ULL;
+
+    test::SeededInput input(kSeed);
+    const auto fine_ring = input.complexes(kFineCapacity);
+
+    // AM and NFM between them cover every deterministic transcendental the
+    // file has: AM runs det_sqrt once per DC-window tap, NFM runs det_atan2.
+    for (const auto mode : {engine::Demod::Am, engine::Demod::Nfm}) {
+        const auto plan = make_plan(mode, 196'500, 10'000, kGrid);
+        const std::uint32_t count = demod_count(plan.demod, kFineCapacity, 1024);
+        const auto params = demod_params(plan, 7, count);
+
+        std::vector<float> cpu_result(count, 0.0F);
+        REQUIRE(dsp::reference_vrx_demod(plan.demod, params, fine_ring, plan.demod_weights,
+                                         cpu_result)
+                    .has_value());
+
+        for (const std::uint32_t local_size : {32U, 64U, 128U, 256U}) {
+            if (local_size > context.info().max_workgroup_size_x) {
+                continue;
+            }
+            const auto gpu_result =
+                run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, local_size);
+            const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+            INFO("mode " << engine::demod_name(mode) << ", local_size_x = " << local_size);
+            INFO(comparison.report);
+            CHECK(comparison.identical);
+        }
+    }
+}
+
+TEST_CASE("the product detectors are bit-exact on values chosen to provoke rounding",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Restricted to the modes whose arithmetic is linear, which is the raw tap
+    // and the four product detectors. The adversarial set reaches 1e38 and
+    // 1e-45, and det_rsqrt's stated domain is roughly 2^-100 to 2^100: outside
+    // it an intermediate overflows or lands in the denormals this project
+    // flushes to zero. Feeding AM and FM values their own header says are out
+    // of range would test undefined behaviour rather than conformance, and a
+    // green result would mean nothing.
+    constexpr std::uint64_t kSeed = 0x5652580000000008ULL;
+
+    test::SeededInput input(kSeed);
+    const auto fine_ring = input.adversarial_complexes(kFineCapacity);
+
+    for (const auto mode : {engine::Demod::Raw, engine::Demod::Usb, engine::Demod::Lsb,
+                            engine::Demod::Dsb, engine::Demod::Cw}) {
+        const dsp::Hertz bandwidth = (mode == engine::Demod::Cw) ? 500 : 3'000;
+        const auto plan = make_plan(mode, 196'500, bandwidth, kGrid);
+        const std::uint32_t count = demod_count(plan.demod, kFineCapacity, 1024);
+        const auto params = demod_params(plan, 7, count);
+
+        const auto gpu_result =
+            run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
+
+        const std::size_t components = (plan.demod.mode == dsp::kDemodRaw) ? 2U : 1U;
+        std::vector<float> cpu_result(static_cast<std::size_t>(count) * components, 0.0F);
+        REQUIRE(dsp::reference_vrx_demod(plan.demod, params, fine_ring, plan.demod_weights,
+                                         cpu_result)
+                    .has_value());
+
+        const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+        INFO("mode " << engine::demod_name(mode));
+        INFO(comparison.report);
+        CHECK(comparison.identical);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Behaviour, which is what catches a convention that is wrong consistently
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A larger channel ring for the behavioural cases, sized so the filter's whole
+// support and the block's read window fit without wrapping. The tone then has
+// no discontinuity anywhere the kernel looks, so what comes out is the
+// filter's answer rather than the ring's.
+constexpr std::uint32_t kToneChanCapacity = 1U << 13;
+constexpr std::uint32_t kToneChanMask = kToneChanCapacity - 1U;
+constexpr std::uint32_t kToneFineCapacity = 1U << 12;
+constexpr std::uint32_t kToneFineMask = kToneFineCapacity - 1U;
+constexpr std::uint32_t kToneOutputs = 2048;
+
+// Chosen so fine_block lands the first input at 512, which leaves room below
+// it for the longest fine filter the planner will build (256 taps) and room
+// above for the whole block.
+constexpr dsp::SampleIndex kToneFirstOutput = 328;
+
+// Runs one receiver's fine stage over a channel carrying a single tone, and
+// returns the block's outputs in order.
+std::vector<dsp::Complex32> fine_tone_response(const dsp::VrxPlan& plan, double tone_hz) {
+    const auto nco = make_nco(plan);
+
+    std::vector<dsp::Complex32> channel_ring(kToneChanCapacity);
+    for (std::size_t n = 0; n < channel_ring.size(); ++n) {
+        channel_ring[n] = tone_at(tone_hz, static_cast<double>(plan.channel_rate), n);
+    }
+
+    auto block = dsp::fine_block(plan, 0, kToneChanMask, kToneFineMask, kToneFirstOutput,
+                                 kToneOutputs);
+    INFO(test::message_of(block));
+    REQUIRE(block.has_value());
+
+    // The ring index is the absolute channel index here, which is what makes
+    // the tone above the signal the kernel actually reads. Both ends of the
+    // read window have to stay inside the ring for that to hold, filter
+    // history included.
+    REQUIRE(block->first_input >= plan.fine.taps);
+    REQUIRE(block->newest_input < kToneChanCapacity);
+    REQUIRE(block->params.in_offset == block->first_input);
+
+    const auto ring = run_fine_on_gpu(plan.fine, block->params, channel_ring, plan.fine_taps,
+                                      nco, 64);
+
+    // Contiguous, because the block was placed so it does not wrap the output
+    // ring either.
+    const auto start = static_cast<std::ptrdiff_t>(block->params.out_offset);
+    REQUIRE(block->params.out_offset + kToneOutputs <= kToneFineCapacity);
+    return std::vector<dsp::Complex32>(ring.begin() + start,
+                                       ring.begin() + start + kToneOutputs);
+}
+
+}  // namespace
+
+TEST_CASE("a tone at the receiver's centre arrives at DC with unit magnitude",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The receiver sits 9 kHz off the channel centre, so the fine stage has a
+    // real residual to undo. What arrives should be a constant: unit
+    // magnitude, because the tap table is normalised to unit gain at the
+    // filter's centre, and zero frequency, because the mixer translates the
+    // residual to DC.
+    const auto plan = make_plan(engine::Demod::Nfm, 196'500, 12'000, kGrid);
+    const double residual = static_cast<double>(plan.placement.residual_numerator) /
+                            static_cast<double>(plan.placement.residual_denominator);
+    INFO("channel " << plan.placement.channel << ", residual " << residual << " Hz, "
+                    << plan.fine.taps << " taps");
+    REQUIRE(residual != 0.0);
+
+    const auto out = fine_tone_response(plan, residual);
+    const auto fit = measure_complex_tone(out, static_cast<double>(plan.demod_rate));
+
+    INFO("magnitude " << fit.magnitude << ", residual frequency " << fit.frequency_hz << " Hz");
+    CHECK(fit.magnitude == Approx(1.0).margin(0.01));
+    CHECK(std::abs(fit.frequency_hz) < 0.5);
+}
+
+TEST_CASE("a CW receiver lands the carrier on the operator's pitch", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // CW is the one mode whose filter centre and mix frequency differ by
+    // something the operator chose. A carrier at the receiver's centre must
+    // come out at the pitch rather than at DC, because a carrier at DC is
+    // inaudible. Getting the sign wrong puts it at minus the pitch, which
+    // sounds identical on a loudspeaker and is wrong.
+    engine::VrxParams request;
+    request.center = 196'500;
+    request.bandwidth = 500;
+    request.demod = engine::Demod::Cw;
+
+    auto placed = engine::place(kGrid, kSourceRate, request);
+    REQUIRE(placed.has_value());
+    auto planned = dsp::plan_vrx(kGrid, kSourceRate, request, *placed);
+    INFO(test::message_of(planned));
+    REQUIRE(planned.has_value());
+    const auto& plan = *planned;
+
+    const double residual = static_cast<double>(plan.placement.residual_numerator) /
+                            static_cast<double>(plan.placement.residual_denominator);
+
+    const auto out = fine_tone_response(plan, residual);
+    const auto fit = measure_complex_tone(out, static_cast<double>(plan.demod_rate));
+
+    INFO("magnitude " << fit.magnitude << ", output frequency " << fit.frequency_hz << " Hz");
+    CHECK(fit.magnitude == Approx(1.0).margin(0.01));
+    CHECK(fit.frequency_hz == Approx(static_cast<double>(request.cw_pitch)).margin(1.0));
+}
+
+TEST_CASE("a USB receiver keeps its own sideband and rejects the other", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The measurement the planner's transition-width choice was made for. Set
+    // by the anti-alias bound alone the fine filter becomes a gentle hump with
+    // no flat region, and a 3 kHz USB receiver rejects its unwanted sideband
+    // by 2.1 dB. Asking for the stopband one half-bandwidth past the passband
+    // edge takes it past 80 dB. Nothing but this case notices the difference,
+    // because both filters look plausible and both are bit-exact.
+    constexpr dsp::Hertz kBandwidth = 3'000;
+    const auto plan = make_plan(engine::Demod::Usb, 196'500, kBandwidth, kGrid);
+
+    const double residual = static_cast<double>(plan.placement.residual_numerator) /
+                            static_cast<double>(plan.placement.residual_denominator);
+    const double half = static_cast<double>(kBandwidth) / 2.0;
+    INFO(plan.fine.taps << " taps, transition " << plan.fine_transition_hz << " Hz, stopband "
+                        << plan.fine_stopband_db << " dB");
+
+    // The passband runs from the suppressed carrier upwards, so its centre is
+    // half a bandwidth above the residual, and that is where the tap table is
+    // centred and where the gain is unity.
+    const auto wanted = fine_tone_response(plan, residual + half);
+    const auto wanted_fit = measure_complex_tone(wanted, static_cast<double>(plan.demod_rate));
+
+    // The mirror image, one whole bandwidth below the filter's centre, which
+    // is past the stopband edge.
+    const auto unwanted = fine_tone_response(plan, residual - half);
+    const auto unwanted_fit =
+        measure_complex_tone(unwanted, static_cast<double>(plan.demod_rate));
+
+    const double rejection_db =
+        20.0 * std::log10(std::max(unwanted_fit.magnitude, 1.0e-12) / wanted_fit.magnitude);
+    INFO("wanted magnitude " << wanted_fit.magnitude << " at " << wanted_fit.frequency_hz
+                             << " Hz, unwanted magnitude " << unwanted_fit.magnitude
+                             << ", rejection " << rejection_db << " dB");
+
+    CHECK(wanted_fit.magnitude == Approx(1.0).margin(0.01));
+    CHECK(wanted_fit.frequency_hz == Approx(half).margin(1.0));
+
+    // 60 dB rather than the design's 80, so the case reports a convention
+    // error rather than a one-decibel drift in the Kaiser estimate. The
+    // designed depth is asserted by the planner's own figure above.
+    CHECK(rejection_db < -60.0);
+}
+
+TEST_CASE("each demodulator recovers its own modulation at the stated level",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The audio convention, asserted rather than described: a unit-amplitude
+    // signal fully modulating its own mode produces audio that swings to
+    // exactly +/-1. These cases hand the demodulator the complex baseband the
+    // fine stage would have produced, so what is under test is the detector
+    // and its gain and nothing upstream of them.
+    //
+    // The baseband is built periodic in the ring, so the detector's history
+    // reads are continuous wherever they wrap and the filters have no
+    // start-up transient to skip past.
+    //
+    // The modulation sits near 1 kHz for every mode, which matters for AM:
+    // its DC-removal window corners at 200 Hz, so a modulation below that
+    // would be measuring the highpass rather than the envelope detector.
+    constexpr double kTargetModulationHz = 1000.0;
+
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz bandwidth;
+        const dsp::GridParams* grid;
+        dsp::Hertz centre;
+        std::uint32_t count;
+    };
+
+    const Case cases[] = {
+        {engine::Demod::Am, 10'000, &kGrid, 196'500, 2048},
+        {engine::Demod::Nfm, 12'000, &kGrid, 196'500, 2048},
+        {engine::Demod::Wfm, 200'000, &kWideGrid, 160'000, 512},
+        {engine::Demod::Usb, 3'000, &kGrid, 196'500, 2048},
+        {engine::Demod::Lsb, 3'000, &kGrid, 196'500, 2048},
+        {engine::Demod::Dsb, 6'000, &kGrid, 196'500, 2048},
+        {engine::Demod::Cw, 500, &kGrid, 196'500, 2048},
+    };
+
+    for (const auto& item : cases) {
+        const auto plan = make_plan(item.mode, item.centre, item.bandwidth, *item.grid);
+        const std::uint32_t count = demod_count(plan.demod, kFineCapacity, item.count);
+
+        const auto demod_rate = static_cast<double>(plan.demod_rate);
+        const auto audio_rate = static_cast<double>(plan.output_rate);
+
+        // A whole number of periods across the ring, so the ring is seamless
+        // and every wrapped history read is continuous.
+        const auto periods = std::max(
+            1.0, std::round(kTargetModulationHz * static_cast<double>(kFineCapacity) /
+                            demod_rate));
+        const double modulation_hz =
+            demod_rate * periods / static_cast<double>(kFineCapacity);
+
+        std::vector<dsp::Complex32> fine_ring(kFineCapacity);
+        for (std::size_t m = 0; m < fine_ring.size(); ++m) {
+            const double turns =
+                std::fmod(modulation_hz * static_cast<double>(m) / demod_rate, 1.0);
+            const double angle = kTwoPi * turns;
+
+            if (item.mode == engine::Demod::Am) {
+                // A unit carrier at 100 percent modulation. Its envelope is
+                // 1 + cos, which touches zero at the trough, so this is the
+                // deepest modulation the mode has.
+                const auto envelope = static_cast<float>(1.0 + std::cos(angle));
+                fine_ring[m] = dsp::Complex32{envelope, 0.0F};
+            } else if (item.mode == engine::Demod::Nfm || item.mode == engine::Demod::Wfm) {
+                // Sinusoidal frequency modulation at exactly the peak
+                // deviation the mode's channel plan implies, so correct audio
+                // is +/-1 by definition of the gain.
+                const double beta =
+                    static_cast<double>(plan.deviation) / modulation_hz;
+                const double phase = beta * std::sin(angle);
+                fine_ring[m] = dsp::Complex32{static_cast<float>(std::cos(phase)),
+                                              static_cast<float>(std::sin(phase))};
+            } else {
+                // A unit-amplitude tone in the passband. The product detector
+                // takes its real part, so correct audio is a cosine of
+                // amplitude one.
+                fine_ring[m] = dsp::Complex32{static_cast<float>(std::cos(angle)),
+                                              static_cast<float>(std::sin(angle))};
+            }
+        }
+
+        const auto params = demod_params(plan, 1024, count);
+
+        INFO("mode " << engine::demod_name(item.mode) << ", demod rate " << plan.demod_rate
+                     << ", audio rate " << plan.output_rate << ", decimation "
+                     << plan.demod.decimation << ", gain " << plan.demod_gain
+                     << ", modulation " << modulation_hz << " Hz, deviation "
+                     << plan.deviation << " Hz");
+
+        const auto audio =
+            run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
+
+        // A margin rather than a settling time. Nothing here has a transient,
+        // because the ring is periodic and every filter reads valid signal
+        // from its first tap; the margin exists so a case that acquires one
+        // reports an amplitude error rather than hiding it in an average.
+        const std::size_t skip = audio.size() / 8;
+        REQUIRE(audio.size() > skip);
+        const std::span<const float> settled(audio.data() + skip, audio.size() - skip);
+
+        // At the audio rate for every mode but the raw tap, and the audio
+        // frequency is the modulation frequency: decimation moves the rate,
+        // not the tone.
+        const auto fit = measure_audio_tone(settled, audio_rate, modulation_hz);
+        INFO("recovered amplitude " << fit.amplitude << ", purity " << fit.purity);
+
+        CHECK(fit.amplitude == Approx(1.0).margin(0.02));
+        CHECK(fit.purity > 0.95);
+    }
+}
+
+TEST_CASE("the raw tap hands back exactly what it was given", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The raw tap is not a demodulator. Its gain is one and its job is to hand
+    // out the complex baseband unchanged, so the right assertion is equality
+    // and not a tolerance.
+    constexpr std::uint64_t kSeed = 0x5652580000000009ULL;
+
+    const auto plan = make_plan(engine::Demod::Raw, 196'500, 12'000, kGrid);
+    REQUIRE(plan.demod.mode == dsp::kDemodRaw);
+    REQUIRE(plan.demod.decimation == 1U);
+    REQUIRE(plan.demod_gain == 1.0F);
+
+    test::SeededInput input(kSeed);
+    const auto fine_ring = input.complexes(kFineCapacity);
+
+    constexpr std::uint32_t kCount = 1024;
+    const auto params = demod_params(plan, 900, kCount);
+
+    const auto audio = run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
+    REQUIRE(audio.size() == 2U * kCount);
+
+    for (std::uint32_t i = 0; i < kCount; ++i) {
+        const auto& expected = fine_ring[(params.in_offset + i) & kFineMask];
+        INFO("sample " << i);
+        CHECK(audio[2U * i] == expected.real());
+        CHECK(audio[2U * i + 1U] == expected.imag());
+    }
+}
