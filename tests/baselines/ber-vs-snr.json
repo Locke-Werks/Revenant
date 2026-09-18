@@ -1,0 +1,138 @@
+{
+  "commit": "HEAD",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 100,
+    "payload_bytes": 64,
+    "snr_start_db": -4.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 10.000000,
+    "trial_batch": 64,
+    "trials_per_point": 10000
+  },
+  "mode": "bpsk",
+  "points": [
+    {
+      "ber": 1.806030273438e-01,
+      "bit_errors": 5918,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": -4.000000,
+      "trials": 64
+    },
+    {
+      "ber": 1.598510742188e-01,
+      "bit_errors": 5238,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": -3.000000,
+      "trials": 64
+    },
+    {
+      "ber": 1.294555664062e-01,
+      "bit_errors": 4242,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": -2.000000,
+      "trials": 64
+    },
+    {
+      "ber": 1.035461425781e-01,
+      "bit_errors": 3393,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": -1.000000,
+      "trials": 64
+    },
+    {
+      "ber": 7.955932617188e-02,
+      "bit_errors": 2607,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": 0.000000,
+      "trials": 64
+    },
+    {
+      "ber": 5.450439453125e-02,
+      "bit_errors": 1786,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": 1.000000,
+      "trials": 64
+    },
+    {
+      "ber": 3.768920898438e-02,
+      "bit_errors": 1235,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": 2.000000,
+      "trials": 64
+    },
+    {
+      "ber": 2.435302734375e-02,
+      "bit_errors": 798,
+      "bits_total": 32768,
+      "decoded_count": 0,
+      "snr_db": 3.000000,
+      "trials": 64
+    },
+    {
+      "ber": 1.162719726562e-02,
+      "bit_errors": 381,
+      "bits_total": 32768,
+      "decoded_count": 2,
+      "snr_db": 4.000000,
+      "trials": 64
+    },
+    {
+      "ber": 5.706787109375e-03,
+      "bit_errors": 187,
+      "bits_total": 32768,
+      "decoded_count": 3,
+      "snr_db": 5.000000,
+      "trials": 64
+    },
+    {
+      "ber": 2.609252929688e-03,
+      "bit_errors": 171,
+      "bits_total": 65536,
+      "decoded_count": 38,
+      "snr_db": 6.000000,
+      "trials": 128
+    },
+    {
+      "ber": 6.530761718750e-04,
+      "bit_errors": 107,
+      "bits_total": 163840,
+      "decoded_count": 229,
+      "snr_db": 7.000000,
+      "trials": 320
+    },
+    {
+      "ber": 2.115885416667e-04,
+      "bit_errors": 104,
+      "bits_total": 491520,
+      "decoded_count": 862,
+      "snr_db": 8.000000,
+      "trials": 960
+    },
+    {
+      "ber": 3.502585671165e-05,
+      "bit_errors": 101,
+      "bits_total": 2883584,
+      "decoded_count": 5532,
+      "snr_db": 9.000000,
+      "trials": 5632
+    },
+    {
+      "ber": 4.687500000000e-06,
+      "bit_errors": 24,
+      "bits_total": 5120000,
+      "decoded_count": 9976,
+      "snr_db": 10.000000,
+      "trials": 10000
+    }
+  ],
+  "schema": 1,
+  "subject": "reference-bpsk-coherent/sps1"
+}

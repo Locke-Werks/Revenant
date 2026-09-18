@@ -1,0 +1,145 @@
+name: nightly
+
+on:
+  schedule:
+    # 09:00 UTC, which is the small hours in US Central. GitHub cron is always
+    # UTC and does not follow daylight saving, so this drifts by an hour twice a
+    # year. That is fine for a sweep.
+    #
+    # A scheduled workflow on a self-hosted runner only fires when the machine
+    # is on. That is a known and accepted property of running the conformance
+    # hardware on a workstation, not a fault to chase: a missed night is a night
+    # the box was off. GitHub also disables scheduled workflows in a repository
+    # with no activity for 60 days, which shows up the same way.
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+# A sweep can run for hours. A second one queued behind it waits rather than
+# killing it, which is the opposite of what ci.yml wants.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Fixed on purpose. Every random draw in the project takes an explicit seed,
+  # never a clock, so a curve is reproducible from the number printed in the
+  # log. A regression found here is rerun locally with this same value.
+  REVENANT_BENCH_SEED: '20260918'
+
+jobs:
+  # The long BER against SNR sweeps. These do not belong in a per-PR gate: they
+  # take too long to sit in front of a review, and a curve moving is a different
+  # kind of news from a kernel disagreeing with its reference.
+  sweep:
+    name: sweep (${{ matrix.name }})
+    runs-on: [self-hosted, windows, x64, gpu]
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      # One physical machine, so one leg at a time. See ci.yml.
+      max-parallel: 1
+      matrix:
+        include:
+          - name: nvidia-4090
+            gpu_index: 0
+          - name: amd-igpu
+            gpu_index: 1
+    env:
+      REVENANT_GPU_INDEX: ${{ matrix.gpu_index }}
+      VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache\revenant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the vcpkg binary cache directory
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # RelWithDebInfo, the same preset CI builds. A sweep measured against a
+      # debug build would say nothing about the code that ships.
+      - name: Configure
+        run: cmake --preset ci
+
+      - name: Build
+        run: cmake --build --preset ci
+
+      - name: Locate the bench tool and the baseline
+        id: preflight
+        shell: pwsh
+        run: |
+          # A missing tool or baseline is a warning and a skipped sweep rather
+          # than a failure. A red nightly every night trains everyone to ignore
+          # the workflow, and the thing worth being loud about is a curve that
+          # moved, not scaffolding that has not caught up yet.
+          $tool = Get-ChildItem -Path build/ci -Recurse -File -Filter 'bench.exe' `
+                    -ErrorAction SilentlyContinue | Select-Object -First 1
+          $baseline = 'tests/baselines/ber-vs-snr.json'
+
+          $missing = @()
+          if (-not $tool) { $missing += 'build/ci/**/bench.exe' }
+          if (-not (Test-Path $baseline)) { $missing += $baseline }
+
+          if ($missing) {
+            Write-Output "::warning::nightly sweep skipped, not built yet: $($missing -join ', ')"
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'ready=false'
+            exit 0
+          }
+
+          "tool:     $($tool.FullName)"
+          "baseline: $baseline"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value 'ready=true'
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "tool=$($tool.FullName)"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "baseline=$baseline"
+
+      - name: Sweep BER against SNR
+        if: steps.preflight.outputs.ready == 'true'
+        shell: pwsh
+        run: |
+          # Two calls, because the tool separates producing a curve from judging
+          # one. The judgement lives in the tool and not in this YAML: it knows
+          # what a tolerable per-point worsening is and how to interpolate the
+          # sensitivity shift in dB, which is the number a person actually cares
+          # about. A step comparing columns here would be a second, worse copy
+          # of that.
+          #
+          # One baseline serves both legs on purpose. Through M0 the subject
+          # under test is a CPU BPSK demodulator, so both devices are expected
+          # to produce byte-identical curves and a difference between them would
+          # itself be the finding. From M4, when decoders are GPU kernels, the
+          # legs start measuring genuinely different work and this comment
+          # should be revisited rather than trusted.
+          New-Item -ItemType Directory -Force -Path bench-out | Out-Null
+          $curve = "bench-out/ber-vs-snr-${{ matrix.name }}.json"
+          "device: $env:REVENANT_GPU_INDEX   seed: $env:REVENANT_BENCH_SEED"
+
+          & '${{ steps.preflight.outputs.tool }}' sweep `
+              --snr-start -4 --snr-stop 10 --snr-step 1 `
+              --trials 10000 `
+              --seed $env:REVENANT_BENCH_SEED `
+              --commit $env:GITHUB_SHA `
+              --out $curve
+          if ($LASTEXITCODE -ne 0) { throw "sweep exited $LASTEXITCODE" }
+
+          # Exit 1 is a regression, 2 bad usage, 3 an error while running. Only
+          # the first is a statement about the code under test, but all three
+          # fail the job: a comparison that could not run has not cleared
+          # anything.
+          & '${{ steps.preflight.outputs.tool }}' compare `
+              '${{ steps.preflight.outputs.baseline }}' $curve
+          if ($LASTEXITCODE -ne 0) { throw "compare exited $LASTEXITCODE" }
+
+      # Uploaded whether or not the comparison passed. A passing curve is the
+      # record of where the numbers were on a given night, and a failing one is
+      # the evidence of what moved. The committed baseline under tests/baselines
+      # is updated deliberately, by hand, from a curve somebody has read.
+      - name: Curves
+        if: always() && steps.preflight.outputs.ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-curves-${{ matrix.name }}
+          path: bench-out/**
+          if-no-files-found: warn
+          retention-days: 90
