@@ -96,6 +96,31 @@ discrete card is stable at every size.
 The cause was not isolated. It could be VkFFT's index arithmetic or barrier
 placement, or this AMD driver miscompiling a correct shader. It matters beyond
 VkFFT: if it is the driver, Revenant's own shared-memory kernels will meet the
-same thing, and the channelizer's FFT stage is a shared-memory kernel. The
-control experiment is a hand-written shared-memory reduction on that device,
-and it should be run early rather than discovered at M2.
+same thing, and the channelizer's FFT stage is a shared-memory kernel.
+
+### The control experiment, run, and inconclusive
+
+The channelizer's own transform is that control: a hand-written shared-memory
+kernel, M = 64, on the same device. It has been run 197 times there since the
+output buffers started being zeroed. It failed once, very early, and has not
+failed in the 192 runs since. The failure was not captured, so there is no
+divergence magnitude to report.
+
+That is too weak to conclude anything and it is recorded rather than
+interpreted. One unreproduced event is equally consistent with a rare driver
+fault, with residue from the buffer-initialisation bug that was being fixed in
+the same minute, and with something not yet imagined. It is written down for
+two reasons: the VkFFT observation predicts exactly this, so the next person
+who sees an intermittent on that device should know it would not be the first;
+and an anomaly nobody records is an anomaly the project gets to be surprised by
+twice.
+
+The kernel itself has been checked by hand and is race-free. Every barrier sits
+at uniform control flow, and the butterfly index mapping provably partitions
+the transform: at stage s the pairs (ia, ib) cover 0..M-1 exactly once, so no
+two invocations in a stage touch the same element.
+
+What would settle it: capture a failure with its divergence pattern, run
+VkFFT's own test suite on that device, and report upstream. Until then the
+honest position is that the discrete card is deterministic across hundreds of
+runs and the integrated part has one unexplained event against it.
