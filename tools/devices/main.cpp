@@ -70,8 +70,15 @@ int main(int argc, char** argv) {
         if (verbose) {
             std::println("      vendor 0x{:04X}  device 0x{:04X}  driver {}", device.vendor_id,
                          device.device_id, device.driver_version);
-            std::println("      max workgroup x {}  max invocations {}",
-                         device.max_workgroup_size_x, device.max_workgroup_invocations);
+            std::println("      max workgroup x {}  max invocations {}  shared memory {} KiB",
+                         device.max_workgroup_size_x, device.max_workgroup_invocations,
+                         device.max_workgroup_shared_memory / 1024);
+            // Printed because it differs by a factor of 512 between the two
+            // devices here, and because it is what bounds how much capture the
+            // device ring can hold.
+            std::println("      max allocation {} MiB  max storage buffer {} MiB",
+                         device.max_memory_allocation_size / (1024 * 1024),
+                         device.max_storage_buffer_range / (1024 * 1024));
         }
     }
 

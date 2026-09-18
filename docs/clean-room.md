@@ -165,12 +165,33 @@ and nothing else:
 
 Two honest notes about that list.
 
-The R820T2 register map is only partially public. The datasheet describes the
-functional blocks; it does not enumerate every register and bit. Anything needed
-beyond what the datasheet states is derived by measurement against the device
-on the desk and is labelled as measured, per the practice above. It is not taken
-from a driver, and a commit that cannot say which of the two it is does not
-merge.
+The R820T2 register map is fully public, and this note previously said the
+opposite. The confusion is that there are two Rafael Micro documents. The
+R820T *datasheet* does describe the functional blocks without enumerating every
+register, which is where the belief came from. The separate *R820T2 Register
+Description* does enumerate all thirty-two registers with per-bit semantics,
+the I2C address and the PLL equations. Rafael Micro released it deliberately,
+in response to a request for driver documentation, which makes it the
+best-provenance document of the set and it is the one the tuner work depends
+on.
+
+The Realtek RTL2832U datasheet, Rev 1.4 of 2010-11-01, covers the USB vendor
+command layout, the register block selector, the I2C repeater and master, the
+DDC, the resampler and the GPIO block, including the equations for the sample
+rate and IF frequency registers.
+
+Between them those two documents cover most of what the backend needs. What
+they do not cover, and the estimate is roughly one part in seven, is derived by
+measurement against the device on the desk and is labelled as measured, per the
+practice above. It is not taken from a driver, and a commit that cannot say
+which of the two it is does not merge.
+
+There is no permissively licensed prior art to lean on. Seven candidates were
+checked and every one was disqualified by reading its licence and its contents:
+the recurring pattern is a repository declaring MIT or Apache while carrying
+relabelled GPL source or crediting a GPL project for "the magic numbers". A
+permissive label on a repository is not a licence audit, and for this hardware
+it is usually wrong.
 
 This document deliberately states no register numbers. A register number
 asserted here without a citation would be the exact provenance failure the

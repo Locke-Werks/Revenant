@@ -10,6 +10,7 @@
             "name": "catch2",
             "host": false
         },
-        "libusb"
+        "libusb",
+        "capnproto"
     ]
 }

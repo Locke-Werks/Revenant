@@ -106,7 +106,23 @@ DeviceInfo describe(VkPhysicalDevice device, std::uint32_t index) {
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(device, &props);
 
+    // maxMemoryAllocationSize lives in the Vulkan 1.1 property struct rather
+    // than the base one, so it needs the chained query. It is worth the extra
+    // call: it is the limit that decides how much capture the device ring can
+    // hold, and reading it wrong is the difference between six seconds of
+    // retention and a failed allocation.
+    VkPhysicalDeviceVulkan11Properties props11{};
+    props11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &props11;
+    vkGetPhysicalDeviceProperties2(device, &props2);
+
     DeviceInfo info;
+    info.max_workgroup_shared_memory = props.limits.maxComputeSharedMemorySize;
+    info.max_memory_allocation_size = props11.maxMemoryAllocationSize;
+    info.max_storage_buffer_range = props.limits.maxStorageBufferRange;
     info.index = index;
     info.name = props.deviceName;
     info.type = props.deviceType;
@@ -354,8 +370,12 @@ Expected<Context> Context::create(Options options) {
     // symptom is a reference diff failing for what looks like an arithmetic
     // reason. Enabling it explicitly, and refusing the device when it is
     // absent, turns that into a message that names the actual problem.
+    VkPhysicalDeviceVulkan12Features available_12{};
+    available_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
     VkPhysicalDeviceVulkan13Features available_13{};
     available_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    available_13.pNext = &available_12;
 
     VkPhysicalDeviceFeatures2 available{};
     available.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -371,9 +391,34 @@ Expected<Context> Context::create(Options options) {
             name));
     }
 
+    // Timeline semaphores, required for the same reason maintenance4 is: the
+    // engine's submission model depends on them and a device that lacks them
+    // cannot run the graph at all.
+    //
+    // A binary semaphore signals once and must be waited on exactly once,
+    // which forces a fence and a host round trip between every pair of
+    // dependent submissions. A timeline semaphore is a monotonic counter that
+    // several submissions can wait on at different values, which is what lets
+    // the channelizer, the disk writer and the full-span FFT all read the same
+    // ring position without the host arbitrating between them. Without it the
+    // no-host-round-trip rule cannot be kept.
+    if (available_12.timelineSemaphore != VK_TRUE) {
+        const std::string name = ctx.info_.name;
+        ctx.destroy();
+        return fail(std::format(
+            "device '{}' does not support timeline semaphores, which the engine's submission "
+            "model requires",
+            name));
+    }
+
+    VkPhysicalDeviceVulkan12Features enabled_12{};
+    enabled_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    enabled_12.timelineSemaphore = VK_TRUE;
+
     VkPhysicalDeviceVulkan13Features enabled_13{};
     enabled_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     enabled_13.maintenance4 = VK_TRUE;
+    enabled_13.pNext = &enabled_12;
 
     VkDeviceCreateInfo device_info{};
     device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

@@ -36,6 +36,21 @@ struct DeviceInfo {
     std::uint32_t max_workgroup_size_x = 0;
     std::uint32_t max_workgroup_invocations = 0;
 
+    // Shared memory available to one workgroup. The FFT stage keeps a whole
+    // transform here, so this is what bounds the transform size that fits in a
+    // single pass.
+    std::uint32_t max_workgroup_shared_memory = 0;
+
+    // The single most important number for sizing the device ring, and one
+    // that differs by a factor of 512 between the two devices in the
+    // development machine: the discrete card allows 1 TiB, the integrated part
+    // caps both of these at 2 GiB. A ring sized from "several seconds of
+    // full-rate IQ" without consulting these configures on one and fails on
+    // the other, which is a CI failure on one leg only and reads as a driver
+    // problem rather than an arithmetic one.
+    std::uint64_t max_memory_allocation_size = 0;
+    std::uint64_t max_storage_buffer_range = 0;
+
     [[nodiscard]] std::string vendor_name() const;
     [[nodiscard]] std::string describe() const;
 };
