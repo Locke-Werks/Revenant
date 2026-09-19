@@ -11,11 +11,32 @@
 #include <string_view>
 #include <vector>
 
+#include "core/dsp/types.h"
 #include "core/error.h"
 #include "core/source/capabilities.h"
 #include "core/source/source.h"
 
 namespace revenant::source {
+
+// Parses 7100000, 7.1M, 162.550M, 14074k, 500 into exact integer hertz.
+//
+// The fraction is folded in with integer arithmetic rather than by parsing a
+// double and multiplying. 162.550 * 1e6 in binary floating point is
+// 162549999.99999997, and while a round would recover the right answer here,
+// the conventions put frequency in integer hertz precisely so that no stage
+// has to be trusted to round the same way twice.
+//
+// It lives here because this file owns the text layer of a source and the
+// same spelling has to work in a URI and on a command line. It began in
+// tools/cli and moved when the RTL-SDR backend needed freq= to accept what
+// --vrx already accepted: one grammar for a frequency, in one place, or the
+// two drift and a number means different things depending on where it was
+// typed.
+//
+// `what` names the thing being parsed and is quoted back in the error, so a
+// caller says "--vrx frequency" or "the rtlsdr freq= parameter" and the
+// message reads as a sentence.
+[[nodiscard]] Expected<dsp::Hertz> parse_frequency(std::string_view text, std::string_view what);
 
 struct SourceDescriptor {
     // The URI open_source takes. See below for the grammar.

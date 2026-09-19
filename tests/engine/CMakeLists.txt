@@ -13,6 +13,12 @@
 # retirement floor and the wrap arithmetic, and most of the risk in a source is
 # in the URI layer, the seek and the flow control. All of that is host logic
 # and all of it fails silently when it fails.
+#
+# test_rtlsdr_source.cpp needs no GPU either, and needs a dongle for only some
+# of its cases. The URI cases run everywhere; the ones that touch hardware
+# skip themselves with a reason when librtlsdr sees no device, so this binary
+# stays green on a build machine with nothing plugged in without pretending it
+# covered the radio.
 
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
@@ -20,6 +26,7 @@ add_executable(revenant_engine_tests
     test_audio_wasapi.cpp
     test_engine.cpp
     test_ring.cpp
+    test_rtlsdr_source.cpp
     test_sources.cpp
 )
 

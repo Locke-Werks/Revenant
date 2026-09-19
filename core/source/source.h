@@ -56,6 +56,21 @@ struct SourceBlock {
 // Returning an error stops the stream, and the error is handed back through
 // Source::stop(). This is the same shape as the BlockSink already in
 // core/dsp/synth/wideband.h, deliberately: one idiom for streamed blocks.
+//
+// A SINK MUST NOT CALL BACK INTO ITS OWN SOURCE. Not tune(), not stop(), not
+// clock(), not any other method on this interface. Every backend here runs
+// its sink on the delivery thread while holding nothing, and serialises
+// control against that thread with a mutex that stop() holds while it joins.
+// A sink that reaches back takes that mutex from inside the thread stop() is
+// waiting on, and the two block on each other permanently. Measured on all
+// three backends: the process hangs until something kills it.
+//
+// Retuning from the sink is the obvious way to write a scanner and it is the
+// wrong way here. Post the request to another
+// thread, or to the control loop that owns the source, and let the sink
+// return. The engine's own consumer does that already: Graph::on_block
+// queues control operations and drains them between blocks rather than
+// acting on them inside the callback.
 using BlockSink = std::function<Status(const SourceBlock&)>;
 
 struct StreamOptions {

@@ -17,6 +17,7 @@
 
 #include "core/source/registry.h"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -31,38 +32,52 @@
 #include <vector>
 
 #include "core/source/file_source.h"
+#include "core/source/rtlsdr_source.h"
 #include "core/source/synthetic_source.h"
 
 namespace revenant::source {
 namespace {
 
-// What a scheme is and whether it turns up in a device list on its own.
+// How a backend appears in a device list.
+enum class Listing : std::uint8_t {
+    // Named, never discovered. A file: there is no directory this could scan
+    // that would not be somebody's guess.
+    Named,
+
+    // One fixed URI, always available, nothing to ask.
+    Constant,
+
+    // Ask the hardware. The list is however many devices are attached, which
+    // is usually none.
+    Probed,
+};
+
+// What a scheme is and how it turns up in a device list.
 //
-// THE REGISTRATION SEAM. Adding the RTL-SDR backend at WP5 is one more row
-// here, one more case in resolve_uri, and a probe in enumerate_sources that
-// asks libusb what is attached. It is a compile-time table and a switch
-// rather than a runtime registration list on purpose: with three backends a
-// table is reviewable at a glance, while a registration list immediately
-// needs an ordering rule, a duplicate rule and a static-initialisation story
-// that nothing here yet needs. Swap it for one when a plugin has to add a
-// backend from outside this library, and not before.
+// THE REGISTRATION SEAM. Adding a backend is one more row here, one more case
+// in describe_uri and open_source, and for a Probed one a branch in
+// enumerate_sources. It is a compile-time table and a switch rather than a
+// runtime registration list on purpose: with three backends a table is
+// reviewable at a glance, while a registration list immediately needs an
+// ordering rule, a duplicate rule and a static-initialisation story that
+// nothing here yet needs. Swap it for one when a plugin has to add a backend
+// from outside this library, and not before.
 struct Backend {
     std::string_view scheme;
     std::string_view summary;
 
-    // True when the backend can be listed without being told where to look. A
-    // file cannot: it is named, not discovered.
-    bool enumerable = false;
+    Listing listing = Listing::Named;
 
-    // The URI enumerate_sources() reports, for an enumerable backend.
+    // The URI enumerate_sources() reports, for a Constant backend.
     std::string_view default_uri;
     std::string_view default_name;
 };
 
-constexpr std::array<Backend, 2> kBackends{
-    Backend{"synthetic", "a synthesised wideband scene", true, "synthetic:wideband",
+constexpr std::array<Backend, 3> kBackends{
+    Backend{"synthetic", "a synthesised wideband scene", Listing::Constant, "synthetic:wideband",
             "Synthetic wideband scene"},
-    Backend{"file", "a recorded raw IQ file", false, "", ""},
+    Backend{"rtlsdr", "an RTL-SDR dongle on USB", Listing::Probed, "", ""},
+    Backend{"file", "a recorded raw IQ file", Listing::Named, "", ""},
 };
 
 [[nodiscard]] std::string known_schemes()
@@ -243,6 +258,13 @@ public:
     [[nodiscard]] Expected<std::int64_t> integer(std::string_view key, std::int64_t fallback);
     [[nodiscard]] Expected<std::uint64_t> unsigned_integer(std::string_view key,
                                                            std::uint64_t fallback);
+
+    // integer() with the k, M and G suffixes the rest of the project accepts.
+    // Offered per key rather than everywhere, because the file and synthetic
+    // backends were specified without it and widening what an existing URI
+    // means would change how a recorded session replays.
+    [[nodiscard]] Expected<dsp::Hertz> frequency(std::string_view key, dsp::Hertz fallback);
+
     [[nodiscard]] Expected<double> real(std::string_view key, double fallback);
     [[nodiscard]] Expected<std::string> text(std::string_view key, std::string fallback);
     [[nodiscard]] Expected<bool> boolean(std::string_view key, bool fallback);
@@ -418,6 +440,17 @@ Expected<std::uint64_t> Query::unsigned_integer(std::string_view key, std::uint6
                                 entry->value, key));
     }
     return value;
+}
+
+Expected<dsp::Hertz> Query::frequency(std::string_view key, dsp::Hertz fallback)
+{
+    requested_.emplace_back(key);
+    Entry* entry = find(key);
+    if (entry == nullptr) {
+        return fallback;
+    }
+    entry->used = true;
+    return parse_frequency(entry->value, std::format("the {}= parameter", key));
 }
 
 Expected<double> Query::real(std::string_view key, double fallback)
@@ -746,6 +779,153 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     return config;
 }
 
+// Which of the two forms rtlsdr://<body> is.
+//
+// A plain decimal number with no leading zero is a position in the device
+// list; anything else is a USB serial string. The rule is stated rather than
+// guessed at because both forms are bare text in the same slot and the
+// ambiguity is real: "1" could be either.
+//
+// Leading zeros decide it because that is what the ambiguity actually looks
+// like in the field. A dongle ships with the serial "00000001" and most are
+// never reprogrammed, so the common serial is exactly the case a
+// digits-means-index rule would get wrong. An index is never written with
+// leading zeros by anything that produces one, including enumerate_sources
+// below.
+[[nodiscard]] bool body_is_index(std::string_view body)
+{
+    if (body.empty()) {
+        return false;
+    }
+    if (body.size() > 1 && body.front() == '0') {
+        return false;
+    }
+    return std::all_of(body.begin(), body.end(),
+                       [](char c) { return c >= '0' && c <= '9'; });
+}
+
+[[nodiscard]] Expected<RtlSdrSourceConfig> rtlsdr_config_of(const ParsedUri& uri)
+{
+    if (uri.body.empty()) {
+        return fail("an rtlsdr URI needs a device: rtlsdr://0 for the first dongle attached, or "
+                    "rtlsdr://<serial> for a particular one. There is no default, because with "
+                    "two dongles plugged in a default picks one of them and the capture does "
+                    "not record which.");
+    }
+
+    auto query = Query::parse(uri.query);
+    if (!query) {
+        return std::unexpected(query.error());
+    }
+
+    auto rate = query->frequency("rate", kRtlSdrDefaultRate);
+    if (!rate) {
+        return std::unexpected(rate.error());
+    }
+    auto freq = query->frequency("freq", 0);
+    if (!freq) {
+        return std::unexpected(freq.error());
+    }
+    auto gain = query->text("gain", "auto");
+    if (!gain) {
+        return std::unexpected(gain.error());
+    }
+    auto ppm = query->integer("ppm", 0);
+    if (!ppm) {
+        return std::unexpected(ppm.error());
+    }
+    auto agc = query->boolean("agc", false);
+    if (!agc) {
+        return std::unexpected(agc.error());
+    }
+    auto bias = query->boolean("bias", false);
+    if (!bias) {
+        return std::unexpected(bias.error());
+    }
+    auto direct = query->text("direct", "off");
+    if (!direct) {
+        return std::unexpected(direct.error());
+    }
+    auto offset = query->boolean("offset", false);
+    if (!offset) {
+        return std::unexpected(offset.error());
+    }
+
+    const bool freq_given = query->present("freq");
+    const bool ppm_given = query->present("ppm");
+
+    if (auto clean = query->reject_unknown("rtlsdr"); !clean) {
+        return std::unexpected(clean.error());
+    }
+
+    RtlSdrSourceConfig config;
+    config.uri = uri.original;
+
+    if (body_is_index(uri.body)) {
+        std::uint64_t index = 0;
+        const char* first = uri.body.data();
+        const char* last = first + uri.body.size();
+        if (std::from_chars(first, last, index).ec != std::errc{} ||
+            index > std::numeric_limits<std::uint32_t>::max()) {
+            return fail(std::format("'{}' is not a device index", uri.body));
+        }
+        config.by_serial = false;
+        config.index = static_cast<std::uint32_t>(index);
+    } else {
+        config.by_serial = true;
+        config.serial = uri.body;
+    }
+
+    config.rate = *rate;
+    config.center_given = freq_given;
+    config.center_hz = *freq;
+
+    const std::string gain_text = lowercased(*gain);
+    if (gain_text == "auto") {
+        config.gain_auto = true;
+    } else {
+        double db = 0.0;
+        const char* first = gain_text.data();
+        const char* last = first + gain_text.size();
+        const auto parsed = std::from_chars(first, last, db);
+        if (parsed.ec != std::errc{} || parsed.ptr != last || !std::isfinite(db)) {
+            return fail(std::format(
+                "gain='{}' is neither 'auto' nor a number of decibels. The tuner's gain is a "
+                "table of fixed steps, so a number lands on the nearest one and the achieved "
+                "value is reported back.",
+                *gain));
+        }
+        config.gain_auto = false;
+        config.gain_db = db;
+    }
+
+    if (*ppm < std::numeric_limits<int>::min() || *ppm > std::numeric_limits<int>::max()) {
+        return fail(std::format("ppm={} is not a frequency correction", *ppm));
+    }
+    config.ppm_given = ppm_given;
+    config.ppm = static_cast<int>(*ppm);
+
+    config.digital_agc = *agc;
+    config.bias_tee = *bias;
+    config.offset_tuning = *offset;
+
+    const std::string direct_text = lowercased(*direct);
+    if (direct_text == "off") {
+        config.direct = DirectSampling::Off;
+    } else if (direct_text == "i") {
+        config.direct = DirectSampling::IBranch;
+    } else if (direct_text == "q") {
+        config.direct = DirectSampling::QBranch;
+    } else {
+        return fail(std::format(
+            "direct='{}' is not a direct sampling mode. It takes off, i or q: the two letters "
+            "are the ADC input the HF signal is wired to, and an RTL-SDR v3 uses q.",
+            *direct));
+    }
+
+    return config;
+}
+
 [[nodiscard]] Expected<SourceCapabilities> describe_uri(std::string_view uri)
 {
     auto parsed = split_uri(uri);
@@ -777,6 +957,18 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
         return caps;
     }
 
+    if (parsed->scheme == "rtlsdr") {
+        auto config = rtlsdr_config_of(*parsed);
+        if (!config) {
+            return std::unexpected(with_context(config.error(), std::string(uri)));
+        }
+        auto caps = describe_rtlsdr_source(*config);
+        if (!caps) {
+            return std::unexpected(with_context(caps.error(), std::string(uri)));
+        }
+        return caps;
+    }
+
     return fail(std::format("'{}' is not a source scheme this build knows. Known schemes are {}.",
                             parsed->scheme, known_schemes()));
 }
@@ -785,23 +977,50 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
 
 Expected<std::vector<SourceDescriptor>> enumerate_sources()
 {
-    // The synthetic source always, and nothing else.
+    // The synthetic source always, plus whatever hardware is attached.
     //
     // A file is named rather than discovered: there is no directory this
     // could scan that would not be somebody's guess, and a device list that
-    // invents entries is worse than a short one. There is no RTL-SDR backend
-    // in this build, so no dongle appears here even with one plugged in; the
-    // seam for it is the table at the top of this file.
+    // invents entries is worse than a short one.
+    //
+    // Nothing here opens anything, which is the promise in registry.h and the
+    // reason this still answers on a machine where opening would fail. A
+    // dongle's serial number is therefore absent from the list even though it
+    // would make a nicer name: reading it means opening the device, and a
+    // device list that fails because something else is already streaming is a
+    // device list that stops working exactly when it is needed.
     std::vector<SourceDescriptor> out;
     for (const Backend& backend : kBackends) {
-        if (!backend.enumerable) {
-            continue;
+        switch (backend.listing) {
+            case Listing::Named:
+                break;
+
+            case Listing::Constant: {
+                SourceDescriptor descriptor;
+                descriptor.uri = std::string(backend.default_uri);
+                descriptor.display_name = std::string(backend.default_name);
+                descriptor.backend = std::string(backend.scheme);
+                out.push_back(std::move(descriptor));
+                break;
+            }
+
+            case Listing::Probed: {
+                auto attached = enumerate_rtlsdr_devices();
+                if (!attached) {
+                    return std::unexpected(
+                        with_context(attached.error(), "listing RTL-SDR devices"));
+                }
+                for (const RtlSdrDevice& device : *attached) {
+                    SourceDescriptor descriptor;
+                    descriptor.uri = std::format("rtlsdr://{}", device.index);
+                    descriptor.display_name =
+                        std::format("{} at index {}", device.name, device.index);
+                    descriptor.backend = std::string(backend.scheme);
+                    out.push_back(std::move(descriptor));
+                }
+                break;
+            }
         }
-        SourceDescriptor descriptor;
-        descriptor.uri = std::string(backend.default_uri);
-        descriptor.display_name = std::string(backend.default_name);
-        descriptor.backend = std::string(backend.scheme);
-        out.push_back(std::move(descriptor));
     }
     return out;
 }
@@ -813,14 +1032,32 @@ Expected<std::vector<SourceCapabilities>> describe_sources()
         return std::unexpected(listed.error());
     }
 
+    // One backend failing does not fail the listing. A device that is
+    // attached but held by another process cannot be described, and that is
+    // the ordinary case rather than an exception: a second copy of the
+    // application, or a capture already running. Returning an error there
+    // hid the synthetic and file backends too, which cannot fail and are
+    // precisely what somebody reaches for when the radio is busy, and it
+    // contradicted the reason enumerate_sources gives for not opening
+    // anything.
+    //
+    // So a description that could not be completed comes back marked rather
+    // than thrown away, carrying what enumeration alone established.
     std::vector<SourceCapabilities> out;
     out.reserve(listed->size());
     for (const SourceDescriptor& descriptor : *listed) {
         auto caps = describe_uri(descriptor.uri);
-        if (!caps) {
-            return std::unexpected(caps.error());
+        if (caps) {
+            out.push_back(std::move(*caps));
+            continue;
         }
-        out.push_back(std::move(*caps));
+
+        SourceCapabilities stub;
+        stub.uri = descriptor.uri;
+        stub.backend = descriptor.backend;
+        stub.display_name = descriptor.display_name;
+        stub.unavailable = caps.error().message;
+        out.push_back(std::move(stub));
     }
     return out;
 }
@@ -856,8 +1093,106 @@ Expected<std::unique_ptr<Source>> open_source(std::string_view uri)
         return opened;
     }
 
+    if (parsed->scheme == "rtlsdr") {
+        auto config = rtlsdr_config_of(*parsed);
+        if (!config) {
+            return std::unexpected(with_context(config.error(), std::string(uri)));
+        }
+        auto opened = open_rtlsdr_source(*config);
+        if (!opened) {
+            return std::unexpected(with_context(opened.error(), std::string(uri)));
+        }
+        return opened;
+    }
+
     return fail(std::format("'{}' is not a source scheme this build knows. Known schemes are {}.",
                             parsed->scheme, known_schemes()));
+}
+
+// ---------------------------------------------------------------------------
+// Frequency text
+// ---------------------------------------------------------------------------
+
+Expected<dsp::Hertz> parse_frequency(std::string_view text, std::string_view what)
+{
+    std::string_view body = text;
+    if (body.size() >= 2) {
+        const std::string_view tail = body.substr(body.size() - 2);
+        if (tail == "Hz" || tail == "hz" || tail == "HZ") {
+            body.remove_suffix(2);
+        }
+    }
+
+    std::int64_t multiplier = 1;
+    if (!body.empty()) {
+        switch (body.back()) {
+            case 'k':
+            case 'K': multiplier = 1'000; body.remove_suffix(1); break;
+            // Lowercase m is mega here too. Milli is not a frequency anybody
+            // types, and rejecting "7.1m" would only ever be pedantry.
+            case 'm':
+            case 'M': multiplier = 1'000'000; body.remove_suffix(1); break;
+            case 'g':
+            case 'G': multiplier = 1'000'000'000; body.remove_suffix(1); break;
+            default: break;
+        }
+    }
+
+    bool negative = false;
+    if (body.starts_with('-')) {
+        negative = true;
+        body.remove_prefix(1);
+    } else if (body.starts_with('+')) {
+        body.remove_prefix(1);
+    }
+
+    const auto dot = body.find('.');
+    const std::string_view whole = (dot == std::string_view::npos) ? body : body.substr(0, dot);
+    const std::string_view frac =
+        (dot == std::string_view::npos) ? std::string_view{} : body.substr(dot + 1);
+
+    if (whole.empty() && frac.empty()) {
+        return fail(std::format("{} '{}' has no digits in it", what, text));
+    }
+
+    const auto digits_only = [](std::string_view run) {
+        return std::all_of(run.begin(), run.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    if (!digits_only(whole) || !digits_only(frac)) {
+        return fail(std::format(
+            "{} '{}' is not a frequency. Expected digits with an optional k, M or G, "
+            "such as 7100000, 7.1M, 162.550M or 14074k",
+            what, text));
+    }
+
+    std::int64_t hertz = 0;
+    if (!whole.empty()) {
+        const char* begin = whole.data();
+        const char* end = begin + whole.size();
+        if (std::from_chars(begin, end, hertz).ec != std::errc{}) {
+            return fail(std::format("{} '{}' is too large", what, text));
+        }
+        // 9.2e18 is the int64 ceiling and the multiply below must stay under
+        // it. Nothing on this planet radiates above 9 EHz.
+        if (hertz > 9'000'000'000LL) {
+            return fail(std::format("{} '{}' is beyond any radio", what, text));
+        }
+        hertz *= multiplier;
+    }
+
+    if (!frac.empty()) {
+        std::int64_t value = 0;
+        std::int64_t scale = 1;
+        // Nine digits is a nanohertz at the G suffix and a millihertz at k.
+        // Past that the sum overflows before it says anything.
+        for (std::size_t i = 0; i < frac.size() && i < 9; ++i) {
+            value = value * 10 + (frac[i] - '0');
+            scale *= 10;
+        }
+        hertz += (value * multiplier + scale / 2) / scale;
+    }
+
+    return negative ? -hertz : hertz;
 }
 
 }  // namespace revenant::source

@@ -88,94 +88,13 @@ using engine::Demod;
 // Numbers in and numbers out
 // ---------------------------------------------------------------------------
 
-// Parses 7100000, 7.1M, 162.550M, 14074k, 500 into exact integer hertz.
+// 7100000, 7.1M, 162.550M, 14074k, 500 into exact integer hertz.
 //
-// The fraction is folded in with integer arithmetic rather than by parsing a
-// double and multiplying. 162.550 * 1e6 in binary floating point is
-// 162549999.99999997, and while a round would recover the right answer here,
-// the conventions put frequency in integer hertz precisely so that no stage
-// has to be trusted to round the same way twice.
-[[nodiscard]] Expected<Hertz> parse_frequency(std::string_view text, std::string_view what)
-{
-    std::string_view body = text;
-    if (body.size() >= 2) {
-        const std::string_view tail = body.substr(body.size() - 2);
-        if (tail == "Hz" || tail == "hz" || tail == "HZ") {
-            body.remove_suffix(2);
-        }
-    }
-
-    std::int64_t multiplier = 1;
-    if (!body.empty()) {
-        switch (body.back()) {
-            case 'k':
-            case 'K': multiplier = 1'000; body.remove_suffix(1); break;
-            // Lowercase m is mega here too. Milli is not a frequency anybody
-            // types, and rejecting "7.1m" would only ever be pedantry.
-            case 'm':
-            case 'M': multiplier = 1'000'000; body.remove_suffix(1); break;
-            case 'g':
-            case 'G': multiplier = 1'000'000'000; body.remove_suffix(1); break;
-            default: break;
-        }
-    }
-
-    bool negative = false;
-    if (body.starts_with('-')) {
-        negative = true;
-        body.remove_prefix(1);
-    } else if (body.starts_with('+')) {
-        body.remove_prefix(1);
-    }
-
-    const auto dot = body.find('.');
-    const std::string_view whole = (dot == std::string_view::npos) ? body : body.substr(0, dot);
-    const std::string_view frac =
-        (dot == std::string_view::npos) ? std::string_view{} : body.substr(dot + 1);
-
-    if (whole.empty() && frac.empty()) {
-        return fail(std::format("{} '{}' has no digits in it", what, text));
-    }
-
-    const auto digits_only = [](std::string_view run) {
-        return std::all_of(run.begin(), run.end(), [](char c) { return c >= '0' && c <= '9'; });
-    };
-    if (!digits_only(whole) || !digits_only(frac)) {
-        return fail(std::format(
-            "{} '{}' is not a frequency. Expected digits with an optional k, M or G, "
-            "such as 7100000, 7.1M, 162.550M or 14074k",
-            what, text));
-    }
-
-    std::int64_t hertz = 0;
-    if (!whole.empty()) {
-        const char* begin = whole.data();
-        const char* end = begin + whole.size();
-        if (std::from_chars(begin, end, hertz).ec != std::errc{}) {
-            return fail(std::format("{} '{}' is too large", what, text));
-        }
-        // 9.2e18 is the int64 ceiling and the multiply below must stay under
-        // it. Nothing on this planet radiates above 9 EHz.
-        if (hertz > 9'000'000'000LL) {
-            return fail(std::format("{} '{}' is beyond any radio", what, text));
-        }
-        hertz *= multiplier;
-    }
-
-    if (!frac.empty()) {
-        std::int64_t value = 0;
-        std::int64_t scale = 1;
-        // Nine digits is a nanohertz at the G suffix and a millihertz at k.
-        // Past that the sum overflows before it says anything.
-        for (std::size_t i = 0; i < frac.size() && i < 9; ++i) {
-            value = value * 10 + (frac[i] - '0');
-            scale *= 10;
-        }
-        hertz += (value * multiplier + scale / 2) / scale;
-    }
-
-    return negative ? -hertz : hertz;
-}
+// The grammar lives in core/source/registry.h, which owns the text layer of a
+// source, because a URI's freq= has to mean exactly what --vrx means. Two
+// copies of it would drift and a number would then depend on where it was
+// typed.
+using source::parse_frequency;
 
 [[nodiscard]] Expected<double> parse_real(std::string_view text, std::string_view what)
 {
@@ -996,6 +915,17 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     for (const source::SourceCapabilities& caps : *described) {
         std::println("{}", caps.uri);
         std::println("  {}  ({} backend)", caps.display_name, caps.backend);
+
+        // A device that is attached but could not be opened still belongs in
+        // the list. Saying why beats leaving it out, because "my dongle is
+        // missing" and "my dongle is busy" send a person looking in very
+        // different places.
+        if (!caps.available()) {
+            std::println("  UNAVAILABLE     {}", caps.unavailable);
+            std::println("");
+            continue;
+        }
+
         std::println("  {} to {} S/s, {}, {}", caps.min_rate, caps.max_rate,
                      source::format_name(caps.native_format), flow_name(caps.flow));
         std::println("");

@@ -10,6 +10,13 @@
 
 find_package(Threads REQUIRED)
 
+# librtlsdr, GPL-2.0-or-later, which is why Revenant is GPL-3.0-or-later. See
+# docs/clean-room.md: clean-room is still the default and this is the recorded
+# exception, taken because the RTL2832U's datasheet specifies the USB
+# transport and no raw IQ mode at all, so there was no document to implement
+# against. docs/rtlsdr-provenance.md has the finding.
+find_package(rtlsdr CONFIG REQUIRED)
+
 add_library(revenant_core STATIC
     dsp/complex_ops.cpp
     dsp/convert.cpp
@@ -39,6 +46,7 @@ add_library(revenant_core STATIC
     source/clock_model.cpp
     source/file_source.cpp
     source/registry.cpp
+    source/rtlsdr_source.cpp
     source/synthetic_source.cpp
 )
 
@@ -58,6 +66,15 @@ target_link_libraries(revenant_core PUBLIC
 if(WIN32)
     target_link_libraries(revenant_core PRIVATE ole32 avrt)
 endif()
+
+# PRIVATE: rtl-sdr.h is included by source/rtlsdr_source.cpp and by nothing
+# else, so nothing that links the engine has to see it. The generator
+# expression is what the port's own usage file prescribes, because a static
+# triplet exports rtlsdr::rtlsdr_static and a shared one exports
+# rtlsdr::rtlsdr.
+target_link_libraries(revenant_core PRIVATE
+    $<IF:$<TARGET_EXISTS:rtlsdr::rtlsdr>,rtlsdr::rtlsdr,rtlsdr::rtlsdr_static>
+)
 
 revenant_add_shaders(revenant_core
     TARGET_ENV vulkan1.3

@@ -129,6 +129,20 @@ struct SourceCapabilities {
 
     std::string display_name;
 
+    // Empty when this description is complete. Otherwise why it is not: the
+    // device is attached and enumerable but could not be opened to be asked,
+    // most often because something else is already streaming from it.
+    //
+    // A field rather than an error return, because describing a list of
+    // sources is not an all-or-nothing operation. A dongle held by another
+    // process must not be able to hide the synthetic and file backends, which
+    // cannot fail and are exactly what somebody reaches for when the radio is
+    // busy. The entry stays in the list, says what is wrong with it, and
+    // carries whatever enumeration alone could establish.
+    std::string unavailable;
+
+    [[nodiscard]] bool available() const { return unavailable.empty(); }
+
     std::vector<TuneRange> tune_ranges;
 
     // Discrete rates the device supports. Empty means continuous between
