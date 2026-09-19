@@ -70,6 +70,146 @@ This is also why the feature is cheap. The expensive part, getting a
 receiver's baseband onto the device at the right bandwidth, is already paid
 for by the demodulator.
 
+## Scroll, and what each axis means
+
+Two gestures, both context sensitive on which display the pointer is over.
+The context is the point: one wheel does two different jobs and never has to
+be told which, because the operator is already looking at the thing they mean
+to change.
+
+### Horizontal scroll tunes
+
+Over the fine-tuning display, it moves the receiver. That is
+`VrxParams::center` through `Engine::set_vrx_params`, the path AFT already
+uses and the one measured continuous across a change.
+
+Over the wide display, it moves the radio. That is `Source::tune`, and it is
+a different kind of operation with three consequences the fine case does not
+have.
+
+**There is no Engine surface for it.** `Source::tune` exists; `Engine` does
+not expose it, and `EngineInfo::source_center` is a snapshot taken once when
+the source was opened. The comment next to that line says it becomes stale
+the moment a retunable device arrives and that following the tune is "the
+change to make then and not now". Scrolling the wide waterfall is then.
+
+**Every receiver's absolute frequency changes meaning.** The grid is in
+baseband, so it survives a retune untouched. What moves is what baseband DC
+corresponds to. A receiver left at a fixed baseband offset drifts in absolute
+terms, which is not what anybody means by tuning the radio: the receivers
+should hold their absolute frequencies and have their offsets recomputed. Any
+that fall outside the new span have to be parked and said to be parked rather
+than silently producing noise from wherever they landed.
+
+**A device retune is not free and not instant.** An RTL-SDR takes time to
+settle and the sample stream is discontinuous across it. A mouse wheel emits
+events far faster than a tuner can follow, so the wide-scroll path has to
+coalesce: accumulate the wheel delta, issue one tune per settling interval,
+and let the waterfall smear while it happens rather than queueing a hundred
+retunes. The fine case needs none of that, which is the other reason the two
+gestures are not the same operation wearing different hats.
+
+### Vertical scroll scrubs, and it should sound like tape
+
+Over the wide waterfall, on a recording rather than a live radio, vertical
+scroll moves through the capture. Scrubbing that pitches the audio the way
+dragging a tape reel does is the right behaviour.
+
+The arithmetic works. With `Fs` the source rate, `Fc` the channel rate, `Fd`
+the demodulation rate and `Fa` the 48 kHz the sound card wants: replay at `k`
+times realtime and the source delivers `k*Fc` channel samples per wall
+second, so the fine stage emits `k*Fd` audio samples per wall second against
+a card that consumes `Fa`. Those balance when
+
+    Fd = Fa / k
+
+and playing an `Fd`-sampled stream out at `Fa` multiplies every frequency by
+`Fa/Fd = k` and divides every duration by `k`. That is exactly tape, and the
+relation was checked rather than asserted.
+
+**The route through `Fd` does not exist, and this document said so before it
+proposed it.** `plan_vrx` sets `demod_rate = decimation * audio_rate` with
+the decimation at least one, so `Fd` is always an integer multiple of `Fa`
+and never below it; `design_audio_taps` refuses the other case outright, as
+"an interpolation rather than a decimation". So `Fd = Fa/k` has a solution
+only at `k = 1/n`. Every `k` above one, which is the fast half of the gesture
+and the half the worked example above uses, is unreachable by construction.
+The section on the fine-tuning display states the same rounding rule a page
+earlier, which is where the contradiction should have been caught.
+
+Three further things sit under that, and together they close the route:
+
+**`Fd` is not a knob.** Nothing in `VrxParams` sets it. It is derived from
+the mode, the bandwidth and the CW pitch through `minimum_demod_rate`. The
+only nearby input is `VrxParams::audio_rate`, which also becomes the plan's
+output rate and therefore the rate the sound card is opened at, which defeats
+the purpose.
+
+**Even the reachable slow direction breaks on the common case.** At
+`k = 0.25`, `Fd` would be 192 kHz, which is a legal multiple of `Fa`. But
+`Fd` cannot exceed `Fc`: the fine filter's stopband edge clamps to `Fc/2` and
+the resampler's whole step goes to zero. A 20 MS/s capture on a 64-channel
+grid has `Fc = 625 kHz` and fits; a 2.4 MS/s dongle capture on the same grid
+has `Fc = 75 kHz` and does not. Slow scrub would fail first on exactly the
+recordings anybody actually has.
+
+**`pace` is not live either.** `EngineConfig` is consumed at `Engine::create`,
+and the file source's copy is a plain non-atomic double written once in
+`start()` and read on the delivery thread. Changing `k` today means stopping
+and restarting the source. Making it live is an atomic and a memory-ordering
+rule, not a parameter pass.
+
+And a fourth, which is about the gesture rather than the plumbing: **`pace`
+is validated non-negative everywhere**, so a backwards scrub, the single most
+characteristic thing dragging a tape reel does, is not expressible anywhere
+in the stack.
+
+### So the varispeed goes in the monitor
+
+Not in the DSP. The monitor backend reads the audio ring at `k` samples per
+sample it delivers, and nothing upstream changes: the recording path stays
+bit-correct, no plan is rebuilt, `Fd` never moves, and `k` above one and
+below one are equally reachable. Rough resampling, which for a scrub is the
+point, since the artefacts are indistinguishable from the effect being asked
+for. It also keeps a user-interface convenience out of the sample path, which
+`docs/conventions.md` has a rule about.
+
+`AudioTap` supports it: `read`, `read_or_fill`, `readable_frames` and
+`trim_to_frames`, all non-allocating and single-reader, and `read_or_fill`
+already turns a shortfall into counted silence, so a starved varispeed read
+degrades the way the rest of the monitor does. The device period does not
+move, because the WASAPI backend opened with `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`
+and only the tap-side read count changes.
+
+Three specifics that have to be got right:
+
+- **`read` consumes and there is no peek.** The backend owns a carry buffer
+  and a fractional phase across callbacks, or every period boundary is a
+  click.
+- **The render thread must not allocate.** The scratch input buffer is sized
+  at `open()` from the largest `k` that will ever be asked for, so the scrub
+  range is capped up front rather than discovered at the first fast drag.
+- **`trim_to_frames` runs immediately before the read.** At `k` above one the
+  250 ms default backlog cap discards exactly the samples the varispeed read
+  is about to want. The cap has to scale with `k` or be suspended while
+  scrubbing.
+
+### What the gesture needs that does not exist
+
+The scrub position itself is `Source::seek`, which is available where it is
+needed: the file and synthetic sources both implement it, both defer to a
+block boundary rather than tearing a block, and the file source resets its
+pacing origin afterwards, which is the behaviour a scrub wants. A Paced
+source refuses with a message naming the capability rather than the symptom,
+so "live sources do not scrub" is already true and already well worded.
+
+What is missing is the way through. `Engine` takes ownership of the source at
+`open_source` and exposes only its capabilities and its stats: there is no
+`seek`, no `tune`, no live `pace`, and no accessor that would let a caller
+reach past it. Horizontal scroll over the wide display needs one new surface
+and vertical scroll needs two more. Naming one of them and stopping, which an
+earlier draft of this section did, understates the work by two thirds.
+
 ## AFT
 
 Automatic frequency tracking, as an option and off by default. It follows a
