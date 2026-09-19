@@ -62,16 +62,34 @@ nothing here has been measured yet.
 
 ## Status
 
-M0, Foundations. Nothing user-facing exists and there is nothing to run.
+M1. There is something to run, and it is a command line.
 
-M0 ships the parts everything later rests on: the vocabulary types, the Vulkan
-context and allocator, the shader build, the CPU reference implementations and
-the conformance suite that diffs kernels against them. It exists so that later
-milestones rest on numerics somebody has verified rather than on numerics that
-looked right.
+```
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto"              --vrx 98.1M:wfm:200k --play --record fm.wav
+```
 
-**The first public release is M3.** Until then this repository is work in
-progress, the layout moves, and there are no binaries.
+That path is real and measured: bytes from the dongle cross the bus once as
+native unsigned 8-bit pairs, are widened by a compute kernel, channelized on
+the GPU, tapped by a receiver that mixes and filters and demodulates on the
+device, and only the finished audio comes back. Five seconds of 98.1 MHz
+broadcast FM through it recorded with every drop counter at zero, checked by
+measuring the 19 kHz stereo pilot against its own neighbourhood rather than by
+listening: 1037x on the station against 2.86x on an empty channel.
+
+What exists: the Vulkan context and allocator, the shader build, the
+polyphase channelizer, eight demodulators, the per-receiver fine stage, audio
+egress to WAV and to the sound card, a synthetic wideband source, a file
+source, an RTL-SDR backend, and the conformance suite that diffs every GPU
+kernel against a scalar twin and demands identical bits. 94 tests pass on an
+RTX 4090 and an integrated Radeon across three build presets.
+
+What does not: any graphical interface, the full-span spectrum and waterfall,
+detection, and every decoder. Those are M2 and beyond.
+
+**The first public release is M3.** Until then the layout moves and there are
+no binaries. The repository is public because the licence made it the
+straightforward way to satisfy the source obligation, not because anything
+here is finished.
 
 ## Requirements
 
@@ -81,8 +99,13 @@ A GPU with Vulkan 1.3 or newer, which means essentially any discrete card from
 the last several years and most integrated graphics. Development and CI run
 against an NVIDIA RTX 4090 and the integrated Radeon in a Ryzen 9 7950X.
 
-A supported SDR device, once there is a device backend. The first one is the
-RTL-SDR v3, over libusb.
+An SDR device, optionally: an RTL-SDR v3 works today, through librtlsdr. The
+synthetic wideband source and the file source need no hardware at all and are
+what the conformance suite runs against, so the engine is fully exercisable
+without a radio.
+
+A sound card, if you want to listen rather than record. The monitor is
+WASAPI in shared mode.
 
 macOS and Linux are not targets yet. The engine is written to the Vulkan API
 and does not use Windows-specific graphics, but nobody has built or run it
