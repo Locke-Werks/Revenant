@@ -22,6 +22,7 @@ add_library(revenant_core STATIC
     dsp/synth/modulators.cpp
     dsp/synth/wideband.cpp
     engine/audio_egress.cpp
+    engine/audio_wasapi.cpp
     engine/device_ring.cpp
     engine/engine.cpp
     engine/graph.cpp
@@ -48,6 +49,15 @@ target_link_libraries(revenant_core PUBLIC
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads
 )
+
+# WIN32 only, because the Linux and macOS audio backends arrive later and
+# engine/audio_wasapi.cpp compiles to a "not supported on this platform"
+# failure there rather than dropping out of the build. ole32 carries COM and
+# the PROPVARIANT helpers; avrt carries MMCSS, which is what gets the render
+# thread scheduled as Pro Audio.
+if(WIN32)
+    target_link_libraries(revenant_core PRIVATE ole32 avrt)
+endif()
 
 revenant_add_shaders(revenant_core
     TARGET_ENV vulkan1.3

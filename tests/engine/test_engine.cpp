@@ -19,6 +19,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -323,6 +324,51 @@ TEST_CASE("an NFM receiver demodulates a synthetic transmission", "[gpu][engine]
     // recovers noise, and noise through a discriminator is full scale and
     // spread across the band.
     CHECK(share.share > 0.5);
+}
+
+TEST_CASE("a paced engine delivers on a clock rather than as fast as it can",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Unthrottled is the default and is what every other case here uses,
+    // because the exit criterion is faster than realtime and there is no code
+    // path for it. A loudspeaker is the one consumer that cannot accept that:
+    // a capture replayed as fast as the GPU retires it fills the monitor's
+    // ring, and what the listener hears is the backlog being trimmed. So a
+    // source can be asked to hold a stopwatch, and this is the case that
+    // proves the request reaches it.
+    constexpr dsp::SampleIndex kSamples = 480'000;  // 0.2 s at 2.4 MS/s
+    constexpr double kPace = 2.0;                   // so the run takes ~0.1 s
+
+    auto config = default_config();
+    config.pace = kPace;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    REQUIRE(eng.open_source(tone_uri(0, kSamples)).has_value());
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto ran = eng.run();
+    const auto elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    const double capture_seconds =
+        static_cast<double>(kSamples) / static_cast<double>(kSourceRate);
+    const double floor_seconds = capture_seconds / kPace;
+    INFO(capture_seconds << " s of capture at " << kPace << "x took " << elapsed << " s");
+
+    // A lower bound only. A machine under load takes longer and that is not a
+    // fault; a machine that finished early was not pacing at all, which is
+    // the failure this exists to catch. 0.8 of the floor leaves room for the
+    // source rounding its own block boundaries.
+    CHECK(elapsed > floor_seconds * 0.8);
 }
 
 TEST_CASE("a receiver keeps producing audio across a retune", "[gpu][engine][m1]") {

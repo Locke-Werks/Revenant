@@ -40,6 +40,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <format>
 #include <memory>
@@ -92,6 +93,11 @@ public:
     }
 
     [[nodiscard]] Status configure(const EngineConfig& config) {
+        if (!std::isfinite(config.pace) || config.pace < 0.0) {
+            return fail(std::format(
+                "pace must be zero for unthrottled or a positive multiple of realtime, got {}",
+                config.pace));
+        }
         config_ = config;
 
         gpu::Context::Options options;
@@ -266,6 +272,13 @@ public:
         info_.grid = grid;
         info_.source_rate = rate;
 
+        // Read once here rather than forwarded live, because this engine has
+        // no tune call: the centre is fixed by the URI the source was opened
+        // with, so a snapshot is the whole truth for the life of the engine.
+        // When a retunable device arrives this becomes stale and has to
+        // follow the tune, which is the change to make then and not now.
+        info_.source_center = source_->center();
+
         // Truncating division, deliberately and only for display. See the note
         // at the top of this file.
         info_.channel_rate = rate / static_cast<dsp::SampleRate>(grid.decimation);
@@ -372,10 +385,13 @@ public:
         source::StreamOptions options;
         options.block_samples = block_samples_;
 
-        // Unthrottled. Faster than realtime is not a mode and there is no code
-        // path for it: it is what happens when nothing is holding a stopwatch,
-        // and the only thing setting the pace is the graph's blocking reserve.
-        options.pace = 0.0;
+        // Unthrottled by default, and faster than realtime is still not a
+        // mode: it is what happens when nothing is holding a stopwatch, and
+        // the only thing setting the pace is then the graph's blocking
+        // reserve. A caller monitoring a capture on a loudspeaker asks for a
+        // stopwatch by setting EngineConfig::pace, which the source honours
+        // and the engine does nothing else with.
+        options.pace = config_.pace;
 
         Graph* graph = graph_.get();
         auto started = source_->start(options, [graph](const source::SourceBlock& block) {

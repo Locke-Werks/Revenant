@@ -4,6 +4,11 @@
 # tests/reference so that REVENANT_GPU_INDEX and REVENANT_REQUIRE_GPU mean the
 # same thing in every binary the conformance matrix runs.
 #
+# test_audio_wasapi.cpp needs no GPU and no sound card. The one case that does
+# touch an endpoint skips itself when there is none, and feeds silence when
+# there is one, so the suite stays runnable on a headless box and stays quiet
+# on a desk.
+#
 # No GPU is needed for the ring or the source cases. Most of the risk in a ring is in the sizing, the
 # retirement floor and the wrap arithmetic, and most of the risk in a source is
 # in the URI layer, the seek and the flow control. All of that is host logic
@@ -12,6 +17,7 @@
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
+    test_audio_wasapi.cpp
     test_engine.cpp
     test_ring.cpp
     test_sources.cpp

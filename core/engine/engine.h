@@ -51,6 +51,19 @@ struct EngineConfig {
     // Samples the upload stages at a time. Larger is fewer submissions and
     // more latency.
     std::size_t block_samples = 65'536;
+
+    // How fast a Demand source is asked to deliver, as a multiple of
+    // realtime. Zero, the default, is unthrottled, and unthrottled is still
+    // what happens when nothing is holding a stopwatch.
+    //
+    // This is not a throttle on the engine and there is still no code path
+    // for faster than realtime. It is the source being asked to deliver on a
+    // clock, which is the one thing a live monitor needs and a radio supplies
+    // for free: a capture replayed as fast as the GPU retires it produces
+    // audio a loudspeaker cannot accept, and what the listener hears is the
+    // monitor's backlog being trimmed rather than the recording. A Paced
+    // source ignores this, because its own hardware already sets the rate.
+    double pace = 0.0;
 };
 
 // What the engine settled on, which is frequently not what was asked for.
@@ -61,6 +74,18 @@ struct EngineInfo {
     dsp::SampleRate source_rate = 0;
     dsp::SampleRate channel_rate = 0;
     dsp::Hertz channel_spacing = 0;
+
+    // What the source's baseband DC corresponds to in real radio frequency,
+    // read once when the source was opened.
+    //
+    // Every frequency in VrxParams is an offset from baseband DC, because
+    // that is the only frame the grid has. A person tunes in absolute hertz,
+    // so something has to hold the constant that relates the two, and a
+    // caller that had to parse it back out of the source URI would be
+    // reimplementing each backend's grammar to do it. Zero for a source whose
+    // baseband is not a translation of anything, which is what a synthetic
+    // scene with no declared centre is.
+    dsp::Hertz source_center = 0;
 };
 
 // One receiver's audio, handed to the caller on the host.
