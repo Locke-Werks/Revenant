@@ -227,7 +227,7 @@ jobs:
       # preset's toolchain file picks it up from there. lukka/run-vcpkg would
       # clone a second copy and pin a different baseline than
       # vcpkg-configuration.json.
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1, pinned: this one is not GitHub's and it runs on the workstation
         with:
           arch: x64
 
@@ -285,7 +285,7 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1, pinned: this one is not GitHub's and it runs on the workstation
         with:
           arch: x64
 
