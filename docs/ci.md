@@ -17,9 +17,45 @@ runners have no discrete GPU, so that suite cannot run there in any meaningful f
 software Vulkan implementation would exercise the API and prove nothing about the drivers
 the divergences actually come from.
 
-So the GPU jobs run on a self-hosted runner. The repository is private, which is also the
-only configuration in which a self-hosted runner is safe: on a public repository a pull
-request from a fork would execute arbitrary code on the machine.
+So the GPU jobs run on a self-hosted runner, and that runner is the maintainer's own
+workstation.
+
+## The fork gate, which is the thing not to break
+
+A self-hosted runner is not a sandbox. It is a persistent machine with a real
+filesystem, a real network position and whatever is in its environment, and a workflow
+can run anything at all on it. While this repository was private that was fine, because
+only somebody with write access could trigger a run.
+
+The repository is public now, so anyone can fork it, change a build script or the
+workflow itself, open a pull request, and have that execute here. It is one of the
+best-known ways to lose a machine and GitHub's own guidance is not to pair self-hosted
+runners with public repositories without a gate.
+
+Two gates, because one of them is a human being clicking a button while tired.
+
+The one in the file: both self-hosted jobs in `ci.yml` carry
+
+```yaml
+if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+```
+
+so a pull request from a fork skips every job that would touch the workstation. Such a
+pull request still runs `guards` on a hosted runner, which is ephemeral and disposable,
+so a contributor still gets the cheap checks. Conformance runs when a maintainer pushes
+the branch to this repository, which is also the point at which somebody has read the
+diff.
+
+The one in the web UI: Settings, Actions, General, "Fork pull request workflows from
+outside collaborators", set to **require approval for all outside collaborators**. The
+default on a public repository is to require approval only for first-time contributors,
+which means one merged typo fix buys somebody unattended execution on the workstation
+from then on.
+
+The consequence is honest and worth stating: an outside contributor's pull request does
+not get GPU verification. `CONTRIBUTING.md` asks contributors to run all three presets
+locally and to say which devices they ran on, and a maintainer runs the matrix before
+merging. A conformance result nobody can trust is worth less than one that is late.
 
 ## Jobs
 

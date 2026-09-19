@@ -6,7 +6,7 @@
 
 **Samples land in GPU memory once, and the whole radio runs there.**
 
-[![license](https://img.shields.io/badge/license-all%20rights%20reserved-d6262a?style=flat-square)](LICENSE)
+[![license](https://img.shields.io/badge/license-GPLv3-d6262a?style=flat-square)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-Windows%2011-d6262a?style=flat-square)](#requirements)
 
 </div>
@@ -124,21 +124,27 @@ until that happens this table is the honest statement of what is verified.
 
 macOS through MoltenVK is out of scope until there is something to render.
 
-## Clean room
+## Clean room, and its one exception
 
-Every device backend and every decoder is written from published
-specifications and datasheets. No GPL-licensed source is read, ported, linked
-or consulted while implementing the corresponding component.
+Decoders and device backends are written from published specifications and
+datasheets, with every constant carrying a citation to the document it came
+from. That discipline is the default and it has not changed.
 
-That is not an aesthetic position. The obvious host libraries for this hardware
-are copyleft, inherited copyleft cannot be removed once it is in the tree, and
-every licence this project might later adopt is still reachable only because
-nothing has answered the question by accident. Backends go over libusb,
-constants carry a citation to the document they came from, and CI greps for
-vendored licence text.
+It is a default rather than an absolute, and the RTL-SDR is why. The RTL2832U
+datasheet specifies the USB transport in full and specifies no raw IQ mode at
+all: the mode that makes the chip a receiver was found by sniffing in 2012 and
+exists as one GPL library's expression of it, so there was nothing to write
+from. Revenant links librtlsdr and is GPL-3.0-or-later as a result. Every
+copyleft dependency is recorded with what it is used for and why the
+specification route was rejected.
 
-[docs/clean-room.md](docs/clean-room.md) is the full position and the practice
-that backs it up.
+The rule that survives intact is the one about laundering: do not read an
+implementation and then present the result as written from a specification.
+Copy it or link it and say which. Provenance that cannot be traced to a
+document is worthless whatever the licence permits.
+
+[docs/clean-room.md](docs/clean-room.md) is the full position, the exception
+table and the disclosure log.
 
 ## Documentation
 
@@ -151,21 +157,37 @@ that backs it up.
   a library, with the measurements that decided it
 - [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
   what it does not
+- [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U
+  datasheet does and does not specify, and why that settled the licence
+- [CONTRIBUTING.md](CONTRIBUTING.md), how to contribute and the provenance rules
+- [CLA.md](CLA.md), the contributor agreement and why it exists
 
 ## License
 
-All rights reserved. See [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-Proprietary for now, and "for now" is doing real work in that sentence. The
-choice between permissive, copyleft, dual and source-available is one a project
-makes once, and making it before there is a release, a contributor or a
-downstream user means making it with the least information anyone will ever
-have about what this becomes. Reserving everything keeps all four available.
+This was all rights reserved, held open on the reasoning that the choice
+between permissive, copyleft, dual and source-available is made once and was
+better made later. Getting a radio working settled it. librtlsdr is the only
+practical path to an RTL2832U, it is GPL-2.0-or-later, and the clean-room
+route was measured and found blocked: the datasheet specifies the transport
+and contains no raw IQ mode at all, because that mode was discovered by
+sniffing in 2012 and exists as one project's expression of it. The evidence
+is in [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md).
 
-What keeps them available in practice is the clean-room discipline above. Every
-line is written from published specifications, so there is no inherited
-copyleft anywhere in the tree. A single GPL library linked in would settle the
-question by accident, in one direction, permanently, and nobody would notice
-until it mattered.
+The version is GPL-3.0 rather than 2.0 because librtlsdr is "or later", and
+that matters more than it looks: GPL-2.0-only cannot be combined with
+LGPL-3.0, which is Qt6, so a 2.0-only dependency would have killed the user
+interface along with the licence question.
+
+Relicensing is not publishing. Copyleft obligations attach to distribution,
+so a private repository whose binaries stay on their author's machines owes
+nothing to anyone; the duty to offer corresponding source begins when a
+binary is handed to someone else. This repository is private today and goes
+public when there is a reason to, not because the licence changed.
+
+Clean-room is still the default everywhere it is affordable, which is
+everywhere a specification is published. The policy, the exceptions and the
+reasoning are in [docs/clean-room.md](docs/clean-room.md).
 
 Copyright (c) 2026 Locke Werks.

@@ -1,8 +1,0 @@
-Device backends. A source produces timestamped blocks of complex samples plus
-a capability description: tunable range, sample rates, gain stages, bit depth,
-clock source.
-
-Written clean-room from datasheets, never ported. See docs/clean-room.md before
-adding anything here.
-
-Arrives: M1, starting with the RTL-SDR over libusb.

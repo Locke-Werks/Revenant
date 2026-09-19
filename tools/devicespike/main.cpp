@@ -1,4 +1,18 @@
-// M0.7: proof that the chosen device path works, before M1 depends on it.
+// A USB-layer diagnostic for a dongle that will not enumerate.
+//
+// This began as the M0.7 spike: proof that the chosen device path worked
+// before M1 depended on it, written when Revenant was all rights reserved and
+// strictly clean-room. The header below explains at length why it stops short
+// of touching a tuner register, and that reasoning is now history rather than
+// policy. Revenant is GPL-3.0-or-later and links librtlsdr, because the
+// RTL2832U datasheet turned out to specify the USB transport and no raw IQ
+// mode at all; docs/rtlsdr-provenance.md has the finding and
+// docs/clean-room.md has the policy that replaced the absolute rule.
+//
+// The file survives the change because what it does is still useful and
+// nothing else does it. When a dongle does not appear in revenant-cli --list,
+// the question is whether the fault is above libusb or below it, and this
+// answers that without librtlsdr in the way. It stays off by default.
 //
 // What this proves, and it is deliberately not more than this:
 //
@@ -10,13 +24,13 @@
 //      instead.
 //   5. Its descriptors, including the EEPROM-backed strings, read back.
 //
-// What this deliberately does NOT do is read tuner registers, and the reason
-// matters more than the code.
+// What this deliberately does NOT do is read tuner registers. The reason it
+// was written that way, kept because the reasoning was sound even though the
+// conclusion was overtaken:
 //
-// Revenant's licensing position rests on a clean-room claim: no copyleft
-// source is read, ported or consulted while implementing a corresponding
-// component. docs/clean-room.md states the rule, names the libraries it
-// applies to and records their licences.
+// Revenant's licensing position rested on a clean-room claim: no copyleft
+// source read, ported or consulted while implementing a corresponding
+// component.
 //
 // The RTL2832U's vendor control protocol and the R820T2's register map are
 // both obtainable from datasheets, and both also sit in a copyleft host
@@ -25,9 +39,9 @@
 // provenance claim that cannot be traced to a document is worth nothing
 // precisely when it is challenged.
 //
-// So tuner access waits for M1, when the datasheets are in hand and every
-// register write can carry a comment naming the document and table it came
-// from. Everything below is the USB standard, which needs no such provenance:
+// So tuner access waited, on the expectation that the datasheets would carry
+// it. They did not: see docs/rtlsdr-provenance.md, which is what settled the
+// licence. Everything below is the USB standard, which needs no provenance:
 // descriptors, configurations, interfaces and endpoints are specified in USB
 // 2.0 and in libusb's own public API.
 //

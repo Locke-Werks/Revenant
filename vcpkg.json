@@ -11,6 +11,7 @@
             "host": false
         },
         "libusb",
+        "rtlsdr",
         "capnproto"
     ]
 }

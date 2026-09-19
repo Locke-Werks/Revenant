@@ -88,19 +88,22 @@ jobs:
             exit 1
           fi
 
-      - name: No vendored GPL source
+      - name: No vendored copyleft source
         shell: bash
         run: |
-          # docs/clean-room.md is the position this enforces: every device
-          # backend and every decoder is written from published specifications,
-          # and no copyleft source is read, ported or vendored. Once inherited
-          # copyleft is in the tree it cannot be taken back out, and the
-          # project's own licence is deliberately still open.
+          # What this guards changed when Revenant took GPL-3.0-or-later so it
+          # could link librtlsdr. Linking a copyleft library is now permitted
+          # and recorded in docs/clean-room.md; copying its source into this
+          # tree is still not, and the two are different acts with different
+          # consequences. A linked dependency is a version in vcpkg.json that
+          # updates, carries its own copyright and can be swapped out. A pasted
+          # file is a fork nobody maintains, with a provenance that has to be
+          # reconstructed from memory the first time anyone asks.
           #
-          # docs/ is excluded because the clean-room document has to name the
-          # licences it is avoiding. Prose about the GPL belongs there, not in a
-          # source comment, so a hit under core/, tools/ or ui/ fails even when
-          # it is only a comment.
+          # So the pattern is the licence GRANT a copied source file carries in
+          # its header, not the name of the licence. Naming a licence in a
+          # comment is now ordinary and correct: a backend that links librtlsdr
+          # should say so where somebody reading it will see it.
           dirs=""
           for dir in core tools ui; do
             if [ -d "$dir" ]; then dirs="$dirs $dir"; fi
@@ -109,9 +112,10 @@ jobs:
             echo "none of core/, tools/ or ui/ exist; the checkout is wrong"
             exit 1
           fi
-          if grep -rniE 'GNU General Public License|GPL-2\.0|GPL-3\.0|GPLv2|GPLv3' $dirs; then
-            echo "GPL-licensed text found under core/, tools/ or ui/"
-            echo "see docs/clean-room.md"
+          if grep -rniE 'This (program|library|file) is free software|under the terms of the GNU|Free Software Foundation, Inc\.|redistribute it and/or modify' $dirs; then
+            echo "a copyleft licence grant was found under core/, tools/ or ui/"
+            echo "that is the header of a copied source file. Link the library"
+            echo "through vcpkg and record it in docs/clean-room.md instead."
             exit 1
           fi
 
@@ -153,6 +157,29 @@ jobs:
     needs: guards
     name: build-and-test (${{ matrix.name }})
     runs-on: [self-hosted, windows, x64, gpu]
+    # NOT ON A FORK. This is the line that stands between a public repository
+    # and somebody else's code running on the maintainer's desktop.
+    #
+    # A self-hosted runner is not a sandbox. It is a persistent machine with a
+    # real filesystem, real credentials in the environment and a real network
+    # position, and a workflow can run anything. On a private repository that
+    # is fine, because only people with write access can trigger one. The
+    # moment the repository is public, anyone can fork it, edit a build script
+    # or this file, open a pull request and have it execute here. That is a
+    # documented and routinely exploited attack, not a theoretical one, and
+    # GitHub's own guidance is not to pair self-hosted runners with public
+    # repositories without exactly this kind of gate.
+    #
+    # So a pull request from a fork skips every GPU leg. It still gets the
+    # guards job on a hosted runner, which is ephemeral and disposable. The
+    # conformance run happens when a maintainer pushes the branch to this
+    # repository, which is also when somebody has read the diff.
+    #
+    # Setting this repository's Actions policy to require approval for all
+    # outside collaborators is the second layer and is set in the web UI, not
+    # here. Do both: an approval is a human being clicking a button while
+    # tired, and this condition is not.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -244,6 +271,10 @@ jobs:
   headless:
     needs: guards
     runs-on: [self-hosted, windows, x64, gpu]
+
+    # The same gate as build-and-test, for the same reason. See the long note
+    # there; this job needs no GPU but runs on the same physical machine.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 45
     env:
       VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache\revenant
