@@ -58,10 +58,12 @@
 #include <thread>
 #include <vector>
 
+#include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
 #include "core/engine/audio_egress.h"
 #include "core/engine/audio_wasapi.h"
 #include "core/engine/engine.h"
+#include "core/engine/spsc_ring.h"
 #include "core/engine/vrx.h"
 #include "core/engine/wav_writer.h"
 #include "core/error.h"
@@ -307,6 +309,11 @@ struct Options {
     SampleRate audio_rate = 48'000;
     int gpu = -1;
 
+    // Draw the full-span waterfall. Points per coarse channel, or zero for
+    // the engine's default; the flag on its own takes the default.
+    bool spectrum = false;
+    std::uint32_t spectrum_points = 0;
+
     bool list = false;
     bool list_audio = false;
     bool quiet = false;
@@ -346,6 +353,12 @@ void print_usage()
         "                      <dir>/vrx<N>-<freq>-<mode>.wav. Created if missing.\n"
         "  --record-format <f> float32 (default) or pcm16.\n"
         "\n"
+        "Watching:\n"
+        "  --spectrum[=<n>]    Draw an ASCII waterfall of the whole span, one row per\n"
+        "                      status interval, peak held in between. n is points per\n"
+        "                      coarse channel, a power of two, default 2048; the frame\n"
+        "                      is then channels*n/2 bins wide. Needs no --vrx.\n"
+        "\n"
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
         "                      fraction. Omitted runs to the end of the source or\n"
@@ -378,6 +391,8 @@ void print_usage()
         "Exit codes: 0 finished cleanly, 1 an error, 2 bad usage.\n"
         "\n"
         "Examples:\n"
+        "  revenant-cli \"synthetic:wideband?rate=2400000&emitters=8&seed=4242\" \\\n"
+        "      --spectrum --duration 5\n"
         "  revenant-cli \"synthetic:wideband?rate=2400000&emitters=8&seed=4242\" \\\n"
         "      --vrx 150k:nfm:16k --record out.wav --duration 5\n"
         "  revenant-cli \"file:///C:/captures/hf.cf32?rate=2400000&format=cf32\" \\\n"
@@ -428,6 +443,25 @@ void print_usage()
         }
         if (arg == "--quiet") {
             options.quiet = true;
+            continue;
+        }
+
+        if (arg == "--spectrum") {
+            options.spectrum = true;
+            if (has_inline) {
+                auto points = parse_integer(inline_value, "--spectrum");
+                if (!points) {
+                    return std::unexpected(points.error());
+                }
+                if (*points < 4 || *points > dsp::kMaxSpectrumTransform ||
+                    (*points & (*points - 1)) != 0) {
+                    return fail(std::format(
+                        "--spectrum takes a power of two between 4 and {} points per coarse "
+                        "channel",
+                        dsp::kMaxSpectrumTransform));
+                }
+                options.spectrum_points = static_cast<std::uint32_t>(*points);
+            }
             continue;
         }
 
@@ -731,6 +765,231 @@ private:
     std::size_t drawn_ = 0;
 };
 
+// ---------------------------------------------------------------------------
+// The ASCII waterfall
+// ---------------------------------------------------------------------------
+//
+// One row per drawn interval, one character per column, oldest at the top.
+//
+// THREE THINGS THAT ARE NOT OBVIOUS FROM THE OUTPUT.
+//
+// The frame arrives on the engine's completion thread and the row is drawn on
+// the status thread, and the two are joined by a lock-free ring rather than by
+// a mutex. A sink that blocks blocks the thread that is bringing every
+// receiver's audio home, so the rule in docs/conventions.md about no mutex in
+// the sample path reaches this far out. A full ring drops the row and counts
+// it rather than waiting.
+//
+// Frames arrive far faster than a terminal can be read: at 2.4 MS/s in 65536
+// sample blocks that is thirty-six a second, where a row every few hundred
+// milliseconds is what a person can follow. The rows in between are not
+// discarded, they are peak-held into the next one, so a signal that keyed up
+// for a tenth of a second still paints. A waterfall that sampled one frame in
+// twenty would miss most of what a detector is for.
+//
+// The scale is per row: the tenth percentile of the row sets the floor and
+// the ninety-ninth sets the top, with a floor under the span so a dead band
+// does not amplify its own noise into a picture. That is deliberately not what
+// docs/ui-spectrum.md asks for, which is a percentile tracked over about
+// thirty seconds with a fast attack and a slow decay. Per row is enough to
+// show that the stage works and is honest about being a demonstration: two
+// rows of this display cannot be compared for absolute level.
+class SpectrumView {
+public:
+    // Darkest to brightest. ASCII only, because this goes to a Windows
+    // console that may be in any code page.
+    static constexpr std::string_view kRamp = " .:-=+*#%@";
+
+    // Width of the time column each row starts with, which the axis lines
+    // have to match.
+    static constexpr std::size_t kPrefix = 8;
+
+    [[nodiscard]] static Expected<std::unique_ptr<SpectrumView>> create(
+        const engine::SpectrumGeometry& geometry, Hertz source_center, std::size_t columns)
+    {
+        if (!geometry.enabled() || columns == 0) {
+            return fail("the waterfall needs a spectrum geometry and at least one column");
+        }
+
+        std::unique_ptr<SpectrumView> view(new (std::nothrow) SpectrumView());
+        if (view == nullptr) {
+            return fail("could not allocate the waterfall");
+        }
+
+        // Eight rows of headroom. The drawing thread polls every ten
+        // milliseconds and frames arrive every twenty-seven at 2.4 MS/s, so
+        // this only fills if the terminal itself stalls.
+        auto ring = engine::SpscRing<float>::create(columns * 8);
+        if (!ring) {
+            return std::unexpected(with_context(ring.error(), "the waterfall's frame ring"));
+        }
+
+        view->geometry_ = geometry;
+        view->source_center_ = source_center;
+        view->columns_ = columns;
+        view->ring_ = std::move(*ring);
+        view->produced_.assign(columns, dsp::kSpectrumFloorDb);
+        view->consumed_.assign(columns, dsp::kSpectrumFloorDb);
+        view->held_.assign(columns, dsp::kSpectrumFloorDb);
+        view->sorted_.assign(columns, dsp::kSpectrumFloorDb);
+        return view;
+    }
+
+    // The engine's completion thread. Reduces a frame to one row and
+    // publishes it. Never blocks, never allocates.
+    [[nodiscard]] Status publish(const engine::SpectrumFrame& frame)
+    {
+        const std::size_t bins = frame.power_db.size();
+        if (bins == 0) {
+            return {};
+        }
+
+        // Peak within a column rather than a mean. A narrow carrier occupying
+        // one bin of the eighty a column covers is invisible in the mean and
+        // is the whole point of looking.
+        for (std::size_t c = 0; c < columns_; ++c) {
+            const std::size_t begin = bins * c / columns_;
+            std::size_t end = bins * (c + 1) / columns_;
+            if (end <= begin) {
+                end = begin + 1;
+            }
+            float peak = frame.power_db[begin];
+            for (std::size_t i = begin + 1; i < end && i < bins; ++i) {
+                peak = std::max(peak, frame.power_db[i]);
+            }
+            produced_[c] = peak;
+        }
+
+        frames_.fetch_add(1, std::memory_order_relaxed);
+
+        // Only the writer shrinks the free count, so a check here is still
+        // true at the write below and the row goes in whole. A torn row would
+        // shift every later row by a column.
+        if (ring_->writable() < columns_) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            return {};
+        }
+        static_cast<void>(ring_->write(std::span<const float>(produced_)));
+        return {};
+    }
+
+    // The drawing thread. Folds everything published since the last call into
+    // the held row and says whether there was anything.
+    [[nodiscard]] bool collect()
+    {
+        bool any = false;
+        while (ring_->read(std::span<float>(consumed_)) == columns_) {
+            for (std::size_t c = 0; c < columns_; ++c) {
+                held_[c] = std::max(held_[c], consumed_[c]);
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    // The drawing thread. Renders the held row and clears it.
+    [[nodiscard]] std::string take_row(double seconds)
+    {
+        sorted_ = held_;
+        std::sort(sorted_.begin(), sorted_.end());
+
+        const float floor = sorted_[columns_ / 10];
+        const float top = std::max(sorted_[(columns_ * 99) / 100], floor + 12.0F);
+        const float span = top - floor;
+
+        std::string row = std::format("{:6.2f}s ", seconds);
+        row.reserve(kPrefix + columns_);
+        for (std::size_t c = 0; c < columns_; ++c) {
+            const float level = std::clamp((held_[c] - floor) / span, 0.0F, 1.0F);
+            const auto step = static_cast<std::size_t>(
+                std::lround(static_cast<double>(level) * static_cast<double>(kRamp.size() - 1)));
+            row += kRamp[std::min(step, kRamp.size() - 1)];
+        }
+
+        std::fill(held_.begin(), held_.end(), dsp::kSpectrumFloorDb);
+        rows_.fetch_add(1, std::memory_order_relaxed);
+        return row;
+    }
+
+    // Where the ticks go and what they say. Two lines, aligned with a row.
+    [[nodiscard]] std::pair<std::string, std::string> axis() const
+    {
+        constexpr std::size_t kTicks = 5;
+
+        std::string labels(kPrefix, ' ');
+        std::string ticks(kPrefix, ' ');
+        labels.append(columns_, ' ');
+        ticks.append(columns_, ' ');
+
+        for (std::size_t t = 0; t < kTicks; ++t) {
+            const std::size_t column = (columns_ - 1) * t / (kTicks - 1);
+            ticks[kPrefix + column] = '|';
+
+            const std::string text = std::format("{:.3f}", frequency_of(column) / 1e6);
+            // Centred on the tick, then pulled back inside the line rather
+            // than clipped, so the first and last labels stay readable.
+            std::size_t start = kPrefix + column;
+            start = (text.size() / 2 > start) ? 0 : start - text.size() / 2;
+            start = std::min(start, kPrefix + columns_ - text.size());
+            labels.replace(start, text.size(), text);
+        }
+
+        labels.append(" MHz");
+        return {labels, ticks};
+    }
+
+    [[nodiscard]] Hertz low_edge() const { return static_cast<Hertz>(std::llround(edge(0))); }
+    [[nodiscard]] Hertz high_edge() const
+    {
+        return static_cast<Hertz>(std::llround(edge(geometry_.bins)));
+    }
+
+    [[nodiscard]] std::uint64_t frames() const
+    {
+        return frames_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t dropped() const
+    {
+        return dropped_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t rows() const { return rows_.load(std::memory_order_relaxed); }
+    [[nodiscard]] std::size_t columns() const { return columns_; }
+
+private:
+    SpectrumView() = default;
+
+    // Absolute frequency at the centre of a display column.
+    [[nodiscard]] double frequency_of(std::size_t column) const
+    {
+        const double bin = (static_cast<double>(geometry_.bins) *
+                            (static_cast<double>(column) + 0.5)) /
+                           static_cast<double>(columns_);
+        return static_cast<double>(source_center_) + geometry_.bin_zero_hz() +
+               bin * geometry_.bin_width_hz();
+    }
+
+    [[nodiscard]] double edge(std::size_t bin) const
+    {
+        return static_cast<double>(source_center_) + geometry_.bin_zero_hz() +
+               (static_cast<double>(bin) - 0.5) * geometry_.bin_width_hz();
+    }
+
+    engine::SpectrumGeometry geometry_{};
+    Hertz source_center_ = 0;
+    std::size_t columns_ = 0;
+
+    std::unique_ptr<engine::SpscRing<float>> ring_;
+
+    std::vector<float> produced_;  // completion thread only
+    std::vector<float> consumed_;  // drawing thread only
+    std::vector<float> held_;      // drawing thread only
+    std::vector<float> sorted_;    // drawing thread only
+
+    std::atomic<std::uint64_t> frames_{0};
+    std::atomic<std::uint64_t> dropped_{0};
+    std::atomic<std::uint64_t> rows_{0};
+};
+
 [[nodiscard]] std::string level_bar(double dbfs)
 {
     constexpr int kCells = 8;
@@ -971,6 +1230,13 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     config.channels = options.channels;
     config.audio_rate = options.audio_rate;
 
+    // Chosen before the engine is created, because the spectrum stage is part
+    // of the coarse chain and is built once when the source is opened.
+    if (options.spectrum) {
+        config.spectrum_transform = options.spectrum_points != 0 ? options.spectrum_points
+                                                                 : dsp::kDefaultSpectrumTransform;
+    }
+
     // A loudspeaker is the one consumer that cannot take audio faster than it
     // can play it. A Demand source with nothing holding a stopwatch delivers
     // as fast as the GPU retires work, so a monitor fed from one hears its
@@ -993,6 +1259,36 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
 
     print_source(eng.source_capabilities());
     print_grid(eng.info());
+
+    // The waterfall, built before the receivers so its geometry is printed
+    // with the rest of what the engine settled on rather than after a page of
+    // placements.
+    std::unique_ptr<SpectrumView> waterfall;
+    if (options.spectrum) {
+        const engine::SpectrumGeometry& geometry = eng.info().spectrum;
+        if (!geometry.enabled()) {
+            return fail("--spectrum was asked for and the engine built no spectrum stage");
+        }
+
+        const std::size_t width = console_width();
+        const std::size_t columns =
+            std::clamp(width - SpectrumView::kPrefix - 1, std::size_t{16}, std::size_t{512});
+
+        auto view = SpectrumView::create(geometry, eng.info().source_center, columns);
+        if (!view) {
+            return std::unexpected(view.error());
+        }
+        waterfall = std::move(*view);
+
+        std::println("");
+        std::println("spectrum  {} bins of {:.3f} Hz, {} points per channel",
+                     geometry.bins, geometry.bin_width_hz(), geometry.transform);
+        std::println("  span            {} to {}", format_hz(waterfall->low_edge()),
+                     format_hz(waterfall->high_edge()));
+        std::println("  display         {} columns, one row every {} ms, peak held between rows",
+                     waterfall->columns(), options.status_ms);
+    }
+
     std::println("");
 
     // Receivers, then their placements, before anything is recorded. A
@@ -1241,6 +1537,15 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         std::println("vrx {}     {}", i + 1, destinations);
     }
 
+    if (waterfall != nullptr) {
+        SpectrumView* view = waterfall.get();
+        if (auto wired = eng.set_spectrum_sink(
+                [view](const engine::SpectrumFrame& frame) { return view->publish(frame); });
+            !wired) {
+            return std::unexpected(with_context(wired.error(), "wiring the waterfall"));
+        }
+    }
+
     if (auto started = egress.start(); !started) {
         return std::unexpected(with_context(started.error(), "starting the audio egress"));
     }
@@ -1272,13 +1577,28 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // own delivered sample count rather than a wall clock, because a capture
     // replayed at forty times realtime has to stop after the requested amount
     // of capture, not of an afternoon.
+    if (waterfall != nullptr) {
+        const auto [labels, ticks] = waterfall->axis();
+        std::println("");
+        std::println("{}", labels);
+        std::println("{}", ticks);
+    }
+
     std::thread monitor([&] {
         constexpr auto kPoll = std::chrono::milliseconds(10);
         auto last_draw = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(options.status_ms);
+        bool pending_row = false;
 
         while (!finished.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(kPoll);
+
+            // Drained every poll rather than once per row, so the ring never
+            // fills and every frame between two rows is peak held into the
+            // next one.
+            if (waterfall != nullptr && waterfall->collect()) {
+                pending_row = true;
+            }
 
             const source::SourceStats source_stats = eng.source_stats();
             const SampleRate rate = eng.info().source_rate;
@@ -1293,10 +1613,25 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             }
 
             const auto now = std::chrono::steady_clock::now();
-            if (options.quiet || now - last_draw < interval) {
+            if (now - last_draw < interval) {
                 continue;
             }
             last_draw = now;
+
+            // The waterfall owns the terminal for the length of a row: the
+            // status line is erased, the row is printed, and the status line
+            // is redrawn under it. One thread does all three, which is the
+            // whole reason the frame came here through a ring instead of
+            // being printed where it arrived.
+            if (pending_row) {
+                status_line.erase();
+                std::println("{}", waterfall->take_row(source_seconds));
+                pending_row = false;
+            }
+
+            if (options.quiet) {
+                continue;
+            }
 
             const double wall_seconds =
                 std::chrono::duration<double>(now - wall_start).count();
@@ -1412,12 +1747,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                  source_stats.samples_delivered, source_stats.blocks_delivered, source_seconds,
                  wall_seconds, wall_seconds > 0.0 ? source_seconds / wall_seconds : 0.0);
 
+    if (waterfall != nullptr) {
+        std::println("spectrum  {} frames in, {} rows drawn", waterfall->frames(),
+                     waterfall->rows());
+    }
+
     bool any_counter = false;
     if (source_stats.overrun_events != 0 || source_stats.samples_lost != 0) {
         any_counter = true;
         std::println("  LOST            {} samples in {} overruns, last at index {}",
                      source_stats.samples_lost, source_stats.overrun_events,
                      source_stats.last_loss_index);
+    }
+    if (waterfall != nullptr && waterfall->dropped() != 0) {
+        any_counter = true;
+        std::println("  DROPPED         {} spectrum frames the display could not keep up with",
+                     waterfall->dropped());
     }
 
     for (std::size_t i = 0; i < receivers.size(); ++i) {
@@ -1555,13 +1900,16 @@ int main(int argc, char** argv)
         std::println(stderr, "revenant-cli: no source URI. Run --list to see what is available.");
         return 2;
     }
-    if (options->receivers.empty()) {
+    // --spectrum is a destination of its own: it watches the whole span and
+    // needs no receiver at all, which is the point of a waterfall.
+    if (options->receivers.empty() && !options->spectrum) {
         std::println(stderr,
-                     "revenant-cli: no receivers. Add one with --vrx, such as "
-                     "--vrx 162.550M:nfm:16k");
+                     "revenant-cli: nothing to do. Add a receiver with --vrx, such as "
+                     "--vrx 162.550M:nfm:16k, or watch the span with --spectrum.");
         return 2;
     }
-    if (options->record.empty() && options->play.empty()) {
+    if (!options->receivers.empty() && options->record.empty() && options->play.empty() &&
+        !options->spectrum) {
         std::println(stderr,
                      "revenant-cli: nothing to do with the audio. Pass --record, --play, or "
                      "both.");

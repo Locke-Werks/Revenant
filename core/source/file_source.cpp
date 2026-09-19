@@ -1,6 +1,6 @@
 // The file backend.
 //
-// Two things here are worth reading before the code. The first is the delivery
+// Two things here are not obvious from the header. The first is the delivery
 // loop, which is four lines and is the whole flow-control story: fill a block,
 // call the sink, stop if it complained. The sink is allowed to take as long as
 // it likes and that is the backpressure. Nothing measures elapsed time unless

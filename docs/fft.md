@@ -185,6 +185,85 @@ who sees an intermittent on that device should know it would not be the first;
 and an anomaly nobody records is an anomaly the project gets to be surprised by
 twice.
 
+### 2026-09-18: the spectrum kernel, and what it turned out to be
+
+A spectrum kernel was written, a second-stage transform of each coarse
+channel, and on the integrated device it failed a few runs in twelve. The
+first reading was that the driver fault this section predicted had finally
+arrived, which would have mattered: it would mean bit-exactness is
+unreachable on that device by any route, and the argument for writing our own
+transform loses its point.
+
+It is not that, and the measurements are worth keeping because two of them
+contradict things that were written down confidently.
+
+**The channelizer is fine at the workgroup counts it ships at.** A comment in
+the spectrum test file claimed `pfb_fft.comp` was clean at 1, 4 and 8
+workgroups and wrong in 3 of 12 runs at 16, 7 of 12 at 32 and 10 of 12 at 64.
+Raising `test_pfb.cpp`'s `kBlocks` from 8 to 64, with its output ring raised
+to match, gives **0 failures in 12 runs on the integrated device and 0 in 12
+on the discrete one**. That claim is withdrawn. It had been used to justify
+pinning the spectrum tests to an eight-channel grid, which is how a kernel
+went a day without any test dispatching the configuration the engine runs.
+
+**The shipped configuration is clean.** Sixty-four channels at every
+workgroup width the graph can pick, including the 256 it actually dispatches,
+is exact on every run on both devices.
+
+**What is not clean is a narrow grid following other dispatches in the same
+process.** M=8, N=256, L=64 passes ten runs in ten when it is the only thing
+a process dispatches. Placed after six sixty-four channel cells it fails
+every run, by about 57000 ulp, with the magnitude steady. Same input, same
+seed, same cell: what changed is what ran before it. That is state surviving
+between dispatches, and the most likely home for it is the driver's handling
+of many pipelines built from one module with different specialization
+constants, which this kernel does more of than anything else in the tree.
+
+Two things it is not. It is not a missing shared-memory barrier: adding
+`memoryBarrierShared()` at both barrier sites moved the rate from 4 in 20 to
+5 in 20. It is not leaked denormal state: the twin already takes
+`ScopedDenormalFlush`.
+
+**It does not make CI flaky, and the reason is worth knowing.**
+`catch_discover_tests` registers one ctest entry per Catch2 case, so each
+case runs in its own process and never accumulates the pipeline churn that
+triggers this. A full `ctest --preset ci` is 0 bad runs in 6 on the
+integrated device. What shows the anomaly is running the test binary
+directly with a tag filter, which is what a developer does while debugging,
+so it is written down here to save the next person the afternoon it cost.
+
+**One more shape, which the engine never asks for.** A workgroup wider than
+half the transform leaves some threads with no butterfly, and on the
+integrated device in a Debug build that produces a 37 dB error at
+M=64 N=256 L=256. The graph picks `min(N/2, ceiling, 256)` so the width is
+never above N/2 and the shape is unreachable, which is why the sweep does not
+carry it. It is recorded because the sizing rule is the only thing preventing
+it, and a future change to that rule would walk straight into this.
+
+A probe cannot currently gate the contamination. The one in `gpu_fixture.cpp` was corrected
+to dispatch the spectrum kernel at the exact shape it gates rather than
+`pfb_fft` at a different size, and it still reports reproducible, because
+twelve repetitions of one identical dispatch are reproducible. The failure
+needs *different* dispatches interleaved, which a repeat-the-same-thing probe
+is the wrong instrument for.
+
+### The control experiment, run, and inconclusive
+
+The channelizer's own transform is that control: a hand-written shared-memory
+kernel, M = 64, on the same device. It has been run 197 times there since the
+output buffers started being zeroed. It failed once, very early, and has not
+failed in the 192 runs since. The failure was not captured, so there is no
+divergence magnitude to report.
+
+That is too weak to conclude anything and it is recorded rather than
+interpreted. One unreproduced event is equally consistent with a rare driver
+fault, with residue from the buffer-initialisation bug that was being fixed in
+the same minute, and with something not yet imagined. It is written down for
+two reasons: the VkFFT observation predicts exactly this, so the next person
+who sees an intermittent on that device should know it would not be the first;
+and an anomaly nobody records is an anomaly the project gets to be surprised by
+twice.
+
 ### 2026-09-18: a second shared-memory kernel, and it is not the same shape
 
 A spectrum kernel was written, a second-stage transform of each coarse

@@ -1,0 +1,310 @@
+// The full-span spectrum: one second-stage transform per coarse channel, the
+// central half of each one kept, power in decibels out.
+//
+// WHY THIS IS M SMALL TRANSFORMS AND NOT ONE LARGE ONE
+//
+// docs/fft.md scopes this project's FFT kernel to a transform that lives in
+// shared memory for its whole life, which is 48 KiB on the discrete card and
+// 32 KiB on the integrated one. At eight bytes per complex float that is a few
+// thousand points. A single transform across twenty megahertz at a resolution
+// anyone would want is sixteen to sixty times outside that, and fft.md
+// declines to serve it: the alternatives it names are a multi-pass kernel
+// nobody has written, or VkFFT with a documented loss of bit-exactness.
+//
+// The channelizer already did most of the work. core/shaders/pfb_branch.comp
+// and core/shaders/pfb_fft.comp produce M channel time series in one pass, so
+// an N-point transform of each one reaches M*N/2 usable bins in pieces that
+// fit. The butterfly graph below is core/shaders/pfb_fft.comp's, line for
+// line, because that kernel is already proved bit-exact against a twin on both
+// devices in the conformance matrix and the cheapest correct transform is the
+// one that has already been refereed.
+//
+// WHY THE CENTRAL HALF, WHICH IS THE PART THAT LOOKS ARBITRARY
+//
+// The grid is 2x oversampled, D = M/2, so a channel's sample rate is twice the
+// spacing between channel centres and adjacent channels overlap by half. A
+// signal sitting in an overlap appears in two channels. Keeping only the
+// central half of each channel's bins, the N/4 bins either side of its centre,
+// gives exactly one owner to every frequency: the pieces tile the span with no
+// gap and no bin counted twice. It is the same property the oversampling was
+// bought for, which is that no signal sits on a boundary in the half that gets
+// used.
+//
+// That tiling is only exact at D = M/2. At any other decimation the central
+// half is not one channel spacing wide and the frame would either overlap
+// itself or leave holes, so the host rejects the configuration rather than
+// producing a plausible-looking frame with the wrong frequency axis. See
+// validate() in core/dsp/spectrum_reference.h.
+//
+// THE OUTPUT ORDER
+//
+// Ascending in frequency across the whole span, so a consumer draws it left to
+// right with no index arithmetic of its own. Coarse channel k sits at slot
+// (k + M/2) mod M, because channels at and above M/2 are negative frequencies:
+// channel M/2 is the most negative and channel 0, baseband DC, lands in the
+// middle. Within a channel, ascending bin j comes from transform bin
+// (j + 3N/4) mod N, which walks the negative quarter of the transform and then
+// the positive quarter.
+//
+// THE LOGARITHM, WHICH IS WHY THIS FILE CARRIES ARITHMETIC IT DID NOT WRITE
+//
+// Vulkan permits GLSL's log2 several units in the last place and each vendor
+// spends them differently, exactly as it does for sin and cos. A kernel that
+// called it could not be refereed by a CPU twin at all. So the logarithm is
+// built here from an exponent split and a polynomial, both exact sequences of
+// correctly-rounded operations, in the same way core/shaders/vrx_demod.comp
+// builds its own sqrt, reciprocal and atan2 and for the same reason.
+//
+// Written from published mathematics only, per docs/clean-room.md: Oppenheim
+// and Schafer, Discrete-Time Signal Processing, chapter 9, for the radix-2
+// decimation-in-time transform; harris, Multirate Signal Processing for
+// Communication Systems, chapter 6, for the oversampled channel bank this sits
+// on top of; and the ordinary atanh series for the logarithm. No GPL-licensed
+// implementation was consulted.
+//
+// The CPU twin is reference_spectrum in core/dsp/spectrum_reference.cpp, and
+// it is bit-identical rather than close. Read the two side by side.
+
+#version 450
+
+// Scheduling only. Every loop is strided and carries no barrier inside it, so
+// a thread with nothing left to do skips the body and the barriers stay in
+// uniform control flow. One workgroup owns one coarse channel, so the number
+// of threads in it cannot change the answer.
+layout(local_size_x_id = 0) in;
+
+// Specialization rather than push constants, for the reasons
+// core/shaders/pfb_fft.comp states: it lets the stage loop bound fold, lets
+// the shared array size resolve at pipeline creation, and makes the grid a
+// property of the pipeline rather than of a dispatch.
+layout(constant_id = 1) const uint kChannels = 64;     // M, a power of two
+layout(constant_id = 2) const uint kTransform = 2048;  // N, a power of two
+layout(constant_id = 3) const uint kStages = 11;       // log2(N)
+
+// One coarse channel's time series out of core/shaders/pfb_fft.comp. That
+// kernel writes channel-major, k * chan_blocks + (m & chan_mask), so this
+// kernel's reads are contiguous and the scatter was paid once upstream.
+layout(std430, binding = 0) readonly buffer ChannelRing {
+    vec2 values[];
+} chan;
+
+// W_N^j = exp(-j*2*pi*j/N), N entries, from build_twiddles() on the host.
+// Never sin or cos in the shader: GLSL permits several units in the last place
+// there and each vendor spends them differently, which would end bit-exactness
+// before accumulation order was even in question.
+layout(std430, binding = 1) readonly buffer Twiddles {
+    vec2 w[];
+} tw;
+
+// The analysis window, N real taps, already normalised on the host so that a
+// full-scale tone at a bin centre reads 0 dB. Without a window the transform's
+// rectangular sidelobes are 13 dB down and one broadcast carrier smears across
+// the whole display, which reads as a noisy receiver rather than as a
+// measurement artefact.
+layout(std430, binding = 2) readonly buffer Window {
+    float taps[];
+} win;
+
+// M * N/2 decibel values, ascending in frequency across the whole span.
+layout(std430, binding = 3) writeonly buffer Frame {
+    float power_db[];
+} frame;
+
+layout(push_constant) uniform Params {
+    // Per-channel ring capacity in blocks, which is also the stride between
+    // one channel's time series and the next, and its mask. A power of two, so
+    // the wrap below is exact rather than approximately right.
+    uint chan_blocks;
+    uint chan_mask;
+
+    // Ring slot of the OLDEST channel sample in this frame's window. A ring
+    // slot and not a SampleIndex: SampleIndex is uint64 and GLSL has no 64-bit
+    // integer here, so the host owns the absolute index and passes the 32-bit
+    // offset. core/shaders/vrx_fine.comp makes the same trade.
+    uint in_offset;
+} params;
+
+// One transform, resident. 8*N bytes, which is what bounds N: the host reads
+// the real ceiling out of DeviceInfo::max_workgroup_shared_memory rather than
+// assuming one, because the two devices in the conformance matrix do not
+// agree and a kernel that baked a size in could not be launched on the smaller
+// one.
+shared vec2 scratch[kTransform];
+
+// Below this a bin is silence for every purpose here, and the logarithm of
+// zero is -inf, which propagates into a colour map and a percentile as a NaN
+// nobody can source. 1e-20 in power is -200 dB, which is the same floor
+// core/engine/graph.cpp uses for the signal meter.
+const float kPowerFloor = 1.0e-20;
+
+// 10*log10(2). Power in decibels is 10*log10(p) and the logarithm below is
+// base two, so the conversion is one multiply.
+const float kDecibelsPerOctave = 3.01029995663981195;
+
+// (2/ln 2) / (2i+1), the atanh series for a base-two logarithm. Five terms,
+// because the argument reduction below holds |t| at or under 0.1715728753 and
+// the first omitted term is then 1e-9, which is two orders of magnitude under
+// what float32 can hold at this magnitude anyway.
+const float kLogC0 = 2.88539008177792681;
+const float kLogC1 = 0.96179669392597560;
+const float kLogC2 = 0.57707801635558536;
+const float kLogC3 = 0.41219858311113240;
+const float kLogC4 = 0.32059889797532520;
+
+const float kSqrt2 = 1.41421356237309505;
+
+// 1 / value for value > 0, deterministically.
+//
+// Transcribed from core/shaders/vrx_demod.comp, which explains it at length:
+// the exponent-negating seed is about 3 percent out and four Newton
+// iterations of r <- r*(2 - a*r) take that below float resolution. Every step
+// is a correctly-rounded multiply or add and the bit manipulation is exact, so
+// two implementations running this sequence agree bit for bit.
+//
+// Duplicated rather than shared because GLSL has no include and this project
+// compiles one kernel per file. The CPU side does not duplicate it: the twin
+// calls revenant::dsp::det_recip, which is the same sequence.
+float det_recip(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x7EF311C3u - bits);
+
+    precise float r1 = seed * (2.0 - value * seed);
+    precise float r2 = r1 * (2.0 - value * r1);
+    precise float r3 = r2 * (2.0 - value * r2);
+    precise float r4 = r3 * (2.0 - value * r3);
+    return r4;
+}
+
+// log2(value) for a positive normal value, deterministically.
+//
+// Split the float into its exponent and a mantissa in [1, 2), both of which
+// are bit selections and therefore exact. Fold the mantissa into
+// [1/sqrt(2), sqrt(2)] so that t = (m-1)/(m+1) cannot exceed 0.1715728753 in
+// magnitude, then evaluate log2(m) = (2/ln 2) * (t + t^3/3 + t^5/5 + ...) by
+// descending Horner in u = t*t, which is the same shape and the same
+// association core/shaders/vrx_demod.comp's det_atan_unit uses. A different
+// association of the same polynomial is a different rounding.
+//
+// The domain is a positive normal float. A denormal has no exponent field to
+// read and would come out wrong rather than merely imprecise; this project
+// flushes denormals to zero everywhere, and the only caller clamps to
+// kPowerFloor first, so the bound is a statement about the domain rather than
+// a limitation in use.
+float det_log2(float value) {
+    const uint bits = floatBitsToUint(value);
+
+    int exponent = int((bits >> 23u) & 0xFFu) - 127;
+    float mantissa = uintBitsToFloat((bits & 0x007FFFFFu) | 0x3F800000u);
+
+    // Exact: a halving is an exponent decrement and the increment compensates
+    // it, so the pair moves no mantissa bit.
+    if (mantissa > kSqrt2) {
+        mantissa = mantissa * 0.5;
+        exponent = exponent + 1;
+    }
+
+    precise float t = (mantissa - 1.0) * det_recip(mantissa + 1.0);
+    precise float u = t * t;
+
+    precise float p = kLogC4;
+    p = p * u + kLogC3;
+    p = p * u + kLogC2;
+    p = p * u + kLogC1;
+    p = p * u + kLogC0;
+
+    precise float fraction = t * p;
+    return float(exponent) + fraction;
+}
+
+// Reverse the low kStages bits, which is the load permutation that makes a
+// decimation-in-time transform come out in natural order. Pure integer work,
+// so nothing here can perturb the bit-exact comparison. The guard is for the
+// degenerate N == 1 case, where a shift by 32 would be undefined; kStages is a
+// specialization constant, so the driver folds the select away.
+uint reversed_index(uint index) {
+    return (kStages == 0u) ? 0u : (bitfieldReverse(index) >> (32u - kStages));
+}
+
+void main() {
+    const uint channel = gl_WorkGroupID.x;
+    if (channel >= kChannels) {
+        return;
+    }
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint threads = gl_WorkGroupSize.x;
+
+    // Where this channel's time series starts in the channel-major ring.
+    const uint origin = channel * params.chan_blocks;
+
+    // Window and load, bit-reversed. The window multiply happens on the
+    // natural-order sample, before the permutation, which is what lets the
+    // twin apply the window into a plain array and then hand it to the
+    // already-refereed reference transform.
+    for (uint i = tid; i < kTransform; i += threads) {
+        const uint natural = reversed_index(i);
+        const vec2 s = chan.values[origin + ((params.in_offset + natural) & params.chan_mask)];
+        const float g = win.taps[natural];
+
+        precise float xr = s.x * g;
+        precise float xi = s.y * g;
+        scratch[i] = vec2(xr, xi);
+    }
+    barrier();
+
+    const uint butterflies = kTransform >> 1u;
+
+    for (uint stage = 0u; stage < kStages; ++stage) {
+        // Span between the two halves of a butterfly at this stage, and the
+        // step through the twiddle circle. Both are powers of two, so the
+        // index arithmetic is shifts and masks with no division.
+        const uint half_span = 1u << stage;
+        const uint twiddle_step = kTransform >> (stage + 1u);
+
+        for (uint b = tid; b < butterflies; b += threads) {
+            const uint j = b & (half_span - 1u);
+            const uint ia = ((b >> stage) << (stage + 1u)) + j;
+            const uint ib = ia + half_span;
+
+            const vec2 a = scratch[ia];
+            const vec2 bv = scratch[ib];
+            const vec2 w = tw.w[j * twiddle_step];
+
+            // Every line is `precise` because each one is the shape a shader
+            // compiler wants to fuse into a fused multiply-add, which keeps
+            // full precision on the intermediate product and rounds once where
+            // separate operations round twice. Whether that fusion happens is
+            // a decision each vendor makes for itself, so left alone this
+            // butterfly gives one answer on NVIDIA and another on AMD, both
+            // plausible, neither flagged.
+            precise float vr = bv.x * w.x - bv.y * w.y;
+            precise float vi = bv.x * w.y + bv.y * w.x;
+            precise float sum_real = a.x + vr;
+            precise float sum_imag = a.y + vi;
+            precise float diff_real = a.x - vr;
+            precise float diff_imag = a.y - vi;
+
+            scratch[ia] = vec2(sum_real, sum_imag);
+            scratch[ib] = vec2(diff_real, diff_imag);
+        }
+        barrier();
+    }
+
+    // The central half, written in ascending frequency order. See the header:
+    // this channel owns slot (k + M/2) mod M of the span, and ascending bin j
+    // within it is transform bin (j + 3N/4) mod N.
+    const uint half_bins = kTransform >> 1u;
+    const uint quarter = kTransform >> 2u;
+    const uint slot = (channel + (kChannels >> 1u)) & (kChannels - 1u);
+    const uint out_origin = slot * half_bins;
+
+    for (uint j = tid; j < half_bins; j += threads) {
+        const vec2 v = scratch[(j + kTransform - quarter) & (kTransform - 1u)];
+
+        precise float power = v.x * v.x + v.y * v.y;
+        precise float floored = max(power, kPowerFloor);
+        precise float db = det_log2(floored) * kDecibelsPerOctave;
+
+        frame.power_db[out_origin + j] = db;
+    }
+}

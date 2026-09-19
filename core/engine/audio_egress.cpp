@@ -2,7 +2,7 @@
 //
 // The threading contract is stated in audio_egress.h and this file is the
 // thing that has to actually hold it up. Three parts of it are not obvious
-// from the interface and are worth reading before the code.
+// from the interface.
 //
 // THE SLOT TABLE is a fixed array of slots with an atomic state each, the
 // same shape as ConsumerTable in core/engine/ring_consumer.h and for the same

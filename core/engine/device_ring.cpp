@@ -1,6 +1,6 @@
 // The device-resident IQ ring.
 //
-// Four things in this file are worth reading before the code, because each one
+// Four things in this file are not visible from the header, because each one
 // is a place where the obvious implementation is wrong in a way that does not
 // show up until something is already recorded badly.
 //

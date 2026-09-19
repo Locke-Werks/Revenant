@@ -340,6 +340,37 @@ Status CommandRunner::run(const Dispatch& dispatch) {
 
     vkCmdDispatch(command_buffer_, dispatch.group_count_x, 1, 1);
 
+    // The kernel's writes, made available to whatever reads them next.
+    //
+    // copy() and clear() have always ended with the matching barrier and this
+    // one did not, on the reasoning that submit_and_wait() fences the work and
+    // a fence means the work is done. A fence orders EXECUTION. It says
+    // nothing about a write sitting in a compute unit's cache, and the next
+    // submission's transfer read is entitled to see the memory as it was.
+    //
+    // NVIDIA flushes at the submission boundary and hid this for the whole of
+    // M0 and M1. The AMD integrated part does not, and the symptom was a
+    // reference diff that passed or failed depending on how much the kernel
+    // had written: at 4 KiB of output every run agreed, at 32 KiB roughly half
+    // the runs came back with a few hundred stale values, and the pattern
+    // moved run to run. It reads exactly like a racy kernel and it was the
+    // harness. docs/fft.md records one unexplained failure of the
+    // channelizer's transform on that device in 197 runs, which is the same
+    // shape and very probably the same cause.
+    //
+    // HOST_READ as well as TRANSFER_READ because a caller may map the
+    // destination directly rather than copying out of it.
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
+                            VK_ACCESS_HOST_READ_BIT;
+
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                             VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+
     return submit_and_wait();
 }
 

@@ -24,6 +24,7 @@ add_library(revenant_core STATIC
     dsp/pfb_branch_reference.cpp
     dsp/pfb_design.cpp
     dsp/pfb_fft_reference.cpp
+    dsp/spectrum_reference.cpp
     dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
     dsp/synth/modulators.cpp
@@ -83,6 +84,7 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/cmul.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pfb_branch.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/pfb_fft.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/spectrum.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cu8_cf32.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cs8_cf32.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cs16_cf32.comp"

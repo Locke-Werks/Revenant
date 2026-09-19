@@ -247,6 +247,15 @@ struct GraphConfig {
     // 0 takes a size the device allows. Never hardcoded: the conformance
     // matrix runs the same kernels on a device with a smaller limit.
     std::uint32_t local_size_x = 0;
+
+    // Points in the full-span spectrum's per-channel transform, or 0 to build
+    // no spectrum stage. See EngineConfig::spectrum_transform, which is where
+    // this comes from and where the reasoning is.
+    //
+    // A non-zero value enlarges the channel ring: the stage transforms the
+    // last N blocks of every channel, so the ring has to hold that window
+    // plus everything the frames in flight are writing above it.
+    std::uint32_t spectrum_transform = 0;
 };
 
 // What the graph settled on, which the caller needs to see rather than infer.
@@ -258,6 +267,11 @@ struct GraphGeometry {
     std::uint32_t frames_in_flight = 0;
     std::uint32_t local_size_x = 0;
     std::uint32_t fft_local_size_x = 0;
+    std::uint32_t spectrum_local_size_x = 0;
+
+    // Empty when GraphConfig::spectrum_transform was zero.
+    SpectrumGeometry spectrum{};
+
     std::size_t block_samples = 0;
     std::uint64_t channel_ring_bytes = 0;
     std::uint64_t staging_bytes = 0;
@@ -301,6 +315,14 @@ struct GraphStats {
     std::uint64_t audio_frames = 0;
     std::uint64_t audio_dropped = 0;
 
+    // Spectrum frames delivered, and dispatches that produced none because
+    // the window's history was not yet contiguous. The second is expected
+    // exactly once at the start of a stream and after every overrun, and is a
+    // counter rather than a log line for the same reason every other loss
+    // here is.
+    std::uint64_t spectrum_frames = 0;
+    std::uint64_t spectrum_skipped = 0;
+
     dsp::SampleIndex write_index = 0;
     dsp::SampleIndex retired_index = 0;
     dsp::SampleIndex next_output_block = 0;
@@ -336,6 +358,7 @@ public:
     [[nodiscard]] Status set_vrx_params(VrxId id, const VrxParams& params,
                                         const VrxPlacement& placement);
     [[nodiscard]] Status set_audio_sink(VrxId id, AudioSink sink);
+    [[nodiscard]] Status set_spectrum_sink(SpectrumSink sink);
     [[nodiscard]] Expected<VrxStatus> vrx_status(VrxId id) const;
     [[nodiscard]] std::vector<VrxId> vrx_ids() const;
 

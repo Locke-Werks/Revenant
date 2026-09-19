@@ -107,6 +107,7 @@
 #include "core/dsp/convert.h"
 #include "core/dsp/pfb_branch_reference.h"
 #include "core/dsp/pfb_fft_reference.h"
+#include "core/dsp/spectrum_reference.h"
 #include "core/engine/record_util.h"
 #include "core/engine/ring_consumer.h"
 #include "core/gpu/buffer.h"
@@ -130,6 +131,19 @@ struct FftPushConstants {
 
 static_assert(sizeof(FftPushConstants) == 4 * sizeof(std::uint32_t),
               "the FFT push block is four packed uint32 in core/shaders/pfb_fft.comp");
+
+// The spectrum kernel's push-constant block, exactly as
+// core/shaders/spectrum.comp declares it. dsp::SpectrumParams carries the
+// three specialization constants alongside these three, which is why both
+// exist here as they do for the FFT.
+struct SpectrumPushConstants {
+    std::uint32_t chan_blocks = 0;
+    std::uint32_t chan_mask = 0;
+    std::uint32_t in_offset = 0;
+};
+
+static_assert(sizeof(SpectrumPushConstants) == 3 * sizeof(std::uint32_t),
+              "the spectrum push block is three packed uint32 in core/shaders/spectrum.comp");
 
 constexpr VkBufferUsageFlags kDeviceStorage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -173,6 +187,61 @@ constexpr double kSilenceFloorDbfs = -200.0;
                                               std::uint64_t samples) {
     const auto bytes = samples * static_cast<std::uint64_t>(source::bytes_per_sample(format));
     return ((bytes + 3) / 4) * 4;
+}
+
+// The frequency axis of a spectrum frame, worked out once from the grid.
+//
+// The central-half selection tiles the span exactly once only on a
+// 2x-oversampled grid. At any other decimation a channel's central half is
+// not one channel spacing wide, so the pieces either overlap or leave holes
+// and every frequency label in the frame is wrong by a growing amount. The
+// engine builds D = M/2 and nothing offers another, so this is refused rather
+// than approximated: a spectrum with a quietly wrong axis is worse than no
+// spectrum, because a person acts on it.
+[[nodiscard]] Expected<SpectrumGeometry> spectrum_geometry_for(const dsp::GridParams& grid,
+                                                               dsp::SampleRate rate,
+                                                               std::uint32_t transform) {
+    dsp::SpectrumParams probe;
+    probe.channels = grid.channels;
+    probe.transform = transform;
+    probe.stages = dsp::fft_stages(transform);
+    // Stands in for the real ring, which is sized after this runs. Only the
+    // three fields above reach the geometry.
+    probe.chan_blocks = transform;
+    probe.chan_mask = transform - 1;
+    if (auto ok = dsp::validate(probe); !ok) {
+        return std::unexpected(with_context(ok.error(), "the spectrum stage"));
+    }
+
+    if (grid.decimation * 2 != grid.channels) {
+        return fail(std::format(
+            "the spectrum stage keeps the central half of each channel's bins, which tiles the "
+            "span only on a 2x-oversampled grid. This grid is M {} with D {}, so a central half "
+            "is {} of a channel spacing wide",
+            grid.channels, grid.decimation,
+            static_cast<double>(grid.channels) / (2.0 * static_cast<double>(grid.decimation))));
+    }
+    if (rate <= 0) {
+        return fail("the spectrum stage needs the source's sample rate");
+    }
+
+    SpectrumGeometry geometry;
+    geometry.transform = transform;
+    geometry.bins_per_channel = dsp::spectrum_bins_per_channel(transform);
+    geometry.channels = grid.channels;
+    geometry.bins = dsp::spectrum_bin_count(grid.channels, transform);
+
+    // rate / (D * N) hertz per bin, exactly.
+    geometry.bin_width_numerator = rate;
+    geometry.bin_width_denominator =
+        static_cast<std::int64_t>(grid.decimation) * static_cast<std::int64_t>(transform);
+
+    // Bin zero is a quarter of a channel stream below the centre of channel
+    // M/2, whose centre is -rate/2. At D = M/2 a quarter of a channel stream
+    // is half a channel spacing, so that is -rate*(M+1)/(2M).
+    geometry.bin_zero_numerator = -rate * (static_cast<std::int64_t>(grid.channels) + 1);
+    geometry.bin_zero_denominator = 2 * static_cast<std::int64_t>(grid.channels);
+    return geometry;
 }
 
 [[nodiscard]] double dbfs_of(double rms) {
@@ -364,7 +433,7 @@ struct Graph::Impl {
     // not take one, and a Treiber stack rather than a ring because the control
     // plane is rare and unbounded and the sample path only ever drains.
     struct ControlOp {
-        enum class Kind : std::uint8_t { Add, Remove, Retune, Sink };
+        enum class Kind : std::uint8_t { Add, Remove, Retune, Sink, Spectrum };
 
         Kind kind = Kind::Add;
         VrxId id;
@@ -372,6 +441,7 @@ struct Graph::Impl {
         VrxPlacement placement;
         std::shared_ptr<VrxSlot> slot;
         std::shared_ptr<AudioSink> sink;
+        std::shared_ptr<SpectrumSink> spectrum_sink;
         ControlOp* next = nullptr;
     };
 
@@ -400,6 +470,21 @@ struct Graph::Impl {
         std::vector<FrameVrx> vrxs;
         dsp::SampleIndex retire_through = 0;
         std::uint64_t timeline_value = 0;
+
+        // The spectrum stage's own scratch and destination, per frame for the
+        // same reason a receiver's are: frames overlap on the device, so a
+        // shared buffer would have the next dispatch writing over the copy
+        // the last one is still reading.
+        gpu::Buffer spectrum_output;
+        gpu::Buffer spectrum_readback;
+        VkDescriptorSet spectrum_set = VK_NULL_HANDLE;
+
+        // Snapshotted by the recording thread when the frame was recorded, so
+        // replacing the sink never races a delivery already under way.
+        std::shared_ptr<SpectrumSink> spectrum_sink;
+        dsp::SampleIndex spectrum_start = 0;
+        dsp::SampleIndex spectrum_count = 0;
+        bool spectrum_recorded = false;
     };
 
     const gpu::Context* context = nullptr;
@@ -416,10 +501,18 @@ struct Graph::Impl {
     gpu::Buffer twiddle_buffer;
     gpu::Buffer channel_ring;
 
+    // The spectrum stage's own tables. A second twiddle circle because its
+    // transform is N points and the channelizer's is M, and a window because
+    // an unwindowed transform's 13 dB sidelobes smear one broadcast carrier
+    // across the whole display.
+    gpu::Buffer spectrum_twiddles;
+    gpu::Buffer spectrum_window;
+
     bool has_convert = false;
     gpu::ComputePipeline convert_pipeline;
     gpu::ComputePipeline branch_pipeline;
     gpu::ComputePipeline fft_pipeline;
+    gpu::ComputePipeline spectrum_pipeline;
 
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
@@ -449,6 +542,22 @@ struct Graph::Impl {
     dsp::SampleIndex trusted_from = 0;
     bool first_delivery_seen = false;
 
+    // Recording thread. The spectrum's window is N channel blocks long and
+    // reaches back over dispatches, so it needs to know where the channel
+    // ring stopped being a continuous record of the stream. That is the first
+    // block after the filter warm-up, and it moves forward again every time a
+    // dispatch skips blocks: a window straddling a skip would transform a
+    // splice of two eras and paint a band of energy that was never on the
+    // air.
+    dsp::SampleIndex blocks_contiguous_from = 0;
+    std::shared_ptr<SpectrumSink> spectrum_sink;
+
+    // Completion thread only, which is single and in-order, so no
+    // synchronisation and no per-frame copies.
+    std::vector<float> spectrum_scratch;
+    std::uint64_t spectrum_sequence = 0;
+    dsp::SampleIndex prototype_group_delay = 0;
+
     std::atomic<ControlOp*> control_head{nullptr};
 
     // Control plane view, so vrx_status and vrx_ids answer without touching
@@ -474,6 +583,8 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> coarse_builds{0};
     std::atomic<std::uint64_t> audio_frames{0};
     std::atomic<std::uint64_t> audio_dropped{0};
+    std::atomic<std::uint64_t> spectrum_frames{0};
+    std::atomic<std::uint64_t> spectrum_skipped{0};
 
     ~Impl() { destroy(); }
 
@@ -564,6 +675,9 @@ struct Graph::Impl {
                         slot->sink = op.sink;
                     }
                 }
+                return;
+            case ControlOp::Kind::Spectrum:
+                spectrum_sink = op.spectrum_sink;
                 return;
         }
     }
@@ -665,6 +779,14 @@ struct Graph::Impl {
             audio_frames.fetch_add(entry.output.frames, std::memory_order_relaxed);
         }
 
+        if (frame.spectrum_recorded) {
+            if (auto delivered = deliver_spectrum(frame); !delivered) {
+                outcome = std::unexpected(delivered.error());
+            }
+            frame.spectrum_recorded = false;
+        }
+        frame.spectrum_sink.reset();
+
         // Releases the receivers this frame referenced, so a receiver removed
         // while it was in flight is destroyed here rather than at the next
         // reuse of the slot.
@@ -681,6 +803,43 @@ struct Graph::Impl {
         completed.fetch_add(1, std::memory_order_release);
         completed.notify_all();
         return outcome;
+    }
+
+    // The completion thread, for one frame that recorded a spectrum.
+    //
+    // The whole frame is metadata: M*N/2 decibel values for a twenty-megahertz
+    // span, which is what the display and the detector both want and is a
+    // fraction of a percent of what the samples behind it would cost to bring
+    // home. Nothing complex crosses here.
+    Status deliver_spectrum(Frame& frame) {
+        const auto bins = static_cast<std::size_t>(geometry.spectrum.bins);
+        if (bins == 0 || bins > spectrum_scratch.size()) {
+            return fail(std::format(
+                "a frame recorded a spectrum of {} bins and the host scratch holds {}", bins,
+                spectrum_scratch.size()));
+        }
+
+        const std::span<float> values(spectrum_scratch.data(), bins);
+        if (auto read = frame.spectrum_readback.read(std::as_writable_bytes(values)); !read) {
+            return std::unexpected(with_context(read.error(), "spectrum readback"));
+        }
+
+        SpectrumFrame out;
+        out.power_db = std::span<const float>(values.data(), values.size());
+        out.geometry = geometry.spectrum;
+        out.start = frame.spectrum_start;
+        out.count = frame.spectrum_count;
+        out.sequence = spectrum_sequence;
+
+        ++spectrum_sequence;
+        spectrum_frames.fetch_add(1, std::memory_order_relaxed);
+
+        if (frame.spectrum_sink != nullptr && *frame.spectrum_sink) {
+            if (auto delivered = (*frame.spectrum_sink)(out); !delivered) {
+                return std::unexpected(with_context(delivered.error(), "spectrum sink"));
+            }
+        }
+        return {};
     }
 };
 
@@ -779,14 +938,67 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     auto max_blocks = static_cast<std::uint32_t>(
         std::max<std::uint64_t>(1, static_cast<std::uint64_t>(config.block_samples) / decimation));
 
+    // --- the spectrum stage, sized before the ring is sized around it -------
+
+    SpectrumGeometry spectrum;
+    std::string spectrum_note;
+    if (config.spectrum_transform != 0) {
+        const std::uint32_t transform_ceiling =
+            dsp::max_spectrum_transform_size(device.max_workgroup_shared_memory);
+        if (transform_ceiling == 0) {
+            return fail(std::format(
+                "'{}' reports {} bytes of workgroup shared memory, which holds no spectrum "
+                "transform at all",
+                device.name, device.max_workgroup_shared_memory));
+        }
+
+        std::uint32_t transform = config.spectrum_transform;
+        if (transform > transform_ceiling) {
+            spectrum_note = std::format(
+                "a {}-point spectrum transform needs {} bytes of shared memory and '{}' offers "
+                "{}, so it was reduced to {} points",
+                transform, dsp::fft_shared_bytes(transform), device.name,
+                device.max_workgroup_shared_memory, transform_ceiling);
+            transform = transform_ceiling;
+        }
+
+        auto made = spectrum_geometry_for(config.grid, config.source_rate, transform);
+        if (!made) {
+            return std::unexpected(with_context(made.error(), "Graph::create"));
+        }
+        spectrum = *made;
+    }
+
+    // One workgroup per coarse channel with the threads striding, so half the
+    // transform is the natural width: every thread owns one butterfly per
+    // stage with none left over. The same reasoning as the channelizer's
+    // transform above, against a different size.
+    std::uint32_t spectrum_local = 0;
+    if (spectrum.enabled()) {
+        spectrum_local = std::max(1U, spectrum.transform / 2);
+        spectrum_local = std::min(spectrum_local, ceiling);
+        spectrum_local = std::min(spectrum_local, 256U);
+    }
+
     std::uint32_t ring_blocks = config.channel_ring_blocks;
     if (ring_blocks == 0) {
         // Every frame in flight owns a disjoint range, which is what lets
         // frames overlap on the device at all. One spare dispatch of headroom
         // so a receiver reading the oldest frame is never adjacent to the
         // newest write.
-        const std::uint64_t wanted =
+        std::uint64_t wanted =
             static_cast<std::uint64_t>(max_blocks) * (config.frames_in_flight + 1);
+
+        // The spectrum reaches further back than anything else does. Its
+        // window is the last N blocks of every channel, and the frames
+        // submitted behind it are writing above that, so the ring has to hold
+        // both at once or a transform reads slots the next dispatch has
+        // already overwritten.
+        if (spectrum.enabled()) {
+            wanted = std::max(wanted, static_cast<std::uint64_t>(spectrum.transform) +
+                                          static_cast<std::uint64_t>(max_blocks) *
+                                              config.frames_in_flight);
+        }
         ring_blocks = static_cast<std::uint32_t>(std::bit_ceil(wanted));
     }
     if (!std::has_single_bit(ring_blocks)) {
@@ -811,6 +1023,8 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     impl.geometry.frames_in_flight = config.frames_in_flight;
     impl.geometry.local_size_x = local_size;
     impl.geometry.fft_local_size_x = fft_local;
+    impl.geometry.spectrum_local_size_x = spectrum_local;
+    impl.geometry.spectrum = spectrum;
     impl.geometry.block_samples = config.block_samples;
     impl.geometry.channel_ring_bytes = channel_ring_bytes;
     impl.geometry.staging_bytes = staging_bytes_for(config.format, config.block_samples);
@@ -822,6 +1036,31 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
                         "ring holds {}, so each dispatch produces at most {}",
                         config.block_samples, max_blocks, ring_blocks,
                         impl.geometry.max_blocks_per_dispatch);
+    }
+    if (!spectrum_note.empty()) {
+        impl.geometry.clamped = true;
+        if (!impl.geometry.clamp_reason.empty()) {
+            impl.geometry.clamp_reason.append("; also ");
+        }
+        impl.geometry.clamp_reason.append(spectrum_note);
+    }
+
+    // A caller who pinned channel_ring_blocks can pin one too small for the
+    // spectrum's window, and the failure on the device is a frame stitched
+    // out of two eras that looks like a band full of signal. Checked here,
+    // where the numbers are, rather than at the first dispatch.
+    if (spectrum.enabled()) {
+        const std::uint64_t needed =
+            static_cast<std::uint64_t>(spectrum.transform) +
+            static_cast<std::uint64_t>(impl.geometry.max_blocks_per_dispatch) *
+                config.frames_in_flight;
+        if (needed > ring_blocks) {
+            return fail(std::format(
+                "a {}-point spectrum window plus {} frames of {} blocks each needs a channel "
+                "ring of {} blocks and this one holds {}",
+                spectrum.transform, config.frames_in_flight,
+                impl.geometry.max_blocks_per_dispatch, needed, ring_blocks));
+        }
     }
 
     // The ring must hold at least the filter support plus a whole block, or a
@@ -867,16 +1106,19 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
                     result);
     }
 
-    // Three sets per frame, written once and never rewritten: every buffer the
-    // coarse chain binds is fixed for the life of the graph or fixed per
-    // frame, so a per-block descriptor update would be pure ceremony.
+    // Up to four sets per frame, written once and never rewritten: every
+    // buffer the coarse chain binds is fixed for the life of the graph or
+    // fixed per frame, so a per-block descriptor update would be pure
+    // ceremony. The fourth is the spectrum's, allocated whether or not the
+    // stage is built, because a pool is cheap and sizing it two ways is one
+    // more thing to get wrong.
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = config.frames_in_flight * 8;
+    pool_size.descriptorCount = config.frames_in_flight * 12;
 
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = config.frames_in_flight * 3;
+    pool_info.maxSets = config.frames_in_flight * 4;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
 
@@ -933,6 +1175,47 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
     impl.twiddle_buffer = std::move(*twiddle_buffer);
     impl.channel_ring = std::move(*channel_buffer);
 
+    // The spectrum stage's own tables, built here rather than handed in: both
+    // are a function of the transform size this graph settled on, and the
+    // caller does not know that until create() has clamped it against the
+    // device.
+    std::vector<dsp::Complex32> spectrum_twiddle_table;
+    std::vector<float> spectrum_window_taps;
+    VkDeviceSize spectrum_twiddle_bytes = 0;
+    VkDeviceSize spectrum_window_bytes = 0;
+    if (impl.geometry.spectrum.enabled()) {
+        const std::uint32_t points = impl.geometry.spectrum.transform;
+
+        auto circle = dsp::build_twiddles(points);
+        if (!circle) {
+            return std::unexpected(with_context(circle.error(), "Graph::prepare spectrum"));
+        }
+        spectrum_twiddle_table = std::move(*circle);
+
+        auto window = dsp::build_spectrum_window(points);
+        if (!window) {
+            return std::unexpected(with_context(window.error(), "Graph::prepare spectrum"));
+        }
+        spectrum_window_taps = std::move(*window);
+
+        spectrum_twiddle_bytes = spectrum_twiddle_table.size() * sizeof(dsp::Complex32);
+        spectrum_window_bytes = spectrum_window_taps.size() * sizeof(float);
+
+        auto device_twiddles = make_device_buffer(spectrum_twiddle_bytes);
+        if (!device_twiddles) {
+            return std::unexpected(
+                with_context(device_twiddles.error(), "Graph::prepare spectrum twiddles"));
+        }
+        impl.spectrum_twiddles = std::move(*device_twiddles);
+
+        auto device_window = make_device_buffer(spectrum_window_bytes);
+        if (!device_window) {
+            return std::unexpected(
+                with_context(device_window.error(), "Graph::prepare spectrum window"));
+        }
+        impl.spectrum_window = std::move(*device_window);
+    }
+
     {
         // A CommandRunner here and nowhere else in this file. Uploading the
         // filter tables is not the sample path, it happens once, and it wants
@@ -977,10 +1260,52 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             return std::unexpected(with_context(cleared.error(), "Graph::prepare"));
         }
 
-        const gpu::CommandRunner::BufferCopy copies[] = {
+        std::vector<gpu::CommandRunner::BufferCopy> copies{
             {prototype_staging->handle(), impl.prototype_buffer.handle(), prototype_bytes},
             {twiddle_staging->handle(), impl.twiddle_buffer.handle(), twiddle_bytes},
         };
+
+        // Declared out here so they outlive the copy, which is recorded and
+        // submitted below rather than as each one is added.
+        gpu::Buffer spectrum_twiddle_staging;
+        gpu::Buffer spectrum_window_staging;
+        if (impl.geometry.spectrum.enabled()) {
+            auto staged = gpu::Buffer::create(context, spectrum_twiddle_bytes,
+                                              VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                              gpu::MemoryKind::Upload);
+            if (!staged) {
+                return std::unexpected(
+                    with_context(staged.error(), "Graph::prepare spectrum twiddle staging"));
+            }
+            spectrum_twiddle_staging = std::move(*staged);
+            if (auto wrote = spectrum_twiddle_staging.write(
+                    std::as_bytes(std::span(spectrum_twiddle_table)));
+                !wrote) {
+                return std::unexpected(
+                    with_context(wrote.error(), "Graph::prepare spectrum twiddles"));
+            }
+
+            auto window_staged = gpu::Buffer::create(context, spectrum_window_bytes,
+                                                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                                     gpu::MemoryKind::Upload);
+            if (!window_staged) {
+                return std::unexpected(with_context(window_staged.error(),
+                                                    "Graph::prepare spectrum window staging"));
+            }
+            spectrum_window_staging = std::move(*window_staged);
+            if (auto wrote = spectrum_window_staging.write(
+                    std::as_bytes(std::span(spectrum_window_taps)));
+                !wrote) {
+                return std::unexpected(
+                    with_context(wrote.error(), "Graph::prepare spectrum window"));
+            }
+
+            copies.push_back({spectrum_twiddle_staging.handle(), impl.spectrum_twiddles.handle(),
+                              spectrum_twiddle_bytes});
+            copies.push_back({spectrum_window_staging.handle(), impl.spectrum_window.handle(),
+                              spectrum_window_bytes});
+        }
+
         if (auto copied = runner->copy(copies); !copied) {
             return std::unexpected(with_context(copied.error(), "Graph::prepare"));
         }
@@ -1035,6 +1360,24 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         impl.fft_pipeline = std::move(*pipeline);
     }
 
+    if (impl.geometry.spectrum.enabled()) {
+        const std::uint32_t spectrum_constants[] = {
+            impl.geometry.spectrum.channels, impl.geometry.spectrum.transform,
+            dsp::fft_stages(impl.geometry.spectrum.transform)};
+
+        gpu::ComputePipeline::Options options;
+        options.spirv = gpu::shaders::spectrum();
+        options.storage_buffer_count = 4;
+        options.local_size_x = impl.geometry.spectrum_local_size_x;
+        options.push_constant_bytes = sizeof(SpectrumPushConstants);
+        options.grid_constants = spectrum_constants;
+        auto pipeline = gpu::ComputePipeline::create(context, options);
+        if (!pipeline) {
+            return std::unexpected(with_context(pipeline.error(), "Graph::prepare spectrum"));
+        }
+        impl.spectrum_pipeline = std::move(*pipeline);
+    }
+
     impl.coarse_builds.fetch_add(1, std::memory_order_relaxed);
 
     // --- one frame's worth of everything, times frames_in_flight ------------
@@ -1085,13 +1428,37 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         }
         frame.branch_output = std::move(*branch);
 
-        VkDescriptorSetLayout layouts[3]{};
+        if (impl.geometry.spectrum.enabled()) {
+            const VkDeviceSize frame_bytes =
+                static_cast<VkDeviceSize>(impl.geometry.spectrum.bins) * sizeof(float);
+
+            auto output = gpu::Buffer::create(context, frame_bytes, kDeviceStorage,
+                                              gpu::MemoryKind::DeviceLocal);
+            if (!output) {
+                return std::unexpected(
+                    with_context(output.error(), "Graph::prepare spectrum scratch"));
+            }
+            frame.spectrum_output = std::move(*output);
+
+            auto readback = gpu::Buffer::create(context, frame_bytes, kReadbackUsage,
+                                                gpu::MemoryKind::Readback);
+            if (!readback) {
+                return std::unexpected(
+                    with_context(readback.error(), "Graph::prepare spectrum readback"));
+            }
+            frame.spectrum_readback = std::move(*readback);
+        }
+
+        VkDescriptorSetLayout layouts[4]{};
         std::uint32_t set_count = 0;
         if (impl.has_convert) {
             layouts[set_count++] = impl.convert_pipeline.descriptor_layout();
         }
         layouts[set_count++] = impl.branch_pipeline.descriptor_layout();
         layouts[set_count++] = impl.fft_pipeline.descriptor_layout();
+        if (impl.geometry.spectrum.enabled()) {
+            layouts[set_count++] = impl.spectrum_pipeline.descriptor_layout();
+        }
 
         VkDescriptorSetAllocateInfo set_alloc{};
         set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1099,7 +1466,7 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         set_alloc.descriptorSetCount = set_count;
         set_alloc.pSetLayouts = layouts;
 
-        VkDescriptorSet sets[3]{};
+        VkDescriptorSet sets[4]{};
         result = vkAllocateDescriptorSets(device, &set_alloc, sets);
         if (result != VK_SUCCESS) {
             return fail(std::format("vkAllocateDescriptorSets failed for frame {} ({})", i,
@@ -1123,12 +1490,21 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
                 return std::unexpected(with_context(wrote.error(), "Graph::prepare branch set"));
             }
         }
-        frame.fft_set = sets[next];
+        frame.fft_set = sets[next++];
         {
             const VkBuffer bound[] = {frame.branch_output.handle(), impl.twiddle_buffer.handle(),
                                       impl.channel_ring.handle()};
             if (auto wrote = write_storage_set(device, frame.fft_set, bound); !wrote) {
                 return std::unexpected(with_context(wrote.error(), "Graph::prepare fft set"));
+            }
+        }
+        if (impl.geometry.spectrum.enabled()) {
+            frame.spectrum_set = sets[next];
+            const VkBuffer bound[] = {impl.channel_ring.handle(), impl.spectrum_twiddles.handle(),
+                                      impl.spectrum_window.handle(),
+                                      frame.spectrum_output.handle()};
+            if (auto wrote = write_storage_set(device, frame.spectrum_set, bound); !wrote) {
+                return std::unexpected(with_context(wrote.error(), "Graph::prepare spectrum set"));
             }
         }
     }
@@ -1139,6 +1515,15 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
     const auto support = impl.prototype_length > 0 ? impl.prototype_length - 1 : 0;
     impl.next_block =
         (static_cast<dsp::SampleIndex>(support) + impl.grid.decimation - 1) / impl.grid.decimation;
+
+    // Nothing below the first output block is the stream's, so that is where
+    // the channel ring starts being a continuous record and where the
+    // spectrum's window is allowed to begin.
+    impl.blocks_contiguous_from = impl.next_block;
+    impl.prototype_group_delay = prototype.group_delay_samples;
+    if (impl.geometry.spectrum.enabled()) {
+        impl.spectrum_scratch.assign(impl.geometry.spectrum.bins, 0.0F);
+    }
 
     // The graph owns the timeline semaphore, so the graph is what starts the
     // completion thread against it. Doing it here rather than making the
@@ -1320,6 +1705,24 @@ Status Graph::set_audio_sink(VrxId id, AudioSink sink) {
     op->kind = Impl::ControlOp::Kind::Sink;
     op->id = id;
     op->sink = std::make_shared<AudioSink>(std::move(sink));
+    impl.push_control(op);
+    return {};
+}
+
+Status Graph::set_spectrum_sink(SpectrumSink sink) {
+    auto& impl = *impl_;
+    if (!impl.geometry.spectrum.enabled()) {
+        return fail("this graph was built with no spectrum stage. The stage is part of the "
+                    "coarse chain and is built once when the source is opened, so it is chosen "
+                    "through GraphConfig::spectrum_transform rather than by attaching a sink");
+    }
+
+    auto* op = new (std::nothrow) Impl::ControlOp();
+    if (op == nullptr) {
+        return fail("Graph::set_spectrum_sink could not allocate the control operation");
+    }
+    op->kind = Impl::ControlOp::Kind::Spectrum;
+    op->spectrum_sink = std::make_shared<SpectrumSink>(std::move(sink));
     impl.push_control(op);
     return {};
 }
@@ -1574,6 +1977,40 @@ Status Graph::on_block(const source::SourceBlock& block) {
         }
     }
 
+    // Anything the two loops above skipped leaves stale slots in the channel
+    // ring. A receiver does not care, because it reads forward from where it
+    // is; the spectrum does, because its window reaches back over several
+    // dispatches and one straddling a skip would transform a splice of two
+    // eras, which paints a band of energy that was never on the air.
+    if (first_block != impl.next_block) {
+        impl.blocks_contiguous_from = first_block;
+    }
+
+    // Whether this dispatch has a continuous window behind it to transform.
+    // False for the first N blocks of a stream and for the first N after any
+    // skip, which is a counted gap in the waterfall rather than a row of
+    // invented signal.
+    //
+    // Not computed at all when nobody is listening. The stage is built with
+    // the coarse chain because it cannot be added to a running graph, but a
+    // dispatch and a readback per block for a frame that goes nowhere is
+    // still work, and a caller that has not attached a sink has said it does
+    // not want it yet.
+    bool record_spectrum = false;
+    dsp::SampleIndex spectrum_first_block = 0;
+    const bool spectrum_wanted = impl.geometry.spectrum.enabled() &&
+                                 impl.spectrum_sink != nullptr && *impl.spectrum_sink;
+    if (block_count > 0 && spectrum_wanted) {
+        const auto points = static_cast<dsp::SampleIndex>(impl.geometry.spectrum.transform);
+        const dsp::SampleIndex one_past = first_block + block_count;
+        if (one_past >= points && one_past - points >= impl.blocks_contiguous_from) {
+            record_spectrum = true;
+            spectrum_first_block = one_past - points;
+        } else {
+            impl.spectrum_skipped.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     // --- record ------------------------------------------------------------
 
     VkResult result = vkResetCommandBuffer(frame.commands, 0);
@@ -1672,15 +2109,63 @@ Status Graph::on_block(const source::SourceBlock& block) {
         impl.channel_blocks.fetch_add(block_count, std::memory_order_relaxed);
     }
 
-    // --- the receivers ------------------------------------------------------
+    // --- the spectrum and the receivers -------------------------------------
 
     frame.vrxs.clear();
-    if (block_count > 0 && !impl.active.empty()) {
+    frame.spectrum_recorded = false;
+    frame.spectrum_sink = impl.spectrum_sink;
+
+    // One barrier for every reader of the channel ring, the spectrum and the
+    // receivers alike, because they all wait on the same transform.
+    if (block_count > 0 && (record_spectrum || !impl.active.empty())) {
         record_barrier(frame.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_ACCESS_SHADER_WRITE_BIT,
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+    }
 
+    if (record_spectrum) {
+        SpectrumPushConstants spectrum_params;
+        spectrum_params.chan_blocks = impl.geometry.channel_ring_blocks;
+        spectrum_params.chan_mask = impl.geometry.channel_ring_mask;
+        spectrum_params.in_offset = static_cast<std::uint32_t>(
+            spectrum_first_block & impl.geometry.channel_ring_mask);
+
+        // One workgroup per coarse channel. The group count is the channel
+        // count and has nothing to do with the thread count inside one, the
+        // same as the transform above.
+        record_dispatch(
+            frame.commands, impl.spectrum_pipeline, frame.spectrum_set,
+            std::as_bytes(std::span<const SpectrumPushConstants>(&spectrum_params, 1)),
+            impl.geometry.spectrum.channels);
+
+        record_barrier(frame.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_TRANSFER_READ_BIT);
+
+        VkBufferCopy region{};
+        region.srcOffset = 0;
+        region.dstOffset = 0;
+        region.size = static_cast<VkDeviceSize>(impl.geometry.spectrum.bins) * sizeof(float);
+        vkCmdCopyBuffer(frame.commands, frame.spectrum_output.handle(),
+                        frame.spectrum_readback.handle(), 1, &region);
+
+        // What the window covers in the source's own index, which is the one
+        // index everything downstream shares. This is
+        // dsp::channel_sample_to_input written out, because the graph keeps
+        // the prototype's group delay rather than the whole filter: channel
+        // block m is taken at input m*D and the linear-phase prototype delays
+        // the signal by exactly its group delay, which the extra zero tap in
+        // taps_per_branch makes a whole number of input samples.
+        frame.spectrum_start =
+            spectrum_first_block * decimation - impl.prototype_group_delay;
+        frame.spectrum_count =
+            static_cast<dsp::SampleIndex>(impl.geometry.spectrum.transform) * decimation;
+        frame.spectrum_recorded = true;
+        impl.dispatches.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    if (block_count > 0 && !impl.active.empty()) {
         frame.vrxs.reserve(impl.active.size());
         for (const auto& slot : impl.active) {
             StageRecord record;
@@ -1711,9 +2196,12 @@ Status Graph::on_block(const source::SourceBlock& block) {
             frame.vrxs.push_back(std::move(entry));
         }
         impl.readbacks.fetch_add(frame.vrxs.size(), std::memory_order_relaxed);
+    }
 
-        // The only thing that comes back. Everything above this line stayed on
-        // the device.
+    // Everything above this line stayed on the device. What crosses back is
+    // audio PCM and a frame of decibels, which is the whole of what
+    // core/engine/engine.h permits.
+    if (frame.spectrum_recorded || !frame.vrxs.empty()) {
         record_barrier(frame.commands,
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1815,6 +2303,8 @@ GraphStats Graph::stats() const {
     out.coarse_builds = impl.coarse_builds.load(std::memory_order_relaxed);
     out.audio_frames = impl.audio_frames.load(std::memory_order_relaxed);
     out.audio_dropped = impl.audio_dropped.load(std::memory_order_relaxed);
+    out.spectrum_frames = impl.spectrum_frames.load(std::memory_order_relaxed);
+    out.spectrum_skipped = impl.spectrum_skipped.load(std::memory_order_relaxed);
     if (impl.cursors != nullptr) {
         out.write_index = impl.cursors->write_index();
         const auto report = impl.cursors->report(impl.consumer_handle);

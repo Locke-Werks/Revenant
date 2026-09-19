@@ -251,6 +251,7 @@ public:
         graph_config.flow = source->capabilities().flow;
         graph_config.block_samples = block_samples;
         graph_config.audio_rate = config_.audio_rate;
+        graph_config.spectrum_transform = config_.spectrum_transform;
 
         auto graph = Graph::create(context_, *ring_, *scheduler_, graph_config);
         if (!graph) {
@@ -271,6 +272,7 @@ public:
         info_.ring = ring_->geometry();
         info_.grid = grid;
         info_.source_rate = rate;
+        info_.spectrum = graph_->geometry().spectrum;
 
         // Read once here rather than forwarded live, because this engine has
         // no tune call: the centre is fixed by the URI the source was opened
@@ -369,6 +371,21 @@ public:
             return fail("Engine::set_audio_sink before a source is open");
         }
         return graph_->set_audio_sink(id, std::move(sink));
+    }
+
+    [[nodiscard]] Status set_spectrum_sink(SpectrumSink sink) override {
+        if (graph_ == nullptr) {
+            return fail("Engine::set_spectrum_sink before a source is open: the spectrum stage "
+                        "is sized against the grid, and there is no grid until the source's "
+                        "rate is known");
+        }
+        if (config_.spectrum_transform == 0) {
+            return fail("this engine was created with EngineConfig::spectrum_transform at zero, "
+                        "so no spectrum stage was built. Set it before Engine::create, because "
+                        "the stage belongs to the coarse chain and adding one to a running "
+                        "graph would mean rebuilding that");
+        }
+        return graph_->set_spectrum_sink(std::move(sink));
     }
 
     [[nodiscard]] Status run() override {

@@ -1,21 +1,31 @@
 // The bench CLI. This is what CI calls.
 //
-// Three commands:
+// Four commands:
 //
-//   sweep     run a sweep and write the curve
-//   compare   diff two curve files, exit nonzero on a regression
-//   validate  run the reference BPSK subject and check the measured curve
-//             against Q(sqrt(2*Eb/N0))
+//   sweep       run a sweep and write the curve
+//   compare     diff two curve files, exit nonzero on a regression
+//   validate    run the reference BPSK subject and check the measured curve
+//               against Q(sqrt(2*Eb/N0))
+//   throughput  measure receivers against wall clock and the channelizer
+//               against memory bandwidth
 //
-// validate is the one that keeps the other two honest. There is no decoder to
-// sweep yet, so the only evidence that the harness, the SNR calibration and
+// validate is the one that keeps sweep and compare honest. There is no decoder
+// to sweep yet, so the only evidence that the harness, the SNR calibration and
 // the generator agree is that the reference subject lands on the closed form.
+//
+// throughput answers a different kind of question and reports rather than
+// judges. It has no pass or fail and no threshold, because every number it
+// produces depends on what else the machine is doing; a timing assertion here
+// would be a test that fails for reasons that have nothing to do with the
+// code. What it does is put measured numbers against three claims this
+// repository has been making without them. See tools/bench/throughput.h.
 
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <format>
+#include <fstream>
 #include <print>
 #include <span>
 #include <string>
@@ -23,9 +33,11 @@
 #include <utility>
 #include <vector>
 
+#include "core/engine/vrx.h"
 #include "core/error.h"
 #include "tools/bench/curve.h"
 #include "tools/bench/sweep.h"
+#include "tools/bench/throughput.h"
 
 namespace {
 
@@ -542,12 +554,240 @@ int command_validate(const ArgMap& args) {
     return kExitOk;
 }
 
-constexpr std::string_view kUsage = R"(revenant bench: BER/SNR sweep harness
+// ---------------------------------------------------------------------------
+// throughput
+// ---------------------------------------------------------------------------
+
+// A comma-separated list of counts. Rejected rather than skipped on a bad
+// entry, for the same reason require_known rejects a mistyped option: a list
+// that silently drops what it could not read measures something nobody asked
+// for.
+[[nodiscard]] Expected<std::vector<std::uint32_t>> parse_count_list(std::string_view text,
+                                                                    std::string_view option) {
+    std::vector<std::uint32_t> out;
+    std::size_t start = 0;
+    while (start <= text.size()) {
+        const std::size_t comma = text.find(',', start);
+        const std::string_view item =
+            text.substr(start, comma == std::string_view::npos ? std::string_view::npos
+                                                               : comma - start);
+        if (item.empty()) {
+            return fail(std::format("option '--{}' has an empty entry in '{}'", option, text));
+        }
+        std::uint32_t value = 0;
+        const auto result =
+            std::from_chars(item.data(), item.data() + item.size(), value);
+        if (result.ec != std::errc{} || result.ptr != item.data() + item.size()) {
+            return fail(std::format("option '--{}' needs a comma-separated list of counts, and "
+                                    "'{}' is not one",
+                                    option, item));
+        }
+        out.push_back(value);
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        start = comma + 1;
+    }
+    if (out.empty()) {
+        return fail(std::format("option '--{}' is empty", option));
+    }
+    return out;
+}
+
+// The device index alone is signed, because -1 is what hands the choice to
+// REVENANT_GPU_INDEX and that is how every other binary here is aimed.
+[[nodiscard]] Expected<int> parse_device_index(std::string_view text) {
+    int value = 0;
+    const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (result.ec != std::errc{} || result.ptr != text.data() + text.size()) {
+        return fail(std::format("option '--gpu' needs a device index, found '{}'", text));
+    }
+    return value;
+}
+
+constexpr std::string_view kThroughputOptions[] = {
+    "gpu",           "rate",       "channels",    "block-samples",  "audio-rate",
+    "seconds",       "seed",       "emitters",    "noise",          "demod",
+    "bandwidth",     "receivers",  "iterations",  "warmup",         "no-device",
+    "no-bandwidth",  "transform-bytes", "transform-sizes", "bandwidth-iterations",
+    "json",          "out",        "quiet",
+};
+
+int command_throughput(const ArgMap& args) {
+    if (const Status ok = args.require_known(kThroughputOptions); !ok) {
+        std::print(stderr, "bench throughput: {}\n", ok.error().message);
+        return kExitUsage;
+    }
+
+    bench::ThroughputConfig config;
+
+    if (args.has("gpu")) {
+        Expected<int> gpu = parse_device_index(args.text("gpu", ""));
+        if (!gpu) {
+            std::print(stderr, "bench throughput: {}\n", gpu.error().message);
+            return kExitUsage;
+        }
+        config.gpu_index = *gpu;
+    }
+
+    const auto read_uint = [&args](std::string_view key, std::uint64_t fallback) {
+        return args.integer(key, fallback);
+    };
+
+    Expected<std::uint64_t> rate = read_uint("rate", static_cast<std::uint64_t>(config.rate));
+    if (!rate) {
+        std::print(stderr, "bench throughput: {}\n", rate.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> channels = read_uint("channels", config.channels);
+    if (!channels) {
+        std::print(stderr, "bench throughput: {}\n", channels.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> block_samples = read_uint("block-samples", config.block_samples);
+    if (!block_samples) {
+        std::print(stderr, "bench throughput: {}\n", block_samples.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> audio_rate =
+        read_uint("audio-rate", static_cast<std::uint64_t>(config.audio_rate));
+    if (!audio_rate) {
+        std::print(stderr, "bench throughput: {}\n", audio_rate.error().message);
+        return kExitUsage;
+    }
+    Expected<double> seconds = args.number("seconds", config.seconds);
+    if (!seconds) {
+        std::print(stderr, "bench throughput: {}\n", seconds.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> seed = read_uint("seed", config.seed);
+    if (!seed) {
+        std::print(stderr, "bench throughput: {}\n", seed.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> emitters = read_uint("emitters", config.emitters);
+    if (!emitters) {
+        std::print(stderr, "bench throughput: {}\n", emitters.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> bandwidth =
+        read_uint("bandwidth", static_cast<std::uint64_t>(config.bandwidth));
+    if (!bandwidth) {
+        std::print(stderr, "bench throughput: {}\n", bandwidth.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> iterations = read_uint("iterations", config.iterations);
+    if (!iterations) {
+        std::print(stderr, "bench throughput: {}\n", iterations.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> warmup = read_uint("warmup", config.warmup);
+    if (!warmup) {
+        std::print(stderr, "bench throughput: {}\n", warmup.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> transform_bytes = read_uint("transform-bytes", config.transform_bytes);
+    if (!transform_bytes) {
+        std::print(stderr, "bench throughput: {}\n", transform_bytes.error().message);
+        return kExitUsage;
+    }
+    Expected<std::uint64_t> bandwidth_iterations =
+        read_uint("bandwidth-iterations", config.bandwidth_iterations);
+    if (!bandwidth_iterations) {
+        std::print(stderr, "bench throughput: {}\n", bandwidth_iterations.error().message);
+        return kExitUsage;
+    }
+
+    auto demod = revenant::engine::demod_from_name(
+        args.text("demod", revenant::engine::demod_name(config.demod)));
+    if (!demod) {
+        std::print(stderr, "bench throughput: {}\n", demod.error().message);
+        return kExitUsage;
+    }
+
+    config.rate = static_cast<revenant::dsp::SampleRate>(*rate);
+    config.channels = static_cast<std::uint32_t>(*channels);
+    config.block_samples = static_cast<std::size_t>(*block_samples);
+    config.audio_rate = static_cast<revenant::dsp::SampleRate>(*audio_rate);
+    config.seconds = *seconds;
+    config.seed = *seed;
+    config.emitters = static_cast<std::size_t>(*emitters);
+    config.noise = args.has("noise");
+    config.demod = *demod;
+    config.bandwidth = static_cast<revenant::dsp::Hertz>(*bandwidth);
+    config.iterations = static_cast<std::uint32_t>(*iterations);
+    config.warmup = static_cast<std::uint32_t>(*warmup);
+    config.device_rig = !args.has("no-device");
+    config.bandwidth_pass = !args.has("no-bandwidth");
+    config.transform_bytes = *transform_bytes;
+    config.bandwidth_iterations = static_cast<std::uint32_t>(*bandwidth_iterations);
+
+    if (args.has("receivers")) {
+        auto counts = parse_count_list(args.text("receivers", ""), "receivers");
+        if (!counts) {
+            std::print(stderr, "bench throughput: {}\n", counts.error().message);
+            return kExitUsage;
+        }
+        config.receiver_counts = std::move(*counts);
+    }
+    if (args.has("transform-sizes")) {
+        auto sizes = parse_count_list(args.text("transform-sizes", ""), "transform-sizes");
+        if (!sizes) {
+            std::print(stderr, "bench throughput: {}\n", sizes.error().message);
+            return kExitUsage;
+        }
+        config.transform_sizes = std::move(*sizes);
+    }
+
+    if (const Status ok = config.validate(); !ok) {
+        std::print(stderr, "bench throughput: {}\n", ok.error().message);
+        return kExitUsage;
+    }
+
+    const bool json_only = args.has("json");
+    const bool quiet = args.has("quiet");
+    const std::string out_path(args.text("out", ""));
+
+    Expected<bench::ThroughputReport> report = bench::run_throughput(config);
+    if (!report) {
+        std::print(stderr, "bench throughput: {}\n", report.error().message);
+        return kExitError;
+    }
+
+    if (json_only) {
+        std::print("{}", bench::throughput_to_json(*report));
+    } else if (!quiet) {
+        bench::print_throughput(*report);
+    }
+
+    if (!out_path.empty()) {
+        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            std::print(stderr, "bench throughput: cannot open '{}' for writing\n", out_path);
+            return kExitError;
+        }
+        const std::string text = bench::throughput_to_json(*report);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.flush();
+        if (!out) {
+            std::print(stderr, "bench throughput: failed while writing '{}'\n", out_path);
+            return kExitError;
+        }
+        if (!json_only && !quiet) {
+            std::println("wrote {}", out_path);
+        }
+    }
+
+    return kExitOk;
+}
+
+constexpr std::string_view kUsage = R"(revenant bench: BER/SNR sweep harness and throughput measurement
 
 usage:
-  bench sweep    [options] [--out FILE]
-  bench compare  REFERENCE.json CANDIDATE.json [options]
-  bench validate [options]
+  bench sweep      [options] [--out FILE]
+  bench compare    REFERENCE.json CANDIDATE.json [options]
+  bench validate   [options]
+  bench throughput [options]
   bench help
 
 sweep options (validate takes the same set):
@@ -576,6 +816,41 @@ compare options:
   --ber-ratio X                per-point worsening factor           (default 1.5)
   --sensitivity-tolerance-db X allowed rightward shift              (default 0.2)
   --quiet                      suppress the per-point table
+
+throughput options:
+  --gpu N                 device index, -1 honours REVENANT_GPU_INDEX
+  --rate HZ               source rate                  (default 20000000)
+  --channels N            channelizer channels         (default 64)
+  --block-samples N       samples per source block     (default 65536)
+  --audio-rate HZ         receiver audio rate          (default 48000)
+  --seconds X             source time per point        (default 4)
+  --seed N                scene seed                   (default 20260918)
+  --emitters N            emitters in the scene        (default 0)
+  --noise                 add the scene's noise floor  (default off)
+  --demod NAME            am nfm wfm usb lsb dsb cw    (default nfm)
+  --bandwidth HZ          receiver bandwidth           (default 16000)
+  --receivers LIST        receiver counts to measure   (default 0,1,2,8,16,32,50,100)
+  --iterations N          device rig iterations        (default 32)
+  --warmup N              device rig warmup passes     (default 4)
+  --no-device             skip the per-stage GPU timing
+  --no-bandwidth          skip the channelizer bandwidth pass
+  --transform-bytes N     transform buffer size, read once and written once,
+                          so the traffic is twice this  (default 134217728,
+                          which is VkFFT's own test size in docs/fft.md)
+  --transform-sizes LIST  channel counts to measure    (default 64,128,256,1024,2048)
+  --bandwidth-iterations N                             (default 16)
+  --json                  print JSON instead of the tables
+  --out FILE              also write the JSON here
+  --quiet                 print nothing but what --out or --json asked for
+
+  The scene is silent by default. The synthetic generator is single threaded
+  and a populated scene at 20 MS/s is an order of magnitude slower than the
+  engine, which would make every receiver count report the generator's rate
+  rather than the engine's. The measured source ceiling is printed first so
+  the headroom is visible rather than assumed.
+
+  throughput reports and never judges: it has no threshold and always exits 0
+  on a completed run.
 
 exit codes:
   0  ok
@@ -615,6 +890,9 @@ int main(int argc, char** argv) {
     }
     if (command == "validate") {
         return command_validate(*parsed);
+    }
+    if (command == "throughput") {
+        return command_throughput(*parsed);
     }
 
     std::print(stderr, "bench: unknown command '{}'\n", command);

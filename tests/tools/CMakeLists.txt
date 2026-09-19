@@ -45,6 +45,33 @@ if(TARGET bench)
         LABELS "tools"
         TIMEOUT 600
     )
+
+    # The throughput command, run small, as a smoke test and nothing more.
+    #
+    # There is no performance threshold here and there must not be one. Every
+    # number the command produces depends on what else is running on the
+    # machine, and a timing assertion on a shared workstation fails for
+    # reasons that have nothing to do with the code. This project does not
+    # ship flaky tests, so what is asserted is what can be asserted: the
+    # command builds an engine, drives a source through it with receivers
+    # attached, times the device, counts bytes and exits zero.
+    #
+    # It needs a GPU. --gpu -1 honours REVENANT_GPU_INDEX, which is how the
+    # conformance matrix aims every other binary here.
+    add_test(
+        NAME bench_throughput_runs
+        COMMAND bench throughput
+                --gpu -1
+                --rate 2400000 --seconds 0.25 --block-samples 16384
+                --receivers 0,2
+                --iterations 4 --warmup 1
+                --transform-sizes 64 --transform-bytes 4194304
+                --bandwidth-iterations 2
+    )
+    set_tests_properties(bench_throughput_runs PROPERTIES
+        LABELS "tools"
+        TIMEOUT 600
+    )
 else()
     message(STATUS "bench is not present yet, skipping the BER theory check")
 endif()

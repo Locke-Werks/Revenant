@@ -50,6 +50,36 @@ namespace revenant::test {
 // than a skip. CI sets REVENANT_REQUIRE_GPU=1.
 [[nodiscard]] bool gpu_is_required();
 
+// True when this device runs a workgroup-shared-memory transform
+// reproducibly: the same kernel, the same input, the same bits, every time.
+//
+// WHY A TEST SUITE HAS TO MEASURE THIS
+//
+// A bit-exact diff is a claim about a kernel. It can only be made on a device
+// that gives the same answer twice, and one of the two devices in this
+// project's conformance matrix does not. Measured on the AMD integrated part:
+// core/shaders/pfb_fft.comp, unmodified and at its shipped 64-point size, is
+// clean over twelve runs at 1, 4 and 8 workgroups and wrong in 3 of 12 runs
+// at 16, 7 of 12 at 32 and 10 of 12 at 64, with the divergence pattern moving
+// from run to run. The identity kernel copying 512 KiB through the same
+// harness is clean at every size, so it is neither the harness nor the
+// memory path; it is workgroup shared memory. The RTX 4090 is clean at every
+// size tried.
+//
+// docs/fft.md predicted exactly this while measuring VkFFT on the same
+// device, and recorded one unexplained failure of the channelizer's own
+// transform there in 197 runs. This is that, reproduced on demand.
+//
+// So the probe below is the project's own transform, run repeatedly against
+// itself at the largest size any case here dispatches. A case that needs
+// bit-exactness skips when the probe fails, which says the device could not
+// referee rather than that the kernel is wrong, and it starts running again
+// by itself on a driver where shared memory works.
+[[nodiscard]] bool shared_memory_is_reproducible();
+
+// What the probe measured, for the skip message. Empty until it has run.
+[[nodiscard]] const std::string& shared_memory_report();
+
 }  // namespace revenant::test
 
 // Opens every case that needs a device. Skips when there is none, unless the
@@ -63,4 +93,19 @@ namespace revenant::test {
             }                                                                           \
             SKIP("no Vulkan device: " << ::revenant::test::gpu_unavailable_reason());   \
         }                                                                               \
+    } while (false)
+
+// Opens every case that demands bit-exactness from a kernel holding its
+// working set in workgroup shared memory. Skips, with the measurement, on a
+// device that cannot reproduce one. Not gated on REVENANT_REQUIRE_GPU: the
+// device is present and working, it is the shared memory that is not
+// reproducible, and a hard failure there would report a driver defect as a
+// kernel regression on every run.
+#define REVENANT_NEEDS_REPRODUCIBLE_SHARED_MEMORY()                                  \
+    do {                                                                             \
+        if (!::revenant::test::shared_memory_is_reproducible()) {                    \
+            SKIP("this device does not reproduce a workgroup-shared-memory "         \
+                 "transform, so it cannot referee a bit-exact claim about one: "     \
+                 << ::revenant::test::shared_memory_report());                       \
+        }                                                                            \
     } while (false)

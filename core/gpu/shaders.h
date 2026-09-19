@@ -29,6 +29,11 @@ namespace revenant::gpu::shaders {
 // into the write. Twin of revenant::dsp::reference_pfb_fft.
 [[nodiscard]] std::span<const std::uint32_t> pfb_fft();
 
+// The full-span spectrum: a second-stage transform of each coarse channel's
+// time series, central half kept, power in decibels out. Twin of
+// revenant::dsp::reference_spectrum.
+[[nodiscard]] std::span<const std::uint32_t> spectrum();
+
 // Native source formats widened into the ring's canonical Complex32.
 //
 // These run as part of the upload rather than on the host. An RTL-SDR delivers
