@@ -87,7 +87,58 @@ is either a second signal or the operator turning the dial, and in both cases
 the correct response is to stop tracking rather than to chase. Manual tuning
 always wins; AFT resumes from wherever it was left.
 
-Whether AFT locks to a carrier peak or to the centroid of the passband energy
-depends on the mode, and is not settled here. A carrier is the right target
-for AM and for CW; a suppressed-carrier mode has no peak to find and wants the
-centroid or nothing at all.
+### What AFT should actually aim at
+
+Not a peak, and not a centroid. Both are statistics of the instantaneous
+spectrum, and for most modes neither one sits where the receiver wants to be.
+
+RTTY is the clear case. It is two tones, mark and space, typically 170 Hz
+apart, and which one is radiating depends on the character being sent. A peak
+tracker follows whichever is loudest, so it sits on mark through an idle and
+then jumps back and forth through traffic. A centroid tracker lands between
+them and wobbles with the mark-to-space ratio, which is a property of the text
+rather than of the tuning. The place the demodulator wants is the midpoint,
+and the midpoint is not where the energy is. It is derived: either tone plus
+or minus half the shift.
+
+Single sideband is worse and quieter about it. There is no carrier at all, and
+the energy centroid sits roughly half a bandwidth from the suppressed carrier
+the receiver is trying to hold, wandering with whatever the speaker is saying.
+RTTY dances in place; SSB walks off.
+
+So the target is the LOGICAL centre of the signal, and that is a property of
+the modulation rather than of the frame. Each mode carries its own rule for
+deriving it:
+
+| Mode | Where the logical centre is |
+| --- | --- |
+| AM | The carrier. A peak is correct here, which is why peak-tracking looks fine until it is tried on anything else |
+| CW | The carrier, but keyed, so track only through key-down and hold through the gaps |
+| NFM, WFM | The centre of the deviation swing, which is a long average rather than any one frame |
+| USB, LSB | The suppressed carrier, at the edge of the passband and not in it. Derived from the passband edge, never from the energy |
+| RTTY and FSK | The midpoint of the tones, derived from one tone and the known shift |
+| PSK | The centre, which for these is where the energy already is |
+
+## Identification, and why AFT does not have to wait for it
+
+The rule above needs to know what the signal is. Most of the time it already
+does, because the operator chose a demodulator: a receiver in RTTY mode with a
+170 Hz shift configured has been told what it is listening to, and the centre
+follows from `VrxParams` with no classifier anywhere. The attended case is
+solved at M2.
+
+Classification is for the unattended case: a scan, a wideband survey, a
+receiver parked on something the operator has not named. `core/detect/` is
+reserved for it and nothing is written there yet.
+
+The useful property, and the reason this is not a dependency to be afraid of,
+is that **a classification result is stable**. A transmission does not change
+modulation halfway through. So the loop does not need realtime identification,
+only eventual identification that sticks: spend a second or two deciding it is
+RTTY and then track correctly for as long as the signal lasts. Classification
+latency does not bound AFT quality, which decouples a hard problem from a loop
+that has to run smoothly.
+
+What AFT does need is a defined answer for "not identified yet, and nobody
+told me". That answer is to hold still. An AFT that guesses a centre rule from
+an unidentified signal is the dancing behaviour with extra steps.
