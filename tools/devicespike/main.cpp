@@ -215,8 +215,9 @@ int main() {
     libusb_exit(context);
 
     std::println("");
-    std::println("The libusb path to this device works. Tuner register access is M1 work and");
-    std::println("waits on the RTL2832U and R820T2 datasheets, so that every register write can");
-    std::println("cite the document it came from. See docs/clean-room.md.");
+    std::println("The libusb path to this device works, so a dongle that revenant-cli cannot");
+    std::println("open has a fault above this layer rather than below it. Tuning and sample");
+    std::println("delivery go through librtlsdr; the datasheets turned out not to carry the");
+    std::println("IQ mode. See docs/rtlsdr-provenance.md and docs/clean-room.md.");
     return 0;
 }

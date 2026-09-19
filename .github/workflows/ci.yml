@@ -100,10 +100,28 @@ jobs:
           # file is a fork nobody maintains, with a provenance that has to be
           # reconstructed from memory the first time anyone asks.
           #
-          # So the pattern is the licence GRANT a copied source file carries in
-          # its header, not the name of the licence. Naming a licence in a
-          # comment is now ordinary and correct: a backend that links librtlsdr
-          # should say so where somebody reading it will see it.
+          # The first attempt at this matched the licence GRANT a copied file
+          # carries in its header. That was wrong twice over, and both were
+          # caught by review rather than by anybody hitting them.
+          #
+          # It rejected Revenant's own files. "This program is free software"
+          # is the opening line of the notice that LICENSE itself, under "How
+          # to Apply These Terms to Your New Programs", instructs authors to
+          # put at the head of every source file. A guard that fails the build
+          # for following the project's own licence is worse than no guard: it
+          # teaches people that the check is noise.
+          #
+          # And it missed the crudest paste there is. A file lifted from a
+          # kernel tree carries "SPDX-License-Identifier: GPL-2.0" and no
+          # grant paragraph at all, so the grant pattern found nothing while
+          # the licence name the previous pattern looked for was sitting right
+          # there.
+          #
+          # So the signal is not the licence text. It is WHOSE COPYRIGHT the
+          # file carries. A pasted file arrives with its author's copyright
+          # line, and removing that line is deliberate laundering rather than
+          # the crude case this backstop is for. Revenant's own files carry
+          # either Locke Werks or nothing.
           dirs=""
           for dir in core tools ui; do
             if [ -d "$dir" ]; then dirs="$dirs $dir"; fi
@@ -112,10 +130,22 @@ jobs:
             echo "none of core/, tools/ or ui/ exist; the checkout is wrong"
             exit 1
           fi
-          if grep -rniE 'This (program|library|file) is free software|under the terms of the GNU|Free Software Foundation, Inc\.|redistribute it and/or modify' $dirs; then
-            echo "a copyleft licence grant was found under core/, tools/ or ui/"
-            echo "that is the header of a copied source file. Link the library"
-            echo "through vcpkg and record it in docs/clean-room.md instead."
+
+          if grep -rniE 'copyright' $dirs | grep -viE 'Locke Werks'; then
+            echo
+            echo "a source file carries somebody else's copyright line."
+            echo "Link the library through vcpkg and record it in"
+            echo "docs/clean-room.md rather than copying it into this tree."
+            exit 1
+          fi
+
+          # Any SPDX identifier that is not this project's own is either a
+          # pasted file or a file whose licence disagrees with LICENSE. Both
+          # are worth stopping for.
+          if grep -rniE 'SPDX-License-Identifier' $dirs | grep -viE 'GPL-3\.0-or-later'; then
+            echo
+            echo "a source file declares a licence that is not this project's."
+            echo "See docs/clean-room.md."
             exit 1
           fi
 
