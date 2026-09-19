@@ -9,6 +9,7 @@
 #include "shaders/pfb_branch_comp.h"
 #include "shaders/pfb_fft_comp.h"
 #include "shaders/spectrum_comp.h"
+#include "shaders/spectrum_levels_comp.h"
 #include "shaders/convert_cu8_cf32_comp.h"
 #include "shaders/convert_cs8_cf32_comp.h"
 #include "shaders/convert_cs16_cf32_comp.h"
@@ -35,6 +36,11 @@ std::span<const std::uint32_t> pfb_fft() {
 
 std::span<const std::uint32_t> spectrum() {
     return std::span<const std::uint32_t>(spectrum_comp_spv, std::size(spectrum_comp_spv));
+}
+
+std::span<const std::uint32_t> spectrum_levels() {
+    return std::span<const std::uint32_t>(spectrum_levels_comp_spv,
+                                          std::size(spectrum_levels_comp_spv));
 }
 
 std::span<const std::uint32_t> convert_cu8_cf32() {

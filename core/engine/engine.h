@@ -53,6 +53,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -118,6 +119,22 @@ struct EngineConfig {
     // this device's shared memory holds, and EngineInfo::spectrum reports
     // what was settled on.
     std::uint32_t spectrum_transform = 0;
+
+    // Holds one or both ends of the spectrum's colour map still, in dBFS.
+    //
+    // Empty is automatic, which docs/ui-spectrum.md makes the default because
+    // it is right almost always. The exception it names is comparing two
+    // captures, where a scale that moves is a scale that lies about which
+    // signal was stronger, and that is what these are for.
+    //
+    // They sit on the config rather than behind a setter because that is
+    // where the rest of the spectrum stage's shape sits, and because a pin
+    // taken for a comparison is decided before the run rather than during it.
+    // A display that wants to pin interactively has everything it needs on
+    // the frame already: SpectrumFrame carries the raw percentiles beside the
+    // smoothed ends.
+    std::optional<float> spectrum_floor_db;
+    std::optional<float> spectrum_ceiling_db;
 };
 
 // The frequency axis of a spectrum frame, and how wide one is.
@@ -242,6 +259,40 @@ struct SpectrumFrame {
     // it skipped a row, rather than drawing a gap as though the band went
     // quiet.
     std::uint64_t sequence = 0;
+
+    // The colour map's two ends for this frame, in the same dBFS as power_db.
+    //
+    // A SECOND DELIBERATE ADDITION TO THIS FILE, AND WHY IT IS HERE RATHER
+    // THAN IN EACH CONSUMER
+    //
+    // docs/ui-spectrum.md, "Auto-scaling, both ends": the floor and the
+    // ceiling both track the signal over about thirty seconds, from
+    // percentiles rather than extremes, expanding in a frame or two and
+    // contracting over the thirty, and measured on the device. Four numbers
+    // is what that costs on the wire.
+    //
+    // They are on the frame because otherwise every consumer computes them,
+    // and then the waterfall, the detector's threshold and a screenshot's
+    // legend disagree about where the noise floor is while all three are
+    // looking at the same frame. That disagreement is invisible: each one is
+    // internally consistent and nothing crosses to compare them.
+    //
+    // The two that actually come out of the device are the percentiles below.
+    // These two are the smoothed ends, carried alongside rather than instead,
+    // because a consumer with its own time constant, a detector that wants
+    // this frame's noise floor and not a thirty-second average among them,
+    // needs the measurement rather than the display's version of it.
+    float floor_db = 0.0F;
+    float ceiling_db = 0.0F;
+
+    // What the device measured of THIS frame, before any smoothing: the low
+    // and high percentiles named in core/dsp/spectrum_levels_reference.h.
+    //
+    // These are the honest instantaneous figure. They move several decibels
+    // frame to frame even on a static band, which is why nothing draws
+    // against them directly.
+    float percentile_low_db = 0.0F;
+    float percentile_high_db = 0.0F;
 };
 
 using SpectrumSink = std::function<Status(const SpectrumFrame&)>;

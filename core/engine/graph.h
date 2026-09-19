@@ -51,6 +51,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -256,6 +257,12 @@ struct GraphConfig {
     // last N blocks of every channel, so the ring has to hold that window
     // plus everything the frames in flight are writing above it.
     std::uint32_t spectrum_transform = 0;
+
+    // Holds one or both ends of the colour map still. See
+    // EngineConfig::spectrum_floor_db, which is where these come from and
+    // where the reasoning is.
+    std::optional<float> spectrum_floor_db;
+    std::optional<float> spectrum_ceiling_db;
 };
 
 // What the graph settled on, which the caller needs to see rather than infer.
@@ -268,6 +275,7 @@ struct GraphGeometry {
     std::uint32_t local_size_x = 0;
     std::uint32_t fft_local_size_x = 0;
     std::uint32_t spectrum_local_size_x = 0;
+    std::uint32_t spectrum_levels_local_size_x = 0;
 
     // Empty when GraphConfig::spectrum_transform was zero.
     SpectrumGeometry spectrum{};

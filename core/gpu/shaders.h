@@ -34,6 +34,11 @@ namespace revenant::gpu::shaders {
 // revenant::dsp::reference_spectrum.
 [[nodiscard]] std::span<const std::uint32_t> spectrum();
 
+// A low and a high percentile of a spectrum frame, by histogram, so the
+// display's colour map can follow the signal without the frame being scanned
+// on the host. Twin of revenant::dsp::reference_spectrum_levels.
+[[nodiscard]] std::span<const std::uint32_t> spectrum_levels();
+
 // Native source formats widened into the ring's canonical Complex32.
 //
 // These run as part of the upload rather than on the host. An RTL-SDR delivers

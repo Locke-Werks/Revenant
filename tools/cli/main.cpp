@@ -51,18 +51,23 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <print>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
 
+#include "core/dsp/spectrum_levels_reference.h"
+#include "core/detect/detector.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
 #include "core/engine/audio_egress.h"
 #include "core/engine/audio_wasapi.h"
 #include "core/engine/engine.h"
+#include "core/engine/spectrum_scale.h"
 #include "core/engine/spsc_ring.h"
 #include "core/engine/vrx.h"
 #include "core/engine/wav_writer.h"
@@ -78,6 +83,7 @@ using revenant::Status;
 using revenant::fail;
 using revenant::with_context;
 
+namespace detect = revenant::detect;
 namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
 namespace source = revenant::source;
@@ -314,6 +320,23 @@ struct Options {
     bool spectrum = false;
     std::uint32_t spectrum_points = 0;
 
+    // Either end of the colour map, held still in dBFS. Empty is automatic,
+    // which is the default docs/ui-spectrum.md wants.
+    std::optional<float> spectrum_floor_db;
+    std::optional<float> spectrum_ceiling_db;
+
+    // Run the wideband detector and print its track list. Needs the spectrum
+    // stage, and turns it on by itself if --spectrum did not.
+    //
+    // Both thresholds are the operator's, per docs/detection.md, which is
+    // why they are flags rather than constants. The detection one is in dB
+    // of SNR in the 2500 Hz reference bandwidth, which is the only unit a
+    // single number can mean the same thing in across a span carrying a
+    // 50 Hz carrier and a 200 kHz broadcast.
+    bool detect = false;
+    double detect_threshold_db = 6.0;
+    double detect_confidence = 0.5;
+
     bool list = false;
     bool list_audio = false;
     bool quiet = false;
@@ -358,6 +381,29 @@ void print_usage()
         "                      status interval, peak held in between. n is points per\n"
         "                      coarse channel, a power of two, default 2048; the frame\n"
         "                      is then channels*n/2 bins wide. Needs no --vrx.\n"
+        "  --spectrum-floor <dbfs>\n"
+        "  --spectrum-ceiling <dbfs>\n"
+        "                      Hold one or both ends of the colour map still, in dBFS.\n"
+        "                      Both ends track the signal automatically otherwise, which\n"
+        "                      is right almost always; pin them when two captures have\n"
+        "                      to be compared, because a scale that moves is a scale\n"
+        "                      that lies about which signal was stronger. The run's own\n"
+        "                      summary prints the automatic ends, which is where the\n"
+        "                      numbers to pin come from.\n"
+        "  --detect            Run the wideband detector and print the live track list:\n"
+        "                      centre, bandwidth, SNR, confidence and age, one line per\n"
+        "                      track. Turns the spectrum stage on by itself, so it needs\n"
+        "                      neither --vrx nor --spectrum.\n"
+        "  --detect-threshold <db>\n"
+        "                      Detection threshold, default 6. In dB of SNR in the\n"
+        "                      2500 Hz reference bandwidth, which is what makes one\n"
+        "                      number mean the same thing for a 50 Hz carrier and a\n"
+        "                      200 kHz broadcast. Lower finds more and invents more;\n"
+        "                      where it belongs depends on the band and the antenna.\n"
+        "  --detect-confidence <x>\n"
+        "                      Confidence a track needs before it is listed, 0 to 1,\n"
+        "                      default 0.5. A track earns confidence by being detected\n"
+        "                      repeatedly and loses it while it is held through a gap.\n"
         "\n"
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
@@ -461,6 +507,64 @@ void print_usage()
                         dsp::kMaxSpectrumTransform));
                 }
                 options.spectrum_points = static_cast<std::uint32_t>(*points);
+            }
+            continue;
+        }
+
+        if (arg == "--detect") {
+            options.detect = true;
+            continue;
+        }
+
+        if (arg == "--detect-threshold" || arg == "--detect-confidence") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_real(*text, arg);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            if (arg == "--detect-threshold") {
+                if (!std::isfinite(*number) || *number < -60.0 || *number > 120.0) {
+                    return fail("--detect-threshold takes a level between -60 and 120 dB");
+                }
+                options.detect_threshold_db = *number;
+            } else {
+                if (!std::isfinite(*number) || *number < 0.0 || *number > 1.0) {
+                    return fail("--detect-confidence takes a value between 0 and 1");
+                }
+                options.detect_confidence = *number;
+            }
+            options.detect = true;
+            continue;
+        }
+
+        if (arg == "--spectrum-floor" || arg == "--spectrum-ceiling") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_real(*text, arg);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            if (!std::isfinite(*number)) {
+                return fail(std::format("{} takes a level in dBFS", arg));
+            }
+            // Below the spectrum stage's own silence floor there is nothing
+            // to see, and above full scale by more than the levels
+            // histogram's range there is nothing to measure.
+            if (*number < static_cast<double>(dsp::kSpectrumLevelsRangeFloorDb) ||
+                *number > static_cast<double>(dsp::kSpectrumLevelsRangeCeilingDb)) {
+                return fail(std::format("{} takes a level between {} and {} dBFS", arg,
+                                        dsp::kSpectrumLevelsRangeFloorDb,
+                                        dsp::kSpectrumLevelsRangeCeilingDb));
+            }
+            if (arg == "--spectrum-floor") {
+                options.spectrum_floor_db = static_cast<float>(*number);
+            } else {
+                options.spectrum_ceiling_db = static_cast<float>(*number);
             }
             continue;
         }
@@ -787,13 +891,51 @@ private:
 // for a tenth of a second still paints. A waterfall that sampled one frame in
 // twenty would miss most of what a detector is for.
 //
-// The scale is per row: the tenth percentile of the row sets the floor and
-// the ninety-ninth sets the top, with a floor under the span so a dead band
-// does not amplify its own noise into a picture. That is deliberately not what
-// docs/ui-spectrum.md asks for, which is a percentile tracked over about
-// thirty seconds with a fast attack and a slow decay. Per row is enough to
-// show that the stage works and is honest about being a demonstration: two
-// rows of this display cannot be compared for absolute level.
+// The scale is the engine's. SpectrumFrame::floor_db and ceiling_db are the
+// two ends docs/ui-spectrum.md specifies: percentiles measured on the device,
+// smoothed with a fast attack and a thirty second decay, identical for every
+// consumer of the frame. This display does not compute a scale of its own and
+// two of its rows can be compared for absolute level, which the per-row
+// version it replaces could not.
+//
+// WHAT IT DOES ADD, AND WHY IT IS NOT A SECOND SCALE
+//
+// One correction, to the floor only, for this display's own reduction.
+//
+// A column here covers hundreds of bins and is drawn as the largest of them,
+// because a narrow carrier in one bin of seven hundred is invisible in a mean
+// and is the whole point of looking. The largest of K samples is not
+// distributed like one sample. On an empty band the bin powers are
+// exponential, so the expected largest of K is the K-th harmonic number times
+// the mean, while the frame's fifth percentile sits at -ln(0.95) times it.
+// The gap between the two is 10*log10(H_K / -ln(1-p)), which at 720 bins per
+// column is 21.4 dB.
+//
+// Ignore it and every column of an empty band draws above the ceiling and the
+// display is a solid wall. It is a property of the reduction rather than of
+// the signal, which is why it is here and not in the engine: a display
+// drawing one bin per pixel has a different K and a GUI zoomed into a hundred
+// kilohertz has another.
+//
+// It moves the floor and not the ceiling. A column containing a real signal
+// draws that signal's own bin, and a maximum over K does not inflate a value
+// that was already the largest, so the top of the map stays where the device
+// put it.
+//
+// A pinned end takes no correction and is never moved, including by the
+// minimum-span rule. A pin is an instruction in dBFS about where the map
+// should end, not a measured percentile, so it is obeyed as written. Pin a
+// ceiling below where the corrected floor lands and the floor is what gives
+// way, because the alternative is drawing against a top the operator did not
+// ask for while the header line says otherwise.
+//
+// What it assumes, stated because it is an assumption: that an empty column
+// is noise. A frame in which every bin is literally identical, which is a
+// silent source rather than a quiet band, has a column maximum equal to the
+// bin value and the correction over-reports by the whole 21 dB, so the
+// display draws nothing. Drawing nothing for a silent source is the right
+// answer arrived at by the wrong route, and it is the only case where the
+// two diverge: a disconnected antenna is thermal noise and the model holds.
 class SpectrumView {
 public:
     // Darkest to brightest. ASCII only, because this goes to a Windows
@@ -804,8 +946,15 @@ public:
     // have to match.
     static constexpr std::size_t kPrefix = 8;
 
+    // A published row is the two ends of the colour map followed by one value
+    // per column. They travel through the same ring as the row rather than
+    // through a pair of atomics, so a row is drawn against the scale that
+    // arrived with it.
+    static constexpr std::size_t kRowHeader = 2;
+
     [[nodiscard]] static Expected<std::unique_ptr<SpectrumView>> create(
-        const engine::SpectrumGeometry& geometry, Hertz source_center, std::size_t columns)
+        const engine::SpectrumGeometry& geometry, Hertz source_center, std::size_t columns,
+        bool floor_pinned, bool ceiling_pinned)
     {
         if (!geometry.enabled() || columns == 0) {
             return fail("the waterfall needs a spectrum geometry and at least one column");
@@ -816,10 +965,12 @@ public:
             return fail("could not allocate the waterfall");
         }
 
+        const std::size_t stride = columns + kRowHeader;
+
         // Eight rows of headroom. The drawing thread polls every ten
         // milliseconds and frames arrive every twenty-seven at 2.4 MS/s, so
         // this only fills if the terminal itself stalls.
-        auto ring = engine::SpscRing<float>::create(columns * 8);
+        auto ring = engine::SpscRing<float>::create(stride * 8);
         if (!ring) {
             return std::unexpected(with_context(ring.error(), "the waterfall's frame ring"));
         }
@@ -827,11 +978,18 @@ public:
         view->geometry_ = geometry;
         view->source_center_ = source_center;
         view->columns_ = columns;
+        view->stride_ = stride;
+        view->floor_pinned_ = floor_pinned;
+        view->ceiling_pinned_ = ceiling_pinned;
         view->ring_ = std::move(*ring);
-        view->produced_.assign(columns, dsp::kSpectrumFloorDb);
-        view->consumed_.assign(columns, dsp::kSpectrumFloorDb);
+        view->produced_.assign(stride, dsp::kSpectrumFloorDb);
+        view->consumed_.assign(stride, dsp::kSpectrumFloorDb);
         view->held_.assign(columns, dsp::kSpectrumFloorDb);
-        view->sorted_.assign(columns, dsp::kSpectrumFloorDb);
+
+        const std::size_t bins_per_column =
+            std::max<std::size_t>(1, static_cast<std::size_t>(geometry.bins) / columns);
+        view->reduction_headroom_db_ =
+            floor_pinned ? 0.0F : peak_reduction_headroom_db(bins_per_column);
         return view;
     }
 
@@ -844,9 +1002,13 @@ public:
             return {};
         }
 
+        produced_[0] = frame.floor_db;
+        produced_[1] = frame.ceiling_db;
+
         // Peak within a column rather than a mean. A narrow carrier occupying
-        // one bin of the eighty a column covers is invisible in the mean and
-        // is the whole point of looking.
+        // one bin of the seven hundred a column covers is invisible in the
+        // mean and is the whole point of looking. The header comment says
+        // what that costs the floor and how it is paid back.
         for (std::size_t c = 0; c < columns_; ++c) {
             const std::size_t begin = bins * c / columns_;
             std::size_t end = bins * (c + 1) / columns_;
@@ -857,7 +1019,7 @@ public:
             for (std::size_t i = begin + 1; i < end && i < bins; ++i) {
                 peak = std::max(peak, frame.power_db[i]);
             }
-            produced_[c] = peak;
+            produced_[kRowHeader + c] = peak;
         }
 
         frames_.fetch_add(1, std::memory_order_relaxed);
@@ -865,7 +1027,7 @@ public:
         // Only the writer shrinks the free count, so a check here is still
         // true at the write below and the row goes in whole. A torn row would
         // shift every later row by a column.
-        if (ring_->writable() < columns_) {
+        if (ring_->writable() < stride_) {
             dropped_.fetch_add(1, std::memory_order_relaxed);
             return {};
         }
@@ -878,9 +1040,14 @@ public:
     [[nodiscard]] bool collect()
     {
         bool any = false;
-        while (ring_->read(std::span<float>(consumed_)) == columns_) {
+        while (ring_->read(std::span<float>(consumed_)) == stride_) {
+            // The latest frame's ends win rather than the oldest's. Several
+            // frames are peak held into one row and the scale moved across
+            // them, so the newest is the one the row is closest to.
+            held_floor_db_ = consumed_[0];
+            held_ceiling_db_ = consumed_[1];
             for (std::size_t c = 0; c < columns_; ++c) {
-                held_[c] = std::max(held_[c], consumed_[c]);
+                held_[c] = std::max(held_[c], consumed_[kRowHeader + c]);
             }
             any = true;
         }
@@ -890,11 +1057,7 @@ public:
     // The drawing thread. Renders the held row and clears it.
     [[nodiscard]] std::string take_row(double seconds)
     {
-        sorted_ = held_;
-        std::sort(sorted_.begin(), sorted_.end());
-
-        const float floor = sorted_[columns_ / 10];
-        const float top = std::max(sorted_[(columns_ * 99) / 100], floor + 12.0F);
+        const auto [floor, top] = map_ends();
         const float span = top - floor;
 
         std::string row = std::format("{:6.2f}s ", seconds);
@@ -910,6 +1073,40 @@ public:
         rows_.fetch_add(1, std::memory_order_relaxed);
         return row;
     }
+
+    // The two ends the next row will be drawn against, for the status line.
+    // The same arithmetic take_row uses, so what is printed is what is drawn.
+    [[nodiscard]] std::pair<float, float> map_ends() const
+    {
+        float floor = held_floor_db_ + reduction_headroom_db_;
+        float top = held_ceiling_db_;
+
+        // The engine already holds its own two ends apart, and the correction
+        // above has just eaten into that gap, so the display re-applies the
+        // same bound to what it actually draws against.
+        //
+        // It takes the span out of whichever end is not pinned. Moving a
+        // pinned end is the one thing this must never do: a pin is the
+        // operator saying where the map ends, and the feature it exists for
+        // is comparing two captures, which needs the same map both times.
+        // Restoring the span by raising a pinned ceiling put the drawn top
+        // as much as 21.4 dB above the requested one while the header line
+        // went on claiming the pin had been obeyed.
+        if (top - floor < engine::kSpectrumMinimumSpanDb) {
+            if (ceiling_pinned_ && !floor_pinned_) {
+                // The operator has asked for a ceiling at or below where the
+                // corrected floor lands, so the floor is what gives way.
+                floor = top - engine::kSpectrumMinimumSpanDb;
+            } else if (!ceiling_pinned_) {
+                top = floor + engine::kSpectrumMinimumSpanDb;
+            }
+            // Both pinned: the operator has said exactly what they want,
+            // including a narrow span, and gets it.
+        }
+        return {floor, top};
+    }
+
+    [[nodiscard]] float reduction_headroom_db() const { return reduction_headroom_db_; }
 
     // Where the ticks go and what they say. Two lines, aligned with a row.
     [[nodiscard]] std::pair<std::string, std::string> axis() const
@@ -958,6 +1155,33 @@ public:
 private:
     SpectrumView() = default;
 
+    // How far above the frame's low percentile a noise-only column draws,
+    // when the column is the largest of `bins` bins.
+    //
+    // On an empty band a bin's power is the squared magnitude of complex
+    // Gaussian noise, which is exponential. The expected largest of K
+    // independent exponentials is the K-th harmonic number times their mean,
+    // and the p-th percentile of one of them is -ln(1-p) times it, so the gap
+    // between the two is the ratio of those, in decibels.
+    //
+    // H_K from the Euler expansion, which is better than a ten-thousandth
+    // from K = 2 upwards. K = 1 is the exact answer rather than the limit,
+    // and it is not a degenerate case: a display with one bin per column
+    // still draws a value a mean above the fifth percentile.
+    [[nodiscard]] static float peak_reduction_headroom_db(std::size_t bins)
+    {
+        constexpr double kEulerMascheroni = 0.577215664901532861;
+        const double count = static_cast<double>(bins);
+        const double harmonic =
+            bins <= 1 ? 1.0 : std::log(count) + kEulerMascheroni + 0.5 / count;
+
+        const double fraction =
+            static_cast<double>(dsp::kSpectrumLowPermille) / 1000.0;
+        const double percentile_of_mean = -std::log(1.0 - fraction);
+
+        return static_cast<float>(10.0 * std::log10(harmonic / percentile_of_mean));
+    }
+
     // Absolute frequency at the centre of a display column.
     [[nodiscard]] double frequency_of(std::size_t column) const
     {
@@ -977,18 +1201,238 @@ private:
     engine::SpectrumGeometry geometry_{};
     Hertz source_center_ = 0;
     std::size_t columns_ = 0;
+    std::size_t stride_ = 0;
+    bool floor_pinned_ = false;
+    bool ceiling_pinned_ = false;
+    float reduction_headroom_db_ = 0.0F;
 
     std::unique_ptr<engine::SpscRing<float>> ring_;
 
     std::vector<float> produced_;  // completion thread only
     std::vector<float> consumed_;  // drawing thread only
     std::vector<float> held_;      // drawing thread only
-    std::vector<float> sorted_;    // drawing thread only
+
+    // Drawing thread only. The last published frame's ends, which is what the
+    // next row is drawn against.
+    float held_floor_db_ = dsp::kSpectrumFloorDb;
+    float held_ceiling_db_ = dsp::kSpectrumFloorDb + engine::kSpectrumMinimumSpanDb;
 
     std::atomic<std::uint64_t> frames_{0};
     std::atomic<std::uint64_t> dropped_{0};
     std::atomic<std::uint64_t> rows_{0};
 };
+
+// The wideband detector's live track list.
+//
+// Shaped like SpectrumView above and for the same reason. The detector runs
+// where the frame arrives, on the engine's completion thread, and the table
+// is printed by the thread that owns the terminal. A snapshot crosses between
+// them through a ring rather than a lock, because the alternative is the
+// display's scheduling deciding how long a spectrum callback takes.
+//
+// Snapshots are fixed-size blocks so a torn read is not expressible: a block
+// is written whole or not at all, and the live count travels inside it, since
+// track id zero is never issued.
+//
+// It also times the detector, which is the one number that decides whether
+// this belongs on the host at all. core/detect/detector.h budgets it against
+// 65536 bins at 305 frames a second; the summary prints what it actually
+// cost, so the budget is checked rather than believed.
+class DetectView {
+public:
+    static constexpr std::size_t kRows = 64;
+
+    // No default member initialisers: SpscRing zero-fills its storage rather
+    // than running constructors, so its element type has to be trivially
+    // default constructible.
+    struct Row {
+        std::uint64_t id;
+        double center_hz;
+        double bandwidth_hz;
+        double snr_db;
+        double confidence;
+        double age_seconds;
+        double silent_seconds;
+        std::uint32_t state;
+        std::uint32_t channel;
+    };
+
+    [[nodiscard]] static Expected<std::unique_ptr<DetectView>> create(
+        const detect::DetectorConfig& config, const engine::SpectrumGeometry& geometry)
+    {
+        auto detector = detect::Detector::create(config, geometry);
+        if (!detector) {
+            return std::unexpected(with_context(detector.error(), "creating the detector"));
+        }
+
+        std::unique_ptr<DetectView> view(new (std::nothrow) DetectView());
+        if (view == nullptr) {
+            return fail("could not allocate the track list");
+        }
+
+        auto ring = engine::SpscRing<Row>::create(kRows * 8);
+        if (!ring) {
+            return std::unexpected(with_context(ring.error(), "the track list's snapshot ring"));
+        }
+
+        view->detector_ = std::move(*detector);
+        view->ring_ = std::move(*ring);
+        view->rate_ = config.source_rate;
+        view->produced_.assign(kRows, Row{});
+        view->consumed_.assign(kRows, Row{});
+        view->held_.assign(kRows, Row{});
+        return view;
+    }
+
+    // The engine's completion thread.
+    [[nodiscard]] Status publish(const engine::SpectrumFrame& frame)
+    {
+        const auto began = std::chrono::steady_clock::now();
+        Status fed = detector_->consume(frame);
+        const auto cost = std::chrono::steady_clock::now() - began;
+
+        consume_ns_.fetch_add(
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(cost).count()),
+            std::memory_order_relaxed);
+        frames_.fetch_add(1, std::memory_order_relaxed);
+        if (!fed) {
+            return fed;
+        }
+
+        // A frame that only fed the average has nothing new to say. Most
+        // frames are that: the decision runs at a tenth of the frame rate.
+        const dsp::SampleIndex decided = detector_->last_decision();
+        if (decided == published_) {
+            return {};
+        }
+        published_ = decided;
+        decisions_.fetch_add(1, std::memory_order_relaxed);
+
+        const double confidence_bar = detector_->config().confidence_threshold;
+        std::size_t used = 0;
+        for (const detect::Track& track : detector_->tracks()) {
+            if (used == kRows) {
+                break;
+            }
+            if (track.confidence < confidence_bar) {
+                continue;
+            }
+            produced_[used] = Row{
+                .id = track.id,
+                .center_hz = static_cast<double>(track.center),
+                .bandwidth_hz = static_cast<double>(track.bandwidth),
+                .snr_db = track.snr_2500_db,
+                .confidence = track.confidence,
+                .age_seconds = seconds_of(track.age_samples()),
+                .silent_seconds = seconds_of(track.silent_samples()),
+                .state = static_cast<std::uint32_t>(track.state),
+                .channel = track.channel_valid ? track.channel : 0xFFFF'FFFFU,
+            };
+            ++used;
+        }
+        for (std::size_t i = used; i < kRows; ++i) {
+            produced_[i].id = 0;
+        }
+
+        if (ring_->writable() < kRows) {
+            dropped_.fetch_add(1, std::memory_order_relaxed);
+            return {};
+        }
+        static_cast<void>(ring_->write(std::span<const Row>(produced_)));
+        return {};
+    }
+
+    // The drawing thread. Takes the newest snapshot and discards any behind
+    // it: a table is a state, not a history, so an older one is of no use.
+    [[nodiscard]] bool collect()
+    {
+        bool any = false;
+        while (ring_->read(std::span<Row>(consumed_)) == kRows) {
+            held_ = consumed_;
+            any = true;
+        }
+        return any;
+    }
+
+    [[nodiscard]] std::span<const Row> rows() const
+    {
+        std::size_t count = 0;
+        while (count < kRows && held_[count].id != 0) {
+            ++count;
+        }
+        return std::span<const Row>(held_.data(), count);
+    }
+
+    [[nodiscard]] const detect::DetectorStats& stats() const { return detector_->stats(); }
+
+    [[nodiscard]] std::uint64_t frames() const
+    {
+        return frames_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t decisions() const
+    {
+        return decisions_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t dropped() const
+    {
+        return dropped_.load(std::memory_order_relaxed);
+    }
+
+    // Mean wall time one frame cost the detector, in microseconds.
+    [[nodiscard]] double microseconds_per_frame() const
+    {
+        const std::uint64_t seen = frames();
+        if (seen == 0) {
+            return 0.0;
+        }
+        return static_cast<double>(consume_ns_.load(std::memory_order_relaxed)) /
+               (static_cast<double>(seen) * 1000.0);
+    }
+
+private:
+    DetectView() = default;
+
+    [[nodiscard]] double seconds_of(dsp::SampleIndex samples) const
+    {
+        return rate_ > 0 ? static_cast<double>(samples) / static_cast<double>(rate_) : 0.0;
+    }
+
+    std::optional<detect::Detector> detector_;
+    std::unique_ptr<engine::SpscRing<Row>> ring_;
+    SampleRate rate_ = 0;
+
+    std::vector<Row> produced_;  // completion thread only
+    std::vector<Row> consumed_;  // drawing thread only
+    std::vector<Row> held_;      // drawing thread only
+
+    dsp::SampleIndex published_ = 0;  // completion thread only
+
+    std::atomic<std::uint64_t> frames_{0};
+    std::atomic<std::uint64_t> decisions_{0};
+    std::atomic<std::uint64_t> dropped_{0};
+    std::atomic<std::uint64_t> consume_ns_{0};
+};
+
+// One track, as a line. Frequencies to the hertz, because a detection an
+// operator is about to click is a frequency they may have to type somewhere
+// else.
+[[nodiscard]] std::string track_line(const DetectView::Row& row)
+{
+    std::string channel = "  -";
+    if (row.channel != 0xFFFF'FFFFU) {
+        channel = std::format("{:3}", row.channel);
+    }
+    std::string held;
+    if (row.silent_seconds > 0.0) {
+        held = std::format(" +{:.1f}s", row.silent_seconds);
+    }
+    return std::format("  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.1f}s  ch {}{}",
+                       row.id, detect::track_state_name(static_cast<detect::TrackState>(row.state)),
+                       format_hz(static_cast<Hertz>(std::llround(row.center_hz))),
+                       format_hz(static_cast<Hertz>(std::llround(row.bandwidth_hz))), row.snr_db,
+                       row.confidence, row.age_seconds, channel, held);
+}
 
 [[nodiscard]] std::string level_bar(double dbfs)
 {
@@ -1232,9 +1676,13 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
 
     // Chosen before the engine is created, because the spectrum stage is part
     // of the coarse chain and is built once when the source is opened.
-    if (options.spectrum) {
+    // --detect needs the same stage, so it turns it on rather than failing
+    // later with a message about a flag the operator did not pass.
+    if (options.spectrum || options.detect) {
         config.spectrum_transform = options.spectrum_points != 0 ? options.spectrum_points
                                                                  : dsp::kDefaultSpectrumTransform;
+        config.spectrum_floor_db = options.spectrum_floor_db;
+        config.spectrum_ceiling_db = options.spectrum_ceiling_db;
     }
 
     // A loudspeaker is the one consumer that cannot take audio faster than it
@@ -1274,7 +1722,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         const std::size_t columns =
             std::clamp(width - SpectrumView::kPrefix - 1, std::size_t{16}, std::size_t{512});
 
-        auto view = SpectrumView::create(geometry, eng.info().source_center, columns);
+        auto view = SpectrumView::create(geometry, eng.info().source_center, columns,
+                                         options.spectrum_floor_db.has_value(),
+                                         options.spectrum_ceiling_db.has_value());
         if (!view) {
             return std::unexpected(view.error());
         }
@@ -1287,6 +1737,59 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                      format_hz(waterfall->high_edge()));
         std::println("  display         {} columns, one row every {} ms, peak held between rows",
                      waterfall->columns(), options.status_ms);
+        std::println("  scale           floor {}, ceiling {}",
+                     options.spectrum_floor_db
+                         ? std::format("pinned at {:.1f} dBFS", *options.spectrum_floor_db)
+                         : std::format("automatic, {:.1f} dB above the 5th percentile for a "
+                                       "{}-bin column peak",
+                                       waterfall->reduction_headroom_db(),
+                                       geometry.bins / waterfall->columns()),
+                     options.spectrum_ceiling_db
+                         ? std::format("pinned at {:.1f} dBFS", *options.spectrum_ceiling_db)
+                         : std::string{"automatic, the 99th percentile"});
+        if (!options.spectrum_floor_db || !options.spectrum_ceiling_db) {
+            std::println("                  automatic ends expand in a frame or two and "
+                         "contract over 30 s");
+        }
+    }
+
+    // The detector, on the same frames the waterfall draws.
+    std::unique_ptr<DetectView> detector;
+    if (options.detect) {
+        const engine::SpectrumGeometry& geometry = eng.info().spectrum;
+        if (!geometry.enabled()) {
+            return fail("--detect was asked for and the engine built no spectrum stage");
+        }
+
+        detect::DetectorConfig detect_config;
+        detect_config.source_rate = eng.info().source_rate;
+        detect_config.source_center = eng.info().source_center;
+        detect_config.grid_channels = eng.info().grid.channels;
+        detect_config.detection_threshold_db = options.detect_threshold_db;
+        detect_config.confidence_threshold = options.detect_confidence;
+
+        auto view = DetectView::create(detect_config, geometry);
+        if (!view) {
+            return std::unexpected(view.error());
+        }
+        detector = std::move(*view);
+
+        std::println("");
+        std::println("detector  threshold {:.1f} dB SNR in {:.0f} Hz, confidence {:.2f}",
+                     detect_config.detection_threshold_db, detect::kReferenceBandwidthHz,
+                     detect_config.confidence_threshold);
+        std::println("  integration     {:.2f} s, deciding every {:.0f} ms, {} consecutive "
+                     "decisions to be born",
+                     detect_config.average_seconds,
+                     detect_config.decision_interval_seconds * 1000.0, detect_config.birth_hits);
+        std::println("  hold            {:.1f} s with no evidence, confidence halving every "
+                     "{:.1f} s",
+                     detect_config.bootstrap_hold_seconds,
+                     detect_config.confidence_half_life_seconds);
+        std::println("  first answer    after {:.2f} s of source time, which is one integration; "
+                     "a threshold calibrated against an average cannot be applied before there "
+                     "is one",
+                     detect_config.average_seconds);
     }
 
     std::println("");
@@ -1537,12 +2040,27 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         std::println("vrx {}     {}", i + 1, destinations);
     }
 
-    if (waterfall != nullptr) {
+    // One sink, because there is one span. When both the waterfall and the
+    // detector want the frame it fans out here rather than either of them
+    // keeping a copy: the buffer is valid for the call and both consumers
+    // finish inside it.
+    if (waterfall != nullptr || detector != nullptr) {
         SpectrumView* view = waterfall.get();
+        DetectView* detect_view = detector.get();
         if (auto wired = eng.set_spectrum_sink(
-                [view](const engine::SpectrumFrame& frame) { return view->publish(frame); });
+                [view, detect_view](const engine::SpectrumFrame& frame) -> Status {
+                    if (view != nullptr) {
+                        if (auto drawn = view->publish(frame); !drawn) {
+                            return drawn;
+                        }
+                    }
+                    if (detect_view != nullptr) {
+                        return detect_view->publish(frame);
+                    }
+                    return {};
+                });
             !wired) {
-            return std::unexpected(with_context(wired.error(), "wiring the waterfall"));
+            return std::unexpected(with_context(wired.error(), "wiring the spectrum sink"));
         }
     }
 
@@ -1589,6 +2107,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         auto last_draw = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(options.status_ms);
         bool pending_row = false;
+        bool pending_tracks = false;
 
         while (!finished.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(kPoll);
@@ -1598,6 +2117,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             // next one.
             if (waterfall != nullptr && waterfall->collect()) {
                 pending_row = true;
+            }
+            if (detector != nullptr && detector->collect()) {
+                pending_tracks = true;
             }
 
             const source::SourceStats source_stats = eng.source_stats();
@@ -1629,6 +2151,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 pending_row = false;
             }
 
+            // The track list, under the same rule: the thread holding the
+            // terminal prints it. A whole table each interval rather than a
+            // diff, because a table read at a glance is the point and a
+            // stream of "track 12 changed" is not.
+            if (pending_tracks) {
+                const std::span<const DetectView::Row> rows = detector->rows();
+                status_line.erase();
+                std::println("{:8.2f}s  {} track{} over {:.1f} dB",
+                             source_seconds, rows.size(), rows.size() == 1 ? "" : "s",
+                             options.detect_threshold_db);
+                for (const DetectView::Row& row : rows) {
+                    std::println("{}", track_line(row));
+                }
+                pending_tracks = false;
+            }
+
             if (options.quiet) {
                 continue;
             }
@@ -1638,6 +2176,14 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             std::string line = std::format(
                 "{:8.2f}s  x{:6.2f}", source_seconds,
                 wall_seconds > 0.0 ? source_seconds / wall_seconds : 0.0);
+
+            // The map's ends, printed because a moving scale is otherwise
+            // invisible: a row that darkened because the band went quiet and
+            // one that darkened because the ceiling rose look identical.
+            if (waterfall != nullptr) {
+                const auto [floor, top] = waterfall->map_ends();
+                line += std::format(" | map {:6.1f} to {:6.1f} dB", floor, top);
+            }
 
             for (std::size_t i = 0; i < receivers.size(); ++i) {
                 auto status = eng.vrx_status(receivers[i].id);
@@ -1748,8 +2294,32 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                  wall_seconds, wall_seconds > 0.0 ? source_seconds / wall_seconds : 0.0);
 
     if (waterfall != nullptr) {
+        const auto [floor, top] = waterfall->map_ends();
         std::println("spectrum  {} frames in, {} rows drawn", waterfall->frames(),
                      waterfall->rows());
+        // Where the scale ended up, which is what to hand to
+        // --spectrum-floor and --spectrum-ceiling on the next capture if the
+        // two are going to be compared.
+        std::println("  colour map      {:.1f} to {:.1f} dBFS at the end of the run", floor, top);
+    }
+
+    if (detector != nullptr) {
+        const detect::DetectorStats& detect_stats = detector->stats();
+        std::println("detector  {} frames in, {} decisions, {} tracks born, {} dropped",
+                     detector->frames(), detect_stats.decisions, detect_stats.tracks_born,
+                     detect_stats.tracks_dropped);
+        std::println("  merge and split {} merges, {} splits", detect_stats.merges,
+                     detect_stats.splits);
+        // The number core/detect/detector.h justifies running this on the
+        // host at all, measured rather than asserted. It covers the whole
+        // consume path, so the decisions are amortised into it.
+        std::println("  cost            {:.3f} ms per frame across {} bins, {:.1f}% of one core "
+                     "at this frame rate",
+                     detector->microseconds_per_frame() / 1000.0, eng.info().spectrum.bins,
+                     source_seconds > 0.0
+                         ? 100.0 * detector->microseconds_per_frame() * 1.0e-6 *
+                               static_cast<double>(detector->frames()) / source_seconds
+                         : 0.0);
     }
 
     bool any_counter = false;
@@ -1763,6 +2333,16 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         any_counter = true;
         std::println("  DROPPED         {} spectrum frames the display could not keep up with",
                      waterfall->dropped());
+    }
+    if (detector != nullptr && detector->dropped() != 0) {
+        any_counter = true;
+        std::println("  DROPPED         {} track snapshots the display could not keep up with",
+                     detector->dropped());
+    }
+    if (detector != nullptr && detector->stats().frames_rejected != 0) {
+        any_counter = true;
+        std::println("  REJECTED        {} frames whose geometry was not the detector's",
+                     detector->stats().frames_rejected);
     }
 
     for (std::size_t i = 0; i < receivers.size(); ++i) {
@@ -1900,12 +2480,28 @@ int main(int argc, char** argv)
         std::println(stderr, "revenant-cli: no source URI. Run --list to see what is available.");
         return 2;
     }
-    // --spectrum is a destination of its own: it watches the whole span and
-    // needs no receiver at all, which is the point of a waterfall.
-    if (options->receivers.empty() && !options->spectrum) {
+    // --spectrum and --detect are each a destination of their own: they watch
+    // the whole span and need no receiver at all, which is the point of both.
+    if (options->receivers.empty() && !options->spectrum && !options->detect) {
         std::println(stderr,
                      "revenant-cli: nothing to do. Add a receiver with --vrx, such as "
-                     "--vrx 162.550M:nfm:16k, or watch the span with --spectrum.");
+                     "--vrx 162.550M:nfm:16k, watch the span with --spectrum, or look for "
+                     "signals with --detect.");
+        return 2;
+    }
+    if (!options->spectrum &&
+        (options->spectrum_floor_db.has_value() || options->spectrum_ceiling_db.has_value())) {
+        std::println(stderr,
+                     "revenant-cli: --spectrum-floor and --spectrum-ceiling set the colour map "
+                     "of a waterfall that was not asked for. Add --spectrum.");
+        return 2;
+    }
+    if (options->spectrum_floor_db.has_value() && options->spectrum_ceiling_db.has_value() &&
+        *options->spectrum_ceiling_db <= *options->spectrum_floor_db) {
+        std::println(stderr,
+                     "revenant-cli: --spectrum-ceiling {:g} is not above --spectrum-floor {:g}, "
+                     "so the colour map has no range.",
+                     *options->spectrum_ceiling_db, *options->spectrum_floor_db);
         return 2;
     }
     if (!options->receivers.empty() && options->record.empty() && options->play.empty() &&

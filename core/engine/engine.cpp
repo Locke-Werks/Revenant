@@ -252,6 +252,8 @@ public:
         graph_config.block_samples = block_samples;
         graph_config.audio_rate = config_.audio_rate;
         graph_config.spectrum_transform = config_.spectrum_transform;
+        graph_config.spectrum_floor_db = config_.spectrum_floor_db;
+        graph_config.spectrum_ceiling_db = config_.spectrum_ceiling_db;
 
         auto graph = Graph::create(context_, *ring_, *scheduler_, graph_config);
         if (!graph) {

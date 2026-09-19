@@ -28,6 +28,7 @@ add_executable(revenant_engine_tests
     test_ring.cpp
     test_rtlsdr_source.cpp
     test_sources.cpp
+    test_spectrum_scale.cpp
 )
 
 target_link_libraries(revenant_engine_tests PRIVATE

@@ -1,0 +1,213 @@
+// Two percentiles of a spectrum frame, measured beside the frame on the
+// device.
+//
+// WHY THIS EXISTS AT ALL
+//
+// docs/ui-spectrum.md wants the colour map's floor and ceiling to track the
+// signal, and wants them from percentiles rather than from the minimum and the
+// maximum, because the minimum of a frame is a dead bin and the maximum is a
+// spur. It also says where the measurement has to happen: on the device.
+// Reading the frame back to the host to scan it would put a pass over 65536
+// floats per block onto the completion thread, which is the thread carrying
+// every receiver's audio home, and it would make the measurement impossible
+// for any consumer that is not on the same machine as the GPU. Two floats
+// travel with the frame instead.
+//
+// WHY A HISTOGRAM AND NOT A SORT
+//
+// An exact percentile needs an order statistic, and an order statistic needs a
+// sort. A bitonic sort of 65536 floats is log2(N)^2/2 = 128 passes over the
+// frame, and it would not fit in one workgroup's shared memory, so it would
+// need several dispatches and a scratch buffer the size of the frame.
+//
+// A histogram needs one pass. The frame is already decibels, which is the axis
+// the answer is wanted on and a bounded one: the spectrum kernel clamps its
+// power at 1e-20 before the logarithm, so no value is below -200 dB, and a
+// value above +40 dBFS would need a hundred times full scale, which no
+// converter in this engine can produce. 1024 buckets over that 240 dB range
+// is 0.234375 dB each.
+//
+// THE ERROR, STATED
+//
+// Two quantisations, and nothing else. There is no approximation in the
+// counting.
+//
+//   The value. The answer is the centre of the bucket the true percentile
+//   falls in, so it is wrong by at most half a bucket, 0.1171875 dB. A colour
+//   map divided into ten steps over a 40 dB range moves a step every 4 dB, so
+//   this is a thirtieth of a step.
+//
+//   The rank. The bucket is chosen by an integer rank, floor(bins*permille/
+//   1000), so the fraction actually reported differs from the one asked for by
+//   under 1/bins. At 65536 bins that is 0.0015 percent.
+//
+//   Out of range. A bin above +40 dBFS lands in the top bucket and reads
+//   39.88 dB. Nothing clamps at the bottom, because the spectrum kernel's own
+//   floor is exactly the bottom of this range.
+//
+// WHY IT CAN BE REFEREED BIT FOR BIT
+//
+// The counting is integer addition into shared memory through atomicAdd.
+// Addition of integers commutes and associates exactly, so the histogram does
+// not depend on the order the invocations arrive in, which is the property a
+// floating-point reduction does not have and the reason this kernel measures
+// a distribution rather than, say, a mean. Everything else here is one
+// subtract, one multiply, two comparisons and a truncation, each a single
+// correctly-rounded or exact operation, so the twin in
+// core/dsp/spectrum_levels_reference.cpp reproduces the bits rather than the
+// value.
+//
+// ONE WORKGROUP, DELIBERATELY
+//
+// The whole frame is read by one workgroup, 256 KiB at the shipped geometry,
+// which is a few microseconds against the spectrum transform's own cost. Two
+// dispatches with per-workgroup partial histograms would be faster and would
+// add a scratch buffer, a second pipeline and a barrier to a stage that is
+// already off the critical path. Measure before splitting it.
+//
+// Written from published mathematics only, per docs/clean-room.md: the
+// histogram-and-cumulative-count percentile is textbook order statistics. No
+// GPL-licensed implementation was consulted.
+//
+// The CPU twin is reference_spectrum_levels in
+// core/dsp/spectrum_levels_reference.cpp, and it is bit-identical rather than
+// close. Read the two side by side.
+
+#version 450
+
+// Scheduling only. Both loops are strided, the barriers sit in uniform control
+// flow, and the counting is order-independent, so the number of threads cannot
+// change the answer.
+layout(local_size_x_id = 0) in;
+
+// The frame core/shaders/spectrum.comp just wrote: M*N/2 decibel values.
+layout(std430, binding = 0) readonly buffer Frame {
+    float power_db[];
+} frame;
+
+// Two floats, the low percentile then the high one.
+layout(std430, binding = 1) writeonly buffer Levels {
+    float value[];
+} levels;
+
+layout(push_constant) uniform Params {
+    // Values in the frame. Passed rather than taken from the array's length
+    // so that a caller binding a larger buffer measures the part it means.
+    uint bins;
+
+    // Which two percentiles, in parts per thousand. Per mille rather than per
+    // cent because the useful high end is between 99 and 99.9 percent and the
+    // coarser unit cannot express it.
+    uint low_permille;
+    uint high_permille;
+} params;
+
+// Buckets, and the decibel range they cover. Duplicated in
+// core/dsp/spectrum_levels_reference.h with the same digits, because GLSL has
+// no way to read a C++ header; the same trade core/shaders/spectrum.comp makes
+// for the logarithm's coefficients.
+const uint kBuckets = 1024u;
+const float kRangeFloorDb = -200.0;
+const float kBucketsPerDb = 4.26666666666666666;  // 1024 / 240
+const float kDbPerBucket = 0.234375;              // 240 / 1024
+const float kTopBucket = 1023.0;
+
+shared uint histogram[kBuckets];
+
+// Which bucket a decibel value falls in.
+//
+// `precise` because the subtract and the multiply are exactly the shape a
+// shader compiler fuses into a fused multiply-add, which rounds once where two
+// operations round twice. A bin sitting on a bucket boundary would then land
+// on one side here and the other side in the twin, and the whole frame's
+// percentile could move a bucket.
+//
+// The bounds are written as comparisons rather than as clamp() so that the
+// twin can mirror them without inheriting GLSL's NaN rules. The frame carries
+// no NaN: the spectrum kernel floors its power before taking a logarithm.
+uint bucket_of(float db) {
+    precise float t = (db - kRangeFloorDb) * kBucketsPerDb;
+    t = (t < 0.0) ? 0.0 : t;
+    t = (t > kTopBucket) ? kTopBucket : t;
+
+    // Truncation toward zero, which on a non-negative value is the floor.
+    // Exact by the conversion's own definition rather than by a rounding rule.
+    return uint(t);
+}
+
+// floor(count * permille / 1000) without a 64-bit intermediate, which GLSL
+// does not have here. count/1000 and count%1000 are both exact, so this is the
+// same integer the division would give and cannot overflow below 4.29 billion
+// bins.
+uint rank_of(uint count, uint permille) {
+    return (count / 1000u) * permille + ((count % 1000u) * permille) / 1000u;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint threads = gl_WorkGroupSize.x;
+
+    // One workgroup owns the whole frame. A second would count the same bins
+    // into its own private shared array and write the same two floats twice.
+    if (gl_WorkGroupID.x != 0u) {
+        return;
+    }
+
+    for (uint b = tid; b < kBuckets; b += threads) {
+        histogram[b] = 0u;
+    }
+    barrier();
+
+    for (uint i = tid; i < params.bins; i += threads) {
+        atomicAdd(histogram[bucket_of(frame.power_db[i])], 1u);
+    }
+    barrier();
+
+    // The cumulative scan, on one thread. 1024 iterations of an add and a
+    // compare against a frame of 65536 reads above it, so parallelising it
+    // would buy a fraction of a percent and cost a second shared array and
+    // another barrier.
+    if (tid != 0u) {
+        return;
+    }
+
+    if (params.bins == 0u) {
+        levels.value[0] = kRangeFloorDb;
+        levels.value[1] = kRangeFloorDb;
+        return;
+    }
+
+    // Zero-based order indices. Clamped because a permille of 1000 asks for
+    // the element one past the end.
+    uint low_rank = rank_of(params.bins, params.low_permille);
+    uint high_rank = rank_of(params.bins, params.high_permille);
+    low_rank = min(low_rank, params.bins - 1u);
+    high_rank = min(high_rank, params.bins - 1u);
+
+    uint low_bucket = 0u;
+    uint high_bucket = 0u;
+    bool low_found = false;
+    bool high_found = false;
+
+    uint cumulative = 0u;
+    for (uint b = 0u; b < kBuckets; ++b) {
+        cumulative += histogram[b];
+
+        // The element at order index r is in the first bucket whose running
+        // total passes r, counting from zero.
+        if (!low_found && cumulative > low_rank) {
+            low_bucket = b;
+            low_found = true;
+        }
+        if (!high_found && cumulative > high_rank) {
+            high_bucket = b;
+            high_found = true;
+        }
+    }
+
+    // Every bin lands in some bucket and both ranks are inside the count, so
+    // both searches succeed. The fallbacks are what an empty histogram would
+    // give and exist so the write below is defined whatever happens above.
+    levels.value[0] = kRangeFloorDb + (float(low_bucket) + 0.5) * kDbPerBucket;
+    levels.value[1] = kRangeFloorDb + (float(high_bucket) + 0.5) * kDbPerBucket;
+}

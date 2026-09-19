@@ -43,6 +43,14 @@ The operator can still pin either end. Automatic is the default because it is
 right almost always, and the exception is comparing two captures, where a
 scale that moves is a scale that lies about which signal was stronger.
 
+A pinned end is drawn exactly where it was pinned. That reads as obvious and
+is the rule a display will break as soon as it has a minimum span to enforce
+or a correction of its own to apply, so it is written down: when something
+has to give, it comes out of the end that is still automatic, and if both
+ends are pinned nothing gives at all. The CLI got this wrong first and drew
+a pinned ceiling up to 21.4 dB above where it was asked for, which defeats
+the one job pinning has.
+
 ## The fine-tuning display
 
 A second spectrum and waterfall showing the receiver's own passband rather

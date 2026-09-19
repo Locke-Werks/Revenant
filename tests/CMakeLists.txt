@@ -14,6 +14,7 @@ add_executable(revenant_reference_tests
     reference/test_divergence.cpp
     reference/test_pfb.cpp
     reference/test_spectrum.cpp
+    reference/test_spectrum_levels.cpp
     reference/test_vrx.cpp
 )
 
@@ -42,6 +43,7 @@ catch_discover_tests(revenant_reference_tests
 
 # Tool suites, added as each tool lands. Guarded so that a checkout mid-way
 # through M0 still configures.
+add_subdirectory(detect)
 add_subdirectory(engine)
 
 if(REVENANT_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
