@@ -210,6 +210,10 @@ went a day without any test dispatching the configuration the engine runs.
 workgroup width the graph can pick, including the 256 it actually dispatches,
 is exact on every run on both devices.
 
+That last sentence held for twelve runs and does not hold for twenty
+thousand. It is corrected below, on the discrete device in its favour and on
+the integrated one against it.
+
 **What is not clean is a narrow grid following other dispatches in the same
 process.** M=8, N=256, L=64 passes ten runs in ten when it is the only thing
 a process dispatches. Placed after six sixty-four channel cells it fails
@@ -219,10 +223,19 @@ between dispatches, and the most likely home for it is the driver's handling
 of many pipelines built from one module with different specialization
 constants, which this kernel does more of than anything else in the tree.
 
+That paragraph is wrong in every particular except the first sentence, and
+the next section replaces it. It is left standing because the reasoning that
+produced it is the trap: twelve samples of a one-in-two-thousand event look
+exactly like a deterministic effect of whatever changed between them.
+
 Two things it is not. It is not a missing shared-memory barrier: adding
 `memoryBarrierShared()` at both barrier sites moved the rate from 4 in 20 to
 5 in 20. It is not leaked denormal state: the twin already takes
 `ScopedDenormalFlush`.
+
+The denormal half stands. The barrier half does not: twenty trials cannot
+tell 0.20 from 0.25, so that experiment had no power to conclude anything,
+and the evidence below points the other way.
 
 **It does not make CI flaky, and the reason is worth knowing.**
 `catch_discover_tests` registers one ctest entry per Catch2 case, so each
@@ -246,6 +259,139 @@ to dispatch the spectrum kernel at the exact shape it gates rather than
 twelve repetitions of one identical dispatch are reproducible. The failure
 needs *different* dispatches interleaved, which a repeat-the-same-thing probe
 is the wrong instrument for.
+
+The conclusion is right and the reason is not. Twelve repetitions report
+reproducible because twelve is nowhere near the sample size the event needs,
+not because they are identical. A probe that could gate this would have to
+run a few thousand dispatches, which is seconds of wall clock but is seconds
+paid by every test process on every device.
+
+### 2026-09-19: measured with an instrument instead of an afternoon
+
+Everything above was inferred from runs of the test binary, a dozen at a
+time, while changing something between them. `tools/gpustress` exists so that
+nobody has to do that again. It dispatches twelve shapes in rotation, keeps
+each shape's CPU twin, and reports every dispatch that disagreed with it,
+grouped so that one bad dispatch among five hundred is visible as one bad
+dispatch rather than as four hundred and ninety-nine divergences from a
+poisoned baseline. It is off by default:
+
+```
+cmake --preset dev -DREVENANT_BUILD_GPU_STRESS=ON
+cmake --build --preset dev --target gpustress
+build/dev/tools/gpustress/gpustress --gpu 1 --rounds 500
+```
+
+Two runs, 40 processes of 500 rounds each, 240,000 dispatches per device.
+
+| | discrete | integrated |
+| --- | --- | --- |
+| spectrum dispatches | 200,000 | 200,000 |
+| disagreeing with the twin | **0** | **106** |
+| branch dispatches | 40,000 | 40,000 |
+| disagreeing with the twin | **0** | **0** |
+
+What that says, against what was written above.
+
+**The discrete device is exact, at a sample size that can carry the claim.**
+Twenty thousand dispatches of each shape, every one bit-identical to the
+twin. The claim that the shipped configuration is clean there survives, three
+orders of magnitude better supported than when it was made.
+
+**On the integrated device the rate is about one spectrum dispatch in
+1,900,** and nothing about it is positional. Every one of the 106 is a single
+isolated dispatch: the shape gives the right answer, gives a wrong one once,
+and gives the right answer again immediately. Nothing is carried forward, so
+"state surviving between dispatches" is withdrawn. The majority answer was
+the twin's answer in every case, at every shape.
+
+**It is not confined to narrow grids.** M=64 N=2048 L=256, which is what the
+graph dispatches, is in the list and is hit. So is M=64 N=256 L=128. There is
+no narrow-grid effect to explain; the earlier runs saw it at M=8 because M=8
+was most of what they dispatched.
+
+**The magnitude is not steady.** Worst divergence per event runs from 1 ulp
+to 2.1e9, which is most of the float range. A figure like "about 57000 ulp"
+was one sample of a distribution.
+
+**It is the spectrum kernel specifically, not shared memory on this device.**
+`pfb_branch` ran 40,000 times in the same processes, interleaved with the
+spectrum dispatches, and was bit-exact every time. It reads the same ring and
+runs under the same driver; it has no shared-memory transform.
+
+**CI is still not affected, for the reason already given.** One ctest entry
+per Catch2 case means a handful of spectrum dispatches per process, and a
+one-in-1,900 event needs thousands. The gate in `gpu_fixture.cpp` stays.
+
+One thing this does not explain, and it is the open end. While the spectrum
+auto-scaling was being checked on the integrated device, `revenant-cli
+--spectrum` was drawing corrupted waterfall rows at roughly one row in four,
+which is three orders of magnitude above the rate measured here. That figure
+is an eyeball count from a terminal and not an instrumented one, so treat it
+as a discrepancy to chase rather than a second measurement.
+
+Same kernel, same device, so the difference is in how it is dispatched. The
+graph records many dispatches into one command buffer with barriers between
+them and submits once; this tool submits one dispatch per command buffer and
+waits on a fence. The engine's pattern is the one that decides whether the
+product is affected, and it is the one this tool does not reproduce. Anyone
+picking the question back up should add that mode rather than re-run the
+sweep.
+
+### What the failures look like from the inside
+
+The sweep above says how often. `gpustress` also records the shape of each
+failure, which says what kind of thing it is. Sixty events, dissected:
+
+| | |
+| --- | --- |
+| wrong values per event | 5 to 4,257, mean 533 |
+| events where exactly one value was wrong | **0 of 60** |
+| events that were a single flipped bit | **0 of 60** |
+| channels touched, as a fraction of the dispatch | 1.6% to 62.5%, mean 36% |
+| bins wrong inside a channel that was touched | 0.6% to 94.5%, mean 24% |
+
+**It is not a bit flip.** Not one event in sixty corrupted a single value,
+and the smallest touched five. Radiation, a memory upset and anything else
+that damages a stored number one at a time are all ruled out by the first
+row of that table. The discrete card sitting in the same case through the
+same 240,000 dispatches is the other half of that argument.
+
+**It is not confined to one workgroup either.** A workgroup cannot reach
+another's shared memory, so an event that corrupts a third of the channels
+in a dispatch is not one transform going wrong in isolation. Whatever
+happens, happens to many workgroups at once.
+
+**The corruption has structure.** The first wrong value in an affected
+channel is bin 0 in 22 events and bin 4 in 29, which is 51 of 60. Bins 1, 2
+and 3 are almost never the first. Scattered damage at 24% density would
+start at bin 1 nearly as often as bin 0; this does not. Bins 0 and 4 are
+what threads 0 and 4 write, because the output loop is
+`for (j = tid; j < half_bins; j += threads)`.
+
+**And it needs more than one thread.** Same M, same N, same input, same
+40,000 dispatches each, with the workgroup width as the only variable:
+
+| workgroup width | events in 40,000 |
+| --- | --- |
+| 1 | **0** |
+| 64 | 7 |
+| 128 | 6 |
+
+That is the measurement that names the class. A single-threaded workgroup
+runs the identical arithmetic in the identical order, reads the same ring
+and writes the same buffer, and does not fail. What it does not do is
+synchronise with anything. Read with the row above it, the fault is a
+concurrency fault inside the workgroup, and the earlier "not a missing
+shared-memory barrier" is withdrawn.
+
+One caveat on that table, stated because it is the obvious objection. A
+single-threaded dispatch of an eight-channel grid is eight threads on a
+device with hundreds of lanes, so it differs from the others in occupancy as
+well as in synchronisation, and the two cannot be separated by this
+experiment alone. It does not weaken the conclusion that the fault needs
+concurrency. It does leave open whether the mechanism is inside the
+workgroup or in how several are scheduled together.
 
 ### The control experiment, run, and inconclusive
 

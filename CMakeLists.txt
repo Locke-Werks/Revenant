@@ -34,6 +34,7 @@ option(REVENANT_BUILD_UI "Build the Qt/QML client" OFF)
 option(REVENANT_WERROR "Treat warnings as errors" OFF)
 option(REVENANT_ASSERT_NO_QT "Fail the configure if anything in core references Qt" OFF)
 option(REVENANT_BUILD_DEVICE_SPIKE "Build the M0.7 libusb device-path spike" OFF)
+option(REVENANT_BUILD_GPU_STRESS "Build the cross-dispatch determinism diagnostic" OFF)
 
 include(CompilerFlags)
 include(CompileShaders)
@@ -93,6 +94,12 @@ endif()
 # and, more importantly, for what it deliberately does not do.
 if(REVENANT_BUILD_DEVICE_SPIKE)
     add_subdirectory(tools/devicespike)
+endif()
+
+# Also a one-off. It reproduces the fault docs/fft.md records, which is what
+# gates re-enabling spectrum conformance on the integrated device.
+if(REVENANT_BUILD_GPU_STRESS)
+    add_subdirectory(tools/gpustress)
 endif()
 
 if(REVENANT_BUILD_TESTS)
