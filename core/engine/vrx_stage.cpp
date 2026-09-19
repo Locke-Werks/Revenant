@@ -41,18 +41,30 @@
 // and faster-than-realtime replay possible, and it is asserted directly in
 // tests/reference/test_vrx.cpp.
 //
-// WHAT THIS COSTS, STATED RATHER THAN DISCOVERED LATER.
+// WHAT THIS COSTS, MEASURED ON 2026-09-18 AND NOT WHAT WAS PREDICTED.
 //
-// The VrxStage seam is one call per receiver, so each receiver records its
-// own fine-to-demod barrier and its own demod-to-copy barrier. Those are
-// global memory barriers, so with N receivers the block costs 2N pipeline
-// flushes and no two receivers overlap. At the grids this engine runs that is
-// a few percent of a block's time and it is the right trade for a seam that
-// lets the demodulators be written separately from the graph. The fix, when
-// the fifty-receiver number is measured and this is what is in the way, is to
-// record all the fine dispatches, then one barrier, then all the detectors:
-// that needs the seam to hand out phases rather than one record() call, which
-// is a change to core/engine/graph.h and not to this file.
+// This comment used to say that the seam's one call per receiver meant 2N
+// global pipeline flushes per block, that no two receivers would overlap, and
+// that the fix when fifty receivers were measured would be to hand the seam
+// phases instead of one record() call so the barriers amortise.
+//
+// The barriers cost 0.1 us per block at every receiver count from one to a
+// hundred. They are not the problem and batching them would buy nothing. The
+// prediction is left here in its corrected form because a wrong number that
+// somebody has already written down sends the next person optimising the
+// wrong thing, and deleting it quietly would let the same guess be made
+// again.
+//
+// What a receiver costs is the dispatch work: about 18 us per receiver per
+// block at M = 64 and 20 MS/s, essentially linear, 17.6 us at one receiver
+// and 20.7 us at a hundred. The coarse chain beside it is flat at about
+// 10 us whether there is one receiver or a hundred, which is the half of
+// "two hundred receivers cost what two cost" that turned out to be true.
+//
+// So fifty receivers run at 3.28 times realtime on the discrete card with
+// every overrun counter at zero, a hundred at 1.79x, and the thing to
+// optimise if that is ever not enough is the fine stage itself rather than
+// the seam around it. docs/fft.md carries the full table.
 
 #include "core/engine/vrx_stage.h"
 
