@@ -9,6 +9,8 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -97,7 +99,27 @@ public:
     [[nodiscard]] VkInstance instance() const { return instance_; }
     [[nodiscard]] VkPhysicalDevice physical_device() const { return physical_; }
     [[nodiscard]] VkDevice device() const { return device_; }
+    // Prefer submit() below. This is here for the handful of calls that take
+    // a queue and do not submit, such as vkQueueWaitIdle at teardown.
     [[nodiscard]] VkQueue compute_queue() const { return compute_queue_; }
+
+    // vkQueueSubmit, under the lock that Vulkan requires and does not provide.
+    //
+    // A VkQueue is externally synchronised: two threads calling vkQueueSubmit
+    // on one is undefined behaviour, not a race that merely reorders work.
+    // While the only submitter was the graph's recording thread that was free.
+    // It stopped being free when a receiver's construction started uploading
+    // its filter tables, because core/engine/graph.h permits add_vrx while the
+    // engine is running, so a control thread and the recording thread can
+    // reach the same queue at once.
+    //
+    // The lock lives here rather than in either caller because the queue does.
+    // A caller-side mutex is one that the next call site has to know to take,
+    // and the failure when it does not is a driver crash somewhere unrelated.
+    [[nodiscard]] VkResult submit(const VkSubmitInfo& info, VkFence fence) const {
+        const std::lock_guard<std::mutex> guard(*submit_lock_);
+        return vkQueueSubmit(compute_queue_, 1, &info, fence);
+    }
     [[nodiscard]] std::uint32_t compute_family() const { return compute_family_; }
     [[nodiscard]] VmaAllocator allocator() const { return allocator_; }
     [[nodiscard]] const DeviceInfo& info() const { return info_; }
@@ -114,6 +136,10 @@ private:
     std::uint32_t compute_family_ = 0;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     DeviceInfo info_{};
+
+    // By pointer so that Context stays movable, which it has to be because
+    // create() returns one by value and the engine holds it as a member.
+    std::unique_ptr<std::mutex> submit_lock_ = std::make_unique<std::mutex>();
 };
 
 // Renders a VkResult as its enum name where known. Vulkan has no API for this

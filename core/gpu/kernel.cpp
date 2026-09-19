@@ -449,7 +449,7 @@ Status CommandRunner::submit_and_wait() {
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &command_buffer_;
 
-    result = vkQueueSubmit(context_->compute_queue(), 1, &submit, fence_);
+    result = context_->submit(submit, fence_);
     if (result != VK_SUCCESS) {
         return fail(std::format("vkQueueSubmit failed ({})", result_name(result)), result);
     }

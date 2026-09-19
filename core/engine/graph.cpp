@@ -1766,7 +1766,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &impl.timeline;
 
-    result = vkQueueSubmit(impl.context->compute_queue(), 1, &submit, VK_NULL_HANDLE);
+    result = impl.context->submit(submit, VK_NULL_HANDLE);
     if (result != VK_SUCCESS) {
         return fail(std::format("vkQueueSubmit failed ({})", gpu::result_name(result)), result);
     }
