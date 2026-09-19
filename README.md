@@ -157,6 +157,8 @@ table and the disclosure log.
   a library, with the measurements that decided it
 - [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
   what it does not
+- [docs/ui-spectrum.md](docs/ui-spectrum.md), how the spectrum and waterfall scale
+  themselves and why the fine-tuning display transforms a different stream
 - [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U
   datasheet does and does not specify, and why that settled the licence
 - [CONTRIBUTING.md](CONTRIBUTING.md), how to contribute and the provenance rules
