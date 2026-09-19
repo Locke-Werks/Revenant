@@ -53,12 +53,18 @@ slowly going wrong.
 
 **It is a transform of the fine stream, not a zoom of the wide one.** The
 per-receiver fine stage in `core/engine/vrx_stage.cpp` already writes complex
-baseband at the demodulation rate into a ring on the device: already mixed to
-DC, already limited to the requested bandwidth, already the exact span this
-display wants. One small FFT of that ring gives native resolution across the
-passband. Zooming the wide transform instead gives however many of its bins
-happen to fall inside sixteen kilohertz, which at any usable wide span is a
-handful, and no amount of interpolation puts the resolution back.
+baseband at the demodulation rate into a ring on the device, mixed to DC and
+limited to the requested bandwidth. Its span is the demodulation rate, which
+`plan_vrx` rounds up to a whole multiple of the audio rate, so it is somewhat
+wider than the receiver's own bandwidth rather than equal to it. Wider is the
+right direction for this: the display shows the filter's skirts and what sits
+just outside them, which is where an adjacent signal about to become a problem
+is visible. One small FFT of that ring gives native resolution across the
+passband. Zooming the wide transform gives whatever its bins are worth there
+instead, and the comparison is the point: a 4096-point transform of a 48 kS/s
+fine ring resolves 11.7 Hz, where a 2^18 transform of a 20 MHz span resolves
+76 Hz. Six times coarser, from a transform sixty-four times larger, and no
+amount of interpolation puts the difference back.
 
 This is also why the feature is cheap. The expensive part, getting a
 receiver's baseband onto the device at the right bandwidth, is already paid
@@ -70,11 +76,20 @@ Automatic frequency tracking, as an option and off by default. It follows a
 drifting carrier by nudging the receiver's centre so the signal stays where
 the filter is.
 
-It rides the retune path that already exists. A retune that changes only the
-frequency is a push constant and a new tap table, taken in place by the stage
-with no gap in the audio; that is measured, not assumed, in the engine suite's
-retune case. So AFT is a control loop over `Engine::set_vrx_params` and needs
-no new machinery in the sample path.
+It rides the retune path that already exists. A small frequency move is a push
+constant and a new tap table, taken in place by the stage with no gap in the
+audio; that is measured, not assumed, in the engine suite's retune case.
+
+Two limits on that, because the measured case was a 300 Hz nudge and AFT will
+not always be nudging. A move that crosses a coarse channel boundary changes
+the channel the receiver reads and the whole residual with it, which is a
+different tap table rather than a shifted one, so a track sitting near a
+boundary needs hysteresis or it will flip channels on measurement noise. And
+`retune()` refuses any change that alters the plan's derived shape, which a
+frequency move can do at a channel edge, because `max_channel_bandwidth` is
+`Fc - 2*|residual|` and a wide receiver's bandwidth clamps differently as the
+residual grows. Neither bites a narrow receiver drifting slowly, which is the
+case AFT is for.
 
 Two properties it must have, because without them it is worse than nothing:
 
@@ -121,11 +136,19 @@ deriving it:
 
 ## Identification, and why AFT does not have to wait for it
 
-The rule above needs to know what the signal is. Most of the time it already
-does, because the operator chose a demodulator: a receiver in RTTY mode with a
-170 Hz shift configured has been told what it is listening to, and the centre
-follows from `VrxParams` with no classifier anywhere. The attended case is
-solved at M2.
+The rule above needs to know what the signal is, and most of the time the
+operator has already said, by choosing a demodulator. That is the cheap half
+of the problem and it needs no classifier.
+
+It does need something that does not exist yet, and the RTTY example is
+exactly where it shows. `Demod` is `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`;
+there is no RTTY in it, and `VrxParams` carries no shift field, only
+`cw_pitch`. So "the operator selected RTTY with a 170 Hz shift" is not a state
+this engine can currently be in. The centre rule for the modes that do exist
+follows from `VrxParams` today; the modes the table below names as the
+interesting cases need the enumeration and the parameters to grow first. That
+is a small change and it is not a free one, because `Demod` is a frozen
+contract and its value is the demodulator kernel's specialization constant.
 
 Classification is for the unattended case: a scan, a wideband survey, a
 receiver parked on something the operator has not named. `core/detect/` is

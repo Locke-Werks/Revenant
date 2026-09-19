@@ -159,6 +159,8 @@ table and the disclosure log.
   what it does not
 - [docs/ui-spectrum.md](docs/ui-spectrum.md), how the spectrum and waterfall scale
   themselves and why the fine-tuning display transforms a different stream
+- [docs/detection.md](docs/detection.md), wideband detection and click-to-tune, and
+  why the detection spectrum is built per channel rather than across the span
 - [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U
   datasheet does and does not specify, and why that settled the licence
 - [CONTRIBUTING.md](CONTRIBUTING.md), how to contribute and the provenance rules

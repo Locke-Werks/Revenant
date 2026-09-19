@@ -221,16 +221,28 @@ under `core/`, `tools/` or `ui/`. It scans those three directories and nothing
 else, so `docs/` is untouched and this document can discuss the licences it
 names.
 
-What it looks for changed with the licence. The old guard matched the name of a
-licence, which was right when no source file here had any business mentioning
-the GPL at all. Now a backend that links librtlsdr should say so in a comment
-where a reader will find it, and a file may carry
-`SPDX-License-Identifier: GPL-3.0-or-later` declaring Revenant's own terms. So
-the pattern is the grant text that sits at the head of a copied source file: the
-sentences offering redistribution under the Free Software Foundation's terms,
-which nobody writes by hand and which arrive only with a pasted file. Read
-`.github/workflows/ci.yml` for the exact expression rather than reproducing it
-here, so that this document does not carry the strings it describes.
+What it looks for changed with the licence, and it took two attempts.
+
+The original guard matched the name of a licence, which was right while no
+source file here had any business mentioning the GPL. That stopped being right
+the moment a backend needed to say in a comment that it links librtlsdr.
+
+The first replacement matched the grant paragraph at the head of a pasted
+file, on the reasoning that nobody writes that text by hand. That reasoning was
+false in both directions and review caught it before anyone hit it. Revenant's
+own files may carry exactly that paragraph, because `LICENSE` itself, under
+"How to Apply These Terms to Your New Programs", instructs authors to put it at
+the head of every source file: the guard would have failed the build for
+complying with the project's licence. And it missed the crudest paste there is,
+a file lifted from a kernel tree whose header is one SPDX line and no grant
+paragraph at all, which the guard it replaced would have caught.
+
+What the guard matches now is whose copyright a file carries. A pasted file
+arrives with its author's copyright line; Revenant's own carry Locke Werks or
+nothing. Any SPDX identifier other than this project's own fails as well, which
+restores the coverage the first replacement gave up. Read
+`.github/workflows/ci.yml` for the exact expressions rather than reproducing
+them here, so that this document does not carry the strings it describes.
 
 That keeps the distinction the policy rests on. Linking a copyleft library is
 permitted and recorded in the table above. Copying its source into this tree is
@@ -402,7 +414,7 @@ unrelated reason without knowing a licence depends on it.
 Every exposure gets recorded here, with what was seen, when, and what was done
 about it. The log stays useful after the licence change, for the same reason it
 was useful before: it is the record of what the people writing this project
-actually read. Three entries, all self-reported by the person who did it, which
+actually read. Four entries, all self-reported by the person who did it, which
 is the behaviour the practice needs to keep producing.
 
 **2026-09-18, polyphase channelizer design.** While verifying the licences of
@@ -443,6 +455,30 @@ articles are documentation, which this document permits.
 
 That survey is what produced the licence change, so it is the last entry written
 under the absolute rule and the first piece of evidence for the exception.
+
+**2026-09-18, librtlsdr per-file licence check.** During review of the RTL-SDR
+backend, the first 2400 bytes of `librtlsdr.c` and `tuner_r82xx.c` were fetched
+from `osmocom/rtl-sdr` to verify that the "or later" grant is present in the
+files that actually compile into the linked library, rather than only in the
+installed `rtl-sdr.h`, which contributes no object code. The grant is present
+in both, which is what the licence section above rests on.
+
+The fetch over-ran the notice, the same shape as the channelizer entry above.
+What was seen beyond it: in `librtlsdr.c`, the include block, the tuner
+interface struct, the async status enum and the opening of a comment about FIR
+coefficients; in `tuner_r82xx.c`, the `r82xx_init_array` register table and the
+start of the frequency range table.
+
+Recorded rather than waved through, because a register initialisation table is
+the exact artefact the no-laundering rule names, and because the licence change
+does not retire that rule. Resolution: nothing here implements a tuner, none of
+it has been reproduced, and Revenant calls librtlsdr rather than reimplementing
+it, so there is no file whose provenance this touches. Had a clean-room tuner
+been in progress, this exposure would have disqualified its author from writing
+it, and the entry exists so that a future reader can see the difference.
+
+It also demonstrates the thing the log is for: the reviewer volunteered this
+against their own work, unprompted, when the cheaper move was silence.
 
 **What the log is for now.** Under the old rule an exposure was a contamination
 to be contained. Under the current one it still gets written down, because the
