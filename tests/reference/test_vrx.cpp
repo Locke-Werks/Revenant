@@ -47,13 +47,12 @@
 #include "core/gpu/shaders.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/tone_measure.h"
 
 using namespace revenant;
 using Catch::Approx;
 
 namespace {
-
-constexpr double kTwoPi = 6.283185307179586476925286766559;
 
 constexpr dsp::SampleRate kSourceRate = 2'400'000;
 
@@ -235,6 +234,10 @@ dsp::VrxDemodParams demod_params(const dsp::VrxPlan& plan, std::uint32_t in_offs
 // ---------------------------------------------------------------------------
 // Measurement
 // ---------------------------------------------------------------------------
+//
+// The tone estimators live in tests/support/tone_measure.h, because the
+// engine suite checks the same things about the same chain and a second copy
+// of a Goertzel would drift from this one.
 
 // A bit-exact diff of two buffers that are both entirely zero passes, and so
 // does a diff of two kernels that both did nothing. Every bit-exact case below
@@ -246,71 +249,13 @@ std::size_t nonzero_count(std::span<const T> values) {
         std::count_if(values.begin(), values.end(), [](const T& v) { return v != T{}; }));
 }
 
-struct ToneFit {
-    double magnitude = 0.0;
-    double frequency_hz = 0.0;
-};
-
-// Root-mean-square magnitude and the frequency implied by the mean phase
-// advance, which is exact for a pure tone and needs no transform.
-ToneFit measure_complex_tone(std::span<const dsp::Complex32> samples, double rate) {
-    REQUIRE(samples.size() > 1);
-
-    std::complex<double> product{0.0, 0.0};
-    double power = 0.0;
-    for (std::size_t i = 1; i < samples.size(); ++i) {
-        const std::complex<double> current(samples[i]);
-        const std::complex<double> previous(samples[i - 1]);
-        product += current * std::conj(previous);
-        power += std::norm(current);
-    }
-
-    ToneFit fit;
-    fit.magnitude = std::sqrt(power / static_cast<double>(samples.size() - 1));
-    fit.frequency_hz = std::arg(product) * rate / kTwoPi;
-    return fit;
-}
-
-struct AudioFit {
-    // Peak amplitude of the component at the frequency asked about.
-    double amplitude = 0.0;
-
-    // That component's share of the total power. A detector that recovered
-    // the right amplitude at the right frequency and also produced a pile of
-    // harmonics would pass an amplitude check alone; this is what notices.
-    double purity = 0.0;
-};
-
-AudioFit measure_audio_tone(std::span<const float> audio, double rate, double frequency_hz) {
-    REQUIRE(!audio.empty());
-
-    double cosine = 0.0;
-    double sine = 0.0;
-    double power = 0.0;
-    for (std::size_t i = 0; i < audio.size(); ++i) {
-        const double turns =
-            std::fmod(frequency_hz * static_cast<double>(i) / rate, 1.0);
-        const double angle = kTwoPi * turns;
-        cosine += static_cast<double>(audio[i]) * std::cos(angle);
-        sine += static_cast<double>(audio[i]) * std::sin(angle);
-        power += static_cast<double>(audio[i]) * static_cast<double>(audio[i]);
-    }
-
-    const auto n = static_cast<double>(audio.size());
-    AudioFit fit;
-    fit.amplitude = 2.0 * std::sqrt(cosine * cosine + sine * sine) / n;
-    const double mean_power = power / n;
-    fit.purity = (mean_power > 0.0) ? (0.5 * fit.amplitude * fit.amplitude) / mean_power : 0.0;
-    return fit;
-}
-
 // A complex exponential at an absolute sample index, with the phase reduced
 // before it reaches the transcendentals so a long ring does not lose
 // precision to a large argument.
 dsp::Complex32 tone_at(double frequency_hz, double rate, std::size_t index) {
     const double turns =
         std::fmod(frequency_hz * static_cast<double>(index) / rate, 1.0);
-    const double angle = kTwoPi * turns;
+    const double angle = test::kTwoPi * turns;
     return dsp::Complex32{static_cast<float>(std::cos(angle)),
                           static_cast<float>(std::sin(angle))};
 }
@@ -363,7 +308,7 @@ TEST_CASE("the deterministic transcendentals agree with the real functions", "[v
     // one of them is a demodulator that works on half the waveform.
     double worst_atan2 = 0.0;
     for (int i = 0; i < 719; ++i) {
-        const double angle = -3.14159265358979323846 + kTwoPi * static_cast<double>(i) / 719.0;
+        const double angle = -3.14159265358979323846 + test::kTwoPi * static_cast<double>(i) / 719.0;
         const auto y = static_cast<float>(std::sin(angle) * 1.7);
         const auto x = static_cast<float>(std::cos(angle) * 1.7);
         const double expected = std::atan2(static_cast<double>(y), static_cast<double>(x));
@@ -429,8 +374,8 @@ TEST_CASE("the NCO table has exact quadrature entries and the phase does not dri
 
     const std::uint64_t difference = (got > exact) ? got - exact : exact - got;
     const double turns = static_cast<double>(difference) / std::pow(2.0, 64);
-    INFO("phase error at sample " << kIndex << " is " << turns * kTwoPi << " radian");
-    CHECK(turns * kTwoPi < 1.0e-8);
+    INFO("phase error at sample " << kIndex << " is " << turns * test::kTwoPi << " radian");
+    CHECK(turns * test::kTwoPi < 1.0e-8);
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +803,7 @@ TEST_CASE("a tone at the receiver's centre arrives at DC with unit magnitude",
     REQUIRE(residual != 0.0);
 
     const auto out = fine_tone_response(plan, residual);
-    const auto fit = measure_complex_tone(out, static_cast<double>(plan.demod_rate));
+    const auto fit = test::measure_complex_tone(out, static_cast<double>(plan.demod_rate));
 
     INFO("magnitude " << fit.magnitude << ", residual frequency " << fit.frequency_hz << " Hz");
     CHECK(fit.magnitude == Approx(1.0).margin(0.01));
@@ -890,7 +835,7 @@ TEST_CASE("a CW receiver lands the carrier on the operator's pitch", "[gpu][vrx]
                             static_cast<double>(plan.placement.residual_denominator);
 
     const auto out = fine_tone_response(plan, residual);
-    const auto fit = measure_complex_tone(out, static_cast<double>(plan.demod_rate));
+    const auto fit = test::measure_complex_tone(out, static_cast<double>(plan.demod_rate));
 
     INFO("magnitude " << fit.magnitude << ", output frequency " << fit.frequency_hz << " Hz");
     CHECK(fit.magnitude == Approx(1.0).margin(0.01));
@@ -920,13 +865,13 @@ TEST_CASE("a USB receiver keeps its own sideband and rejects the other", "[gpu][
     // half a bandwidth above the residual, and that is where the tap table is
     // centred and where the gain is unity.
     const auto wanted = fine_tone_response(plan, residual + half);
-    const auto wanted_fit = measure_complex_tone(wanted, static_cast<double>(plan.demod_rate));
+    const auto wanted_fit = test::measure_complex_tone(wanted, static_cast<double>(plan.demod_rate));
 
     // The mirror image, one whole bandwidth below the filter's centre, which
     // is past the stopband edge.
     const auto unwanted = fine_tone_response(plan, residual - half);
     const auto unwanted_fit =
-        measure_complex_tone(unwanted, static_cast<double>(plan.demod_rate));
+        test::measure_complex_tone(unwanted, static_cast<double>(plan.demod_rate));
 
     const double rejection_db =
         20.0 * std::log10(std::max(unwanted_fit.magnitude, 1.0e-12) / wanted_fit.magnitude);
@@ -1000,7 +945,7 @@ TEST_CASE("each demodulator recovers its own modulation at the stated level",
         for (std::size_t m = 0; m < fine_ring.size(); ++m) {
             const double turns =
                 std::fmod(modulation_hz * static_cast<double>(m) / demod_rate, 1.0);
-            const double angle = kTwoPi * turns;
+            const double angle = test::kTwoPi * turns;
 
             if (item.mode == engine::Demod::Am) {
                 // A unit carrier at 100 percent modulation. Its envelope is
@@ -1048,7 +993,7 @@ TEST_CASE("each demodulator recovers its own modulation at the stated level",
         // At the audio rate for every mode but the raw tap, and the audio
         // frequency is the modulation frequency: decimation moves the rate,
         // not the tone.
-        const auto fit = measure_audio_tone(settled, audio_rate, modulation_hz);
+        const auto fit = test::measure_audio_tone(settled, audio_rate, modulation_hz);
         INFO("recovered amplitude " << fit.amplitude << ", purity " << fit.purity);
 
         CHECK(fit.amplitude == Approx(1.0).margin(0.02));

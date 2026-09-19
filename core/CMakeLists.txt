@@ -27,6 +27,7 @@ add_library(revenant_core STATIC
     engine/graph.cpp
     engine/scheduler.cpp
     engine/vrx_place.cpp
+    engine/vrx_stage.cpp
     engine/wav_writer.cpp
     gpu/buffer.cpp
     gpu/context.cpp

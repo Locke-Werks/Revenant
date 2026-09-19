@@ -30,6 +30,7 @@
 #include "core/engine/vrx.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/tone_measure.h"
 
 using namespace revenant;
 using Catch::Approx;
@@ -59,6 +60,22 @@ std::string tone_uri(dsp::Hertz offset_hz, dsp::SampleIndex samples) {
            "&samples=" + std::to_string(samples) +
            "&span_low=" + std::to_string(offset_hz - 1600) +
            "&span_high=" + std::to_string(offset_hz + 1600);
+}
+
+// One continuously-keyed narrowband FM transmission, for the cases that want
+// something a demodulator can actually recover.
+//
+// The span is 16 kHz wide because the scene picks the emitter's deviation
+// between 2.5 and 5 kHz and its modulating tone up to 1.5 kHz, so by Carson's
+// rule the widest it builds is 13 kHz and a narrower span would be refused.
+// The emitter then sits somewhere inside that span rather than exactly at the
+// offset, which is why the receiver in these cases is wider than the signal.
+std::string nfm_uri(dsp::Hertz offset_hz, dsp::SampleIndex samples) {
+    return "synthetic:wideband?rate=" + std::to_string(kSourceRate) +
+           "&emitters=1&modes=nfm&seed=515151&noise_dbfs=-120&snr_min=50&snr_max=50" +
+           "&samples=" + std::to_string(samples) +
+           "&span_low=" + std::to_string(offset_hz - 8000) +
+           "&span_high=" + std::to_string(offset_hz + 8000);
 }
 
 engine::EngineConfig default_config() {
@@ -230,26 +247,223 @@ TEST_CASE("a tone travels the whole chain and arrives in the right channel",
     CHECK(std::abs(measured_hz) < static_cast<double>(kChannelSpacing) * 0.05);
 }
 
-TEST_CASE("a demodulator that has no stage installed is refused by name",
-          "[gpu][engine][m1]") {
+TEST_CASE("an NFM receiver demodulates a synthetic transmission", "[gpu][engine][m1]") {
     REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The whole chain with a real demodulator on the end of it. Everything
+    // below this is already proved elsewhere: the channelizer against its
+    // twins in tests/reference/test_pfb.cpp, the fine stage and the detector
+    // against theirs in tests/reference/test_vrx.cpp. What only this case
+    // covers is the wiring between them, which is where the indices are, and
+    // an index that is wrong by the filter's support produces audio that
+    // sounds like audio.
+    constexpr dsp::Hertz kOffset = 37'500 * 5;
 
     auto created = engine::Engine::create(default_config());
     REQUIRE(created.has_value());
     auto& eng = **created;
-    REQUIRE(eng.open_source(tone_uri(0, 200'000)).has_value());
+
+    REQUIRE(eng.open_source(nfm_uri(kOffset, 1'200'000)).has_value());
 
     engine::VrxParams params;
-    params.center = 0;
+    params.center = kOffset;
+    // Wide enough that the emitter is inside the passband wherever in the
+    // span the scene put it, and wide enough that its deviation, which the
+    // scene picks between 2.5 and 5 kHz, does not overrun the detector's
+    // full-scale point.
+    params.bandwidth = 25'000;
     params.demod = engine::Demod::Nfm;
 
     const auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
 
-    // The graph ships one stage of its own, the raw tap, and the demodulators
-    // install themselves through a factory. Until that factory is wired the
-    // honest answer is a refusal that names the mode and says where the stage
-    // comes from, rather than silence or a receiver that produces nothing.
-    REQUIRE_FALSE(added.has_value());
-    INFO(added.error().message);
-    CHECK(added.error().message.find("nfm") != std::string::npos);
+    std::mutex lock;
+    std::vector<float> audio;
+    dsp::SampleRate audio_rate = 0;
+    std::uint32_t channels = 0;
+
+    REQUIRE(eng.set_audio_sink(*added, [&](const engine::AudioChunk& chunk) -> Status {
+                 const std::lock_guard<std::mutex> guard(lock);
+                 audio_rate = chunk.rate;
+                 channels = chunk.channels;
+                 audio.insert(audio.end(), chunk.samples.begin(), chunk.samples.end());
+                 return {};
+             }).has_value());
+
+    const auto ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    INFO(audio.size() << " audio samples at " << audio_rate << " S/s, " << channels
+                      << " channel(s)");
+    REQUIRE(audio.size() > 4096);
+
+    // Real audio, not a complex tap: one float per frame at the engine's
+    // audio rate rather than two at the channel rate.
+    CHECK(channels == 1);
+    CHECK(audio_rate == 48'000);
+
+    // 1.2 million samples at 2.4 MS/s is half a second, which at 48 kHz is
+    // 24000 audio samples. The chain loses the filter's support at the front
+    // and whatever the last partial block could not complete at the back, so
+    // this is a range and not an equality.
+    CHECK(audio.size() > 20'000);
+    CHECK(audio.size() < 24'100);
+
+    const auto share = test::dominant_tone(audio, static_cast<double>(audio_rate),
+                                           {400.0, 1000.0, 1500.0});
+    INFO("dominant tone " << share.frequency_hz << " Hz holding " << share.share
+                          << " of the AC power");
+
+    // The scene modulates an NFM emitter with a single tone chosen from these
+    // three. A discriminator fed the right samples recovers that tone and
+    // very little else; one fed samples from the wrong point in the stream
+    // recovers noise, and noise through a discriminator is full scale and
+    // spread across the band.
+    CHECK(share.share > 0.5);
+}
+
+TEST_CASE("a receiver keeps producing audio across a retune", "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Moving the dial is the one retune a stage handles in place: the tap
+    // table is re-modulated to the new centre and copied into the buffer the
+    // kernel reads, while a dispatch from an earlier frame is still reading
+    // it. That copy is ordered against the earlier read by one barrier and
+    // nothing else, and if the ordering is wrong the symptom is a block of
+    // audio filtered through half of each tap table, which is a click.
+    constexpr dsp::Hertz kOffset = 37'500 * 4;
+
+    auto created = engine::Engine::create(default_config());
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    REQUIRE(eng.open_source(nfm_uri(kOffset, 1'200'000)).has_value());
+
+    engine::VrxParams params;
+    params.center = kOffset;
+    params.bandwidth = 25'000;
+    params.demod = engine::Demod::Nfm;
+
+    const auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    std::mutex lock;
+    std::size_t before = 0;
+    std::size_t after = 0;
+    std::atomic<bool> retuned{false};
+    Status retune_status;
+
+    REQUIRE(eng.set_audio_sink(*added, [&](const engine::AudioChunk& chunk) -> Status {
+                 const std::lock_guard<std::mutex> guard(lock);
+                 if (retuned.load(std::memory_order_relaxed)) {
+                     after += chunk.samples.size();
+                     return {};
+                 }
+                 before += chunk.samples.size();
+                 if (before > 4096) {
+                     // A few hundred hertz, which stays on the same coarse
+                     // channel and leaves every rate and every tap count
+                     // exactly where they were. That is the retune a stage
+                     // must take in place.
+                     engine::VrxParams moved = params;
+                     moved.center = kOffset + 300;
+                     retune_status = eng.set_vrx_params(*added, moved);
+                     retuned.store(true, std::memory_order_relaxed);
+                 }
+                 return {};
+             }).has_value());
+
+    const auto ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    INFO(test::message_of(retune_status));
+    CHECK(retune_status.has_value());
+
+    INFO(before << " audio samples before the retune, " << after << " after");
+    CHECK(retuned.load());
+    CHECK(after > 4096);
+
+    // The stream did not restart. A stage that rebuilt itself on a retune
+    // would drop its position and the two halves would not add up.
+    CHECK(before + after > 20'000);
+
+    const auto status = eng.vrx_status(*added);
+    REQUIRE(status.has_value());
+    CHECK(status->params.center == kOffset + 300);
+}
+
+TEST_CASE("receivers on several modes run together", "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Each receiver records its own two dispatches and its own barriers into
+    // the shared command buffer, so more than one of them is a different code
+    // path from one of them, and it is the path the engine will always be on.
+    auto created = engine::Engine::create(default_config());
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    REQUIRE(eng.open_source("synthetic:wideband?rate=" + std::to_string(kSourceRate) +
+                            "&emitters=12&seed=90210&samples=600000")
+                .has_value());
+
+    struct Receiver {
+        engine::Demod demod;
+        dsp::Hertz bandwidth;
+    };
+
+    const Receiver wanted[] = {
+        {engine::Demod::Raw, 12'000}, {engine::Demod::Am, 10'000},
+        {engine::Demod::Nfm, 16'000}, {engine::Demod::Usb, 3'000},
+        {engine::Demod::Lsb, 3'000},  {engine::Demod::Dsb, 6'000},
+        {engine::Demod::Cw, 500},
+    };
+
+    std::mutex lock;
+    std::vector<std::size_t> received(std::size(wanted), 0);
+    std::vector<std::uint32_t> reported_channels(std::size(wanted), 0);
+
+    for (std::size_t i = 0; i < std::size(wanted); ++i) {
+        engine::VrxParams params;
+        params.center = 37'500 * static_cast<dsp::Hertz>(i + 1);
+        params.bandwidth = wanted[i].bandwidth;
+        params.demod = wanted[i].demod;
+
+        const auto added = eng.add_vrx(params);
+        INFO("receiver " << i << " (" << engine::demod_name(wanted[i].demod) << "): "
+                         << test::message_of(added));
+        REQUIRE(added.has_value());
+
+        REQUIRE(eng.set_audio_sink(*added, [&, i](const engine::AudioChunk& chunk) -> Status {
+                     const std::lock_guard<std::mutex> guard(lock);
+                     received[i] += chunk.samples.size();
+                     reported_channels[i] = chunk.channels;
+                     return {};
+                 }).has_value());
+    }
+
+    const auto ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    for (std::size_t i = 0; i < std::size(wanted); ++i) {
+        INFO("receiver " << i << " (" << engine::demod_name(wanted[i].demod) << ") delivered "
+                         << received[i] << " floats on " << reported_channels[i]
+                         << " channel(s)");
+        CHECK(received[i] > 1024);
+
+        // The raw tap hands back interleaved complex at the channel rate.
+        // Everything else is real audio.
+        CHECK(reported_channels[i] == (wanted[i].demod == engine::Demod::Raw ? 2U : 1U));
+    }
+
+    const auto stats = eng.source_stats();
+    CHECK(stats.overrun_events == 0);
+    CHECK(stats.samples_lost == 0);
 }

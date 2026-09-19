@@ -107,6 +107,7 @@
 #include "core/dsp/convert.h"
 #include "core/dsp/pfb_branch_reference.h"
 #include "core/dsp/pfb_fft_reference.h"
+#include "core/engine/record_util.h"
 #include "core/engine/ring_consumer.h"
 #include "core/gpu/buffer.h"
 #include "core/gpu/kernel.h"
@@ -151,65 +152,6 @@ constexpr std::uint32_t kComplexBytes = 8;
 // its logarithm produces -inf, which propagates into a meter and a squelch
 // comparison as a NaN nobody can source.
 constexpr double kSilenceFloorDbfs = -200.0;
-
-[[nodiscard]] std::uint32_t group_count(std::uint64_t invocations, std::uint32_t local_size) {
-    if (local_size == 0) {
-        return 0;
-    }
-    const std::uint64_t groups = (invocations + local_size - 1) / local_size;
-    return static_cast<std::uint32_t>(groups);
-}
-
-// The whole-buffer dependency between two stages of the chain.
-void record_barrier(VkCommandBuffer commands, VkPipelineStageFlags source_stage,
-                    VkAccessFlags source_access, VkPipelineStageFlags destination_stage,
-                    VkAccessFlags destination_access) {
-    VkMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    barrier.srcAccessMask = source_access;
-    barrier.dstAccessMask = destination_access;
-
-    vkCmdPipelineBarrier(commands, source_stage, destination_stage, 0, 1, &barrier, 0, nullptr, 0,
-                         nullptr);
-}
-
-void record_dispatch(VkCommandBuffer commands, const gpu::ComputePipeline& pipeline,
-                     VkDescriptorSet set, std::span<const std::byte> push_constants,
-                     std::uint32_t groups) {
-    vkCmdBindPipeline(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.handle());
-    vkCmdBindDescriptorSets(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.layout(), 0, 1,
-                            &set, 0, nullptr);
-    if (!push_constants.empty()) {
-        vkCmdPushConstants(commands, pipeline.layout(), VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           static_cast<std::uint32_t>(push_constants.size()),
-                           push_constants.data());
-    }
-    vkCmdDispatch(commands, groups, 1, 1);
-}
-
-[[nodiscard]] Status write_storage_set(VkDevice device, VkDescriptorSet set,
-                                       std::span<const VkBuffer> buffers) {
-    std::vector<VkDescriptorBufferInfo> infos(buffers.size());
-    std::vector<VkWriteDescriptorSet> writes(buffers.size());
-    for (std::size_t i = 0; i < buffers.size(); ++i) {
-        if (buffers[i] == VK_NULL_HANDLE) {
-            return fail(std::format("descriptor binding {} was left unbound", i));
-        }
-        infos[i].buffer = buffers[i];
-        infos[i].offset = 0;
-        infos[i].range = VK_WHOLE_SIZE;
-
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = set;
-        writes[i].dstBinding = static_cast<std::uint32_t>(i);
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[i].pBufferInfo = &infos[i];
-    }
-    vkUpdateDescriptorSets(device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0,
-                           nullptr);
-    return {};
-}
 
 [[nodiscard]] std::span<const std::uint32_t> convert_shader_for(source::SampleFormat format) {
     switch (format) {

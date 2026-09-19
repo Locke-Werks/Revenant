@@ -53,6 +53,7 @@
 #include "core/engine/graph.h"
 #include "core/engine/ring_consumer.h"
 #include "core/engine/scheduler.h"
+#include "core/engine/vrx_stage.h"
 
 namespace revenant::engine {
 namespace {
@@ -490,6 +491,15 @@ private:
 }  // namespace
 
 Expected<std::unique_ptr<Engine>> Engine::create(const EngineConfig& config) {
+    // The graph ships the raw tap and asks a factory for every other
+    // demodulator. This is the one place that knows a graph is about to
+    // exist, so it is where the demodulator package gets registered; see the
+    // note in core/engine/vrx_stage.h on why this is not a static
+    // initialiser. Once per process, because installing is a lock and a
+    // std::function assignment and there is no reason to do it per engine.
+    static std::once_flag stages_installed;
+    std::call_once(stages_installed, install_default_vrx_stages);
+
     auto engine = std::make_unique<EngineImpl>();
     if (auto configured = engine->configure(config); !configured) {
         return std::unexpected(configured.error());
