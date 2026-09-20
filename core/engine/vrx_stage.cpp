@@ -109,6 +109,28 @@ constexpr std::uint32_t kMaxFineCapacity = 1U << 22;
 
 constexpr std::uint32_t kMinFineCapacity = 1U << 10;
 
+// The one claim dsp::VrxShape rests on that nothing else measures: the fine
+// tap table is exactly dsp::fine_tap_table_size(fine) entries long, which is
+// why the shape carries the config and not the length.
+//
+// It is checked rather than assumed because the consequence of it being
+// false is silent. build_buffers sizes the device and staging buffers from
+// the config, and a retune whose shape compares equal copies that many bytes
+// out of whatever table the new plan brought, so a table that did not match
+// its config would be copied short or read past its end with no diagnostic
+// anywhere. Two lines here is what lets the shape stay one list.
+[[nodiscard]] Status fine_taps_match_config(const dsp::VrxPlan& plan) {
+    const std::size_t wanted = dsp::fine_tap_table_size(plan.fine);
+    if (plan.fine_taps.size() == wanted) {
+        return {};
+    }
+    return fail(std::format(
+        "a receiver's fine tap table holds {} entries where its {} phases and {} taps imply "
+        "{}. dsp::VrxShape leaves the length out because it is a function of the config, so "
+        "the two cannot differ and one of the planner or fine_tap_table_size has moved",
+        plan.fine_taps.size(), plan.fine.phases, plan.fine.taps, wanted));
+}
+
 // How far below its own sample the detector reads. Named rather than folded
 // into one worst case because AM's DC-removal window is hundreds of samples
 // and everything else is one or none, and sizing every receiver for AM would
@@ -548,7 +570,18 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
     }
     nco_ = std::move(*nco);
 
-    taps_bytes_ = plan_.fine_taps.size() * sizeof(dsp::Complex32);
+    // Sized from the config, not from the vector that happens to be in the
+    // plan. dsp::VrxShape leaves the tap table's length out on the grounds
+    // that it is a function of VrxFineConfig, and every retune past the
+    // shape comparison copies taps_bytes_ bytes out of whatever table the
+    // new plan brought. Taking the length off the vector here would make
+    // that reasoning circular: a plan whose table did not match its config
+    // would size the buffer to itself and the mismatch would first be felt
+    // as a short or overrunning copy at some later retune.
+    if (const Status sized = fine_taps_match_config(plan_); !sized) {
+        return std::unexpected(with_context(sized.error(), "receiver tap table"));
+    }
+    taps_bytes_ = dsp::fine_tap_table_size(plan_.fine) * sizeof(dsp::Complex32);
     const VkDeviceSize weight_bytes = plan_.demod_weights.size() * sizeof(float);
     const VkDeviceSize fine_bytes = static_cast<VkDeviceSize>(fine_capacity_) * kComplexBytes;
     const VkDeviceSize audio_bytes = static_cast<VkDeviceSize>(max_audio_) * sizeof(float);
@@ -915,6 +948,18 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
     const dsp::VrxShape have = dsp::shape_of(plan_);
     if (want != have) {
         return fail(dsp::describe_shape_change(have, want));
+    }
+
+    // The shape says the fine config is unchanged, and the tap table's
+    // length is a function of that config, so the new table is exactly as
+    // long as the buffers built for the old one. That is the sentence
+    // VrxShape gives for not carrying the length, and this is the only
+    // place it is load-bearing: the copy below runs on the recording thread
+    // with taps_bytes_ fixed at build time, so a table that had come out a
+    // different length would be copied short or read past its end and the
+    // audio would carry the damage rather than a refusal.
+    if (const Status sized = fine_taps_match_config(next); !sized) {
+        return std::unexpected(with_context(sized.error(), "receiver retune"));
     }
 
     // Everything that survives is the tuning: the tap table's modulation, the

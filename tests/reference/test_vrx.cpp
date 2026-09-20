@@ -836,6 +836,47 @@ TEST_CASE("the generalised minimum rate against the shorthand it replaced, mode 
     }
 }
 
+TEST_CASE("a plan's fine tap table is exactly the length its config implies", "[vrx][m1]") {
+    // dsp::VrxShape leaves the table's length out and cites
+    // fine_tap_table_size for why. Nothing measured that, and the
+    // consequence of it being false is not a refusal: core/engine/-
+    // vrx_stage.cpp sizes its device and staging buffers once and every
+    // retune past the shape comparison copies that fixed byte count out of
+    // the new plan's table.
+    //
+    // So the property is asserted here for every mode, and at two
+    // bandwidths per mode that land on different tap counts, rather than
+    // being left to the one shape a GPU test happens to build.
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz bandwidth;
+        const dsp::GridParams* grid;
+    };
+
+    const Case cases[] = {
+        {engine::Demod::Raw, 12'000, &kGrid},      {engine::Demod::Raw, 2'400, &kGrid},
+        {engine::Demod::Am, 10'000, &kGrid},       {engine::Demod::Am, 6'000, &kGrid},
+        {engine::Demod::Nfm, 12'000, &kGrid},      {engine::Demod::Nfm, 25'000, &kGrid},
+        {engine::Demod::Wfm, 200'000, &kWideGrid}, {engine::Demod::Wfm, 150'000, &kWideGrid},
+        {engine::Demod::Usb, 2'700, &kGrid},       {engine::Demod::Usb, 1'800, &kGrid},
+        {engine::Demod::Lsb, 2'700, &kGrid},       {engine::Demod::Lsb, 1'800, &kGrid},
+        {engine::Demod::Dsb, 6'000, &kGrid},       {engine::Demod::Dsb, 3'000, &kGrid},
+        {engine::Demod::Cw, 500, &kGrid},          {engine::Demod::Cw, 250, &kGrid},
+    };
+
+    for (const Case& want : cases) {
+        INFO("mode " << engine::demod_name(want.mode) << ", bandwidth " << want.bandwidth);
+        const dsp::Hertz centre = (want.grid == &kWideGrid) ? 160'000 : 196'500;
+        const auto plan = make_plan(want.mode, centre, want.bandwidth, *want.grid);
+        CHECK(plan.fine_taps.size() == dsp::fine_tap_table_size(plan.fine));
+
+        // And the shape a retune compares carries the config that implies
+        // it, so two plans with equal shapes have equally long tables.
+        const dsp::VrxShape shape = dsp::shape_of(plan);
+        CHECK(dsp::fine_tap_table_size(shape.fine) == plan.fine_taps.size());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The fine stage, bit for bit
 // ---------------------------------------------------------------------------

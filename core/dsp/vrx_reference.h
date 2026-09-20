@@ -199,6 +199,17 @@ inline constexpr std::uint32_t kMaxFinePhases = 4096;
 // A function of the config and nothing else, which is why VrxShape does not
 // carry the length separately. It used to be compared separately, in
 // DemodStage::retune, alongside the config that determines it.
+//
+// THIS FUNCTION IS THE LICENCE FOR THAT AND IT HAS TO BE CALLED TO BE ONE.
+// It was declared, documented as the reason the length is not a shape
+// member, and then used by nothing, so the shape rested on arithmetic three
+// other places wrote out by hand. It is now the one expression: design_-
+// fine_taps allocates from it, reference_vrx_fine validates against it, and
+// core/engine/vrx_stage.cpp checks a plan's table against it both when it
+// sizes the device buffers and on every retune that the shape comparison
+// lets through. A retune copies a fixed byte count into a buffer built for
+// the previous plan, so a table whose length did not match its config would
+// be copied short or read past its end with nothing saying so.
 [[nodiscard]] constexpr std::size_t fine_tap_table_size(const VrxFineConfig& config) {
     return static_cast<std::size_t>(config.phases) * static_cast<std::size_t>(config.taps) + 1U;
 }
@@ -840,7 +851,10 @@ struct VrxPlan {
 //
 // The fine tap TABLE's length is not a member. It is P*T + 1 and therefore a
 // function of `fine`, which fine_tap_table_size states; comparing it as well
-// would be a second list again.
+// would be a second list again. core/engine/vrx_stage.cpp checks a plan's
+// table against that function rather than taking the sentence on trust,
+// because it is the one place where the sentence being false would be felt
+// as a bad copy instead of a refusal.
 struct VrxShape {
     VrxFineConfig fine{};
     VrxDemodConfig demod{};

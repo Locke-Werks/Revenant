@@ -475,8 +475,7 @@ Status reference_vrx_fine(const VrxFineConfig& config, const VrxFineParams& para
         return std::unexpected(with_context(valid.error(), "reference_vrx_fine"));
     }
 
-    const std::size_t wanted_taps =
-        static_cast<std::size_t>(config.phases) * static_cast<std::size_t>(config.taps) + 1U;
+    const std::size_t wanted_taps = fine_tap_table_size(config);
     if (taps.size() != wanted_taps) {
         return fail(std::format("reference_vrx_fine wants {} tap entries, got {}", wanted_taps,
                                 taps.size()));
@@ -1276,7 +1275,11 @@ Expected<std::vector<Complex32>> design_fine_taps(const VrxFineConfig& config,
         }
     }
 
-    std::vector<Complex32> table(length + 1U, Complex32{});
+    // Through fine_tap_table_size rather than length + 1, because that
+    // function is what VrxShape cites when it leaves the table's length out
+    // of the shape. A designer that allocated its own arithmetic is how the
+    // two would come apart.
+    std::vector<Complex32> table(fine_tap_table_size(config), Complex32{});
 
     // The modulation, referenced to the filter's own centre so the table is
     // conjugate-symmetric about its midpoint and the group delay carries no
