@@ -12,19 +12,21 @@
 #
 # test_rds_bits.cpp covers recovered subcarrier to differentially decoded
 # bits. test_rds_groups.cpp covers block sync, the checkword and the group
-# parsers, and is landing on a separate branch in the same session; the EXISTS
-# guard is there so the two build independently and merge without either
-# branch editing the other's line.
+# parsers.
+#
+# Both were behind an EXISTS guard while they landed on separate branches in
+# the same session. Both have landed, and the guard is gone. On a test
+# executable it was the worse of the two: a guard that can drop a whole file
+# of cases out of the binary at configure time takes them out of ctest as
+# well, and ctest then reports green over a suite that is quietly smaller
+# than it was. A test that is not run does not fail, which is the one thing a
+# missing test must never look like.
 
-set(REVENANT_DECODE_TEST_SOURCES
+add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
     test_rds_bits.cpp
+    test_rds_groups.cpp
 )
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_rds_groups.cpp")
-    list(APPEND REVENANT_DECODE_TEST_SOURCES test_rds_groups.cpp)
-endif()
-
-add_executable(revenant_decode_tests ${REVENANT_DECODE_TEST_SOURCES})
 
 target_link_libraries(revenant_decode_tests PRIVATE
     revenant_core

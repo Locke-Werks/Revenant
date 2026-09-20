@@ -18,23 +18,18 @@ find_package(Threads REQUIRED)
 find_package(rtlsdr CONFIG REQUIRED)
 
 # The decoders. rds_bits.cpp is the RDS physical layer, subcarrier to bits;
-# rds_groups.cpp is the block and group layer above it and is landing on a
-# separate branch in the same session.
+# rds_groups.cpp is the block and group layer above it.
 #
-# The EXISTS guard is there so the two branches build independently and merge
-# without either one having to edit the other's line. tests/CMakeLists.txt
-# already uses the same guard on rpc/ for the same reason. Once both have
-# landed the guard can go, and a missing file would then be a broken build
-# rather than a silently absent decoder, which is the right end state.
-set(REVENANT_DECODE_SOURCES
-    decode/rds_bits.cpp
-)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/decode/rds_groups.cpp")
-    list(APPEND REVENANT_DECODE_SOURCES decode/rds_groups.cpp)
-endif()
-
+# Both were behind an EXISTS guard while they landed on separate branches in
+# the same session. Both have landed, and the guard is gone rather than left
+# in place: it was configure-time only, so a file that went missing or got
+# renamed would drop a whole decoder out of the library and configure clean,
+# and the first sign of it would be a link error somewhere unrelated or,
+# worse, nothing at all. A missing source is now a broken build, which is
+# what it is.
 add_library(revenant_core STATIC
-    ${REVENANT_DECODE_SOURCES}
+    decode/rds_bits.cpp
+    decode/rds_groups.cpp
     detect/detector.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
