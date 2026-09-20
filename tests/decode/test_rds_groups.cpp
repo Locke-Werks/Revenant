@@ -390,6 +390,197 @@ TEST_CASE("the corrector fixes every burst it claims and refuses every one it do
     }
 }
 
+TEST_CASE("block 3 gets no more chances at a correction than any other block", "[rds]") {
+    // THE BAR, and it is deliberately wider than the one bug that prompted it.
+    //
+    // Block 3 is the only block with two candidate offsets, so it is the only
+    // one that can be offered a second correction attempt after the first
+    // refuses. Any rule that offers it one hands block 3 a lower effective
+    // error threshold than blocks 1, 2 and 4, and the block it delivers is
+    // read as a repeat of PI. So the property worth asserting is not that one
+    // burst is refused, it is that block 3 accepts no more syndromes than
+    // anything else once block 2 has said which offset to expect.
+    //
+    // The sweep runs every error pattern confined to the ten checkword bits,
+    // which is a bijection onto the 1023 ways a received block's syndrome can
+    // be wrong. What comes back out of a corrected block is not asserted here
+    // and is often not what was sent: the corrector flips the one burst that
+    // owns that syndrome, and for most of the 51 that burst reaches into the
+    // information word rather than staying in the checkword. That is the
+    // inherent miscorrection the header describes and it is not what this
+    // test is about. What this test is about is how many of the 1023 get
+    // through at all.
+    constexpr std::uint16_t kPi = 0x2345;
+
+    auto accepted = [](std::size_t index, bool check_pi) {
+        int count = 0;
+        for (std::uint32_t error = 1; error < 1024; ++error) {
+            RdsDecoder decoder;
+            prime(decoder);
+
+            const GroupWords words{kPi, type0_block2(10, true, false, true, false, 0),
+                                   0xE0E0, 0x2020, false};
+            auto blocks = encode_group(words);
+            blocks[index] ^= error;
+            for (const std::uint32_t block : blocks) {
+                feed_word(decoder, block);
+            }
+
+            INFO(std::format("block {} error {:03X}", index + 1, error));
+            REQUIRE(decoder.last_group().has_value());
+            const auto& group = *decoder.last_group();
+            if (group.blocks[index].valid) {
+                ++count;
+            }
+            if (check_pi) {
+                // Block 2 is intact in every one of these and says version A,
+                // so block 3 is AF codes and must never reach the PI.
+                CHECK_FALSE(group.c_prime);
+                CHECK(decoder.state().pi == kPi);
+            }
+        }
+        return count;
+    };
+
+    // 26 single-bit errors and 25 adjacent pairs, the whole of what the span-2
+    // default can repair.
+    CHECK(accepted(0, false) == 51);
+    CHECK(accepted(2, true) == 51);
+
+    SECTION("the burst that used to be promoted into a PI") {
+        // Bits 3, 4 and 5, entirely inside the checkword. Against C the
+        // residue is 0x038, a span-3 burst that the span-2 default refuses.
+        // Against C' it is 0x200, which is bit 9 on its own, so a retry
+        // against C' turns an uncorrectable block into a clean C' block
+        // holding the AF pair, and a C' block 3 is read as PI.
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const GroupWords words{kPi, type0_block2(10, true, false, true, false, 0),
+                               0xE0E0, 0x2020, false};
+        auto blocks = encode_group(words);
+        blocks[2] ^= 0x38u;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.last_group().has_value());
+        CHECK_FALSE(decoder.last_group()->blocks[2].valid);
+        CHECK_FALSE(decoder.last_group()->c_prime);
+        CHECK(decoder.state().pi == kPi);
+    }
+
+    SECTION("and the exact C' coincidence, which needs no corrector at all") {
+        // 0x238 is offset C XOR offset C', so this block arrives as a
+        // faultless C' codeword while block 2 says version A. Reading it as C'
+        // would put 0xE0E0 on the display as the station.
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const GroupWords words{kPi, type0_block2(10, true, false, true, false, 0),
+                               0xE0E0, 0x2020, false};
+        auto blocks = encode_group(words);
+        blocks[2] ^= 0x238u;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.last_group().has_value());
+        CHECK_FALSE(decoder.last_group()->c_prime);
+        CHECK(decoder.state().pi == kPi);
+    }
+
+    SECTION("a version B group still has its block 3 corrected against C'") {
+        // The retry exists for this and deleting it would be the wrong fix.
+        // Block 2 says version B, so C' is the offset block 3 is measured
+        // against and a two-bit burst in its checkword is repaired.
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const std::uint16_t b2 = type0_block2(10, true, false, true, false, 0, true);
+        GroupWords words{kPi, b2, 0x7788, 0x2020, true};
+        auto blocks = encode_group(words);
+        blocks[2] ^= 0x03u;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.last_group().has_value());
+        CHECK(decoder.last_group()->blocks[2].valid);
+        CHECK(decoder.last_group()->blocks[2].corrected);
+        CHECK(decoder.last_group()->c_prime);
+        CHECK(decoder.state().pi == 0x7788);
+    }
+
+    SECTION("c_prime and version_b agree on every group that has a type") {
+        // apply_group reads PI out of block 3 on c_prime while apply_type0 and
+        // apply_type2 branch on version_b. They can only stay in step if the
+        // two fields are the same answer, which they are once block 2 selects
+        // the offset.
+        for (const bool version_b : {false, true}) {
+            for (std::uint32_t error = 0; error < 1024; ++error) {
+                RdsDecoder decoder;
+                prime(decoder);
+
+                const std::uint16_t b2 =
+                    type0_block2(10, true, false, true, false, 0, version_b);
+                GroupWords words{kPi, b2, 0x7788, 0x2020, version_b};
+                auto blocks = encode_group(words);
+                blocks[2] ^= error;
+                for (const std::uint32_t block : blocks) {
+                    feed_word(decoder, block);
+                }
+
+                INFO(std::format("version_b {} error {:03X}", version_b, error));
+                REQUIRE(decoder.last_group().has_value());
+                const auto& group = *decoder.last_group();
+                REQUIRE(group.type_valid);
+                // A dropped block 3 leaves c_prime false, which is the answer
+                // apply_group wants: it needs both before it touches the PI.
+                CHECK(group.c_prime == (group.version_b && group.blocks[2].valid));
+            }
+        }
+    }
+}
+
+TEST_CASE("with block 2 lost, block 3 is read against C before C'", "[rds]") {
+    // Two syndromes are correctable against both offsets, 0x020 and 0x218, and
+    // the choice between them is arbitrary. It is asserted because it is
+    // arbitrary: reverse it and a version A block 3 becomes a C' block whose
+    // payload is written over the station PI, which is the one direction of
+    // the coin flip that damages something.
+    //
+    // 0x020 is reached by a span-2 burst on bits 23 and 24. Against C that is
+    // exactly the transmitted error. Against C' the residue is 0x370, which is
+    // bit 20 alone, so a C'-first decoder would deliver a different word.
+    RdsDecoder decoder;
+    prime(decoder);
+
+    constexpr std::uint16_t kBlock3 = 0x4C71;
+    GroupWords words{0x2345, type0_block2(10, true, false, true, false, 0), kBlock3,
+                     0x2020, false};
+    auto blocks = encode_group(words);
+    blocks[1] ^= kBlockMask;    // block 2 arrives as its own complement
+    blocks[2] ^= 0x1800000u;    // bits 23 and 24
+
+    REQUIRE(poly_mod(blocks[2]) == 0x020u);
+    for (const std::uint32_t block : blocks) {
+        feed_word(decoder, block);
+    }
+
+    REQUIRE(decoder.last_group().has_value());
+    const auto& group = *decoder.last_group();
+    CHECK_FALSE(group.blocks[1].valid);
+    REQUIRE(group.blocks[2].valid);
+    CHECK(group.blocks[2].corrected);
+    CHECK_FALSE(group.c_prime);
+    CHECK(group.blocks[2].value == kBlock3);
+    // The C' reading would have been this, and would also have been written
+    // over the PI from block 1.
+    CHECK(group.blocks[2].value != static_cast<std::uint16_t>(kBlock3 ^ 0x6400u));
+    CHECK(decoder.state().pi == 0x2345);
+}
+
 // ---------------------------------------------------------------------------
 // Synchronisation
 // ---------------------------------------------------------------------------

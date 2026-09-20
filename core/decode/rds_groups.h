@@ -339,9 +339,25 @@ struct Block {
 struct Group {
     std::array<Block, kBlocksPerGroup> blocks{};
 
-    // Which offset block 3 actually carried. A version B group uses C'. Kept
-    // separate from version_b because block 2 can be lost while block 3
-    // arrives clean, and then the offset is the only evidence there is.
+    // Which offset block 3 was read against. A version B group uses C'.
+    //
+    // Kept separate from version_b because block 2 can be lost while block 3
+    // arrives clean, and then the offset is the only evidence there is. When
+    // block 2 did arrive, its version bit is what selects the offset, so this
+    // field and version_b always agree on a group that has a type at all.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it said the received
+    // offset was better evidence than block 2's version bit in every case,
+    // because the offset is checked by block 3's own CRC. That holds for an
+    // undamaged block and fails for a damaged one, where the check is only a
+    // hypothesis the corrector was allowed to choose. Block 3 was tested
+    // against C and then, on failure, against C', so it had two chances at a
+    // correctable residue where every other block gets one: 101 of the 1023
+    // ways a block can arrive with a wrong syndrome were accepted there
+    // against 51 for blocks 1, 2 and 4. Fifty of the extra come back flagged
+    // C', and a C' block 3 rewrites the station PI with block 3's payload, so
+    // the widened acceptance landed on the one field the whole decode keys
+    // off. See RdsDecoder::receive_block for the rule that replaced it.
     bool c_prime = false;
 
     std::uint8_t type = 0;   // A3..A0 from block 2, meaningless unless type_valid

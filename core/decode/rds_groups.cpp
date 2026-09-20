@@ -827,15 +827,38 @@ void RdsDecoder::receive_block() {
 
     const std::uint16_t syndrome = block_syndrome(window_);
 
-    // Block 3 carries C in a version A group and C' in a version B group, and
-    // the received offset is better evidence of which than block 2's version
-    // bit is: it is checked by the CRC of this block, and block 2 may not have
-    // arrived at all.
+    // Block 3 carries C in a version A group and C' in a version B group.
+    //
+    // WHICH OF THE TWO IS TESTED, AND WHY BLOCK 2 DECIDES IT.
+    //
+    // Block 3 is the only block with two candidate offsets, so it is the only
+    // one that can be handed a second correction attempt when the first one
+    // refuses. Handing it that attempt unconditionally costs exactly what the
+    // span-2 default in rds_groups.h exists to buy: of the 1023 ways a block
+    // can arrive with a wrong syndrome, 51 are correctable for blocks 1, 2 and
+    // 4 and 101 were accepted here, and fifty of the extra came back flagged
+    // C'. A C' block 3 is read as a repeat of PI, so those fifty do not
+    // produce a wrong character in a text field, they produce a wrong station
+    // identity. A three-bit burst inside the checkword alone is enough: it is
+    // uncorrectable against C and lands on a single-bit pattern against C'.
+    //
+    // Block 2's version bit settles it whenever block 2 arrived, because block
+    // 2 was checked against one offset and had no second hypothesis available
+    // to it. Only a lost block 2 leaves block 3's own syndrome to answer, and
+    // then both offsets are tested as before. The received offset is still the
+    // better evidence in the case the old rule was written for; it is not
+    // better evidence than a block that had no choice in what it matched.
     BlockOffset offset = offset_for_index(index);
     bool c_prime = false;
-    if (index == 2 && syndrome == offset_word(BlockOffset::kCPrime)) {
-        offset = BlockOffset::kCPrime;
-        c_prime = true;
+    bool retry_other_c = false;
+    if (index == 2) {
+        if (group_.blocks[1].valid) {
+            c_prime = ((group_.blocks[1].value >> 11) & 0x01) != 0;
+        } else {
+            c_prime = syndrome == offset_word(BlockOffset::kCPrime);
+            retry_other_c = !c_prime;
+        }
+        offset = c_prime ? BlockOffset::kCPrime : BlockOffset::kC;
     }
 
     std::uint16_t residue = static_cast<std::uint16_t>(syndrome ^ offset_word(offset));
@@ -866,11 +889,14 @@ void RdsDecoder::receive_block() {
             corrected_window ^= burst->pattern;
             residue = 0;
             corrected = true;
-        } else if (index == 2 && !c_prime) {
-            // A version B group whose block 3 took errors: the exact C' match
-            // above failed, so try correcting against C' as well before giving
-            // up. Preferring C when both correct is arbitrary and deliberate,
-            // and it is why the version bit in block 2 is kept separately.
+        } else if (retry_other_c) {
+            // Block 2 was lost and block 3 is not a clean C' block, so a
+            // version B group whose block 3 also took errors is still on the
+            // table. Try correcting against C' before giving up. Preferring C
+            // when both offsets yield a correction is arbitrary and
+            // deliberate: two syndromes, 0x020 and 0x218, are correctable both
+            // ways, and a decoder that flipped the preference would read
+            // block 3's payload as a PI on the first of them.
             const std::uint16_t alt =
                 static_cast<std::uint16_t>(syndrome ^ offset_word(BlockOffset::kCPrime));
             if (const auto alt_burst =
@@ -945,9 +971,13 @@ void RdsDecoder::apply_group(const Group& group) {
         state_.pi_valid = true;
     }
 
-    // A version B group repeats PI in block 3. The offset that block 3
-    // actually carried is what decides, rather than block 2's version bit: the
-    // offset was checked by this block's own CRC.
+    // A version B group repeats PI in block 3. c_prime is what decides, and
+    // it is the same answer as version_b on any group that has a type at all:
+    // receive_block reads block 3 against the offset block 2 named whenever
+    // block 2 arrived, and a group whose block 2 did not arrive has no
+    // type_valid and reaches none of the parsers below. So this guard and the
+    // version_b branches in apply_type0 and apply_type2 cannot disagree about
+    // the same group, which they could while block 3 chose its own offset.
     if (group.c_prime && group.blocks[2].valid) {
         state_.pi = group.blocks[2].value;
         state_.pi_valid = true;
