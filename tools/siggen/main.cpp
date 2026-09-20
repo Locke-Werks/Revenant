@@ -30,6 +30,7 @@
 #include "core/dsp/types.h"
 #include "core/error.h"
 #include "core/dsp/synth/modulators.h"
+#include "core/dsp/synth/wfm_mod.h"
 #include "core/dsp/synth/wideband.h"
 
 namespace {
@@ -647,8 +648,214 @@ void report_buffer(const Writer& writer, double full_scale)
 }
 
 // ---------------------------------------------------------------------------
+// Broadcast FM
+// ---------------------------------------------------------------------------
+
+// The station options, shared by the `wfm` subcommand and the FM stations a
+// wideband scene can carry, so the two cannot drift into describing a
+// station differently.
+struct StationOptions {
+    siggen::FmProgramme programme{};
+    dsp::Hertz peak_deviation = siggen::kCompositePeakDeviationHz;
+    dsp::Hertz pilot_deviation = 6750;
+    dsp::Hertz rds_deviation = 2000;
+    bool pilot = true;
+    double clock_error_ppm = 0.0;
+    std::size_t rds_bits = 1024;
+};
+
+[[nodiscard]] Expected<StationOptions> read_station(Options& options)
+{
+    StationOptions station;
+
+    auto deviation = options.integer("deviation", station.peak_deviation);
+    auto audio = options.integer("audio-deviation", station.programme.audio_deviation_hz);
+    auto left = options.integer("left-tone", station.programme.left_tone_hz);
+    auto right = options.integer("right-tone", station.programme.right_tone_hz);
+    auto pilot_deviation = options.integer("pilot-deviation", station.pilot_deviation);
+    auto rds_deviation = options.integer("rds-deviation", station.rds_deviation);
+    auto bits = options.integer("rds-bits", static_cast<std::int64_t>(station.rds_bits));
+    auto clock = options.real("clock-error-ppm", station.clock_error_ppm);
+    auto curve = options.text("preemphasis", "50us");
+    const bool mono = options.flag("mono");
+    const bool no_pilot = options.flag("no-pilot");
+
+    if (!deviation) { return std::unexpected(deviation.error()); }
+    if (!audio) { return std::unexpected(audio.error()); }
+    if (!left) { return std::unexpected(left.error()); }
+    if (!right) { return std::unexpected(right.error()); }
+    if (!pilot_deviation) { return std::unexpected(pilot_deviation.error()); }
+    if (!rds_deviation) { return std::unexpected(rds_deviation.error()); }
+    if (!bits) { return std::unexpected(bits.error()); }
+    if (!clock) { return std::unexpected(clock.error()); }
+    if (!curve) { return std::unexpected(curve.error()); }
+
+    if (*bits <= 0) {
+        return fail("--rds-bits must be positive");
+    }
+
+    auto preemphasis = siggen::preemphasis_from_name(*curve);
+    if (!preemphasis) {
+        return std::unexpected(preemphasis.error());
+    }
+
+    station.peak_deviation = *deviation;
+    station.programme.audio_deviation_hz = *audio;
+    station.programme.left_tone_hz = *left;
+    station.programme.right_tone_hz = *right;
+    station.programme.stereo = !mono;
+    station.programme.preemphasis = *preemphasis;
+    station.pilot_deviation = *pilot_deviation;
+    station.rds_deviation = *rds_deviation;
+    station.pilot = !no_pilot;
+    station.clock_error_ppm = *clock;
+    station.rds_bits = static_cast<std::size_t>(*bits);
+    return station;
+}
+
+[[nodiscard]] siggen::WfmSpec station_spec(const StationOptions& station,
+                                           SampleRate rate,
+                                           Hertz offset,
+                                           std::uint64_t seed)
+{
+    siggen::WfmSpec spec;
+    spec.rate = rate;
+    spec.carrier_offset = offset;
+    spec.peak_deviation_hz = station.peak_deviation;
+    spec.programme = station.programme;
+    spec.rds.pilot_enabled = station.pilot;
+    spec.rds.pilot_deviation_hz = station.pilot_deviation;
+    spec.rds.rds_deviation_hz = station.rds_deviation;
+    spec.rds.clock_error_ppm = station.clock_error_ppm;
+    spec.rds.bits = siggen::random_bits(station.rds_bits, seed);
+    return spec;
+}
+
+[[nodiscard]] Status run_wfm(Options& options)
+{
+    // 684000 is four times the 171000 a WFM receiver needs to hand its
+    // composite to the RDS decoder intact, and the lowest multiple of it
+    // that carries a 75 kHz station's 268750 Hz of occupied bandwidth.
+    auto common = read_common(options, 684000);
+    if (!common) {
+        return std::unexpected(common.error());
+    }
+
+    auto station = read_station(options);
+    if (!station) {
+        return std::unexpected(station.error());
+    }
+
+    if (auto clean = options.reject_unused(); !clean) {
+        return clean;
+    }
+
+    siggen::WfmSpec spec =
+        station_spec(*station, common->rate, common->offset, common->seed);
+    spec.amplitude = common->amplitude;
+    spec.initial_phase = common->phase;
+
+    auto modulator = siggen::WfmModulator::create(spec);
+    if (!modulator) {
+        return std::unexpected(with_context(modulator.error(), "siggen wfm"));
+    }
+
+    auto stream = open_output(common->out_path);
+    if (!stream) {
+        return std::unexpected(stream.error());
+    }
+
+    Writer writer(*stream, common->format, common->full_scale);
+    std::vector<Complex32> buffer(common->block);
+
+    SampleIndex produced = 0;
+    while (produced < common->samples) {
+        const auto length = static_cast<std::size_t>(std::min<SampleIndex>(
+            static_cast<SampleIndex>(common->block), common->samples - produced));
+        modulator->render(produced, dsp::ComplexSpan(buffer.data(), length));
+        if (auto written = writer.consume(ConstComplexSpan(buffer.data(), length)); !written) {
+            return written;
+        }
+        produced += length;
+    }
+
+    stream->flush();
+    if (!*stream) {
+        return fail(std::format("failed to flush '{}'", common->out_path));
+    }
+
+    const siggen::FmComposite& composite = modulator->composite();
+    const siggen::SpectralExtent extent = modulator->occupied_extent();
+
+    std::print("wfm at {} S/s\n", common->rate);
+    std::print("  carrier offset    {} Hz\n", common->offset);
+    std::print("  occupied band     {} to {} Hz, centre {} Hz, width {} Hz (Carson)\n",
+               extent.low_hz, extent.high_hz, extent.center_hz(), extent.bandwidth_hz());
+    std::print("  deviation         {} Hz peak on the multiplex\n", spec.peak_deviation_hz);
+    std::print("  programme         {} tone{} at {} Hz{}, {} Hz of deviation, {} "
+               "pre-emphasis\n",
+               spec.programme.stereo ? "stereo" : "mono",
+               spec.programme.stereo ? "s" : "",
+               spec.programme.left_tone_hz,
+               spec.programme.stereo
+                   ? std::format(" and {} Hz", spec.programme.right_tone_hz)
+                   : std::string{},
+               spec.programme.audio_deviation_hz,
+               siggen::preemphasis_name(spec.programme.preemphasis));
+    std::print("  pilot             {}\n",
+               spec.rds.pilot_enabled
+                   ? std::format("{} Hz of deviation at 19 kHz", spec.rds.pilot_deviation_hz)
+                   : std::string("off"));
+    std::print("  rds               {} bits from seed {}, {} Hz of injection at 57 kHz\n",
+               modulator->payload_bits().size(), common->seed, spec.rds.rds_deviation_hz);
+    std::print("  whole payload     {} samples, {:.3f} s\n",
+               modulator->nominal_sample_count(),
+               static_cast<double>(modulator->nominal_sample_count()) /
+                   static_cast<double>(common->rate));
+    // A bound and not a measurement: the three parts do not peak together.
+    // Above 1.0 the station is deviating past the figure above, which is
+    // reachable on purpose and is not clamped.
+    std::print("  composite peak    {:.4f} of full deviation (upper bound){}\n",
+               composite.peak_bound(),
+               (composite.peak_bound() > 1.0) ? "  OVER DEVIATING" : "");
+    report_buffer(writer, common->full_scale);
+    std::print("  wrote             {}\n", common->out_path);
+    return {};
+}
+
+// ---------------------------------------------------------------------------
 // Wideband
 // ---------------------------------------------------------------------------
+
+[[nodiscard]] Expected<std::vector<Hertz>> parse_offset_list(std::string_view list)
+{
+    std::vector<Hertz> offsets;
+    std::size_t at = 0;
+    while (at <= list.size()) {
+        const std::size_t comma = list.find(',', at);
+        const std::string_view piece =
+            list.substr(at, (comma == std::string_view::npos) ? std::string_view::npos
+                                                              : comma - at);
+        if (!piece.empty()) {
+            Hertz parsed = 0;
+            const char* begin = piece.data();
+            const char* end = begin + piece.size();
+            const auto result = std::from_chars(begin, end, parsed);
+            if (result.ec != std::errc{} || result.ptr != end) {
+                return fail(std::format("'{}' is not an integer offset in hertz", piece));
+            }
+            offsets.push_back(parsed);
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        at = comma + 1;
+    }
+    if (offsets.empty()) {
+        return fail("--fm-stations listed no offsets");
+    }
+    return offsets;
+}
 
 [[nodiscard]] Expected<std::vector<siggen::Modulation>> parse_mode_list(std::string_view list)
 {
@@ -747,6 +954,37 @@ void report_buffer(const Writer& writer, double full_scale)
         spec.random.palette = *palette;
     }
 
+    // Broadcast FM stations, placed by hand. They are not in the random
+    // palette and will not be: a station is 268750 Hz wide and carries a
+    // payload somebody chose, so there is nothing sensible to draw.
+    auto fm_offsets = options.text("fm-stations", "");
+    auto fm_snr = options.real("fm-snr", 30.0);
+    if (!fm_offsets) { return std::unexpected(fm_offsets.error()); }
+    if (!fm_snr) { return std::unexpected(fm_snr.error()); }
+
+    if (!fm_offsets->empty()) {
+        auto offsets = parse_offset_list(*fm_offsets);
+        if (!offsets) {
+            return std::unexpected(offsets.error());
+        }
+        auto station = read_station(options);
+        if (!station) {
+            return std::unexpected(station.error());
+        }
+        for (std::size_t i = 0; i < offsets->size(); ++i) {
+            siggen::WfmStationPlacement placement;
+            // A different payload per station, derived from the scene seed
+            // so the whole scene still reproduces from one number.
+            placement.station = station_spec(*station, spec.rate, (*offsets)[i],
+                                             siggen::derive_seed(common->seed, 0x5746'4d00 + i));
+            placement.use_snr = spec.add_noise;
+            placement.snr_in_occupied_bandwidth_db = *fm_snr;
+            placement.end_sample =
+                (common->samples > 0) ? common->samples : siggen::kAlwaysOn;
+            spec.fm_stations.push_back(std::move(placement));
+        }
+    }
+
     if (auto clean = options.reject_unused(); !clean) {
         return clean;
     }
@@ -795,6 +1033,11 @@ void report_buffer(const Writer& writer, double full_scale)
     std::print("  duration          {} samples, {:.3f} s\n", common->samples, seconds);
     std::print("  emitters          {} transmissions from {} slots\n",
                scene->truth().size(), spec.random.emitter_count);
+    if (!spec.fm_stations.empty()) {
+        std::print("  fm stations       {} at {}, {} RDS bits each\n",
+                   spec.fm_stations.size(), *fm_offsets,
+                   spec.fm_stations.front().station.rds.bits.size());
+    }
     std::print("  placement span    {} to {} Hz\n", *span_low, *span_high);
     std::print("  noise floor       {}\n",
                spec.add_noise ? std::format("{:.2f} dBFS full band, power {:.6g}",
@@ -822,6 +1065,7 @@ void print_usage()
         "\n"
         "Modes:\n"
         "  cw am nfm usb lsb fsk2 bpsk qpsk   one emitter, streamed to a file\n"
+        "  wfm                                a broadcast FM station carrying RDS\n"
         "  wideband                           a populated scene with ground truth\n"
         "  modes                              list the mode names\n"
         "\n"
@@ -846,10 +1090,21 @@ void print_usage()
         "  fsk2              --symbol-rate X --deviation N --symbols N\n"
         "  bpsk qpsk         --symbol-rate X --rolloff X --symbols N --span N\n"
         "\n"
+        "  wfm               --deviation N --audio-deviation N --left-tone N\n"
+        "                    --right-tone N --mono --preemphasis none|75us|50us\n"
+        "                    --pilot-deviation N --no-pilot --rds-deviation N\n"
+        "                    --rds-bits N --clock-error-ppm X\n"
+        "                    Deviations are hertz at the standard 75 kHz full scale;\n"
+        "                    lowering --deviation scales every one of them with it.\n"
+        "                    The default rate is 684000, four times what the RDS\n"
+        "                    decoder wants and enough to carry the whole station.\n"
+        "\n"
         "  wideband          --emitters N --bursts N --span-low N --span-high N\n"
         "                    --noise-dbfs X --no-noise --snr-min X --snr-max X\n"
         "                    --min-burst S --max-burst S --modes a,b,c\n"
         "                    --center N --epoch-ns N --threads N --truth PATH\n"
+        "                    --fm-stations a,b,c --fm-snr X plus every wfm option\n"
+        "                    above, which apply to all of them\n"
         "\n"
         "Every mode is deterministic from its seed, and a file generated in one\n"
         "block is byte for byte the same as the same file generated in many.\n");
@@ -871,6 +1126,9 @@ void print_usage()
     }
     if (command == "wideband") {
         return run_wideband(*options);
+    }
+    if (command == "wfm") {
+        return run_wfm(*options);
     }
 
     auto kind = siggen::modulation_from_name(command);
