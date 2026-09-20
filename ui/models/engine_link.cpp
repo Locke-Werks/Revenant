@@ -597,6 +597,14 @@ void EngineLink::setConfidenceBar(double bar)
     // so the overlay silently stopped updating. See kMaxConfidenceBar for
     // the engine's reasoning about one.
     //
+    // This clamp is not redundant with the slider's range, which is the
+    // reading it invites. A Slider whose `to` is bound to maxConfidenceBar
+    // keeps a `to` of exactly one, because QQuickSlider::setTo drops an
+    // assignment within 1e-12 of the value it holds; measured on Qt 6.8.3
+    // and written up on kMaxConfidenceBar. So one arrives here on every drag
+    // to full travel and this line is what turns it into a bar the engine
+    // accepts.
+    //
     // NaN is dealt with before the clamp because it compares false against
     // both bounds and would pass straight through, which is the same defect
     // one step further out: the engine refuses a non-finite bar too. It

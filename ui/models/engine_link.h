@@ -151,6 +151,16 @@ namespace revenant::ui {
 // strong the signal is. An empty list is also what a dead band looks like,
 // so the engine refuses rather than answering emptily.
 //
+// "Never arrives" is the limit, and the limit is not what the arithmetic
+// does at every setting the detector accepts. In doubles the iteration
+// stops, and where it stops depends on confidence_rise: at a rise of one
+// half or more the last step lands on exactly one, so a saturated track's
+// confidence IS one and the engine is refusing a bar that would have
+// listed it. confidence_fixed_point below maps that across the whole range
+// core/detect/detector.cpp validates, because the paragraphs here turn on
+// which part of the map the engine is running in. At the shipped rise the
+// sentence above holds as written.
+//
 // setConfidenceBar clamped to [0, 1] INCLUSIVE until 2026-09-19, which put
 // the one value the engine refuses inside the range a writable property
 // accepts. Writing 1.0 made every later detections call fail; poll_detections
@@ -162,6 +172,15 @@ namespace revenant::ui {
 // confidence slider binds its `to` to that property, so the engine's rule is
 // written down once. It carried a hardcoded 0.95 until 2026-09-20, which was
 // neither this constant nor anything that would follow it.
+//
+// That binding does not move this particular slider, and the comment there
+// says so at length. QQuickSlider::setTo drops an assignment that is
+// qFuzzyCompare-equal to the value the property holds, `to` starts at one,
+// and this constant is 1.1e-16 short of one, so the slider's top of travel
+// is exactly one: measured on Qt 6.8.3, where a `to` of 1 - 1e-11 is taken
+// and 1 - 1e-12 is not. setConfidenceBar below is therefore what stands
+// between a handle at full travel and the bar the engine refuses. It is not
+// a second line behind the slider's range. It is the only line.
 //
 // epsilon is 2^-52 and the spacing of doubles just below one is 2^-53, so
 // this is exactly std::nextafter(1.0, 0.0), written in a form that is
@@ -218,49 +237,150 @@ inline constexpr double kMaxConfidenceBar =
 // it being exactly kMaxConfidenceBar and nothing checked that.
 [[nodiscard]] constexpr double confidence_fixed_point(double rise) {
     double confidence = rise;
-    // Bounded so a rise near the detector's 0.001 floor cannot hang a
-    // compile; every call here converges in under 200 steps.
+    // Bounded, though not against the input the previous comment named. It
+    // said the cap stopped a rise near the detector's 0.001 floor hanging a
+    // compile. Measured with MSVC 19.44.35228: that floor converges on its
+    // own in 30390 iterations and compiles without complaint, a rise of zero
+    // converges on the first iteration, and a rise of -1 runs to negative
+    // infinity and stops there in 1023. The cap engages only
+    // below a rise of about 0.000292, a third of the floor detector.cpp
+    // enforces, so nothing this file or that config can produce reaches it.
+    //
+    // It stays, because a caller outside that range would otherwise spend
+    // hundreds of thousands of iterations in a constant expression on an
+    // answer nobody here wants. What changed is what happens when it fires.
+    // Falling out of the loop used to return the last iterate, which is not
+    // a fixed point, to assertions that read it as one: the two written
+    // with < would have passed on it and reported a guard that never ran.
+    //
+    // A NaN was the obvious replacement and it does not work here. MSVC
+    // 19.44.35228 folds a NaN comparison in a constant expression as though
+    // it were ordered: with the cap forced low, nan < kMaxConfidenceBar
+    // evaluated TRUE at compile time and false at run time in the same
+    // binary, so both < assertions would have kept passing. Throwing makes
+    // the evaluation non-constant instead, and a non-constant evaluation is
+    // not something a comparison rule can reinterpret: every assertion below
+    // then fails to compile and the diagnostic names this line. Nothing
+    // calls this at run time, and no rise detector.cpp accepts would reach
+    // the throw if something did.
     for (int step = 0; step < 100000; ++step) {
         const double next = confidence + (1.0 - confidence) * rise;
         if (next == confidence) {
-            break;
+            return confidence;
         }
         confidence = next;
     }
-    return confidence;
+    throw "confidence_fixed_point did not converge inside its iteration cap";
 }
 
-// core/detect/DetectorConfig::confidence_rise, copied rather than included.
+// core/detect/DetectorConfig::confidence_rise, copied rather than included,
+// and NOTHING BINDS THE COPY TO THE ORIGINAL. Read the next four paragraphs
+// before trusting anything below that mentions 0.35.
 //
-// ui/CMakeLists.txt links no part of the engine on purpose, so detector.h is
-// not reachable from this project and cannot be made reachable without
-// giving up the two-runtime split that file argues for. The copy can go
-// stale against the engine; what the assertions below catch is the
-// arithmetic moving out from under the constant, which is the failure that
-// has no other witness.
+// It cannot be included. ui/CMakeLists.txt links no part of the engine on
+// purpose and states the rule from this side; core/rpc/CMakeLists.txt states
+// it from the other. detector.h is not reachable here and making it reachable
+// means giving up the two-runtime split, which is a standing decision and not
+// an obstacle to route around.
+//
+// It cannot be checked at runtime either, which was the other way out. The
+// detector's configuration is not on the wire: core/rpc/types.h's
+// DetectionList carries decisions, total, the detection threshold and the
+// hold, and no confidence_rise. The only engine value that reflects the rise
+// is a track's confidence after it saturates, which takes tens of seconds of
+// unbroken carrier to observe and says nothing until then.
+//
+// So what the assertions below actually guard, stated plainly because the
+// first version of them overstated it. They are arithmetic over an input
+// this file owns. They fire when confidence_fixed_point stops agreeing with
+// the map measured beside them, which is what a compiler change or a careless
+// edit to the iteration would do. They CANNOT fire when somebody edits
+// confidence_rise in detector.h, which is the failure the old assertion
+// message named, and the lane that added them "proved they fire" by editing
+// this copy, which is the guard watching its own input.
+//
+// What keeps it in step is therefore the map and not the number. The
+// assertions pin the whole range detector.cpp validates, [0.001, 1.0]
+// inclusive per its require_range call, rather than the one value copied
+// here, so a reader who finds the engine on a different rise can place it on
+// the map without rerunning anything. Moving this copy to match a changed
+// engine is then a one-line edit whose consequences are already written down.
 inline constexpr double kDetectorConfidenceRise = 0.35;
 
-// The identity the comment on kMaxConfidenceBar depends on. It holds over a
-// narrow band of rise and the two bounds are asserted beside it, because a
-// reader otherwise has to rederive where it stops holding.
+// WHERE THIS IS COMPILED, WHICH IS NOT CI
+//
+// Only ui/ compiles this header, and no CI leg configures ui/: the root
+// CMakeLists.txt refuses REVENANT_BUILD_UI outright because one cache cannot
+// hold both runtimes. So the 281 tests and every job in
+// .github/workflows/ci.yml go past these assertions without compiling them.
+// They stop anyone who builds the client, which is everyone who ships it and
+// nobody who merges. Closing that needs a CI job configuring ui/ against the
+// dynamic triplet, which is a change to that workflow and is not made here.
+//
+// THE MAP. Measured 2026-09-20 with MSVC 19.44.35228 at /fp:precise, by
+// bisection over doubles, and each boundary is asserted below rather than
+// described:
+//
+//   rise <= 0.25            settles BELOW the bar: two ulps below one at
+//                           0.25 itself, and further short as the rise
+//                           falls, 5.6e-14 short at the 0.001 floor
+//   0.25 < rise < 0.5       settles on exactly kMaxConfidenceBar
+//   rise >= 0.5             settles on exactly one
+//
+// The boundaries are exact and adjacent doubles either side of them are
+// asserted, because "below a quarter" was the previous wording and it is off
+// by the endpoint: a rise of exactly 0.25 stalls too, and the first rise that
+// reaches the bar is the very next double above it.
+//
+// Only the middle band makes the paragraphs on kMaxConfidenceBar true. In the
+// bottom band the top of the slider's travel is a bar no track can ever
+// clear, so the list there is empty for every signal, which is the failure
+// that constant is named for. In the top band a saturated track's confidence
+// is exactly one, so the engine's "one is never reached" is false and its
+// refusal of a threshold of one refuses a bar that would have worked.
+
+// The shipped rise, which sits in the middle band. This is the identity every
+// claim about the top of the slider's travel rests on.
 static_assert(confidence_fixed_point(kDetectorConfidenceRise) == kMaxConfidenceBar,
-              "The detector's confidence no longer settles on kMaxConfidenceBar, so the top of "
-              "the slider's travel is a bar no track can reach and the list there is empty for "
-              "every signal. Read the comment above and fix the claim before the constant.");
+              "confidence_fixed_point no longer puts the shipped rise on kMaxConfidenceBar. "
+              "Either the iteration changed or this compiler rounds it differently. The "
+              "paragraphs above about the top of the slider's travel are what to fix, not "
+              "this number.");
 
-// Below a quarter the increment from one ulp lower rounds down or ties to
-// even, so the iteration stalls two ulps below one and never reaches the
-// bar at all.
+// The bottom of the range detector.cpp accepts, and the bottom band's
+// behaviour at its widest. The iteration runs 30390 times here, which is the
+// most expensive call in this file and still compiles.
+static_assert(confidence_fixed_point(0.001) < kMaxConfidenceBar,
+              "confidence_fixed_point disagrees with the measured map at the detector's rise "
+              "floor of 0.001");
+
+// The lower boundary, both sides of it. A quarter is IN the bottom band; the
+// next double above a quarter is the first that reaches the bar.
 static_assert(confidence_fixed_point(0.25) < kMaxConfidenceBar,
-              "confidence_fixed_point disagrees with the measured break point at rise 0.25");
+              "confidence_fixed_point disagrees with the measured map at rise 0.25, which is "
+              "the last rise whose confidence never reaches the bar");
+static_assert(confidence_fixed_point(0.25 + std::numeric_limits<double>::epsilon() / 4.0) ==
+                  kMaxConfidenceBar,
+              "confidence_fixed_point disagrees with the measured map one double above rise "
+              "0.25, which is the first rise whose confidence reaches the bar");
 
-// At a half and above the increment from one ulp below rounds up, so a
-// saturated track lands on exactly one. The bar still lists it, because the
-// comparison is >=, but the engine's "one is never reached" stops being
-// true and core/detect/detector.cpp's refusal of a threshold of one becomes
-// wrong rather than conservative.
+// The upper boundary, both sides of it. At a half and above the increment
+// from one ulp below rounds up, so a saturated track lands on exactly one.
+static_assert(confidence_fixed_point(0.5 - std::numeric_limits<double>::epsilon() / 4.0) ==
+                  kMaxConfidenceBar,
+              "confidence_fixed_point disagrees with the measured map one double below rise "
+              "0.5, which is the last rise that settles on the bar");
 static_assert(confidence_fixed_point(0.5) == 1.0,
-              "confidence_fixed_point disagrees with the measured break point at rise 0.5");
+              "confidence_fixed_point disagrees with the measured map at rise 0.5, which is "
+              "the first rise whose confidence reaches exactly one");
+
+// The top of the range detector.cpp accepts. A rise of one closes the whole
+// gap on the first detection, which is the case require_reachable_confidence
+// in core/detect/detector.cpp singles out as the one where a threshold of one
+// is reachable.
+static_assert(confidence_fixed_point(1.0) == 1.0,
+              "confidence_fixed_point disagrees with the measured map at rise 1.0, the top of "
+              "the range the detector accepts");
 
 // The narrowest passband a drag will produce, in hertz.
 //
