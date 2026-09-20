@@ -202,6 +202,18 @@ public:
     // This subscription's own counters, read off the engine. Per
     // subscription rather than per client and per server, so a second client
     // falling behind on the same receiver does not appear here.
+    //
+    // Refused once the subscription is over, however it ended: an
+    // unsubscribe_audio, a subscribe_audio that replaced it, or an ended
+    // callback. All three leave this client holding no subscription on that
+    // receiver and all three answer in those words.
+    //
+    // THE ENDED CASE USED TO ANSWER Ok. Until 2026-09-20 the ended path
+    // cleared the callbacks and kept the subscription capability, so a
+    // caller that had just been told the receiver was removed could poll
+    // this and be handed the dead stream's last counts. A UI polling a
+    // status line saw a healthy subscription on a receiver that did not
+    // exist.
     [[nodiscard]] virtual Expected<AudioStats> audio_stats(std::uint64_t vrx) = 0;
 
     // The RDS surface, which the schema carries and the engine does not

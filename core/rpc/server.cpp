@@ -811,6 +811,25 @@ public:
                                       "no counters left to report"});
         }
 
+        // ENDED IS NOT CANCELLED AND THE NULL CHECK ABOVE DOES NOT COVER IT
+        //
+        // end() is what clears node_, and it runs for a cancel and for the
+        // destructor. A subscription the SERVER ended, which is the receiver
+        // being removed out from under it, leaves node_ set and the node
+        // frozen at its last counts. Answering from it reports a healthy
+        // subscription on a receiver that no longer exists.
+        //
+        // core/rpc/client.h's client drops its capability the moment ended()
+        // arrives, so it never reaches this line. The guard is here because
+        // the schema is the contract and any client may hold a capability
+        // across an ended.
+        if (node_->cancelled) {
+            return to_exception(
+                Error{"this audio subscription was ended by the engine, so its counters are "
+                      "frozen at whatever the stream stopped on. AudioReceiver::ended carried "
+                      "the reason"});
+        }
+
         auto out = context.getResults().initStats();
         const std::scoped_lock held(node_->lock);
         out.setFramesSent(node_->frames_sent);

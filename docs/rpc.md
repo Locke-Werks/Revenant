@@ -377,6 +377,17 @@ told in words. It is best effort, it is never sent for a cancel the client
 asked for, and a server whose event loop has already stopped cannot send it at
 all; a dropped connection is the other signal.
 
+**A client that has been sent `ended` drops the subscription capability**, and
+`core/rpc/client.h`'s client did not until 2026-09-20. Keeping it had two
+consequences and the visible one is the worse: `audio_stats` found the stale
+capability, asked the server, and came back Ok with the dead stream's frozen
+counters, so a status line polling it showed a healthy subscription on a
+receiver that had been removed. The other is that the capability holds the
+server's node and its queue open until the connection drops, so a client
+cycling receivers accumulated one per removal. Both paths now go through the
+same teardown, and the server refuses `stats` on a subscription it ended
+whatever the client does.
+
 **`squelchOpen` rides on every chunk** for the same reason: a closed gate is
 not a drop and not a gap, `core/engine/graph.cpp` fills the chunk with zeros
 and sends it at the full rate, and nothing else in the stream distinguishes

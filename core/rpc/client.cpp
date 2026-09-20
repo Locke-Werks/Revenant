@@ -625,6 +625,16 @@ private:
     [[nodiscard]] kj::Promise<void> end_passband(LoopState& state, std::uint64_t vrx);
     [[nodiscard]] kj::Promise<void> end_audio(LoopState& state, std::uint64_t vrx);
 
+    // Everything one audio subscription owns on this side, dropped in one
+    // place. Loop thread only.
+    //
+    // It reaches state_ rather than taking a LoopState&, which is what makes
+    // it usable from both teardown paths. end_audio is called from inside an
+    // on_loop body and has one in hand; deliver_audio_ended is called from a
+    // capability the server invoked and has none, and that asymmetry is how
+    // the two came to differ.
+    void forget_audio(std::uint64_t vrx);
+
     // Runs body on the event loop thread and waits for the promise it returns,
     // translating whatever comes back into an Expected.
     //
@@ -1167,13 +1177,35 @@ Status ClientImpl::subscribe_passband(std::uint64_t vrx, std::uint32_t every_nth
     });
 }
 
-kj::Promise<void> ClientImpl::end_audio(LoopState& state, std::uint64_t vrx) {
+void ClientImpl::forget_audio(std::uint64_t vrx) {
     audio_callbacks_.erase(vrx);
     audio_ended_.erase(vrx);
     audio_scratch_.erase(vrx);
 
+    // THE CAPABILITY IS THE HALF THAT USED TO BE LEFT BEHIND
+    //
+    // Until 2026-09-20 the three maps above were erased in two places and
+    // this one only in end_audio, so a stream the server ended left its
+    // AudioSubscription in place. audio_stats then found it, sent statsRequest
+    // and came back Ok with a dead subscription's frozen counters, where
+    // every other teardown path answers "this client holds no audio
+    // subscription on that receiver". A UI polling stats saw a healthy
+    // subscription on a receiver that had been removed. The surviving
+    // reference also held the server's AudioSubscriptionImpl, its AudioNode
+    // and that node's queue open until the connection dropped, so a client
+    // cycling receivers accumulated one per removal.
+    //
+    // state_ is null only while the loop's stack is unwinding, and LoopState
+    // is what is being destroyed at that point, so there is nothing to erase.
+    if (state_ != nullptr) {
+        state_->audios.erase(vrx);
+    }
+}
+
+kj::Promise<void> ClientImpl::end_audio(LoopState& state, std::uint64_t vrx) {
     auto found = state.audios.find(vrx);
     if (found == state.audios.end()) {
+        forget_audio(vrx);
         return kj::READY_NOW;
     }
 
@@ -1190,7 +1222,7 @@ kj::Promise<void> ClientImpl::end_audio(LoopState& state, std::uint64_t vrx) {
     // thoroughly and would leave the same guarantee resting on destruction
     // order.
     auto cancelled = found->second->cancelRequest().send().ignoreResult();
-    state.audios.erase(found);
+    forget_audio(vrx);
     return cancelled.catch_([](kj::Exception&&) {});
 }
 
@@ -1234,9 +1266,7 @@ Expected<std::uint32_t> ClientImpl::subscribe_audio(std::uint64_t vrx,
                         // A subscription that never took has nothing to call
                         // back into, so do not hold the caller's closures
                         // alive on the strength of it.
-                        audio_callbacks_.erase(vrx);
-                        audio_ended_.erase(vrx);
-                        audio_scratch_.erase(vrx);
+                        forget_audio(vrx);
                         return kj::Promise<std::uint32_t>(kj::mv(failure));
                     });
             });
@@ -1285,17 +1315,20 @@ void ClientImpl::deliver_audio_ended(std::uint64_t vrx, capnp::Text::Reader reas
         return;
     }
 
-    // Copied out before the callback runs and the maps are cleared after it,
-    // because the callback is the client's and may unsubscribe from inside
-    // itself. client.h forbids calling back into the Client from here, but
-    // erasing the entry this iterator names is this file's own footgun
-    // rather than the caller's.
+    // Copied out before the teardown runs, because the callback is the
+    // client's and may unsubscribe from inside itself. client.h forbids
+    // calling back into the Client from here, but erasing the entry this
+    // iterator names is this file's own footgun rather than the caller's.
     AudioEndedCallback callable = ended->second;
     const std::string text = read_text(reason);
 
-    audio_callbacks_.erase(vrx);
-    audio_ended_.erase(vrx);
-    audio_scratch_.erase(vrx);
+    // The same teardown a cancel goes through, minus the cancel itself. The
+    // server has already ended this subscription, so there is nothing left to
+    // stop; what is left is to stop holding it. Dropping the capability is
+    // what releases the server's AudioSubscriptionImpl and the AudioNode
+    // under it, and it is what makes a later audio_stats on this receiver
+    // refuse rather than report a corpse.
+    forget_audio(vrx);
 
     if (callable) {
         callable(text);

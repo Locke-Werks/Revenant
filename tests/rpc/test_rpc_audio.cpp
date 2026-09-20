@@ -650,11 +650,34 @@ TEST_CASE("removing a receiver mid-stream tells its listeners in words",
     INFO(test::message_of(vrx));
     REQUIRE(vrx.has_value());
 
+    // A second receiver, subscribed on the SAME client, which nothing in
+    // this case touches. It is the control arm: the assertions below are all
+    // about a subscription going away, and without a live one beside it they
+    // would be satisfied by a teardown that took every audio subscription
+    // this client held.
+    auto keeper = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(keeper));
+    REQUIRE(keeper.has_value());
+
+    auto keeper_log = std::make_shared<AudioLog>();
+    auto kept =
+        harness.client().subscribe_audio(*keeper, 0, into(keeper_log), ending(keeper_log));
+    INFO(test::message_of(kept));
+    REQUIRE(kept.has_value());
+
     auto log = std::make_shared<AudioLog>();
     auto opened = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
     INFO(test::message_of(opened));
     REQUIRE(opened.has_value());
     REQUIRE(wait_for_chunks(*log, 20, 4000) >= 20);
+    REQUIRE(wait_for_chunks(*keeper_log, 20, 4000) >= 20);
+
+    // Answering before the removal, so the refusal below is a change of
+    // answer rather than a call that never worked.
+    auto live = harness.client().audio_stats(*vrx);
+    INFO(test::message_of(live));
+    REQUIRE(live.has_value());
+    CHECK(live->frames_sent > 0);
 
     const auto removed = harness.client().remove_vrx(*vrx);
     INFO(test::message_of(removed));
@@ -671,6 +694,36 @@ TEST_CASE("removing a receiver mid-stream tells its listeners in words",
     const std::size_t at_end = log->size();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     CHECK(log->size() == at_end);
+
+    // THE COUNTERS GO WITH IT, which is what this case gained on 2026-09-20.
+    // The ended path cleared the callbacks and kept the subscription
+    // capability, so this call found it, asked the server, and came back Ok
+    // with the dead stream's last counts. A UI polling a status line saw a
+    // healthy subscription on a receiver that had been removed, and the
+    // surviving reference held the server's node and its queue open until
+    // the connection dropped.
+    auto dead = harness.client().audio_stats(*vrx);
+    REQUIRE_FALSE(dead.has_value());
+    INFO(dead.error().message);
+    CHECK(dead.error().message.find("holds no audio subscription") != std::string::npos);
+
+    // Idempotent afterwards rather than an error, the same as any other
+    // unsubscribe of something that is already over.
+    harness.client().unsubscribe_audio(*vrx);
+
+    // THE CONTROL. The other receiver on this client never stopped and its
+    // counters still answer, so the teardown above took one subscription and
+    // not the map it lived in.
+    const std::size_t keeper_at_end = keeper_log->size();
+    REQUIRE(wait_for_chunks(*keeper_log, keeper_at_end + 10, 4000) >= keeper_at_end + 10);
+    CHECK_FALSE(keeper_log->ended());
+
+    auto keeper_stats = harness.client().audio_stats(*keeper);
+    INFO(test::message_of(keeper_stats));
+    REQUIRE(keeper_stats.has_value());
+    CHECK(keeper_stats->frames_sent > 0);
+
+    harness.client().unsubscribe_audio(*keeper);
 }
 
 // --- shape 6 ----------------------------------------------------------------

@@ -879,8 +879,20 @@ interface AudioReceiver {
 # as well, on the same terms as SpectrumSubscription: an explicit end reads
 # better in a log than a dropped reference, and a client shutting down cleanly
 # should not depend on collection timing to stop a stream.
+#
+# A CLIENT THAT HAS BEEN SENT ended SHOULD DROP THIS, and the reason is not
+# tidiness. The subscription is over on the server's side either way, but the
+# capability is what holds the server's node and its queue of up to
+# bufferFrames of audio open, so a client that cycles receivers and keeps the
+# capability each time accumulates one per removal until it disconnects.
+# core/rpc/client.h's client did exactly that until 2026-09-20.
 interface AudioSubscription {
     cancel @0 () -> ();
+
+    # Refused once the subscription is over, whether it was cancelled or
+    # ended by the engine, and the two refusals say which. Answering an ended
+    # subscription's counters reports a healthy stream on a receiver that no
+    # longer exists, and the numbers never move again.
     stats @1 () -> (stats :AudioStats);
 }
 
