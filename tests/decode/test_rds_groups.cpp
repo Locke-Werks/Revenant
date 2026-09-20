@@ -1419,6 +1419,22 @@ TEST_CASE("the MJD conversion matches EN 50067 Annex G and refuses to leave its 
     CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{1900, 2, 28}));
     CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2100, 3, 1}));
 
+    // A day the month does not have. Annex G item b) is arithmetic and has no
+    // opinion about calendars, so 2026-02-31 converts silently and comes back
+    // out of date_from_mjd as 2026-03-03. A caller round-tripping a date it
+    // typed in gets a different date and nothing on the path says so, which
+    // is the same failure mode the window bounds exist to stop.
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2026, 2, 31}));
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2026, 4, 31}));
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2026, 2, 29}));
+
+    // 1900 is not a leap year and 2000 is, and both are inside the window.
+    // 1900-02-29 landed on 15079, which is 1900-03-01, the first valid MJD.
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{1900, 2, 29}));
+    CHECK(revenant::decode::mjd_from_date(CalendarDate{2000, 2, 29}).has_value());
+    CHECK(revenant::decode::mjd_from_date(CalendarDate{2024, 2, 29}).has_value());
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2100, 2, 29}));
+
     // The round trip over the whole window, both directions plus the weekday,
     // because a formula transcribed with integer truncation either works
     // everywhere or fails somewhere nobody sampled.

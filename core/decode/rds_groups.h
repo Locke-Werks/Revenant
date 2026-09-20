@@ -328,6 +328,12 @@ inline constexpr int kMjdFirstValid = 15079;  // 1900-03-01
 inline constexpr int kMjdLastValid = 88127;   // 2100-02-28
 
 [[nodiscard]] Expected<CalendarDate> date_from_mjd(int mjd);
+
+// The day is checked against the month's own length, leap years included.
+// Annex G item b) is arithmetic and converts 2026-02-31 to MJD 61102 without
+// complaint, which reads back as 2026-03-03, so a caller round-tripping a
+// date it typed in would get a different one and nothing on the path would
+// say so.
 [[nodiscard]] Expected<int> mjd_from_date(CalendarDate date);
 
 // 1 is Monday, per Annex G item c).

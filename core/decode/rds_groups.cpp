@@ -271,6 +271,21 @@ constexpr std::uint16_t kPiExceptionHigh = 0x9EFF;
     return ecc == 0xA0 || ecc == 0xA1 || ecc == 0xA5;
 }
 
+// Gregorian, so 1900 is not a leap year and 2000 is. Both fall inside Annex
+// G's window, and 1900 is the one people get wrong.
+[[nodiscard]] constexpr bool is_leap_year(int year) noexcept {
+    return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+}
+
+[[nodiscard]] constexpr int days_in_month(int year, int month) noexcept {
+    constexpr std::array<int, 12> kLengths = {31, 28, 31, 30, 31, 30,
+                                              31, 31, 30, 31, 30, 31};
+    if (month == 2 && is_leap_year(year)) {
+        return 29;
+    }
+    return kLengths[static_cast<std::size_t>(month - 1)];
+}
+
 [[nodiscard]] ProgrammeItemNumber decode_pin(std::uint16_t word) noexcept {
     ProgrammeItemNumber pin;
     pin.day = static_cast<int>((word >> 11) & 0x1F);
@@ -651,7 +666,16 @@ Expected<CalendarDate> date_from_mjd(int mjd) {
 }
 
 Expected<int> mjd_from_date(CalendarDate date) {
-    if (date.month < 1 || date.month > 12 || date.day < 1 || date.day > 31) {
+    // The day is checked against the month's own length rather than against
+    // 31. Annex G item b) is arithmetic and has no opinion: 2026-02-31 walks
+    // through it and comes out as MJD 61102, which date_from_mjd then reads
+    // back as 2026-03-03. A caller round-tripping a date it typed in gets a
+    // different date with no error anywhere on the path, which is the shape
+    // of wrong this decoder refuses everywhere else. 1900-02-29 is the same
+    // failure at the window's edge: it lands on 15079, the first valid MJD,
+    // which is 1900-03-01.
+    if (date.month < 1 || date.month > 12 || date.day < 1 ||
+        date.day > days_in_month(date.year, date.month)) {
         return fail(std::format("{:04}-{:02}-{:02} is not a calendar date", date.year,
                                 date.month, date.day));
     }
