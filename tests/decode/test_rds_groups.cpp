@@ -1840,9 +1840,10 @@ TEST_CASE("reset clears the state and keeps the configuration", "[rds]") {
     CHECK_FALSE(decoder.state().pi_valid);
     CHECK(decoder.state().ps_text() == "        ");
 
-    // All eight counters, not just bits_fed_. A caller divides one by another
-    // to get a block error rate or a group rate, and a reset that clears the
-    // denominator alone makes those rates wrong rather than stale.
+    // All eight counters, where this case once asserted bits_fed_ alone. A
+    // caller divides one by another to get a block error rate or a group
+    // rate, and a reset that clears the denominator by itself makes those
+    // rates wrong rather than stale.
     CHECK(decoder.bits_fed() == 0);
     CHECK(decoder.groups_decoded() == 0);
     CHECK(decoder.blocks_good() == 0);

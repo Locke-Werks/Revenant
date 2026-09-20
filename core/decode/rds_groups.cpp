@@ -803,8 +803,8 @@ void RdsDecoder::reset() {
     af_pending_lf_mf_ = false;
     af_first_of_pair_ = 0;
 
-    // All eight counters, not just bits_fed_. They are the numerator and
-    // denominator of every rate a caller derives from this decoder, and
+    // All eight counters, where this once cleared bits_fed_ alone. They are
+    // the numerator and denominator of every rate a caller derives here, and
     // clearing one of the eight makes those rates wrong rather than stale: a
     // block error rate computed after a retune divided the previous station's
     // dropped blocks by the new station's bits.
