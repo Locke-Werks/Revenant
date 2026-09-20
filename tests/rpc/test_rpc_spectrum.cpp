@@ -17,6 +17,7 @@
 // have on a radio, so the numbers below are in seconds rather than in
 // whatever the GPU happened to manage.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include <format>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,6 +45,7 @@
 #include "tests/rpc/rpc_fixture.h"
 
 using namespace revenant;
+using Catch::Approx;
 using test::FrameLog;
 using test::FrameRecord;
 using test::Harness;
@@ -684,6 +687,168 @@ TEST_CASE("subscribing again replaces the first subscription", "[gpu][rpc][spect
 
     harness.client().unsubscribe_spectrum();
     CHECK(harness.stop_engine().has_value());
+}
+
+TEST_CASE("one receiver's passband streams and carries its own axis",
+          "[gpu][rpc][spectrum][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The surface an operator drags a filter edge over. It has to arrive with
+    // its own geometry rather than the span's, because its width is the
+    // receiver's demodulation rate and moves whenever the filter does.
+    constexpr std::uint32_t kPassbandTransform = 512;
+    constexpr std::int64_t kLow = 300;
+    constexpr std::int64_t kHigh = 2'700;
+
+    Harness harness;
+    HarnessOptions options = streaming_options();
+    options.passband_transform = kPassbandTransform;
+
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    rpc::VrxParams params;
+    params.center = 187'500;
+    params.demod = rpc::Demod::Usb;
+    params.passband_low = kLow;
+    params.passband_high = kHigh;
+
+    auto id = harness.client().add_vrx(params);
+    INFO(test::message_of(id));
+    REQUIRE(id.has_value());
+
+    auto status = harness.client().vrx_status(*id);
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+    const std::uint32_t demod_rate = status->demod_rate;
+    REQUIRE(demod_rate > 0);
+
+    struct Seen {
+        std::mutex lock;
+        std::vector<rpc::PassbandFrame> frames;
+    };
+    auto seen = std::make_shared<Seen>();
+
+    const auto subscribed = harness.client().subscribe_passband(
+        *id, 1, [seen](const rpc::PassbandFrame& frame) {
+            std::scoped_lock held(seen->lock);
+            if (seen->frames.size() < 64) {
+                seen->frames.push_back(frame);
+            }
+        });
+    INFO(test::message_of(subscribed));
+    REQUIRE(subscribed.has_value());
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(8000);
+    std::size_t got = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock held(seen->lock);
+            got = seen->frames.size();
+        }
+        if (got >= 8) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    INFO(got << " passband frames arrived");
+    REQUIRE(got >= 8);
+
+    harness.client().unsubscribe_passband(*id);
+    CHECK(harness.stop_engine().has_value());
+
+    std::vector<rpc::PassbandFrame> frames;
+    {
+        std::scoped_lock held(seen->lock);
+        frames = seen->frames;
+    }
+    REQUIRE(frames.size() >= 8);
+
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        INFO("frame " << i << " of " << frames.size());
+        const rpc::PassbandFrame& frame = frames[i];
+
+        CHECK(frame.vrx == *id);
+        CHECK(frame.geometry.transform == kPassbandTransform);
+        CHECK(frame.geometry.bins == kPassbandTransform);
+        CHECK(frame.power_db.size() == frame.geometry.bins);
+
+        // The axis is the receiver's own. Its width is the demodulation rate
+        // vrxStatus reported, which is the check that the two surfaces agree
+        // about how wide this receiver is: a display drawing filter edges
+        // against a frame whose span it had guessed would put them in the
+        // wrong place by whatever the guess was out by.
+        CHECK(frame.geometry.rate == demod_rate);
+        REQUIRE(frame.geometry.bin_width.denominator != 0);
+        const double bin_width = frame.geometry.bin_width.hertz();
+        CHECK(bin_width * static_cast<double>(frame.geometry.bins) ==
+              Approx(static_cast<double>(demod_rate)).epsilon(1.0e-9));
+
+        // Bin zero sits half a demodulation rate below what the fine stage
+        // mixed to DC, which for USB is the receiver's own centre.
+        REQUIRE(frame.geometry.bin_zero.denominator != 0);
+        CHECK(frame.geometry.bin_zero.hertz() ==
+              Approx(static_cast<double>(params.center) -
+                     0.5 * static_cast<double>(demod_rate))
+                  .margin(1.0));
+
+        CHECK(frame.count > 0);
+        CHECK(std::ranges::all_of(frame.power_db, [](float value) {
+            return std::isfinite(value);
+        }));
+
+        if (i > 0) {
+            CHECK(frame.sequence > frames[i - 1].sequence);
+        }
+    }
+}
+
+TEST_CASE("a passband subscription is refused when there is nothing to transform",
+          "[gpu][rpc][spectrum][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    // passband_transform defaults to zero, so this engine has no passband
+    // stage at all. Handing back a subscription that can never produce a
+    // frame would leave a detail display waiting forever with nothing to say
+    // why.
+    Harness harness;
+    HarnessOptions options;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    rpc::VrxParams params;
+    params.center = 187'500;
+    params.demod = rpc::Demod::Nfm;
+
+    auto id = harness.client().add_vrx(params);
+    INFO(test::message_of(id));
+    REQUIRE(id.has_value());
+
+    const auto refused = harness.client().subscribe_passband(
+        *id, 1, [](const rpc::PassbandFrame&) {});
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find("passband") != std::string::npos);
+
+    // An empty callback is not an unsubscribe here either.
+    const auto empty =
+        harness.client().subscribe_passband(*id, 1, rpc::Client::PassbandCallback{});
+    REQUIRE_FALSE(empty.has_value());
+    INFO(empty.error().message);
+    CHECK(empty.error().message.find("callback") != std::string::npos);
+
+    // And a receiver that does not exist is refused by id rather than by
+    // being given a stream nothing will ever write to.
+    const auto unknown = harness.client().subscribe_passband(
+        *id + 9'999, 1, [](const rpc::PassbandFrame&) {});
+    CHECK_FALSE(unknown.has_value());
 }
 
 TEST_CASE("an engine with no spectrum stage refuses a subscription with its reason",

@@ -121,11 +121,15 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <utility>
 
 #include <QElapsedTimer>
 #include <QObject>
@@ -176,6 +180,59 @@ namespace revenant::ui {
 // exists to prevent, and it is prevented by a margin of one ulp.
 inline constexpr double kMaxConfidenceBar =
     1.0 - std::numeric_limits<double>::epsilon() / 2.0;
+
+// The narrowest passband a drag will produce, in hertz.
+//
+// A display-side stop and not the engine's floor, which the engine does not
+// publish and could not: the real limit is wherever design_fine_taps and the
+// tap cap refuse, and that depends on the channel rate, so there is no
+// constant a client can hold. Fifty hertz is narrower than any filter a
+// receiver ships and wide enough that the engine builds it on every grid
+// this project uses, so the drag stops somewhere honest rather than handing
+// the operator a refusal they cannot act on.
+//
+// The alternative, letting the drag go narrower and showing the engine's
+// refusal, is more truthful and feels broken: the handle keeps moving and
+// nothing happens.
+inline constexpr int kMinPassbandWidthHz = 50;
+
+// How far a keystroke moves an edge. Ten hertz plain, a hundred with shift,
+// one with control, which is the ordinary three-speed a tuning control has.
+inline constexpr int kPassbandStepHz = 10;
+inline constexpr int kPassbandCoarseStepHz = 100;
+inline constexpr int kPassbandFineStepHz = 1;
+
+// The demodulator names, in the ordinal order rpc::Demod declares them, so
+// the table and the enum cannot drift the way two hand-written lists would.
+//
+// A copy of engine::demod_name, and a copy on purpose: this process links no
+// part of the engine, which is the whole reason ui/CMakeLists.txt exists.
+// core/rpc/convert.h holds the static_asserts that keep rpc::Demod ordinal
+// for ordinal with engine::Demod, so the ORDINALS here are pinned by the
+// engine's own build even though the spellings are not.
+inline constexpr const char* kDemodNames[] = {"raw", "am",  "nfm", "wfm",
+                                              "usb", "lsb", "dsb", "cw"};
+
+[[nodiscard]] inline QString demod_name(rpc::Demod mode) {
+    const auto index = static_cast<std::size_t>(mode);
+    if (index >= std::size(kDemodNames)) {
+        return QStringLiteral("unknown");
+    }
+    return QString::fromLatin1(kDemodNames[index]);
+}
+
+// The name back to an ordinal, or nothing when it is not one of the eight.
+// Nothing rather than a default, because a mode nobody meant is a receiver
+// tuned to something nobody asked for, and the mode is the one parameter
+// where being wrong is inaudible until the recording turns out unusable.
+[[nodiscard]] inline std::optional<rpc::Demod> demod_from_name(const QString& name) {
+    for (std::size_t i = 0; i < std::size(kDemodNames); ++i) {
+        if (name == QLatin1StringView(kDemodNames[i])) {
+            return static_cast<rpc::Demod>(i);
+        }
+    }
+    return std::nullopt;
+}
 
 class EngineLink : public QObject {
     Q_OBJECT
@@ -368,6 +425,89 @@ class EngineLink : public QObject {
     // write still unanswered.
     Q_PROPERTY(QString detectionFault READ detectionFault NOTIFY detectionFaultChanged)
 
+    // ------------------------------------------------------------------
+    // The receiver the detail pane is on
+    // ------------------------------------------------------------------
+    //
+    // ONE RECEIVER, AND WHY THAT IS NOT THE ENGINE'S SHAPE. The engine has
+    // no primary receiver and core/engine/vrx.h argues at length that it
+    // must not grow one: a channelizer that makes channels nearly free is
+    // the whole reason multi-VFO stops being an accessory to a tuner. What
+    // is single here is the DETAIL PANE, which is one pane showing one
+    // receiver's passband, and this is that pane's state rather than the
+    // engine's. A second pane is a second set of these, not a change to the
+    // engine.
+    //
+    // EVERY WRITE HERE IS ASYNCHRONOUS. An RPC call blocks for a round trip
+    // and core/rpc/client.h forbids making one from the frame callback, so
+    // the Qt thread cannot make one either without stalling the window. A
+    // write records what is wanted and wakes the supervisor, which applies
+    // it and polls the status back. So these properties are the UI's own
+    // authoritative copy on the way out and the engine's answer on the way
+    // in, and the two differ for one supervisor pass after every write.
+    // That is deliberate: a drag that waited for the engine to echo before
+    // it redrew would move at the round-trip rate.
+
+    // Zero when the pane is on no receiver, which is the state the window
+    // comes up in and returns to when the engine goes away.
+    Q_PROPERTY(qulonglong receiverId READ receiverId NOTIFY receiverChanged)
+
+    // Absolute radio frequency, which is params.center plus the source's
+    // own centre. Absolute because that is what an operator reads and what
+    // is printed on a band plan; the baseband conversion belongs here
+    // because EngineInfo::sourceCenter is what makes it possible and this
+    // is the object that holds one.
+    Q_PROPERTY(double receiverCenterHz READ receiverCenterHz NOTIFY receiverChanged)
+
+    Q_PROPERTY(QString receiverDemod READ receiverDemod NOTIFY receiverChanged)
+
+    // The passband this pane is asking for, in signed hertz from the
+    // receiver's centre. Written by the drag and by the keyboard, read back
+    // by the overlay so the rule it draws is the one the operator is
+    // moving rather than the one the engine last echoed.
+    Q_PROPERTY(int receiverPassbandLow READ receiverPassbandLow NOTIFY receiverChanged)
+    Q_PROPERTY(int receiverPassbandHigh READ receiverPassbandHigh NOTIFY receiverChanged)
+
+    // What the engine granted, which differs from the pair above only when
+    // the channel could not carry it. Drawn in a second, dimmer shade, and
+    // the difference between the two is what says WHICH edge was clamped.
+    Q_PROPERTY(int receiverGrantedLow READ receiverGrantedLow NOTIFY receiverStatusChanged)
+    Q_PROPERTY(int receiverGrantedHigh READ receiverGrantedHigh NOTIFY receiverStatusChanged)
+    Q_PROPERTY(bool receiverClamped READ receiverClamped NOTIFY receiverStatusChanged)
+
+    // How far either edge may reach before the channel refuses it, in hertz
+    // from the receiver's centre. The drag stops here rather than letting
+    // the operator pull into a clamp, because a handle that keeps moving
+    // while the filter does not is a handle that lies.
+    //
+    // Zero until the engine has answered once, which is a limit a drag must
+    // check rather than assume.
+    Q_PROPERTY(int receiverEdgeLimit READ receiverEdgeLimit NOTIFY receiverStatusChanged)
+
+    // The rate the fine stage resampled to, which is the width of the
+    // passband frame's axis. A change to it is a remove and an add rather
+    // than a push constant, so a drag watches it to tell a move it can send
+    // live from one that will break the audio.
+    Q_PROPERTY(int receiverDemodRate READ receiverDemodRate NOTIFY receiverStatusChanged)
+
+    Q_PROPERTY(double receiverLevelDbfs READ receiverLevelDbfs NOTIFY receiverStatusChanged)
+
+    // Whether a passband frame has arrived for this receiver, so the pane
+    // can say "waiting" rather than drawing an empty band as a dead one.
+    Q_PROPERTY(bool passbandActive READ passbandActive NOTIFY passbandChanged)
+
+    // Why the engine refused something this pane asked of a receiver.
+    // Empty when nothing is outstanding. Kept separate from errorText for
+    // the reason detectionFault is: a refused passband is not a lost
+    // engine and must not read as one.
+    Q_PROPERTY(QString receiverFault READ receiverFault NOTIFY receiverFaultChanged)
+
+    // A width change is drawn and has not been sent, because sending it
+    // mid-gesture would break the audio once per pixel. It goes out on
+    // release. The readout says so, because a filter that is drawn where
+    // the audio is not has to admit it.
+    Q_PROPERTY(bool receiverPending READ receiverPending NOTIFY receiverChanged)
+
 public:
     explicit EngineLink(QObject* parent = nullptr);
     ~EngineLink() override;
@@ -478,6 +618,144 @@ public:
         return shown_.detections;
     }
 
+    // ------------------------------------------------------------------
+    // The receiver surface
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] qulonglong receiverId() const { return receiver_id_; }
+    [[nodiscard]] double receiverCenterHz() const;
+    [[nodiscard]] QString receiverDemod() const;
+    [[nodiscard]] int receiverPassbandLow() const {
+        return static_cast<int>(wanted_.passband_low);
+    }
+    [[nodiscard]] int receiverPassbandHigh() const {
+        return static_cast<int>(wanted_.passband_high);
+    }
+    [[nodiscard]] int receiverGrantedLow() const {
+        return static_cast<int>(receiver_status_.placement.granted_low);
+    }
+    [[nodiscard]] int receiverGrantedHigh() const {
+        return static_cast<int>(receiver_status_.placement.granted_high);
+    }
+    [[nodiscard]] bool receiverClamped() const {
+        return receiver_status_.placement.bandwidth_clamped;
+    }
+    [[nodiscard]] int receiverEdgeLimit() const { return receiver_edge_limit_; }
+    [[nodiscard]] int receiverDemodRate() const {
+        return static_cast<int>(receiver_status_.demod_rate);
+    }
+    [[nodiscard]] double receiverLevelDbfs() const { return receiver_status_.level_dbfs; }
+    [[nodiscard]] bool passbandActive() const { return passband_active_; }
+    [[nodiscard]] QString receiverFault() const { return receiver_fault_; }
+    [[nodiscard]] bool receiverPending() const { return width_uncommitted_; }
+
+    // Puts the detail pane on a receiver at this absolute frequency in this
+    // mode, adding one if there is none and retuning the one there is.
+    //
+    // The passband is left unstated, so the engine answers with the mode's
+    // own default and the pane reads it back off the placement. That is the
+    // whole reason this client carries no table of its own: the defaults
+    // live in dsp::default_passband, this process links no part of the DSP,
+    // and a copy here would be a second table to keep in step.
+    //
+    // mode is a demodulator name as core/engine/vrx.h spells it: raw, am,
+    // nfm, wfm, usb, lsb, dsb, cw. An empty string keeps the mode the pane
+    // already has.
+    Q_INVOKABLE void tuneReceiver(double absolute_hz, const QString& mode);
+
+    // Changes the mode in place as far as the operator is concerned, which
+    // is a remove and an add underneath: the demodulator IS the stage and
+    // core/engine/graph.cpp refuses to change it on a running receiver.
+    //
+    // The mode's default passband comes with it UNLESS the operator has
+    // moved an edge on this receiver, in which case the edges they set are
+    // kept. Moving to a mode whose default is one-sided from a mode whose
+    // default is not would otherwise throw away a filter somebody had just
+    // placed by hand.
+    Q_INVOKABLE void setReceiverDemod(const QString& mode);
+
+    // Moves the passband edges. Signed hertz from the receiver's centre,
+    // low strictly below high.
+    //
+    // Clamped here to the engine's own limits before it is sent: to
+    // receiverEdgeLimit either side, and to kMinPassbandWidthHz apart. The
+    // engine would refuse or fit a request outside those, and a handle that
+    // kept moving while the filter did not is a handle that lies.
+    //
+    // Marks the edges as touched, which is what stops a later mode change
+    // replacing them with that mode's default.
+    //
+    // A PAN GOES OUT NOW; A WIDTH CHANGE WAITS FOR THE RELEASE.
+    //
+    // Which of the two this is decides whether the engine can take it in
+    // place. Moving a filter of a fixed width is a push constant and a new
+    // tap table, which is free. Changing its width moves the tap count,
+    // because Kaiser sets the filter's length from its transition and the
+    // transition is half a width, and a different tap count is a different
+    // pipeline: the engine refuses it in place and the only way to apply it
+    // is to remove the receiver and add it again, which stops the audio.
+    //
+    // So a pan is sent on every mouse move and the audio follows the
+    // pointer. A widen is drawn immediately and held until
+    // commitReceiverPassband, so one gesture costs one break in the audio
+    // rather than one per pixel. beginReceiverDrag and endReceiverDrag are
+    // what tell this object a gesture is running; outside one, every change
+    // goes out at once, which is what a keystroke wants.
+    //
+    // A pan is free AWAY FROM THE FOLD and not against it. The transition
+    // the planner can afford is bounded by the distance from the passband's
+    // nearer edge to plus or minus half the demodulation rate, so on a
+    // receiver whose band nearly fills its rate, panning towards the fold
+    // shortens that distance and lengthens the filter. The tap count moves
+    // and the engine refuses, exactly as it does for a widen. Nothing here
+    // predicts it: the arithmetic lives in plan_vrx and this process links
+    // none of the DSP, so the refusal is what says so and the recreate
+    // behind it is what carries the gesture through.
+    Q_INVOKABLE void setReceiverPassband(int low, int high);
+
+    // A gesture is starting and ending. Between them a width change is
+    // drawn and not sent; the end sends whatever is outstanding.
+    Q_INVOKABLE void beginReceiverDrag();
+    Q_INVOKABLE void endReceiverDrag();
+
+    // Sends an outstanding width change now. endReceiverDrag calls it.
+    Q_INVOKABLE void commitReceiverPassband();
+
+    // Moves both edges by the same amount, holding the width. This is the
+    // drag on the fill between the handles.
+    Q_INVOKABLE void nudgeReceiverPassband(int delta_hz);
+
+    // Puts the mode's own default passband back, and clears the touched
+    // flag so a later mode change follows the mode again.
+    Q_INVOKABLE void resetReceiverPassband();
+
+    // Takes the pane off its receiver and removes it from the engine.
+    Q_INVOKABLE void removeReceiver();
+
+    // Absolute hertz at a fraction across the passband frame, on the same
+    // half-bin convention frequencyAtFraction uses for the span: 0 is the
+    // outer edge of the first bin and 1 the outer edge of the last.
+    //
+    // The axis comes off the frame's own geometry, so this is correct on CW
+    // without knowing anything about CW: bin zero is carried as what the
+    // fine stage mixed to DC, which on that one mode is a pitch below the
+    // receiver's centre. See PassbandGeometry.
+    [[nodiscard]] Q_INVOKABLE double passbandFrequencyAtFraction(double fraction) const;
+
+    // The inverse, and the one a drag actually needs: where a pixel
+    // fraction lands as a signed offset from the receiver's centre, which
+    // is the frame VrxParams::passbandLow and passbandHigh are in.
+    [[nodiscard]] Q_INVOKABLE double passbandOffsetAtFraction(double fraction) const;
+
+    // Where an offset from the receiver's centre sits across the frame, as
+    // a fraction. The inverse of the line above, and what draws a rule at
+    // an edge.
+    [[nodiscard]] Q_INVOKABLE double passbandFractionAtOffset(double offset_hz) const;
+
+    // The passband frame the detail items draw. Qt thread only, and valid
+    // until the next passbandChanged, on the same terms frame() is.
+    [[nodiscard]] const rpc::PassbandFrame& passbandFrame() const { return passband_display_; }
+
 signals:
     // The link came up or went away. An item holding history keyed to one
     // engine's geometry clears it here, on the edge into connected: the next
@@ -518,6 +796,23 @@ signals:
     // would redraw the same stale list. A status line binds here; nothing
     // that draws boxes should.
     void detectionFaultChanged();
+
+    // The pane moved to another receiver, or its request changed. Emitted
+    // by the WRITE and not by the engine's answer, because a drag redraws
+    // from its own request and would otherwise move at the round-trip rate.
+    void receiverChanged();
+
+    // The engine answered about this receiver: what it granted, what it
+    // clamped, what rate it is running at. Separate from receiverChanged
+    // so an overlay can redraw the requested rule on every mouse move and
+    // the granted one only when there is news.
+    void receiverStatusChanged();
+
+    // A new passband frame is in passbandFrame(). Emitted on the Qt
+    // thread, so an item may repaint from the slot.
+    void passbandChanged();
+
+    void receiverFaultChanged();
 
 private:
     // The supervisor thread, and the two halves of what it does.
@@ -705,6 +1000,103 @@ private:
     // metacall each, and the GUI thread then runs a queue of calls that all
     // find the same single frame waiting.
     std::atomic<bool> wake_pending_{false};
+
+    // ------------------------------------------------------------------
+    // The receiver the detail pane is on
+    // ------------------------------------------------------------------
+
+    // Qt thread. Records what the pane now wants and wakes the supervisor
+    // to go and apply it. Every Q_INVOKABLE above ends here.
+    void post_receiver_request(bool recreate);
+
+    // Supervisor thread. Applies whatever the Qt thread last asked for and
+    // then reads the receiver's status back.
+    void apply_receiver_request();
+    void poll_receiver_status();
+
+    // Supervisor thread. Adds a receiver for the pane, subscribes its
+    // passband, and hands the id to the Qt thread. Removes the previous one
+    // first, because the pane holds one.
+    [[nodiscard]] bool recreate_receiver(const rpc::VrxParams& params);
+    void drop_receiver();
+
+    // Supervisor thread. Hands the Qt thread the engine's refusal, or an
+    // empty string. Posts only on a change.
+    void note_receiver_fault(QString fault);
+
+    // Qt thread, queued from the supervisor.
+    void adopt_receiver_status();
+    void adopt_receiver_fault();
+
+    // Invoked on the Cap'n Proto event loop thread.
+    void on_passband_frame(const rpc::PassbandFrame& frame);
+
+    // Qt thread. Takes whatever passband frame is waiting.
+    void drain_passband();
+
+    // Qt thread. The request the pane holds, fitted to the engine's limits.
+    [[nodiscard]] std::pair<int, int> fit_edges(int low, int high) const;
+
+    // Qt thread only. The pane's own authoritative copy of the request,
+    // which is what the overlay draws and what the supervisor sends. Its
+    // center is BASEBAND, the frame VrxParams is in; receiverCenterHz adds
+    // the source's centre back for the label.
+    rpc::VrxParams wanted_;
+    qulonglong receiver_id_ = 0;
+
+    // The operator has moved an edge on this receiver, so a mode change
+    // keeps their edges instead of taking the new mode's default.
+    bool edges_touched_ = false;
+
+    // A gesture is running, and a width change made during it is drawn and
+    // not yet sent. sent_width_ is the width the engine was last given, so
+    // a change can be told from a pan without asking the engine.
+    bool dragging_ = false;
+    bool width_uncommitted_ = false;
+    int sent_width_ = 0;
+
+    // Qt thread only. The engine's last answer about this receiver, and the
+    // edge limit derived from it.
+    rpc::VrxStatus receiver_status_;
+    int receiver_edge_limit_ = 0;
+    QString receiver_fault_;
+    bool passband_active_ = false;
+
+    // The Qt thread's copy of the passband frame, and the hand-off slot the
+    // event loop thread fills. Latest wins, exactly as the span's does and
+    // for the same reason.
+    rpc::PassbandFrame passband_display_;
+    rpc::PassbandFrame passband_staging_;  // event loop thread only
+    rpc::PassbandFrame passband_ready_;    // guarded by swap_mutex_
+    bool has_passband_ready_ = false;      // guarded by swap_mutex_
+    std::atomic<bool> passband_wake_pending_{false};
+
+    // Written by the Qt thread, consumed by the supervisor. The params are
+    // a whole struct rather than a set of atomics because they have to be
+    // applied as one request: a centre from one drag and a passband from
+    // the next would tune a receiver nobody asked for.
+    std::mutex receiver_mutex_;
+    rpc::VrxParams requested_params_;      // guarded by receiver_mutex_
+    bool has_receiver_request_ = false;    // guarded by receiver_mutex_
+    bool receiver_request_recreates_ = false;  // guarded by receiver_mutex_
+    bool receiver_request_removes_ = false;    // guarded by receiver_mutex_
+    rpc::VrxStatus pending_receiver_status_;   // guarded by receiver_mutex_
+    bool has_pending_receiver_status_ = false;  // guarded by receiver_mutex_
+    qulonglong pending_receiver_id_ = 0;        // guarded by receiver_mutex_
+    bool has_pending_receiver_id_ = false;      // guarded by receiver_mutex_
+    QString pending_receiver_fault_;            // guarded by receiver_mutex_
+    bool has_pending_receiver_fault_ = false;   // guarded by receiver_mutex_
+
+    // Supervisor thread only: the receiver it has actually created on the
+    // engine, and the fault last handed over so a repeat needs no lock.
+    qulonglong live_receiver_id_ = 0;
+    QString posted_receiver_fault_;
+
+    // Set by any write, cleared by the supervisor when it has applied one.
+    // It is in the wait predicate, so a drag is applied on the next tick of
+    // the loop rather than on the next poll interval: 250 ms of latency on
+    // a filter edge is felt as the handle sticking.
+    bool receiver_work_pending_ = false;  // guarded by supervisor_mutex_
 };
 
 }  // namespace revenant::ui

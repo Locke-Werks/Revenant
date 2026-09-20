@@ -184,6 +184,13 @@ struct Options {
     // reason it is a separate process is that it draws.
     std::uint32_t spectrum_points = 2048;
 
+    // Points in a per-receiver passband transform, or zero for no passband
+    // stage. On by default here for the same reason the spectrum is: a
+    // client connecting to this is a display, and the passband is the
+    // surface a filter is dragged over. It costs nothing until a client
+    // subscribes, because the stage is per receiver and opt in.
+    std::uint32_t passband_points = 512;
+
     std::optional<float> spectrum_floor_db;
     std::optional<float> spectrum_ceiling_db;
 
@@ -236,6 +243,13 @@ void print_usage()
         "  --no-spectrum       Build no spectrum stage. subscribeSpectrum then fails\n"
         "                      with the engine's reason rather than returning a\n"
         "                      subscription that never produces a frame.\n"
+        "  --passband <n>      Points in a per-receiver passband transform, default\n"
+        "                      512, a power of two. Costs nothing until a client\n"
+        "                      subscribes to one: the stage is per receiver and\n"
+        "                      opt in.\n"
+        "  --no-passband       Build no passband stage. subscribePassband then fails\n"
+        "                      with the engine's reason and the detail display in a\n"
+        "                      client has nothing to draw.\n"
         "  --spectrum-floor <dbfs>\n"
         "  --spectrum-ceiling <dbfs>\n"
         "                      Hold one or both ends of the colour map still. Both\n"
@@ -445,6 +459,24 @@ void print_usage()
             continue;
         }
 
+        if (arg == "--passband") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_bounded(*text, arg, 2, 8'192);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            options.passband_points = static_cast<std::uint32_t>(*number);
+            continue;
+        }
+
+        if (arg == "--no-passband") {
+            options.passband_points = 0;
+            continue;
+        }
+
         if (arg == "--spectrum-floor" || arg == "--spectrum-ceiling") {
             auto text = value_of(i, arg, inline_value, has_inline);
             if (!text) {
@@ -632,6 +664,7 @@ void print_engine_block(const engine::Engine& eng)
     config.block_samples = options.block_samples;
     config.pace = options.pace;
     config.spectrum_transform = options.spectrum_points;
+    config.passband_transform = options.passband_points;
     config.spectrum_floor_db = options.spectrum_floor_db;
     config.spectrum_ceiling_db = options.spectrum_ceiling_db;
 

@@ -116,6 +116,21 @@ public:
                                                      FrameCallback callback) = 0;
     virtual void unsubscribe_spectrum() = 0;
 
+    // One receiver's passband, on the same thread and the same terms.
+    using PassbandCallback = std::function<void(const PassbandFrame&)>;
+
+    // One subscription per receiver per Client, for the same reason
+    // subscribe_spectrum allows one: subscribing to the same receiver again
+    // replaces the first. Several receivers at once is ordinary and is what
+    // a rack of them looks like.
+    //
+    // Fails on an engine built with no passband stage and for a raw tap,
+    // which has no fine stage to transform, in the engine's own words.
+    [[nodiscard]] virtual Status subscribe_passband(std::uint64_t vrx,
+                                                     std::uint32_t every_nth,
+                                                     PassbandCallback callback) = 0;
+    virtual void unsubscribe_passband(std::uint64_t vrx) = 0;
+
     // Frames this client was sent.
     [[nodiscard]] virtual std::uint64_t frames_received() const = 0;
 

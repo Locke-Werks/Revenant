@@ -176,6 +176,7 @@
 #include <format>
 #include <future>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -294,6 +295,29 @@ private:
     engine::SpectrumFrame frame_;
 };
 
+// The same for one receiver's passband. A separate class and not a template
+// over the two frame types, because the two structs share no base and the
+// saving would be one small copy each.
+class PassbandCopy {
+public:
+    PassbandCopy() = default;
+
+    PassbandCopy(const PassbandCopy&) = delete;
+    PassbandCopy& operator=(const PassbandCopy&) = delete;
+
+    void assign(const engine::PassbandFrame& source) {
+        bins_.assign(source.power_db.begin(), source.power_db.end());
+        frame_ = source;
+        frame_.power_db = std::span<const float>(bins_);
+    }
+
+    [[nodiscard]] const engine::PassbandFrame& frame() const { return frame_; }
+
+private:
+    std::vector<float> bins_;
+    engine::PassbandFrame frame_;
+};
+
 // The most frame buffers that can exist at once, and so the pool's capacity:
 // one being filled on the completion thread, one waiting in the slot, one
 // being fanned out on the loop thread. core/engine/scheduler.h has exactly
@@ -357,6 +381,20 @@ struct Subscription : std::enable_shared_from_this<Subscription> {
     bool cancelled = false;
 };
 
+// One subscriber to one receiver's passband. Loop thread only, same as
+// Subscription above and for the same reasons.
+struct PassbandNode : std::enable_shared_from_this<PassbandNode> {
+    PassbandNode(schema::PassbandReceiver::Client client, engine::VrxId which,
+                 std::uint32_t nth)
+        : receiver(kj::mv(client)), vrx(which), every_nth(nth) {}
+
+    schema::PassbandReceiver::Client receiver;
+    engine::VrxId vrx;
+    std::uint32_t every_nth = 1;
+    bool in_flight = false;
+    bool cancelled = false;
+};
+
 class ServerImpl;
 
 // What the engine's sink reaches the server through.
@@ -415,9 +453,18 @@ public:
     // Engine completion thread.
     [[nodiscard]] Status on_frame(const engine::SpectrumFrame& frame);
 
+    // Engine completion thread, for one receiver.
+    [[nodiscard]] Status on_passband_frame(const engine::PassbandFrame& frame);
+
     // Event loop thread.
     void add_subscription(std::shared_ptr<Subscription> subscription);
     void end_subscription(const std::shared_ptr<Subscription>& subscription);
+
+    // Event loop thread. Installs the engine's per-receiver passband sink on
+    // the first subscriber to that receiver and takes it off with the last,
+    // which is what makes a transform nobody is watching cost nothing.
+    [[nodiscard]] Status add_passband(std::shared_ptr<PassbandNode> node);
+    void end_passband(const std::shared_ptr<PassbandNode>& node);
 
     // Event loop thread. Queues a listing for the worker and hands back a
     // promise this loop resolves when the worker is done. See the note at the
@@ -444,6 +491,11 @@ private:
     void deliver(Subscription& subscription, const engine::SpectrumFrame& frame);
     void drop_cancelled();
     void refresh_subscriber_summary();
+
+    void drain_passbands();
+    void fan_out_passband(const engine::PassbandFrame& frame);
+    void deliver_passband(PassbandNode& node, const engine::PassbandFrame& frame);
+    void detach_passband_sink(engine::VrxId vrx);
 
     void taskFailed(kj::Exception&&) override {
         // Every send already carries its own error handler, which ends the
@@ -524,9 +576,57 @@ private:
     std::vector<std::unique_ptr<FrameCopy>> spare_;
     kj::Own<kj::CrossThreadPromiseFulfiller<void>> wakeup_;
 
+    // One pending slot per receiver, under frame_lock_ and woken by the same
+    // fulfiller, so a burst across several receivers rings the bell once and
+    // pump() drains all of them.
+    //
+    // Per receiver and not one shared slot: two receivers produce frames on
+    // the same completion thread one after the other, and a single slot would
+    // make each one throw the other away rather than the previous frame of
+    // its own. Newest wins WITHIN a receiver, which is the waterfall rule,
+    // and never between receivers.
+    std::map<std::uint32_t, std::unique_ptr<PassbandCopy>> passband_pending_;
+    std::vector<std::unique_ptr<PassbandCopy>> passband_spare_;
+
+    // Receivers this server has a passband sink installed on, so the last
+    // subscriber leaving can take it off again and free the device buffers.
+    // Loop thread only.
+    std::map<std::uint32_t, std::uint32_t> passband_sinks_;
+
     // Loop thread only.
     std::vector<std::shared_ptr<Subscription>> subscriptions_;
+    std::vector<std::shared_ptr<PassbandNode>> passband_nodes_;
     kj::TaskSet* sends_ = nullptr;
+};
+
+class PassbandSubscriptionImpl final : public schema::PassbandSubscription::Server {
+public:
+    PassbandSubscriptionImpl(ServerImpl& owner, std::shared_ptr<PassbandNode> node)
+        : owner_(owner), node_(std::move(node)) {}
+
+    PassbandSubscriptionImpl(const PassbandSubscriptionImpl&) = delete;
+    PassbandSubscriptionImpl& operator=(const PassbandSubscriptionImpl&) = delete;
+
+    // Not an override, for the reason SubscriptionImpl's destructor gives:
+    // capnp::Capability::Server has no virtual destructor.
+    ~PassbandSubscriptionImpl() { end(); }
+
+    kj::Promise<void> cancel(CancelContext) override {
+        end();
+        return kj::READY_NOW;
+    }
+
+private:
+    void end() {
+        if (node_ == nullptr) {
+            return;
+        }
+        owner_.end_passband(node_);
+        node_.reset();
+    }
+
+    ServerImpl& owner_;
+    std::shared_ptr<PassbandNode> node_;
 };
 
 class SubscriptionImpl final : public schema::SpectrumSubscription::Server {
@@ -684,6 +784,35 @@ public:
         schema::SpectrumSubscription::Client handle =
             kj::heap<SubscriptionImpl>(owner_, node);
         owner_.add_subscription(std::move(node));
+        context.getResults().setSubscription(kj::mv(handle));
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> subscribePassband(SubscribePassbandContext context) override {
+        auto request = context.getParams();
+        if (!request.hasReceiver()) {
+            return to_exception(Error{"subscribePassband needs a receiver capability, and "
+                                      "this request carried a null pointer in its place"});
+        }
+
+        auto id = to_vrx_id(request.getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
+
+        auto node = std::make_shared<PassbandNode>(request.getReceiver(), *id,
+                                                   std::max(request.getEveryNth(), 1U));
+
+        // The sink goes on before the capability exists, so a refusal from
+        // the engine (no passband stage, a raw tap, no such receiver) comes
+        // back as the engine's own sentence rather than as a subscription
+        // that can never produce a frame.
+        if (auto installed = owner_.add_passband(node); !installed) {
+            return to_exception(installed.error());
+        }
+
+        schema::PassbandSubscription::Client handle =
+            kj::heap<PassbandSubscriptionImpl>(owner_, std::move(node));
         context.getResults().setSubscription(kj::mv(handle));
         return kj::READY_NOW;
     }
@@ -1064,7 +1193,12 @@ kj::Promise<void> ServerImpl::pump() {
     // Arm, then drain, then wait. A frame handed over while no fulfiller was
     // armed sets the slot and rings nothing, so draining before arming would
     // leave it sitting there until the frame behind it arrived.
+    //
+    // Both kinds through one pump and one bell. A receiver's passband and the
+    // span are produced by the same completion thread in the same dispatch,
+    // so two pumps would be two wakeups for one batch of work.
     drain();
+    drain_passbands();
 
     return armed.promise.then([this]() { return pump(); });
 }
@@ -1139,6 +1273,216 @@ void ServerImpl::deliver(Subscription& subscription, const engine::SpectrumFrame
                 live->cancelled = true;
             }
         }));
+}
+
+Status ServerImpl::on_passband_frame(const engine::PassbandFrame& frame) {
+    // The engine's completion thread, the same one on_frame runs on. It
+    // touches no capability and never waits on the loop thread.
+    const std::uint32_t key = frame.vrx.value;
+
+    std::unique_ptr<PassbandCopy> buffer;
+    {
+        std::scoped_lock held(frame_lock_);
+        if (!passband_spare_.empty()) {
+            buffer = std::move(passband_spare_.back());
+            passband_spare_.pop_back();
+        }
+    }
+    if (buffer == nullptr) {
+        buffer = std::make_unique<PassbandCopy>();
+    }
+    buffer->assign(frame);
+
+    kj::Own<kj::CrossThreadPromiseFulfiller<void>> waker;
+    {
+        std::scoped_lock held(frame_lock_);
+        auto slot = passband_pending_.find(key);
+        if (slot != passband_pending_.end() && slot->second != nullptr) {
+            // Newest wins, within this receiver only. Charged as a drop for
+            // the same reason the span's is: the client asked for a rate and
+            // is not getting it.
+            frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+            passband_spare_.push_back(std::move(slot->second));
+        }
+        passband_pending_[key] = std::move(buffer);
+        waker = kj::mv(wakeup_);
+    }
+
+    if (waker.get() != nullptr) {
+        waker->fulfill();
+    }
+    return {};
+}
+
+void ServerImpl::drain_passbands() {
+    // Moved out whole, so the loop thread fans out without holding the lock
+    // the completion thread wants for its next copy.
+    std::map<std::uint32_t, std::unique_ptr<PassbandCopy>> ready;
+    {
+        std::scoped_lock held(frame_lock_);
+        ready.swap(passband_pending_);
+    }
+    if (ready.empty()) {
+        return;
+    }
+
+    for (auto& entry : ready) {
+        if (entry.second != nullptr) {
+            fan_out_passband(entry.second->frame());
+        }
+    }
+
+    // Returned rather than dropped, so the completion thread's next copy has
+    // storage waiting for it. Safe here because deliver_passband writes the
+    // bins into the outgoing message before it issues the send.
+    std::scoped_lock held(frame_lock_);
+    for (auto& entry : ready) {
+        if (entry.second != nullptr) {
+            passband_spare_.push_back(std::move(entry.second));
+        }
+    }
+}
+
+void ServerImpl::fan_out_passband(const engine::PassbandFrame& frame) {
+    bool any_cancelled = false;
+    for (const auto& node : passband_nodes_) {
+        if (node->cancelled) {
+            any_cancelled = true;
+            continue;
+        }
+        if (node->vrx != frame.vrx) {
+            continue;
+        }
+        if (node->every_nth > 1 && (frame.sequence % node->every_nth) != 0) {
+            // What this subscription asked for, so not a drop.
+            continue;
+        }
+        if (node->in_flight) {
+            frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        deliver_passband(*node, frame);
+    }
+
+    if (any_cancelled) {
+        std::vector<std::shared_ptr<PassbandNode>> gone;
+        for (const auto& node : passband_nodes_) {
+            if (node->cancelled) {
+                gone.push_back(node);
+            }
+        }
+        for (const auto& node : gone) {
+            end_passband(node);
+        }
+    }
+}
+
+void ServerImpl::deliver_passband(PassbandNode& node, const engine::PassbandFrame& frame) {
+    const std::uint64_t words = (frame.power_db.size() + 1) / 2 + 32;
+    auto request = node.receiver.frameRequest(capnp::MessageSize{words, 0});
+    write_passband_frame(request.initFrame(), frame);
+
+    node.in_flight = true;
+    frames_sent_.fetch_add(1, std::memory_order_relaxed);
+
+    auto weak = node.weak_from_this();
+    sends_->add(request.send().ignoreResult().then(
+        [weak]() {
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+            }
+        },
+        [weak](kj::Exception&&) {
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                live->cancelled = true;
+            }
+        }));
+}
+
+Status ServerImpl::add_passband(std::shared_ptr<PassbandNode> node) {
+    const std::uint32_t key = node->vrx.value;
+
+    // The engine is asked once per receiver, however many clients are
+    // watching it. A second set_passband_sink would replace the first, which
+    // would be silent and would take the other client's frames with it.
+    auto existing = passband_sinks_.find(key);
+    if (existing == passband_sinks_.end()) {
+        std::scoped_lock held(sink_lock_);
+        if (sink_closed_) {
+            return fail("this server is stopping and will install no further sinks");
+        }
+
+        auto gate = gate_;
+        const engine::VrxId which = node->vrx;
+        Status installed = engine_.set_passband_sink(
+            which, [gate, which](const engine::PassbandFrame& frame) -> Status {
+                // The same gate the spectrum sink uses. A sink call already
+                // running when stop() closes the gate finds the owner null
+                // and returns rather than touching a dead server.
+                std::scoped_lock owned(gate->lock);
+                if (gate->owner == nullptr) {
+                    return {};
+                }
+                return gate->owner->on_passband_frame(frame);
+            });
+        if (!installed) {
+            return installed;
+        }
+        passband_sinks_[key] = 0;
+    }
+
+    passband_sinks_[key] += 1;
+    passband_nodes_.push_back(std::move(node));
+    return {};
+}
+
+void ServerImpl::end_passband(const std::shared_ptr<PassbandNode>& node) {
+    const std::uint32_t key = node->vrx.value;
+    node->cancelled = true;
+
+    const auto before = passband_nodes_.size();
+    std::erase(passband_nodes_, node);
+    if (passband_nodes_.size() == before) {
+        // Already ended. Cancelling twice is ordinary: a client can call
+        // cancel and then drop the capability.
+        return;
+    }
+
+    auto counted = passband_sinks_.find(key);
+    if (counted == passband_sinks_.end()) {
+        return;
+    }
+    if (counted->second > 1) {
+        counted->second -= 1;
+        return;
+    }
+
+    passband_sinks_.erase(counted);
+    detach_passband_sink(node->vrx);
+}
+
+void ServerImpl::detach_passband_sink(engine::VrxId vrx) {
+    {
+        std::scoped_lock held(sink_lock_);
+        if (sink_closed_) {
+            // stop() has already taken every sink off.
+            return;
+        }
+        // Asynchronous, so a frame recorded before this can still arrive.
+        // The pending slot below is dropped for that reason rather than
+        // left to be fanned out to a subscription nobody holds.
+        static_cast<void>(engine_.set_passband_sink(vrx, {}));
+    }
+
+    std::scoped_lock held(frame_lock_);
+    auto slot = passband_pending_.find(vrx.value);
+    if (slot != passband_pending_.end()) {
+        if (slot->second != nullptr) {
+            passband_spare_.push_back(std::move(slot->second));
+        }
+        passband_pending_.erase(slot);
+    }
 }
 
 void ServerImpl::add_subscription(std::shared_ptr<Subscription> subscription) {
@@ -1293,6 +1637,7 @@ void ServerImpl::stop() {
             static_cast<void>(engine_.set_spectrum_sink({}));
             sink_installed_ = false;
         }
+
     }
 
     if (shutdown_.get() != nullptr) {
@@ -1310,10 +1655,22 @@ void ServerImpl::stop() {
         std::scoped_lock owned(gate_->lock);
         gate_->owner = nullptr;
     }
+    // Every receiver this server was watching, taken off only now: the map
+    // is loop-thread state and the loop has just been joined, so this is the
+    // first moment it can be read from here. sink_closed_ above is what
+    // stopped a subscribePassband adding to it in the meantime.
+    for (const auto& entry : passband_sinks_) {
+        static_cast<void>(engine_.set_passband_sink(engine::VrxId{entry.first}, {}));
+    }
+    passband_sinks_.clear();
+    passband_nodes_.clear();
+
     {
         std::scoped_lock held(frame_lock_);
         pending_.reset();
         spare_.clear();
+        passband_pending_.clear();
+        passband_spare_.clear();
     }
 
     // Released here rather than left to the destructor, for the same reason

@@ -407,10 +407,18 @@ struct Passband {
 // The passband a request asks for, before it is fitted to the channel.
 //
 // One of three answers, in order. The explicit pair when VrxParams carries
-// one. Otherwise VrxParams::bandwidth expanded through the mode's shorthand
-// rule, which reproduces the geometry this planner had before edges existed:
-// symmetric about the centre for raw, AM, NFM, WFM, DSB and CW, [0, B] for
-// USB and [-B, 0] for LSB. Otherwise the mode's default above.
+// one. Otherwise a positive VrxParams::bandwidth expanded through the mode's
+// shorthand rule, which reproduces the geometry this planner had before
+// edges existed: symmetric about the centre for raw, AM, NFM, WFM, DSB and
+// CW, [0, B] for USB and [-B, 0] for LSB. Otherwise the mode's default
+// above.
+//
+// A bandwidth of zero is "not stated" and a negative one is a mistake, and
+// the two are answered differently on purpose. Zero reaching the default is
+// what lets a client change a receiver's mode without carrying its own copy
+// of the table: it sends zeros and reads the granted edges back off
+// VrxPlacement. The Qt client is out of process and links no part of the
+// DSP, so a table it could call directly would have had to be a second copy.
 //
 // Refuses low >= high, with both numbers in the message: an empty or
 // inverted passband is a request nobody can fill and the two numbers are

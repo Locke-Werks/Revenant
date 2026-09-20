@@ -92,6 +92,73 @@ struct SpectrumGeometry {
     binZero @5 :Rational;
 }
 
+# The frequency axis of one receiver's passband frame.
+#
+# Per frame rather than in EngineInfo, unlike SpectrumGeometry above, because
+# only the transform size is engine-wide: the width of the axis is the
+# receiver's own demodulation rate and moves whenever its filter does.
+struct PassbandGeometry {
+    transform @0 :UInt32;
+    bins @1 :UInt32;
+
+    # The fine stream's rate, which is the whole width of the frame. It is
+    # somewhat wider than the receiver's passband rather than equal to it,
+    # and the margin is where the filter's skirts are drawn.
+    rate @2 :UInt32;
+
+    binWidth @3 :Rational;
+
+    # Centre frequency of bin zero, half the demodulation rate below whatever
+    # the fine stage mixed to DC.
+    #
+    # NOT always the receiver's centre, and carried rather than derived for
+    # exactly that reason. For CW the fine stage translates the carrier to the
+    # operator's pitch, so this sits a pitch below VrxParams::center; a
+    # display that computed the axis from params.center would be one pitch out
+    # on one mode and right on the other seven. It is also what makes an
+    # asymmetric passband need no special case on the drawing side: the axis
+    # is read off what was mixed, and the filter's edges are drawn against it.
+    binZero @4 :Rational;
+}
+
+# One receiver's own complex baseband, transformed.
+#
+# The response shaping it is the receiver's own fine filter and nothing
+# divides that out. The skirts ARE the feature: a filter parked on a signal is
+# judged by where its edges fall against the signal's, which is the whole
+# reason this frame exists and the surface a passband is dragged over.
+struct PassbandFrame {
+    vrx @0 :UInt64;
+
+    # Decibels relative to full scale, ascending in frequency across the whole
+    # demodulation rate, no gaps and nothing counted twice.
+    powerDb @1 :List(Float32);
+
+    geometry @2 :PassbandGeometry;
+
+    # Source samples this frame's window covers, [start, start + count).
+    # Absolute from the start of the stream, with both the channelizer
+    # prototype's group delay and the fine filter's already taken off, so it
+    # lines up with an AudioChunk's start and with a SpectrumFrame's.
+    start @3 :UInt64;
+    count @4 :UInt64;
+
+    # Frames the ENGINE delivered to this receiver before this one, so a
+    # waterfall that skipped a row knows it skipped a row.
+    sequence @5 :UInt64;
+
+    # This receiver's own colour map, scaled on its own passband. A display
+    # scaled by something it is not showing is a display that lies, and a
+    # passband holding one signal has nothing in common with a 20 MHz span
+    # whose percentiles are mostly noise.
+    floorDb @6 :Float32;
+    ceilingDb @7 :Float32;
+
+    # What the device measured of THIS frame, before any smoothing.
+    percentileLowDb @8 :Float32;
+    percentileHighDb @9 :Float32;
+}
+
 struct EngineInfo {
     device @0 :DeviceInfo;
     grid @1 :GridParams;
@@ -589,6 +656,18 @@ interface SpectrumSubscription {
     cancel @0 () -> ();
 }
 
+# The same two, for one receiver's passband. Separate interfaces rather than a
+# frame union on the spectrum pair, because a client normally wants the span
+# at one rate and a receiver's passband at another, and a single subscription
+# would make cancelling one cancel both.
+interface PassbandReceiver {
+    frame @0 (frame :PassbandFrame) -> ();
+}
+
+interface PassbandSubscription {
+    cancel @0 () -> ();
+}
+
 interface Session {
     info @0 () -> (info :EngineInfo);
     running @1 () -> (running :Bool);
@@ -662,4 +741,21 @@ interface Session {
     # client may set a threshold before it polls rather than having to poll
     # once at the wrong one.
     setDetectionThreshold @11 (thresholdDb :Float64) -> ();
+
+    # One receiver's passband, on the same terms as subscribeSpectrum above:
+    # everyNth of 0 or 1 is every frame, dropping the capability ends it, and
+    # a frame is skipped rather than queued when the previous one has not
+    # been answered.
+    #
+    # PER RECEIVER AND OPT IN. Until something subscribes, that receiver
+    # records no transform and holds no buffers for one, which is why this
+    # takes a receiver id rather than being a flag on addVrx: a recorder
+    # serving eight receivers should not pay for eight transforms nobody is
+    # looking at. The last subscription going away takes the buffers with it.
+    #
+    # Refused on an engine built with no passband stage, and refused for a
+    # raw tap, which has no fine stage to transform. The engine's own words
+    # come back in both cases.
+    subscribePassband @12 (vrx :UInt64, receiver :PassbandReceiver, everyNth :UInt32)
+        -> (subscription :PassbandSubscription);
 }

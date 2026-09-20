@@ -207,6 +207,32 @@ void write_spectrum_frame(schema::SpectrumFrame::Builder out,
     out.setPercentileHighDb(in.percentile_high_db);
 }
 
+void write_passband_geometry(schema::PassbandGeometry::Builder out,
+                             const engine::PassbandGeometry& in) {
+    out.setTransform(in.transform);
+    out.setBins(in.bins);
+    out.setRate(to_wire_rate(in.rate));
+    write_rational(out.initBinWidth(), in.bin_width_numerator, in.bin_width_denominator);
+    write_rational(out.initBinZero(), in.bin_zero_numerator, in.bin_zero_denominator);
+}
+
+void write_passband_frame(schema::PassbandFrame::Builder out,
+                          const engine::PassbandFrame& in) {
+    out.setVrx(in.vrx.value);
+    auto bins = out.initPowerDb(static_cast<unsigned>(in.power_db.size()));
+    for (unsigned i = 0; i < bins.size(); ++i) {
+        bins.set(i, in.power_db[i]);
+    }
+    write_passband_geometry(out.initGeometry(), in.geometry);
+    out.setStart(in.start);
+    out.setCount(in.count);
+    out.setSequence(in.sequence);
+    out.setFloorDb(in.floor_db);
+    out.setCeilingDb(in.ceiling_db);
+    out.setPercentileLowDb(in.percentile_low_db);
+    out.setPercentileHighDb(in.percentile_high_db);
+}
+
 void write_detection(schema::Detection::Builder out, const detect::Track& in) {
     out.setId(in.id);
     out.setCenterHz(in.center);

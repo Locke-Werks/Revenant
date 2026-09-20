@@ -356,23 +356,49 @@ TEST_CASE("an asymmetric passband is placed and read back over the wire", "[gpu]
     CHECK(remote->demod_rate == local->demod_rate);
     CHECK(remote->demod_rate > 0);
 
-    // And the edges move when they are asked to, in place, without the
-    // receiver being removed and added.
-    rpc::VrxParams wider = params;
-    wider.passband_low = 100;
-    wider.passband_high = 3'900;
+    // A PAN IS IN PLACE AND A WIDEN IS NOT, WHICH IS THE WHOLE OF WHAT A
+    // DRAGGING SURFACE HAS TO KNOW.
+    //
+    // Sliding a filter of a fixed width across the band keeps the
+    // demodulation rate and the tap count, so it is a push constant and a
+    // new tap table and the engine takes it without the audio noticing.
+    rpc::VrxParams panned = params;
+    panned.passband_low = kLow + 200;
+    panned.passband_high = kHigh + 200;
 
-    const auto applied = harness.client().set_vrx_params(*id, wider);
+    const auto applied = harness.client().set_vrx_params(*id, panned);
     INFO(test::message_of(applied));
     REQUIRE(applied.has_value());
 
     auto after = harness.client().vrx_status(*id);
     INFO(test::message_of(after));
     REQUIRE(after.has_value());
-    CHECK(after->params.passband_low == 100);
-    CHECK(after->params.passband_high == 3'900);
-    CHECK(after->placement.granted_low == 100);
-    CHECK(after->placement.granted_high == 3'900);
+    CHECK(after->params.passband_low == kLow + 200);
+    CHECK(after->params.passband_high == kHigh + 200);
+    CHECK(after->placement.granted_low == kLow + 200);
+    CHECK(after->placement.granted_high == kHigh + 200);
+    CHECK(after->demod_rate == remote->demod_rate);
+
+    // Changing the WIDTH is refused in place, and this is not a rate
+    // boundary being crossed: the tap count moves with every width, because
+    // Kaiser sets the filter's length from its transition and the
+    // transition is half a width. So a widen is a remove and an add however
+    // small it is, and the engine says so rather than storing the request
+    // over a stage still running the old filter.
+    rpc::VrxParams wider = params;
+    wider.passband_low = 100;
+    wider.passband_high = 3'900;
+
+    const auto refused = harness.client().set_vrx_params(*id, wider);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find("remove and an add") != std::string::npos);
+
+    // Refused means nothing moved, rather than half of it having moved.
+    auto unchanged = harness.client().vrx_status(*id);
+    REQUIRE(unchanged.has_value());
+    CHECK(unchanged->params.passband_low == kLow + 200);
+    CHECK(unchanged->params.passband_high == kHigh + 200);
 }
 
 TEST_CASE("a passband wider than one channel is fitted at the edge that does not fit",
@@ -502,17 +528,34 @@ TEST_CASE("every receiver parameter survives a round trip", "[gpu][rpc][m1]") {
     // below rather than worked around silently. The mode's own conversion on
     // this path is covered by the case that sends an ordinal the engine does
     // not know through setVrxParams and watches it be refused.
+    //
+    // The AUDIO RATE stays as well, and that is newer. A change to it moves
+    // the demodulation rate, which is a different pipeline and a different
+    // ring, and the engine now refuses that in place rather than storing
+    // the request and letting the stage quietly keep its old filter. This
+    // case used to change it to 24000 and assert the call succeeded, which
+    // it did: the params were echoed back, the audio did not change, and
+    // nothing anywhere said so. The refusal is asserted on its own below.
+    //
+    // The passband below MOVES WITHOUT CHANGING WIDTH, and that is not a
+    // detail of this case. A width change moves the filter's tap count,
+    // because Kaiser sets the length from the transition and the transition
+    // is half a width, and a different tap count is a different pipeline:
+    // the engine refuses it in place. A pan of a fixed width keeps both the
+    // tap count and the rate, so it is a push constant and a new tap table,
+    // and it is what this case is here to round trip. The refusal a widen
+    // gets is asserted on its own below and in the asymmetric-passband case
+    // above.
     rpc::VrxParams changed = sent;
     changed.center = 131'072;
     changed.bandwidth = 5'127;
-    changed.audio_rate = 24'000;
     changed.squelch_dbfs = -41.5;
     changed.agc_attack_ms = 17.25;
     changed.agc_decay_ms = 250.5;
     changed.agc_enabled = true;
     changed.cw_pitch = 421;
-    changed.passband_low = -2'211;
-    changed.passband_high = 3'049;
+    changed.passband_low = sent.passband_low + 500;
+    changed.passband_high = sent.passband_high + 500;
 
     const auto applied = harness.client().set_vrx_params(*id, changed);
     INFO(test::message_of(applied));
@@ -549,6 +592,68 @@ TEST_CASE("every receiver parameter survives a round trip", "[gpu][rpc][m1]") {
     REQUIRE_FALSE(refused.has_value());
     INFO(refused.error().message);
     CHECK(refused.error().message.find("cannot become") != std::string::npos);
+
+    // The other in-place refusal, which is the one a dragged filter edge
+    // runs into. Changing the audio rate moves the demodulation rate, so it
+    // is a remove and an add, and the engine says so rather than echoing
+    // the request back over a stage still running the old filter.
+    rpc::VrxParams faster = changed;
+    faster.audio_rate = 24'000;
+    const auto resized = harness.client().set_vrx_params(*id, faster);
+    REQUIRE_FALSE(resized.has_value());
+    INFO(resized.error().message);
+    CHECK(resized.error().message.find("remove and an add") != std::string::npos);
+
+    // Refused means refused: the receiver is still what it was, rather than
+    // half-changed. A refusal that had already stored the params would read
+    // as the change having been taken.
+    auto unchanged = harness.client().vrx_status(*id);
+    REQUIRE(unchanged.has_value());
+    CHECK(unchanged->params.audio_rate == changed.audio_rate);
+    CHECK(unchanged->demod_rate > 0);
+
+    // And the same refusal for a width, which is the one a drag actually
+    // meets: the rate here does not move at all and the engine still
+    // refuses, because the tap count does. Asserted beside the audio-rate
+    // case rather than folded into it, because a reader who knows only
+    // that the rate is the trigger would read this as a bug.
+    rpc::VrxParams narrower = changed;
+    narrower.passband_low = -1'500;
+    narrower.passband_high = 1'500;
+    const auto narrowed = harness.client().set_vrx_params(*id, narrower);
+    REQUIRE_FALSE(narrowed.has_value());
+    INFO(narrowed.error().message);
+    CHECK(narrowed.error().message.find("taps") != std::string::npos);
+    CHECK(narrowed.error().message.find("remove and an add") != std::string::npos);
+
+    // A pan of the same width is still taken in place, which is what makes
+    // a filter followable live at all.
+    //
+    // DOWNWARDS, AND THE DIRECTION IS NOT ARBITRARY. This receiver's
+    // passband is 9376 Hz inside a 16 kS/s demodulation rate, so its upper
+    // edge is close to the fold and the transition the planner can afford
+    // is bounded by the distance to it rather than by the width. Panning UP
+    // narrows that distance, narrows the transition, and lengthens the
+    // filter: measured, plus 300 hertz takes it from 82 taps to 90 and the
+    // engine refuses in place. Panning down does not.
+    //
+    // So "a pan is free" holds away from the fold and not against it, and a
+    // surface dragging a filter finds that out from the engine's refusal
+    // the same way it finds out about a widen. Asserted downwards here
+    // because the case is about the round trip; the boundary itself is what
+    // the refusals above cover.
+    rpc::VrxParams slid = changed;
+    slid.passband_low = changed.passband_low - 300;
+    slid.passband_high = changed.passband_high - 300;
+    const auto panned = harness.client().set_vrx_params(*id, slid);
+    INFO(test::message_of(panned));
+    REQUIRE(panned.has_value());
+
+    auto after_pan = harness.client().vrx_status(*id);
+    REQUIRE(after_pan.has_value());
+    CHECK(after_pan->params.passband_low == slid.passband_low);
+    CHECK(after_pan->params.passband_high == slid.passband_high);
+    CHECK(after_pan->demod_rate == unchanged->demod_rate);
 }
 
 TEST_CASE("all eight demodulator modes survive a round trip", "[gpu][rpc][m1]") {

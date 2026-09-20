@@ -589,6 +589,16 @@ struct Graph::Impl {
         // request add_vrx would already have refused.
         dsp::SampleRate demod_rate = 0;
 
+        // Taps per polyphase branch in the fine filter, which is the other
+        // half of what makes a retune a rebuild. It moves with the
+        // passband's WIDTH, because Kaiser sets the length from the
+        // transition and the transition is half a width: a narrower filter
+        // wants more taps, the tap buffer changes size, and the pipeline's
+        // specialization constant changes with it. Panning a filter of a
+        // fixed width leaves both alone, which is why a pan is free and a
+        // widen is not.
+        std::uint32_t fine_taps = 0;
+
         // The recording thread's own copy, so that a retune landing while a
         // block is being recorded cannot tear a field out from under it. The
         // two are kept in step by the control queue, which is the only path
@@ -968,11 +978,30 @@ struct Graph::Impl {
                 for (auto& slot : active) {
                     if (slot->id == op.id) {
                         slot->recording_params = op.params;
-                        // Discarded deliberately: a stage that cannot retune
-                        // keeps its old tuning, which is wrong but audible,
-                        // where dropping the receiver would be silent. The
-                        // error surfaces on the next status read through the
-                        // params not matching.
+
+                        // Still discarded, and still for the reason below,
+                        // but this is now the unreachable case rather than
+                        // the ordinary one: set_vrx_params refuses a change
+                        // that moves the demodulation rate before the op is
+                        // ever queued, which is the shape change a caller
+                        // can actually produce. What is left here is a
+                        // stage refusing for some other reason of its own.
+                        //
+                        // A stage that cannot retune keeps its old tuning,
+                        // which is wrong but audible, where dropping the
+                        // receiver would be silent.
+                        //
+                        // WHAT THIS COMMENT USED TO CLAIM. It said the
+                        // error surfaced on the next status read through
+                        // the params not matching. It did not: this op is
+                        // queued only after set_vrx_params has already
+                        // stored the new params on the slot, so vrx_status
+                        // reported exactly what was asked for while the
+                        // stage ran something else. A caller dragging a
+                        // filter edge past a rate boundary therefore saw
+                        // the request echoed back, heard no change, and had
+                        // nothing anywhere to tell it why. The refusal in
+                        // set_vrx_params is what closes that.
                         (void)slot->stage->retune(op.params, op.placement);
                     }
                 }
@@ -2785,8 +2814,9 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     slot->params = params;
     slot->placement = placement;
     slot->recording_params = params;
-    if (auto rate = dsp::demod_rate_for(params, placement, request.audio_rate)) {
-        slot->demod_rate = *rate;
+    if (auto planned = dsp::plan_vrx(impl.grid, impl.config.source_rate, params, placement)) {
+        slot->demod_rate = planned->demod_rate;
+        slot->fine_taps = planned->fine.taps;
     }
     slot->stage = std::move(stage);
     slot->audio_bytes = slot->stage->audio_bytes_for(impl.geometry.max_blocks_per_dispatch);
@@ -2878,13 +2908,47 @@ Status Graph::set_vrx_params(VrxId id, const VrxParams& params, const VrxPlaceme
                 "stage, so changing it is a remove and an add",
                 id.value, demod_name(slot->params.demod), demod_name(params.demod)));
         }
+        // Refused before anything is stored, because a change to the
+        // pipeline's shape is a different pipeline, a different ring and a
+        // different tap table, and rebuilding those under command buffers
+        // already in flight is the one thing the graph promises never to
+        // do. DemodStage::retune refuses it too, in these same words, and
+        // that refusal reaches nobody: it is discarded on the recording
+        // thread by the control op this method queues. So the question has
+        // to be asked here, where there is still a caller to answer.
+        //
+        // Asked OF THE PLANNER rather than of a rule written out again
+        // here. Two places deciding what counts as a shape change is how
+        // one of them comes to differ from the stage, and the difference
+        // would be a retune this method accepted and the stage silently
+        // dropped, which is the failure this whole check exists to end.
+        // The cost is designing three filter tables per call, on the
+        // control plane and not on the sample path.
+        //
+        // Moving the dial is not this. A retune that keeps the rate and the
+        // tap count is a push constant and a new tap table, which is free,
+        // and that is exactly what panning a filter of a fixed width is.
+        // Changing its WIDTH moves the tap count, because Kaiser sets the
+        // length from the transition and the transition is half a width, so
+        // a widen is a remove and an add however small it is.
+        auto planned = dsp::plan_vrx(impl.grid, impl.config.source_rate, params, placement);
+        if (!planned) {
+            return std::unexpected(with_context(planned.error(), "Graph::set_vrx_params"));
+        }
+        if (slot->demod_rate != 0 && (planned->demod_rate != slot->demod_rate ||
+                                      planned->fine.taps != slot->fine_taps)) {
+            return fail(std::format(
+                "this retune changes the receiver's filter shape, not just where it is "
+                "pointed: {} taps at {} S/s becomes {} taps at {} S/s. Moving the dial is a "
+                "push constant and a new tap table, which is free; changing the bandwidth or "
+                "the audio rate is a remove and an add",
+                slot->fine_taps, slot->demod_rate, planned->fine.taps, planned->demod_rate));
+        }
+
         slot->params = params;
         slot->placement = placement;
-        const dsp::SampleRate audio_rate =
-            params.audio_rate != 0 ? params.audio_rate : impl.config.audio_rate;
-        if (auto rate = dsp::demod_rate_for(params, placement, audio_rate)) {
-            slot->demod_rate = *rate;
-        }
+        slot->demod_rate = planned->demod_rate;
+        slot->fine_taps = planned->fine.taps;
     }
 
     auto* op = new (std::nothrow) Impl::ControlOp();

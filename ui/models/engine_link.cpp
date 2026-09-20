@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <optional>
 #include <utility>
 
 #include <QMetaObject>
@@ -118,10 +121,18 @@ void EngineLink::supervise()
             // A detection-only pass. The connection was good a quarter of a
             // second ago and a failed detections call will find out for us
             // anyway, so this does not need its own liveness question.
+            //
+            // The receiver work goes first. A drag posts a request and wakes
+            // this loop immediately rather than waiting out the poll
+            // interval, so this is the path a moving filter edge takes and
+            // the status poll behind it is what reads the grant back.
+            apply_receiver_request();
+            poll_receiver_status();
             poll_detections();
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
-            supervisor_wake_.wait_for(lock, kDetectionPollInterval,
-                                      [this] { return stopping_; });
+            supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
+                return stopping_ || (receiver_work_pending_ && client_ != nullptr);
+            });
             if (stopping_) {
                 break;
             }
@@ -136,6 +147,12 @@ void EngineLink::supervise()
             // so this is the only place that finds out, and the Client has
             // to be destroyed before another can be made: its loop thread is
             // joined by that destructor and nothing else.
+            // The receiver goes with it. Nothing has to be removed from an
+            // engine that is gone, but the pane's own id and passband have
+            // to stop claiming to be about a live receiver, and the next
+            // engine will not have one at that id.
+            live_receiver_id_ = 0;
+
             client_->unsubscribe_spectrum();
             client_.reset();
 
@@ -157,17 +174,30 @@ void EngineLink::supervise()
             // the window: connected, geometry on screen, and a frame rate
             // frozen at whatever it last was.
             note_running(*alive);
+            apply_receiver_request();
+            poll_receiver_status();
             poll_detections();
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);
-        supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] { return stopping_; });
+
+        // client_ is in the predicate, not just the flag. A request posted
+        // while the link is down cannot be applied, and a predicate that
+        // ignored that would return true immediately on every pass and turn
+        // the reconnect loop into a spin: the wait would never sleep, and
+        // attempt_connect would run as fast as the socket could refuse.
+        // client_ is the supervisor's own and is read here on its own
+        // thread.
+        supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
+            return stopping_ || (receiver_work_pending_ && client_ != nullptr);
+        });
         if (stopping_) {
             break;
         }
     }
 
     if (client_ != nullptr) {
+        drop_receiver();
         client_->unsubscribe_spectrum();
         client_.reset();
     }
@@ -347,6 +377,42 @@ void EngineLink::adopt()
     }
     shown_ = {};
     emit detectionsChanged();
+
+    // The receiver goes with the connection, on both edges. Its id was
+    // issued by one engine and the next engine issues from one again, so a
+    // pane still claiming that id would be pointed at whichever receiver
+    // the new engine happened to create first. The REQUEST is kept: the
+    // frequency, mode and edges the operator set are theirs and a
+    // reconnection should put them back, which is what the tune below does.
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        has_pending_receiver_status_ = false;
+        has_pending_receiver_id_ = false;
+        pending_receiver_id_ = 0;
+    }
+
+    // Whether the pane HAD a receiver, which is the test for putting one
+    // back. Not "wanted_.center is non-zero": a receiver tuned exactly to
+    // the source's own centre is an ordinary thing to want and would never
+    // have been restored.
+    const bool had_receiver = receiver_id_ != 0;
+    receiver_id_ = 0;
+    receiver_status_ = {};
+    receiver_edge_limit_ = 0;
+    passband_active_ = false;
+    passband_display_ = {};
+    emit receiverStatusChanged();
+    emit passbandChanged();
+
+    if (connected_ && !was_connected && had_receiver) {
+        // The pane had a receiver before the engine went away, so put it
+        // back rather than making the operator retune by hand. Recreated
+        // rather than retuned, because there is nothing on the new engine
+        // to retune.
+        post_receiver_request(true);
+    } else {
+        emit receiverChanged();
+    }
 
     emit connectionChanged();
     if (engine_running_ != was_running) {

@@ -820,11 +820,27 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
         return Passband{params.passband_low, params.passband_high};
     }
 
-    if (params.bandwidth <= 0) {
+    if (params.bandwidth < 0) {
         return fail(std::format(
-            "resolve_passband: bandwidth must be positive, got {} Hz, and no passband edges "
-            "were given either",
+            "resolve_passband: bandwidth cannot be negative, got {} Hz, and no passband "
+            "edges were given either",
             params.bandwidth));
+    }
+
+    // Nothing stated at all, so the mode's own channel plan answers. This is
+    // what lets a client change mode without carrying a copy of the table:
+    // it sends zeros and reads the granted edges back off VrxPlacement.
+    // Zero and negative are deliberately different, because zero is "I did
+    // not say" and a negative width is a mistake.
+    if (params.bandwidth == 0) {
+        const Passband fallback = default_passband(params.demod);
+        if (fallback.width() <= 0) {
+            return fail(std::format(
+                "resolve_passband: demodulator {} has no default passband, so a request that "
+                "states neither edges nor a bandwidth cannot be filled",
+                static_cast<std::uint32_t>(params.demod)));
+        }
+        return fallback;
     }
 
     // The shorthand expansion. This is the geometry plan_vrx had before
@@ -1363,10 +1379,17 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
     const Hertz cw_pitch = std::max<Hertz>(0, params.cw_pitch);
     const Passband mixed = mix_frame(plan.passband, plan.mode, cw_pitch);
 
-    const Hertz required = minimum_demod_rate(plan.mode, mixed);
-    const auto decimation = static_cast<std::uint32_t>(
-        std::max<std::int64_t>(1, (required + plan.audio_rate - 1) / plan.audio_rate));
-    plan.demod_rate = static_cast<SampleRate>(decimation) * plan.audio_rate;
+    // Through demod_rate_for rather than inline, so the figure a caller can
+    // get cheaply and the figure this planner builds a filter for are the
+    // same arithmetic rather than two copies of it. Graph::set_vrx_params
+    // asks the cheap one on every retune.
+    auto resolved_rate = demod_rate_for(params, placement, plan.audio_rate);
+    if (!resolved_rate) {
+        return std::unexpected(with_context(resolved_rate.error(), "plan_vrx"));
+    }
+    plan.demod_rate = *resolved_rate;
+    const auto decimation =
+        static_cast<std::uint32_t>(plan.demod_rate / plan.audio_rate);
 
     // The fine filter has two jobs and the transition width is where they
     // meet.

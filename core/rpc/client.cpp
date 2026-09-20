@@ -50,6 +50,7 @@
 #include <cstdint>
 #include <format>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -413,6 +414,33 @@ void read_spectrum_frame(SpectrumFrame& out, schema::SpectrumFrame::Reader in) {
     out.percentile_high_db = in.getPercentileHighDb();
 }
 
+[[nodiscard]] PassbandGeometry read_passband_geometry(schema::PassbandGeometry::Reader in) {
+    PassbandGeometry out;
+    out.transform = in.getTransform();
+    out.bins = in.getBins();
+    out.rate = in.getRate();
+    out.bin_width = read_rational(in.getBinWidth());
+    out.bin_zero = read_rational(in.getBinZero());
+    return out;
+}
+
+void read_passband_frame(PassbandFrame& out, schema::PassbandFrame::Reader in) {
+    auto bins = in.getPowerDb();
+    out.vrx = in.getVrx();
+    out.power_db.resize(bins.size());
+    for (unsigned i = 0; i < bins.size(); ++i) {
+        out.power_db[i] = bins[i];
+    }
+    out.geometry = read_passband_geometry(in.getGeometry());
+    out.start = in.getStart();
+    out.count = in.getCount();
+    out.sequence = in.getSequence();
+    out.floor_db = in.getFloorDb();
+    out.ceiling_db = in.getCeilingDb();
+    out.percentile_low_db = in.getPercentileLowDb();
+    out.percentile_high_db = in.getPercentileHighDb();
+}
+
 // Everything the event loop thread owns, in one place on its own stack.
 //
 // See the thread model at the top of the file. These three cannot be members
@@ -430,6 +458,12 @@ struct LoopState {
     // has KJ_IF_MAYBE and no kj::none) while a null kj::Own reads the same in
     // every version.
     kj::Own<schema::SpectrumSubscription::Client> subscription;
+
+    // One per receiver being watched, keyed by the receiver's id. A map and
+    // not a single slot, because a rack of receivers with a detail display
+    // open on two of them is the ordinary case and a client watching two
+    // should not have to open two connections.
+    std::map<std::uint64_t, kj::Own<schema::PassbandSubscription::Client>> passbands;
 };
 
 class ClientImpl;
@@ -447,6 +481,21 @@ private:
     // joins it before any member of the Client is destroyed, and the loop
     // unwinding is what drops the last reference to this object.
     ClientImpl& owner_;
+};
+
+// The same, for one receiver. It carries the receiver's id because the
+// engine's frame does too but the subscription is what a client keyed its
+// callback on, and trusting the frame's field to route would let a
+// misaddressed frame reach the wrong display.
+class PassbandReceiverImpl final : public schema::PassbandReceiver::Server {
+public:
+    PassbandReceiverImpl(ClientImpl& owner, std::uint64_t vrx) : owner_(owner), vrx_(vrx) {}
+
+    kj::Promise<void> frame(FrameContext context) override;
+
+private:
+    ClientImpl& owner_;
+    std::uint64_t vrx_ = 0;
 };
 
 class ClientImpl final : public Client {
@@ -481,17 +530,25 @@ public:
                                             FrameCallback callback) override;
     void unsubscribe_spectrum() override;
 
+    [[nodiscard]] Status subscribe_passband(std::uint64_t vrx, std::uint32_t every_nth,
+                                            PassbandCallback callback) override;
+    void unsubscribe_passband(std::uint64_t vrx) override;
+
     [[nodiscard]] std::uint64_t frames_received() const override;
     [[nodiscard]] std::uint64_t frames_dropped() const override;
 
     // Loop thread only, called by SpectrumReceiverImpl.
     void deliver(schema::SpectrumFrame::Reader in);
 
+    // Loop thread only, called by PassbandReceiverImpl.
+    void deliver_passband(std::uint64_t vrx, schema::PassbandFrame::Reader in);
+
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
 
     // Loop thread only.
     [[nodiscard]] kj::Promise<void> end_subscription(LoopState& state);
+    [[nodiscard]] kj::Promise<void> end_passband(LoopState& state, std::uint64_t vrx);
 
     // Runs body on the event loop thread and waits for the promise it returns,
     // translating whatever comes back into an Expected.
@@ -562,6 +619,13 @@ private:
     bool callback_active_ = false;
     SpectrumFrame scratch_;
 
+    // One callback and one scratch frame per receiver being watched. The
+    // scratch is per receiver rather than shared because two receivers have
+    // different bin counts and a shared buffer would resize on every
+    // alternating frame.
+    std::map<std::uint64_t, PassbandCallback> passband_callbacks_;
+    std::map<std::uint64_t, PassbandFrame> passband_scratch_;
+
     // client.h says calls queue. This is what makes them.
     std::mutex calls_;
 
@@ -574,6 +638,14 @@ private:
     std::atomic<std::uint64_t> frames_received_{0};
     std::atomic<std::uint64_t> frames_dropped_{0};
 };
+
+kj::Promise<void> PassbandReceiverImpl::frame(FrameContext context) {
+    owner_.deliver_passband(vrx_, context.getParams().getFrame());
+
+    // The same backpressure as the span's: the engine allows one frame in
+    // flight per subscription and cannot start another until this returns.
+    return kj::READY_NOW;
+}
 
 kj::Promise<void> SpectrumReceiverImpl::frame(FrameContext context) {
     owner_.deliver(context.getParams().getFrame());
@@ -879,6 +951,88 @@ Status ClientImpl::subscribe_spectrum(std::uint32_t every_nth, FrameCallback cal
                 });
         });
     });
+}
+
+kj::Promise<void> ClientImpl::end_passband(LoopState& state, std::uint64_t vrx) {
+    passband_callbacks_.erase(vrx);
+    passband_scratch_.erase(vrx);
+
+    auto found = state.passbands.find(vrx);
+    if (found == state.passbands.end()) {
+        return kj::READY_NOW;
+    }
+
+    // Cancel, then drop, for the same ordering reason end_subscription has:
+    // a frame the engine sent before answering the cancel has already been
+    // dispatched by the time the answer arrives, so a caller that
+    // unsubscribes and then tears down what its callback touched is not
+    // racing one already on the wire.
+    auto cancelled = found->second->cancelRequest().send().ignoreResult();
+    state.passbands.erase(found);
+    return cancelled.catch_([](kj::Exception&&) {});
+}
+
+Status ClientImpl::subscribe_passband(std::uint64_t vrx, std::uint32_t every_nth,
+                                      PassbandCallback callback) {
+    if (!callback) {
+        return fail("subscribe_passband: the callback is empty. unsubscribe_passband is how a "
+                    "subscription ends");
+    }
+
+    return on_loop("subscribe_passband", [this, vrx, every_nth,
+                                          &callback](LoopState& state) {
+        return end_passband(state, vrx)
+            .then([this, &state, vrx, every_nth, &callback]() {
+                // Installed before the request goes out, because the engine
+                // may call frame() on the receiver before it answers the
+                // subscribe and a callback installed afterwards would miss
+                // it.
+                passband_callbacks_[vrx] = std::move(callback);
+                passband_scratch_[vrx] = PassbandFrame{};
+
+                auto request = state.session.subscribePassbandRequest();
+                request.setVrx(vrx);
+                request.setReceiver(schema::PassbandReceiver::Client(
+                    kj::heap<PassbandReceiverImpl>(*this, vrx)));
+                request.setEveryNth(every_nth);
+
+                return request.send()
+                    .then([&state, vrx](auto&& response) {
+                        state.passbands[vrx] =
+                            kj::heap<schema::PassbandSubscription::Client>(
+                                response.getSubscription());
+                    })
+                    .catch_([this, vrx](kj::Exception&& failure) -> kj::Promise<void> {
+                        passband_callbacks_.erase(vrx);
+                        passband_scratch_.erase(vrx);
+                        return kj::Promise<void>(kj::mv(failure));
+                    });
+            });
+    });
+}
+
+void ClientImpl::unsubscribe_passband(std::uint64_t vrx) {
+    // No error channel, for the reason unsubscribe_spectrum gives: the only
+    // failure is a connection that has already ended the subscription.
+    static_cast<void>(on_loop("unsubscribe_passband", [this, vrx](LoopState& state) {
+        return end_passband(state, vrx);
+    }));
+}
+
+void ClientImpl::deliver_passband(std::uint64_t vrx, schema::PassbandFrame::Reader in) {
+    auto callback = passband_callbacks_.find(vrx);
+    if (callback == passband_callbacks_.end() || !callback->second) {
+        // An unsubscribe that crossed a frame already on the wire.
+        return;
+    }
+
+    auto scratch = passband_scratch_.find(vrx);
+    if (scratch == passband_scratch_.end()) {
+        return;
+    }
+
+    read_passband_frame(scratch->second, in);
+    callback->second(scratch->second);
 }
 
 void ClientImpl::unsubscribe_spectrum() {

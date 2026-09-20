@@ -905,6 +905,15 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
     // destroying buffers that command buffers already in flight still name,
     // and this stage cannot see when those complete. So it is refused for the
     // same reason and in the same words the graph refuses a mode change.
+    //
+    // This refusal now reaches nobody, and that is deliberate rather than an
+    // oversight. Graph::set_vrx_params asks the planner the same question
+    // before it queues the control op, so a caller gets the refusal on its
+    // own call with the numbers in it; by the time execution arrives here
+    // the op is on the recording thread and there is no caller left to
+    // answer. Kept because it is this stage's own invariant and the graph's
+    // check is not allowed to be the only thing holding it: a second entry
+    // point, or a graph edited to ask a looser question, would find this.
     if (!same_shape(next.fine, plan_.fine) || !same_shape(next.demod, plan_.demod) ||
         next.channel_rate != plan_.channel_rate || next.demod_rate != plan_.demod_rate ||
         next.output_rate != plan_.output_rate ||

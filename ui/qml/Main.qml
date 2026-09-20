@@ -103,6 +103,20 @@ ApplicationWindow {
         window.tunedCandidates = candidates
         window.tunedRank = rank
         window.tunedExhausted = exhausted
+
+        // And the receiver actually moves, which it did not before this.
+        //
+        // The passband is NOT taken from the detection's measured width.
+        // The detector reports the band that has energy in it, and on USB
+        // that band is entirely above the suppressed carrier, so handing it
+        // over as a width parks the filter straddling a carrier that is not
+        // being transmitted. The engine's own per-mode default is used
+        // instead, which is what an empty passband on VrxParams asks for,
+        // and the operator drags from there.
+        //
+        // The centre caveat below still stands and is why the mode is left
+        // as it is rather than guessed from the bandwidth.
+        engineLink.tuneReceiver(centerHz, "")
     }
 
     ColumnLayout {
@@ -563,6 +577,161 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // The VFO detail display, and the filter drawn over it
+        // ------------------------------------------------------------------
+        // This is the receiver's OWN passband, transformed by the engine,
+        // and the two rules over it are that receiver's filter edges. The
+        // edges are dragged here, which is the one interaction in this
+        // window that changes what the engine is doing rather than what the
+        // window is showing.
+        //
+        // The pane appears when a receiver exists and not before. There is
+        // nothing to draw and nothing to drag without one, and an empty
+        // pane with handles in it invites a gesture that cannot do
+        // anything.
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+            visible: engineLink.receiverId > 0
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Label {
+                    text: "vfo"
+                    color: window.inkTune
+                    font.pixelSize: 13
+                    font.bold: true
+                }
+
+                Label {
+                    text: (engineLink.receiverCenterHz / 1.0e6).toFixed(6) + " MHz"
+                    color: window.ink
+                    font.pixelSize: 13
+                    font.bold: true
+                }
+
+                // The mode, as the eight buttons an operator actually
+                // reaches for. Changing one is a remove and an add
+                // underneath, because the demodulator is the stage; the
+                // pane keeps its identity across that and the operator sees
+                // a mode change.
+                Repeater {
+                    model: ["am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw"]
+
+                    Label {
+                        required property string modelData
+
+                        text: modelData
+                        color: engineLink.receiverDemod === modelData
+                               ? window.inkTune : window.inkDim
+                        font.pixelSize: 12
+                        font.bold: engineLink.receiverDemod === modelData
+
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: engineLink.setReceiverDemod(parent.modelData)
+                        }
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Label {
+                    visible: engineLink.receiverDemodRate > 0
+                    text: (engineLink.receiverDemodRate / 1000).toFixed(1) + " kS/s"
+                    color: window.inkDim
+                    font.pixelSize: 12
+                }
+
+                Label {
+                    visible: engineLink.receiverLevelDbfs > -199
+                    text: engineLink.receiverLevelDbfs.toFixed(1) + " dBFS"
+                    color: window.inkDim
+                    font.pixelSize: 12
+                }
+
+                Label {
+                    text: "clear"
+                    color: window.inkDim
+                    font.pixelSize: 12
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: engineLink.removeReceiver()
+                    }
+                }
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.round(window.height * 0.18)
+
+                PassbandItem {
+                    id: passband
+                    anchors.fill: parent
+                    link: engineLink
+                }
+
+                Plate {
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 4
+                    visible: !engineLink.passbandActive
+                    text: "waiting for the first passband frame"
+                }
+            }
+
+            // The readout, which is the whole of what a drag says back.
+            // Live while one is running and the granted pair when one is
+            // not, so the strip never goes blank and never shows a stale
+            // gesture. The colour is the one thing this file decides: the
+            // item reports that an edge is against the channel limit and
+            // the window chooses how loudly to say so.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Label {
+                    Layout.minimumWidth: 0
+                    text: passband.readout
+                    color: passband.atLimit ? window.inkWarn
+                           : engineLink.receiverClamped ? window.inkWarn : window.ink
+                    font.pixelSize: 12
+                    font.bold: passband.dragging
+                    elide: Text.ElideRight
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Label {
+                    Layout.minimumWidth: 0
+                    text: "drag an edge, shift-drag to widen both, [ ] \\ select, "
+                          + "arrows move, up and down widen, home resets"
+                    color: window.inkDim
+                    font.pixelSize: 11
+                    elide: Text.ElideRight
+                }
+            }
+
+            Label {
+                Layout.fillWidth: true
+                visible: engineLink.receiverFault.length > 0
+                text: engineLink.receiverFault
+                color: window.inkWarn
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
+            }
+        }
+
+        // ------------------------------------------------------------------
         // The frequency axis, in absolute hertz
         // ------------------------------------------------------------------
         // Aligned with the two items above rather than merely near them:
@@ -635,16 +804,18 @@ ApplicationWindow {
         // ------------------------------------------------------------------
         // What the last click resolved to
         // ------------------------------------------------------------------
-        // NOTHING CONSUMES THIS YET, AND THE ROW SAYS SO
+        // WHAT THIS ROW USED TO SAY
         //
-        // Receiver control from the window is not built: EngineLink holds no
-        // add_vrx and the window has no receiver list, so a click cannot
-        // produce a receiver however much it looks as though it should. The
-        // frequency is displayed instead of being acted on, and the second
-        // line says both of the things that are wrong with acting on it, so
-        // that nobody reads the number as a tuning solution.
+        // Until the passband work it said that receiver control from the
+        // window was not built, that EngineLink held no add_vrx, and that a
+        // click therefore could not produce a receiver however much it
+        // looked as though it should. All three are now false: takeTune
+        // above calls tuneReceiver, the detail pane below draws that
+        // receiver's passband, and its filter edges are dragged there. The
+        // sentence is recorded rather than deleted because it was the
+        // explanation for the whole of this row's shape.
         //
-        // The centre caveat is the one that outlives the plumbing.
+        // The centre caveat is the one that outlived the plumbing.
         // rpc::Detection::center_hz is the centre of the measured occupied
         // band, which core/detect/detector.h says in as many words is not
         // the logical centre docs/ui-spectrum.md wants. For AM it is the
@@ -739,10 +910,10 @@ ApplicationWindow {
             Label {
                 Layout.fillWidth: true
                 text: window.tunedId > 0
-                      ? "no receiver was created: GUI receiver control is not built. "
-                        + "This is the measured centre of the occupied band, not the mode's "
-                        + "logical centre, so it is the carrier for AM and it is wrong for "
-                        + "RTTY and SSB."
+                      ? "the receiver moved here. This is the measured centre of the "
+                        + "occupied band, not the mode's logical centre, so it is the "
+                        + "carrier for AM and it is wrong for RTTY and SSB: drag the "
+                        + "filter edges below to put the passband where the signal is."
                       : "no detection there, so this is the frequency under the pointer."
                 color: window.inkDim
                 font.pixelSize: 11

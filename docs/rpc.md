@@ -232,6 +232,32 @@ decimation knows what it asked for; what it cannot otherwise know is whether
 the engine also skipped. Keeping the two distinguishable is what lets a
 waterfall say it is behind instead of silently lying about the band.
 
+### A receiver's passband crosses the same way, and only when asked
+
+`subscribePassband` is `subscribeSpectrum` per receiver: the same `everyNth`,
+the same one-frame-in-flight backpressure, the same newest-wins drop, and a
+capability whose release ends the subscription.
+
+Two things differ, and both follow from it being per receiver rather than
+per engine.
+
+**It is opt in on the engine side, not just on the wire.** Until something
+subscribes, that receiver records no transform and holds no device buffers
+for one, and the last subscription going away frees them again. A recorder
+serving eight receivers pays for none of it. That is why the method takes a
+receiver id rather than there being a flag on `addVrx`: the cost is a
+pipeline and a readback per frame in flight, per receiver, and it should be
+borne by the pane that is looking.
+
+**The geometry travels on the frame and not in `EngineInfo`.** Only the
+transform size is engine-wide. The width of a passband's axis is the
+receiver's own demodulation rate, which moves whenever its filter does, so
+`PassbandGeometry` rides on every frame. Its `binZero` is the frequency the
+fine stage mixed to DC, carried as an exact rational rather than derived: on
+CW that is a sidetone below `VrxParams::center`, and a client that computed
+the axis from the centre would draw one mode's filter a pitch out of place
+and the other seven correctly.
+
 ### Audio does not cross
 
 Not yet. The CLI renders its own through WASAPI in the same process as the

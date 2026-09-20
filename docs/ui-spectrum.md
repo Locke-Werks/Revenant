@@ -78,6 +78,43 @@ This is also why the feature is cheap. The expensive part, getting a
 receiver's baseband onto the device at the right bandwidth, is already paid
 for by the demodulator.
 
+### The filter is dragged here
+
+The passband is drawn over that transform as two rules and a fill, and the
+rules are handles. `ui/render/passband_item.cpp` holds the interaction and
+`ui/models/receiver_link.cpp` the round trip; what belongs in this document
+is the three decisions that are about the display rather than about the code.
+
+**The rules and the picture are placed from one axis.** `PassbandGeometry`
+carries bin zero as the exact rational the fine stage mixed to DC, and both
+the trace and the rules go through it. That is what makes the display right
+on CW without anything in it knowing about CW: on that one mode the axis sits
+a sidetone below the receiver's centre, and a display that derived the axis
+from `VrxParams::center` would draw the filter one pitch out of place there
+and correctly on the other seven.
+
+**The mapping freezes for the length of a gesture.** The pane's span is the
+demodulation rate and the demodulation rate is derived from the passband, so
+widening the filter widens the pane. Left alone, the handle jumps backwards
+out from under the pointer, which is unusable. The pixel-to-hertz mapping is
+therefore taken at drag start and held; frames arriving during the drag are
+drawn into it by their own axis, so a narrower frame letterboxes and a wider
+one is cropped, and neither is stretched. On release the axis eases back to
+the live span over about 150 ms, so the change is seen rather than jumped.
+
+**Two shades, not one.** The requested edges are drawn from the client's own
+copy of the request and move with the pointer. What the engine granted comes
+back a round trip later on `VrxPlacement::grantedLow` and `grantedHigh` and
+is drawn in a second, dimmer pair whenever it differs. One shade can say a
+filter is 8 kHz wide; two can say it was asked to be 10 and lost the top,
+which is the channel clamp finally visible instead of being a bool nobody
+reads.
+
+The keyboard equivalent is `[` and `]` to select an edge, `\` for both,
+arrows to move the selection, up and down to widen and narrow symmetrically,
+Home for the mode's default and Escape to cancel a drag. Shift is a hundred
+hertz and control is one.
+
 ## Scroll, and what each axis means
 
 Two gestures, both context sensitive on which display the pointer is over.
@@ -324,7 +361,7 @@ deriving it:
 | AM | The carrier. A peak is correct here, which is why peak-tracking looks fine until it is tried on anything else |
 | CW | The carrier, but keyed, so track only through key-down and hold through the gaps |
 | NFM, WFM | The centre of the deviation swing, which is a long average rather than any one frame |
-| USB, LSB | The suppressed carrier, at the edge of the passband and not in it. Derived from the passband edge, never from the energy |
+| USB, LSB | The suppressed carrier, which since the passband became two edges IS `VrxParams::center` by definition. Read, not derived, and never taken from the energy |
 | RTTY and FSK | The midpoint of the tones, derived from one tone and the known shift |
 | PSK | The centre, which for these is where the energy already is |
 

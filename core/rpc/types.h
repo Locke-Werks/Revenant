@@ -301,4 +301,40 @@ struct SpectrumFrame {
     float percentile_high_db = 0.0F;
 };
 
+// The frequency axis of one receiver's passband frame.
+//
+// Per frame rather than in EngineInfo, because only the transform size is
+// engine-wide: the width is the receiver's demodulation rate and moves
+// whenever its filter does.
+struct PassbandGeometry {
+    std::uint32_t transform = 0;
+    std::uint32_t bins = 0;
+    std::uint32_t rate = 0;
+    Rational bin_width;
+
+    // Half the demodulation rate below whatever the fine stage mixed to DC,
+    // which is NOT always the receiver's centre: on CW it sits a pitch
+    // below. Carried rather than derived so a display drawing filter edges
+    // against it needs no per-mode arithmetic of its own.
+    Rational bin_zero;
+
+    [[nodiscard]] constexpr bool enabled() const { return bins != 0; }
+};
+
+struct PassbandFrame {
+    std::uint64_t vrx = 0;
+    std::vector<float> power_db;
+    PassbandGeometry geometry;
+    std::uint64_t start = 0;
+    std::uint64_t count = 0;
+
+    // Frames the engine delivered to THIS RECEIVER before this one.
+    std::uint64_t sequence = 0;
+
+    float floor_db = 0.0F;
+    float ceiling_db = 0.0F;
+    float percentile_low_db = 0.0F;
+    float percentile_high_db = 0.0F;
+};
+
 }  // namespace revenant::rpc

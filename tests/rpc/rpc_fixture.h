@@ -87,6 +87,11 @@ struct HarnessOptions {
     // frame in flight.
     std::uint32_t spectrum_transform = 0;
 
+    // Zero builds no passband stage, on the same terms and for the same
+    // reason: a receiver's passband is per-receiver opt in and costs a
+    // pipeline and a readback per frame in flight once anything subscribes.
+    std::uint32_t passband_transform = 0;
+
     // Always bounded. A synthetic source with no sample count runs forever,
     // and a test that hangs reports less than one that fails.
     dsp::SampleIndex samples = 2'400'032;

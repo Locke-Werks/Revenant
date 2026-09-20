@@ -115,6 +115,9 @@ qt_add_executable(revenant_ui
     main.cpp
     models/engine_link.cpp
     models/engine_link.h
+    models/receiver_link.cpp
+    render/passband_item.cpp
+    render/passband_item.h
     render/spectrum_item.cpp
     render/spectrum_item.h
     render/spectrum_scale.cpp

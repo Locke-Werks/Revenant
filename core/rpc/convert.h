@@ -99,6 +99,13 @@ void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& i
 void write_spectrum_frame(schema::SpectrumFrame::Builder out,
                           const engine::SpectrumFrame& in);
 
+// The same for one receiver's passband, whose span carries the same lifetime
+// rule and therefore the same copy.
+void write_passband_geometry(schema::PassbandGeometry::Builder out,
+                             const engine::PassbandGeometry& in);
+void write_passband_frame(schema::PassbandFrame::Builder out,
+                          const engine::PassbandFrame& in);
+
 // One track, as the wire carries it. Deliberately lossy: see the note on
 // schema::Detection for which fields of detect::Track are left behind and
 // why.
