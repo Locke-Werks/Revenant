@@ -354,6 +354,91 @@ static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
 // Design
 // ---------------------------------------------------------------------------
 
+// A receiver's passband, as two signed edges in hertz from VrxParams::center.
+//
+// Two numbers and not a width, because a width cannot say where the band
+// sits. USB is the carrier plus 300 to plus 2700 hertz and has no energy at
+// the carrier at all; a CW operator listening at a 700 Hz sidetone wants a
+// window offset by the sidetone. Both were expressible before this only as a
+// mode the planner special-cased, which is why USB and LSB were the two
+// modes with their own arithmetic in plan_vrx and nothing else could be
+// asked for.
+//
+// The frame is VrxParams::center, for every mode, with no exceptions. The
+// filter passes [center + low, center + high]. What the fine stage MIXES to
+// DC is a separate question and is center for seven modes and
+// center - cw_pitch for CW, so the pitch is a translation and never an edge.
+// Picking the tuned frequency as the origin is what makes the USB reading
+// above literally true rather than needing a half-bandwidth correction.
+struct Passband {
+    Hertz low = 0;
+    Hertz high = 0;
+
+    [[nodiscard]] constexpr Hertz width() const { return high - low; }
+
+    // The furthest either edge reaches from a given origin, which is the
+    // half-span the stream has to be able to represent. Takes the origin
+    // rather than assuming zero because the constraint is against the fine
+    // stage's fold, and the fold is about the mix centre.
+    [[nodiscard]] constexpr Hertz reach_from(Hertz origin) const {
+        const Hertz below = origin - low;
+        const Hertz above = high - origin;
+        return (below > above) ? below : above;
+    }
+
+    friend constexpr bool operator==(Passband, Passband) = default;
+};
+
+// What a mode is tuned to when nobody said. Ordinary channel widths, shaped
+// as edges.
+//
+// These moved here from tools/cli/main.cpp, where they were the CLI's
+// private table and therefore not what the UI or any other client would use.
+// A default that lives in one client is a default the next client invents
+// differently.
+//
+// USB and LSB are the two entries that are not a width reshaped. 300 to 2700
+// hertz is this project's own SSB convention, already written down in
+// core/dsp/synth/modulators.h where the modulator generates exactly that
+// audio band, so a receiver whose default did not match it would be filtering
+// off signal the tree's own generator produces.
+[[nodiscard]] Passband default_passband(engine::Demod mode);
+
+// The passband a request asks for, before it is fitted to the channel.
+//
+// One of three answers, in order. The explicit pair when VrxParams carries
+// one. Otherwise VrxParams::bandwidth expanded through the mode's shorthand
+// rule, which reproduces the geometry this planner had before edges existed:
+// symmetric about the centre for raw, AM, NFM, WFM, DSB and CW, [0, B] for
+// USB and [-B, 0] for LSB. Otherwise the mode's default above.
+//
+// Refuses low >= high, with both numbers in the message: an empty or
+// inverted passband is a request nobody can fill and the two numbers are
+// what says which way round the caller had them.
+[[nodiscard]] Expected<Passband> resolve_passband(const engine::VrxParams& params);
+
+// The passband fitted to what one grid channel can carry, each edge on its
+// own.
+//
+// Both edges are bounded by half of max_channel_bandwidth below, which is
+// how far from the receiver a symmetric band was allowed to reach before
+// this change. Applying the same limit to each edge separately is what is
+// new: a request too wide at the top keeps its lower edge where the operator
+// put it, where one width could only ever take the same amount off both
+// ends. A clamped receiver can therefore now come back off-centre as well as
+// narrow, which is why the granted pair travels on VrxPlacement and a
+// display draws the request and the grant in two shades.
+//
+// The limit is deliberately NOT the distance from the receiver to the
+// channel's Nyquist, which is larger on the slack side by |residual|. That
+// headroom is load-bearing: plan_vrx bounds the fine filter's transition by
+// the gap between the fold and the passband edge, and an edge granted all
+// the way to the Nyquist leaves none, so a receiver too wide for its channel
+// would be refused outright where today it is given the widest filter that
+// fits. The cost is up to 2*|residual| of band a clamped receiver could in
+// principle have had on one side.
+[[nodiscard]] Passband clamp_to_channel(const engine::VrxPlacement& placement, Passband band);
+
 // Widest bandwidth one grid channel can deliver to a receiver placed here.
 //
 // The hard limit is the channel stream's own Nyquist. The fine stage reads
@@ -371,6 +456,13 @@ static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
 // to -6 dB where two adjacent channels cross. Nothing here corrects that
 // droop; VrxPlacement has no field to report it in, and at M1 the answer for
 // a receiver that wants a flat wide channel is a coarser grid.
+//
+// STILL THE LIMIT, BUT NO LONGER THE FIT. clamp_to_channel above is what
+// place() and plan_vrx call, and half of this figure is the bound it puts on
+// each edge, so this remains the answer to "how wide can a receiver here
+// be" and is no longer the answer to "what did this receiver get". A
+// symmetric request is granted exactly this width, to the hertz, which is
+// what it was granted before.
 [[nodiscard]] Hertz max_channel_bandwidth(const engine::VrxPlacement& placement);
 
 // Peak deviation a mode's channel plan implies for a requested bandwidth.
@@ -384,25 +476,74 @@ static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
 // Returns zero for a mode that has no deviation.
 [[nodiscard]] Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth);
 
-// Smallest demodulation rate a mode can be demodulated at.
+// Smallest demodulation rate a mode can be demodulated at, for a passband
+// whose edges are given in the frame the FINE STAGE MIXES TO DC.
 //
-// Three different constraints, one per family. A detector that folds the
-// spectrum needs room for what it folds: the AM envelope of a band of width B
-// carries content to B, and a product detector on a one-sided passband of
-// width B produces audio to B, so both need 2B. A discriminator produces the
-// modulating audio, which is narrower than the channel, so FM needs only the
-// channel. Every mode is then floored at 1.5B so the fine filter has a
-// transition band to live in at all: the stopband edge is Fd/2 and the
-// passband edge is B/2, so Fd = B would leave no transition and no filter.
-// CW additionally needs the pitch plus half the bandwidth to fit below Fd/2.
+// Three constraints, and the caller does the one piece of frame arithmetic
+// there is: band here is the passband translated into the mix frame, which
+// is the passband unchanged for seven modes and the passband plus the CW
+// pitch for CW, because CW mixes a pitch below the tuned frequency.
 //
-// Zero for a non-positive bandwidth. For a `mode` that is not an enumerator
-// of engine::Demod, the widest of the three constraints rather than the
-// shared floor: the floor is the rate below which no mode can be filtered,
-// not one at which an unidentified detector is safe, and giving it to a
-// folding detector aliases the top of the audio band with nothing reporting
-// it. plan_vrx rejects such a mode before it reaches here.
+//   width/2 * 3       The fine filter needs a transition band to live in at
+//                     all. Its passband edge is half a width from its own
+//                     centre and it reaches stopband half a transition
+//                     further out, so a transition of width/2 puts the
+//                     stopband at 0.75 of a width and Fd has to reach twice
+//                     that. Independent of where the band sits, because it
+//                     is measured from the filter's own centre.
+//   reach * 2         Whatever the detector does afterwards, the fine stream
+//                     has to be able to represent the band, and the furthest
+//                     edge from the mix centre is what sets that.
+//   width * 2, AM     The envelope of a band of width W carries content out
+//                     to W wherever that band sits, because an envelope is
+//                     built from differences.
+//
+// WHAT THIS FUNCTION USED TO SAY, AND WHY TWO OF ITS CASES ARE GONE. Until
+// this change it took one symmetric bandwidth and carried a case for USB and
+// LSB (2B, "a product detector on a one-sided passband of width B produces
+// audio to B") and a case for CW (2*pitch + B, "the passband sits at the
+// pitch, so its upper edge is pitch + B/2"). Both were the reach term
+// written out for the one passband shape each of those modes was allowed to
+// have: a USB band of [0, B] reaches B from the mix centre, and a CW band of
+// [-B/2, +B/2] translated by the pitch reaches pitch + B/2. With the band
+// stated rather than inferred they are the same expression, so they are one
+// line instead of three and the answer for the shapes they covered is
+// unchanged to the hertz. They are recorded here rather than deleted quietly
+// because a reader arriving from core/shaders/vrx_fine.comp's mode table
+// will be looking for them.
+//
+// The exhaustive switch over engine::Demod stays, and stays without a
+// default label, even though only AM now differs. It is the guard that makes
+// a ninth demodulator a build error rather than a mode that silently sits at
+// the shared floor. See the long note beside the kDemod constants.
+//
+// Zero for an empty or inverted band. For a `mode` that is not an enumerator
+// of engine::Demod, the widest of the constraints rather than the shared
+// floor: the floor is the rate below which no mode can be filtered, not one
+// at which an unidentified detector is safe, and giving it to a folding
+// detector aliases the top of the audio band with nothing reporting it.
+// plan_vrx rejects such a mode before it reaches here.
+[[nodiscard]] Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame);
+
+// The symmetric shorthand, kept so callers holding one width still have an
+// answer and so the generalisation above can be checked against what it
+// replaced. Exactly minimum_demod_rate(mode, band) for the band the mode's
+// shorthand rule expands `bandwidth` to, translated by the pitch for CW.
 [[nodiscard]] Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch);
+
+// The demodulation rate a request will actually run at: the minimum above,
+// rounded up to a whole multiple of the audio rate.
+//
+// Split out of plan_vrx because it is the one number a caller needs before
+// it can tell a retune that is a push constant from one that is a remove and
+// an add, and plan_vrx is far too expensive to call for it: it designs three
+// filter tables. A drag on the passband display asks this question on every
+// frame of the gesture.
+//
+// Shares plan_vrx's resolution and fit, so the two cannot answer differently.
+[[nodiscard]] Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
+                                                  const engine::VrxPlacement& placement,
+                                                  SampleRate audio_rate);
 
 // The mode's audio scale. The convention: a unit-amplitude signal fully
 // modulating its own mode produces audio that swings to exactly +/-1.0. See
@@ -468,8 +609,29 @@ struct VrxPlan {
     // it is the rate the indices passed to demod_block are counted in.
     SampleRate output_rate = 0;
 
-    // After clamping to what one channel can deliver.
+    // The passband after resolution and after fitting to what one channel
+    // can deliver, as signed hertz from params.center. This is the request
+    // in its granted form and the thing every derived quantity below is
+    // computed from.
+    Passband passband{};
+
+    // passband.width(), kept as its own field because a great deal of this
+    // file's arithmetic and every one of its callers used to be written
+    // against one width and still reads better that way.
+    //
+    // It is the GRANTED width and not the requested one, which is what it
+    // has always been. What changed is that a width no longer determines the
+    // filter: two receivers with the same bandwidth and different edges are
+    // different filters, so anything that needs to know where the band sits
+    // reads `passband` rather than this.
     Hertz bandwidth = 0;
+
+    // Either edge was pulled in to fit the channel. Not "the width did not
+    // fit", which is what it meant while there was only a width: a clamp can
+    // now move one edge and leave the other, so a caller that wants to know
+    // WHICH compares `passband` against resolve_passband of the request, or
+    // reads VrxPlacement::granted_low and granted_high, which carry the same
+    // pair out to a client that never sees a plan.
     bool bandwidth_clamped = false;
 
     // Where the fine filter is centred and what the fine stage mixes to DC,

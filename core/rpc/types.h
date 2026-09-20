@@ -122,7 +122,22 @@ struct VrxParams {
     // wrong. See core/rpc/revenant.capnp, which carries the full record.
     std::int64_t center = 0;
 
+    // A SHORTHAND for the passband below, not the request itself. Expanded
+    // through the mode's rule when passband_low and passband_high are both
+    // zero, and ignored when either is set. Echoed back exactly as sent, so
+    // it is not the granted width; granted_high minus granted_low is.
+    //
+    // It used to be the whole request, read as a half-width either side of
+    // center, and that reading was already untrue of USB and LSB. See
+    // core/rpc/revenant.capnp, which carries the full record.
     std::int64_t bandwidth = 12'000;
+
+    // Signed hertz from center, low strictly below high, both zero for "not
+    // stated". The filter passes [center + low, center + high] on every
+    // mode; CW's pitch moves what is mixed to DC and is not an edge.
+    std::int64_t passband_low = 0;
+    std::int64_t passband_high = 0;
+
     Demod demod = Demod::Nfm;
     std::uint32_t audio_rate = 0;
     double squelch_dbfs = -200.0;
@@ -137,13 +152,24 @@ struct VrxPlacement {
     Rational channel_centre;
     Rational residual;
     std::uint32_t channel_rate = 0;
+
+    // Either edge was pulled in to fit the channel, and the pair that came
+    // back. The fit is per edge, so a clamped receiver can be off-centre as
+    // well as narrow and the bool alone no longer says what happened.
     bool bandwidth_clamped = false;
+    std::int64_t granted_low = 0;
+    std::int64_t granted_high = 0;
 };
 
 struct VrxStatus {
     std::uint64_t id = 0;
     VrxParams params;
     VrxPlacement placement;
+
+    // The rate the fine stage resampled to. A change that moves it is a
+    // remove and an add rather than a push constant.
+    std::uint32_t demod_rate = 0;
+
     double level_dbfs = -200.0;
     bool squelch_open = false;
     std::uint64_t audio_samples = 0;

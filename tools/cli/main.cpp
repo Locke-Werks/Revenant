@@ -64,6 +64,7 @@
 #include "core/detect/detector.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
+#include "core/dsp/vrx_reference.h"
 #include "core/engine/audio_egress.h"
 #include "core/engine/audio_wasapi.h"
 #include "core/engine/engine.h"
@@ -183,23 +184,13 @@ using source::parse_frequency;
 // Receiver specifications
 // ---------------------------------------------------------------------------
 
-// What one mode needs to sound right when the operator did not say. These are
-// the ordinary channel widths for each mode rather than anything the engine
-// derives, which is why they live here and not in the DSP.
-[[nodiscard]] Hertz default_bandwidth(Demod demod)
-{
-    switch (demod) {
-        case Demod::Raw: return 12'000;
-        case Demod::Am: return 10'000;
-        case Demod::Nfm: return 16'000;
-        case Demod::Wfm: return 200'000;
-        case Demod::Usb:
-        case Demod::Lsb: return 3'000;
-        case Demod::Dsb: return 6'000;
-        case Demod::Cw: return 500;
-    }
-    return 12'000;
-}
+// What one mode needs to sound right when the operator did not say.
+//
+// This used to be a table of eight widths here, private to the CLI, and it
+// has moved to dsp::default_passband. A default that lives in one client is
+// a default the next client invents differently, and the widths are now
+// edges: USB's default is the carrier plus 300 to plus 2700 rather than
+// 3 kHz of something centred on nothing in particular.
 
 struct VrxSpec {
     // As typed. Absolute radio frequency unless relative is set, in which
@@ -208,7 +199,12 @@ struct VrxSpec {
     bool relative = false;
 
     Demod demod = Demod::Nfm;
-    Hertz bandwidth = 0;
+
+    // The passband, as signed hertz from center. Always resolved here rather
+    // than left as a bandwidth for the engine to expand: the shorthand
+    // exists for wire compatibility and a client that has a mode in its hand
+    // has no reason to use it.
+    dsp::Passband passband{};
 
     // center resolved against the source's centre, which is the frame
     // VrxParams is in. Filled once the source is open, because nothing knows
@@ -216,7 +212,7 @@ struct VrxSpec {
     Hertz baseband = 0;
 };
 
-// freq[:mode[:bandwidth]]
+// freq[:mode[:bandwidth]] or freq:mode:low:high
 [[nodiscard]] Expected<VrxSpec> parse_vrx_spec(std::string_view text)
 {
     if (text.empty()) {
@@ -230,12 +226,23 @@ struct VrxSpec {
 
     const auto second = rest.find(':');
     const std::string_view mode = rest.substr(0, second);
-    const std::string_view width =
-        (second == std::string_view::npos) ? std::string_view{} : rest.substr(second + 1);
+    rest = (second == std::string_view::npos) ? std::string_view{} : rest.substr(second + 1);
 
-    if (!width.empty() && width.find(':') != std::string_view::npos) {
+    // The third field is either one width or the low edge of a pair, and
+    // which it is depends on whether a fourth follows. A pair is how an
+    // asymmetric passband is named, so `7.1M:usb:300:2700` is the carrier
+    // plus 300 to plus 2700 hertz and `7.1M:usb:2.4k` is the same 2.4 kHz
+    // the mode's shorthand would have produced.
+    const auto third = rest.find(':');
+    const std::string_view width = rest.substr(0, third);
+    const std::string_view upper =
+        (third == std::string_view::npos) ? std::string_view{} : rest.substr(third + 1);
+
+    if (!upper.empty() && upper.find(':') != std::string_view::npos) {
         return fail(std::format(
-            "--vrx '{}' has too many fields. The form is freq[:mode[:bandwidth]]", text));
+            "--vrx '{}' has too many fields. The form is freq[:mode[:bandwidth]] or "
+            "freq:mode:low:high, where low and high are signed hertz from freq",
+            text));
     }
 
     VrxSpec spec;
@@ -269,8 +276,8 @@ struct VrxSpec {
     }
 
     if (width.empty()) {
-        spec.bandwidth = default_bandwidth(spec.demod);
-    } else {
+        spec.passband = dsp::default_passband(spec.demod);
+    } else if (upper.empty()) {
         auto parsed = parse_frequency(width, "--vrx bandwidth");
         if (!parsed) {
             return std::unexpected(parsed.error());
@@ -278,7 +285,36 @@ struct VrxSpec {
         if (*parsed <= 0) {
             return fail(std::format("--vrx '{}' asks for a bandwidth of {} Hz", text, *parsed));
         }
-        spec.bandwidth = *parsed;
+
+        // Expanded here rather than sent as a bandwidth, so the CLI and the
+        // engine agree by calling the same function instead of by both
+        // knowing the same rule.
+        engine::VrxParams shorthand;
+        shorthand.demod = spec.demod;
+        shorthand.bandwidth = *parsed;
+        auto resolved = dsp::resolve_passband(shorthand);
+        if (!resolved) {
+            return std::unexpected(
+                with_context(resolved.error(), std::format("--vrx '{}'", text)));
+        }
+        spec.passband = *resolved;
+    } else {
+        auto low = parse_frequency(width, "--vrx passband low edge");
+        if (!low) {
+            return std::unexpected(low.error());
+        }
+        auto high = parse_frequency(upper, "--vrx passband high edge");
+        if (!high) {
+            return std::unexpected(high.error());
+        }
+        if (*low >= *high) {
+            return fail(std::format(
+                "--vrx '{}' asks for a passband from {} Hz to {} Hz, which is empty or "
+                "inverted. Both are signed hertz from the receiver's frequency and the low "
+                "edge is the smaller number, so USB is 300:2700 and LSB is -2700:-300",
+                text, *low, *high));
+        }
+        spec.passband = dsp::Passband{*low, *high};
     }
 
     return spec;
@@ -353,16 +389,22 @@ void print_usage()
         "\n"
         "Receivers:\n"
         "  --vrx <spec>        A receiver, repeatable. freq[:mode[:bandwidth]]\n"
+        "                      or freq:mode:low:high for an asymmetric passband.\n"
         "                      freq and bandwidth take 7100000, 7.1M, 162.550M, 14074k.\n"
         "                      mode is raw am nfm wfm usb lsb dsb cw, default nfm.\n"
-        "                      Default bandwidth per mode: am 10k, nfm 16k, wfm 200k,\n"
-        "                      usb/lsb 3k, dsb 6k, cw 500, raw 12k.\n"
+        "                      Default passband per mode: am +/-5k, nfm +/-8k,\n"
+        "                      wfm +/-100k, usb 300..2700, lsb -2700..-300,\n"
+        "                      dsb +/-3k, cw +/-250, raw +/-6k.\n"
+        "                      low and high are signed hertz from freq, so a\n"
+        "                      sideband filter is named where it sits and can be\n"
+        "                      pulled as wide as the channel allows.\n"
         "                      freq is absolute radio frequency. A leading + or -\n"
         "                      makes it an offset from wherever the source is\n"
         "                      tuned, which is what a capture wants when you do\n"
         "                      not remember its centre.\n"
         "                      Examples: --vrx 162.550M:nfm:16k  --vrx 7.1M:lsb:2.8k\n"
-        "                                --vrx +12.5k:nfm\n"
+        "                                --vrx 7.074M:usb:300:2700  --vrx +12.5k:nfm\n"
+        "                                --vrx 3.9M:usb:50:6000\n"
         "\n"
         "Listening:\n"
         "  --play [<n>]        Send receiver n to the speakers, 1-based, default 1.\n"
@@ -1586,11 +1628,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // The absolute frequency first, because that is the number the operator
     // typed and the one on the repeater list. The baseband offset follows it
     // only when the two differ, which is when the source declares a centre.
-    std::println("vrx {}     {} {}  bandwidth {}{}", number, format_hz(absolute),
-                 engine::demod_name(status.params.demod), format_hz(status.params.bandwidth),
+    //
+    // The passband is printed as its two edges and its width, because a
+    // width alone cannot tell a USB filter on the carrier apart from one 300
+    // hertz above it and those are different receivers.
+    const std::int64_t granted_width = placement.granted_high - placement.granted_low;
+    std::println("vrx {}     {} {}  passband {:+} to {:+} Hz ({}){}", number,
+                 format_hz(absolute), engine::demod_name(status.params.demod),
+                 placement.granted_low, placement.granted_high, format_hz(granted_width),
                  placement.bandwidth_clamped
                      ? "  CLAMPED: wider than one grid channel can carry"
                      : "");
+    if (placement.bandwidth_clamped) {
+        std::println("  asked for       {:+} to {:+} Hz", status.params.passband_low,
+                     status.params.passband_high);
+    }
+    std::println("  demod rate      {} S/s", status.demod_rate);
     if (absolute != status.params.center) {
         std::println("  baseband        {:+} Hz from the source's centre",
                      status.params.center);
@@ -1876,7 +1929,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
 
         engine::VrxParams params;
         params.center = spec.baseband;
-        params.bandwidth = spec.bandwidth;
+        params.passband_low = spec.passband.low;
+        params.passband_high = spec.passband.high;
+        params.bandwidth = spec.passband.width();
         params.demod = spec.demod;
         params.audio_rate = options.audio_rate;
 

@@ -122,6 +122,7 @@
 #include "core/dsp/pfb_fft_reference.h"
 #include "core/dsp/spectrum_levels_reference.h"
 #include "core/dsp/spectrum_reference.h"
+#include "core/dsp/vrx_reference.h"
 #include "core/engine/record_util.h"
 #include "core/engine/spectrum_scale.h"
 #include "core/engine/ring_consumer.h"
@@ -577,6 +578,16 @@ struct Graph::Impl {
         // reports, and no engine thread reads them.
         VrxParams params;
         VrxPlacement placement;
+
+        // The rate the fine stage resampled to, recomputed whenever params
+        // or placement change. Control plane only, like the two above.
+        //
+        // Cached rather than asked of the stage, because the graph's own raw
+        // tap has no plan to ask and because dsp::demod_rate_for is the same
+        // arithmetic plan_vrx does without designing three filter tables.
+        // Zero when the request could not be resolved at all, which is a
+        // request add_vrx would already have refused.
+        dsp::SampleRate demod_rate = 0;
 
         // The recording thread's own copy, so that a retune landing while a
         // block is being recorded cannot tear a field out from under it. The
@@ -2774,6 +2785,9 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     slot->params = params;
     slot->placement = placement;
     slot->recording_params = params;
+    if (auto rate = dsp::demod_rate_for(params, placement, request.audio_rate)) {
+        slot->demod_rate = *rate;
+    }
     slot->stage = std::move(stage);
     slot->audio_bytes = slot->stage->audio_bytes_for(impl.geometry.max_blocks_per_dispatch);
     if (slot->audio_bytes == 0) {
@@ -2866,6 +2880,11 @@ Status Graph::set_vrx_params(VrxId id, const VrxParams& params, const VrxPlaceme
         }
         slot->params = params;
         slot->placement = placement;
+        const dsp::SampleRate audio_rate =
+            params.audio_rate != 0 ? params.audio_rate : impl.config.audio_rate;
+        if (auto rate = dsp::demod_rate_for(params, placement, audio_rate)) {
+            slot->demod_rate = *rate;
+        }
     }
 
     auto* op = new (std::nothrow) Impl::ControlOp();
@@ -2994,6 +3013,7 @@ Expected<VrxStatus> Graph::vrx_status(VrxId id) const {
     status.id = slot->id;
     status.params = slot->params;
     status.placement = slot->placement;
+    status.demod_rate = slot->demod_rate;
     status.level_dbfs = slot->load_level();
     status.squelch_open = slot->squelch_open.load(std::memory_order_relaxed);
     status.audio_samples = slot->audio_samples.load(std::memory_order_relaxed);

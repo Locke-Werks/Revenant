@@ -165,6 +165,8 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     out.setAgcDecayMs(in.agc_decay_ms);
     out.setAgcEnabled(in.agc_enabled);
     out.setCwPitch(in.cw_pitch);
+    out.setPassbandLow(in.passband_low);
+    out.setPassbandHigh(in.passband_high);
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in) {
@@ -174,12 +176,15 @@ void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPla
     write_rational(out.initResidual(), in.residual_numerator, in.residual_denominator);
     out.setChannelRate(to_wire_rate(in.channel_rate));
     out.setBandwidthClamped(in.bandwidth_clamped);
+    out.setGrantedLow(in.granted_low);
+    out.setGrantedHigh(in.granted_high);
 }
 
 void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& in) {
     out.setId(in.id.value);
     write_vrx_params(out.initParams(), in.params);
     write_vrx_placement(out.initPlacement(), in.placement);
+    out.setDemodRate(to_wire_rate(in.demod_rate));
     out.setLevelDbfs(in.level_dbfs);
     out.setSquelchOpen(in.squelch_open);
     out.setAudioSamples(in.audio_samples);
@@ -233,6 +238,8 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     out.agc_decay_ms = in.getAgcDecayMs();
     out.agc_enabled = in.getAgcEnabled();
     out.cw_pitch = in.getCwPitch();
+    out.passband_low = in.getPassbandLow();
+    out.passband_high = in.getPassbandHigh();
     return out;
 }
 

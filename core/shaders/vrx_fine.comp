@@ -39,18 +39,35 @@
 // modulated to the filter's centre frequency f_t, and the kernel applies ONE
 // output rotation per sample, at the frequency f_o being translated to DC.
 //
-// Keeping f_t and f_o separate is not generality for its own sake. Four of the
-// eight demodulators need them different:
+// Keeping f_t and f_o separate is not generality for its own sake. It is what
+// lets a receiver's passband sit anywhere relative to the frequency it is
+// tuned to, which is one rule for all eight demodulators:
+//
+//   every mode   f_t = residual + (low + high)/2
+//   every mode   f_o = residual,   except CW, where f_o = residual - pitch
+//
+// low and high are the passband's two edges, signed hertz from the tuned
+// frequency, and CW's pitch is an ordinary translation that lands the carrier
+// somewhere audible. The demodulator kernel takes a real part for four of the
+// eight and does not know which one it is looking at.
+//
+// WHAT THIS TABLE USED TO SAY. Until 2026-09-20 a receiver carried one
+// symmetric bandwidth and this kernel's contract was written as four rows:
 //
 //   AM, NFM, WFM, DSB, Raw   f_t = residual,          f_o = residual
 //   USB                      f_t = residual + bw/2,   f_o = residual
 //   LSB                      f_t = residual - bw/2,   f_o = residual
 //   CW                       f_t = residual,          f_o = residual - pitch
 //
-// USB and LSB are an asymmetric passband and nothing else, and CW is an
-// ordinary translation that lands the carrier on the operator's pitch. The
-// demodulator kernel then takes a real part for all four and does not know
-// which one it is looking at. See core/dsp/vrx_reference.h, design_fine_taps.
+// followed by "USB and LSB are an asymmetric passband and nothing else". That
+// sentence was the whole of it: a request could not state an asymmetric
+// passband, so the only two that existed were the two the planner built from
+// a mode name. The four rows are the one rule above evaluated at the bands
+// that request expands to, so nothing this kernel is handed has changed shape
+// and no build of it has ever needed to. Recorded rather than replaced
+// because core/dsp/vrx_reference.cpp's planner points back here.
+//
+// See core/dsp/vrx_reference.h, design_fine_taps and resolve_passband.
 //
 // THE NCO, WHICH IS THE PART THAT GOES WRONG QUIETLY.
 //

@@ -188,14 +188,83 @@ struct VrxParams {
     # not a mistake that shows up gently.
     center @0 :Int64;
 
+    # A SHORTHAND for the passband below, and frozen at this ordinal.
+    #
+    # WHAT THIS FIELD USED TO MEAN
+    #
+    # Until 2026-09-20 it was the whole passband request, and every quantity
+    # derived from it read it as a half-width either side of `center`. That
+    # reading was never true of all eight modes. plan_vrx already put USB's
+    # passband at [center, center + B] and LSB's at [center - B, center], and
+    # core/shaders/vrx_fine.comp said so in its own header: "USB and LSB are
+    # an asymmetric passband and nothing else". So a caller that set this
+    # field and expected a filter centred on the tuned frequency was already
+    # not getting one on two of the eight modes, and had no way at all to ask
+    # for the shapes real receivers use: USB is the carrier plus 300 to plus
+    # 2700 hertz, a transceiver running wide transmit audio wants the edges
+    # pulled out to 6 kHz without moving the carrier, and a CW operator wants
+    # a window offset from the carrier by the sidetone.
+    #
+    # What it means now:
+    #
+    #   On input, with passbandLow and passbandHigh both zero, it is expanded
+    #   through the mode's shorthand rule by dsp::resolve_passband, which
+    #   reproduces the old geometry exactly for every one of the eight.
+    #   Symmetric for raw, AM, NFM, WFM, DSB and CW; [0, B] for USB; [-B, 0]
+    #   for LSB.
+    #
+    #   On input, with either edge set, it is IGNORED.
+    #
+    #   On output it is echoed exactly as it was sent, because VrxStatus
+    #   hands back the params it was given and reading one out and passing
+    #   it straight back in has to leave the receiver where it was. So it is
+    #   not the width when the pair was given, and a reader that wants the
+    #   width reads VrxPlacement::grantedHigh minus grantedLow, which is the
+    #   figure the engine built a filter for rather than anything that was
+    #   asked for.
+    #
+    # Recorded rather than renumbered away. The schema is unreleased, so
+    # deleting the field breaks nothing today; what it would do is free
+    # ordinal 1 for something else to take later, at which point an old
+    # `bandwidth = 3000` message reads as whatever now lives there. That trap
+    # fires once, silently, on a saved session, and the cost of avoiding it
+    # is one frozen Int64.
     bandwidth @1 :Int64;
+
     demod @2 :Demod;
     audioRate @3 :UInt32;
     squelchDbfs @4 :Float64;
     agcAttackMs @5 :Float64;
     agcDecayMs @6 :Float64;
     agcEnabled @7 :Bool;
+
+    # CW only. The offset the carrier is translated to so it is audible.
+    #
+    # NOT a passband edge, and the distinction is the whole reason the
+    # passband below is stated about `center` rather than about whatever the
+    # fine stage mixes to DC. The pitch moves the MIX and leaves the filter
+    # where it is, so the filter still passes [center + low, center + high]
+    # on CW exactly as on the other seven, and a CW window that sits off the
+    # carrier is said with offset edges.
     cwPitch @8 :Int64;
+
+    # The passband, as SIGNED HERTZ FROM `center`, low strictly below high.
+    # Both zero means "not stated", and then `bandwidth` above is expanded
+    # through the mode's shorthand rule instead.
+    #
+    # The frame is `center` for every mode with no exceptions, so the filter
+    # passes [center + passbandLow, center + passbandHigh]. That is what
+    # makes USB read the way an operator says it: a 3.750 MHz carrier with
+    # low = +300 and high = +2700. Anchoring on the channel centre or on the
+    # mix centre would each have made one mode's numbers unrecognisable.
+    #
+    # Each edge is fitted to the channel on its own, so a request too wide on
+    # one side keeps the other edge where it was. VrxPlacement::grantedLow
+    # and grantedHigh are what came back, and comparing them against these
+    # two is how a display says WHICH edge was clamped rather than only that
+    # something was.
+    passbandLow @9 :Int64;
+    passbandHigh @10 :Int64;
 }
 
 struct VrxPlacement {
@@ -204,11 +273,29 @@ struct VrxPlacement {
     residual @2 :Rational;
     channelRate @3 :UInt32;
 
-    # True when the requested bandwidth did not fit one grid channel and the
-    # receiver was given the widest that does. The caller is told rather
-    # than quietly receiving less than it asked for, and the display needs
-    # it because the consequence is audible.
+    # True when EITHER passband edge was pulled in to fit one grid channel.
+    # The caller is told rather than quietly receiving less than it asked
+    # for, and the display needs it because the consequence is audible.
+    #
+    # WHAT THIS FIELD USED TO MEAN: "the requested bandwidth did not fit one
+    # grid channel and the receiver was given the widest that does". That
+    # was one width against one limit, and a clamped receiver was still
+    # centred where it was asked to be. The fit is per edge now, so a
+    # receiver can come back off-centre as well as narrow, and this bool
+    # says only that something moved. grantedLow and grantedHigh say what.
     bandwidthClamped @4 :Bool;
+
+    # The passband the receiver was actually given, in the same frame
+    # VrxParams::passbandLow and passbandHigh are in: signed hertz from
+    # params.center.
+    #
+    # Equal to the resolved request unless the channel could not carry it.
+    # A display draws the requested pair and this pair in two shades, which
+    # is the whole reason they are both on the wire: one shade can say a
+    # filter is 8 kHz wide, and two can say it was asked to be 10 and lost
+    # the top.
+    grantedLow @5 :Int64;
+    grantedHigh @6 :Int64;
 }
 
 struct VrxStatus {
@@ -226,6 +313,21 @@ struct VrxStatus {
     # read it.
     audioSamples @5 :UInt64;
     audioDropped @6 :UInt64;
+
+    # The rate the fine stage resampled to, which is the width of this
+    # receiver's passband frame and what decides whether a change can be
+    # applied in place.
+    #
+    # On the wire because a client cannot derive it. It is
+    # dsp::minimum_demod_rate rounded up to a whole multiple of the audio
+    # rate, and the audio rate a receiver ended up with is the engine's
+    # default when params.audioRate was zero. A retune that moves it is a
+    # remove and an add rather than a push constant, so a surface dragging
+    # the passband edges reads this to tell a change it can send live from
+    # one that will break the audio mid-gesture.
+    #
+    # Zero from an engine built before this field existed.
+    demodRate @7 :UInt32;
 }
 
 struct SpectrumFrame {
@@ -344,12 +446,29 @@ struct Detection {
     # fraction of the band's excess over the noise floor, bounded by fine
     # bins. Integer hertz for the same reason as the centre.
     #
-    # A click-to-tune surface passes this to VrxParams::bandwidth and then has
-    # to read VrxPlacement::bandwidthClamped back, because a bandwidth wider
-    # than one grid channel does not fail: place() clamps and succeeds, and
-    # the operator gets a receiver narrower than the signal they clicked with
-    # nothing anywhere saying so. docs/detection.md names that as the failure
-    # this pair exists to prevent.
+    # A click-to-tune surface turns this into a passband against the mode the
+    # operator selected, and then reads VrxPlacement::grantedLow and
+    # grantedHigh back, because a passband wider than one grid channel does
+    # not fail: place() fits each edge and succeeds, and the operator gets a
+    # receiver narrower than the signal they clicked with nothing anywhere
+    # saying so. docs/detection.md names that as the failure this pair exists
+    # to prevent.
+    #
+    # WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it told a
+    # click-to-tune surface to pass this straight into VrxParams::bandwidth
+    # and read VrxPlacement::bandwidthClamped back. The second half still
+    # holds in spirit. The first half is wrong for the sideband modes and was
+    # wrong when it was written: the detector measures the band that has
+    # energy in it, and on USB that band is entirely above the suppressed
+    # carrier, so assigning it to a field read as a half-width either side
+    # parks the filter straddling a carrier that is not being transmitted and
+    # throws away half the audio.
+    #
+    # The instruction that replaces it: centre the measured band for the
+    # symmetric modes, and for USB, LSB and CW anchor one edge on the
+    # measured band's near edge and let the other follow the measured width.
+    # dsp::resolve_passband is what the engine does with a bare bandwidth and
+    # is the same rule written out.
     bandwidthHz @2 :Int64;
 
     # Signal to noise in the project's 2500 Hz reference bandwidth, per

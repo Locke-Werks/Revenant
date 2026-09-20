@@ -166,6 +166,25 @@ constexpr std::uint32_t kDefaultPhases = 256;
 
 [[nodiscard]] std::int64_t absolute(std::int64_t value) { return value < 0 ? -value : value; }
 
+// The passband translated from the receiver's frame into the frame the fine
+// stage mixes to DC.
+//
+// One line and one mode, and it is the whole of what CW's pitch does to the
+// geometry. The filter is centred on the tuned frequency for every mode, so
+// a passband is always stated about VrxParams::center; the mix is a pitch
+// BELOW that for CW so the carrier lands somewhere audible, which puts the
+// tuned frequency a pitch above the mix centre and moves both edges with it.
+//
+// Everything that cares where the band sits relative to the fold goes
+// through here: minimum_demod_rate, the transition-width bound in plan_vrx,
+// and nothing else.
+[[nodiscard]] Passband mix_frame(Passband band, std::uint32_t mode, Hertz cw_pitch) {
+    if (mode != kDemodCw) {
+        return band;
+    }
+    return Passband{band.low + cw_pitch, band.high + cw_pitch};
+}
+
 // Reduces a rational in place by the greatest common divisor, keeping the
 // denominator positive.
 void reduce_rational(std::int64_t& numerator, std::int64_t& denominator) {
@@ -744,6 +763,134 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
 // Design
 // ---------------------------------------------------------------------------
 
+Passband default_passband(engine::Demod mode) {
+    // No default label, for the reason spelled out on minimum_demod_rate
+    // below: a ninth demodulator must stop here rather than inherit a
+    // twelve-kilohertz window that suits nothing.
+    switch (mode) {
+        // The raw tap is not a demodulator and has no channel plan. Twelve
+        // kilohertz is what VrxParams has always defaulted to and is kept so
+        // that a caller who names no mode and no width gets what it used to.
+        case engine::Demod::Raw: return Passband{-6'000, 6'000};
+
+        // Broadcast AM's transmitted channel is 10 kHz wide.
+        case engine::Demod::Am: return Passband{-5'000, 5'000};
+
+        // Land mobile in a 25 kHz channel: 5 kHz deviation plus 3 kHz of
+        // audio, twice, is 16 kHz of occupied bandwidth by Carson.
+        case engine::Demod::Nfm: return Passband{-8'000, 8'000};
+
+        // FM broadcast: 75 kHz deviation plus a 53 kHz baseband is 256 kHz
+        // by Carson, and 200 kHz is the channel the band plan allocates.
+        case engine::Demod::Wfm: return Passband{-100'000, 100'000};
+
+        // This project's own SSB convention, and not a bandwidth centred on
+        // anything. core/dsp/synth/modulators.h generates 300 to 3000 Hz of
+        // audio, so a receiver anchored on the suppressed carrier at plus
+        // 300 is sitting where the signal starts. 2700 rather than 3000 is
+        // the ordinary communications receiver's upper edge.
+        case engine::Demod::Usb: return Passband{300, 2'700};
+        case engine::Demod::Lsb: return Passband{-2'700, -300};
+
+        // Both sidebands of the same audio band.
+        case engine::Demod::Dsb: return Passband{-3'000, 3'000};
+
+        // 500 Hz about the carrier, which is the narrowest filter a general
+        // coverage receiver ships and comfortably wider than a hand-sent
+        // 25 wpm keying envelope. The sidetone is a mix and not an edge, so
+        // it does not appear here.
+        case engine::Demod::Cw: return Passband{-250, 250};
+    }
+
+    // Not an enumerator. Nothing is known about the mode, so nothing is
+    // known about its channel plan; the caller finds out by getting a band
+    // it cannot use rather than one that looks plausible.
+    return Passband{};
+}
+
+Expected<Passband> resolve_passband(const engine::VrxParams& params) {
+    if (params.passband_low != 0 || params.passband_high != 0) {
+        if (params.passband_low >= params.passband_high) {
+            return fail(std::format(
+                "resolve_passband: the passband runs from {} Hz to {} Hz, which is empty or "
+                "inverted. Both edges are signed hertz from the receiver's centre and the low "
+                "edge is the smaller number, so USB is 300 to 2700 and LSB is -2700 to -300",
+                params.passband_low, params.passband_high));
+        }
+        return Passband{params.passband_low, params.passband_high};
+    }
+
+    if (params.bandwidth <= 0) {
+        return fail(std::format(
+            "resolve_passband: bandwidth must be positive, got {} Hz, and no passband edges "
+            "were given either",
+            params.bandwidth));
+    }
+
+    // The shorthand expansion. This is the geometry plan_vrx had before
+    // edges existed, moved out of the planner and written down: symmetric
+    // about the centre for every mode whose detector wants the carrier in
+    // the middle, one-sided for the two sideband modes.
+    //
+    // A half-width is taken twice rather than once and subtracted, so an odd
+    // bandwidth comes out symmetric and one hertz narrow instead of
+    // asymmetric by one hertz. That is what the filter always was: the
+    // planner passed bandwidth/2 to design_fine_taps as a half-width, so an
+    // odd bandwidth already produced a filter of bandwidth - 1 and only the
+    // reported figure differed.
+    const Hertz half = params.bandwidth / 2;
+    switch (params.demod) {
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw: return Passband{-half, half};
+        case engine::Demod::Usb: return Passband{0, params.bandwidth};
+        case engine::Demod::Lsb: return Passband{-params.bandwidth, 0};
+    }
+
+    return fail(std::format("resolve_passband: demodulator {} is not one of the eight",
+                            static_cast<std::uint32_t>(params.demod)));
+}
+
+Passband clamp_to_channel(const engine::VrxPlacement& placement, Passband band) {
+    const Hertz widest = max_channel_bandwidth(placement);
+    if (widest <= 0) {
+        return band;
+    }
+
+    // ONE LIMIT, APPLIED TO EACH EDGE ON ITS OWN.
+    //
+    // The limit is max_channel_bandwidth halved, which is how far from the
+    // receiver a symmetric band was allowed to reach before this change, and
+    // it is not simply the distance to the channel's Nyquist. The difference
+    // is the |residual| of headroom the symmetric figure reserved on the
+    // slack side, and that headroom is load-bearing: plan_vrx bounds the
+    // filter's transition by the distance from the fold to the passband
+    // edge, and an edge granted all the way to the channel's Nyquist leaves
+    // it zero, so a receiver too wide for its channel would be refused
+    // outright where it used to be given the widest filter that fits.
+    //
+    // Keeping the limit symmetric about the receiver therefore costs a
+    // clamped receiver up to 2*|residual| of band it could in principle have
+    // had on one side, and buys every clamped receiver a filter that can
+    // actually be designed. What is new is that the two edges are fitted
+    // INDEPENDENTLY: a request too wide at the top keeps its lower edge
+    // where the operator put it instead of losing the same amount at both
+    // ends, which is what one width could only ever do.
+    const Hertz limit = widest / 2;
+
+    Passband out = band;
+    if (out.low < -limit) {
+        out.low = -limit;
+    }
+    if (out.high > limit) {
+        out.high = limit;
+    }
+    return out;
+}
+
 Hertz max_channel_bandwidth(const engine::VrxPlacement& placement) {
     if (placement.channel_rate <= 0 || placement.residual_denominator <= 0) {
         return 0;
@@ -794,15 +941,29 @@ Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
     return 0;
 }
 
-Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
-    if (bandwidth <= 0) {
+Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame) {
+    const Hertz width = band_in_mix_frame.width();
+    if (width <= 0) {
         return 0;
     }
 
-    // The floor every mode shares: the fine filter's stopband edge is Fd/2 and
-    // its passband edge is B/2, so Fd = B would leave no transition band and
-    // therefore no filter. 1.5B leaves a transition of B/4.
-    const Hertz floor_rate = (3 * bandwidth + 1) / 2;
+    // The floor every mode shares: the fine filter's stopband edge is Fd/2
+    // and its passband edge is half a width from its own centre, so Fd =
+    // width would leave no transition band and therefore no filter. 1.5
+    // widths leaves a transition of a quarter of a width. Measured from the
+    // filter's centre and so independent of where the band sits.
+    //
+    // The shared floor used to be written (3*bandwidth + 1) / 2 against one
+    // symmetric width, and this is the same expression against the width the
+    // band actually has.
+    const Hertz shape_floor = (3 * width + 1) / 2;
+
+    // Whatever the detector does, the fine stream has to carry the band, and
+    // the furthest edge from the mix centre is what sets that. This is the
+    // term that used to be written out once for USB and LSB and once for CW;
+    // see the header for why those two cases are gone and what they were.
+    const Hertz reach = band_in_mix_frame.reach_from(0);
+    const Hertz floor_rate = std::max(shape_floor, 2 * reach);
 
     // THE PARAMETER IS THE 32-BIT WORD, THE SWITCH IS OVER THE ENUM.
     //
@@ -825,17 +986,25 @@ Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
     // demodulator cannot be given a rate by omission.
     switch (static_cast<engine::Demod>(mode)) {
         case engine::Demod::Am:
-            // The envelope of a band of width B carries content out to B.
-            return std::max(floor_rate, 2 * bandwidth);
+            // The envelope of a band of width W carries content out to W,
+            // wherever that band sits, because an envelope is built from
+            // differences within the band and not from the band's position.
+            // This is the one mode the reach term above does not cover.
+            return std::max(floor_rate, 2 * width);
         case engine::Demod::Usb:
         case engine::Demod::Lsb:
-            // A product detector on a one-sided passband of width B produces
-            // audio out to B.
-            return std::max(floor_rate, 2 * bandwidth);
+            // A product detector produces audio out to the furthest edge
+            // from the mix centre, which is the reach term already in
+            // floor_rate. Spelled out rather than merged with the four
+            // below, because arriving at the same number for a different
+            // reason is not the same claim.
+            return floor_rate;
         case engine::Demod::Cw:
-            // The passband sits at the pitch, so its upper edge is
-            // pitch + B/2 and that has to fit below Fd/2.
-            return std::max(floor_rate, 2 * cw_pitch + bandwidth);
+            // The carrier is translated to the pitch, so the pitch is
+            // already inside the band the caller handed over and the reach
+            // term carries it. Same expression as USB and LSB and the same
+            // number it always produced.
+            return floor_rate;
         case engine::Demod::Raw:
         case engine::Demod::Nfm:
         case engine::Demod::Wfm:
@@ -852,14 +1021,67 @@ Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
     // Not an enumerator. Unreachable from plan_vrx, which range-checks the
     // mode before it gets here, so this is a direct caller with a bad value.
     //
-    // The floor is the wrong thing to hand it. 1.5B is the rate below which
-    // no mode can be filtered at all, not a rate at which any given mode
-    // works: four of the eight can need more than it, and a detector that
-    // folds the spectrum given 1.5B produces audio out past Fd/2 that comes
-    // back inside the band, quietly, with nothing downstream measuring it.
-    // The widest requirement any mode makes costs a bigger filter and a
-    // faster resampler, which is visible and recoverable.
-    return std::max({floor_rate, 2 * bandwidth, 2 * cw_pitch + bandwidth});
+    // The floor is the wrong thing to hand it. The shape floor is the rate
+    // below which no mode can be filtered at all, not a rate at which any
+    // given mode works, and a detector that folds the spectrum given it
+    // produces audio out past Fd/2 that comes back inside the band, quietly,
+    // with nothing downstream measuring it. The widest requirement any mode
+    // makes costs a bigger filter and a faster resampler, which is visible
+    // and recoverable.
+    return std::max(floor_rate, 2 * width);
+}
+
+Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
+    if (bandwidth <= 0) {
+        return 0;
+    }
+
+    engine::VrxParams shorthand;
+    shorthand.bandwidth = bandwidth;
+    shorthand.cw_pitch = cw_pitch;
+    if (mode <= kDemodCw) {
+        shorthand.demod = static_cast<engine::Demod>(mode);
+    }
+
+    auto band = resolve_passband(shorthand);
+    if (!band) {
+        return 0;
+    }
+    return minimum_demod_rate(mode, mix_frame(*band, mode, cw_pitch));
+}
+
+Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
+                                    const engine::VrxPlacement& placement,
+                                    SampleRate audio_rate) {
+    if (audio_rate <= 0) {
+        return fail(std::format("demod_rate_for: audio rate must be positive, got {}",
+                                audio_rate));
+    }
+
+    const auto mode = static_cast<std::uint32_t>(params.demod);
+    if (mode > kDemodCw) {
+        return fail(std::format("demod_rate_for: demodulator {} is not one of the eight",
+                                mode));
+    }
+
+    auto band = resolve_passband(params);
+    if (!band) {
+        return std::unexpected(with_context(band.error(), "demod_rate_for"));
+    }
+    const Passband granted = clamp_to_channel(placement, *band);
+    if (granted.width() <= 0) {
+        return fail(std::format(
+            "demod_rate_for: the residual of {}/{} Hz leaves nothing of a {} S/s channel for "
+            "a passband of {} to {} Hz",
+            placement.residual_numerator, placement.residual_denominator,
+            placement.channel_rate, band->low, band->high));
+    }
+
+    const Hertz required =
+        minimum_demod_rate(mode, mix_frame(granted, mode, std::max<Hertz>(0, params.cw_pitch)));
+    const auto decimation =
+        std::max<std::int64_t>(1, (required + audio_rate - 1) / audio_rate);
+    return static_cast<SampleRate>(decimation * audio_rate);
 }
 
 float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation) {
@@ -1117,24 +1339,31 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
         return fail(std::format("plan_vrx: demodulator {} is not one of the eight",
                                 plan.mode));
     }
-    if (params.bandwidth <= 0) {
-        return fail(std::format("plan_vrx: bandwidth must be positive, got {} Hz",
-                                params.bandwidth));
+
+    // The request resolved into two edges, once, here. resolve_passband is
+    // the only place a shorthand is ever expanded and place() calls the same
+    // function, so the placement's granted edges and the plan's cannot
+    // disagree about what was asked for.
+    auto requested = resolve_passband(params);
+    if (!requested) {
+        return std::unexpected(with_context(requested.error(), "plan_vrx"));
     }
 
-    const Hertz widest = max_channel_bandwidth(placement);
-    if (widest <= 0) {
+    plan.passband = clamp_to_channel(placement, *requested);
+    plan.bandwidth = plan.passband.width();
+    plan.bandwidth_clamped = plan.passband != *requested;
+    if (plan.bandwidth <= 0) {
         return fail(std::format(
             "plan_vrx: the residual of {}/{} Hz leaves nothing of a {} S/s channel for a "
-            "receiver to use",
+            "passband of {} to {} Hz",
             placement.residual_numerator, placement.residual_denominator,
-            placement.channel_rate));
+            placement.channel_rate, requested->low, requested->high));
     }
-    plan.bandwidth = std::min(params.bandwidth, widest);
-    plan.bandwidth_clamped = plan.bandwidth < params.bandwidth;
 
-    const Hertz required =
-        minimum_demod_rate(plan.mode, plan.bandwidth, std::max<Hertz>(0, params.cw_pitch));
+    const Hertz cw_pitch = std::max<Hertz>(0, params.cw_pitch);
+    const Passband mixed = mix_frame(plan.passband, plan.mode, cw_pitch);
+
+    const Hertz required = minimum_demod_rate(plan.mode, mixed);
     const auto decimation = static_cast<std::uint32_t>(
         std::max<std::int64_t>(1, (required + plan.audio_rate - 1) / plan.audio_rate));
     plan.demod_rate = static_cast<SampleRate>(decimation) * plan.audio_rate;
@@ -1158,18 +1387,35 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
     // USB receiver rejected its unwanted sideband by 2.1 dB. Asking instead
     // for the stopband one half-bandwidth past the passband edge, so a signal
     // one whole bandwidth away is gone, takes the same measurement past 80 dB.
+    // TWO EDGES AND SO TWO BOUNDS, WHERE THERE USED TO BE ONE.
+    //
+    // The fold is at plus and minus stop_edge about the MIX centre, so an
+    // asymmetric passband is nearer one of them than the other and the
+    // nearer one decides. Written as one min over the two distances. A
+    // symmetric band puts both distances at stop_edge - width/2 and this
+    // reduces to the 2*(stop_edge - pass_edge) it replaces, to the bit.
+    //
+    // The approximation this does NOT fix, and which was already here:
+    // stop_edge takes the channel's limit as Fc/2 from the MIX centre, and
+    // the channel's band is Fc/2 from the CHANNEL centre, which is
+    // |residual| away. So when the channel rather than the fold is the
+    // binding constraint this is optimistic by up to |residual| on one side.
+    // Left alone deliberately: correcting it changes the tap count of every
+    // receiver whose demodulation rate exceeds its channel rate, which is a
+    // measurement this change is not making.
     const double stop_edge =
         0.5 * static_cast<double>(std::min(plan.demod_rate, plan.channel_rate));
-    const double pass_edge = 0.5 * static_cast<double>(plan.bandwidth);
-
-    const double transition_limit = 2.0 * (stop_edge - pass_edge);
-    const double transition_wanted = pass_edge;
+    const double transition_limit =
+        2.0 * std::min(stop_edge - static_cast<double>(mixed.high),
+                       stop_edge + static_cast<double>(mixed.low));
+    const double transition_wanted = 0.5 * static_cast<double>(plan.bandwidth);
     const double transition = std::min(transition_limit, transition_wanted);
     if (!(transition > 0.0)) {
         return fail(std::format(
-            "plan_vrx: a bandwidth of {} Hz leaves no transition band between its own edge "
-            "and the {} Hz fold of a {} S/s channel resampled to {} S/s",
-            plan.bandwidth, stop_edge, plan.channel_rate, plan.demod_rate));
+            "plan_vrx: a passband of {} to {} Hz leaves no transition band between its own "
+            "edge and the {} Hz fold of a {} S/s channel resampled to {} S/s",
+            plan.passband.low, plan.passband.high, stop_edge, plan.channel_rate,
+            plan.demod_rate));
     }
 
     plan.fine.phases = kDefaultPhases;
@@ -1198,35 +1444,50 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
         (static_cast<double>(plan.fine.phases) * static_cast<double>(plan.fine.taps) - 1.0) /
         (2.0 * static_cast<double>(plan.fine.phases));
 
-    // Where the filter sits and what gets translated to DC. They differ for
-    // three of the eight modes; see the table in core/shaders/vrx_fine.comp.
+    // Where the filter sits and what gets translated to DC.
+    //
+    // ONE RULE FOR ALL EIGHT MODES, WHERE THERE USED TO BE THREE CASES. The
+    // filter is centred on the middle of the granted passband and the mix is
+    // the receiver's own centre, except for CW, which mixes a pitch below so
+    // the carrier is audible.
+    //
+    // WHAT THIS BLOCK USED TO DO. Until this change it read a single
+    // symmetric bandwidth and derived the USB and LSB centres from it:
+    // filter = residual +/- B/2, over a denominator of 2*residual_denominator
+    // so an odd bandwidth stayed exact. That is the same arithmetic as the
+    // line below for the bands the shorthand expands USB and LSB to, [0, B]
+    // and [-B, 0], whose midpoints are +B/2 and -B/2, so nothing about those
+    // two modes moves by a hertz. It is recorded rather than removed because
+    // core/shaders/vrx_fine.comp documents the four-row table it produced and
+    // a reader will arrive from there looking for it.
+    //
+    // Over a common denominator of 2*residual_denominator for the same
+    // reason it always was: the midpoint of two integer edges lands on a
+    // half hertz whenever their sum is odd, and rounding it is a tuning
+    // offset nobody can source.
     const std::int64_t residual_numerator = placement.residual_numerator;
     const std::int64_t residual_denominator = placement.residual_denominator;
 
-    plan.filter_numerator = residual_numerator;
-    plan.filter_denominator = residual_denominator;
+    plan.filter_numerator =
+        2 * residual_numerator + residual_denominator * (plan.passband.low + plan.passband.high);
+    plan.filter_denominator = 2 * residual_denominator;
+
     plan.mix_numerator = residual_numerator;
     plan.mix_denominator = residual_denominator;
-
-    if (plan.mode == kDemodUsb || plan.mode == kDemodLsb) {
-        // Shift the passband to one side of the suppressed carrier. Over a
-        // common denominator of 2*residual_denominator so the half-bandwidth
-        // is exact even when the bandwidth is odd.
-        const std::int64_t half = plan.bandwidth;  // over a denominator of 2
-        plan.filter_numerator = 2 * residual_numerator +
-                                (plan.mode == kDemodUsb ? 1 : -1) * residual_denominator * half;
-        plan.filter_denominator = 2 * residual_denominator;
-    }
     if (plan.mode == kDemodCw) {
         // Land the carrier on the operator's pitch rather than on DC, so it
         // is audible.
-        plan.mix_numerator = residual_numerator - residual_denominator * params.cw_pitch;
+        plan.mix_numerator = residual_numerator - residual_denominator * cw_pitch;
         plan.mix_denominator = residual_denominator;
     }
 
     reduce_rational(plan.filter_numerator, plan.filter_denominator);
     reduce_rational(plan.mix_numerator, plan.mix_denominator);
 
+    // The half-width truncates on an odd width, as it always has: the
+    // planner passed bandwidth/2 here before edges existed and this is the
+    // same quantity. The centre is exact, so an odd width costs half a hertz
+    // of width and nothing of position.
     auto taps = design_fine_taps(plan.fine, plan.channel_rate, plan.bandwidth / 2,
                                  plan.filter_numerator, plan.filter_denominator,
                                  kFineAttenuationDb);

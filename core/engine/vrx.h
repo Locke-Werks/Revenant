@@ -101,9 +101,53 @@ struct VrxParams {
     // docs/ui-spectrum.md has the argument.
     dsp::Hertz center = 0;
 
-    // Passband width. The fine stage resamples to whatever this needs, so it
-    // is not constrained to the grid's channel spacing.
+    // Passband width, and a SHORTHAND rather than the request itself. The
+    // fine stage resamples to whatever this needs, so it is not constrained
+    // to the grid's channel spacing.
+    //
+    // WHAT THIS FIELD USED TO MEAN. Until this change it was the whole
+    // passband request and every derived quantity read it as a half-width
+    // either side of `center`. That reading was never true for all eight
+    // modes: plan_vrx already put USB's passband at [center, center + B] and
+    // LSB's at [center - B, center], so a caller that set a bandwidth and
+    // expected a filter centred on the tuned frequency was already not
+    // getting one on those two modes, and had no way to say what it did
+    // want.
+    //
+    // It is now the input the mode's shorthand rule is expanded from when
+    // passband_low and passband_high are both zero, and that expansion
+    // reproduces the old geometry exactly for every mode:
+    // dsp::resolve_passband is the one place it happens. It is IGNORED when
+    // the pair is given. It is the granted width, high minus low, on the way
+    // back out, so a caller that only knows about this field gets the right
+    // width for an asymmetric filter and loses only the offset.
+    //
+    // Kept rather than deleted because a saved request from before the pair
+    // existed should still open, and because retiring the field would free
+    // its wire ordinal for something else to reuse later.
     dsp::Hertz bandwidth = 12'000;
+
+    // The passband, as signed hertz from `center`, with low strictly below
+    // high. Both zero means "not stated" and `bandwidth` is expanded
+    // instead.
+    //
+    // Two numbers because a width cannot say where the band sits, and where
+    // it sits is most of what a receiver's filter is. USB is the carrier
+    // plus 300 to plus 2700 and has nothing at the carrier; a transceiver
+    // running 20 kHz of transmit audio wants the edges pulled out and stays
+    // anchored on the same carrier while it happens. Neither is a width.
+    //
+    // The frame is `center` for every mode with no exceptions, so the filter
+    // passes [center + passband_low, center + passband_high]. CW's sidetone
+    // is NOT in here: the pitch translates what the fine stage mixes to DC
+    // and leaves the filter where it is, so a CW window offset from the
+    // carrier is stated as offset edges and the pitch stays the separate
+    // thing it is.
+    //
+    // dsp::default_passband has the per-mode defaults a client applies when
+    // the operator has not moved the edges.
+    dsp::Hertz passband_low = 0;
+    dsp::Hertz passband_high = 0;
 
     Demod demod = Demod::Nfm;
 
@@ -143,9 +187,24 @@ struct VrxPlacement {
     // decimation.
     dsp::SampleRate channel_rate = 0;
 
-    // True when the requested bandwidth does not fit in one grid channel and
-    // the receiver was given the widest that does. The caller is told rather
-    // than quietly receiving less than it asked for.
+    // The passband the receiver was actually given, in the same frame
+    // VrxParams::passband_low and passband_high are in: signed hertz from
+    // params.center.
+    //
+    // Equal to the resolved request unless the channel could not carry it.
+    // Each edge is fitted on its own, so a request too wide on one side
+    // keeps the other edge where it was; a display draws the granted pair
+    // and the requested pair in two shades and the difference is the clamp.
+    dsp::Hertz granted_low = 0;
+    dsp::Hertz granted_high = 0;
+
+    // True when EITHER edge was pulled in to fit one grid channel. The
+    // caller is told rather than quietly receiving less than it asked for.
+    //
+    // WHAT THIS FIELD USED TO MEAN: "the requested bandwidth did not fit and
+    // the receiver was given the widest that does", which was one width
+    // against one limit. The clamp is per edge now, so this says only that
+    // something moved and the granted pair above says what.
     bool bandwidth_clamped = false;
 };
 
@@ -164,6 +223,18 @@ struct VrxStatus {
     VrxParams params;
 
     VrxPlacement placement;
+
+    // The rate the fine stage resampled to, which is what the passband
+    // display's axis spans and what decides whether a change to this
+    // receiver can be applied in place.
+    //
+    // Here because a client cannot derive it: it is minimum_demod_rate
+    // rounded up to a multiple of the audio rate, and the audio rate a
+    // receiver ended up with is the engine's default when the request named
+    // none. A retune that changes it is a remove and an add, so a surface
+    // dragging the passband edges reads this to tell a change it can send
+    // live from one that will break the audio.
+    dsp::SampleRate demod_rate = 0;
 
     // Signal level in the passband, dBFS, updated per block. This is what
     // drives the meter in the receiver rack.

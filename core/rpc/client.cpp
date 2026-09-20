@@ -286,6 +286,8 @@ struct PromiseValue<kj::Promise<T>> {
     out.agc_decay_ms = in.getAgcDecayMs();
     out.agc_enabled = in.getAgcEnabled();
     out.cw_pitch = in.getCwPitch();
+    out.passband_low = in.getPassbandLow();
+    out.passband_high = in.getPassbandHigh();
     return out;
 }
 
@@ -299,6 +301,8 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.setAgcDecayMs(in.agc_decay_ms);
     out.setAgcEnabled(in.agc_enabled);
     out.setCwPitch(in.cw_pitch);
+    out.setPassbandLow(in.passband_low);
+    out.setPassbandHigh(in.passband_high);
 }
 
 [[nodiscard]] VrxPlacement read_vrx_placement(schema::VrxPlacement::Reader in) {
@@ -308,6 +312,8 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.residual = read_rational(in.getResidual());
     out.channel_rate = in.getChannelRate();
     out.bandwidth_clamped = in.getBandwidthClamped();
+    out.granted_low = in.getGrantedLow();
+    out.granted_high = in.getGrantedHigh();
     return out;
 }
 
@@ -321,6 +327,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.id = in.getId();
     out.params = std::move(*params);
     out.placement = read_vrx_placement(in.getPlacement());
+    out.demod_rate = in.getDemodRate();
     out.level_dbfs = in.getLevelDbfs();
     out.squelch_open = in.getSquelchOpen();
     out.audio_samples = in.getAudioSamples();

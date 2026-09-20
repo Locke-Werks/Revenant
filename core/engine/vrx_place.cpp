@@ -134,9 +134,13 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
             params.center, nyquist));
     }
 
-    if (params.bandwidth <= 0) {
-        return fail(std::format("place: bandwidth must be positive, got {} Hz",
-                                params.bandwidth));
+    // The passband the request resolves to, before anything is known about
+    // where it lands. Resolved here rather than after the placement so that
+    // a request nobody can fill is refused before the grid arithmetic runs,
+    // which is what the bandwidth check this replaces did.
+    auto requested = dsp::resolve_passband(params);
+    if (!requested) {
+        return std::unexpected(with_context(requested.error(), "place"));
     }
 
     // Nearest grid channel. Minimising |centre - s*rate/M| over the signed
@@ -194,13 +198,20 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
         placement.residual_denominator /= divisor;
     }
 
-    // What one channel can actually deliver to this receiver, given where the
-    // receiver landed inside it. The definition and its derivation are in
-    // core/dsp/vrx_reference.h so that place() and the planner cannot disagree
-    // about it; the caller is told that it was reduced, and asks the planner
-    // for the figure.
-    const dsp::Hertz widest = dsp::max_channel_bandwidth(placement);
-    placement.bandwidth_clamped = params.bandwidth > widest;
+    // What one channel can actually deliver to this receiver, given where
+    // the receiver landed inside it. The definition and its derivation are
+    // in core/dsp/vrx_reference.h so that place() and the planner cannot
+    // disagree about it: both call the same clamp against the same
+    // placement, and the edges the caller reads here are the edges the
+    // planner will build a filter for.
+    //
+    // This used to be one comparison against max_channel_bandwidth, which
+    // could say that something did not fit and never which side. Each edge
+    // is fitted on its own now and both are carried out.
+    const dsp::Passband granted = dsp::clamp_to_channel(placement, *requested);
+    placement.granted_low = granted.low;
+    placement.granted_high = granted.high;
+    placement.bandwidth_clamped = granted != *requested;
 
     return placement;
 }

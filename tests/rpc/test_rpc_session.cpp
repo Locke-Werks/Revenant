@@ -85,6 +85,8 @@ void bring_up(Harness& harness, const HarnessOptions& options) {
     params.agc_decay_ms = 812.25;
     params.agc_enabled = false;
     params.cw_pitch = 613;
+    params.passband_low = -4'313;
+    params.passband_high = 5'063;
     return params;
 }
 
@@ -98,6 +100,8 @@ void check_params_match(const rpc::VrxParams& got, const rpc::VrxParams& sent) {
     CHECK(got.agc_decay_ms == sent.agc_decay_ms);
     CHECK(got.agc_enabled == sent.agc_enabled);
     CHECK(got.cw_pitch == sent.cw_pitch);
+    CHECK(got.passband_low == sent.passband_low);
+    CHECK(got.passband_high == sent.passband_high);
 }
 
 // The ordinary channel width per mode, so each one is added with something it
@@ -297,6 +301,121 @@ TEST_CASE("a clamp the engine applied reaches the client as a sentence", "[gpu][
     CHECK(remote->spectrum.bins == kChannels * remote->spectrum.bins_per_channel);
 }
 
+TEST_CASE("an asymmetric passband is placed and read back over the wire", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // The shape a width cannot express: a USB receiver whose band starts 300
+    // hertz above the suppressed carrier and ends 2700 above it, so neither
+    // edge is a half bandwidth from the tuned frequency and the band does not
+    // contain the carrier at all.
+    constexpr std::int64_t kLow = 300;
+    constexpr std::int64_t kHigh = 2'700;
+
+    rpc::VrxParams params;
+    params.center = 187'500;
+    params.demod = rpc::Demod::Usb;
+    params.passband_low = kLow;
+    params.passband_high = kHigh;
+
+    // Deliberately left at the struct default and deliberately wrong for
+    // this receiver. The pair wins, and this is what proves the shorthand is
+    // ignored rather than quietly averaged in.
+    REQUIRE(params.bandwidth == 12'000);
+
+    auto id = harness.client().add_vrx(params);
+    INFO(test::message_of(id));
+    REQUIRE(id.has_value());
+
+    auto remote = harness.client().vrx_status(*id);
+    INFO(test::message_of(remote));
+    REQUIRE(remote.has_value());
+
+    CHECK(remote->params.passband_low == kLow);
+    CHECK(remote->params.passband_high == kHigh);
+
+    // Nothing here is near the channel's limit, so the grant is the request
+    // and the clamp says nothing happened.
+    CHECK(remote->placement.granted_low == kLow);
+    CHECK(remote->placement.granted_high == kHigh);
+    CHECK_FALSE(remote->placement.bandwidth_clamped);
+
+    // The engine's own view, so the wire is checked against what was built
+    // rather than against itself.
+    auto local = harness.engine().vrx_status(engine::VrxId{static_cast<std::uint32_t>(*id)});
+    INFO(test::message_of(local));
+    REQUIRE(local.has_value());
+    CHECK(local->placement.granted_low == remote->placement.granted_low);
+    CHECK(local->placement.granted_high == remote->placement.granted_high);
+
+    // The rate the passband display spans, which a client cannot derive
+    // because the audio rate a receiver ended up with is the engine's
+    // default when the request named none.
+    CHECK(remote->demod_rate == local->demod_rate);
+    CHECK(remote->demod_rate > 0);
+
+    // And the edges move when they are asked to, in place, without the
+    // receiver being removed and added.
+    rpc::VrxParams wider = params;
+    wider.passband_low = 100;
+    wider.passband_high = 3'900;
+
+    const auto applied = harness.client().set_vrx_params(*id, wider);
+    INFO(test::message_of(applied));
+    REQUIRE(applied.has_value());
+
+    auto after = harness.client().vrx_status(*id);
+    INFO(test::message_of(after));
+    REQUIRE(after.has_value());
+    CHECK(after->params.passband_low == 100);
+    CHECK(after->params.passband_high == 3'900);
+    CHECK(after->placement.granted_low == 100);
+    CHECK(after->placement.granted_high == 3'900);
+}
+
+TEST_CASE("a passband wider than one channel is fitted at the edge that does not fit",
+          "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    auto info = harness.client().info();
+    INFO(test::message_of(info));
+    REQUIRE(info.has_value());
+    const std::int64_t channel_rate = info->channel_rate;
+    REQUIRE(channel_rate > 0);
+
+    // On a channel centre, so the residual is zero and the two edges have
+    // the same room. One edge is asked for more than the channel carries and
+    // the other is well inside, which is the case a single width could not
+    // report: it would have taken the same amount off both.
+    rpc::VrxParams params;
+    params.center = 0;
+    params.demod = rpc::Demod::Usb;
+    params.passband_low = -1'000;
+    params.passband_high = channel_rate;
+
+    auto id = harness.client().add_vrx(params);
+    INFO(test::message_of(id));
+    REQUIRE(id.has_value());
+
+    auto status = harness.client().vrx_status(*id);
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+
+    CHECK(status->placement.bandwidth_clamped);
+    CHECK(status->placement.granted_low == -1'000);
+    CHECK(status->placement.granted_high < params.passband_high);
+    CHECK(status->placement.granted_high > 0);
+
+    // The request is echoed unchanged, so a display can draw both and say
+    // which edge moved rather than only that something did.
+    CHECK(status->params.passband_high == params.passband_high);
+}
+
 TEST_CASE("a channel centre that is not a whole hertz survives exactly", "[gpu][rpc][m1]") {
     REVENANT_NEEDS_GPU();
 
@@ -392,6 +511,8 @@ TEST_CASE("every receiver parameter survives a round trip", "[gpu][rpc][m1]") {
     changed.agc_decay_ms = 250.5;
     changed.agc_enabled = true;
     changed.cw_pitch = 421;
+    changed.passband_low = -2'211;
+    changed.passband_high = 3'049;
 
     const auto applied = harness.client().set_vrx_params(*id, changed);
     INFO(test::message_of(applied));
@@ -416,6 +537,8 @@ TEST_CASE("every receiver parameter survives a round trip", "[gpu][rpc][m1]") {
     CHECK(local->params.agc_decay_ms == changed.agc_decay_ms);
     CHECK(local->params.agc_enabled == changed.agc_enabled);
     CHECK(local->params.cw_pitch == changed.cw_pitch);
+    CHECK(local->params.passband_low == changed.passband_low);
+    CHECK(local->params.passband_high == changed.passband_high);
 
     // And the rule the paragraph above rests on, so that an engine which
     // later allows a mode change in place makes this case say so rather than

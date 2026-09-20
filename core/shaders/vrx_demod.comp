@@ -77,9 +77,15 @@
 //   NFM   arg(z[m] * conj(z[m-1])) * Fd / (2*pi*deviation), so audio is +/-1
 //   WFM   at peak deviation and is independent of signal amplitude, which is
 //         what a limiting discriminator is for. Deviation is taken from the
-//         requested bandwidth by the channel plan the mode belongs to: 5 kHz
-//         in 25 kHz for land mobile NFM, so deviation = bandwidth/5; 75 kHz in
-//         200 kHz for FM broadcast, so deviation = 3*bandwidth/8.
+//         granted passband's WIDTH, high minus low, by the channel plan the
+//         mode belongs to: 5 kHz in 25 kHz for land mobile NFM, so deviation
+//         = width/5; 75 kHz in 200 kHz for FM broadcast, so deviation =
+//         3*width/8. The width and not the reach: a passband pulled off
+//         centre carries the same deviation, because what a discriminator
+//         sees is how far the instantaneous frequency swings and not where
+//         the band sits. This used to be written against "the requested
+//         bandwidth", which was the same number while a request could only
+//         be one symmetric width.
 //   USB   Re(z), gain 1. A unit-amplitude tone in the passband gives audio
 //   LSB   +/-1, which is the same peak-envelope reference AM uses, so a
 //   CW    voice peak at full scale sounds the same loudness in every one of

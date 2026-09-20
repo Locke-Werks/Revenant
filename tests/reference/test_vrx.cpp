@@ -111,6 +111,26 @@ dsp::VrxPlan make_plan(engine::Demod mode, dsp::Hertz centre, dsp::Hertz bandwid
     return *planned;
 }
 
+// The same, asking for the passband by its two edges rather than by a width
+// the mode reshapes.
+dsp::VrxPlan make_edge_plan(engine::Demod mode, dsp::Hertz centre, dsp::Hertz low,
+                            dsp::Hertz high, const dsp::GridParams& grid) {
+    engine::VrxParams params;
+    params.center = centre;
+    params.passband_low = low;
+    params.passband_high = high;
+    params.demod = mode;
+
+    auto placed = engine::place(grid, kSourceRate, params);
+    INFO(test::message_of(placed));
+    REQUIRE(placed.has_value());
+
+    auto planned = dsp::plan_vrx(grid, kSourceRate, params, *placed);
+    INFO(test::message_of(planned));
+    REQUIRE(planned.has_value());
+    return *planned;
+}
+
 std::vector<dsp::Complex32> make_nco(const dsp::VrxPlan& plan) {
     auto built = dsp::build_nco_table(plan.fine.nco_log2);
     INFO(test::message_of(built));
@@ -376,6 +396,152 @@ TEST_CASE("the NCO table has exact quadrature entries and the phase does not dri
     const double turns = static_cast<double>(difference) / std::pow(2.0, 64);
     INFO("phase error at sample " << kIndex << " is " << turns * test::kTwoPi << " radian");
     CHECK(turns * test::kTwoPi < 1.0e-8);
+}
+
+// ---------------------------------------------------------------------------
+// The passband: resolution, defaults and the fit to one channel
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the bandwidth shorthand expands to the geometry the planner used to build",
+          "[vrx][m1]") {
+    // The check that the generalisation to two edges reduces correctly. Every
+    // mode's shorthand expansion is the band plan_vrx derived from one
+    // symmetric bandwidth before edges existed: symmetric for six of the
+    // eight, [0, B] for USB and [-B, 0] for LSB, which is the table in
+    // core/shaders/vrx_fine.comp read as a passband rather than as three
+    // special cases.
+    constexpr dsp::Hertz kWidth = 3'000;
+
+    struct Expectation {
+        engine::Demod mode;
+        dsp::Passband band;
+    };
+
+    const Expectation expected[] = {
+        {engine::Demod::Raw, {-1'500, 1'500}}, {engine::Demod::Am, {-1'500, 1'500}},
+        {engine::Demod::Nfm, {-1'500, 1'500}}, {engine::Demod::Wfm, {-1'500, 1'500}},
+        {engine::Demod::Usb, {0, 3'000}},      {engine::Demod::Lsb, {-3'000, 0}},
+        {engine::Demod::Dsb, {-1'500, 1'500}}, {engine::Demod::Cw, {-1'500, 1'500}},
+    };
+
+    for (const auto& want : expected) {
+        INFO("mode " << engine::demod_name(want.mode));
+        engine::VrxParams params;
+        params.demod = want.mode;
+        params.bandwidth = kWidth;
+
+        auto got = dsp::resolve_passband(params);
+        INFO(test::message_of(got));
+        REQUIRE(got.has_value());
+        CHECK(got->low == want.band.low);
+        CHECK(got->high == want.band.high);
+        CHECK(got->width() == kWidth);
+    }
+
+    // An odd bandwidth resolves symmetric and one hertz narrow rather than
+    // asymmetric by one, because that is the filter the planner has always
+    // built: it passed bandwidth/2 to design_fine_taps as a half-width, so
+    // only the reported figure ever carried the odd hertz.
+    engine::VrxParams odd;
+    odd.demod = engine::Demod::Nfm;
+    odd.bandwidth = 501;
+    auto resolved_odd = dsp::resolve_passband(odd);
+    REQUIRE(resolved_odd.has_value());
+    CHECK(resolved_odd->low == -250);
+    CHECK(resolved_odd->high == 250);
+
+    // The pair wins over the shorthand, and the shorthand is not consulted.
+    engine::VrxParams both;
+    both.demod = engine::Demod::Usb;
+    both.bandwidth = 99'999;
+    both.passband_low = 300;
+    both.passband_high = 2'700;
+    auto resolved_both = dsp::resolve_passband(both);
+    REQUIRE(resolved_both.has_value());
+    CHECK(resolved_both->low == 300);
+    CHECK(resolved_both->high == 2'700);
+
+    // An empty or inverted band is refused with both numbers in the message,
+    // rather than being reordered into something nobody asked for.
+    engine::VrxParams inverted;
+    inverted.passband_low = 2'700;
+    inverted.passband_high = 300;
+    auto refused = dsp::resolve_passband(inverted);
+    CHECK_FALSE(refused.has_value());
+    if (!refused) {
+        const std::string text = test::message_of(refused);
+        CHECK(text.find("2700") != std::string::npos);
+        CHECK(text.find("300") != std::string::npos);
+    }
+}
+
+TEST_CASE("every mode has a default passband and SSB's is anchored on the carrier",
+          "[vrx][m1]") {
+    // The table exists so that a client changing mode has one place to read
+    // what that mode wants, rather than each client inventing its own. These
+    // are the widths the CLI carried privately, reshaped.
+    struct Expectation {
+        engine::Demod mode;
+        dsp::Passband band;
+    };
+
+    const Expectation expected[] = {
+        {engine::Demod::Raw, {-6'000, 6'000}},     {engine::Demod::Am, {-5'000, 5'000}},
+        {engine::Demod::Nfm, {-8'000, 8'000}},     {engine::Demod::Wfm, {-100'000, 100'000}},
+        {engine::Demod::Usb, {300, 2'700}},        {engine::Demod::Lsb, {-2'700, -300}},
+        {engine::Demod::Dsb, {-3'000, 3'000}},     {engine::Demod::Cw, {-250, 250}},
+    };
+
+    for (const auto& want : expected) {
+        INFO("mode " << engine::demod_name(want.mode));
+        const dsp::Passband got = dsp::default_passband(want.mode);
+        CHECK(got.low == want.band.low);
+        CHECK(got.high == want.band.high);
+        CHECK(got.width() > 0);
+    }
+
+    // The property that a width could not express: neither sideband mode's
+    // default contains the carrier, and the two are mirror images.
+    const dsp::Passband usb = dsp::default_passband(engine::Demod::Usb);
+    const dsp::Passband lsb = dsp::default_passband(engine::Demod::Lsb);
+    CHECK(usb.low > 0);
+    CHECK(lsb.high < 0);
+    CHECK(usb.low == -lsb.high);
+    CHECK(usb.high == -lsb.low);
+}
+
+TEST_CASE("the channel fit moves the edge that does not fit and leaves the other",
+          "[vrx][m1]") {
+    engine::VrxParams params;
+    params.center = 196'500;
+    params.demod = engine::Demod::Usb;
+    params.passband_low = 300;
+    params.passband_high = 2'700;
+
+    auto placed = engine::place(kGrid, kSourceRate, params);
+    INFO(test::message_of(placed));
+    REQUIRE(placed.has_value());
+
+    // A passband this narrow is nowhere near the channel's limit, so nothing
+    // moves and nothing claims to have moved.
+    CHECK(placed->granted_low == 300);
+    CHECK(placed->granted_high == 2'700);
+    CHECK_FALSE(placed->bandwidth_clamped);
+
+    const dsp::Hertz limit = dsp::max_channel_bandwidth(*placed) / 2;
+    REQUIRE(limit > 0);
+
+    // One edge past the limit and the other well inside it. The edge that
+    // does not fit is pulled to the limit; the one that does is untouched,
+    // which is the whole difference from the single width this replaced.
+    const dsp::Passband asked{-1'000, limit + 5'000};
+    const dsp::Passband got = dsp::clamp_to_channel(*placed, asked);
+    CHECK(got.low == -1'000);
+    CHECK(got.high == limit);
+
+    // A band inside the limit on both sides comes back untouched.
+    const dsp::Passband inside{-limit, limit};
+    CHECK(dsp::clamp_to_channel(*placed, inside) == inside);
 }
 
 // ---------------------------------------------------------------------------
@@ -840,6 +1006,108 @@ TEST_CASE("a CW receiver lands the carrier on the operator's pitch", "[gpu][vrx]
     INFO("magnitude " << fit.magnitude << ", output frequency " << fit.frequency_hz << " Hz");
     CHECK(fit.magnitude == Approx(1.0).margin(0.01));
     CHECK(fit.frequency_hz == Approx(static_cast<double>(request.cw_pitch)).margin(1.0));
+}
+
+TEST_CASE("an asymmetric passband is bit-exact against the twin", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    constexpr std::uint64_t kSeed = 0x565258000000000AULL;
+
+    // The property the asymmetric passband rests on, asserted rather than
+    // argued. The fine kernel consumes a complex tap table and one NCO
+    // delta; it has no bandwidth, no edges and no mode, so an asymmetric
+    // filter is different numbers in a buffer both sides read. Off the
+    // channel centre so the residual is non-zero and the tap table's
+    // modulation carries a filter centre that is neither the mix centre nor
+    // a half bandwidth from it.
+    const auto plan = make_edge_plan(engine::Demod::Usb, 196'500, 300, 2'700, kGrid);
+    INFO("passband " << plan.passband.low << " to " << plan.passband.high << " Hz, "
+                     << plan.fine.taps << " taps, demod rate " << plan.demod_rate);
+    REQUIRE(plan.passband.low == 300);
+    REQUIRE(plan.passband.high == 2'700);
+
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+    const auto params = fine_params(plan, kChanCapacity - 40U, 1024, 7'654'321);
+
+    const auto gpu_result =
+        run_fine_on_gpu(plan.fine, params, channel_ring, plan.fine_taps, nco, 64);
+
+    std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+    const auto computed = dsp::reference_vrx_fine(plan.fine, params, channel_ring,
+                                                  plan.fine_taps, nco, cpu_result);
+    INFO(test::message_of(computed));
+    REQUIRE(computed.has_value());
+
+    REQUIRE(nonzero_count(std::span<const dsp::Complex32>(cpu_result)) > params.count / 2);
+
+    const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+    INFO(comparison.report);
+    CHECK(comparison.identical);
+    CHECK(comparison.max_ulp_error == 0);
+}
+
+TEST_CASE("an asymmetric USB passband passes inside its edges and rejects below them",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // What a width could not ask for and this can: the carrier plus 300 to
+    // plus 2700 hertz, which is where an SSB signal actually is. Measured in
+    // decibels rather than eyeballed, at three places.
+    constexpr dsp::Hertz kLow = 300;
+    constexpr dsp::Hertz kHigh = 2'700;
+    const auto plan = make_edge_plan(engine::Demod::Usb, 196'500, kLow, kHigh, kGrid);
+
+    const double residual = static_cast<double>(plan.placement.residual_numerator) /
+                            static_cast<double>(plan.placement.residual_denominator);
+    const double centre = 0.5 * static_cast<double>(kLow + kHigh);
+    INFO(plan.fine.taps << " taps, transition " << plan.fine_transition_hz << " Hz, stopband "
+                        << plan.fine_stopband_db << " dB, passband centre " << centre << " Hz");
+
+    // Unity at the middle of the band the operator asked for, which is 1500
+    // Hz above the carrier and not the carrier itself. A symmetric filter of
+    // the same width would have its unity gain at the carrier.
+    const auto inside = fine_tone_response(plan, residual + centre);
+    const auto inside_fit =
+        test::measure_complex_tone(inside, static_cast<double>(plan.demod_rate));
+    CHECK(inside_fit.magnitude == Approx(1.0).margin(0.01));
+    CHECK(inside_fit.frequency_hz == Approx(centre).margin(1.0));
+
+    const auto response_db = [&](double offset_from_carrier) {
+        const auto out = fine_tone_response(plan, residual + offset_from_carrier);
+        const auto fit = test::measure_complex_tone(out, static_cast<double>(plan.demod_rate));
+        return 20.0 * std::log10(std::max(fit.magnitude, 1.0e-12) / inside_fit.magnitude);
+    };
+
+    // 200 Hz below the low edge. This is inside the filter's transition
+    // rather than out in its stopband, and deliberately so: a 2.4 kHz filter
+    // asks for a 1.2 kHz transition and the tap cap gives it about 1.5, so
+    // the stopband does not begin until nearly 2 kHz from the centre.
+    // Rejection here is a statement about where the EDGE is, and a
+    // symmetric filter of the same width centred on the carrier would be
+    // passing this tone at very nearly unity.
+    const double below_db = response_db(static_cast<double>(kLow) - 200.0);
+    INFO("200 Hz below the low edge: " << below_db << " dB");
+    CHECK(below_db < -8.0);
+
+    // The suppressed carrier itself, 300 Hz below the low edge.
+    const double carrier_db = response_db(0.0);
+    INFO("at the suppressed carrier: " << carrier_db << " dB");
+    CHECK(carrier_db < -15.0);
+
+    // 900 Hz below the carrier, which is one whole width below the filter's
+    // centre and so past the stopband edge the planner designed for. The
+    // three figures together are the skirt, measured rather than asserted
+    // from the design.
+    const double deep_db = response_db(-900.0);
+    INFO("900 Hz below the carrier: " << deep_db << " dB");
+    CHECK(deep_db < -40.0);
+    CHECK(deep_db < carrier_db);
+    CHECK(carrier_db < below_db);
 }
 
 TEST_CASE("a USB receiver keeps its own sideband and rejects the other", "[gpu][vrx][m1]") {
