@@ -5,6 +5,10 @@
     "description": "The Qt/QML client for the Revenant engine",
     "supports": "windows",
     "dependencies": [
-        "capnproto"
+        "capnproto",
+        {
+            "name": "catch2",
+            "host": false
+        }
     ]
 }

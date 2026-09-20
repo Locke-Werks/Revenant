@@ -1,0 +1,343 @@
+#include "audio/audio_ring.h"
+
+#include <algorithm>
+#include <cstring>
+
+namespace revenant::ui {
+namespace {
+
+// The floor the ring is allocated at, expressed in chunks rather than in
+// milliseconds, and applied only when a chunk turns out to be longer than
+// the granted depth.
+//
+// The engine applies a two-chunk floor to its own queue for a reason
+// core/rpc/revenant.capnp states at length: a depth under two chunks evicts
+// every chunk before it can be sent, the client hears nothing, and every
+// other check still passes. The same arithmetic applies on this side with
+// one extra term, because the card is pulling out of this ring while a
+// chunk is being written into it. Four is two for the engine's reason and
+// two for the card's.
+constexpr std::size_t kMinChunksBuffered = 4;
+
+}  // namespace
+
+void AudioRing::set_depth_millis(std::uint32_t millis)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    depth_millis_ = millis;
+}
+
+void AudioRing::establish(RingFormat incoming)
+{
+    format_ = incoming;
+    ++format_generation_;
+
+    // Milliseconds to frames, which is the conversion the engine cannot do
+    // when it answers subscribeAudio and this object cannot do before the
+    // first chunk either. Both need the receiver's audio rate and the wire
+    // does not carry it anywhere else.
+    const std::uint64_t frames =
+        (static_cast<std::uint64_t>(depth_millis_) * incoming.sample_rate) / 1000U;
+
+    // One frame rather than zero at the bottom, so the modulo arithmetic
+    // below has a divisor. A depth of zero is a caller that subscribed
+    // without recording the grant, and it starves rather than dividing by
+    // zero; the counters say which.
+    capacity_ = std::max<std::size_t>(static_cast<std::size_t>(frames), 1U);
+
+    samples_.assign(capacity_ * incoming.channel_count, 0.0F);
+    sources_.assign(capacity_, static_cast<std::uint8_t>(FrameSource::idle));
+
+    head_ = 0;
+    buffered_ = 0;
+    have_stream_ = false;
+    next_index_ = 0;
+    last_source_ = FrameSource::idle;
+}
+
+void AudioRing::grow_to(std::size_t frames)
+{
+    if (frames <= capacity_ || !format_.valid()) {
+        return;
+    }
+
+    const std::size_t channels = format_.channel_count;
+    std::vector<float> samples(frames * channels, 0.0F);
+    std::vector<std::uint8_t> sources(frames, static_cast<std::uint8_t>(FrameSource::idle));
+
+    // Laid out from zero rather than copied wrapped, because the new ring
+    // is a different size and the old head offset means nothing in it.
+    for (std::size_t i = 0; i < buffered_; ++i) {
+        const std::size_t from = (head_ + i) % capacity_;
+        std::memcpy(&samples[i * channels], &samples_[from * channels],
+                    channels * sizeof(float));
+        sources[i] = sources_[from];
+    }
+
+    samples_.swap(samples);
+    sources_.swap(sources);
+    capacity_ = frames;
+    head_ = 0;
+}
+
+void AudioRing::evict_front(std::size_t frames)
+{
+    const std::size_t going = std::min(frames, buffered_);
+    head_ = (head_ + going) % capacity_;
+    buffered_ -= going;
+    counts_.frames_overrun += going;
+}
+
+void AudioRing::push(const float* samples, std::size_t frames, FrameSource source)
+{
+    if (frames == 0) {
+        return;
+    }
+
+    // A single chunk longer than the whole ring cannot be written at any
+    // head position, so the ring grows to hold several of them rather than
+    // the write failing. This is the path a very slow source block or a
+    // very low granted depth takes.
+    if (frames > capacity_) {
+        grow_to(frames * kMinChunksBuffered);
+    }
+
+    if (buffered_ + frames > capacity_) {
+        evict_front(buffered_ + frames - capacity_);
+    }
+
+    const std::size_t channels = format_.channel_count;
+    std::size_t written = 0;
+    while (written < frames) {
+        const std::size_t at = (head_ + buffered_) % capacity_;
+        const std::size_t run = std::min(frames - written, capacity_ - at);
+        if (samples == nullptr) {
+            std::memset(&samples_[at * channels], 0, run * channels * sizeof(float));
+        } else {
+            std::memcpy(&samples_[at * channels], &samples[written * channels],
+                        run * channels * sizeof(float));
+        }
+        std::memset(&sources_[at], static_cast<int>(source), run);
+        buffered_ += run;
+        written += run;
+    }
+}
+
+void AudioRing::push_silence(std::size_t frames, FrameSource source)
+{
+    push(nullptr, frames, source);
+}
+
+void AudioRing::write(const rpc::AudioChunk& chunk)
+{
+    const RingFormat incoming{chunk.sample_rate, chunk.channel_count};
+
+    const std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!incoming.valid()) {
+        // A rate of zero cannot open a device and a channel count of zero
+        // makes AudioChunk::frames a divide by zero. Counted rather than
+        // asserted: this is wire data and a client does not get to decide
+        // that the far end is impossible.
+        ++counts_.malformed_chunks;
+        return;
+    }
+
+    if (incoming != format_) {
+        establish(incoming);
+    }
+
+    const std::uint64_t frames64 = chunk.frames();
+
+    if (!have_stream_) {
+        // The first chunk's own index is not a gap. The stream opens late
+        // by design: a demodulator produces nothing until its filter
+        // support is inside real samples, and the engine emits no chunk for
+        // a dispatch that produced none.
+        have_stream_ = true;
+        next_index_ = chunk.sample_index;
+    }
+
+    std::uint64_t gap = 0;
+    if (chunk.sample_index > next_index_) {
+        gap = chunk.sample_index - next_index_;
+    } else if (chunk.sample_index < next_index_) {
+        // Backwards. The engine's per-pair invariant says this cannot
+        // happen inside one receiver's stream, so reaching it means the
+        // stream is not the one this object was following: an id reused by
+        // a later receiver is the way that happens. There is nothing to
+        // splice, so the baseline moves and the count says it did.
+        ++counts_.restarts;
+        next_index_ = chunk.sample_index;
+    }
+
+    if (gap > 0) {
+        ++counts_.gap_events;
+
+        // Split exactly the way core/rpc/revenant.capnp asks for it to be
+        // split. framesDroppedBefore is what the SERVER's queue evicted,
+        // so that much of the gap is this client being too slow, and
+        // anything past it went missing upstream in the engine. Two causes
+        // with two different fixes, so they are not added together.
+        const std::uint64_t wire = std::min(gap, chunk.frames_dropped_before);
+        counts_.frames_gap_wire += wire;
+        counts_.frames_gap_upstream += gap - wire;
+    }
+
+    // Whether the gap plus the chunk can be placed at all, written so that
+    // the sum cannot overflow.
+    //
+    // A chunk with NO gap in front of it always fits, whatever its length,
+    // because push grows the ring for one longer than the whole capacity.
+    // Only the gap can force a resync: growing the ring to hold a gap would
+    // mean allocating for the worst stall the network ever has and then
+    // keeping that memory for the life of the stream.
+    const bool fits =
+        gap == 0 || (gap <= capacity_ && frames64 <= capacity_ - gap);
+
+    if (!fits) {
+        // The resync. Filling this gap would evict live audio to make room
+        // for silence, which is the wrong way round, so everything buffered
+        // goes and the chunk starts a fresh timeline. The jump is real and
+        // frames_gap_discarded plus resyncs is the only record of it.
+        //
+        // frames_overrun is deliberately not charged for the drop: that
+        // counter means the card was too slow to take what arrived, and
+        // this is the opposite fault.
+        head_ = 0;
+        buffered_ = 0;
+        ++counts_.resyncs;
+        counts_.frames_gap_discarded += gap;
+    } else if (gap > 0) {
+        push_silence(static_cast<std::size_t>(gap), FrameSource::gap_fill);
+        counts_.frames_filled += gap;
+    }
+
+    if (frames64 > 0) {
+        push(chunk.samples.data(), static_cast<std::size_t>(frames64),
+             chunk.squelch_open ? FrameSource::audio : FrameSource::gated);
+        counts_.frames_written += frames64;
+    }
+
+    next_index_ = chunk.sample_index + frames64;
+}
+
+ReadResult AudioRing::read(float* out, std::size_t frames)
+{
+    ReadResult result;
+    if (out == nullptr || frames == 0) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        result.last_source = last_source_;
+        return result;
+    }
+
+    const std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!format_.valid()) {
+        // No stream yet, so there is no channel count and this object does
+        // not know how long the caller's buffer is. It is LEFT UNTOUCHED
+        // and the whole request is reported as starved, which is the one
+        // exception to read() always filling; see the note on the
+        // declaration. The caller takes its format from this object, so it
+        // has nothing to have opened a sink with here.
+        result.frames_starved = frames;
+        counts_.frames_starved += frames;
+        return result;
+    }
+
+    const std::size_t channels = format_.channel_count;
+    const std::size_t take = std::min(frames, buffered_);
+
+    std::size_t done = 0;
+    while (done < take) {
+        const std::size_t run = std::min(take - done, capacity_ - head_);
+        std::memcpy(&out[done * channels], &samples_[head_ * channels],
+                    run * channels * sizeof(float));
+
+        // The last frame of this run, which after the loop is the last
+        // frame handed over. That is deliberately the newest frame going to
+        // the card and not the newest frame in the ring: an indicator on
+        // the latter leads the sound by the whole depth.
+        last_source_ = static_cast<FrameSource>(sources_[head_ + run - 1]);
+
+        head_ = (head_ + run) % capacity_;
+        buffered_ -= run;
+        done += run;
+    }
+    result.frames_from_ring = take;
+
+    if (take < frames) {
+        const std::size_t short_by = frames - take;
+        std::memset(&out[take * channels], 0, short_by * channels * sizeof(float));
+        result.frames_starved = short_by;
+        counts_.frames_starved += short_by;
+
+        // The starve is what the card plays last, so it is what the
+        // indicator says. A read that was partly real audio and partly
+        // invented silence is a dip, and a dip that reads as healthy audio
+        // is the failure this whole enum exists to prevent.
+        last_source_ = FrameSource::starved;
+    }
+
+    result.last_source = last_source_;
+    return result;
+}
+
+void AudioRing::reset()
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+
+    // The format goes too, which is what makes set_depth_millis take effect:
+    // the next chunk then differs from format_ and re-establishes at the
+    // depth the engine has just granted. It also bumps the generation, so a
+    // consumer holding an open sink reopens rather than playing the next
+    // receiver at the last one's rate.
+    format_ = {};
+    capacity_ = 0;
+    head_ = 0;
+    buffered_ = 0;
+    have_stream_ = false;
+    next_index_ = 0;
+    last_source_ = FrameSource::idle;
+    samples_.clear();
+    sources_.clear();
+}
+
+void AudioRing::reset_counts()
+{
+    reset();
+    const std::lock_guard<std::mutex> lock(mutex_);
+    counts_ = {};
+}
+
+RingFormat AudioRing::format() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return format_;
+}
+
+std::uint64_t AudioRing::format_generation() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return format_generation_;
+}
+
+RingCounts AudioRing::counts() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return counts_;
+}
+
+std::size_t AudioRing::frames_buffered() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return buffered_;
+}
+
+std::size_t AudioRing::capacity_frames() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return capacity_;
+}
+
+}  // namespace revenant::ui

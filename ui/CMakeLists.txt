@@ -72,6 +72,12 @@ endif()
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2)
 find_package(CapnProto CONFIG REQUIRED)
 
+# ui/tests, which is a separate executable that links no Qt at all. Optional,
+# so a checkout with no Catch2 in the dynamic triplet still configures and
+# builds the client; see the block above the target for what it covers and
+# what it deliberately does not.
+option(REVENANT_UI_TESTS "Build the ui unit tests" ON)
+
 qt_standard_project_setup(REQUIRES 6.8)
 
 # ---------------------------------------------------------------------------
@@ -271,6 +277,71 @@ if(WIN32)
         message(WARNING
             "windeployqt was not found near ${revenant_qt_bin}. revenant-ui will "
             "build, and running it will need C:/Qt/.../bin on PATH.")
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# ui/tests
+# ---------------------------------------------------------------------------
+#
+# WHAT THIS COVERS AND WHAT IT DOES NOT, SAID FIRST SO NOBODY READS A GREEN
+# RUN AS A WORKING CLIENT.
+#
+# It covers AudioRing: the timeline arithmetic, the gap policy, the overrun
+# and starve policies and the per-frame source that drives the squelch
+# indicator. That class holds every decision on the audio path that can be
+# wrong in a way a person would not hear until much later.
+#
+# It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
+# QAudioSink against WASAPI, and a test binary on a build agent has no output
+# device, so the device picker, the format refusal and the unplug path are
+# verified by running the client and not here. The QML is not covered at all.
+# A green run here means the arithmetic is right. It does not mean the client
+# plays.
+#
+# Catch2 rather than QTest, matching tests/ in the engine tree. It comes from
+# the same manifest as capnproto and it is the only reason ui/vcpkg.json has a
+# second dependency.
+#
+# NO CI JOB CONFIGURES THIS PROJECT. .github/workflows/ci.yml builds the
+# engine tree and the root CMakeLists.txt refuses REVENANT_BUILD_UI outright,
+# because one cache cannot hold both runtimes. So this target is run by
+# whoever builds the client and by nobody who merges, exactly like the
+# static_asserts in models/engine_link.h. Closing that needs a CI leg
+# configuring ui/ against the dynamic triplet and it is not made here.
+if(REVENANT_UI_TESTS)
+    find_package(Catch2 3 CONFIG QUIET)
+    if(Catch2_FOUND)
+        include(CTest)
+        include(Catch)
+
+        # audio_ring.cpp and nothing else of ours. The point of the class is
+        # that it holds no Qt type, and a test target that linked Qt would
+        # stop that being true the first time somebody reached for QString in
+        # there.
+        add_executable(revenant_ui_tests
+            audio/audio_ring.cpp
+            tests/test_audio_ring.cpp
+        )
+
+        target_include_directories(revenant_ui_tests PRIVATE
+            "${REVENANT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+
+        target_link_libraries(revenant_ui_tests PRIVATE Catch2::Catch2WithMain)
+
+        revenant_apply_warnings(revenant_ui_tests)
+
+        catch_discover_tests(revenant_ui_tests
+            PROPERTIES
+                LABELS "ui"
+                TIMEOUT 60
+        )
+    else()
+        message(STATUS
+            "Catch2 was not found in this triplet, so ui/tests is skipped. "
+            "revenant-ui itself is unaffected.")
     endif()
 endif()
 
