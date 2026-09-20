@@ -100,18 +100,28 @@ channelizer, seven demodulators and a raw complex tap, the per-receiver fine
 stage, audio egress to WAV and to the sound card, a synthetic wideband source,
 a file source, an RTL-SDR backend, the full-span spectrum with a waterfall in
 the terminal, auto-scaling measured on the device, the per-receiver passband
-spectrum, the wideband detector, the Cap'n Proto session that carries all of
-it to another process, the Qt client that draws it, and the conformance suite
-that diffs every GPU kernel against a scalar twin and demands identical bits.
-307 tests pass on an RTX 4090.
+spectrum, the wideband detector, the RDS and RBDS decoder, the Cap'n Proto
+session that carries all of it to another process, the Qt client that draws it
+and plays its audio, and the conformance suite that diffs every GPU kernel
+against a scalar twin and demands identical bits. 351 tests pass on an
+RTX 4090. `ui/` is a separate CMake project and has a suite of its own.
 
-What does not: every decoder. Audio and RDS have a shape on the wire and
-nothing behind them, so the client is still silent and the command line is
-what listens; both methods refuse in words saying the surface exists and is
-not wired, because a stream that produced nothing would read as a broken
-radio. The session cannot open or stop a source, and nothing saves a set of
-receivers across a restart. Those are in `docs/rpc.md`, each with what it
-would take and what the gap costs meanwhile.
+What does not: every decoder but RDS. `docs/modes.md` is the scoped list and
+none of the rest of it is written. The session cannot open or stop a source,
+and nothing saves a set of receivers across a restart. Those are in
+`docs/rpc.md`, each with what it would take and what the gap costs meanwhile.
+
+This paragraph used to read "every decoder. Audio and RDS have a shape on the
+wire and nothing behind them, so the client is still silent and the command
+line is what listens; both methods refuse in words saying the surface exists
+and is not wired, because a stream that produced nothing would read as a
+broken radio." Every clause of it is now false. `subscribeAudio` carries
+float32 PCM and the Qt client plays it through a `QAudioSink`, and
+`rdsStation` and `setRdsRegion` serve a real decoder that runs per receiver
+on the engine's completion thread. The retraction is left here rather than
+swapped out because the sentence was an instruction to whoever read it: it
+told them not to look for audio in the client, and there is audio in the
+client.
 
 A client logs in with a pre-shared token before it holds anything at all, and
 still binds loopback by default: the wire is plaintext, so a token crossing a
