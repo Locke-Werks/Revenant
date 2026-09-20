@@ -35,9 +35,16 @@
 # engine configuration, a small block so the window gate is exercised at all,
 # and because the two would otherwise share a fixture that suited neither.
 
+# test_audio_fanout.cpp needs neither a GPU nor a sound card. AudioFanout is
+# the one part of core/engine/engine.h that is pure host code, and the wire
+# cases in tests/rpc rest on it, so its ordering and its failure semantics are
+# refereed here where a failure names the property rather than a subscription
+# that went quiet.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
+    test_audio_fanout.cpp
     test_audio_wasapi.cpp
     test_engine.cpp
     test_engine_passband.cpp

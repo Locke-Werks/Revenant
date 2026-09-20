@@ -14,8 +14,8 @@
 # about the client's own argument checking need no device and say so.
 #
 # The suite runs the engine at pace = 1, which nothing else here does. The
-# spectrum cases need a window to subscribe inside, let a callback fall
-# behind in, and unsubscribe from, and an unthrottled synthetic source
+# spectrum and audio cases need a window to subscribe inside, let a callback
+# fall behind in, and unsubscribe from, and an unthrottled synthetic source
 # retires in tens of milliseconds. That is what the timeouts below are sized
 # against.
 #
@@ -29,6 +29,7 @@ if(TARGET revenant_rpc_server)
         ../support/no_modal_dialogs.cpp
         ../reference/gpu_fixture.cpp
         rpc_fixture.cpp
+        test_rpc_audio.cpp
         test_rpc_auth.cpp
         test_rpc_detect.cpp
         test_rpc_session.cpp

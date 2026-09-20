@@ -1,0 +1,784 @@
+// One receiver's audio, over a real socket, against a running engine.
+//
+// This file replaced the subscribeAudio case in tests/rpc/test_rpc_unwired.cpp
+// on 2026-09-20. That case asserted the server said the surface was not
+// wired, and existed so that the branch wiring it would have to come here and
+// delete something. This is what it was deleted for.
+//
+// THE REACHABLE SHAPES, ENUMERATED BEFORE THE BAR AND NOT AFTER
+//
+// A subscription that certifies one path while reading as though it covers
+// the surface is the failure this project keeps having, so the shapes were
+// listed first and each one has a case:
+//
+//   1. no such receiver                          refused, in the engine's words
+//   2. subscribe twice to one receiver           the second replaces the first
+//   3. two clients on one receiver               both stream, one engine sink
+//   4. the receiver removed mid-stream           ended() with a reason
+//   5. a slow consumer                           drops, counted, and exact
+//   6. the capability dropped without a cancel   the subscription ends anyway
+//   7. a raw tap with no demodulator             refused, in the server's words
+//   8. a squelched receiver                      zeros at the full rate
+//
+// Three of them share one case where sharing is the point: shape 3 is
+// asserted alongside a sink attached directly to the engine, because "two
+// clients work" and "a client does not take the loudspeaker" are the same
+// property seen from two sides. Shape 5's control arm is a fast subscriber on
+// the SAME receiver in the SAME run, which is what separates a drop counter
+// that moved because of the drop from one that moved because of the run.
+//
+// THE SOURCE IS PACED, as it is in test_rpc_spectrum.cpp and nowhere else in
+// this suite. An unthrottled synthetic source retires in tens of
+// milliseconds, which is not a window a case can subscribe inside, fall
+// behind in and then read counters out of. pace = 1 makes the chunk rate the
+// one a radio would produce: at 16384-sample blocks on a 2400032 S/s source
+// that is about 146 chunks a second, and at the engine's default 48 kHz audio
+// rate a chunk is about 328 frames and 6.8 ms of sound.
+
+#include <catch2/catch_test_macros.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "core/dsp/types.h"
+#include "core/engine/engine.h"
+#include "core/error.h"
+#include "core/rpc/client.h"
+#include "core/rpc/types.h"
+#include "tests/reference/gpu_fixture.h"
+#include "tests/reference/reference_diff.h"
+#include "tests/rpc/rpc_fixture.h"
+
+using namespace revenant;
+using test::Harness;
+using test::HarnessOptions;
+
+namespace {
+
+// Two seconds of capture at 16384-sample blocks. Enough that a slow
+// subscriber has something to fall behind by and that a fast one on the same
+// receiver collects a couple of hundred chunks.
+constexpr dsp::SampleIndex kRunSamples = 4'800'064;
+constexpr std::uint32_t kBlockSamples = 16'384;
+
+// A receiver on one of the scene's emitters, in the baseband frame the whole
+// suite uses.
+constexpr std::int64_t kReceiverCenter = 131'072;
+
+[[nodiscard]] HarnessOptions streaming_options() {
+    HarnessOptions options;
+    options.samples = kRunSamples;
+    options.pace = 1.0;
+    options.block_samples = kBlockSamples;
+    return options;
+}
+
+void bring_up(Harness& harness, const HarnessOptions& options) {
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+}
+
+void bring_up_running(Harness& harness, const HarnessOptions& options) {
+    bring_up(harness, options);
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+}
+
+[[nodiscard]] rpc::VrxParams nfm_receiver() {
+    rpc::VrxParams params;
+    params.center = kReceiverCenter;
+    params.bandwidth = 12'000;
+    params.demod = rpc::Demod::Nfm;
+    return params;
+}
+
+// One chunk, reduced to what a case asserts on. The samples themselves are
+// summarised rather than kept: at 146 chunks a second for two seconds,
+// keeping every buffer is megabytes nobody reads, and what the cases ask is
+// whether the stream was contiguous, whether the gate was open and whether
+// anything was in it.
+struct ChunkRecord {
+    std::uint64_t sample_index = 0;
+    std::uint64_t frames = 0;
+    std::uint64_t dropped_before = 0;
+    std::uint32_t rate = 0;
+    std::uint16_t channels = 0;
+    bool squelch_open = false;
+    float peak = 0.0F;
+};
+
+// A subscriber's record of what arrived, safe to read from the test thread
+// while the callback is still running on the client's event loop thread.
+//
+// Held through a shared_ptr the callbacks capture by value, for the reason
+// FrameLog is: the callbacks outlive the statement that installed them and
+// are dropped by the client's loop thread, which is a worse place to find a
+// dangling reference than a compile error would have been.
+class AudioLog {
+public:
+    // Client event loop thread.
+    void record(const rpc::AudioChunk& chunk) {
+        std::chrono::milliseconds delay{0};
+        {
+            const std::lock_guard<std::mutex> held(lock_);
+            delay = delay_;
+
+            ChunkRecord entry;
+            entry.sample_index = chunk.sample_index;
+            entry.frames = chunk.frames();
+            entry.dropped_before = chunk.frames_dropped_before;
+            entry.rate = chunk.sample_rate;
+            entry.channels = chunk.channel_count;
+            entry.squelch_open = chunk.squelch_open;
+            for (const float sample : chunk.samples) {
+                entry.peak = std::max(entry.peak, std::abs(sample));
+            }
+            chunks_.push_back(entry);
+        }
+
+        // Outside the lock, so the test thread reading chunks() is not held
+        // for the length of a deliberately slow callback. The client does not
+        // answer the chunk() call until this returns, so the engine's queue
+        // for this subscription is what fills.
+        if (delay.count() > 0) {
+            std::this_thread::sleep_for(delay);
+        }
+    }
+
+    // Client event loop thread.
+    void end(const std::string& reason) {
+        const std::lock_guard<std::mutex> held(lock_);
+        ended_ = true;
+        reason_ = reason;
+    }
+
+    [[nodiscard]] std::vector<ChunkRecord> chunks() const {
+        const std::lock_guard<std::mutex> held(lock_);
+        return chunks_;
+    }
+
+    [[nodiscard]] std::size_t size() const {
+        const std::lock_guard<std::mutex> held(lock_);
+        return chunks_.size();
+    }
+
+    [[nodiscard]] bool ended() const {
+        const std::lock_guard<std::mutex> held(lock_);
+        return ended_;
+    }
+
+    [[nodiscard]] std::string reason() const {
+        const std::lock_guard<std::mutex> held(lock_);
+        return reason_;
+    }
+
+    void set_callback_delay(std::chrono::milliseconds delay) {
+        const std::lock_guard<std::mutex> held(lock_);
+        delay_ = delay;
+    }
+
+private:
+    mutable std::mutex lock_;
+    std::vector<ChunkRecord> chunks_;
+    std::chrono::milliseconds delay_{0};
+    bool ended_ = false;
+    std::string reason_;
+};
+
+[[nodiscard]] rpc::Client::AudioCallback into(std::shared_ptr<AudioLog> log) {
+    return [log](const rpc::AudioChunk& chunk) { log->record(chunk); };
+}
+
+[[nodiscard]] rpc::Client::AudioEndedCallback ending(std::shared_ptr<AudioLog> log) {
+    return [log](const std::string& reason) { log->end(reason); };
+}
+
+[[nodiscard]] std::size_t wait_for_chunks(const AudioLog& log, std::size_t wanted,
+                                          int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (log.size() >= wanted) {
+            return log.size();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return log.size();
+}
+
+[[nodiscard]] bool wait_for_ended(const AudioLog& log, int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (log.ended()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return log.ended();
+}
+
+// The invariant the schema states on AudioChunk::framesDroppedBefore, checked
+// on every consecutive pair:
+//
+//   sampleIndex == previous.sampleIndex + previous frame count
+//                  + framesDroppedBefore
+//
+// It is the whole reason a drop counted on this wire can be told apart from
+// anything else that might have moved a counter. The engine's chunk stream
+// for one receiver is contiguous by construction, so every frame missing from
+// what arrived was evicted by this subscription's queue, and front eviction
+// puts those frames exactly between the chunk before and the chunk after.
+// Returns the total that was accounted for as an eviction.
+[[nodiscard]] std::uint64_t check_contiguous(const std::vector<ChunkRecord>& chunks) {
+    std::uint64_t accounted = 0;
+    for (std::size_t i = 1; i < chunks.size(); ++i) {
+        const ChunkRecord& previous = chunks[i - 1];
+        const ChunkRecord& current = chunks[i];
+        INFO("chunk " << i << " at index " << current.sample_index << " follows index "
+                      << previous.sample_index << " of " << previous.frames
+                      << " frames, with " << current.dropped_before << " dropped between");
+        REQUIRE(current.sample_index ==
+                previous.sample_index + previous.frames + current.dropped_before);
+        accounted += current.dropped_before;
+    }
+    return accounted;
+}
+
+}  // namespace
+
+// --- shape 1, shape 7 -------------------------------------------------------
+
+TEST_CASE("subscribeAudio refuses a receiver that does not exist",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    auto log = std::make_shared<AudioLog>();
+    auto refused = harness.client().subscribe_audio(9'999, 0, into(log), ending(log));
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+
+    // The engine's own sentence, and the OPPOSITE of what this call used to
+    // answer. While the surface was unwired it refused before reading its
+    // arguments, on purpose, because "no receiver 9999 is registered" would
+    // have implied a good id worked. Now one does, so naming the receiver is
+    // the true answer rather than the misleading one.
+    CHECK(refused.error().message.find("9999") != std::string::npos);
+    CHECK(refused.error().message.find("is registered") != std::string::npos);
+    CHECK(refused.error().message.find("is not wired") == std::string::npos);
+}
+
+TEST_CASE("subscribeAudio refuses a raw tap", "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    rpc::VrxParams params = nfm_receiver();
+    params.demod = rpc::Demod::Raw;
+    auto vrx = harness.client().add_vrx(params);
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto refused = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+
+    // Refused by the server rather than by the engine, which would install a
+    // sink on a raw tap happily. What comes out of one is interleaved complex
+    // I/Q at the coarse channel rate, which a client playing it as
+    // two-channel PCM renders as noise at the wrong speed.
+    CHECK(refused.error().message.find("raw tap") != std::string::npos);
+
+    // And the receiver survives the refusal.
+    auto ids = harness.client().vrx_ids();
+    INFO(test::message_of(ids));
+    REQUIRE(ids.has_value());
+    CHECK(ids->size() == 1);
+}
+
+// --- the stream itself, plus the depth clamp --------------------------------
+
+TEST_CASE("audio streams as contiguous float32 PCM and reports the depth it granted",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+
+    // Zero asks for the default and must come back as the default rather
+    // than as zero: a client cannot tell "you got what you asked for" from
+    // "the field was ignored" otherwise.
+    auto granted = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    INFO(test::message_of(granted));
+    REQUIRE(granted.has_value());
+    CHECK(*granted == 500);
+
+    const std::size_t seen = wait_for_chunks(*log, 40, 4000);
+    INFO("chunks received: " << seen);
+    REQUIRE(seen >= 40);
+
+    const auto chunks = log->chunks();
+    REQUIRE_FALSE(chunks.empty());
+
+    // The rate and the channel count are on every chunk rather than cached
+    // from VrxStatus, and they have to be the engine's.
+    for (const ChunkRecord& chunk : chunks) {
+        CHECK(chunk.rate == 48'000);
+        CHECK(chunk.channels == 1);
+        CHECK(chunk.frames > 0);
+    }
+
+    // A fast subscriber loses nothing, so every chunk butts against the one
+    // before it and no frames are accounted for as evictions. This is the
+    // control the slow case below is read against.
+    CHECK(check_contiguous(chunks) == 0);
+
+    // The gate is open by default: VrxParams::squelch_dbfs defaults to
+    // -200 dBFS, which is under the arithmetic's own floor.
+    CHECK(chunks.front().squelch_open);
+
+    // Something is actually in the samples. A stream of correctly indexed
+    // silence would pass every check above.
+    const bool any_signal = std::ranges::any_of(
+        chunks, [](const ChunkRecord& chunk) { return chunk.peak > 1e-6F; });
+    CHECK(any_signal);
+
+    auto stats = harness.client().audio_stats(*vrx);
+    INFO(test::message_of(stats));
+    REQUIRE(stats.has_value());
+    CHECK(stats->frames_sent > 0);
+    CHECK(stats->frames_dropped == 0);
+    CHECK(stats->drop_events == 0);
+
+    // Non-zero only once a chunk has arrived to set it, which is the
+    // retraction the schema carries: the server cannot turn milliseconds
+    // into frames before it knows the receiver's audio rate and a chunk's
+    // length. 500 ms at 48 kHz is 24000 frames, and the two-chunk floor is
+    // far below that here.
+    CHECK(stats->buffer_frames == 24'000);
+
+    harness.client().unsubscribe_audio(*vrx);
+
+    // Never for a cancel this client asked for.
+    CHECK_FALSE(log->ended());
+}
+
+TEST_CASE("a buffer depth outside the clamp is reported rather than applied silently",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+
+    // Under the floor. A depth of one millisecond is 48 frames, which is a
+    // seventh of a chunk, and a queue enforcing it would evict everything
+    // while every other check still passed.
+    auto low = harness.client().subscribe_audio(*vrx, 1, into(log), ending(log));
+    INFO(test::message_of(low));
+    REQUIRE(low.has_value());
+    CHECK(*low == 20);
+
+    // Over the ceiling.
+    auto high = harness.client().subscribe_audio(*vrx, 60'000, into(log), ending(log));
+    INFO(test::message_of(high));
+    REQUIRE(high.has_value());
+    CHECK(*high == 5'000);
+
+    // And a value inside it comes back untouched, which is the control: a
+    // clamp that returned a constant would satisfy both checks above.
+    auto inside = harness.client().subscribe_audio(*vrx, 250, into(log), ending(log));
+    INFO(test::message_of(inside));
+    REQUIRE(inside.has_value());
+    CHECK(*inside == 250);
+
+    harness.client().unsubscribe_audio(*vrx);
+}
+
+// --- shape 5, with its control arm ------------------------------------------
+
+TEST_CASE("a slow subscriber loses chunks, and the count is exactly what it lost",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    // The control arm, on the SAME receiver and in the SAME run. Without it a
+    // non-zero drop count says only that something was lost somewhere; with
+    // it, the two subscriptions saw one identical stream and only one of them
+    // lost anything.
+    auto fast_client = harness.connect_another();
+    INFO(test::message_of(fast_client));
+    REQUIRE(fast_client.has_value());
+
+    auto fast_log = std::make_shared<AudioLog>();
+    auto fast = (*fast_client)->subscribe_audio(*vrx, 0, into(fast_log), ending(fast_log));
+    INFO(test::message_of(fast));
+    REQUIRE(fast.has_value());
+
+    auto slow_log = std::make_shared<AudioLog>();
+
+    // 20 ms of depth against a chunk that is 6.8 ms of sound, so the queue
+    // holds about three chunks, and a callback that takes 50 ms per chunk
+    // against a stream producing one every 6.8. The queue fills within a few
+    // chunks and evicts from the front from then on.
+    slow_log->set_callback_delay(std::chrono::milliseconds(50));
+    auto slow = harness.client().subscribe_audio(*vrx, 20, into(slow_log), ending(slow_log));
+    INFO(test::message_of(slow));
+    REQUIRE(slow.has_value());
+    CHECK(*slow == 20);
+
+    REQUIRE(wait_for_chunks(*fast_log, 150, 6000) >= 150);
+    REQUIRE(wait_for_chunks(*slow_log, 8, 6000) >= 8);
+
+    // Stop delaying before anything is read back: audio_stats runs on the
+    // client's event loop thread and would otherwise queue behind a sleep.
+    slow_log->set_callback_delay(std::chrono::milliseconds(0));
+
+    const auto slow_chunks = slow_log->chunks();
+    const auto fast_chunks = fast_log->chunks();
+
+    // THE CONTROL. The fast subscriber on the same receiver lost nothing at
+    // all, so the stream itself had no gap in it and the engine dropped
+    // nothing upstream. Anything the slow one is missing was evicted from its
+    // own queue.
+    CHECK(check_contiguous(fast_chunks) == 0);
+
+    auto fast_stats = (*fast_client)->audio_stats(*vrx);
+    INFO(test::message_of(fast_stats));
+    REQUIRE(fast_stats.has_value());
+    CHECK(fast_stats->frames_dropped == 0);
+    CHECK(fast_stats->drop_events == 0);
+
+    // THE COUNTER MOVED. Not structurally-always-zero like the one
+    // core/rpc/client.h retracts: a chunk is taken on the engine's completion
+    // thread and drained at the client's pace, so two threads run
+    // concurrently with the slow one outside the process.
+    const std::uint64_t evicted = check_contiguous(slow_chunks);
+    INFO("slow subscriber received " << slow_chunks.size() << " chunks and is missing "
+                                     << evicted << " frames between them");
+    CHECK(evicted > 0);
+
+    auto slow_stats = harness.client().audio_stats(*vrx);
+    INFO(test::message_of(slow_stats));
+    REQUIRE(slow_stats.has_value());
+    CHECK(slow_stats->frames_dropped > 0);
+    CHECK(slow_stats->drop_events > 0);
+
+    // AND THE TWO AGREE. framesDroppedBefore is reset when a chunk goes out,
+    // so the frames the client can see between the chunks it received are
+    // those evicted up to the last send; the counter also holds whatever was
+    // evicted after it. Equal would be wrong and less would mean the counter
+    // was moved by something other than these evictions.
+    CHECK(slow_stats->frames_dropped >= evicted);
+
+    // The depth the queue is actually enforcing: 20 ms at 48 kHz is 960
+    // frames, comfortably above the two-chunk floor of about 656.
+    CHECK(slow_stats->buffer_frames == 960);
+
+    // Neither subscription's loss reached the receiver's own counter. That
+    // is the narrowing in core/engine/vrx.h: a drop belongs to a consumer,
+    // and one receiver here has two of them with different answers.
+    auto status = harness.client().vrx_status(*vrx);
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+    CHECK(status->audio_dropped == 0);
+}
+
+// --- shape 2 ----------------------------------------------------------------
+
+TEST_CASE("subscribing to one receiver twice replaces the first subscription",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto first = std::make_shared<AudioLog>();
+    auto opened = harness.client().subscribe_audio(*vrx, 0, into(first), ending(first));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    REQUIRE(wait_for_chunks(*first, 20, 4000) >= 20);
+
+    auto second = std::make_shared<AudioLog>();
+    auto replaced = harness.client().subscribe_audio(*vrx, 0, into(second), ending(second));
+    INFO(test::message_of(replaced));
+    REQUIRE(replaced.has_value());
+
+    const std::size_t first_at_swap = first->size();
+    REQUIRE(wait_for_chunks(*second, 20, 4000) >= 20);
+
+    // The replacement is fed and the original is not. A handful more may have
+    // reached the first between the replace and the read, because the cancel
+    // and a chunk already on the wire can cross, so this is a small margin
+    // rather than equality.
+    CHECK(first->size() <= first_at_swap + 4);
+
+    // The first was cancelled by this client, not ended by the engine, so it
+    // hears nothing about it.
+    CHECK_FALSE(first->ended());
+
+    // And the replacement's own stream is whole rather than starting mid-gap.
+    CHECK(check_contiguous(second->chunks()) == 0);
+
+    harness.client().unsubscribe_audio(*vrx);
+}
+
+// --- shape 3, and the loudspeaker ------------------------------------------
+
+TEST_CASE("two clients and a local sink share one receiver's audio",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    // Attached FIRST and directly on the engine, which is what a host playing
+    // audio out of a sound card in the same process looks like. Before the
+    // composition seam, the first subscribeAudio below would have replaced
+    // this and nothing anywhere would have said so.
+    std::atomic<std::uint64_t> local_frames{0};
+    auto token = harness.engine().attach_audio_sink(
+        engine::VrxId{static_cast<std::uint32_t>(*vrx)},
+        [&local_frames](const engine::AudioChunk& chunk) -> Status {
+            local_frames.fetch_add(chunk.samples.size() / std::max(chunk.channels, 1U),
+                                   std::memory_order_relaxed);
+            return {};
+        });
+    INFO(test::message_of(token));
+    REQUIRE(token.has_value());
+
+    auto other = harness.connect_another();
+    INFO(test::message_of(other));
+    REQUIRE(other.has_value());
+
+    auto mine = std::make_shared<AudioLog>();
+    auto theirs = std::make_shared<AudioLog>();
+
+    auto one = harness.client().subscribe_audio(*vrx, 0, into(mine), ending(mine));
+    INFO(test::message_of(one));
+    REQUIRE(one.has_value());
+
+    auto two = (*other)->subscribe_audio(*vrx, 0, into(theirs), ending(theirs));
+    INFO(test::message_of(two));
+    REQUIRE(two.has_value());
+
+    REQUIRE(wait_for_chunks(*mine, 40, 4000) >= 40);
+    REQUIRE(wait_for_chunks(*theirs, 40, 4000) >= 40);
+
+    const std::uint64_t local_at_check = local_frames.load(std::memory_order_relaxed);
+    CHECK(local_at_check > 0);
+
+    // Both wire subscriptions saw the same stream, whole.
+    CHECK(check_contiguous(mine->chunks()) == 0);
+    CHECK(check_contiguous(theirs->chunks()) == 0);
+
+    // One client leaving takes nothing else with it.
+    (*other)->unsubscribe_audio(*vrx);
+    const std::size_t mine_at_leave = mine->size();
+    REQUIRE(wait_for_chunks(*mine, mine_at_leave + 10, 4000) >= mine_at_leave + 10);
+
+    // And the local sink is still being fed, which is the whole point.
+    harness.client().unsubscribe_audio(*vrx);
+    const std::uint64_t local_after = local_frames.load(std::memory_order_relaxed);
+    CHECK(local_after > local_at_check);
+
+    // The last wire subscription going away detached the server's entry and
+    // only the server's: this token is still live, so the fan-out is still
+    // there and still holding it.
+    auto detached = harness.engine().detach_audio_sink(
+        engine::VrxId{static_cast<std::uint32_t>(*vrx)}, *token);
+    INFO(test::message_of(detached));
+    CHECK(detached.has_value());
+
+    // With nothing left attached the fan-out is gone, so the same token
+    // detaches nothing rather than finding a stale one.
+    auto again = harness.engine().detach_audio_sink(
+        engine::VrxId{static_cast<std::uint32_t>(*vrx)}, *token);
+    CHECK_FALSE(again.has_value());
+}
+
+// --- shape 4 ----------------------------------------------------------------
+
+TEST_CASE("removing a receiver mid-stream tells its listeners in words",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto opened = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    REQUIRE(wait_for_chunks(*log, 20, 4000) >= 20);
+
+    const auto removed = harness.client().remove_vrx(*vrx);
+    INFO(test::message_of(removed));
+    REQUIRE(removed.has_value());
+
+    // Silence is what a quiet channel with the squelch shut sounds like, so a
+    // stream that simply stopped would be indistinguishable from one nobody
+    // is talking on. This is the only thing in the stream that says which.
+    REQUIRE(wait_for_ended(*log, 4000));
+    INFO(log->reason());
+    CHECK(log->reason().find("removed") != std::string::npos);
+
+    // And the subscription is really finished rather than merely quiet.
+    const std::size_t at_end = log->size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(log->size() == at_end);
+}
+
+// --- shape 6 ----------------------------------------------------------------
+
+TEST_CASE("a client that goes away without cancelling takes its subscription and nothing else",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto mine = std::make_shared<AudioLog>();
+    auto one = harness.client().subscribe_audio(*vrx, 0, into(mine), ending(mine));
+    INFO(test::message_of(one));
+    REQUIRE(one.has_value());
+
+    auto leaver_log = std::make_shared<AudioLog>();
+    {
+        auto leaver = harness.connect_another();
+        INFO(test::message_of(leaver));
+        REQUIRE(leaver.has_value());
+
+        auto two =
+            (*leaver)->subscribe_audio(*vrx, 0, into(leaver_log), ending(leaver_log));
+        INFO(test::message_of(two));
+        REQUIRE(two.has_value());
+        REQUIRE(wait_for_chunks(*leaver_log, 20, 4000) >= 20);
+
+        // Destroyed without unsubscribing, which is what a client that
+        // crashed looks like from here: the AudioSubscription capability is
+        // released with the connection and the server's destructor is what
+        // ends the subscription.
+    }
+
+    const std::size_t leaver_at_exit = leaver_log->size();
+    const std::size_t mine_at_exit = mine->size();
+
+    // The survivor keeps streaming.
+    REQUIRE(wait_for_chunks(*mine, mine_at_exit + 20, 4000) >= mine_at_exit + 20);
+
+    // And the one that left is finished.
+    CHECK(leaver_log->size() == leaver_at_exit);
+
+    harness.client().unsubscribe_audio(*vrx);
+}
+
+// --- shape 8 ----------------------------------------------------------------
+
+TEST_CASE("a squelched receiver sends silence at the full rate rather than stopping",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    rpc::VrxParams params = nfm_receiver();
+
+    // Above full scale, so the gate is shut whatever the scene is doing. The
+    // default is -200 dBFS, which is under the arithmetic's own floor and so
+    // never closes; that default is why the mute path went unexercised for as
+    // long as it did.
+    params.squelch_dbfs = 20.0;
+
+    auto vrx = harness.client().add_vrx(params);
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto opened = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    REQUIRE(wait_for_chunks(*log, 40, 4000) >= 40);
+    const auto chunks = log->chunks();
+
+    for (const ChunkRecord& chunk : chunks) {
+        // The gate, said on the chunk rather than left to a vrxStatus poll,
+        // so an indicator follows the audio instead of lagging it.
+        CHECK_FALSE(chunk.squelch_open);
+
+        // Zeros the engine wrote, not a quiet band.
+        CHECK(chunk.peak == 0.0F);
+    }
+
+    // AT THE FULL RATE AND WITH THE TIMELINE WHOLE, which is the difference
+    // between a closed gate and a drop. Nothing here is missing and nothing
+    // had to be filled.
+    CHECK(check_contiguous(chunks) == 0);
+
+    auto stats = harness.client().audio_stats(*vrx);
+    INFO(test::message_of(stats));
+    REQUIRE(stats.has_value());
+    CHECK(stats->frames_dropped == 0);
+
+    // The regression this case exists for. Until 2026-09-20 the squelch mute
+    // was the only site that incremented this counter, so a receiver with the
+    // gate shut reported a dropout for every frame of a channel that was
+    // simply quiet.
+    auto status = harness.client().vrx_status(*vrx);
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+    CHECK_FALSE(status->squelch_open);
+    CHECK(status->audio_samples > 0);
+    CHECK(status->audio_dropped == 0);
+
+    harness.client().unsubscribe_audio(*vrx);
+}
