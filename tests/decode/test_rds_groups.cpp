@@ -734,21 +734,47 @@ TEST_CASE("noise alone does not produce decoded groups for long", "[rds]") {
     // Seeded and printed, per docs/conventions.md. The claim under test is not
     // "noise never syncs": EN 50067 Annex C clause C.2 says a false anchor
     // turns up about six times a second and the whole acquisition rule exists
-    // because of it. The claim is that a decoder handed nothing but noise for
-    // a whole second does not sit in sync producing confident garbage.
+    // because of it. The claim is that a decoder handed nothing but noise does
+    // not sit in sync producing confident garbage.
+    //
+    // WHAT THIS CASE USED TO CHECK. Until 2026-09-20 it asserted only that the
+    // decoder was not synced on the last bit and that no PI had landed. A
+    // decoder that had spent the whole second in sync emitting groups passed
+    // it as long as it had dropped out again by the end, which is the one
+    // outcome the name promises against. groups_decoded() is asserted now, and
+    // the run is ten seconds rather than one.
+    //
+    // The bit comes off the generator's low bit rather than through a
+    // uniform_int_distribution, because that distribution's mapping is not
+    // specified by the standard and these are exact counts rather than bounds.
     constexpr std::uint64_t kSeed = 20260920;
     INFO("seed " << kSeed);
 
     RdsDecoder decoder;
     std::mt19937_64 generator(kSeed);
-    std::uniform_int_distribution<int> coin(0, 1);
     for (int i = 0; i < 1187; ++i) {  // one second at 1187.5 bit/s
-        decoder.feed(coin(generator) != 0);
+        decoder.feed((generator() & 1u) != 0);
     }
 
     INFO(std::format("acquisitions {} losses {} groups {}", decoder.sync_acquisitions(),
                      decoder.sync_losses(), decoder.groups_decoded()));
     CHECK_FALSE(decoder.synced());
+    CHECK_FALSE(decoder.state().pi_valid);
+    CHECK(decoder.sync_acquisitions() == 0);
+    CHECK(decoder.groups_decoded() == 0);
+    CHECK(decoder.blocks_good() == 0);
+
+    // Ten more seconds, so clause C.2's false anchor has had something like
+    // sixty chances at the four-block rule rather than six. This is the "for
+    // long" in the name.
+    for (int i = 0; i < 118750; ++i) {
+        decoder.feed((generator() & 1u) != 0);
+    }
+    INFO(std::format("after eleven seconds: acquisitions {} groups {}",
+                     decoder.sync_acquisitions(), decoder.groups_decoded()));
+    CHECK_FALSE(decoder.synced());
+    CHECK(decoder.sync_acquisitions() == 0);
+    CHECK(decoder.groups_decoded() == 0);
     CHECK_FALSE(decoder.state().pi_valid);
 }
 
