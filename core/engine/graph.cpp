@@ -623,10 +623,15 @@ struct Graph::Impl {
         // left. dsp::VrxShape is now the whole question and both ask it.
         dsp::VrxShape shape{};
 
-        // False until the request has been planned once. A receiver whose
-        // request could not be resolved at all is one add_vrx would already
-        // have refused, so this is false only for the graph's own raw tap
-        // built before a placement could be planned.
+        // False when the request could not be planned at all, in which case
+        // set_vrx_params has nothing to compare against and lets the
+        // planner's own refusal answer.
+        //
+        // Only the raw tap reaches that state. Every other stage is built
+        // by a factory that plans, so an unplannable request fails in
+        // add_vrx before a slot exists; RawTapStage is a buffer copy of a
+        // channel and never asks the planner, so a raw receiver whose
+        // passband the planner would refuse is still added.
         bool shape_known = false;
 
         // The recording thread's own copy, so that a retune landing while a
