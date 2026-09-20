@@ -420,6 +420,11 @@ void PassbandItem::takeFrame()
     frame_axis_ = liveAxis();
     have_frame_ = true;
 
+    // A frame is the only thing that can move the pane's span, because the
+    // axis comes off the frame's own geometry. So this is where a release
+    // that armed the ease finds out whether the engine changed the rate.
+    tryRescale();
+
     rebuildQuads();
     update();
 }
@@ -437,6 +442,7 @@ void PassbandItem::onConnectionChanged()
     columns_.clear();
     levels_.clear();
     frame_axis_ = {};
+    rescale_armed_ = false;
     rescaling_ = false;
     rescale_tick_.stop();
     grab_ = PassbandGrab::None;
@@ -498,6 +504,10 @@ void PassbandItem::mousePressEvent(QMouseEvent* event)
     // The mapping is taken now and held until release. See the header: the
     // pane's span is derived from the passband, so an axis that followed the
     // drag would move the handle out from under the pointer.
+    //
+    // A new gesture supersedes an ease that was still waiting for the last
+    // one's answer: the mapping taken below is the one to come back to.
+    rescale_armed_ = false;
     rescaling_ = false;
     rescale_tick_.stop();
     frozen_ = drawnAxis();
@@ -587,7 +597,7 @@ void PassbandItem::mouseReleaseEvent(QMouseEvent* event)
         // break in the audio for the whole drag rather than one per pixel.
         link_->endReceiverDrag();
     }
-    beginRescale();
+    armRescale();
 
     rebuildQuads();
     rebuildReadout();
@@ -596,30 +606,69 @@ void PassbandItem::mouseReleaseEvent(QMouseEvent* event)
     event->accept();
 }
 
-void PassbandItem::beginRescale()
+void PassbandItem::armRescale()
 {
-    const Axis live = liveAxis();
-    if (!live.valid() || !frozen_.valid()) {
-        rescaling_ = false;
-        rescale_tick_.stop();
-        return;
-    }
-
-    // Nothing to animate when the span did not move, which is every drag
-    // that stayed inside one demodulation rate. Compared as a fraction
-    // rather than in hertz because the pane is anything from a few hundred
-    // hertz to a couple of hundred kilohertz wide.
-    const double moved = std::abs(live.span_hz() - frozen_.span_hz());
-    if (moved < 0.001 * std::max(live.span_hz(), 1.0)) {
-        rescaling_ = false;
-        rescale_tick_.stop();
+    // ARMED AT RELEASE, STARTED WHEN THE AXIS ACTUALLY MOVES, WHICH IS NOT
+    // THE SAME MOMENT AND USED TO BE TREATED AS ONE.
+    //
+    // The pane's span is the demodulation rate, and the demodulation rate
+    // is the engine's answer. At release the width change has only been
+    // queued: EngineLink holds it back for the length of the gesture, the
+    // supervisor thread has still to make the call, and the new rate
+    // arrives on a later passband frame. So liveAxis() here is the span the
+    // pane already has, the comparison against the frozen mapping found
+    // nothing had moved, and the easing this function exists for never ran
+    // for the one case it exists for: the pane snapped when the new rate
+    // landed.
+    //
+    // Starting the animation blind instead would be worse. It would ease
+    // towards a span that is about to change, and the change would land
+    // mid-ease.
+    if (!frozen_.valid()) {
+        rescale_armed_ = false;
         return;
     }
 
     rescale_from_ = frozen_;
-    rescaling_ = true;
+    rescale_armed_ = true;
     rescale_clock_.start();
-    rescale_tick_.start();
+
+    // A pan the engine took live may already have moved the span before the
+    // pointer came up, in which case there is nothing to wait for.
+    tryRescale();
+}
+
+void PassbandItem::tryRescale()
+{
+    if (!rescale_armed_) {
+        return;
+    }
+
+    const Axis live = liveAxis();
+    if (!live.valid()) {
+        return;
+    }
+
+    // Compared as a fraction rather than in hertz because the pane is
+    // anything from a few hundred hertz to a couple of hundred kilohertz
+    // wide.
+    const double moved = std::abs(live.span_hz() - rescale_from_.span_hz());
+    if (moved >= 0.001 * std::max(live.span_hz(), 1.0)) {
+        rescale_armed_ = false;
+        rescaling_ = true;
+        rescale_clock_.start();
+        rescale_tick_.start();
+        return;
+    }
+
+    // A drag that stayed inside one demodulation rate is the ordinary case
+    // and there is nothing to animate, but this cannot be told apart from
+    // an answer still in flight without waiting. The deadline is what stops
+    // an arm that will never fire from easing some unrelated rate change
+    // minutes later out of a stale mapping.
+    if (rescale_clock_.elapsed() >= kRescaleArmMs) {
+        rescale_armed_ = false;
+    }
 }
 
 void PassbandItem::stepRescale()
@@ -752,7 +801,7 @@ void PassbandItem::keyPressEvent(QKeyEvent* event)
                 at_limit_ = false;
                 setCursor(Qt::ArrowCursor);
                 link_->endReceiverDrag();
-                beginRescale();
+                armRescale();
                 rebuildQuads();
                 rebuildReadout();
                 emit dragChanged();

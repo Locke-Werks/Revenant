@@ -34,8 +34,15 @@
 // mid-drag are drawn into the frozen mapping BY THEIR OWN AXIS, so a
 // narrower frame letterboxes and a wider one is cropped; neither is
 // stretched, because a stretched frame is a picture claiming a signal is
-// somewhere it is not. On release the mapping eases back to the live one
-// over kRescaleMs, so the operator sees the span change rather than a jump.
+// somewhere it is not. The mapping then eases back to the live one over
+// kRescaleMs, so the operator sees the span change rather than a jump.
+//
+// THE EASE IS ARMED AT THE RELEASE AND STARTED BY THE FRAME THAT MOVES THE
+// SPAN, WHICH IS NOT THE SAME MOMENT. This paragraph used to say "on
+// release", and the code did too, which is why the easing never ran for the
+// case it was written for: at the release the width change has only been
+// queued, so the span is still the one the pane already had and the
+// comparison found nothing to animate. See kRescaleArmMs.
 //
 // WHY THE DISPLAY DOES NOT WAIT FOR THE ENGINE
 //
@@ -76,6 +83,22 @@ inline constexpr double kEdgeGrabSlackPx = 8.0;
 // changed it. Long enough to read as a movement rather than a jump, short
 // enough not to be waited on.
 inline constexpr int kRescaleMs = 150;
+
+// How long after a gesture the pane keeps waiting for the span to move
+// before deciding it is not going to.
+//
+// The easing cannot start at the release. The width change is queued there,
+// not applied: EngineLink holds it for the length of the gesture, the
+// supervisor thread makes the call afterwards, and the new demodulation
+// rate arrives on a later passband frame. So the release ARMS the easing
+// and the frame that carries a different span starts it.
+//
+// Two seconds covers the supervisor's wake, a round trip and a frame with
+// room to spare, and it is short enough that an arm which never fires,
+// which is every drag that stayed inside one rate, cannot still be sitting
+// there when some unrelated change moves the span later. Nothing is drawn
+// differently while armed; the pane is already on the live axis.
+inline constexpr int kRescaleArmMs = 2'000;
 
 // What a press landed on.
 enum class PassbandGrab : std::uint8_t {
@@ -183,7 +206,10 @@ private:
     void resizeColumns(int columns, std::size_t bins);
     [[nodiscard]] int deviceColumns() const;
 
-    void beginRescale();
+    // Arms the ease at the end of a gesture; starts it when a frame brings
+    // a span that actually differs. See kRescaleArmMs.
+    void armRescale();
+    void tryRescale();
     void stepRescale();
 
     EngineLink* link_ = nullptr;
@@ -226,8 +252,15 @@ private:
     Axis frozen_{};
     Axis rescale_from_{};
     QTimer rescale_tick_;
-    QElapsedTimer rescale_clock_;
+
+    // The gesture ended and the span has not moved yet. See kRescaleArmMs.
+    bool rescale_armed_ = false;
     bool rescaling_ = false;
+
+    // Times whichever of the two phases is running: the wait while armed,
+    // then the ease once it starts. One clock rather than two, because the
+    // phases never overlap and tryRescale restarts it at the handover.
+    QElapsedTimer rescale_clock_;
 
     // Which edge the keyboard moves. Both means the passband pans.
     PassbandGrab selection_ = PassbandGrab::Band;
