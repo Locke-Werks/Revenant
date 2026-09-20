@@ -243,6 +243,61 @@ inline constexpr std::array<double, 3> kRolloffs{0.2, 0.35, 0.5};
     return spec;
 }
 
+// One station that fades instead of stopping.
+//
+// siggen has no level ramp: an emitter is placed at one SNR for one window.
+// A fade is therefore a staircase of placements at the same carrier offset,
+// back to back, each a step quieter than the last. Twelve steps of a quarter
+// second over three seconds is 0.67 dB a step, which the detector's own
+// second of integration smooths into a ramp long before it reaches a
+// decision.
+//
+// 8 dB over 3 s, the case the residual rule used to lose: 2.67 dB/s against
+// the 4.343 dB/s an exponential average falls at with no input. Two seconds
+// of steady signal before it so there is a track to lose, and two after it so
+// a track dropped mid-fade cannot be hidden by the scene ending.
+[[nodiscard]] siggen::SceneSpec fading_scene() {
+    constexpr double kSteady = 2.0;
+    constexpr double kFade = 3.0;
+    constexpr std::size_t kSteps = 12;
+    constexpr double kHighDb = 30.0;
+    constexpr double kFallDb = 8.0;
+
+    siggen::SceneSpec spec;
+    spec.rate = kRate;
+    spec.center_hz = 98'100'000;
+    spec.duration_samples = static_cast<dsp::SampleIndex>(
+        std::llround((kSteady + kFade + kSteady) * static_cast<double>(kRate)));
+    spec.seed = 4242;
+    spec.noise_power_full_band_dbfs = kNoiseDbfs;
+    spec.worker_threads = 1;
+
+    const auto at = [](double seconds) {
+        return static_cast<dsp::SampleIndex>(std::llround(seconds * static_cast<double>(kRate)));
+    };
+
+    const auto place = [&](double start, double end, double snr_db, std::uint64_t seed) {
+        siggen::EmitterPlacement placement;
+        placement.modulator = psk_of(111'000.0, 0, seed);
+        placement.use_snr = true;
+        placement.snr_in_occupied_bandwidth_db = snr_db;
+        placement.start_sample = at(start);
+        placement.end_sample = at(end);
+        spec.emitters.push_back(placement);
+    };
+
+    place(0.0, kSteady, kHighDb, 50);
+    for (std::size_t i = 0; i < kSteps; ++i) {
+        const double step = kFade / static_cast<double>(kSteps);
+        const double from = kSteady + static_cast<double>(i) * step;
+        const double level =
+            kHighDb - kFallDb * (static_cast<double>(i) + 1.0) / static_cast<double>(kSteps);
+        place(from, from + step, level, 51 + i);
+    }
+    place(kSteady + kFade, kSteady + kFade + kSteady, kHighDb - kFallDb, 70);
+    return spec;
+}
+
 // The same ladder, keyed. Each rung transmits once, in a window chosen so the
 // starts and the stops are staggered rather than simultaneous: a detector that
 // only works when the whole band changes at once would pass a scene where
@@ -903,6 +958,59 @@ TEST_CASE("an emitter of known extent reads as one track of that extent", "[dete
     CHECK(failures == kKnownSplits);
 }
 
+// THE OTHER SIDE OF THE RESIDUAL RULE: a station that fades keeps its track.
+//
+// The rule withholds a candidate whose band is falling at the rate an
+// exponential average falls at with no input, because that is a stopped
+// transmission on the way out. The bar below asks that a stopped station go
+// away, and nothing asked the opposite question until this: a signal that
+// fades and keeps transmitting has to stay.
+//
+// The two are the same rule read from its two ends, and the failing end was
+// the one nobody scored. At the shipped average_seconds the old form withheld
+// anything falling at 2.606 dB/s or faster, so a station fading 8 dB over
+// three seconds, which is mobile VHF behind a building or an HF path at dusk,
+// stopped being fed from the fourth consecutive falling decision. Its track
+// then reached the hold three seconds later and was DROPPED, and because the
+// suppression sits on the candidate no replacement was born from it either.
+//
+// tracks_born and tracks_dropped are the whole assertion. One birth and no
+// drops is one identity across the fade. A drop is the fault whether or not
+// something is reborn afterward, and a second birth is the same fault seen
+// from the other side, because an operator watching the row sees the number
+// change.
+TEST_CASE("a station that fades keeps its track", "[detect][scene-bar]") {
+    const test::SceneGeometry geometry;
+    const FrameCache cache = FrameCache::render(geometry, fading_scene());
+
+    detect::DetectorConfig config;
+    config.detection_threshold_db = 6.0;
+    const RunResult result = cache.run(config);
+
+    std::println("");
+    std::println("one station fading 8 dB over 3 s: {} decisions, {} born, {} dropped, {} "
+                 "candidates published, {} withheld as residual",
+                 result.decisions, result.stats.tracks_born, result.stats.tracks_dropped,
+                 result.stats.candidates, result.stats.candidates_residual);
+
+    CHECK(result.decisions > 0);
+    CHECK(result.stats.tracks_born == 1);
+    CHECK(result.stats.tracks_dropped == 0);
+
+    // And the case has teeth, over the same frames. A tolerance of one puts
+    // the window's lower edge at zero, so any fall inside a run qualifies and
+    // the rule fires on direction alone, which is the shape it had. The track
+    // goes and nothing replaces it while the station is still transmitting.
+    detect::DetectorConfig loose = config;
+    loose.residual_rate_tolerance = 1.0;
+    const RunResult without = cache.run(loose);
+    std::println("  the same fade with the window at its far end: {} born, {} dropped, {} "
+                 "withheld as residual",
+                 without.stats.tracks_born, without.stats.tracks_dropped,
+                 without.stats.candidates_residual);
+    CHECK(without.stats.tracks_dropped >= 1);
+}
+
 // THE OTHER HALF OF THE BAR: what a track reports once its signal stops.
 //
 // The bar above scores each emitter while it transmits and stops there,
@@ -928,12 +1036,13 @@ TEST_CASE("an emitter of known extent reads as one track of that extent", "[dete
 // bandwidth against 129857 Hz measured on signal.
 //
 // Measured here 2026-09-20. With the residual rule on, the three stations
-// outlive their signals by 3.19, 3.28 and 3.27 s, of which 0.24, 0.33 and
-// 0.32 s are Live and 2.95 s is the hold, at worst centre errors of 12, -19
+// outlive their signals by 3.30, 3.28 and 3.27 s, of which 0.35, 0.33 and
+// 0.32 s are Live and 2.95 s is the hold, at worst centre errors of 13, -25
 // and -3 Hz and a bandwidth ratio of 1.00 on all three. With it off, by
 // setting residual_decisions to zero, all three are still Live and still
-// published when the four second window closes and nine of the twenty-two
-// assertions below fail. That is what makes this a bar and not a report.
+// published when the four second window closes and nine of the assertions
+// below fail. That is what makes this a bar and not a report.
+//
 TEST_CASE("a stopped emitter stops being published", "[detect][scene-bar]") {
     const test::SceneGeometry geometry;
 
@@ -1064,6 +1173,40 @@ TEST_CASE("what the growth level costs at each end", "[.scene][detect]") {
             CHECK(result.decisions > 0);
         }
     }
+}
+
+// How wide the residual window has to be, measured at both of its edges.
+//
+// The rule fires when a band's fall over a run lands within
+// residual_rate_tolerance of what pure decay would produce. Too narrow and a
+// genuine residual never matches, so a stopped station keeps its row; too
+// wide and the lower edge reaches down into the rates real signals fade at.
+// This walks the width over the scene the post-stop bar uses and prints what
+// each station's tail costs, so the shipped number is read off a curve rather
+// than argued for.
+TEST_CASE("how wide the residual window has to be", "[.scene][detect]") {
+    const test::SceneGeometry geometry;
+    const siggen::SceneSpec spec = broadcast_scene(10.0, true);
+    const FrameCache cache = FrameCache::render(geometry, spec);
+
+    std::println("");
+    std::println("residual window width against each station's tail, 4 s window");
+    std::println("  {:>9} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}", "tolerance", "out 0",
+                 "live 0", "out 1", "live 1", "out 2", "live 2", "withheld");
+    for (const double tolerance : {0.10, 0.15, 0.25, 0.35, 0.50, 0.75, 1.00}) {
+        detect::DetectorConfig config;
+        config.detection_threshold_db = 6.0;
+        config.residual_rate_tolerance = tolerance;
+        const RunResult result = cache.run(config, 4.0);
+
+        std::string line = std::format("  {:>9.2f}", tolerance);
+        for (const test::EmitterScore& score : result.scores) {
+            line += std::format(" {:>8.2f} {:>8.2f}", score.residual_seconds,
+                                score.after_live_seconds);
+        }
+        std::println("{} {:>8}", line, result.stats.candidates_residual);
+    }
+    CHECK(true);
 }
 
 // Where the wide end stops working, on the shipped grid.

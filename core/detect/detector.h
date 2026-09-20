@@ -424,17 +424,16 @@ struct DetectorConfig {
     // a case isolating some other behaviour wants.
     //
     // WHAT THIS PARAGRAPH USED TO SAY, FIRST RETRACTION. This knob was
-    // edge_excess_fraction,
-    // default 0.25, and the level was that fraction of the SEED'S OWN mean
-    // excess: "how far below a detection's own mean per-bin excess a
-    // neighbouring bin may sit and still be grown into it". The reasoning
-    // above about the ladder's edges being arbitrary was and is right. The
-    // bar it set was wrong, and it was wrong in a way that only a shaped
-    // spectrum exposes. A signal-relative level is high when the signal is
-    // loud: measured on the 20 dB ladder it landed 27.7 to 35.2 times the
-    // local noise floor, so growth stopped wherever the signal fell 6 dB
-    // under its own mean rather than where the signal ended. A root raised
-    // cosine at rolloff 0.5 spends two thirds of its occupied band in
+    // edge_excess_fraction, default 0.25, and the level was that fraction of
+    // the SEED'S OWN mean excess: "how far below a detection's own mean
+    // per-bin excess a neighbouring bin may sit and still be grown into it".
+    // The reasoning above about the ladder's edges being arbitrary was and is
+    // right. The bar it set was wrong, and it was wrong in a way that only a
+    // shaped spectrum exposes. A signal-relative level is high when the
+    // signal is loud: measured on the 20 dB ladder it landed 27.7 to 35.2
+    // times the local noise floor, so growth stopped wherever the signal fell
+    // 6 dB under its own mean rather than where the signal ended. A root
+    // raised cosine at rolloff 0.5 spends two thirds of its occupied band in
     // transition skirt, so growth stopped well inside it: the 166.5 kHz
     // emitter's 4096-bin rung grew by exactly zero bins against 4546 bins of
     // truth on 128 of 128 decisions, and the 30 kHz emitter's 512-bin rung
@@ -538,27 +537,95 @@ struct DetectorConfig {
     // 1.0, 0.8 and 0.4 against a predicted 4.34, 5.43 and 10.86: within two
     // percent over a factor of 2.5 in the time constant.
     //
-    // A candidate is suppressed when its SNR has fallen at residual_decisions
-    // consecutive decisions and the total fall over that run is at least
-    // residual_decay_fraction of what pure decay would produce. Suppression
-    // is at the candidate and not at the track on purpose: a track-level rule
-    // leaves the candidate free, and a new track is then born from it every
-    // time the old one times out.
+    // A candidate is suppressed when its band's mean per-bin excess has
+    // fallen at residual_decisions consecutive decisions AND the total fall
+    // over that run is within residual_rate_tolerance, relatively, of what
+    // pure decay would produce over the same span of source seconds.
+    // Suppression is at the candidate and not at the track on purpose: a
+    // track-level rule leaves the candidate free, and a new track is then
+    // born from it every time the old one times out.
     //
-    // Only a lower bound on the rate, and that is not an oversight. Pure
-    // decay is the FASTEST the average can fall, because it is what the
-    // average does with no input at all, so anything falling faster has no
-    // input either.
+    // Measured over a band fixed at the run's start rather than over the
+    // candidate's current extent. snr_2500_db scales with the extent the
+    // search happened to accept that decision, so a band that splits, or one
+    // whose skirts drop under the growth level as it decays, registers a fall
+    // that is geometry and not decay. The mean excess over a fixed support
+    // has no such term, and a split then shows up as one step of the wrong
+    // SIZE, which the window below rejects.
     //
-    // The cost of a false positive is bounded and small. A genuine signal
-    // fading at that rate is suppressed, its track goes Held rather than
-    // being dropped, and the first decision at which the SNR stops falling
-    // publishes the candidate again and the track keeps its id. So the
-    // failure mode is a momentary Held state, not a lost track.
+    // A WINDOW AND NOT A FLOOR, AND WHY THAT IS THE WHOLE RULE
+    //
+    // The tolerance is two-sided. An earlier form took any fall of at least
+    // 0.6 of the predicted one, on the argument that pure decay is the
+    // FASTEST the average can fall so anything faster also has no input. The
+    // argument is sound about the average and does not carry to the measured
+    // statistic, which also moves with the band: a fall faster than predicted
+    // is measurement or geometry, not a louder silence. And the lower half of
+    // that rule is what does the damage, because it catches every real fade
+    // slower than the average's own rate as well.
+    //
+    // So the run's rate has to LAND ON the predicted rate rather than merely
+    // reach some fraction of it. The residual lands within two percent of it,
+    // measured above, and a quarter is a wide window around that. Measured
+    // 2026-09-20 on the three-station scene, the width is inert from 0.10 to
+    // 0.50: all three stations stop being published 3.27 to 3.30 s after they
+    // stop, at every one of those five settings.
+    //
+    // A run whose rate leaves the window starts again at the decision that
+    // left it, rather than carrying its history forward. Ripple alone
+    // produces a fall about half the time, so four consecutive falls turn up
+    // on their own once in sixteen decisions per band, and a run that began
+    // that way before a real stop drags flat seconds into the rate. That is
+    // what the insensitivity above rests on: without the restart the first
+    // station stayed Live for 1.11 s against 0.33 for the other two, and the
+    // width had to reach 0.50 before it caught up.
+    //
+    // The window is relative to the predicted fall, so it scales with the
+    // run's span in SECONDS and not with its length in decisions. A run that
+    // is four decisions of a fast decision interval spans little time, the
+    // predicted fall over it is small, and the absolute tolerance is small
+    // with it, so ripple keeps the rule from firing until the run is long
+    // enough to be sure. residual_decisions is a floor under the run, not the
+    // thing that sets its noise immunity.
     //
     // Zero decisions switches the rule off entirely, which is what a case
-    // isolating some other behaviour wants.
-    double residual_decay_fraction = 0.6;
+    // isolating some other behaviour wants. A tolerance of zero also switches
+    // it off, since no measured fall equals the prediction exactly. A
+    // tolerance of one switches it fully ON, because the lower edge of the
+    // window reaches zero and every fall inside the run qualifies. The two
+    // ends of the range are not symmetric and the upper one is the dangerous
+    // one.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. The knob was residual_decay_fraction,
+    // default 0.6, the test was one-sided, and this block said: "The cost of
+    // a false positive is bounded and small. A genuine signal fading at that
+    // rate is suppressed, its track goes Held rather than being dropped, and
+    // the first decision at which the SNR stops falling publishes the
+    // candidate again and the track keeps its id. So the failure mode is a
+    // momentary Held state, not a lost track."
+    //
+    // That held only while the fade was shorter than the hold. At the shipped
+    // average_seconds the old bar was 0.6 * 4.343 = 2.606 dB/s sustained, so
+    // a signal fading 8 dB over 3 s, which is ordinary mobile VHF or an HF
+    // evening, was withheld from the fourth consecutive falling decision
+    // onward. update_tracks then reached silent > hold_samples three seconds
+    // later and DROPPED the track, and because the suppression sits on the
+    // candidate no replacement was born either, so a transmitter still 20 dB
+    // over the noise floor left the list entirely. Both bars asserted that
+    // outcome as a pass, because both only counted ids appearing.
+    //
+    // The cost is now measured rather than claimed away, and it is at the
+    // FAST end rather than the slow one. An exponential average fed a ramp
+    // lags it, so the average's own fall only reaches the input's after the
+    // ramp has run for several time constants; below that the measured rate
+    // never settles inside the window for four consecutive decisions. On the
+    // unit grid at the shipped second of averaging, a 33-bin emitter starting
+    // 60 dB over the reference bandwidth keeps its track through a fall of 4,
+    // 8, 13, 20 and 30 dB over three seconds, and loses it at 40 dB over
+    // three seconds: 13.3 dB/s, three times the rate an emptying average
+    // falls at, sustained for three time constants. A signal doing that is
+    // leaving, and it is still a lost track rather than a momentary Held one.
+    double residual_rate_tolerance = 0.25;
     std::uint32_t residual_decisions = 4;
 
     // Minimum band overlap, as a fraction of the narrower band, for a
@@ -673,7 +740,7 @@ private:
     [[nodiscard]] bool emit_candidate(std::size_t first, std::size_t last);
 
     // Drops the candidates whose energy is the exponential average's own
-    // residual. See residual_decay_fraction.
+    // residual. See residual_rate_tolerance.
     void reject_residual(double elapsed_seconds);
 
     void update_tracks(dsp::SampleIndex now, double elapsed_seconds);
@@ -757,15 +824,25 @@ private:
     // identity, and rebuilt every decision: an entry no candidate matches is
     // stale and goes.
     struct Decaying {
+        // The candidate's own band this decision, which is what the next
+        // decision matches against by overlap.
         std::uint32_t first_bin = 0;
         std::uint32_t last_bin = 0;
 
-        // The previous decision's SNR, which is what "still falling" is
-        // measured against, and the SNR the current run of falls started
-        // from with the source seconds it has spanned, which is what the
-        // rate is measured over.
-        double snr_db = 0.0;
-        double run_snr_db = 0.0;
+        // The band the run's statistic is measured over, fixed at the
+        // decision the run started. A fall has to be the power falling and
+        // not the accepted extent moving, so the support cannot move with
+        // the measurement.
+        std::uint32_t run_first_bin = 0;
+        std::uint32_t run_last_bin = 0;
+
+        // Mean per-bin excess over run_first_bin..run_last_bin, in decibels:
+        // the previous decision's, which is what "still falling" is measured
+        // against, and the one the current run of falls started from with the
+        // source seconds it has spanned, which is what the rate is measured
+        // over.
+        double level_db = 0.0;
+        double run_level_db = 0.0;
         double run_seconds = 0.0;
         std::uint32_t run = 0;
     };

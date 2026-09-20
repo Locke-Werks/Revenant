@@ -193,8 +193,11 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
     if (auto ok = require_range(config.edge_floor_sigma, 0.0, 100.0, "edge_floor_sigma"); !ok) {
         return std::unexpected(ok.error());
     }
-    if (auto ok = require_range(config.residual_decay_fraction, 0.0, 10.0,
-                                "residual_decay_fraction");
+    // One is the far end and not a wide margin: it puts the window's lower
+    // edge at zero, so every fall inside a run qualifies and the rule fires
+    // on any decaying band whatever its rate. See residual_rate_tolerance.
+    if (auto ok = require_range(config.residual_rate_tolerance, 0.0, 1.0,
+                                "residual_rate_tolerance");
         !ok) {
         return std::unexpected(ok.error());
     }
@@ -943,8 +946,20 @@ void Detector::reject_residual(double elapsed_seconds) {
     // over average_seconds is the dB per second a band falls at once the
     // thing that filled it has stopped. Nothing that is still transmitting
     // falls at exactly that rate, which is the whole discriminator. See
-    // DetectorConfig::residual_decay_fraction.
+    // DetectorConfig::residual_rate_tolerance.
     constexpr double kDbPerNeper = 4.342944819032518;
+
+    // Mean per-bin excess over a band, in decibels. This is the statistic the
+    // run is measured on, and it is measured over a band that does not move
+    // while a run lasts, so that a fall is the power falling rather than the
+    // accepted extent shrinking. See DetectorConfig::residual_rate_tolerance.
+    const auto level_of = [this](std::uint32_t first, std::uint32_t last) {
+        const std::size_t low = std::min<std::size_t>(first, bins_ - 1);
+        const std::size_t high = std::min<std::size_t>(last, bins_ - 1);
+        const auto count = static_cast<double>(high - low + 1);
+        const double excess = excess_cumulative_[high + 1] - excess_cumulative_[low];
+        return linear_to_db(excess / count);
+    };
 
     decaying_next_.clear();
     decaying_next_.reserve(candidates_.size());
@@ -954,9 +969,11 @@ void Detector::reject_residual(double elapsed_seconds) {
         const Candidate candidate = candidates_[c];
 
         // Matched by bin overlap rather than by identity, because this runs
-        // before anything has one. Largest overlap wins, so a band that
-        // splits while it decays does not hand its history to whichever
-        // piece the sweep reached first.
+        // before anything has one. Largest overlap wins, so when a band comes
+        // apart the run goes to the piece that inherits most of it rather
+        // than to whichever piece the sweep reached first. That is only about
+        // WHICH piece continues the run; what keeps the split itself from
+        // reading as a fall is the fixed measurement band below.
         const Decaying* matched = nullptr;
         std::uint32_t best_overlap = 0;
         for (const Decaying& held : decaying_) {
@@ -971,33 +988,68 @@ void Detector::reject_residual(double elapsed_seconds) {
             }
         }
 
+        // A run is a stretch of consecutive decisions over which the band has
+        // been falling, throughout, at the rate an emptying average falls at.
+        // Both halves of that are load-bearing.
+        //
+        // The rate is measured over the whole run rather than step by step,
+        // because one decision's statistic carries the averaged noise's own
+        // ripple, which on a narrow band is a sizeable fraction of one
+        // decision's worth of decay: a step-by-step test would need a
+        // tolerance wide enough to catch anything. Over several decisions the
+        // ripple averages down and the decay does not.
+        //
+        // And a run whose rate has left the window starts again HERE rather
+        // than surviving with its history. Ripple alone produces a fall about
+        // half the time, so four consecutive falls turn up on their own once
+        // in sixteen decisions per band, and a run that began that way before
+        // a real stop carries flat seconds into run_seconds and dilutes the
+        // rate for as long as it takes them to wash out. Measured on the
+        // post-stop scene, one of the three stations had exactly that and
+        // stayed Live for 1.11 s after it stopped against 0.33 for the other
+        // two. Restarting costs one decision on a clean stop and removes the
+        // dependence on what the band was doing beforehand.
         Decaying now{.first_bin = candidate.first_bin,
                      .last_bin = candidate.last_bin,
-                     .snr_db = candidate.snr_2500_db,
-                     .run_snr_db = candidate.snr_2500_db,
+                     .run_first_bin = candidate.first_bin,
+                     .run_last_bin = candidate.last_bin,
+                     .level_db = 0.0,
+                     .run_level_db = 0.0,
                      .run_seconds = 0.0,
                      .run = 0};
 
-        // A run is consecutive STRICT falls, and the rate is measured over
-        // the whole run rather than step by step. Per-decision SNR carries
-        // the averaged noise's own ripple, which on a narrow band is a
-        // sizeable fraction of one decision's worth of decay, so a
-        // step-by-step rate test would need a tolerance wide enough to catch
-        // anything. Over four decisions the ripple averages down and the
-        // decay does not.
-        if (matched != nullptr && candidate.snr_2500_db < matched->snr_db) {
-            now.run = matched->run + 1;
-            now.run_snr_db = matched->run_snr_db;
-            now.run_seconds = matched->run_seconds + elapsed_seconds;
+        bool decaying = false;
+        if (matched != nullptr) {
+            const double carried = level_of(matched->run_first_bin, matched->run_last_bin);
+            if (carried < matched->level_db) {
+                const double seconds = matched->run_seconds + elapsed_seconds;
+                const double expected = kDbPerNeper * seconds / config_.average_seconds;
+                const double fall = matched->run_level_db - carried;
+
+                // Two-sided. A fall short of the window is a signal fading of
+                // its own accord and a fall past it is geometry or noise, and
+                // neither is an average emptying out.
+                if (fall >= (1.0 - config_.residual_rate_tolerance) * expected &&
+                    fall <= (1.0 + config_.residual_rate_tolerance) * expected) {
+                    decaying = true;
+                    now.run_first_bin = matched->run_first_bin;
+                    now.run_last_bin = matched->run_last_bin;
+                    now.level_db = carried;
+                    now.run_level_db = matched->run_level_db;
+                    now.run_seconds = seconds;
+                    now.run = matched->run + 1;
+                }
+            }
+        }
+        if (!decaying) {
+            // The run starts over on this candidate's own band, so the next
+            // decision compares like with like.
+            now.level_db = level_of(now.run_first_bin, now.run_last_bin);
+            now.run_level_db = now.level_db;
         }
         decaying_next_.push_back(now);
 
-        const double expected = kDbPerNeper * now.run_seconds / config_.average_seconds;
-        const bool residual = config_.residual_decisions > 0 &&
-                              now.run >= config_.residual_decisions &&
-                              (now.run_snr_db - candidate.snr_2500_db) >=
-                                  config_.residual_decay_fraction * expected;
-        if (residual) {
+        if (config_.residual_decisions > 0 && now.run >= config_.residual_decisions) {
             ++stats_.candidates_residual;
             continue;
         }

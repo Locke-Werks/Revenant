@@ -50,6 +50,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <print>
 #include <random>
 #include <string>
 #include <vector>
@@ -911,6 +912,143 @@ TEST_CASE("a track stops being published soon after its signal stops", "[detect]
     // the track: a track-level rule leaves the candidate free and a fresh id
     // appears in the same band a few decisions later, forever.
     CHECK(new_ids == 0);
+}
+
+// A signal that fades keeps its track, and the rate is what decides.
+//
+// The residual rule withholds a candidate whose band is falling at the
+// exponential average's own decay rate, because that is what a stopped
+// transmission looks like on the way out. It used to withhold anything
+// falling at 0.6 of that rate or faster, on the argument that the cost of a
+// false positive was a momentary Held state. It is not: the suppression sits
+// on the candidate, so the track stops being fed, reaches its hold three
+// seconds later and is DROPPED, and no replacement is born either because
+// there is no candidate to born one from. A transmitter still tens of
+// decibels over the noise leaves the list entirely.
+//
+// 8 dB over 3 s is the case, and it is ordinary: mobile VHF driving behind a
+// building, an aeronautical signal at low elevation, an HF path at dusk. At
+// the shipped second of averaging that is 2.67 dB/s against a predicted 4.343,
+// so it cleared the old 2.606 bar with room to spare.
+//
+// Nothing here reads a clock. The fade is a function of the sample index the
+// scene has reached, exactly like everything else in this file.
+TEST_CASE("a fading signal keeps its track", "[detect]") {
+    constexpr std::uint64_t kSeed = 19283;
+    INFO("seed " << kSeed);
+
+    constexpr std::size_t kCentreBin = 480;
+    constexpr std::size_t kWidthBins = 33;
+    constexpr double kStartDb = 60.0;
+    constexpr double kFadeSeconds = 3.0;
+
+    // Feeds one frame at a time with the emitter at whatever level the ramp
+    // has reached. Returns the id it saw, or zero.
+    const auto fade = [](detect::Detector& detector, Scene& scene, double from_db, double to_db,
+                         double seconds) {
+        const auto frames = static_cast<std::size_t>(std::llround(seconds / kFrameSeconds));
+        for (std::size_t i = 0; i < frames; ++i) {
+            const double t = static_cast<double>(i) / static_cast<double>(std::max<std::size_t>(1, frames));
+            scene.set({Emitter{.centre_bin = kCentreBin,
+                               .width_bins = kWidthBins,
+                               .snr_2500_db = from_db + t * (to_db - from_db)}});
+            auto fed = detector.consume(scene.next());
+            if (!fed) {
+                FAIL("consume refused a frame: " << fed.error().message);
+            }
+        }
+    };
+
+    const auto run = [&](double start_db, double fall_db, double tolerance) {
+        Scene scene(-90.0, kSeed);
+        scene.set({Emitter{.centre_bin = kCentreBin,
+                           .width_bins = kWidthBins,
+                           .snr_2500_db = start_db}});
+
+        detect::DetectorConfig config = base_config();
+        // The shipped pair, so the rate in the comment is the rate under test.
+        config.average_seconds = 1.0;
+        config.decision_interval_seconds = 0.1;
+        config.residual_rate_tolerance = tolerance;
+
+        auto made = detect::Detector::create(config, scene.geometry());
+        REQUIRE(made);
+        detect::Detector detector = std::move(*made);
+
+        run_for(detector, scene, 3.0);
+        REQUIRE(detector.tracks().size() == 1);
+        const std::uint64_t id = detector.tracks()[0].id;
+
+        fade(detector, scene, start_db, start_db - fall_db, kFadeSeconds);
+        run_for(detector, scene, 1.0);
+
+        struct Outcome {
+            std::uint64_t id = 0;
+            std::size_t tracks = 0;
+            std::uint64_t dropped = 0;
+            std::uint64_t born = 0;
+            std::string text;
+        };
+        Outcome outcome;
+        outcome.tracks = detector.tracks().size();
+        outcome.dropped = detector.stats().tracks_dropped;
+        outcome.born = detector.stats().tracks_born;
+        outcome.text = describe(detector);
+        for (const detect::Track& track : detector.tracks()) {
+            if (track.id == id) {
+                outcome.id = id;
+            }
+        }
+        return outcome;
+    };
+
+    const double shipped = detect::DetectorConfig{}.residual_rate_tolerance;
+
+    SECTION("8 dB over 3 s, which is 0.61 of the rate an emptying average falls at") {
+        const auto outcome = run(kStartDb, 8.0, shipped);
+        INFO(outcome.text);
+        CHECK(outcome.tracks == 1);
+        CHECK(outcome.id != 0);
+        CHECK(outcome.dropped == 0);
+        CHECK(outcome.born == 1);
+    }
+
+    SECTION("the same fade, with the window opened to its far end") {
+        // A tolerance of one puts the window's lower edge at zero, so every
+        // fall inside a run qualifies and the rule fires on direction alone.
+        // That is the shape the rule had, and this is what it cost: the
+        // track is dropped and nothing replaces it, while the signal is
+        // still 52 dB over the operator's threshold.
+        const auto outcome = run(kStartDb, 8.0, 1.0);
+        INFO(outcome.text);
+        CHECK(outcome.dropped >= 1);
+        CHECK(outcome.id == 0);
+    }
+
+    SECTION("30 dB over 3 s, more than twice the rate, and it still keeps its track") {
+        // The margin is not one decibel wide. An exponential average fed a
+        // ramp lags it: the average's own fall only reaches the input's once
+        // the ramp has run for several time constants, and at 10 dB/s over
+        // three seconds it never lands inside the window for the four
+        // consecutive decisions the rule needs.
+        const auto outcome = run(kStartDb, 30.0, shipped);
+        INFO(outcome.text);
+        CHECK(outcome.tracks == 1);
+        CHECK(outcome.id != 0);
+        CHECK(outcome.dropped == 0);
+    }
+
+    SECTION("40 dB over 3 s is where it does cost a track, and the header says so") {
+        // 13.3 dB/s, three times the rate an emptying average falls at.
+        // Sustained that long the average cannot tell the ramp from an
+        // input that went to zero, and the track is dropped even though the
+        // signal ends 14 dB over the threshold. Measured rather than
+        // reasoned: the sweep behind this section kept the track at 4, 8,
+        // 13, 20 and 30 dB of fall and lost it at 40.
+        const auto outcome = run(kStartDb, 40.0, shipped);
+        INFO(outcome.text);
+        CHECK(outcome.dropped >= 1);
+    }
 }
 
 TEST_CASE("two signals merge into one track and split back into two", "[detect]") {
