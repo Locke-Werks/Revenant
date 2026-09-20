@@ -352,25 +352,45 @@ struct Block {
 struct Group {
     std::array<Block, kBlocksPerGroup> blocks{};
 
-    // Which offset block 3 was read against. A version B group uses C'.
+    // Which offset block 3 was read against, and false whenever block 3 was
+    // not accepted at all. A version B group uses C'.
     //
-    // Kept separate from version_b because block 2 can be lost while block 3
-    // arrives clean, and then the offset is the only evidence there is. When
-    // block 2 did arrive, its version bit is what selects the offset, so this
-    // field and version_b always agree on a group that has a type at all.
+    // WHAT IT AGREES WITH AND WHAT IT DOES NOT. On a group with a type and a
+    // valid block 3, c_prime equals version_b, because block 2's version bit
+    // is what chose the offset. On a group with a type and a dropped block 3
+    // the two disagree: c_prime is false and version_b is whatever block 2
+    // said. On a group with no type at all, version_b is meaningless and
+    // c_prime is block 3's own syndrome matching C' exactly.
     //
-    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it said the received
-    // offset was better evidence than block 2's version bit in every case,
-    // because the offset is checked by block 3's own CRC. That holds for an
-    // undamaged block and fails for a damaged one, where the check is only a
-    // hypothesis the corrector was allowed to choose. Block 3 was tested
-    // against C and then, on failure, against C', so it had two chances at a
-    // correctable residue where every other block gets one: 101 of the 1023
-    // ways a block can arrive with a wrong syndrome were accepted there
-    // against 51 for blocks 1, 2 and 4. Fifty of the extra come back flagged
-    // C', and a C' block 3 rewrites the station PI with block 3's payload, so
-    // the widened acceptance landed on the one field the whole decode keys
-    // off. See RdsDecoder::receive_block for the rule that replaced it.
+    // So a reader asking "is this a version B group" wants version_b, and a
+    // reader asking "what was block 3 measured against" wants c_prime.
+    // apply_group reads version_b before it repeats a PI out of block 3,
+    // deliberately: see the paragraph there.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY, TWICE.
+    //
+    // Until 2026-09-20 it said the received offset was better evidence than
+    // block 2's version bit in every case, because the offset is checked by
+    // block 3's own CRC. That holds for an undamaged block and fails for a
+    // damaged one, where the check is only a hypothesis the corrector was
+    // allowed to choose. Block 3 was tested against C and then, on failure,
+    // against C', so it had two chances at a correctable residue where every
+    // other block gets one: 101 of the 1023 ways a block can arrive with a
+    // wrong syndrome were accepted there against 51 for blocks 1, 2 and 4.
+    // Fifty of the extra come back flagged C', and a C' block 3 rewrote the
+    // station PI with block 3's payload, so the widened acceptance landed on
+    // the one field the whole decode keys off.
+    //
+    // The correction written the same day said this field and version_b
+    // "always agree on a group that has a type at all". They do not: a
+    // dropped block 3 leaves c_prime false while version_b still reports what
+    // block 2 said. That correction also fixed only the half of the fault it
+    // could see. Gating on the version bit closed the case where block 2 was
+    // valid, and block 2 is exactly the block that is absent in the other
+    // case, so with block 2 dropped block 3 kept both correction attempts and
+    // a promoted block 3 kept rewriting the PI. Both are closed now, from the
+    // offset choice in RdsDecoder::receive_block and from the PI write in
+    // RdsDecoder::apply_group.
     bool c_prime = false;
 
     std::uint8_t type = 0;   // A3..A0 from block 2, meaningless unless type_valid

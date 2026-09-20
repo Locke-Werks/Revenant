@@ -27,9 +27,17 @@ constexpr std::uint32_t kBlockMask = 0x03FFFFFFu;  // 26 bits
 }
 
 // Which offset word block n of a group carries, counting from zero. Block 3
-// is answered as C here and the C' case is resolved against the received
-// syndrome, because a version B group is only distinguishable by that offset
-// or by a block 2 that may have been lost.
+// is answered as C here and receive_block overrides that to C' when it has
+// evidence of a version B group: block 2's version bit when block 2 arrived,
+// and otherwise block 3's own syndrome matching C' exactly.
+//
+// WHAT THIS COMMENT USED TO SAY. Until 2026-09-20 it said the C' case was
+// "resolved against the received syndrome, because a version B group is only
+// distinguishable by that offset or by a block 2 that may have been lost".
+// Block 2 is no longer the fallback: when it arrived, its version bit is what
+// chooses, because block 2 was measured against one offset and so had no
+// second hypothesis to pick from. The sentence survived the change that
+// replaced it. See RdsDecoder::receive_block.
 [[nodiscard]] constexpr BlockOffset offset_for_index(int index) noexcept {
     switch (index) {
         case 0: return BlockOffset::kA;
@@ -921,34 +929,47 @@ void RdsDecoder::receive_block() {
 
     // Block 3 carries C in a version A group and C' in a version B group.
     //
-    // WHICH OF THE TWO IS TESTED, AND WHY BLOCK 2 DECIDES IT.
+    // ONE OFFSET, CHOSEN BEFORE ANY CORRECTION RUNS.
     //
     // Block 3 is the only block with two candidate offsets, so it is the only
-    // one that can be handed a second correction attempt when the first one
-    // refuses. Handing it that attempt unconditionally costs exactly what the
-    // span-2 default in rds_groups.h exists to buy: of the 1023 ways a block
-    // can arrive with a wrong syndrome, 51 are correctable for blocks 1, 2 and
-    // 4 and 101 were accepted here, and fifty of the extra came back flagged
-    // C'. A C' block 3 is read as a repeat of PI, so those fifty do not
-    // produce a wrong character in a text field, they produce a wrong station
-    // identity. A three-bit burst inside the checkword alone is enough: it is
-    // uncorrectable against C and lands on a single-bit pattern against C'.
+    // one that could be handed a second correction attempt when the first
+    // refuses. It is not handed one. Every block in the group, block 3
+    // included, is measured against exactly one offset and corrected at most
+    // once, because a second attempt is a second chance at a correctable
+    // residue and that is a lower effective error threshold for this block
+    // position than for the other three.
     //
-    // Block 2's version bit settles it whenever block 2 arrived, because block
-    // 2 was checked against one offset and had no second hypothesis available
-    // to it. Only a lost block 2 leaves block 3's own syndrome to answer, and
-    // then both offsets are tested as before. The received offset is still the
-    // better evidence in the case the old rule was written for; it is not
-    // better evidence than a block that had no choice in what it matched.
+    // The offset is picked from whatever evidence exists, in this order.
+    //
+    // Block 2's version bit, whenever block 2 arrived. Block 2 was measured
+    // against one offset and had no second hypothesis to choose from, so its
+    // answer is evidence rather than something the corrector selected.
+    //
+    // Otherwise block 3's own syndrome, and only on an exact match with C'.
+    // A block that needs correcting is corrected against C. Taking C' on an
+    // exact match costs one acceptance and buys the only way a version B
+    // group announces itself when block 2 has faded: of the 1023 ways a
+    // block's syndrome can arrive wrong, 51 are correctable for blocks 1, 2
+    // and 4, 51 are correctable here, and one more is the arithmetic
+    // coincidence where offset C XOR offset C' is exactly the error. That
+    // one is a clean codeword and not a correction, and apply_group refuses
+    // to read a PI out of it.
+    //
+    // WHAT THIS COMMENT USED TO SAY. Until 2026-09-20 it said "only a lost
+    // block 2 leaves block 3's own syndrome to answer, and then both offsets
+    // are tested as before", which was the retry this paragraph now refuses.
+    // Testing both accepted 101 of the 1023 against 51 everywhere else, and
+    // fifty of the extra came back flagged C' and rewrote the station PI with
+    // block 3's payload. The version-bit rule that arrived with that sentence
+    // closed the case where block 2 was valid and left the case it was
+    // written about wide open.
     BlockOffset offset = offset_for_index(index);
     bool c_prime = false;
-    bool retry_other_c = false;
     if (index == 2) {
         if (group_.blocks[1].valid) {
             c_prime = ((group_.blocks[1].value >> 11) & 0x01) != 0;
         } else {
             c_prime = syndrome == offset_word(BlockOffset::kCPrime);
-            retry_other_c = !c_prime;
         }
         offset = c_prime ? BlockOffset::kCPrime : BlockOffset::kC;
     }
@@ -981,23 +1002,6 @@ void RdsDecoder::receive_block() {
             corrected_window ^= burst->pattern;
             residue = 0;
             corrected = true;
-        } else if (retry_other_c) {
-            // Block 2 was lost and block 3 is not a clean C' block, so a
-            // version B group whose block 3 also took errors is still on the
-            // table. Try correcting against C' before giving up. Preferring C
-            // when both offsets yield a correction is arbitrary and
-            // deliberate: two syndromes, 0x020 and 0x218, are correctable both
-            // ways, and a decoder that flipped the preference would read
-            // block 3's payload as a PI on the first of them.
-            const std::uint16_t alt =
-                static_cast<std::uint16_t>(syndrome ^ offset_word(BlockOffset::kCPrime));
-            if (const auto alt_burst =
-                    burst_for_syndrome(alt, options_.correctable_burst_span)) {
-                corrected_window ^= alt_burst->pattern;
-                residue = 0;
-                corrected = true;
-                c_prime = true;
-            }
         }
     }
 
@@ -1063,22 +1067,43 @@ void RdsDecoder::apply_group(const Group& group) {
         state_.pi_valid = true;
     }
 
-    // A version B group repeats PI in block 3. c_prime is what decides, and
-    // it is the same answer as version_b on any group that has a type at all:
-    // receive_block reads block 3 against the offset block 2 named whenever
-    // block 2 arrived, and a group whose block 2 did not arrive has no
-    // type_valid and reaches none of the parsers below. So this guard and the
-    // version_b branches in apply_type0 and apply_type2 cannot disagree about
-    // the same group, which they could while block 3 chose its own offset.
-    if (group.c_prime && group.blocks[2].valid) {
-        state_.pi = group.blocks[2].value;
-        state_.pi_valid = true;
-    }
-
     if (!group.type_valid) {
         // Without block 2 there is no group type, and every field below is
-        // addressed by it. Block 1's PI above is the only thing recoverable.
+        // addressed by it. Block 1's PI above is the only thing recoverable,
+        // block 3's PI repeat included: see the paragraph under the gate.
         return;
+    }
+
+    // A version B group repeats PI in block 3, and block 2 is what says the
+    // group is version B. Nothing else is allowed to say it.
+    //
+    // WHY NOT c_prime, WHICH IS THE FIELD THAT NAMES THE OFFSET. Because with
+    // block 2 lost, c_prime is block 3's opinion of itself. A version A block
+    // 3 whose error happens to be offset C XOR offset C' arrives as a
+    // faultless C' codeword, and there is no second witness to say otherwise,
+    // so reading a PI out of it puts an AF pair or two characters of
+    // RadioText on the display as the station. The block is still accepted,
+    // because a clean C' codeword is the only announcement a version B group
+    // makes once block 2 has faded and refusing it would drop block 3 of
+    // every version B transmission in a fade. It is accepted as a block and
+    // refused as an identity.
+    //
+    // TWO NARROWER RULES THAT WERE CONSIDERED AND DO NOT HOLD. Refusing the
+    // write when block 1 already supplied a PI this group closes the shape
+    // where block 1 arrived and leaves the one where it did not: block 1 and
+    // block 2 both lost, block 3 promoted, and the PI is written from it with
+    // nothing to contradict it. Refusing the write when block 3 was corrected
+    // is wrong in both directions at once: it admits the exact C' coincidence
+    // above, which needs no corrector at all, and it refuses the real version
+    // B group whose block 3 took a burst, which is the case the correction
+    // exists for.
+    //
+    // With block 2 arrived, c_prime and version_b are the same answer on a
+    // valid block 3, so this reads version_b and the version_b branches in
+    // apply_type0 and apply_type2 cannot disagree with it about one group.
+    if (group.version_b && group.blocks[2].valid) {
+        state_.pi = group.blocks[2].value;
+        state_.pi_valid = true;
     }
 
     const std::uint16_t b2 = group.blocks[1].value;
