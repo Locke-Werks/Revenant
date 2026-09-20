@@ -469,9 +469,18 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
         case QAudio::SuspendedState:
             break;
         case QAudio::IdleState:
-            // The sink ran out of data. RingSource always fills, so this is
-            // reachable only with no stream at all, and tick() closes the
-            // sink for that. Nothing to do and nothing to say.
+            // The sink has nothing to play at this instant. This used to
+            // say it was "reachable only with no stream at all", which
+            // overstated it: a starving network does not get here, because
+            // RingSource fills every request at least one frame wide, but
+            // the backend reports Idle in the ordinary course between
+            // start() and the first pull, and readData answers a request
+            // narrower than one frame with zero bytes, which is the same
+            // report.
+            //
+            // None of those want action. tick() closes the sink when the
+            // stream is gone, and the other two are answered by the next
+            // pull.
             break;
         case QAudio::StoppedState: {
             const QtAudio::Error why = sink_ == nullptr ? QtAudio::NoError : sink_->error();

@@ -40,9 +40,15 @@ void AudioRing::establish(RingFormat incoming)
         (static_cast<std::uint64_t>(depth_millis_) * incoming.sample_rate) / 1000U;
 
     // One frame rather than zero at the bottom, so the modulo arithmetic
-    // below has a divisor. A depth of zero is a caller that subscribed
-    // without recording the grant, and it starves rather than dividing by
-    // zero; the counters say which.
+    // below has a divisor.
+    //
+    // A depth of zero is a caller that subscribed without recording the
+    // grant. It does NOT starve, which this comment used to claim, and no
+    // counter says it happened: the first chunk is longer than one frame,
+    // so push grows the ring to kMinChunksBuffered of them and the stream
+    // runs at that floor instead of at the depth the engine granted. The
+    // audible result is a ring four chunks deep rather than none, which is
+    // a shorter buffer and not a silent one.
     capacity_ = std::max<std::size_t>(static_cast<std::size_t>(frames), 1U);
 
     samples_.assign(capacity_ * incoming.channel_count, 0.0F);
