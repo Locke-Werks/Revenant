@@ -819,6 +819,122 @@ TEST_CASE("a wideband scene can carry a broadcast FM station", "[tools][wfm]")
     CHECK(blocked == from_scene);
 }
 
+TEST_CASE("a scene places a station by SNR, which is what everything asks for",
+          "[tools][wfm]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // WHAT THIS CASE IS FOR
+    //
+    // WfmStationPlacement::use_snr defaults to true and siggen sets it true
+    // on every station it places, so the SNR path is the one the tool
+    // actually runs. The only scene case there was set it false, which took
+    // the branch that copies WfmSpec::amplitude through untouched, so
+    // nothing had ever exercised the arithmetic that turns a requested
+    // ratio into a gain on a station.
+    //
+    // That arithmetic has two places to be wrong in a way no signal shows:
+    // the noise in the emitter's own band, which is the full-band figure
+    // scaled by the station's 268750 Hz out of the scene's rate, and the
+    // conversion from a power ratio to an amplitude gain. Both produce a
+    // station at the wrong level with the truth row agreeing, because the
+    // row is computed from the same numbers.
+    //
+    // So the gain is measured off the rendered scene instead. The scene is
+    // the station at some gain plus noise that does not correlate with it,
+    // so projecting the scene onto the station the placement was built from
+    // recovers that gain directly.
+
+    CHECK(siggen::WfmStationPlacement{}.use_snr);
+
+    constexpr double kRequestedSnrDb = 20.0;
+    constexpr double kNoiseFullBandDbfs = -60.0;
+    constexpr dsp::SampleRate kSceneRate = 1'000'000;
+    constexpr std::size_t kWindow = 40000;
+
+    siggen::WfmSpec station = base_station(300);
+    station.rate = kSceneRate;
+
+    siggen::SceneSpec scene_spec;
+    scene_spec.rate = kSceneRate;
+    scene_spec.duration_samples = kWindow;
+    scene_spec.add_noise = true;
+    scene_spec.noise_power_full_band_dbfs = kNoiseFullBandDbfs;
+    scene_spec.seed = kSeed;
+
+    siggen::WfmStationPlacement placement;
+    placement.station = station;
+    placement.snr_in_occupied_bandwidth_db = kRequestedSnrDb;
+    placement.end_sample = scene_spec.duration_samples;
+    scene_spec.fm_stations.push_back(placement);
+
+    auto scene = siggen::Scene::create(scene_spec);
+    REQUIRE(scene.has_value());
+    REQUIRE(scene->truth().size() == 1);
+    const siggen::EmitterTruth& truth = scene->truth().front();
+
+    // Stated as the arithmetic. Total noise power 1e-6 across 1 MHz, of
+    // which the station's 268750 Hz holds 2.6875e-7; 20 dB above that is
+    // 2.6875e-5 of station power, and the station's nominal power is
+    // amplitude squared, which is 1, so the gain is its square root.
+    constexpr double kNoiseInBand = 1e-6 * 268750.0 / 1'000'000.0;
+    const double expected_power = kNoiseInBand * 100.0;
+    const double expected_gain = std::sqrt(expected_power);
+
+    CHECK(scene->noise_power_full_band() == Approx(1e-6).epsilon(1e-12));
+    CHECK(truth.mean_power == Approx(expected_power).epsilon(1e-9));
+    CHECK(truth.snr_in_occupied_bandwidth_db == Approx(kRequestedSnrDb).epsilon(1e-9));
+
+    // 2.6875e-5 over 1e-6 is 14.29 dB across the whole rate, which is what a
+    // measurement over the raw buffer reads and is 5.7 dB below the in-band
+    // figure because the station fills 27 percent of the scene.
+    CHECK(truth.snr_in_full_band_db == Approx(14.2935).epsilon(1e-4));
+
+    auto modulator = siggen::WfmModulator::create(station);
+    REQUIRE(modulator.has_value());
+    CHECK(modulator->nominal_mean_power() == Approx(1.0).epsilon(1e-12));
+
+    std::vector<dsp::Complex32> from_scene(kWindow);
+    std::vector<dsp::Complex32> bare(kWindow);
+    scene->render(0, dsp::ComplexSpan(from_scene));
+    modulator->render(0, dsp::ComplexSpan(bare));
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (std::size_t i = 0; i < kWindow; ++i) {
+        numerator += static_cast<double>(from_scene[i].real()) *
+                         static_cast<double>(bare[i].real()) +
+                     static_cast<double>(from_scene[i].imag()) *
+                         static_cast<double>(bare[i].imag());
+        denominator += static_cast<double>(bare[i].real()) *
+                           static_cast<double>(bare[i].real()) +
+                       static_cast<double>(bare[i].imag()) *
+                           static_cast<double>(bare[i].imag());
+    }
+    const double measured_gain = numerator / denominator;
+
+    INFO(std::format("measured gain {:.9f} against {:.9f}", measured_gain, expected_gain));
+
+    // The noise is uncorrelated with the station, so it does not bias this
+    // estimate, but it does scatter it: one standard deviation is
+    // sqrt(N * noise_power / 2) over N, which is 3.5e-6 against a gain of
+    // 5.18e-3, so 6.8e-4 relative. This run, at the seed printed above,
+    // reads 1.0e-3 low, and the tolerance is set well clear of that rather
+    // than on it. What it is guarding against is a factor of 193: taking
+    // the power ratio as a gain instead of its square root.
+    CHECK(measured_gain == Approx(expected_gain).epsilon(5e-3));
+
+    // And a station placed by SNR into a scene with no noise is refused
+    // rather than silently placed at zero, which is the failure the default
+    // would otherwise cause in a scene somebody turned the noise off in.
+    siggen::SceneSpec quiet = scene_spec;
+    quiet.add_noise = false;
+    auto refused = siggen::Scene::create(quiet);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find("noise floor") != std::string::npos);
+}
+
 TEST_CASE("a scene's truth row carries the station's deviation bound", "[tools][wfm]")
 {
     INFO(std::format("seed {}", kSeed));
