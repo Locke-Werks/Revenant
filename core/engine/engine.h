@@ -47,6 +47,37 @@
 // count rather than by the sample rate, so it does not grow when the radio
 // gets wider. A caller budgeting PCIe or callback latency should use the
 // number above and not the adjective. Nothing here returns complex baseband.
+//
+// AND THE PASSBAND IS A SECOND REDUCTION, WHICH THE PROMISE WAS NEVER
+// AMENDED FOR
+//
+// The paragraphs above were written when the full-span frame was the only
+// addition, and they read as though it still is. PassbandFrame is a second
+// thing crossing the bus that is neither audio, nor a decoded symbol, nor
+// detection metadata, and it arrived without this block saying so. Recorded
+// here rather than folded in, because the promise at the top of this file is
+// what a reader checks a new surface against, and a surface that is already
+// in the tree and not in the promise makes the promise the wrong instrument.
+//
+// It passes the same test the full-span frame passes, on the same arithmetic
+// and more cheaply. A passband frame is passband_transform bins of four
+// bytes, one per block per SUBSCRIBED receiver, so at the shipped 4096
+// points that is 16 KiB a frame and 5.0 MB/s at the 305 blocks a second a
+// 20 MS/s source runs. Against the full-span frame's 80 MB/s it is noise,
+// and against the 160 MB/s the cf32 stream costs going out it is three
+// percent. It is bounded by the transform size rather than by the
+// demodulation rate, so widening a receiver's filter does not widen it.
+//
+// What keeps it bounded in the other direction is that it is opt in per
+// receiver: a rack of fifty receivers with one under examination pays for
+// one. Fifty at once would be 250 MB/s and past what the full-span frame
+// costs, so the per-receiver sink is load-bearing rather than tidy, and a
+// caller that attaches sinks in bulk has left this promise's terms.
+//
+// The promise is therefore: samples cross once, and what comes back is audio
+// PCM, decoded symbols, detection metadata, and bounded spectral reductions
+// of the span and of a receiver's own passband. A fourth thing crossing
+// amends this block again rather than arriving quietly.
 
 #pragma once
 
@@ -300,8 +331,14 @@ struct EngineInfo {
 
 // One receiver's audio, handed to the caller on the host.
 //
-// This and the spectrum frame are the only things that come back across the
-// bus. Everything else the engine computes stays on the device.
+// WHAT THIS COMMENT USED TO SAY. Until 2026-09-20 it read "this and the
+// spectrum frame are the only things that come back across the bus".
+// PassbandFrame below is a third and it was added without this sentence
+// being touched. The count was right once, and counting is the wrong shape
+// for it, so the rule is stated instead: what comes back is audio PCM,
+// decoded symbols, detection metadata and the two bounded spectral
+// reductions, with the arithmetic for all of it at the top of this file.
+// Everything else the engine computes stays on the device.
 struct AudioChunk {
     VrxId vrx;
     dsp::SampleIndex start = 0;
