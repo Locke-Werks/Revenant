@@ -830,10 +830,23 @@ TEST_CASE("bit error rate against Eb/N0", "[decode][rds]")
             point.eb_n0_db, report->snr_in_reference_bandwidth_db,
             report->reference_bandwidth_hz, decode::lock_name(decoded.status.lock),
             decoded.status.quality, match.compared, match.errors, ber, point.ceiling));
+        INFO(std::format("overhang {} against a ceiling of {}", match.overhang,
+                         kMaxOverhangBits));
 
         REQUIRE(decoded.status.lock == decode::RdsLock::Locked);
         REQUIRE(match.compared > kBitCount / 3);
         CHECK(ber <= point.ceiling);
+
+        // The bits decoded off the end of the payload are bounded here too,
+        // which every other round trip in this file checks and this one did
+        // not. Only the overlap with the transmitted sequence is scored, so
+        // junk past the end is invisible to the BER: a decoder that emitted
+        // a thousand bits out of the shaping run-out would post the same
+        // figure as one that emitted two and would pass every ceiling above.
+        // Noise is where that is most likely to happen and least likely to
+        // be noticed, which is why the sweep is the wrong place to leave it
+        // out.
+        CHECK(match.overhang <= kMaxOverhangBits);
 
         // Monotone. A curve that improves and then does not is a loop falling
         // out of lock at high SNR, which no amount of ceiling would catch.
