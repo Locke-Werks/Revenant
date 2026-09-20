@@ -142,11 +142,32 @@ TEST_CASE("the right token gets a session and the wrong one gets a refusal",
     INFO(refused.error().message);
     CHECK(refused.error().message.find("not this engine's token") != std::string::npos);
 
-    // And the refusal says nothing about the token itself. The length is
-    // published, so hiding it would be theatre; there is simply nothing else
-    // true to say, and "too short" would invite a caller to treat the length
-    // as the thing to get right.
-    CHECK(refused.error().message.find("32") == std::string::npos);
+    // AND ONE WRONG TOKEN IS REFUSED IN EXACTLY THE SAME WORDS AS ANOTHER
+    //
+    // This is the property, rather than the absence of some particular word.
+    // The refusal must say the token was rejected and nothing that
+    // distinguishes one wrong token from another: not how far along it
+    // stopped matching, not how long it was, not that it was empty.
+    //
+    // Two earlier versions of this check got it wrong in the way this project
+    // keeps getting things wrong. The first searched the message for "32" and
+    // the message carries the port, so it passed except on the runs where an
+    // ephemeral port happened to contain those characters. The second
+    // searched for "byte" and the refusal legitimately says "pass those
+    // bytes", so it never passed at all. Comparing two refusals against each
+    // other needs no guess about the wording and survives the wording
+    // changing.
+    rpc::Token other = test_token();
+    other.front() = static_cast<std::uint8_t>(other.front() ^ 0xFFU);
+    auto also_refused = harness.connect_with(other);
+    REQUIRE_FALSE(also_refused.has_value());
+
+    const std::string_view marker = "remote exception: ";
+    const std::size_t first = refused.error().message.find(marker);
+    const std::size_t second = also_refused.error().message.find(marker);
+    REQUIRE(first != std::string::npos);
+    REQUIRE(second != std::string::npos);
+    CHECK(refused.error().message.substr(first) == also_refused.error().message.substr(second));
 }
 
 TEST_CASE("a token of the wrong length is refused before a socket is opened",
