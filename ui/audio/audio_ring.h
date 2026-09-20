@@ -161,9 +161,14 @@ struct RingCounts {
     // baseline is restarted rather than the chunk being spliced.
     std::uint64_t restarts = 0;
 
-    // Chunks refused because sample_rate or channel_count was zero, which
-    // would make frames() a divide by zero or a rate the card cannot be
-    // opened at.
+    // Chunks refused because sample_rate or channel_count was zero.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it gave the reason
+    // as "which would make frames() a divide by zero or a rate the card
+    // cannot be opened at". The first half is false: core/rpc/types.h
+    // guards that division. The real reason is that an invalid format
+    // differs from the current one, so establishing on it would throw away
+    // a healthy stream on a single bad chunk. See the branch in write().
     std::uint64_t malformed_chunks = 0;
 };
 

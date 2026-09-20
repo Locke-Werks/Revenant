@@ -135,10 +135,34 @@ void AudioRing::write(const rpc::AudioChunk& chunk)
     const std::lock_guard<std::mutex> lock(mutex_);
 
     if (!incoming.valid()) {
-        // A rate of zero cannot open a device and a channel count of zero
-        // makes AudioChunk::frames a divide by zero. Counted rather than
-        // asserted: this is wire data and a client does not get to decide
-        // that the far end is impossible.
+        // WHAT THIS PARAGRAPH USED TO SAY
+        //
+        // Until 2026-09-20 it read "A rate of zero cannot open a device and
+        // a channel count of zero makes AudioChunk::frames a divide by
+        // zero." The second half is false and was false when it was
+        // written: core/rpc/types.h guards that division and returns zero
+        // frames for a zero channel count. It is recorded rather than
+        // swapped because the same sentence was repeated on
+        // RingCounts::malformed_chunks and in the test that covers this
+        // branch, so anyone who took it from one of those three is owed
+        // the retraction.
+        //
+        // WHAT THIS BRANCH ACTUALLY PREVENTS, which is worse than a divide
+        // and is the reason it stays: the line below this one establishes
+        // on any format that differs from the current one. An invalid
+        // format differs, so ONE malformed chunk in the middle of a
+        // healthy stream would re-establish the ring on it: everything
+        // buffered dropped with no counter charged for it, the format
+        // generation bumped, and AudioPlayer closing the sink because the
+        // format it now reads is invalid. A single bad chunk would cost
+        // the whole ring's depth of real audio and a sink reopen.
+        //
+        // A zero rate also survives establish() in a shape nothing else
+        // handles: capacity_ floors at one frame, grow_to refuses to grow
+        // an invalid format, and push then drives buffered_ past capacity_.
+        //
+        // Counted rather than asserted: this is wire data and a client does
+        // not get to decide that the far end is impossible.
         ++counts_.malformed_chunks;
         return;
     }

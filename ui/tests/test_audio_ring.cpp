@@ -434,26 +434,56 @@ TEST_CASE("a rate change re-establishes the ring", "[audio][ring]")
     CHECK(ring.frames_buffered() == 480);
 }
 
-TEST_CASE("a malformed chunk is refused rather than divided by", "[audio][ring]")
+TEST_CASE("a malformed chunk does not tear down a healthy stream", "[audio][ring]")
 {
-    // REJECTS: trusting the wire. AudioChunk::frames divides by
+    // THIS CASE USED TO SAY IT REJECTED A DIVIDE BY ZERO, and that was
+    // never the hazard. It read "AudioChunk::frames divides by
     // channel_count, and a chunk with a channel count of zero from a
     // damaged or hostile peer is a divide by zero inside the RPC event
-    // loop's callback, which takes the whole connection down. A sample
-    // rate of zero is the same class of fault one layer up: it opens a
-    // QAudioSink at 0 Hz.
+    // loop's callback". core/rpc/types.h guards that division and returns
+    // zero frames, so there was no division to guard and the case was
+    // certifying a danger that did not exist.
+    //
+    // REJECTS, for real: letting an invalid format reach establish().
+    // write() establishes on any format that differs from the current one,
+    // and an invalid format differs. So ONE bad chunk in the middle of a
+    // running stream would drop everything buffered with no counter
+    // charged for it, bump the format generation, and leave format()
+    // invalid, which AudioPlayer::tick reads as no stream at all and
+    // closes the sink for. A single malformed chunk from a damaged or
+    // hostile peer would cost the ring's whole depth of real audio and a
+    // sink reopen, and nothing but malformed_chunks would say why.
     AudioRing ring;
     ring.set_depth_millis(kDepthMs);
 
-    AudioChunk no_channels = make_chunk(0, 4, 0.5F);
+    // A stream that is running and has audio in it, which is the state the
+    // refusal has to protect.
+    ring.write(make_chunk(0, 480, 0.5F));
+    const RingFormat established = ring.format();
+    const std::uint64_t generation = ring.format_generation();
+    REQUIRE(ring.frames_buffered() == 480);
+
+    AudioChunk no_channels = make_chunk(480, 4, 0.25F);
     no_channels.channel_count = 0;
     ring.write(no_channels);
 
-    ring.write(make_chunk(0, 4, 0.5F, true, 0, 0, 1));
+    ring.write(make_chunk(480, 4, 0.25F, true, 0, 0, 1));
 
     CHECK(ring.counts().malformed_chunks == 2);
-    CHECK(ring.counts().frames_written == 0);
-    CHECK(ring.frames_buffered() == 0);
+
+    // Nothing of the running stream moved: not the audio, not the format,
+    // not the generation the player reopens on, and not the written count.
+    CHECK(ring.frames_buffered() == 480);
+    CHECK(ring.format() == established);
+    CHECK(ring.format_generation() == generation);
+    CHECK(ring.counts().frames_written == 480);
+
+    // And the timeline is untouched, so the next real chunk is contiguous
+    // rather than being charged a gap for the frames the bad ones claimed.
+    ring.write(make_chunk(480, 480, 0.75F));
+    CHECK(ring.counts().gap_events == 0);
+    CHECK(ring.counts().restarts == 0);
+    CHECK(ring.frames_buffered() == 960);
 }
 
 TEST_CASE("an index that goes backwards restarts rather than wrapping", "[audio][ring]")
