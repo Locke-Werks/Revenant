@@ -1,0 +1,10 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "revenant-ui",
+    "version-semver": "0.1.0",
+    "description": "The Qt/QML client for the Revenant engine",
+    "supports": "windows",
+    "dependencies": [
+        "capnproto"
+    ]
+}

@@ -12,6 +12,7 @@ machine and what CI runs against.
 | Ninja | any current release | See the trap below. The one on `PATH` is probably the wrong one. |
 | LunarG Vulkan SDK | 1.4.350 | `VULKAN_SDK` must be set. `glslangValidator` and `spirv-val` come from here. |
 | vcpkg | at `C:\vcpkg` | `VCPKG_ROOT` must be set. Manifest mode, so dependencies come from `vcpkg.json`. |
+| Qt | 6.8.3, kit `msvc2022_64` | The `ui/` build only. The engine, the tools and the tests do not need it and must never find it. |
 
 C++23, through `/std:c++latest`. `std::expected`, `std::format` and
 `std::print` are in use across the engine and the tools. `std::mdspan` is the
@@ -150,6 +151,51 @@ device silently being tested twice.
 Validation layers default to on in a Debug build and off otherwise. They are the
 difference between a descriptive error and a driver hang, so leave them on while
 writing a kernel.
+
+## The UI is a second build
+
+`ui/` is its own CMake project, configured separately against a different vcpkg
+triplet and a different C runtime. Everything above builds `/MT` against
+`x64-windows-static`; the Qt client builds `/MD` against `x64-windows`.
+docs/rpc.md has the reasoning, the `dumpbin` measurements behind it, and the
+rule about what `core/rpc/client.cpp` is allowed to include.
+
+`REVENANT_BUILD_UI` in the root `CMakeLists.txt` is not the switch for this. It
+fails the configure with a message saying the QML client arrives at M2, and it
+will not become the switch, because the main tree's cache holds the wrong
+triplet and the wrong runtime library.
+
+From an x64 Native Tools prompt, same as `dev` and `ci`, for the same
+Strawberry Perl reason:
+
+```powershell
+cmake -S ui -B build\ui -G Ninja `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+  -DVCPKG_TARGET_TRIPLET=x64-windows `
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+  -DCMAKE_PREFIX_PATH="C:\Qt\6.8.3\msvc2022_64" `
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build\ui
+```
+
+`scripts/build.ps1` drives the presets in `CMakePresets.json` and knows nothing
+about this tree. Do not point it here.
+
+Two ways to get it wrong:
+
+- Configuring `ui/` into `build\dev`, or any other main build directory. The
+  cache there already holds `x64-windows-static` and `MultiThreaded`, CMake
+  reuses both, and the configure succeeds. What comes out is Qt linked against
+  the static CRT, which fails at link if you are lucky and at runtime if you
+  are not.
+- Expecting to link `revenant_rpc_client` from the main build. That library is
+  `/MT` and unusable here. `ui/` compiles `core/rpc/client.cpp` and the
+  generated schema sources itself. Build the main tree first regardless, since
+  that is what proves the schema still generates.
+
+`ui/` currently holds three placeholders naming what goes in `ui/models`,
+`ui/qml` and `ui/render`. There is no `ui/CMakeLists.txt` yet, so the commands
+above are the shape of that build and not something that runs today.
 
 ## Signing
 

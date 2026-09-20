@@ -1,0 +1,104 @@
+// Engine structs to schema readers and back.
+//
+// Every one of these is mechanical, and that is the point of having them in
+// one file: a field that is silently dropped on the way out is a field the
+// UI renders as zero with nothing to say it was ever set. Reviewing one file
+// against core/engine/engine.h and core/rpc/revenant.capnp is a thing a
+// person can actually do; reviewing the same conversions smeared through
+// eight RPC method bodies is not.
+//
+// TWO INVARIANTS THIS FILE EXISTS TO HOLD
+//
+// Frequencies stay rational. docs/conventions.md refuses integer hertz for
+// a channel centre because k*rate/M is usually not a whole number, and a
+// conversion layer is exactly where that rule gets quietly broken by
+// somebody reaching for the double. Nothing here calls bin_width_hz() or
+// divides a rational.
+//
+// The demodulator enum is checked, not cast on faith. The schema's ordinals
+// are declared to match engine::Demod, so the conversion is a cast, and a
+// static_assert per mode below is what keeps that true. Reorder either side
+// without the other and the build stops here rather than retuning every
+// receiver in a saved session to a different mode.
+
+#pragma once
+
+#include "core/engine/engine.h"
+#include "core/engine/vrx.h"
+#include "core/rpc/revenant.capnp.h"
+#include "core/source/capabilities.h"
+#include "core/source/source.h"
+
+namespace revenant::rpc {
+
+// The cast the conversions below rely on, made a compile error to break.
+static_assert(static_cast<std::uint16_t>(schema::Demod::RAW) ==
+              static_cast<std::uint16_t>(engine::Demod::Raw));
+static_assert(static_cast<std::uint16_t>(schema::Demod::AM) ==
+              static_cast<std::uint16_t>(engine::Demod::Am));
+static_assert(static_cast<std::uint16_t>(schema::Demod::NFM) ==
+              static_cast<std::uint16_t>(engine::Demod::Nfm));
+static_assert(static_cast<std::uint16_t>(schema::Demod::WFM) ==
+              static_cast<std::uint16_t>(engine::Demod::Wfm));
+static_assert(static_cast<std::uint16_t>(schema::Demod::USB) ==
+              static_cast<std::uint16_t>(engine::Demod::Usb));
+static_assert(static_cast<std::uint16_t>(schema::Demod::LSB) ==
+              static_cast<std::uint16_t>(engine::Demod::Lsb));
+static_assert(static_cast<std::uint16_t>(schema::Demod::DSB) ==
+              static_cast<std::uint16_t>(engine::Demod::Dsb));
+static_assert(static_cast<std::uint16_t>(schema::Demod::CW) ==
+              static_cast<std::uint16_t>(engine::Demod::Cw));
+
+[[nodiscard]] schema::Demod to_schema(engine::Demod mode);
+
+// Rejects an out-of-range ordinal rather than casting it.
+//
+// A Cap'n Proto enum field can legally hold a value the reader's schema has
+// never heard of, which is how a newer client reaches an older engine. The
+// generated C++ hands that back as an enum with no matching name, and a
+// blind cast turns it into whichever mode happens to sit at that ordinal.
+// Mode is the one receiver parameter where being wrong is inaudible until
+// somebody notices the recording is unintelligible.
+[[nodiscard]] Expected<engine::Demod> from_schema(schema::Demod mode);
+
+void write_rational(schema::Rational::Builder out, std::int64_t numerator,
+                    std::int64_t denominator);
+
+void write_device(schema::DeviceInfo::Builder out, const gpu::DeviceInfo& in);
+void write_source_descriptor(schema::SourceDescriptor::Builder out,
+                             const source::SourceCapabilities& in);
+void write_grid(schema::GridParams::Builder out, const dsp::GridParams& in);
+void write_spectrum_geometry(schema::SpectrumGeometry::Builder out,
+                             const engine::SpectrumGeometry& in);
+void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo& in);
+void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in);
+void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in);
+void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in);
+void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& in);
+
+// Copies the whole frame, including its power_db span, so the result
+// outlives the sink call. engine::SpectrumFrame documents that span as valid
+// for the duration of the call and not after, which for a wire format means
+// the copy is not an inefficiency to be optimised away later.
+void write_spectrum_frame(schema::SpectrumFrame::Builder out,
+                          const engine::SpectrumFrame& in);
+
+[[nodiscard]] Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in);
+
+// There is deliberately no read_spectrum_geometry here.
+//
+// One existed, nothing ever called it, and it could not be called by the one
+// reader that needs the conversion: client.cpp is forbidden from including
+// this header, because it compiles a second time against the dynamic CRT
+// where revenant_core is not linked. So the live reader is client.cpp's own,
+// over core/rpc/types.h.
+//
+// Two readers is worse than the duplication looks. This one guarded a zero
+// denominator by substituting 1, and the live one copies it through on
+// purpose, because types.h::hertz() already decides what a zero denominator
+// means and a second policy here would make one wire value mean two
+// different frequencies depending on which layer read it. Deleted rather
+// than left dead, since dead code with a conflicting policy is a trap for
+// whoever wires it up.
+
+}  // namespace revenant::rpc

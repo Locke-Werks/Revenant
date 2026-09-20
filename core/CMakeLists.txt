@@ -104,3 +104,6 @@ revenant_apply_warnings(revenant_core)
 # setting is a decision on the record rather than a compiler default nobody
 # checked.
 revenant_apply_reference_fp(revenant_core)
+
+# The wire. Two libraries, and the comment in rpc/CMakeLists.txt says why.
+add_subdirectory(rpc)

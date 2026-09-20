@@ -1,0 +1,191 @@
+# The Qt/QML client, which is a separate CMake project on purpose.
+#
+# WHY THIS IS NOT add_subdirectory(ui) FROM THE ROOT
+#
+# revenant_core is compiled /MT and revenant-cli links no CRT DLL, which is
+# what lets it ship as one signed file. Qt 6.8.3 at C:/Qt/6.8.3/msvc2022_64 is
+# built against the dynamic CRT: dumpbin /DEPENDENTS on Qt6Core.dll lists
+# MSVCP140.dll, VCRUNTIME140.dll and the api-ms-win-crt-* forwarders, checked
+# rather than assumed. One CMake project cannot hold both runtimes, and a
+# std::string handed across that boundary in-process is allocated on one heap
+# and freed on another. So this configures on its own, against the dynamic
+# vcpkg triplet, and talks to the engine over a socket.
+#
+# The consequence for this file: it links no part of the engine. It compiles
+# the schema and core/rpc/client.cpp from the main tree by path, and those
+# depend on capnp, core/rpc/types.h and core/error.h and nothing else. See
+# core/rpc/CMakeLists.txt, which states the same rule from the other side.
+#
+# TO CONFIGURE AND BUILD, from any shell, no vcvars needed:
+#
+#   cd ui
+#   cmake --preset vs
+#   cmake --build --preset vs
+#
+# The vs preset uses the Visual Studio generator, which finds its own
+# toolchain. CMakePresets.json also carries a ninja preset for a shell that is
+# already an x64 Native Tools prompt. Both pin VCPKG_TARGET_TRIPLET to
+# x64-windows and CMAKE_MSVC_RUNTIME_LIBRARY to the dynamic CRT; configuring
+# without those produces a link that half matches Qt and fails in ways that
+# read as missing symbols rather than as a runtime mismatch.
+
+cmake_minimum_required(VERSION 3.28)
+
+project(revenant_ui
+    DESCRIPTION "The Qt/QML client for the Revenant engine"
+    LANGUAGES CXX
+)
+
+# Where the engine tree is. A cache variable rather than a hard-coded
+# relative path so this can be configured from a checkout laid out
+# differently, and resolved because CAPNP_GENERATE_CPP matches the source
+# prefix against the schema path as a string: an unresolved ".." in here
+# fails that comparison with a message about output paths that says nothing
+# about the cause. get_filename_component rather than cmake_path, because
+# cmake_path's NORMALIZE leaves a trailing slash on a path ending in "..".
+set(REVENANT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    CACHE PATH "The Revenant engine source tree this client is built against")
+get_filename_component(REVENANT_SOURCE_DIR "${REVENANT_SOURCE_DIR}" ABSOLUTE)
+
+if(NOT EXISTS "${REVENANT_SOURCE_DIR}/core/rpc/revenant.capnp")
+    message(FATAL_ERROR
+        "REVENANT_SOURCE_DIR is '${REVENANT_SOURCE_DIR}' and there is no "
+        "core/rpc/revenant.capnp under it. Point it at the engine tree.")
+endif()
+
+option(REVENANT_WERROR "Treat warnings as errors" OFF)
+
+# The house warning set, taken from the engine tree rather than copied, so the
+# two cannot drift.
+list(APPEND CMAKE_MODULE_PATH "${REVENANT_SOURCE_DIR}/cmake")
+include(CompilerFlags)
+
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+endif()
+
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2)
+find_package(CapnProto CONFIG REQUIRED)
+
+qt_standard_project_setup(REQUIRES 6.8)
+
+# ---------------------------------------------------------------------------
+# The schema, compiled here rather than imported
+# ---------------------------------------------------------------------------
+#
+# The main tree's generated headers are built /MT and live in its build
+# directory. Reusing them would mean linking its capnp, which is the static
+# triplet's. So this project runs capnpc itself against the same .capnp file.
+# One schema, two generated copies, one per runtime: that is the price of the
+# process split and it is paid at build time rather than at a heap boundary.
+#
+# Output is laid out as if relative to the engine tree, so the include reads
+# "core/rpc/revenant.capnp.h" here exactly as it does there.
+set(CAPNPC_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(CAPNPC_SRC_PREFIX "${REVENANT_SOURCE_DIR}")
+file(MAKE_DIRECTORY "${CAPNPC_OUTPUT_DIR}/core/rpc")
+capnp_generate_cpp(revenant_capnp_sources revenant_capnp_headers
+    "${REVENANT_SOURCE_DIR}/core/rpc/revenant.capnp")
+
+# ---------------------------------------------------------------------------
+# The client half of the wire, compiled from the main tree by path
+# ---------------------------------------------------------------------------
+set(revenant_rpc_client_sources "${REVENANT_SOURCE_DIR}/core/rpc/client.cpp")
+
+if(NOT EXISTS "${revenant_rpc_client_sources}")
+    # Configure still succeeds, because getting this far is worth knowing even
+    # while the client implementation is being written. The link is what
+    # fails, and it fails naming Client::connect, which is the truth.
+    message(WARNING
+        "core/rpc/client.cpp does not exist yet. This project will configure "
+        "and compile, and the link will fail on revenant::rpc::Client::connect. "
+        "Nothing here stubs core/rpc/client.h: the header is the contract.")
+    set(revenant_rpc_client_sources "")
+endif()
+
+# ---------------------------------------------------------------------------
+# The client
+# ---------------------------------------------------------------------------
+qt_add_executable(revenant_ui
+    main.cpp
+    models/engine_link.cpp
+    models/engine_link.h
+    render/spectrum_item.cpp
+    render/spectrum_item.h
+    render/spectrum_scale.cpp
+    render/spectrum_scale.h
+    render/waterfall_item.cpp
+    render/waterfall_item.h
+    ${revenant_capnp_sources}
+    ${revenant_rpc_client_sources}
+)
+
+qt_add_qml_module(revenant_ui
+    URI Revenant
+    VERSION 1.0
+    QML_FILES
+        qml/Main.qml
+)
+
+# Neither of these is ours and neither passes /W4. Scoped to the files rather
+# than relaxed on the target, so the hand-written sources stay at the house
+# level. The generated schema has no Q_OBJECT in it and client.cpp knows
+# nothing about Qt, so both are kept out of the moc scan as well.
+set_source_files_properties(${revenant_capnp_sources}
+    PROPERTIES SKIP_AUTOGEN TRUE)
+set_source_files_properties(${revenant_rpc_client_sources}
+    PROPERTIES SKIP_AUTOGEN TRUE)
+if(MSVC)
+    set_source_files_properties(${revenant_capnp_sources}
+        PROPERTIES COMPILE_OPTIONS "/W0")
+endif()
+
+target_include_directories(revenant_ui
+    PRIVATE
+        "${REVENANT_SOURCE_DIR}"
+        "${CAPNPC_OUTPUT_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        # qmltyperegistrar writes <engine_link.h> rather than
+        # <models/engine_link.h> into the generated registration unit: it
+        # knows the header's basename and not where the build put it. The
+        # include is guarded by __has_include, so getting this wrong does not
+        # fail there. It fails later, compiling the registration with every
+        # QML_ELEMENT type undeclared, and the error names the type rather
+        # than the missing path.
+        "${CMAKE_CURRENT_SOURCE_DIR}/models"
+        "${CMAKE_CURRENT_SOURCE_DIR}/render"
+)
+
+target_link_libraries(revenant_ui
+    PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Quick
+        Qt6::QuickControls2
+        CapnProto::capnp-rpc
+        CapnProto::capnp
+        CapnProto::kj-async
+        CapnProto::kj
+)
+
+revenant_apply_warnings(revenant_ui)
+
+# A GUI subsystem binary, so a double-click does not open a console behind the
+# window. Startup failures before the window exists go to stderr, which is why
+# the ninja preset is the one to use when a connection refuses.
+set_target_properties(revenant_ui PROPERTIES
+    WIN32_EXECUTABLE ON
+    MACOSX_BUNDLE ON
+    OUTPUT_NAME revenant-ui
+)
+
+message(STATUS "revenant_ui")
+message(STATUS "  engine tree  ${REVENANT_SOURCE_DIR}")
+message(STATUS "  Qt           ${Qt6_VERSION} at ${QT6_INSTALL_PREFIX}")
+message(STATUS "  CRT          ${CMAKE_MSVC_RUNTIME_LIBRARY}")
+message(STATUS "  triplet      ${VCPKG_TARGET_TRIPLET}")

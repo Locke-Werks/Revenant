@@ -46,6 +46,12 @@ catch_discover_tests(revenant_reference_tests
 add_subdirectory(detect)
 add_subdirectory(engine)
 
+# The RPC service. Guarded inside its own file on revenant_rpc_server, which
+# is not built at all when Cap'n Proto is missing from the toolchain.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rpc/CMakeLists.txt")
+    add_subdirectory(rpc)
+endif()
+
 if(REVENANT_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
     add_subdirectory(tools)
 endif()

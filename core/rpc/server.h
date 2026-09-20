@@ -1,0 +1,131 @@
+// The engine side of the wire.
+//
+// Holds a reference to a running (or not yet running) Engine and serves the
+// Session interface over a socket. Unlike core/rpc/client.h this one does
+// link revenant_core, because its whole job is to be the engine's mouth.
+//
+// THREADING, WHICH IS THE ONLY HARD PART IN HERE
+//
+// Four threads matter and none of them is the same thread.
+//
+//   The caller's. Constructs the Server, and later stops it.
+//
+//   The Cap'n Proto event loop, which Server owns. Every capability in the
+//   generated schema may only be touched from here. This is not a
+//   performance guideline; kj's promise machinery is not thread safe and
+//   calling a capability from elsewhere corrupts it.
+//
+//   The engine's completion thread, which is where a SpectrumSink is
+//   invoked. It is therefore the one thread that must never touch a
+//   capability directly.
+//
+//   The listing worker, which exists because listSources opens hardware.
+//   source::describe_sources reaches rtlsdr_open, a libusb open, claim and
+//   reset, and running that on the loop thread stalled every other client's
+//   calls, the spectrum fan-out, and the shutdown fulfiller that stop()
+//   depends on. The work runs here; only the fulfiller crosses back, which
+//   is the split kj supports. stop() closes the queue and joins this thread
+//   before it fulfils the shutdown promise, so no listing is ever fulfilled
+//   at an event loop that has gone.
+//
+// The bridge between the last two is a cross-thread promise fulfiller. The
+// sink copies the frame into a single-frame slot and fulfils a promise the
+// loop thread is waiting on; the loop thread then does the capability work.
+//
+// This paragraph used to say "the sink calls kj::Executor::executeAsync, and
+// that is the supported mechanism and the only one". Both halves were wrong,
+// and the correction is recorded rather than quietly swapped because the
+// wrong version is the one an experienced reader would expect to be right.
+//
+// executeAsync cannot be called from the engine's completion thread. kj's own
+// header is explicit that the promise it returns "belongs to the requesting
+// thread", and a kj promise requires an event loop on the thread that owns
+// it. The completion thread has none, so the call throws. There is also no
+// fire-and-forget form to fall back on: the same header states that
+// destroying the returned promise blocks until the executor thread
+// acknowledges cancellation, so dropping it cancels the work rather than
+// detaching it.
+//
+// executeSync does work from a thread with no loop, and is still wrong here.
+// It blocks the caller until the loop thread is done, and the caller is the
+// thread retiring GPU readbacks. Parking it behind anything the loop is busy
+// with would stall the signal path to
+// serve the display.
+//
+// kj::newPromiseAndCrossThreadFulfiller is the primitive kj documents as
+// safe to fire from any thread, which is exactly and only what the sink
+// needs. The Executor is still held, with addRef, because the cross-thread
+// promise keeps a bare reference to its creating thread's executor and kj
+// destroys an unreferenced Executor along with its loop.
+//
+// BACKPRESSURE, DECIDED HERE RATHER THAN DISCOVERED LATER
+//
+// A slow client must not grow a queue. At the shipped geometry a frame is
+// 256 KiB and the engine makes 305 a second, so a client that stalls for two
+// seconds would be 150 MB behind if anything buffered on its behalf.
+//
+// So: at most one frame in flight per subscription. A frame arriving while
+// the previous call has not resolved is dropped and counted, not queued. For
+// a waterfall that is the right answer anyway, since the newest frame is the
+// one worth drawing. The count is reported so that a display can say it is
+// behind instead of silently lying about the band.
+
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+
+#include "core/engine/engine.h"
+#include "core/error.h"
+
+namespace revenant::rpc {
+
+struct ServerOptions {
+    // Loopback by default. Serving an engine to the network is a decision
+    // somebody makes on purpose, and there is no authentication on this
+    // interface yet, so the default must not be the one that exposes it.
+    std::string bind_address = "127.0.0.1";
+
+    // Zero binds an ephemeral port, which the test suite needs so that two
+    // runs on one machine do not collide. Server::port() reports what was
+    // actually bound.
+    std::uint16_t port = 0;
+};
+
+class Server {
+public:
+    // The engine must outlive the server. The server installs a spectrum
+    // sink on it and removes that sink on destruction, so constructing two
+    // servers on one engine is not supported and is rejected rather than
+    // silently letting the second replace the first's sink.
+    [[nodiscard]] static Expected<std::unique_ptr<Server>> create(engine::Engine& engine,
+                                                                   const ServerOptions& options);
+
+    virtual ~Server() = default;
+
+    Server(const Server&) = delete;
+    Server& operator=(const Server&) = delete;
+    Server(Server&&) = delete;
+    Server& operator=(Server&&) = delete;
+
+    // The port actually bound, which is what ServerOptions::port asked for
+    // unless that was zero. Valid as soon as create returns.
+    [[nodiscard]] virtual std::uint16_t port() const = 0;
+
+    // Frames handed to subscribers, and frames dropped because a subscriber
+    // had not finished with the previous one. See BACKPRESSURE above.
+    [[nodiscard]] virtual std::uint64_t frames_sent() const = 0;
+    [[nodiscard]] virtual std::uint64_t frames_dropped() const = 0;
+
+    // Stops the event loop and joins its thread. Idempotent, and also run by
+    // the destructor, because a server torn down while a client is mid-call
+    // is the ordinary case rather than the exception.
+    virtual void stop() = 0;
+
+protected:
+    Server() = default;
+};
+
+}  // namespace revenant::rpc

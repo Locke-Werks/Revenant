@@ -81,7 +81,7 @@ endif()
 # Guarded so a checkout part-way through M0 still configures. Once both tools
 # exist the guards are noise and come out.
 if(REVENANT_BUILD_TOOLS)
-    foreach(tool IN ITEMS siggen bench devices cli)
+    foreach(tool IN ITEMS siggen bench devices cli engined)
         if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/${tool}/CMakeLists.txt")
             add_subdirectory(tools/${tool})
         else()
