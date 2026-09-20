@@ -32,6 +32,7 @@ if(TARGET revenant_rpc_server)
         test_rpc_audio.cpp
         test_rpc_auth.cpp
         test_rpc_detect.cpp
+        test_rpc_rds.cpp
         test_rpc_session.cpp
         test_rpc_spectrum.cpp
         test_rpc_token.cpp

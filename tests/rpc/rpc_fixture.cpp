@@ -45,7 +45,7 @@ Harness::~Harness() { shutdown(); }
 Status Harness::open(const HarnessOptions& options) {
     engine::EngineConfig config;
     config.gpu_index = -1;  // honours REVENANT_GPU_INDEX, like every other binary here
-    config.channels = kChannels;
+    config.channels = options.channels == 0 ? kChannels : options.channels;
     config.taps_per_branch = 17;
     config.ring_seconds = options.ring_seconds;
     config.block_samples = options.block_samples;
@@ -59,9 +59,11 @@ Status Harness::open(const HarnessOptions& options) {
     }
     engine_ = std::move(*created);
 
-    if (auto opened = engine_->open_source(scene_uri(options.samples, options.center_hz));
-        !opened) {
-        return std::unexpected(with_context(opened.error(), "opening the scene"));
+    const std::string uri = options.source_uri.empty()
+                                ? scene_uri(options.samples, options.center_hz)
+                                : options.source_uri;
+    if (auto opened = engine_->open_source(uri); !opened) {
+        return std::unexpected(with_context(opened.error(), std::format("opening {}", uri)));
     }
 
     // Ephemeral, so two of these running at once on one machine do not

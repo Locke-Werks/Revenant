@@ -152,6 +152,24 @@ struct HarnessOptions {
     // False leaves the client unconnected, for the cases that are about
     // connecting.
     bool connect_client = true;
+
+    // A source URI instead of the scene above, and a grid to read it with.
+    //
+    // WHY THESE TWO EXIST AND WHY THEY ARE NOT THE DEFAULT
+    //
+    // kSourceRate over kChannels puts a coarse channel at 75001 S/s, which
+    // is right for everything else here and is an eighth of what a
+    // demodulator producing an FM composite needs. The RDS cases run a
+    // 171 kHz composite, which the planner demodulates at 342000, and a
+    // receiver cannot be given a demodulation rate its channel cannot carry
+    // without the fine filter losing the transition band it is designed in.
+    //
+    // So those cases bring their own rate and their own channel count, and
+    // the arithmetic tying the two together is in
+    // tests/rpc/test_rpc_rds.cpp beside the station that has to fit. Empty
+    // and zero mean the scene and kChannels, which is every other case.
+    std::string source_uri;
+    std::uint32_t channels = 0;
 };
 
 // A ring request the engine satisfies in full, so nothing is clamped.
