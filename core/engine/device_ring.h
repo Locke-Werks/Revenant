@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -143,6 +144,82 @@ public:
     // Releases everything below `through`. The writer's floor is the minimum
     // retired cursor across all consumers.
     [[nodiscard]] Status retire(const RingConsumer& consumer, dsp::SampleIndex through);
+
+    // Where one consumer stands. Empty when the handle is not registered on
+    // this ring, which is what a consumer left over from a moved-from ring
+    // looks like.
+    [[nodiscard]] std::optional<ConsumerCursor> cursor(const RingConsumer& consumer) const;
+
+    // --- the producer -------------------------------------------------------
+    //
+    // The writer carries two cursors for the same reason a consumer does, and
+    // the pair is the mirror image of claim and retire: the reservation is the
+    // window it has taken and is filling, write_index() is what it has
+    // finished with and published. Writing sample i destroys sample i minus
+    // one capacity, and that destruction happens before the publish, so
+    // first_available() is derived from the reservation. A single producer
+    // cursor names the oldest samples as present for exactly as long as they
+    // are being demolished, and a Lossy consumer sitting at that edge reads a
+    // window stitched from two eras with nothing saying so.
+    //
+    // One producer thread. reserve, reserve_blocking, release_reservation,
+    // publish and note_dropped belong to the thread that owns the upload and
+    // to no other; reserved_index, stop and stopped are any thread's.
+    //
+    // A mutator that can be reached on a ring that was never created, or was
+    // moved from, reports it rather than returning a number that reads as an
+    // ordinary result: zero granted is indistinguishable from a full ring, so
+    // a Paced producer would count a dead ring as a permanent overrun and the
+    // recording would look merely lossy. release_reservation and note_dropped
+    // are the exceptions, because both run on paths that are already unwinding
+    // or already counting a loss, and a second error to discard there buys
+    // nothing.
+
+    // The Paced adapter. Takes what there is room for, never waits, and
+    // returns how much it took. A short grant is an overrun: a radio's clock
+    // does not wait, so the samples that did not fit are already gone and the
+    // only question is whether anyone is told. Record it with note_dropped.
+    [[nodiscard]] Expected<std::uint64_t> reserve(std::uint64_t count);
+
+    // The Demand adapter. Parks until the slowest Blocking consumer has
+    // retired enough room, which is the backpressure that makes a file source
+    // run at exactly the rate its consumers retire. That is where faster than
+    // realtime comes from: there is no throttle anywhere, only this wait.
+    // Fails when the ring has been stopped, and when `count` exceeds the whole
+    // capacity, where no amount of retiring could ever satisfy it.
+    [[nodiscard]] Status reserve_blocking(std::uint64_t count);
+
+    // Hands back the tail of a reservation the producer did not fill, for the
+    // error paths between reserving and publishing.
+    void release_reservation(std::uint64_t unused);
+
+    // Makes reserved samples readable and returns how many became readable. A
+    // producer may publish one reservation in pieces, so a short return is not
+    // a partial failure: it is the reservation running out, which means the
+    // caller published more than it took.
+    //
+    // This is a release store and nothing more. It makes the producer's host
+    // writes visible to a thread that observes the new cursor, and says
+    // nothing about whether the device has finished a copy: that is the
+    // submission's own barrier and timeline. Conflating the two is the tearing
+    // bug device_ring.cpp names, and it is two bugs rather than one.
+    [[nodiscard]] Expected<std::uint64_t> publish(std::uint64_t count);
+
+    // Samples that never reached the ring, because a Paced source outran it or
+    // a Blocking consumer left no room. Counted rather than logged, because a
+    // log line produces a recording that looks continuous and is not.
+    void note_dropped(std::uint64_t samples);
+
+    // How far the producer has taken the ring, published or not.
+    [[nodiscard]] dsp::SampleIndex reserved_index() const;
+
+    // Wakes everyone parked, once and permanently: a producer waiting on a
+    // Blocking consumer that will never retire again, and anyone waiting for
+    // samples that will never arrive. A process that cannot exit is worse than
+    // one that exits having dropped samples. The destructor does this too, so
+    // calling it is for a shutdown that has to happen before the ring dies.
+    void stop();
+    [[nodiscard]] bool stopped() const;
 
     // Oldest sample still guaranteed present, and the newest written. A
     // consumer that finds its position below the first has been overrun.

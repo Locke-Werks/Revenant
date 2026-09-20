@@ -17,6 +17,13 @@
 // The last two are the ones the placeholder failed, so they are written as
 // the failure rather than as the fix: a frame count and a decibel margin,
 // both of which a regression would move.
+//
+// The outlier guard is not in that specification and its cases are written
+// differently. It exists because of a defect the specification's own
+// asymmetry produces, so each of its cases runs the same input twice, once
+// with the guard switched off and once with it on, and prints both. That is
+// the only way a reader can tell the number that matters, which is the
+// difference, from the number the arithmetic happens to give.
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -24,6 +31,7 @@
 #include <cmath>
 #include <cstddef>
 #include <format>
+#include <limits>
 #include <string>
 
 #include "core/engine/spectrum_scale.h"
@@ -56,6 +64,16 @@ engine::SpectrumScaleLevels settle(engine::SpectrumScale& scale, float low_db, f
         ends = scale.update(low_db, high_db, kFrameSeconds);
     }
     return ends;
+}
+
+// A scale with the outlier guard switched off, which is every version of this
+// class before the guard existed. The defect cases run this beside the
+// default so the fix is measured against the behaviour it replaced rather
+// than against an assertion about it.
+engine::SpectrumScaleConfig unguarded() {
+    engine::SpectrumScaleConfig config;
+    config.outlier_window_frames = 1;
+    return config;
 }
 
 }  // namespace
@@ -95,38 +113,264 @@ TEST_CASE("a signal appearing suddenly is not clipped for thirty seconds",
     // could not have: at a symmetric thirty seconds a transmission that keys
     // up is a solid bar with no structure in it until it has been on the air
     // for half a minute, which on a waterfall is the whole of the event.
+    constexpr float kQuietHigh = -78.0F;
+    constexpr float kSignalHigh = -38.0F;  // a carrier forty decibels up
+    constexpr float kStepDb = kSignalHigh - kQuietHigh;
+
     auto scale = make_scale({});
-    const auto quiet = settle(scale, -95.0F, -78.0F, 60.0);
+    auto bare = make_scale(unguarded());
+    const auto quiet = settle(scale, -95.0F, kQuietHigh, 60.0);
+    static_cast<void>(settle(bare, -95.0F, kQuietHigh, 60.0));
     INFO(std::format("quiet band settled at {} to {}", quiet.floor_db, quiet.ceiling_db));
     REQUIRE(quiet.ceiling_db == Approx(-78.0).margin(0.5));
 
-    // A carrier appears, forty decibels above the band.
-    constexpr float kSignalHigh = -38.0F;
+    float guarded_ceiling[5] = {quiet.ceiling_db, 0.0F, 0.0F, 0.0F, 0.0F};
+    float bare_ceiling[5] = {quiet.ceiling_db, 0.0F, 0.0F, 0.0F, 0.0F};
+    for (std::size_t frame = 1; frame < 5; ++frame) {
+        guarded_ceiling[frame] = scale.update(-95.0F, kSignalHigh, kFrameSeconds).ceiling_db;
+        bare_ceiling[frame] = bare.update(-95.0F, kSignalHigh, kFrameSeconds).ceiling_db;
+    }
 
-    const auto after_one = scale.update(-95.0F, kSignalHigh, kFrameSeconds);
-    const auto after_two = scale.update(-95.0F, kSignalHigh, kFrameSeconds);
-    const auto after_three = scale.update(-95.0F, kSignalHigh, kFrameSeconds);
+    // One string rather than an INFO per frame: a Catch2 INFO expires with
+    // its scope, so one written inside the loop is gone before any assertion
+    // below can carry it.
+    std::string report;
+    for (std::size_t frame = 1; frame < 5; ++frame) {
+        report += std::format("frame {}: guarded {:.2f} dB ({:.1f}% of the step), unguarded "
+                              "{:.2f} dB ({:.1f}%). ",
+                              frame, guarded_ceiling[frame],
+                              100.0F * (guarded_ceiling[frame] - kQuietHigh) / kStepDb,
+                              bare_ceiling[frame],
+                              100.0F * (bare_ceiling[frame] - kQuietHigh) / kStepDb);
+    }
+    INFO(report);
 
-    INFO(std::format("ceiling after one frame {}, two {}, three {}", after_one.ceiling_db,
-                     after_two.ceiling_db, after_three.ceiling_db));
+    // The outlier guard costs the first frame and nothing after it. The
+    // second largest of the last three is still the quiet level until two
+    // frames have seen the signal, so frame one moves the ceiling not at all
+    // and frames two and three move at full attack speed.
+    CHECK(guarded_ceiling[1] == Approx(quiet.ceiling_db).margin(0.01));
+    CHECK(bare_ceiling[1] > quiet.ceiling_db + 0.5F * kStepDb);
 
-    // Within three frames, which is eighty milliseconds, the ceiling is
-    // within three decibels of the new level: under a third of one step of a
-    // ten-step colour map, so the signal is drawn with structure in it from
-    // essentially the moment it appears.
-    CHECK(kSignalHigh - after_three.ceiling_db < 3.0F);
+    // Three frames in, which is 82 ms at the shipped geometry, the step is
+    // substantially covered and what is left is a small fraction of one step
+    // of a ten-step colour map, so the signal is drawn with structure in it
+    // rather than as a solid bar.
+    const float left_at_three = kSignalHigh - guarded_ceiling[3];
+    INFO(std::format("{:.2f} dB of the {:.0f} dB step still uncovered at three frames",
+                     left_at_three, kStepDb));
+    CHECK(left_at_three < 5.0F);
+    CHECK((guarded_ceiling[3] - kQuietHigh) / kStepDb > 0.85F);
 
-    // And it moved most of the way on the very first frame, which is what
-    // "expand within a frame or two" means.
-    CHECK(after_one.ceiling_db > quiet.ceiling_db + 0.5F * (kSignalHigh - quiet.ceiling_db));
+    // And the delay is exactly one frame, not approximately one: the guarded
+    // ceiling on frame n is the unguarded ceiling on frame n-1, to four
+    // decimal places of a decibel. This is the whole cost of the guard,
+    // written as an identity rather than as a tolerance on the coverage,
+    // because a tolerance is a number the delay could grow inside.
+    for (std::size_t frame = 2; frame < 5; ++frame) {
+        INFO(std::format("guarded frame {} is {:.4f}, unguarded frame {} is {:.4f}", frame,
+                         guarded_ceiling[frame], frame - 1, bare_ceiling[frame - 1]));
+        CHECK(guarded_ceiling[frame] == Approx(bare_ceiling[frame - 1]).margin(1e-4));
+    }
 
     // The contrast with the decay, measured rather than asserted: the same
-    // step in the other direction barely moves in one frame, which is what
-    // stops the scale rescaling under the operator between transmissions.
-    const auto one_frame_down = scale.update(-95.0F, -78.0F, kFrameSeconds);
-    INFO(std::format("one frame after the signal stops the ceiling moved from {} to {}",
-                     after_three.ceiling_db, one_frame_down.ceiling_db));
-    CHECK(after_three.ceiling_db - one_frame_down.ceiling_db < 0.05F);
+    // step in the other direction barely moves, which is what stops the scale
+    // rescaling under the operator between transmissions. The guard holds the
+    // old level for two more frames first, because the signal is still the
+    // second largest in the window until it has fallen out of it, so this is
+    // read three frames after the carrier stops rather than one.
+    static_cast<void>(scale.update(-95.0F, kQuietHigh, kFrameSeconds));
+    static_cast<void>(scale.update(-95.0F, kQuietHigh, kFrameSeconds));
+    const auto settled_down = scale.update(-95.0F, kQuietHigh, kFrameSeconds);
+    const auto one_frame_down = scale.update(-95.0F, kQuietHigh, kFrameSeconds);
+    INFO(std::format("three frames after the carrier stops the ceiling is {}, one frame later {}",
+                     settled_down.ceiling_db, one_frame_down.ceiling_db));
+    CHECK(settled_down.ceiling_db - one_frame_down.ceiling_db < 0.05F);
+}
+
+TEST_CASE("one anomalous frame does not hold the colour map for thirty seconds",
+          "[spectrum][scale][m1]") {
+    // The defect the outlier guard exists for, and the reason the fix could
+    // not be a slower attack. A single frame measuring forty decibels high
+    // lifts the ceiling most of the way in that one frame, because the attack
+    // is one frame period, and the thirty-second decay then holds the
+    // displacement long after the frame that caused it is gone.
+    //
+    // Both devices produce that frame. docs/fft.md has the integrated Radeon
+    // corrupting an isolated spectrum dispatch with the correct answer either
+    // side of it; on the discrete card the same shape arrives from a
+    // transmitter keying up nearby for one frame, which is a correct
+    // measurement rather than a fault. Neither is a reason to rescale the map
+    // for half a minute.
+    constexpr float kQuietHigh = -78.0F;
+    constexpr float kAnomalyHigh = -38.0F;
+
+    auto scale = make_scale({});
+    auto bare = make_scale(unguarded());
+
+    static_cast<void>(settle(scale, -95.0F, kQuietHigh, 60.0));
+    static_cast<void>(settle(bare, -95.0F, kQuietHigh, 60.0));
+
+    // One frame, and the band is exactly as quiet either side of it.
+    const auto spike = scale.update(-95.0F, kAnomalyHigh, kFrameSeconds);
+    const auto bare_spike = bare.update(-95.0F, kAnomalyHigh, kFrameSeconds);
+
+    const auto after_thirty = settle(scale, -95.0F, kQuietHigh, 30.0);
+    const auto bare_after_thirty = settle(bare, -95.0F, kQuietHigh, 30.0);
+    const auto after_ninety = settle(scale, -95.0F, kQuietHigh, 60.0);
+    const auto bare_after_ninety = settle(bare, -95.0F, kQuietHigh, 60.0);
+
+    INFO(std::format("displacement above the quiet ceiling, guarded then unguarded: "
+                     "immediately {:.2f} / {:.2f} dB, at 30 s {:.2f} / {:.2f} dB, at 90 s "
+                     "{:.2f} / {:.2f} dB",
+                     spike.ceiling_db - kQuietHigh, bare_spike.ceiling_db - kQuietHigh,
+                     after_thirty.ceiling_db - kQuietHigh,
+                     bare_after_thirty.ceiling_db - kQuietHigh,
+                     after_ninety.ceiling_db - kQuietHigh,
+                     bare_after_ninety.ceiling_db - kQuietHigh));
+
+    // The unguarded scale is the defect, measured, so that the numbers below
+    // it are a comparison rather than a claim. Half a minute after one bad
+    // frame the map is still displaced by most of a colour-map step.
+    CHECK(bare_spike.ceiling_db - kQuietHigh > 20.0F);
+    CHECK(bare_after_thirty.ceiling_db - kQuietHigh > 5.0F);
+
+    // The guarded scale never moves at all, which is the property the order
+    // statistic buys and a per-frame cap could not: a value seen once is
+    // discarded rather than attenuated, so its size does not matter.
+    CHECK(spike.ceiling_db == Approx(kQuietHigh).margin(0.01));
+    CHECK(after_thirty.ceiling_db == Approx(kQuietHigh).margin(0.01));
+    CHECK(after_ninety.ceiling_db == Approx(kQuietHigh).margin(0.01));
+}
+
+TEST_CASE("the rejection does not depend on where in the window the bad frame lands",
+          "[spectrum][scale][m1]") {
+    // The window is a ring, so a bad frame overwrites whichever slot is next
+    // and the held samples arrive at the selection in any rotation. The first
+    // version of the selection answered correctly for two of the three
+    // rotations and propped the ceiling up on the third, and the case above
+    // happened to land on a good one: 2197 frames of settling put the write
+    // cursor at slot 1 every time, so it never saw the rotation that failed.
+    //
+    // Priming with a few more quiet frames first walks the bad one through
+    // every slot, which is the cheapest way to make a ring's rotation part of
+    // the test rather than part of the luck.
+    constexpr float kQuietHigh = -78.0F;
+    constexpr float kAnomalyHigh = -38.0F;
+
+    for (std::uint32_t prime = 0; prime <= engine::kSpectrumMaxOutlierWindow; ++prime) {
+        auto scale = make_scale({});
+        static_cast<void>(settle(scale, -95.0F, kQuietHigh, 60.0));
+        for (std::uint32_t i = 0; i < prime; ++i) {
+            static_cast<void>(scale.update(-95.0F, kQuietHigh, kFrameSeconds));
+        }
+
+        const auto spike = scale.update(-95.0F, kAnomalyHigh, kFrameSeconds);
+        const auto after_thirty = settle(scale, -95.0F, kQuietHigh, 30.0);
+
+        INFO(std::format("primed with {} extra quiet frames: ceiling {} at the bad frame and "
+                         "{} thirty seconds later",
+                         prime, spike.ceiling_db, after_thirty.ceiling_db));
+        CHECK(spike.ceiling_db == Approx(kQuietHigh).margin(0.01));
+        CHECK(after_thirty.ceiling_db == Approx(kQuietHigh).margin(0.01));
+    }
+}
+
+TEST_CASE("the floor is guarded the same way and in the other direction",
+          "[spectrum][scale][m1]") {
+    // The floor expands downwards, so its outlier is a frame reading low, and
+    // the guard has to take the second SMALLEST rather than the second
+    // largest. Written as its own case because an implementation that
+    // guarded the ceiling and left the floor on the raw measurement would
+    // pass every other case in this file.
+    constexpr float kQuietLow = -95.0F;
+    constexpr float kAnomalyLow = -135.0F;
+
+    auto scale = make_scale({});
+    auto bare = make_scale(unguarded());
+    static_cast<void>(settle(scale, kQuietLow, -78.0F, 60.0));
+    static_cast<void>(settle(bare, kQuietLow, -78.0F, 60.0));
+
+    const auto spike = scale.update(kAnomalyLow, -78.0F, kFrameSeconds);
+    const auto bare_spike = bare.update(kAnomalyLow, -78.0F, kFrameSeconds);
+
+    const auto after_thirty = settle(scale, kQuietLow, -78.0F, 30.0);
+    const auto bare_after_thirty = settle(bare, kQuietLow, -78.0F, 30.0);
+
+    INFO(std::format("floor displacement below the quiet floor, guarded then unguarded: "
+                     "immediately {:.2f} / {:.2f} dB, at 30 s {:.2f} / {:.2f} dB",
+                     kQuietLow - spike.floor_db, kQuietLow - bare_spike.floor_db,
+                     kQuietLow - after_thirty.floor_db, kQuietLow - bare_after_thirty.floor_db));
+
+    CHECK(kQuietLow - bare_spike.floor_db > 20.0F);
+    CHECK(kQuietLow - bare_after_thirty.floor_db > 5.0F);
+    CHECK(spike.floor_db == Approx(kQuietLow).margin(0.01));
+    CHECK(after_thirty.floor_db == Approx(kQuietLow).margin(0.01));
+}
+
+TEST_CASE("two consecutive anomalous frames are a signal and are followed",
+          "[spectrum][scale][m1]") {
+    // The other half of the rule, and the reason it is an order statistic
+    // rather than a rejection threshold. Nothing here decides whether a
+    // measurement is true. It decides whether more than one frame saw it, so
+    // a real transmission that lasts two frames is followed at full speed
+    // while an isolated frame is discarded whatever its size.
+    constexpr float kQuietHigh = -78.0F;
+    constexpr float kSignalHigh = -38.0F;
+
+    auto scale = make_scale({});
+    const auto quiet = settle(scale, -95.0F, kQuietHigh, 60.0);
+
+    const auto first = scale.update(-95.0F, kSignalHigh, kFrameSeconds);
+    const auto second = scale.update(-95.0F, kSignalHigh, kFrameSeconds);
+
+    INFO(std::format("ceiling {} after one frame of signal, {} after two", first.ceiling_db,
+                     second.ceiling_db));
+
+    CHECK(first.ceiling_db == Approx(quiet.ceiling_db).margin(0.01));
+    CHECK(second.ceiling_db > quiet.ceiling_db + 0.5F * (kSignalHigh - quiet.ceiling_db));
+}
+
+TEST_CASE("a seek forgets the outlier window as well as the level",
+          "[spectrum][scale][m1]") {
+    // reset() is for a seek, where the band on the far side of the cut has
+    // nothing to do with the near side. Keeping the window across it would
+    // let two stale measurements outvote the first real one, which is the
+    // single input the order statistic has no defence against.
+    auto scale = make_scale({});
+    static_cast<void>(settle(scale, -95.0F, -78.0F, 60.0));
+
+    scale.reset();
+    const auto first = scale.update(-60.0F, -20.0F, 0.0);
+
+    INFO(std::format("first frame after the seek gives {} to {}", first.floor_db,
+                     first.ceiling_db));
+    CHECK(first.floor_db == Approx(-60.0));
+    CHECK(first.ceiling_db == Approx(-20.0));
+}
+
+TEST_CASE("a non-finite percentile is dropped rather than carried",
+          "[spectrum][scale][m1]") {
+    // A corrupted frame is not guaranteed to be merely wrong. One NaN through
+    // the recurrence makes every later frame NaN for the life of the process,
+    // and the display never recovers, so the measurement is refused entry
+    // rather than clamped to something invented.
+    auto scale = make_scale({});
+    const auto quiet = settle(scale, -95.0F, -78.0F, 60.0);
+
+    const auto poisoned = scale.update(std::numeric_limits<float>::quiet_NaN(),
+                                       std::numeric_limits<float>::infinity(), kFrameSeconds);
+    INFO(std::format("after a NaN floor and an infinite ceiling the map is {} to {}",
+                     poisoned.floor_db, poisoned.ceiling_db));
+    CHECK(std::isfinite(poisoned.floor_db));
+    CHECK(std::isfinite(poisoned.ceiling_db));
+    CHECK(poisoned.floor_db == Approx(quiet.floor_db));
+    CHECK(poisoned.ceiling_db == Approx(quiet.ceiling_db));
+
+    // And the frame after it is scaled normally, so one bad readback costs
+    // one row rather than the session.
+    const auto recovered = scale.update(-95.0F, -78.0F, kFrameSeconds);
+    CHECK(recovered.ceiling_db == Approx(quiet.ceiling_db).margin(0.01));
 }
 
 TEST_CASE("the decay is about thirty seconds", "[spectrum][scale][m1]") {
@@ -276,6 +520,29 @@ TEST_CASE("the scale refuses a configuration it cannot serve", "[spectrum][scale
         engine::SpectrumScaleConfig config;
         config.minimum_span_db = 0.0F;
         CHECK_FALSE(engine::SpectrumScale::create(config).has_value());
+    }
+    {
+        // Zero is the one value of the outlier window that means nothing. One
+        // is no guard, which is a thing to ask for and is accepted; zero is a
+        // window with no measurement in it.
+        engine::SpectrumScaleConfig config;
+        config.outlier_window_frames = 0;
+        CHECK_FALSE(engine::SpectrumScale::create(config).has_value());
+    }
+    {
+        engine::SpectrumScaleConfig config;
+        config.outlier_window_frames = engine::kSpectrumMaxOutlierWindow + 1;
+        CHECK_FALSE(engine::SpectrumScale::create(config).has_value());
+    }
+    {
+        engine::SpectrumScaleConfig config;
+        config.outlier_window_frames = 1;
+        CHECK(engine::SpectrumScale::create(config).has_value());
+    }
+    {
+        engine::SpectrumScaleConfig config;
+        config.outlier_window_frames = engine::kSpectrumMaxOutlierWindow;
+        CHECK(engine::SpectrumScale::create(config).has_value());
     }
 }
 

@@ -32,6 +32,59 @@ namespace {
     return value + alpha * (target - value);
 }
 
+// Adds one measurement, overwriting the oldest once the window is full.
+//
+// `window` is validated in create(), so the modulo is a compare rather than a
+// division and the index cannot leave the array.
+void remember(SpectrumEndHistory& history, float value, std::uint32_t window) {
+    history.samples[history.next] = value;
+    history.next = history.next + 1 >= window ? 0U : history.next + 1;
+    if (history.held < window) {
+        ++history.held;
+    }
+}
+
+// The second most extreme of what is held, in the direction the end expands.
+// Precondition: at least one sample is held.
+//
+// This is the whole outlier rule, and it is a selection rather than a sort
+// because the window is three by default and eight at most: a sort of eight
+// floats once per frame would not be measurable either, but a single pass
+// says what the rule is without the reader having to work out which end of
+// the sorted array is meant.
+//
+// With one sample held this returns that sample, which is what makes the
+// first frame after a create or a reset jump rather than sit still.
+//
+// have_second is not redundant with held. Seeding the runner-up from the
+// first sample instead makes that one sample count as both the largest and
+// the second largest, so a window holding {-20, -60} answers -20 and a single
+// measurement props the end up on its own, which is the whole defect this
+// guards against. That version survived the first run of the outlier cases,
+// because which slot of the ring the newest sample lands in decides whether
+// it shows. "the rejection does not depend on where in the window the bad
+// frame lands", in tests/engine/test_spectrum_scale.cpp, is what walks it
+// through every slot.
+[[nodiscard]] float second_extreme(const SpectrumEndHistory& history, bool upward) {
+    float best = history.samples[0];
+    float second = best;
+    bool have_second = false;
+    for (std::uint32_t i = 1; i < history.held; ++i) {
+        const float value = history.samples[i];
+        if (upward ? value > best : value < best) {
+            second = best;
+            have_second = true;
+            best = value;
+            continue;
+        }
+        if (!have_second || (upward ? value > second : value < second)) {
+            second = value;
+            have_second = true;
+        }
+    }
+    return second;
+}
+
 }  // namespace
 
 Expected<SpectrumScale> SpectrumScale::create(const SpectrumScaleConfig& config) {
@@ -56,6 +109,13 @@ Expected<SpectrumScale> SpectrumScale::create(const SpectrumScaleConfig& config)
         return fail(std::format("the spectrum scale's minimum span must be a positive number of "
                                 "decibels, got {}",
                                 config.minimum_span_db));
+    }
+    if (config.outlier_window_frames == 0 ||
+        config.outlier_window_frames > kSpectrumMaxOutlierWindow) {
+        return fail(std::format("the spectrum scale's outlier window is {} frames and must be "
+                                "between 1 and {}. One is no guard at all, which is a thing to "
+                                "ask for; zero is not",
+                                config.outlier_window_frames, kSpectrumMaxOutlierWindow));
     }
 
     const bool floor_pinned = config.pinned_floor_db.has_value();
@@ -84,9 +144,31 @@ Expected<SpectrumScale> SpectrumScale::create(const SpectrumScaleConfig& config)
 }
 
 SpectrumScaleLevels SpectrumScale::update(float low_db, float high_db, double elapsed_seconds) {
+    // A non-finite percentile is dropped rather than substituted. One NaN
+    // through the recurrence makes every later frame NaN, forever, and there
+    // is no replacement value that is not an invention. The device is not
+    // supposed to produce one; docs/fft.md is the reason that is not the same
+    // as it never happening.
+    if (std::isfinite(low_db)) {
+        remember(low_history_, low_db, config_.outlier_window_frames);
+    }
+    if (std::isfinite(high_db)) {
+        remember(high_history_, high_db, config_.outlier_window_frames);
+    }
+    if (low_history_.held == 0 || high_history_.held == 0) {
+        return levels_;
+    }
+
+    // Each end against the second most extreme of its own window, in the
+    // direction that end expands. See the header: this is what stops one
+    // frame from moving an end that the decay will then hold for half a
+    // minute.
+    const float low_guarded = second_extreme(low_history_, false);
+    const float high_guarded = second_extreme(high_history_, true);
+
     if (!started_) {
-        levels_.floor_db = low_db;
-        levels_.ceiling_db = high_db;
+        levels_.floor_db = low_guarded;
+        levels_.ceiling_db = high_guarded;
         started_ = true;
         settle();
         return levels_;
@@ -98,10 +180,10 @@ SpectrumScaleLevels SpectrumScale::update(float low_db, float high_db, double el
     // Expansion is the ceiling rising and the floor falling, which are the two
     // directions that uncover signal. Those take the attack; the two that hide
     // it take the decay.
-    levels_.ceiling_db =
-        approach(levels_.ceiling_db, high_db, high_db > levels_.ceiling_db ? attack : decay);
+    levels_.ceiling_db = approach(levels_.ceiling_db, high_guarded,
+                                  high_guarded > levels_.ceiling_db ? attack : decay);
     levels_.floor_db =
-        approach(levels_.floor_db, low_db, low_db < levels_.floor_db ? attack : decay);
+        approach(levels_.floor_db, low_guarded, low_guarded < levels_.floor_db ? attack : decay);
 
     settle();
     return levels_;

@@ -19,12 +19,21 @@
 # skip themselves with a reason when librtlsdr sees no device, so this binary
 # stays green on a build machine with nothing plugged in without pretending it
 # covered the radio.
+#
+# test_engine_spectrum.cpp is the spectrum path's half of test_engine.cpp and
+# needs a GPU for the same reason: the transform is on the device and the
+# frame comes back through a readback buffer, so nothing about the axis, the
+# window gate or the sink can be dispatched without one. It is a separate file
+# rather than more cases in test_engine.cpp because it needs a different
+# engine configuration, a small block so the window gate is exercised at all,
+# and because the two would otherwise share a fixture that suited neither.
 
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
     test_audio_wasapi.cpp
     test_engine.cpp
+    test_engine_spectrum.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp
     test_sources.cpp

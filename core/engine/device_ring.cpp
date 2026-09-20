@@ -116,22 +116,25 @@
 // encoding a source overrun uses. One gap concept, end to end.
 //
 //
-// WHAT THIS FILE CANNOT DO, STATED HERE RATHER THAN DISCOVERED AT INTEGRATION
+// WHAT IS STILL NOT HERE, STATED RATHER THAN DISCOVERED AT INTEGRATION
 //
-// The frozen core/engine/device_ring.h declares no producer. There is no
-// try_write, no write, no publish, no reserve, and no VkSemaphore accessor, so
-// nothing outside this translation unit can advance the write cursor and
-// write_index() reads zero for the lifetime of the ring. The cursor engine a
-// producer needs is written, commented and tested: it is ConsumerTable in
-// ring_consumer.h, whose reserve, reserve_blocking, publish,
-// release_reservation and note_dropped are the Paced and Demand adapters the
-// design calls for. Wiring them up is five forwarding methods on DeviceRing
-// plus an upload path, and both need the header to gain them.
+// The ring owns no VkSemaphore. Section 2(a) describes the ordering half of
+// the producer's job in terms of a ring timeline, and the timeline that
+// actually plays that part belongs to the graph: core/engine/graph.cpp creates
+// it, signals it once per submission and the scheduler waits on it. That is
+// why ring_consumer.h has the caller fill in ReadLease::timeline_value rather
+// than the ring filling it in.
+//
+// It holds while one graph is both the ring's only producer and its only
+// consumer, which is the case today. A second consumer dispatching against the
+// same ring would need a timeline value it has no way to ask the ring for, and
+// moving the semaphore in here is the change to make then rather than now.
 
 #include "core/engine/device_ring.h"
 
 #include <format>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -272,7 +275,8 @@ DeviceRing& DeviceRing::operator=(DeviceRing&& other) noexcept {
 // stale consumer's claim or retire fails with a message naming the problem
 // instead of corrupting the live ring's cursors. Move a ring before it has
 // consumers; the failure mode if you do not is loud, which is the most that
-// can be arranged without a back-reference the frozen header does not have.
+// can be arranged while RingConsumer holds a raw back-pointer and the move
+// has no way to reach the handles already issued.
 void DeviceRing::destroy() noexcept {
     if (state_ != nullptr) {
         // Wakes any producer parked on a Blocking consumer that will now never
@@ -304,7 +308,7 @@ Expected<RingConsumer> DeviceRing::add_consumer(ConsumerKind kind) {
     // This is also where a Blocking registration against a Paced source would
     // be rejected, and is not, because RingConfig does not carry the source's
     // flow control. engine::register_consumer in ring_consumer.h does that
-    // check; see the note at the end of this file.
+    // check instead, and is the call a caller who knows the source should make.
     auto handle = state_->consumers.acquire_slot(kind, state_->consumers.write_index());
     if (!handle) {
         return std::unexpected(with_context(handle.error(), "DeviceRing::add_consumer"));
@@ -367,6 +371,89 @@ Status DeviceRing::retire(const RingConsumer& consumer, dsp::SampleIndex through
     }
     return state_->consumers.retire(consumer.id_, through);
 }
+
+// Thread safety: any thread. The two cursors are read with two loads and are
+// not a snapshot of the pair: claimed can be observed ahead of a retire that
+// had already happened on the consumer's own thread. Anything computing a
+// floor reads retired, which only ever rises.
+std::optional<ConsumerCursor> DeviceRing::cursor(const RingConsumer& consumer) const {
+    if (state_ == nullptr || consumer.ring_ != this) {
+        return std::nullopt;
+    }
+    const auto report = state_->consumers.report(consumer.id_);
+    return report ? std::optional<ConsumerCursor>{report->cursor} : std::nullopt;
+}
+
+// The producer. Each of these is the single upload thread's, and each one is
+// the ring's own cursor arithmetic rather than a copy of it kept somewhere
+// else: a producer holding its own table publishes into cursors no consumer of
+// this ring can see, so write_index() answers zero while samples are flowing.
+//
+// Thread safety: the producer thread only, for all five mutators.
+Expected<std::uint64_t> DeviceRing::reserve(std::uint64_t count) {
+    if (state_ == nullptr) {
+        return fail("DeviceRing::reserve on a ring that was never created, or was moved from");
+    }
+    return state_->consumers.reserve(count);
+}
+
+// Two ways this can fail and they are not the same event, so they do not share
+// a message. A stopped ring is an orderly shutdown reaching a parked producer.
+// A request larger than the whole ring is arithmetic that no retirement can
+// ever satisfy, so waiting on it is a deadlock dressed as backpressure, and it
+// is refused before the wait rather than discovered inside it.
+Status DeviceRing::reserve_blocking(std::uint64_t count) {
+    if (state_ == nullptr) {
+        return fail("DeviceRing::reserve_blocking on a ring that was never created, or was moved "
+                    "from");
+    }
+    if (count > geometry_.capacity_samples) {
+        return fail(std::format(
+            "a producer asked to reserve {} samples from a ring that holds {}. No amount of "
+            "retiring can make that fit, so waiting for it would never return",
+            count, geometry_.capacity_samples));
+    }
+    if (!state_->consumers.reserve_blocking(count)) {
+        return fail(std::format(
+            "the ring was stopped while the producer waited for room for {} samples", count));
+    }
+    return {};
+}
+
+void DeviceRing::release_reservation(std::uint64_t unused) {
+    if (state_ != nullptr) {
+        state_->consumers.release_reservation(unused);
+    }
+}
+
+Expected<std::uint64_t> DeviceRing::publish(std::uint64_t count) {
+    if (state_ == nullptr) {
+        return fail("DeviceRing::publish on a ring that was never created, or was moved from");
+    }
+    return state_->consumers.publish(count);
+}
+
+void DeviceRing::note_dropped(std::uint64_t samples) {
+    if (state_ != nullptr) {
+        state_->consumers.note_dropped(samples);
+    }
+}
+
+// Thread safety: any thread. A snapshot, and the producer may have moved by
+// the time a caller acts on it.
+dsp::SampleIndex DeviceRing::reserved_index() const {
+    return state_ == nullptr ? dsp::SampleIndex{0} : state_->consumers.reserved_index();
+}
+
+// Thread safety: any thread, and idempotent. A ring that was never created has
+// nobody parked on it, so this is a no-op there rather than an error.
+void DeviceRing::stop() {
+    if (state_ != nullptr) {
+        state_->consumers.stop();
+    }
+}
+
+bool DeviceRing::stopped() const { return state_ != nullptr && state_->consumers.stopped(); }
 
 // The oldest sample a consumer may still read, counting the window the
 // producer currently has open rather than only what it has published.

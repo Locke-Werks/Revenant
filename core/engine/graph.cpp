@@ -50,23 +50,34 @@
 // what Scheduler's completion thread drives.
 //
 //
-// 3. THE GRAPH OWNS THE RING'S PRODUCER CURSORS, WHICH IT SHOULD NOT HAVE TO
+// 3. THE GRAPH IS THE RING'S PRODUCER, AND THE ORDER OF ITS CURSOR MOVES IS
+//    THE CONTRACT
 //
-// The frozen core/engine/device_ring.h declares no producer: no reserve, no
-// publish, no timeline accessor, and DeviceRing::write_index() therefore
-// reads zero for the ring's whole life. The cursor engine exists and is
-// tested, as ConsumerTable in core/engine/ring_consumer.h, but DeviceRing's
-// instance of it is private and unreachable. device_ring.cpp says exactly
-// this at the bottom of the file.
+// Four moves per block, and each is where it is for a reason:
 //
-// So the graph holds its own ConsumerTable, sized to the ring's capacity, and
-// uses DeviceRing for the device buffer and the geometry. Everything the
-// cursors are for still happens: Demand backpressure through
-// reserve_blocking, Paced overrun counting through note_dropped, and a
-// retirement floor the writer honours. What does not happen is any other
-// consumer of the same ring seeing those cursors, because they are in the
-// wrong object. Unpicking that is five forwarding methods on DeviceRing and
-// needs the header to gain them; the integrator note says so.
+//   reserve   before a byte is copied. Taking the window is what laps a Lossy
+//             consumer that has fallen behind, and what parks a Demand source
+//             against the retirement floor. On a Paced source a short grant
+//             is an overrun and is counted where it happens.
+//   publish   after the command buffer is recorded, before it is submitted.
+//             It is a release store over host memory and nothing else: the
+//             device-side hazard is the barriers inside the command buffer
+//             plus the timeline, and the two are different problems.
+//   claim     after the publish, because the ring refuses a claim past what
+//             has been published and the block count was derived from the
+//             published end.
+//   retire    on the completion thread, once the timeline value says the
+//             dispatch has finished reading. Retiring at record time hands
+//             the writer permission to overwrite samples an in-flight
+//             dispatch is still reading, and the symptom is noise in one
+//             demodulated channel with nothing in any log.
+//
+// Those cursors are the ring's own, reached through DeviceRing's producer
+// methods. They lived in a private ConsumerTable here for a while, because
+// the header declared no producer: the arithmetic was right and it was in the
+// wrong object, so no other consumer of the ring could see it and
+// DeviceRing::write_index() answered zero for the ring's whole life. A
+// producer-side cursor that is not the ring's is that bug again.
 //
 //
 // 4. THE FILTER WARM-UP IS NOT AN EDGE CASE
@@ -545,10 +556,9 @@ struct Graph::Impl {
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
 
-    // See note 3 at the top of the file: the frozen DeviceRing has no
-    // producer, so the cursors live here.
-    std::unique_ptr<ConsumerTable> cursors;
-    std::uint32_t consumer_handle = 0;
+    // The graph's registration on the ring. Note 3 at the top of the file has
+    // the order its cursors move in.
+    RingConsumer consumer;
 
     std::vector<Frame> frames;
 
@@ -625,8 +635,14 @@ struct Graph::Impl {
     ~Impl() { destroy(); }
 
     void destroy() noexcept {
-        if (cursors != nullptr) {
-            cursors->stop();
+        // Deregistering rather than stopping the ring. Both wake a producer
+        // parked on this consumer's retirement, because release_slot bumps
+        // the epoch, and only this one leaves the ring usable: a graph that
+        // failed halfway through create() has no business poisoning a ring it
+        // was handed. Discarded because a destructor has nobody to tell, and
+        // because the only failure is a consumer that is already gone.
+        if (ring != nullptr && consumer.valid()) {
+            (void)ring->remove_consumer(consumer);
         }
         ControlOp* head = control_head.exchange(nullptr, std::memory_order_acq_rel);
         while (head != nullptr) {
@@ -653,6 +669,27 @@ struct Graph::Impl {
             vkDestroySemaphore(device, timeline, nullptr);
             timeline = VK_NULL_HANDLE;
         }
+    }
+
+    // Publishes a whole reservation.
+    //
+    // The ring lets a producer publish one reservation in pieces, so a short
+    // return is legal there and a bug here: this graph reserves and publishes
+    // one block at a time. The two cursors coming apart means the ring's index
+    // has stopped being the stream's index, and every timestamp downstream is
+    // derived from that equality.
+    [[nodiscard]] Status publish_all(std::uint64_t granted) {
+        auto published = ring->publish(granted);
+        if (!published) {
+            return std::unexpected(published.error());
+        }
+        if (*published != granted) {
+            return fail(std::format(
+                "the graph reserved {} samples of ring and published {}: the producer's cursors "
+                "have come apart, so the ring's index is no longer the stream's",
+                granted, *published));
+        }
+        return {};
     }
 
     void push_control(ControlOp* op) {
@@ -829,7 +866,7 @@ struct Graph::Impl {
         frame.vrxs.clear();
 
         if (frame.retire_through > 0) {
-            if (auto retired = cursors->retire(consumer_handle, frame.retire_through); !retired) {
+            if (auto retired = ring->retire(consumer, frame.retire_through); !retired) {
                 outcome = std::unexpected(with_context(retired.error(), "Graph frame retire"));
             }
         }
@@ -1040,11 +1077,31 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
 
         std::uint32_t transform = config.spectrum_transform;
         if (transform > transform_ceiling) {
-            spectrum_note = std::format(
-                "a {}-point spectrum transform needs {} bytes of shared memory and '{}' offers "
-                "{}, so it was reduced to {} points",
-                transform, dsp::fft_shared_bytes(transform), device.name,
-                device.max_workgroup_shared_memory, transform_ceiling);
+            // Which of the two ceilings bound is a different fact about the
+            // world, and this sentence is the only field EngineInfo has to
+            // say it in. max_spectrum_transform_size returns the lesser of
+            // what this device's shared memory holds and
+            // dsp::kMaxSpectrumTransform, the largest circle build_twiddles
+            // will build, so naming shared memory unconditionally tells a
+            // client on a large card that its transform needed fewer bytes
+            // than the card offers and was cut anyway. Read across the wire
+            // that is a reason to go buy a bigger GPU, which cannot lift a
+            // cap the GPU did not set.
+            const std::uint32_t device_ceiling =
+                dsp::max_fft_transform_size(device.max_workgroup_shared_memory);
+            spectrum_note =
+                device_ceiling < dsp::kMaxSpectrumTransform
+                    ? std::format("a {}-point spectrum transform needs {} bytes of shared memory "
+                                  "and '{}' offers {}, so it was reduced to {} points",
+                                  transform, dsp::fft_shared_bytes(transform), device.name,
+                                  device.max_workgroup_shared_memory, transform_ceiling)
+                    : std::format("a {}-point spectrum transform is above the {}-point ceiling "
+                                  "core/dsp/pfb_design.cpp's twiddle table sets, so it was "
+                                  "reduced to {} points. That ceiling is not this device's: '{}' "
+                                  "has shared memory for {} points, and a larger card does not "
+                                  "raise it",
+                                  transform, dsp::kMaxSpectrumTransform, transform_ceiling,
+                                  device.name, device_ceiling);
             transform = transform_ceiling;
         }
 
@@ -1181,19 +1238,22 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
             config.block_samples));
     }
 
-    impl.cursors = std::make_unique<ConsumerTable>(ring.geometry().capacity_samples);
-
     // Blocking against a Demand source is the backpressure that makes offline
     // replay run at the speed the GPU allows. Lossy against a Paced one,
     // because a radio's clock does not wait and stalling the writer would turn
     // this consumer being slow into lost radio samples.
+    //
+    // Through register_consumer rather than DeviceRing::add_consumer so the
+    // pairing is checked against the source's flow control instead of being
+    // trusted to the line above. RingConfig carries no flow control, so the
+    // ring cannot make that check on its own.
     const ConsumerKind kind = config.flow == source::FlowControl::Demand ? ConsumerKind::Blocking
                                                                          : ConsumerKind::Lossy;
-    auto handle = impl.cursors->acquire_slot(kind, 0);
-    if (!handle) {
-        return std::unexpected(with_context(handle.error(), "Graph::create"));
+    auto registered = register_consumer(ring, config.flow, kind);
+    if (!registered) {
+        return std::unexpected(with_context(registered.error(), "Graph::create"));
     }
-    impl.consumer_handle = *handle;
+    impl.consumer = *registered;
 
     VkSemaphoreTypeCreateInfo type{};
     type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
@@ -1964,7 +2024,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
 
     const dsp::SampleIndex target_end =
         block.stamp.start + static_cast<dsp::SampleIndex>(block.sample_count);
-    const dsp::SampleIndex reserved = impl.cursors->reserved_index();
+    const dsp::SampleIndex reserved = impl.ring->reserved_index();
     if (target_end <= reserved) {
         return fail(std::format(
             "the source delivered samples [{}, {}) and the ring has already reserved through {}. "
@@ -1988,13 +2048,14 @@ Status Graph::on_block(const source::SourceBlock& block) {
     const bool first_delivery = !impl.first_delivery_seen;
     impl.first_delivery_seen = true;
 
-    if (need > impl.cursors->capacity()) {
+    const auto ring_capacity = impl.ring->geometry().capacity_samples;
+    if (need > ring_capacity) {
         return fail(std::format(
             "this block needs {} samples of ring and the ring holds {}. {} of that is the {} "
             "between the last sample placed and this block's first, so the engine either fell "
             "more than a whole ring behind or was started at a sample index further than one "
             "ring from the origin",
-            need, impl.cursors->capacity(), gap,
+            need, ring_capacity, gap,
             first_delivery ? "stream's start index" : "gap the source reported"));
     }
 
@@ -2004,15 +2065,19 @@ Status Graph::on_block(const source::SourceBlock& block) {
         // exactly the rate the GPU retires work, and it is the whole of
         // "faster than realtime": there is no throttle anywhere, only this
         // parking until a dispatch has finished with the samples it read.
-        if (!impl.cursors->reserve_blocking(need)) {
-            return fail("the engine was stopped while the source was waiting for ring space");
+        if (auto taken = impl.ring->reserve_blocking(need); !taken) {
+            return std::unexpected(with_context(taken.error(), "Graph::on_block"));
         }
         granted = need;
     } else {
-        granted = impl.cursors->reserve(need);
+        auto taken = impl.ring->reserve(need);
+        if (!taken) {
+            return std::unexpected(with_context(taken.error(), "Graph::on_block"));
+        }
+        granted = *taken;
         if (granted < need) {
             const std::uint64_t lost = need - granted;
-            impl.cursors->note_dropped(lost);
+            impl.ring->note_dropped(lost);
             impl.overrun_events.fetch_add(1, std::memory_order_relaxed);
             impl.samples_dropped.fetch_add(lost, std::memory_order_relaxed);
         }
@@ -2048,15 +2113,17 @@ Status Graph::on_block(const source::SourceBlock& block) {
             // Publish anyway so the ring's index tracks the stream's. The
             // samples are not in the ring and are counted as lost, which is
             // what an overrun is.
-            (void)impl.cursors->publish(granted);
-            impl.cursors->note_dropped(block.sample_count);
+            if (auto published = impl.publish_all(granted); !published) {
+                return std::unexpected(with_context(published.error(), "Graph::on_block"));
+            }
+            impl.ring->note_dropped(block.sample_count);
             impl.overrun_events.fetch_add(1, std::memory_order_relaxed);
             impl.samples_dropped.fetch_add(block.sample_count, std::memory_order_relaxed);
             impl.trusted_from = std::max(impl.trusted_from, target_end);
             return {};
         }
         if (impl.cancelled.load(std::memory_order_acquire)) {
-            impl.cursors->release_reservation(granted);
+            impl.ring->release_reservation(granted);
             return fail("the engine was stopped while waiting for a frame slot");
         }
         impl.completed.wait(done, std::memory_order_acquire);
@@ -2096,7 +2163,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
             }
         }
         if (!copy_status) {
-            impl.cursors->release_reservation(granted);
+            impl.ring->release_reservation(granted);
             return std::unexpected(with_context(copy_status.error(), "Graph::on_block staging"));
         }
     }
@@ -2121,7 +2188,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
     }
     const dsp::SampleIndex after_trusted = first_block;
 
-    const dsp::SampleIndex oldest = impl.cursors->first_available();
+    const dsp::SampleIndex oldest = impl.ring->first_available();
     while (first_block * decimation < support ||
            first_block * decimation - support < oldest) {
         ++first_block;
@@ -2180,7 +2247,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
 
     VkResult result = vkResetCommandBuffer(frame.commands, 0);
     if (result != VK_SUCCESS) {
-        impl.cursors->release_reservation(granted);
+        impl.ring->release_reservation(granted);
         return fail(std::format("vkResetCommandBuffer failed ({})", gpu::result_name(result)),
                     result);
     }
@@ -2191,7 +2258,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
 
     result = vkBeginCommandBuffer(frame.commands, &begin);
     if (result != VK_SUCCESS) {
-        impl.cursors->release_reservation(granted);
+        impl.ring->release_reservation(granted);
         return fail(std::format("vkBeginCommandBuffer failed ({})", gpu::result_name(result)),
                     result);
     }
@@ -2378,7 +2445,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
             auto recorded = slot->stage->record(record);
             if (!recorded) {
                 (void)vkEndCommandBuffer(frame.commands);
-                impl.cursors->release_reservation(granted);
+                impl.ring->release_reservation(granted);
                 return std::unexpected(with_context(
                     recorded.error(), std::format("receiver {} stage", slot->id.value)));
             }
@@ -2407,7 +2474,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
 
     result = vkEndCommandBuffer(frame.commands);
     if (result != VK_SUCCESS) {
-        impl.cursors->release_reservation(granted);
+        impl.ring->release_reservation(granted);
         return fail(std::format("vkEndCommandBuffer failed ({})", gpu::result_name(result)),
                     result);
     }
@@ -2416,12 +2483,16 @@ Status Graph::on_block(const source::SourceBlock& block) {
     // thread that reads the write cursor. The device-side hazard is the
     // barriers above and the timeline below, and the two must not be
     // conflated: a release store says nothing about a copy in flight.
-    (void)impl.cursors->publish(granted);
+    if (auto published = impl.publish_all(granted); !published) {
+        return std::unexpected(with_context(published.error(), "Graph::on_block"));
+    }
 
+    // After the publish, not before: the ring refuses a claim past what has
+    // been published, and this window's end was derived from the published
+    // end a few lines up.
     if (block_count > 0) {
-        if (auto claimed =
-                impl.cursors->claim(impl.consumer_handle,
-                                    (first_block + block_count - 1) * decimation + 1);
+        if (auto claimed = impl.ring->claim(impl.consumer,
+                                            (first_block + block_count - 1) * decimation + 1);
             !claimed) {
             return std::unexpected(with_context(claimed.error(), "Graph::on_block claim"));
         }
@@ -2479,8 +2550,14 @@ Status Graph::flush() {
 void Graph::cancel() {
     auto& impl = *impl_;
     impl.cancelled.store(true, std::memory_order_release);
-    if (impl.cursors != nullptr) {
-        impl.cursors->stop();
+
+    // Permanent, and on the ring rather than on this graph, because the thread
+    // this has to reach is the source's and it is parked inside the ring's
+    // reserve_blocking. Cancel is the one place that poisons the ring: the
+    // destructor deregisters instead, so a graph that never ran leaves the
+    // ring alone.
+    if (impl.ring != nullptr) {
+        impl.ring->stop();
     }
     impl.completed.notify_all();
 }
@@ -2502,10 +2579,10 @@ GraphStats Graph::stats() const {
     out.audio_dropped = impl.audio_dropped.load(std::memory_order_relaxed);
     out.spectrum_frames = impl.spectrum_frames.load(std::memory_order_relaxed);
     out.spectrum_skipped = impl.spectrum_skipped.load(std::memory_order_relaxed);
-    if (impl.cursors != nullptr) {
-        out.write_index = impl.cursors->write_index();
-        const auto report = impl.cursors->report(impl.consumer_handle);
-        out.retired_index = report ? report->cursor.retired : 0;
+    if (impl.ring != nullptr) {
+        out.write_index = impl.ring->write_index();
+        const auto cursor = impl.ring->cursor(impl.consumer);
+        out.retired_index = cursor ? cursor->retired : 0;
     }
     out.next_output_block = impl.next_block;
     return out;
