@@ -39,11 +39,36 @@
 // The composite is the only place the subcarrier exists as a distinct signal.
 //
 // In this engine the composite is what a WFM receiver produces when its
-// audio_rate is set high enough that no audio decimation filter runs across
-// it. core/dsp/vrx_reference.cpp designs no filter at all when the decimation
-// resolves to 1, and cuts at 0.45 * audio_rate when it does not, so the
-// composite survives intact for any audio_rate at or above kMinimumRateHz
-// below. That path costs no new kernel, no new stage and no new buffer.
+// audio_rate is set high enough that the audio decimation filter does not run
+// across the subcarrier. core/dsp/vrx_reference.cpp designs no filter at all
+// when the decimation resolves to 1 (plan_vrx sets audio_taps to 1), and
+// otherwise designs a Kaiser lowpass whose PASSBAND edge is 0.4 * audio_rate
+// and whose stopband starts at 0.5 * audio_rate. The composite reaches
+// 59375 Hz, so the whole of it is inside that passband only at an audio_rate
+// of 148438 or above. RdsBitsConfig::rate defaults to 171000, which clears
+// it. That path costs no new kernel, no new stage and no new buffer.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 it said the composite survived intact at any audio_rate
+// at or above kMinimumRateHz, which is 125000. It does not, and 125000 was
+// never the number for this: 0.45 * 125000 is 56250, below the subcarrier
+// itself, so at that rate the audio filter removes the data outright before
+// the decoder ever sees it. kMinimumRateHz is the DECODER's floor, the one
+// create() enforces, and it governs a composite arriving from a file or from
+// core/dsp/synth/rds_mod.h with no receiver in the path at all. It says
+// nothing about the receiver, which is why the two numbers differ and why
+// naming one of them twice was the mistake.
+//
+// The kMinimumRateHz paragraph below carried 132000 for the receiver bound
+// and that was wrong too, in the smaller way: 0.45 * audio_rate is the
+// filter's CUTOFF, its 6 dB point, not its passband edge. An audio_rate of
+// 132000 puts 59375 Hz at the cutoff, with the upper half of the data band
+// already 6 dB down and sloping. Both numbers have been corrected to 148438,
+// which is 59375 / 0.4, and both are recorded here rather than swapped
+// quietly because a reader who sized a receiver off either one got a
+// composite with its data sideband eaten and a decoder that will not lock,
+// which does not look like a rate problem from the outside.
 //
 // NOTHING HERE IS BIT EXACT AGAINST A GPU TWIN
 //
@@ -160,10 +185,22 @@ inline constexpr Hertz kShapingCutoffHz = 2375;
 // 2375 Hz data passband.
 //
 // The engine's own floor is higher for an unrelated reason. A WFM receiver's
-// audio decimation filter cuts at 0.45 * audio_rate (core/dsp/vrx_reference.cpp
-// line 1043), so an audio_rate below 132000 starts eating the subcarrier before
-// the composite ever reaches this decoder. That is a property of the receiver,
-// not of this code, which is why the two numbers differ.
+// audio decimation filter runs its transition from 0.4 to 0.5 of the audio
+// rate (plan_vrx in core/dsp/vrx_reference.cpp), so the composite's 59375 Hz
+// edge is inside the passband only from an audio_rate of 148438 up, and below
+// that the receiver eats the upper data sideband before the composite ever
+// reaches this decoder. That is a property of the receiver, not of this code,
+// which is why the two numbers differ. See the retraction in the input
+// paragraph at the top of this file: this bound was written as 132000, which
+// is where 59375 Hz reaches the filter's 6 dB CUTOFF rather than its passband
+// edge, and a composite delivered at that rate arrives with half its data
+// band sloping away.
+//
+// create() enforces 125000 and not 148438, deliberately. A composite handed
+// over by core/dsp/synth/rds_mod.h, or read out of a file, went through no
+// audio filter and is intact at 125000; refusing it would be this decoder
+// declining a signal it can decode because of a stage that was not in the
+// path.
 inline constexpr SampleRate kMinimumRateHz = 125000;
 
 // ---------------------------------------------------------------------------
