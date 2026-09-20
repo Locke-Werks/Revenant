@@ -337,6 +337,70 @@ struct PassbandFrame {
     float percentile_high_db = 0.0F;
 };
 
+// One receiver's audio, as it reaches a client.
+//
+// Owns its samples, for the reason SpectrumFrame owns its bins: by the time
+// a client sees one it has already been copied onto the wire, and handing a
+// UI a span into a capnp message it does not own is a lifetime bug waiting
+// for the first consumer that keeps a buffer.
+struct AudioChunk {
+    // Interleaved when channel_count is above one. Real audio, never complex
+    // baseband: a raw tap cannot be subscribed to.
+    std::vector<float> samples;
+
+    // Both on every chunk rather than cached from VrxStatus. A pane that
+    // outlives the receiver behind it, which ui/models/receiver_link.cpp
+    // makes the ordinary case by turning a refused retune into a remove and
+    // an add, would otherwise play the next receiver's stream at the last
+    // one's rate.
+    std::uint32_t sample_rate = 0;
+    std::uint16_t channel_count = 1;
+
+    // Absolute index of the first FRAME, from the start of this receiver's
+    // audio stream. Contiguous when it equals the previous chunk's index
+    // plus its frame count.
+    std::uint64_t sample_index = 0;
+
+    // Frames this subscription lost between the previous chunk and this one
+    // because its queue was full. A sample_index gap LARGER than this lost
+    // the remainder upstream, which is a different fault with a different
+    // fix, so the two are carried separately rather than inferred from each
+    // other.
+    std::uint64_t frames_dropped_before = 0;
+
+    // False means the samples above are zeros the engine wrote because the
+    // gate was shut, not a quiet band and not a drop. The chunk still
+    // crosses at the full rate and the timeline stays whole.
+    bool squelch_open = false;
+
+    [[nodiscard]] std::uint64_t frames() const {
+        return channel_count == 0 ? 0 : samples.size() / channel_count;
+    }
+};
+
+// One audio subscription's running totals, read back from the engine.
+//
+// Per subscription and not per server: a slow client's drops must never show
+// up on a fast client's status line.
+struct AudioStats {
+    std::uint64_t frames_sent = 0;
+    std::uint64_t frames_dropped = 0;
+
+    // Times the queue went from not evicting to evicting. One two-second
+    // stall and four hundred scattered hitches lose the same frames and
+    // sound nothing alike.
+    std::uint64_t drop_events = 0;
+
+    std::uint64_t backlog_frames = 0;
+
+    // The depth being enforced, in frames. Zero until the first chunk has
+    // arrived: the server cannot turn the granted milliseconds into frames
+    // before it knows the receiver's audio rate and a chunk's length, and it
+    // learns both from the first chunk. See the schema's note on
+    // subscribeAudio.
+    std::uint64_t buffer_frames = 0;
+};
+
 // Which of the two mutually incompatible readings of the same bitstream the
 // RDS decoder is configured for.
 //
@@ -354,15 +418,19 @@ struct PassbandFrame {
 // from the tuned frequency as long as it shows it as something the operator
 // can override.
 //
-// WHY THERE IS NO RdsStation STRUCT HERE, AND NO AudioChunk
+// WHY THERE IS NO RdsStation STRUCT HERE
 //
-// Neither surface is served. A mirror of either one would be a hundred lines
-// of conversion no test could exercise and nothing could populate, sitting in
-// the one header whose whole job is to be the contract a UI compiles against.
-// This enum is here because Client::set_rds_region needs an argument to take;
-// the payload halves arrive with the branches that fill them, and
-// Client::rds_station returning Status rather than a struct is where the
+// The RDS surface is not served. A mirror of it would be a hundred lines of
+// conversion no test could exercise and nothing could populate, sitting in
+// the one header whose whole job is to be the contract a UI compiles
+// against. This enum is here because Client::set_rds_region needs an
+// argument to take; the payload half arrives with the branch that fills it,
+// and Client::rds_station returning Status rather than a struct is where the
 // compiler will point that branch.
+//
+// This note used to say "AND NO AudioChunk" on the same terms. Audio is
+// served, so AudioChunk and AudioStats are above, populated by
+// core/rpc/client.cpp and exercised by tests/rpc/test_rpc_audio.cpp.
 enum class RdsRegion : std::uint8_t { Rds, Rbds };
 
 }  // namespace revenant::rpc

@@ -76,6 +76,43 @@
 // a waterfall that is the right answer anyway, since the newest frame is the
 // one worth drawing. The count is reported so that a display can say it is
 // behind instead of silently lying about the band.
+//
+// AUDIO IS THE EXCEPTION, AND IT IS A DIFFERENT RULE RATHER THAN A LOOSER ONE
+//
+// The paragraph above is written about pictures and every word of it depends
+// on that. A spectrum frame is a measurement of a band that is still there,
+// so an older one is redundant and the newest is the one worth having. An
+// audio chunk is the only copy of that instant: the newest is worth no more
+// than the one before it, and skipping one is not a lower frame rate, it is
+// a hole the listener hears.
+//
+// So an audio subscription QUEUES, up to the depth subscribeAudio granted
+// it, and the one-chunk-in-flight limit on the wire is only the wire's own
+// serialisation rather than the whole of the policy. When the queue is full
+// the OLDEST chunk goes, not the newest, because late audio is worse than no
+// audio when the point is to hear what the radio is doing now, and because
+// front eviction is what makes AudioChunk::framesDroppedBefore exact: the
+// frames it discards lie precisely between the last chunk sent and the next
+// one, so a client can check
+//
+//   sampleIndex == previous.sampleIndex + previous frame count
+//                  + framesDroppedBefore
+//
+// on every consecutive pair, and a gap larger than that was lost upstream in
+// the engine rather than here.
+//
+// The counters are PER SUBSCRIPTION and are read through
+// AudioSubscription.stats, not through frames_sent and frames_dropped below.
+// Those two are server-wide and the spectrum's own comment admits they
+// over-count across subscribers; a slow client's drops must never appear on
+// a fast client's status line, and audio has no shared decimation to excuse
+// it. Audio does not touch them at all.
+//
+// WHAT NEITHER RULE FIXES. A subscription's queue absorbs a slow socket and
+// nothing else. The engine's completion thread still walks every subscriber
+// on a receiver inline, per core/engine/engine.h's AudioFanout, so a sink
+// that blocks rather than copying delays the radio. Everything this file
+// installs copies and returns.
 
 #pragma once
 

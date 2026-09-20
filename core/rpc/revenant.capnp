@@ -58,15 +58,22 @@
 #
 # WHAT IS ON THE WIRE HERE AND NOT YET BEHIND IT
 #
-# subscribeAudio, rdsStation and setRdsRegion are declared, ordinal-allocated
-# and refused. The engine has no wire audio fan-out and no RDS decoder wired
-# into it; both are their own lane. The refusal names the surface and says it
-# is not wired, because a method that answered with an empty stream or a
-# zeroed struct would read as a broken engine rather than as unfinished work.
-# Everything the three say about shape and about backpressure is the contract
-# those lanes implement, and the reason all three ordinals were allocated in
-# one pass is that a Cap'n Proto field number is permanent and three lanes
-# racing to append would collide.
+# rdsStation and setRdsRegion are declared, ordinal-allocated and refused.
+# No RDS decoder is wired into the engine; that is its own lane. The refusal
+# names the surface and says it is not wired, because a method that answered
+# with a zeroed struct would read as a broken engine rather than as
+# unfinished work.
+#
+# subscribeAudio was the third of them and is served as of 2026-09-20. This
+# paragraph used to name it alongside the other two and say "the engine has
+# no wire audio fan-out"; core/engine/engine.h has AudioFanout and
+# Engine::attach_audio_sink now, and tests/rpc/test_rpc_audio.cpp drives the
+# whole path over a socket. What the paragraph said about the refusal's shape
+# still holds for the two that remain.
+#
+# The reason all three ordinals were allocated in one pass is that a Cap'n
+# Proto field number is permanent and three lanes racing to append would
+# collide.
 
 using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("revenant::rpc::schema");
@@ -830,10 +837,18 @@ struct AudioStats {
     # nothing alike, so the count of events is carried beside the total.
     dropEvents @2 :UInt64;
 
-    # In this subscription's queue right now, and the depth it was granted.
-    # Both in frames, because the depth was asked for in milliseconds and
-    # granted in whole chunks, so the millisecond figure is no longer the
-    # number the queue is enforcing.
+    # In this subscription's queue right now, and the depth it is enforcing.
+    # Both in frames, because the depth was asked for in milliseconds and the
+    # queue holds chunks, so the millisecond figure is not the number being
+    # applied.
+    #
+    # bufferFrames is ZERO UNTIL THE FIRST CHUNK ARRIVES, which is not a
+    # depth of zero and is not a queue that drops everything. The server
+    # cannot turn milliseconds into frames before it has seen a chunk: it
+    # needs the receiver's audio rate, which VrxParams::audioRate echoes as
+    # zero for a receiver that took the engine's default, and it needs a
+    # chunk's length to apply the two-chunk floor. subscribeAudio has the
+    # whole of that argument.
     backlogFrames @3 :UInt64;
     bufferFrames @4 :UInt64;
 }
@@ -1527,11 +1542,14 @@ interface Session {
     # it, cancel ends it explicitly, and the engine sink behind it is
     # refcounted per receiver exactly as subscribePassband's is.
     #
-    # NOT SERVED YET. The engine has one AudioSink slot per receiver and no
-    # fan-out, so the wire half cannot be built without changing the engine,
-    # and that is its own lane. This method is declared and refused, in words
-    # that say the surface exists and is not wired, because a subscription
-    # that never produced a chunk would read as a dead radio.
+    # SERVED SINCE 2026-09-20, and this paragraph used to say it was not: "the
+    # engine has one AudioSink slot per receiver and no fan-out, so the wire
+    # half cannot be built without changing the engine, and that is its own
+    # lane." The engine was changed. core/engine/engine.h now carries
+    # AudioFanout and Engine::attach_audio_sink, so a receiver feeds a
+    # recording, a loudspeaker and any number of subscriptions at once, and
+    # the slot the old paragraph describes is still there underneath as the
+    # thing the fan-out installs itself into.
     #
     # THERE IS NO everyNth, which is the one place this departs from the two
     # subscriptions above it, and the departure is the point. Dropping every
@@ -1562,24 +1580,39 @@ interface Session {
     # approximate, because the frames it discards lie precisely between the
     # last chunk sent and the next one.
     #
-    # THE DEPTH IS CLAMPED, AND THE FLOOR BEATS THE CEILING
+    # THE DEPTH IS CLAMPED IN MILLISECONDS HERE AND IN FRAMES LATER
     #
-    # A depth under one chunk evicts every chunk before the loop thread can
-    # send it. The client hears nothing at all, the counters climb at the full
-    # sample rate, and every other check still passes. So the floor is two
-    # chunks, and it is a clamp rather than advice.
+    # bufferMillis is clamped to 20..5000 and bufferMillisGranted reports what
+    # is in force, on the EngineInfo::ringClamped precedent: a depth that was
+    # quietly changed is a dropout nobody can trace. Zero means the default,
+    # 500, and comes back as 500 rather than as zero.
     #
-    # A chunk is block_samples / sourceRate long, independent of the audio
-    # rate, and that is 27 ms at the engine defaults on a 2.4 MS/s source and
-    # 262 ms on a 250 kS/s dongle at the same block size. Two chunks can
-    # therefore exceed the 5000 ms ceiling, so the effective maximum is 5000
-    # or two chunks, whichever is larger. On a slow source the DEFAULT is
-    # clamped up as well, which a client did not ask for and has to be told
-    # about.
+    # A depth under two chunks evicts every chunk before the loop thread can
+    # send it: the client hears nothing at all, the counters climb at the full
+    # sample rate, and every other check still passes. So two chunks is a
+    # floor as well, it is a clamp rather than advice, and it is applied in
+    # FRAMES when the first chunk arrives. AudioStats::bufferFrames is where a
+    # client reads the depth that is actually enforcing, and it is zero until
+    # the first chunk has arrived to set it.
     #
-    # bufferMillisGranted is what is actually in force. Reported rather than
-    # applied silently, on the EngineInfo::ringClamped precedent: a depth that
-    # was quietly changed is a dropout nobody can trace.
+    # WHAT THIS PARAGRAPH USED TO SAY, AND WHAT THE CODE PROVED WRONG. Until
+    # 2026-09-20 it read: "Two chunks can therefore exceed the 5000 ms
+    # ceiling, so the effective maximum is 5000 or two chunks, whichever is
+    # larger. On a slow source the DEFAULT is clamped up as well, which a
+    # client did not ask for and has to be told about." That put the two-chunk
+    # floor in bufferMillisGranted, and the server cannot compute it when it
+    # answers. It needs two numbers it does not have. A chunk is
+    # block_samples / sourceRate long and EngineInfo carries sourceRate and
+    # not block_samples. Converting either to frames needs the receiver's
+    # audio rate, and VrxParams::audioRate is a verbatim echo that reads zero
+    # for every receiver that took the engine's default, which EngineInfo does
+    # not carry either. Both are known the instant the first chunk arrives,
+    # which is why the floor moved there and why bufferFrames is on AudioStats
+    # in frames.
+    #
+    # The millisecond figure is still worth reporting and is still a clamp a
+    # client is told about; it is no longer the whole of the answer, and a
+    # client that needs the whole of it reads bufferFrames.
     #
     # Refused, with the engine's own words, for a receiver that does not
     # exist, on an engine whose source is not open, and for a raw tap. The raw

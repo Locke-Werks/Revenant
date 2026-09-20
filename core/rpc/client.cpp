@@ -455,6 +455,29 @@ void read_passband_frame(PassbandFrame& out, schema::PassbandFrame::Reader in) {
     out.percentile_high_db = in.getPercentileHighDb();
 }
 
+void read_audio_chunk(AudioChunk& out, schema::AudioChunk::Reader in) {
+    auto samples = in.getSamples();
+    out.samples.resize(samples.size());
+    for (unsigned i = 0; i < samples.size(); ++i) {
+        out.samples[i] = samples[i];
+    }
+    out.sample_rate = in.getSampleRate();
+    out.channel_count = in.getChannelCount();
+    out.sample_index = in.getSampleIndex();
+    out.frames_dropped_before = in.getFramesDroppedBefore();
+    out.squelch_open = in.getSquelchOpen();
+}
+
+[[nodiscard]] AudioStats read_audio_stats(schema::AudioStats::Reader in) {
+    AudioStats out;
+    out.frames_sent = in.getFramesSent();
+    out.frames_dropped = in.getFramesDropped();
+    out.drop_events = in.getDropEvents();
+    out.backlog_frames = in.getBacklogFrames();
+    out.buffer_frames = in.getBufferFrames();
+    return out;
+}
+
 // Everything the event loop thread owns, in one place on its own stack.
 //
 // See the thread model at the top of the file. These three cannot be members
@@ -478,6 +501,11 @@ struct LoopState {
     // open on two of them is the ordinary case and a client watching two
     // should not have to open two connections.
     std::map<std::uint64_t, kj::Own<schema::PassbandSubscription::Client>> passbands;
+
+    // The same, for audio. A separate map rather than a pair in the one
+    // above, because a client watching a receiver's passband and listening
+    // to it is the ordinary case and the two end independently.
+    std::map<std::uint64_t, kj::Own<schema::AudioSubscription::Client>> audios;
 };
 
 class ClientImpl;
@@ -506,6 +534,21 @@ public:
     PassbandReceiverImpl(ClientImpl& owner, std::uint64_t vrx) : owner_(owner), vrx_(vrx) {}
 
     kj::Promise<void> frame(FrameContext context) override;
+
+private:
+    ClientImpl& owner_;
+    std::uint64_t vrx_ = 0;
+};
+
+// The same, for one receiver's audio. It carries the receiver's id for the
+// reason PassbandReceiverImpl does: the subscription is what a client keyed
+// its callback on, and a misaddressed chunk must not reach another pane.
+class AudioReceiverImpl final : public schema::AudioReceiver::Server {
+public:
+    AudioReceiverImpl(ClientImpl& owner, std::uint64_t vrx) : owner_(owner), vrx_(vrx) {}
+
+    kj::Promise<void> chunk(ChunkContext context) override;
+    kj::Promise<void> ended(EndedContext context) override;
 
 private:
     ClientImpl& owner_;
@@ -548,8 +591,12 @@ public:
                                             PassbandCallback callback) override;
     void unsubscribe_passband(std::uint64_t vrx) override;
 
-    [[nodiscard]] Status subscribe_audio(std::uint64_t vrx,
-                                         std::uint32_t buffer_millis) override;
+    [[nodiscard]] Expected<std::uint32_t> subscribe_audio(
+        std::uint64_t vrx, std::uint32_t buffer_millis, AudioCallback on_chunk,
+        AudioEndedCallback on_ended) override;
+    void unsubscribe_audio(std::uint64_t vrx) override;
+    [[nodiscard]] Expected<AudioStats> audio_stats(std::uint64_t vrx) override;
+
     [[nodiscard]] Status rds_station(std::uint64_t vrx) override;
     [[nodiscard]] Status set_rds_region(std::uint64_t vrx, RdsRegion region) override;
 
@@ -562,6 +609,10 @@ public:
     // Loop thread only, called by PassbandReceiverImpl.
     void deliver_passband(std::uint64_t vrx, schema::PassbandFrame::Reader in);
 
+    // Loop thread only, called by AudioReceiverImpl.
+    void deliver_audio(std::uint64_t vrx, schema::AudioChunk::Reader in);
+    void deliver_audio_ended(std::uint64_t vrx, capnp::Text::Reader reason);
+
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
 
@@ -572,6 +623,7 @@ private:
     // Loop thread only.
     [[nodiscard]] kj::Promise<void> end_subscription(LoopState& state);
     [[nodiscard]] kj::Promise<void> end_passband(LoopState& state, std::uint64_t vrx);
+    [[nodiscard]] kj::Promise<void> end_audio(LoopState& state, std::uint64_t vrx);
 
     // Runs body on the event loop thread and waits for the promise it returns,
     // translating whatever comes back into an Expected.
@@ -649,6 +701,14 @@ private:
     std::map<std::uint64_t, PassbandCallback> passband_callbacks_;
     std::map<std::uint64_t, PassbandFrame> passband_scratch_;
 
+    // The same three per receiver being listened to. The scratch chunk is
+    // reused rather than reallocated per chunk, which at 146 chunks a second
+    // per receiver is the difference between one allocation and a stream of
+    // them; AudioChunk::samples keeps its capacity across an assign.
+    std::map<std::uint64_t, AudioCallback> audio_callbacks_;
+    std::map<std::uint64_t, AudioEndedCallback> audio_ended_;
+    std::map<std::uint64_t, AudioChunk> audio_scratch_;
+
     // client.h says calls queue. This is what makes them.
     std::mutex calls_;
 
@@ -661,6 +721,21 @@ private:
     std::atomic<std::uint64_t> frames_received_{0};
     std::atomic<std::uint64_t> frames_dropped_{0};
 };
+
+kj::Promise<void> AudioReceiverImpl::chunk(ChunkContext context) {
+    owner_.deliver_audio(vrx_, context.getParams().getChunk());
+
+    // Returning only now, after the callback has run, is what makes the
+    // engine's queue fill rather than this process's. A slow callback is a
+    // chunk the engine evicts and counts, which is the whole of the
+    // backpressure rule core/rpc/server.h states for audio.
+    return kj::READY_NOW;
+}
+
+kj::Promise<void> AudioReceiverImpl::ended(EndedContext context) {
+    owner_.deliver_audio_ended(vrx_, context.getParams().getReason());
+    return kj::READY_NOW;
+}
 
 kj::Promise<void> PassbandReceiverImpl::frame(FrameContext context) {
     owner_.deliver_passband(vrx_, context.getParams().getFrame());
@@ -952,7 +1027,7 @@ Status ClientImpl::set_detection_threshold(double threshold_db) {
     });
 }
 
-// The three the engine does not serve. Each one makes the real call and hands
+// The two the engine does not serve. Each one makes the real call and hands
 // back the server's refusal, rather than short-circuiting here.
 //
 // Refusing locally would be cheaper and would be wrong twice over. It would
@@ -960,20 +1035,6 @@ Status ClientImpl::set_detection_threshold(double threshold_db) {
 // together, and it would mean tests/rpc asserting against this file instead
 // of against the server, so a branch that served the surface would have a
 // green test and a client that still said no.
-Status ClientImpl::subscribe_audio(std::uint64_t vrx, std::uint32_t buffer_millis) {
-    return on_loop("subscribe_audio", [vrx, buffer_millis](LoopState& state) {
-        auto request = state.session.subscribeAudioRequest();
-        request.setVrx(vrx);
-        request.setBufferMillis(buffer_millis);
-
-        // No receiver capability is sent, because there is nothing for the
-        // engine to call. The branch that serves this passes one, and the
-        // server checks for it there; today the refusal comes first and the
-        // null pointer is never looked at.
-        return request.send().ignoreResult();
-    });
-}
-
 Status ClientImpl::rds_station(std::uint64_t vrx) {
     return on_loop("rds_station", [vrx](LoopState& state) {
         auto request = state.session.rdsStationRequest();
@@ -1104,6 +1165,141 @@ Status ClientImpl::subscribe_passband(std::uint64_t vrx, std::uint32_t every_nth
                     });
             });
     });
+}
+
+kj::Promise<void> ClientImpl::end_audio(LoopState& state, std::uint64_t vrx) {
+    audio_callbacks_.erase(vrx);
+    audio_ended_.erase(vrx);
+    audio_scratch_.erase(vrx);
+
+    auto found = state.audios.find(vrx);
+    if (found == state.audios.end()) {
+        return kj::READY_NOW;
+    }
+
+    // Cancel, then drop, for the ordering reason end_subscription has: a
+    // chunk the engine sent before answering the cancel has already been
+    // dispatched by the time the answer arrives, so a caller that
+    // unsubscribes and then tears down what its callback touched is not
+    // racing one already on the wire.
+    //
+    // The cancel is also what keeps ended() from firing. The schema says a
+    // client never hears ended for a cancel it asked for, and the server
+    // honours that by never sending one down a subscription it was told to
+    // stop; dropping the capability alone would end the subscription just as
+    // thoroughly and would leave the same guarantee resting on destruction
+    // order.
+    auto cancelled = found->second->cancelRequest().send().ignoreResult();
+    state.audios.erase(found);
+    return cancelled.catch_([](kj::Exception&&) {});
+}
+
+Expected<std::uint32_t> ClientImpl::subscribe_audio(std::uint64_t vrx,
+                                                    std::uint32_t buffer_millis,
+                                                    AudioCallback on_chunk,
+                                                    AudioEndedCallback on_ended) {
+    if (!on_chunk) {
+        return fail("subscribe_audio: the chunk callback is empty. unsubscribe_audio is how a "
+                    "subscription ends");
+    }
+
+    return on_loop("subscribe_audio", [this, vrx, buffer_millis, &on_chunk,
+                                       &on_ended](LoopState& state) {
+        // Replacing, per client.h, and the old one is ended first so that a
+        // chunk from it cannot arrive at the new callback.
+        return end_audio(state, vrx)
+            .then([this, &state, vrx, buffer_millis, &on_chunk, &on_ended]() {
+                // Installed before the request goes out, because the engine
+                // may call chunk() on the receiver before it answers the
+                // subscribe and a callback installed afterwards would miss
+                // it.
+                audio_callbacks_[vrx] = std::move(on_chunk);
+                audio_ended_[vrx] = std::move(on_ended);
+                audio_scratch_[vrx] = AudioChunk{};
+
+                auto request = state.session.subscribeAudioRequest();
+                request.setVrx(vrx);
+                request.setReceiver(
+                    schema::AudioReceiver::Client(kj::heap<AudioReceiverImpl>(*this, vrx)));
+                request.setBufferMillis(buffer_millis);
+
+                return request.send()
+                    .then([&state, vrx](auto&& response) -> std::uint32_t {
+                        state.audios[vrx] = kj::heap<schema::AudioSubscription::Client>(
+                            response.getSubscription());
+                        return response.getBufferMillisGranted();
+                    })
+                    .catch_([this, vrx](kj::Exception&& failure)
+                                -> kj::Promise<std::uint32_t> {
+                        // A subscription that never took has nothing to call
+                        // back into, so do not hold the caller's closures
+                        // alive on the strength of it.
+                        audio_callbacks_.erase(vrx);
+                        audio_ended_.erase(vrx);
+                        audio_scratch_.erase(vrx);
+                        return kj::Promise<std::uint32_t>(kj::mv(failure));
+                    });
+            });
+    });
+}
+
+void ClientImpl::unsubscribe_audio(std::uint64_t vrx) {
+    // No error channel, for the reason unsubscribe_spectrum gives: the only
+    // failure is a connection that has already ended the subscription.
+    static_cast<void>(on_loop("unsubscribe_audio", [this, vrx](LoopState& state) {
+        return end_audio(state, vrx);
+    }));
+}
+
+Expected<AudioStats> ClientImpl::audio_stats(std::uint64_t vrx) {
+    return on_loop("audio_stats", [vrx](LoopState& state) -> kj::Promise<AudioStats> {
+        auto found = state.audios.find(vrx);
+        if (found == state.audios.end()) {
+            kj::throwFatalException(KJ_EXCEPTION(
+                FAILED, "this client holds no audio subscription on that receiver"));
+        }
+        return found->second->statsRequest().send().then(
+            [](auto&& response) { return read_audio_stats(response.getStats()); });
+    });
+}
+
+void ClientImpl::deliver_audio(std::uint64_t vrx, schema::AudioChunk::Reader in) {
+    auto callback = audio_callbacks_.find(vrx);
+    if (callback == audio_callbacks_.end() || !callback->second) {
+        // An unsubscribe that crossed a chunk already on the wire.
+        return;
+    }
+
+    auto scratch = audio_scratch_.find(vrx);
+    if (scratch == audio_scratch_.end()) {
+        return;
+    }
+
+    read_audio_chunk(scratch->second, in);
+    callback->second(scratch->second);
+}
+
+void ClientImpl::deliver_audio_ended(std::uint64_t vrx, capnp::Text::Reader reason) {
+    auto ended = audio_ended_.find(vrx);
+    if (ended == audio_ended_.end()) {
+        return;
+    }
+
+    // Copied out before the callback runs and the maps are cleared after it,
+    // because the callback is the client's and may unsubscribe from inside
+    // itself. client.h forbids calling back into the Client from here, but
+    // erasing the entry this iterator names is this file's own footgun
+    // rather than the caller's.
+    AudioEndedCallback callable = ended->second;
+    const std::string text = read_text(reason);
+
+    audio_callbacks_.erase(vrx);
+    audio_ended_.erase(vrx);
+    audio_scratch_.erase(vrx);
+
+    if (callable) {
+        callable(text);
+    }
 }
 
 void ClientImpl::unsubscribe_passband(std::uint64_t vrx) {

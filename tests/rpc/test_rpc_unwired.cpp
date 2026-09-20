@@ -1,18 +1,18 @@
-// The two surfaces the schema carries and the engine does not serve.
+// The surface the schema carries and the engine does not serve.
 //
-// WHAT THESE CASES ARE FOR, WHICH IS NOT WHAT THEY ASSERT
+// WHAT THIS CASE IS FOR, WHICH IS NOT WHAT IT ASSERTS
 //
-// They assert that subscribeAudio, rdsStation and setRdsRegion reach the
-// server and come back refused in a sentence saying the surface exists and is
-// not wired. That is a small thing to check. What it buys is that the branch
-// serving either one starts from a red test rather than from nothing: it has
-// to delete a case here, and deleting a case is a decision somebody makes
-// rather than a gap nobody notices.
+// It asserts that rdsStation and setRdsRegion reach the server and come back
+// refused in a sentence saying the surface exists and is not wired. That is a
+// small thing to check. What it buys is that the branch serving them starts
+// from a red test rather than from nothing: it has to delete a case here, and
+// deleting a case is a decision somebody makes rather than a gap nobody
+// notices.
 //
-// They also pin the shape of the refusal. A method that answered with an
-// empty stream or a struct of zeros would look like a broken engine and send
-// whoever saw it to the radio, so "there is nothing here yet" has to be a
-// refusal and has to say so in words.
+// It also pins the shape of the refusal. A method that answered with a struct
+// of zeros would look like a broken engine and send whoever saw it to the
+// radio, so "there is nothing here yet" has to be a refusal and has to say so
+// in words.
 //
 // THE ORDER THE REFUSAL COMES IN IS PART OF THE CONTRACT
 //
@@ -20,8 +20,21 @@
 // does not exist gets the not-wired sentence and not "no receiver 9 is
 // registered". The second reads as though a good id would have worked, and on
 // a surface that does nothing that is the one thing a caller must not be told.
-// The case below sends a live receiver's id and a nonsense one and asserts
-// they get the same answer.
+//
+// SUBSCRIBEAUDIO USED TO BE HERE AND IS NOT
+//
+// This file carried a third case asserting the same refusal from
+// subscribeAudio, and that is exactly what it was for: the branch serving
+// audio had to come here and delete it. It did, on 2026-09-20.
+// tests/rpc/test_rpc_audio.cpp is what replaced it, and the assertion that
+// used to be "it says it is not wired" is now the stream itself, the drop
+// counter moving under a slow subscriber, and the eight reachable shapes the
+// refusal never had to distinguish.
+//
+// The one thing that changed shape rather than moving: subscribeAudio now
+// reads its arguments and answers about them, so "no receiver 9999 is
+// registered" is the right answer there. That inversion is why the two
+// remaining cases still assert the opposite here.
 
 #include <cstdint>
 #include <string>
@@ -47,38 +60,11 @@ void bring_up(Harness& harness, const HarnessOptions& options) {
     REQUIRE(ready.has_value());
 }
 
-// The phrase all three refusals share, so a client matches one string and the
+// The phrase both refusals share, so a client matches one string and the
 // branch that serves a surface has one string to delete.
 constexpr const char* kNotWired = "is not wired to the engine yet";
 
 }  // namespace
-
-TEST_CASE("subscribeAudio is on the wire and says it is not served", "[gpu][rpc][unwired]") {
-    REVENANT_NEEDS_GPU();
-
-    Harness harness;
-    bring_up(harness, HarnessOptions{});
-
-    auto vrx = harness.client().add_vrx(
-        rpc::VrxParams{.center = 131'072, .bandwidth = 12'000, .demod = rpc::Demod::Nfm});
-    INFO(test::message_of(vrx));
-    REQUIRE(vrx.has_value());
-
-    auto refused = harness.client().subscribe_audio(*vrx, 500);
-    REQUIRE_FALSE(refused.has_value());
-    INFO(refused.error().message);
-    CHECK(refused.error().message.find("subscribeAudio") != std::string::npos);
-    CHECK(refused.error().message.find(kNotWired) != std::string::npos);
-
-    // A receiver that does not exist gets the SAME answer, because the
-    // refusal comes before the arguments are read. Telling this caller "no
-    // receiver 9999 is registered" would say a good id works.
-    auto nonsense = harness.client().subscribe_audio(9'999, 500);
-    REQUIRE_FALSE(nonsense.has_value());
-    INFO(nonsense.error().message);
-    CHECK(nonsense.error().message.find(kNotWired) != std::string::npos);
-    CHECK(nonsense.error().message.find("is registered") == std::string::npos);
-}
 
 TEST_CASE("the RDS surface is on the wire and says it is not served", "[gpu][rpc][unwired]") {
     REVENANT_NEEDS_GPU();

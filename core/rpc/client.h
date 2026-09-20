@@ -158,26 +158,73 @@ public:
                                                      PassbandCallback callback) = 0;
     virtual void unsubscribe_passband(std::uint64_t vrx) = 0;
 
-    // The two surfaces the schema carries and the engine does not serve.
+    // One receiver's audio, as raw float32 PCM, on the same thread and the
+    // same terms as the two above.
+    using AudioCallback = std::function<void(const AudioChunk&)>;
+
+    // No further chunk is coming, with the engine's own words for why. Never
+    // called for an unsubscribe_audio this client asked for. Optional: pass
+    // an empty one and the stream simply stops, which is what a client that
+    // is tearing down anyway wants.
     //
-    // All three reach the server and all three come back refused, in a
-    // sentence saying the surface exists and is not wired. They are here so
-    // that a client has something to call and tests/rpc has something to
-    // assert, and so that the branches that serve them start from a compile
-    // error in the right place rather than from nothing.
+    // It exists because audio has no visible failure. A receiver removed out
+    // from under a spectrum subscription freezes a picture and a frozen
+    // picture is obvious; the same event here produces silence, and silence
+    // is what a quiet channel with the squelch shut sounds like.
+    using AudioEndedCallback = std::function<void(const std::string& reason)>;
+
+    // Answers with the buffer depth actually granted, in milliseconds. Zero
+    // asks for the default and comes back as the default rather than as
+    // zero, and the value is clamped rather than applied silently, because a
+    // depth that quietly changed is a dropout nobody can trace.
+    //
+    // THAT NUMBER IS NOT THE WHOLE CLAMP. A two-chunk floor is applied in
+    // frames when the first chunk arrives, because the server cannot convert
+    // milliseconds to frames until it knows the receiver's audio rate and
+    // how long a chunk is, and it learns both from the first chunk.
+    // AudioStats::buffer_frames is the depth being enforced.
+    //
+    // THERE IS NO every_nth, which is where this departs from the two
+    // subscriptions above. Dropping every other spectrum frame halves an
+    // update rate and loses nothing anyone wanted; dropping every other
+    // audio chunk is a 50 percent duty cycle of silence. A client that wants
+    // less audio subscribes to fewer receivers.
+    //
+    // One subscription per receiver per Client; subscribing to the same
+    // receiver again replaces the first. Fails for a receiver that does not
+    // exist, before the source is open, and for a raw tap, in the engine's
+    // own words for the first two and in the server's for the last.
+    [[nodiscard]] virtual Expected<std::uint32_t> subscribe_audio(
+        std::uint64_t vrx, std::uint32_t buffer_millis, AudioCallback on_chunk,
+        AudioEndedCallback on_ended) = 0;
+    virtual void unsubscribe_audio(std::uint64_t vrx) = 0;
+
+    // This subscription's own counters, read off the engine. Per
+    // subscription rather than per client and per server, so a second client
+    // falling behind on the same receiver does not appear here.
+    [[nodiscard]] virtual Expected<AudioStats> audio_stats(std::uint64_t vrx) = 0;
+
+    // The RDS surface, which the schema carries and the engine does not
+    // serve. Both reach the server and both come back refused, in a sentence
+    // saying the surface exists and is not wired. They are here so that a
+    // client has something to call and tests/rpc has something to assert,
+    // and so that the branch that serves them starts from a compile error in
+    // the right place rather than from nothing.
     //
     // THE SIGNATURES ARE THE ARGUMENT HALF ONLY, DELIBERATELY
     //
-    // subscribe_audio takes no callback and rds_station hands back Status
-    // rather than a station struct, because the payload types would be
-    // mirrors of schema structs nothing can populate: a hundred lines of
-    // conversion in core/rpc/types.h that no test could exercise, in the one
-    // header whose job is to be the contract a UI compiles against. The
-    // branch that serves audio adds the callback and the branch that serves
-    // RDS changes this return type, and both changes fail to compile at every
-    // caller, which is where they should fail.
-    [[nodiscard]] virtual Status subscribe_audio(std::uint64_t vrx,
-                                                  std::uint32_t buffer_millis) = 0;
+    // rds_station hands back Status rather than a station struct, because
+    // the payload type would be a mirror of a schema struct nothing can
+    // populate: a hundred lines of conversion in core/rpc/types.h that no
+    // test could exercise, in the one header whose job is to be the contract
+    // a UI compiles against. The branch that serves RDS changes this return
+    // type, and the change fails to compile at every caller, which is where
+    // it should fail.
+    //
+    // subscribe_audio was the third of these and is served. It took no
+    // callback on the same argument and now takes two; this paragraph said
+    // that the branch serving it would add one and break every caller, and
+    // that is what happened.
     [[nodiscard]] virtual Status rds_station(std::uint64_t vrx) = 0;
     [[nodiscard]] virtual Status set_rds_region(std::uint64_t vrx, RdsRegion region) = 0;
 

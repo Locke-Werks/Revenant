@@ -309,7 +309,7 @@ detection is asking to be put near a signal rather than on a channel centre.
 `Detection::centerHz` is absolute and `VrxParams::center` is a baseband
 offset, so tuning is `centerHz - EngineInfo::sourceCenter`.
 
-### Audio has a shape on the wire and nothing behind it
+### Audio crosses as raw PCM, and it queues rather than skipping
 
 `AudioChunk`, `AudioReceiver`, `AudioSubscription` and
 `Session::subscribeAudio` are in the schema as of 2026-09-20, with the codec
@@ -320,27 +320,82 @@ putting a lossy stage in the middle of a chain whose whole claim is that it is
 bit exact; 16-bit PCM was refused because it adds a quantisation and a dither
 decision and clips headroom a settling AGC uses.
 
-**The method is refused.** The engine holds one `AudioSink` per receiver and a
-second `set_audio_sink` replaces the first, so fanning audio out to subscribers
-means changing `core/engine`, and that is its own branch. `subscribeAudio`
-comes back with a sentence saying the surface exists and is not wired, before
-it looks at its arguments. A subscription that produced no chunk would read as
-a broken radio; a refusal that says why does not.
+**The engine grew a composition seam to make this possible.**
+`core/engine/engine.h` now carries `AudioFanout` and `attach_audio_sink`, so a
+receiver feeds a recording, a loudspeaker and any number of subscriptions at
+once. The single `set_audio_sink` slot is still there underneath and is what
+the fan-out installs itself into; a caller reaching it directly still displaces
+everything. The server attaches once per receiver however many clients are
+listening, and detaches with the last of them.
 
-**What this paragraph used to say.** Until 2026-09-20: "Audio does not cross.
-Not yet. The CLI renders its own through WASAPI in the same process as the
-engine. A remote client wanting audio needs a codec decision, and nothing today
-forces that decision to be made." The decision has been made, and the
-retraction is here rather than a quiet rewrite because `README.md` and
-`core/rpc/revenant.capnp` carried the same claim and anyone who read one of the
-three concluded a remote client could not listen.
+**This section used to say the method was refused.** Until 2026-09-20: "the
+engine holds one `AudioSink` per receiver and a second `set_audio_sink`
+replaces the first, so fanning audio out to subscribers means changing
+`core/engine`, and that is its own branch." That was the branch. The paragraph
+before it, which said audio did not cross at all, had already been retracted
+once when the codec decision landed; both retractions stay because `README.md`
+and `core/rpc/revenant.capnp` carried the same claims and a reader may have
+taken it from any of them.
 
-### RDS is the same: declared, allocated, refused
+**Backpressure is a different rule from the two display streams, not a looser
+one.** A spectrum frame is a measurement of a band that is still there, so an
+older one is redundant and the engine keeps the newest. An audio chunk is the
+only copy of that instant. So a subscription queues, up to the depth it was
+granted, and when the queue is full the OLDEST chunk goes: late audio is worse
+than no audio when the point is to hear what the radio is doing now, and front
+eviction is what makes `framesDroppedBefore` exact rather than approximate. A
+client can check `sampleIndex == previous.sampleIndex + previous frame count +
+framesDroppedBefore` on every consecutive pair; a gap larger than that was lost
+upstream in the engine, which is a different fault with a different fix.
 
-`Session::rdsStation` and `Session::setRdsRegion` land beside it, with
+**There is no `everyNth`.** Dropping every other spectrum frame halves an
+update rate and loses nothing anyone wanted. Dropping every other audio chunk
+is a 50 percent duty cycle of silence. A client that wants less audio
+subscribes to fewer receivers.
+
+**The depth is clamped twice and only one clamp is in the answer.**
+`bufferMillis` is clamped to 20..5000 and `bufferMillisGranted` reports it,
+with zero meaning the 500 ms default and coming back as 500. A two-chunk floor
+is then applied in frames when the first chunk arrives, because the server
+cannot convert milliseconds to frames before it knows the receiver's audio rate
+and how long a chunk is, and `EngineInfo` carries neither `block_samples` nor
+the engine's default audio rate while `VrxParams::audioRate` echoes zero for a
+receiver that took that default. `AudioStats::bufferFrames` is the depth
+actually enforcing and is zero until the first chunk sets it. The schema's note
+on `subscribeAudio` records what it used to claim instead.
+
+**`AudioStats` is per subscription.** `Server::frames_dropped` is server-wide
+and its own comment admits it over-counts across spectrum subscribers; a slow
+client's drops must never appear on a fast client's status line, and audio has
+no shared decimation to excuse it. Audio does not touch that counter at all.
+
+**`ended` exists because audio has no visible failure.** A receiver removed out
+from under a spectrum subscription freezes a picture and a frozen picture is
+obvious from across the room. The same event here produces silence, and silence
+is what a quiet channel with the squelch shut sounds like, so the subscriber is
+told in words. It is best effort, it is never sent for a cancel the client
+asked for, and a server whose event loop has already stopped cannot send it at
+all; a dropped connection is the other signal.
+
+**`squelchOpen` rides on every chunk** for the same reason: a closed gate is
+not a drop and not a gap, `core/engine/graph.cpp` fills the chunk with zeros
+and sends it at the full rate, and nothing else in the stream distinguishes
+that from a transmitter that stopped.
+
+**The raw tap is refused**, in the server's own words rather than the engine's,
+because the engine would install a sink on it happily. `RawTapStage` hands back
+interleaved complex I/Q at the coarse channel rate, which a client playing it
+as two-channel PCM renders as noise at the wrong speed, at tens of times the
+rate this design was costed at. An I/Q subscription is a separate method that
+does not exist.
+
+### RDS is still declared, allocated, refused
+
+`Session::rdsStation` and `Session::setRdsRegion` remain unwired, with
 `RdsStation` and the six structs and enums under it. The decoder exists in
 `core/decode` and nothing in `core/engine` feeds it a composite, so both
-methods refuse in the same words.
+methods refuse in words saying the surface exists and is not wired. A struct of
+zeros would read as a broken engine rather than as unfinished work.
 
 All three ordinals were allocated in one pass with the login bootstrap because
 a Cap'n Proto field number is permanent and three branches appending to one
@@ -360,9 +415,14 @@ What the schema does carry is the state a client needs to draw and control:
 `SourceDescriptor` for a picker; `SourceStats` and `VrxStatus` for the
 counters; and the `DetectionList` above, which is the detection metadata the
 engine's promise names and the reason that clause is in it.
-Overruns, lost samples and dropped audio samples travel because they are
-correctness events, and a remote client is exactly the caller that cannot read
-the log.
+Overruns and lost samples travel because they are correctness events, and a
+remote client is exactly the caller that cannot read the log.
+`VrxStatus::audioDropped` travels beside them and is narrower than it reads:
+it is frames the engine handed to a receiver's sink and had refused, which
+also ends the run, so it is normally zero. It used to be incremented by the
+squelch mute, which is not a dropout at all. What a listener missed belongs to
+a consumer rather than to a receiver, and `AudioStats::framesDropped` is where
+a subscription's own losses are counted.
 
 `EngineInfo` also carries `ringClamped` and `ringClampReason`. They are how a
 remote client learns the engine did not build what it was asked for, and they

@@ -183,6 +183,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -381,6 +382,105 @@ struct Subscription : std::enable_shared_from_this<Subscription> {
     bool cancelled = false;
 };
 
+// The audio depth clamp, in milliseconds. Zero asks for the default.
+//
+// The ceiling is the schema's. The floor is 20 ms, which is under one chunk
+// on every source this tree has run and is therefore not the binding
+// constraint; the binding one is the two-chunk floor applied in frames when
+// the first chunk arrives. It is here so that a client asking for 1 ms is
+// told the number changed rather than being handed its own value back and a
+// queue that behaves like something else.
+constexpr std::uint32_t kDefaultAudioBufferMillis = 500;
+constexpr std::uint32_t kMinAudioBufferMillis = 20;
+constexpr std::uint32_t kMaxAudioBufferMillis = 5000;
+
+// Chunk buffers a subscription keeps for reuse. Small on purpose: the queue
+// itself is the buffer, and this is only what keeps the engine's completion
+// thread out of the allocator in the steady state, where at most one buffer
+// is being refilled while another is on its way out.
+constexpr std::size_t kAudioSpareBuffers = 4;
+
+[[nodiscard]] constexpr std::uint32_t grant_audio_buffer_millis(std::uint32_t asked) {
+    const std::uint32_t wanted = asked == 0 ? kDefaultAudioBufferMillis : asked;
+    return std::clamp(wanted, kMinAudioBufferMillis, kMaxAudioBufferMillis);
+}
+
+// One chunk, owning its samples so it can outlive the sink call.
+//
+// engine::AudioChunk::samples is valid for the duration of that call and not
+// after, exactly like a spectrum frame's bins, and audio is queued rather
+// than replaced, so the copy is what makes the queue legal at all.
+struct AudioChunkBuffer {
+    std::vector<float> samples;
+    std::uint64_t sample_index = 0;
+    std::uint32_t frames = 0;
+    std::uint32_t rate = 0;
+    std::uint16_t channels = 1;
+    bool squelch_open = true;
+};
+
+// One subscriber to one receiver's audio.
+//
+// UNLIKE EVERY OTHER NODE IN THIS FILE, PART OF THIS ONE IS SHARED. The
+// display subscriptions keep a single frame in a slot and are touched only
+// on the loop thread. Audio is a queue, because a chunk is the only copy of
+// that instant and the newest is worth no more than the one before it, and
+// the engine's completion thread has to be able to push into that queue
+// without waiting for the loop. So everything under `lock` is written by
+// both threads and everything above it is the loop thread's alone.
+struct AudioNode : std::enable_shared_from_this<AudioNode> {
+    AudioNode(schema::AudioReceiver::Client client, engine::VrxId which,
+              std::uint32_t millis)
+        : receiver(kj::mv(client)), vrx(which), granted_millis(millis) {}
+
+    // Loop thread only.
+    schema::AudioReceiver::Client receiver;
+    engine::VrxId vrx;
+    std::uint32_t granted_millis = 0;
+    bool in_flight = false;
+    bool cancelled = false;
+    bool ended_sent = false;
+
+    // Both threads, under `lock`.
+    std::mutex lock;
+    std::deque<AudioChunkBuffer> queue;
+    std::vector<AudioChunkBuffer> spare;
+
+    // The depth in force, and zero until the first chunk sets it. See the
+    // schema's note on AudioStats::bufferFrames for why it cannot be
+    // computed when the subscription is answered.
+    std::uint64_t buffer_frames = 0;
+    std::uint64_t queued_frames = 0;
+
+    // Evicted since the last chunk this node was sent, which is exactly what
+    // rides out on the next one as framesDroppedBefore.
+    std::uint64_t dropped_before = 0;
+
+    std::uint64_t frames_sent = 0;
+    std::uint64_t frames_dropped = 0;
+    std::uint64_t drop_events = 0;
+
+    // True while the queue is evicting, so drop_events counts the edge
+    // rather than the frames.
+    bool dropping = false;
+};
+
+class ServerImpl;
+
+// Everything one receiver's audio sink needs, co-owned by the sink callable.
+//
+// The same shape as SinkGate below and for the same reason: the callable
+// outlives the Server whenever a dispatch was in flight when the sink came
+// off, so `owner` is cleared under this lock and a late call finds null
+// instead of freed memory. It carries the node list as well, because the
+// completion thread is the one that has to walk it.
+struct AudioRoute {
+    std::mutex lock;
+    ServerImpl* owner = nullptr;
+    std::vector<std::shared_ptr<AudioNode>> nodes;
+    engine::AudioSinkId sink = 0;
+};
+
 // One subscriber to one receiver's passband. Loop thread only, same as
 // Subscription above and for the same reasons.
 struct PassbandNode : std::enable_shared_from_this<PassbandNode> {
@@ -466,6 +566,25 @@ public:
     [[nodiscard]] Status add_passband(std::shared_ptr<PassbandNode> node);
     void end_passband(const std::shared_ptr<PassbandNode>& node);
 
+    // Engine completion thread, with route.lock already held by the sink
+    // callable that got here. Always answers success: a subscriber that
+    // cannot keep up counts a drop of its own, and failing here would fail
+    // the dispatch and end the run over one slow socket.
+    [[nodiscard]] Status on_audio_chunk(AudioRoute& route, const engine::AudioChunk& chunk);
+
+    // Event loop thread. Attaches the engine sink on the first subscriber to
+    // a receiver and detaches it with the last, so a receiver nobody is
+    // listening to costs nothing on the wire.
+    [[nodiscard]] Status add_audio(std::shared_ptr<AudioNode> node);
+    void end_audio(const std::shared_ptr<AudioNode>& node);
+
+    // Event loop thread. Tells every subscriber on this receiver that no
+    // further chunk is coming, then ends them. Called when a receiver is
+    // removed through this session: silence is what a quiet channel sounds
+    // like, so a stream that simply stops is indistinguishable from one
+    // nobody is talking on.
+    void end_audio_for_vrx(engine::VrxId vrx, std::string_view reason);
+
     // Event loop thread. Queues a listing for the worker and hands back a
     // promise this loop resolves when the worker is done. See the note at the
     // top: this is the only engine-facing call that opens hardware, and the
@@ -496,6 +615,9 @@ private:
     void fan_out_passband(const engine::PassbandFrame& frame);
     void deliver_passband(PassbandNode& node, const engine::PassbandFrame& frame);
     void detach_passband_sink(engine::VrxId vrx);
+
+    void drain_audio();
+    void pump_audio(const std::shared_ptr<AudioNode>& node);
 
     void taskFailed(kj::Exception&&) override {
         // Every send already carries its own error handler, which ends the
@@ -596,6 +718,18 @@ private:
     // Loop thread only.
     std::vector<std::shared_ptr<Subscription>> subscriptions_;
     std::vector<std::shared_ptr<PassbandNode>> passband_nodes_;
+
+    // One route per receiver that has at least one audio subscriber. The map
+    // is the loop thread's; each route's node list is shared with the
+    // completion thread under that route's own lock.
+    //
+    // No spare-buffer pool here, unlike the two display streams. A chunk's
+    // buffer belongs to the subscription that queued it, because two
+    // subscribers on one receiver hold different numbers of chunks for
+    // different lengths of time and a shared pool would be a queue with the
+    // accounting hidden in it.
+    std::map<std::uint32_t, std::shared_ptr<AudioRoute>> audio_routes_;
+
     kj::TaskSet* sends_ = nullptr;
 };
 
@@ -627,6 +761,54 @@ private:
 
     ServerImpl& owner_;
     std::shared_ptr<PassbandNode> node_;
+};
+
+class AudioSubscriptionImpl final : public schema::AudioSubscription::Server {
+public:
+    AudioSubscriptionImpl(ServerImpl& owner, std::shared_ptr<AudioNode> node)
+        : owner_(owner), node_(std::move(node)) {}
+
+    AudioSubscriptionImpl(const AudioSubscriptionImpl&) = delete;
+    AudioSubscriptionImpl& operator=(const AudioSubscriptionImpl&) = delete;
+
+    // Not an override, for the reason SubscriptionImpl's destructor gives:
+    // capnp::Capability::Server has no virtual destructor. This is what makes
+    // a client that drops the capability without cancelling end the
+    // subscription anyway, which is the case a client that crashed relies on.
+    ~AudioSubscriptionImpl() { end(); }
+
+    kj::Promise<void> cancel(CancelContext) override {
+        end();
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> stats(StatsContext context) override {
+        if (node_ == nullptr) {
+            return to_exception(Error{"this audio subscription has been cancelled, so it has "
+                                      "no counters left to report"});
+        }
+
+        auto out = context.getResults().initStats();
+        const std::scoped_lock held(node_->lock);
+        out.setFramesSent(node_->frames_sent);
+        out.setFramesDropped(node_->frames_dropped);
+        out.setDropEvents(node_->drop_events);
+        out.setBacklogFrames(node_->queued_frames);
+        out.setBufferFrames(node_->buffer_frames);
+        return kj::READY_NOW;
+    }
+
+private:
+    void end() {
+        if (node_ == nullptr) {
+            return;
+        }
+        owner_.end_audio(node_);
+        node_.reset();
+    }
+
+    ServerImpl& owner_;
+    std::shared_ptr<AudioNode> node_;
 };
 
 class SubscriptionImpl final : public schema::SpectrumSubscription::Server {
@@ -720,6 +902,16 @@ public:
         if (auto removed = owner_.engine().remove_vrx(*id); !removed) {
             return to_exception(removed.error());
         }
+
+        // After the removal and not before: a removal that failed leaves the
+        // receiver running and its subscribers listening to it.
+        //
+        // The two display streams need nothing here, because a receiver
+        // removed out from under one freezes a picture and a frozen picture
+        // is visible from across the room. Audio goes quiet instead, and a
+        // quiet channel with the squelch shut sounds identical, so the
+        // subscriber is told in words.
+        owner_.end_audio_for_vrx(*id, "the receiver was removed");
         return kj::READY_NOW;
     }
 
@@ -858,6 +1050,59 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> subscribeAudio(SubscribeAudioContext context) override {
+        auto request = context.getParams();
+        if (!request.hasReceiver()) {
+            return to_exception(Error{"subscribeAudio needs a receiver capability, and this "
+                                      "request carried a null pointer in its place"});
+        }
+
+        auto id = to_vrx_id(request.getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
+
+        // Asked before the sink goes on, and its refusal is the engine's own
+        // sentence: "no receiver N is registered" for an id that was never
+        // issued or has been removed, and the source-not-open message when
+        // there is no graph to ask. Both are what the operator needs to read.
+        auto status = owner_.engine().vrx_status(*id);
+        if (!status) {
+            return to_exception(status.error());
+        }
+
+        // The raw tap, refused here rather than by the engine, because the
+        // engine would happily install a sink on it. RawTapStage hands back
+        // interleaved complex I/Q at the coarse channel rate; a client
+        // playing that as two-channel PCM plays noise at the wrong speed, and
+        // the rate is tens of times what this design was costed at.
+        if (!engine::produces_audio(status->params.demod)) {
+            return to_exception(Error{std::format(
+                "receiver {} is a raw tap, so there is no audio on it to subscribe to. The raw "
+                "tap is interleaved complex I/Q at the coarse channel rate rather than "
+                "demodulated audio; an I/Q subscription is a separate method that does not "
+                "exist yet, and serving it through this one is the only thing that would make "
+                "it look like one",
+                id->value)});
+        }
+
+        const std::uint32_t granted = grant_audio_buffer_millis(request.getBufferMillis());
+        auto node = std::make_shared<AudioNode>(request.getReceiver(), *id, granted);
+
+        // The sink goes on before the capability exists, so a refusal comes
+        // back as a sentence rather than as a subscription that can never
+        // produce a chunk.
+        if (auto installed = owner_.add_audio(node); !installed) {
+            return to_exception(installed.error());
+        }
+
+        schema::AudioSubscription::Client handle =
+            kj::heap<AudioSubscriptionImpl>(owner_, std::move(node));
+        context.getResults().setSubscription(kj::mv(handle));
+        context.getResults().setBufferMillisGranted(granted);
+        return kj::READY_NOW;
+    }
+
     // The two surfaces the schema carries and the engine does not serve.
     //
     // Refused rather than answered, and refused BEFORE the arguments are
@@ -866,22 +1111,20 @@ public:
     // worked, and the shape of a refusal is the only thing a caller can learn
     // from a surface that does nothing.
     //
-    // A subscription that produced no chunk, or a station struct of zeros,
-    // would each look like a broken engine instead of unfinished work, and
-    // the person seeing it would go looking at the radio.
+    // A station struct of zeros would look like a broken engine instead of
+    // unfinished work, and the person seeing it would go looking at the
+    // radio.
     //
-    // The sentence is the same in all three so that a client can match one
-    // phrase rather than three, and so that the branch turning these green
-    // has one string to delete. core/rpc/revenant.capnp says what each of
-    // them will do.
-
-    kj::Promise<void> subscribeAudio(SubscribeAudioContext) override {
-        return to_exception(Error{
-            "subscribeAudio exists on the wire and is not wired to the engine yet. The engine "
-            "holds one audio sink per receiver and a second one replaces the first, so fanning "
-            "audio out to subscribers means changing core/engine, which is its own branch. See "
-            "core/rpc/revenant.capnp for the shape it will have"});
-    }
+    // The sentence is the same in both so that a client can match one phrase
+    // rather than two, and so that the branch turning these green has one
+    // string to delete. core/rpc/revenant.capnp says what each of them will
+    // do.
+    //
+    // subscribeAudio above was the third of them and is served now. Its
+    // refusal is gone rather than softened, which is why the one above reads
+    // the receiver id first and answers about the receiver: on a surface that
+    // works, "no receiver 9 is registered" is the true answer rather than the
+    // misleading one.
 
     kj::Promise<void> rdsStation(RdsStationContext) override {
         return to_exception(Error{
@@ -1043,6 +1286,16 @@ void ServerImpl::serve(ServerOptions options) {
         sends.clear();
         sends_ = nullptr;
         subscriptions_.clear();
+
+        // Audio subscriptions hold a capability made on this thread, so they
+        // are dropped here rather than left to stop(), which runs on the
+        // caller's. The routes themselves stay: stop() detaches their engine
+        // sinks and closes them once this thread has been joined.
+        for (const auto& entry : audio_routes_) {
+            const std::scoped_lock owned(entry.second->lock);
+            entry.second->nodes.clear();
+        }
+
         refresh_subscriber_summary();
     } catch (const kj::Exception& error) {
         announce(fail(std::format("the RPC server could not bind {}:{}: {}",
@@ -1294,11 +1547,13 @@ kj::Promise<void> ServerImpl::pump() {
     // armed sets the slot and rings nothing, so draining before arming would
     // leave it sitting there until the frame behind it arrived.
     //
-    // Both kinds through one pump and one bell. A receiver's passband and the
-    // span are produced by the same completion thread in the same dispatch,
-    // so two pumps would be two wakeups for one batch of work.
+    // All three kinds through one pump and one bell. A receiver's audio, its
+    // passband and the span are produced by the same completion thread in
+    // the same dispatch, so three pumps would be three wakeups for one batch
+    // of work.
     drain();
     drain_passbands();
+    drain_audio();
 
     return armed.promise.then([this]() { return pump(); });
 }
@@ -1585,6 +1840,304 @@ void ServerImpl::detach_passband_sink(engine::VrxId vrx) {
     }
 }
 
+Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& chunk) {
+    // The engine's completion thread, with route.lock held by the callable
+    // that got here. It touches no capability and never waits on the loop.
+    if (chunk.channels == 0) {
+        return {};
+    }
+    const auto frames = static_cast<std::uint32_t>(chunk.samples.size() / chunk.channels);
+    if (frames == 0) {
+        return {};
+    }
+
+    bool queued = false;
+    for (const auto& node : route.nodes) {
+        const std::scoped_lock held(node->lock);
+
+        // The two-chunk floor, applied here because this is the first moment
+        // the server knows what a chunk is. See the schema on subscribeAudio:
+        // the length needs block_samples and the conversion from
+        // milliseconds needs the receiver's audio rate, and EngineInfo
+        // carries neither. Re-checked on every chunk rather than only the
+        // first, because a retune is a remove and an add and the replacement
+        // can be at another rate.
+        const std::uint64_t depth =
+            static_cast<std::uint64_t>(node->granted_millis) * chunk.rate / 1000U;
+        const std::uint64_t floor = 2ULL * frames;
+        node->buffer_frames = std::max(depth, floor);
+
+        // From the FRONT, which is the oldest chunk not yet sent. Late audio
+        // is worse than no audio when the point is to hear what the radio is
+        // doing now, and front eviction is also what makes
+        // framesDroppedBefore exact: the frames it discards lie precisely
+        // between the last chunk this subscriber was sent and the next one.
+        bool evicted = false;
+        while (!node->queue.empty() &&
+               node->queued_frames + frames > node->buffer_frames) {
+            AudioChunkBuffer& oldest = node->queue.front();
+            node->queued_frames -= oldest.frames;
+            node->frames_dropped += oldest.frames;
+            node->dropped_before += oldest.frames;
+            evicted = true;
+            if (node->spare.size() < kAudioSpareBuffers) {
+                node->spare.push_back(std::move(oldest));
+            }
+            node->queue.pop_front();
+        }
+
+        // The edge rather than the frames. One two-second stall and four
+        // hundred scattered hitches lose the same frames and sound nothing
+        // alike.
+        if (evicted && !node->dropping) {
+            node->drop_events += 1;
+        }
+        node->dropping = evicted;
+
+        AudioChunkBuffer buffer;
+        if (!node->spare.empty()) {
+            buffer = std::move(node->spare.back());
+            node->spare.pop_back();
+        }
+
+        // assign rather than a fresh vector, so a recycled buffer copies the
+        // samples without reaching the allocator.
+        buffer.samples.assign(chunk.samples.begin(), chunk.samples.end());
+        buffer.sample_index = chunk.start;
+        buffer.frames = frames;
+        buffer.rate = static_cast<std::uint32_t>(chunk.rate);
+        buffer.channels = static_cast<std::uint16_t>(chunk.channels);
+        buffer.squelch_open = chunk.squelch_open;
+
+        node->queued_frames += frames;
+        node->queue.push_back(std::move(buffer));
+        queued = true;
+    }
+
+    if (!queued) {
+        return {};
+    }
+
+    // The same bell the two display streams ring, taken rather than borrowed
+    // so a burst across several receivers wakes the loop once.
+    kj::Own<kj::CrossThreadPromiseFulfiller<void>> waker;
+    {
+        const std::scoped_lock held(frame_lock_);
+        waker = kj::mv(wakeup_);
+    }
+    if (waker.get() != nullptr) {
+        waker->fulfill();
+    }
+    return {};
+}
+
+void ServerImpl::drain_audio() {
+    // Snapshotted under each route's lock and pumped outside it, so the
+    // completion thread is not held off for the length of a fan-out.
+    std::vector<std::shared_ptr<AudioNode>> ready;
+    for (const auto& entry : audio_routes_) {
+        const std::scoped_lock held(entry.second->lock);
+        ready.insert(ready.end(), entry.second->nodes.begin(), entry.second->nodes.end());
+    }
+
+    std::vector<std::shared_ptr<AudioNode>> gone;
+    for (const auto& node : ready) {
+        if (node->cancelled) {
+            gone.push_back(node);
+            continue;
+        }
+        pump_audio(node);
+    }
+
+    // After the pass rather than during it, because end_audio mutates both
+    // audio_routes_ and the node list this loop is walking.
+    for (const auto& node : gone) {
+        end_audio(node);
+    }
+}
+
+void ServerImpl::pump_audio(const std::shared_ptr<AudioNode>& node) {
+    // One chunk in flight per subscription, which is the same rule the
+    // display streams use and means something different here. There it is
+    // the whole of the backpressure and a frame arriving during one is
+    // dropped. Here it is only the wire's own serialisation: a chunk that
+    // arrives while this is true is QUEUED, and the depth is what decides
+    // whether anything is lost.
+    if (node->cancelled || node->in_flight || sends_ == nullptr) {
+        return;
+    }
+
+    AudioChunkBuffer buffer;
+    std::uint64_t dropped_before = 0;
+    {
+        const std::scoped_lock held(node->lock);
+        if (node->queue.empty()) {
+            return;
+        }
+        buffer = std::move(node->queue.front());
+        node->queue.pop_front();
+        node->queued_frames -= buffer.frames;
+        dropped_before = node->dropped_before;
+        node->dropped_before = 0;
+        node->frames_sent += buffer.frames;
+    }
+
+    // Sized up front so the samples land in one segment. Two floats to a
+    // word, plus room for the six scalars and the struct itself.
+    const std::uint64_t words = (buffer.samples.size() + 1) / 2 + 32;
+    auto request = node->receiver.chunkRequest(capnp::MessageSize{words, 0});
+    auto out = request.initChunk();
+    auto samples = out.initSamples(static_cast<unsigned>(buffer.samples.size()));
+    for (unsigned i = 0; i < samples.size(); ++i) {
+        samples.set(i, buffer.samples[i]);
+    }
+    out.setSampleRate(buffer.rate);
+    out.setChannelCount(buffer.channels);
+    out.setSampleIndex(buffer.sample_index);
+    out.setFramesDroppedBefore(dropped_before);
+    out.setSquelchOpen(buffer.squelch_open);
+
+    node->in_flight = true;
+
+    auto weak = node->weak_from_this();
+    sends_->add(request.send().ignoreResult().then(
+        [this, weak]() {
+            // Straight on to the next one rather than waiting for the engine
+            // to ring again. A subscriber that has just come back from a
+            // stall has a backlog, and draining it at the production rate
+            // would keep it exactly as far behind as the stall left it.
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                pump_audio(live);
+            }
+        },
+        [weak](kj::Exception&&) {
+            // A receiver that threw or went away is not coming back. Ended
+            // here rather than retried, and with no ended() call: the
+            // capability it would travel on is the one that failed.
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                live->cancelled = true;
+            }
+        }));
+
+    // Recycled only now, after the samples are in the outgoing message, so
+    // nothing in flight still refers to this buffer.
+    const std::scoped_lock held(node->lock);
+    if (node->spare.size() < kAudioSpareBuffers) {
+        node->spare.push_back(std::move(buffer));
+    }
+}
+
+Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node) {
+    const std::uint32_t key = node->vrx.value;
+
+    auto existing = audio_routes_.find(key);
+    if (existing == audio_routes_.end()) {
+        const std::scoped_lock held(sink_lock_);
+        if (sink_closed_) {
+            return fail("this server is stopping and will install no further sinks");
+        }
+
+        auto route = std::make_shared<AudioRoute>();
+        route->owner = this;
+
+        // attach rather than set, which is the whole point of the seam in
+        // core/engine/engine.h: a recording or a loudspeaker already on this
+        // receiver keeps its audio, and this server's sink joins it.
+        auto attached = engine_.attach_audio_sink(
+            node->vrx, [route](const engine::AudioChunk& chunk) -> Status {
+                std::scoped_lock owned(route->lock);
+                if (route->owner == nullptr) {
+                    return {};
+                }
+                return route->owner->on_audio_chunk(*route, chunk);
+            });
+        if (!attached) {
+            return std::unexpected(attached.error());
+        }
+
+        route->sink = *attached;
+        existing = audio_routes_.emplace(key, std::move(route)).first;
+    }
+
+    const std::scoped_lock held(existing->second->lock);
+    existing->second->nodes.push_back(std::move(node));
+    return {};
+}
+
+void ServerImpl::end_audio(const std::shared_ptr<AudioNode>& node) {
+    node->cancelled = true;
+
+    auto found = audio_routes_.find(node->vrx.value);
+    if (found == audio_routes_.end()) {
+        return;
+    }
+
+    bool last = false;
+    {
+        const std::scoped_lock held(found->second->lock);
+        const auto before = found->second->nodes.size();
+        std::erase(found->second->nodes, node);
+        if (found->second->nodes.size() == before) {
+            // Already ended. Cancelling twice is ordinary: a client can call
+            // cancel and then drop the capability.
+            return;
+        }
+        last = found->second->nodes.empty();
+    }
+    if (!last) {
+        return;
+    }
+
+    auto route = found->second;
+    audio_routes_.erase(found);
+
+    {
+        const std::scoped_lock held(sink_lock_);
+        if (!sink_closed_) {
+            // Discarded: the only failures are a receiver the graph no
+            // longer knows, which is the ordinary teardown order, and a
+            // token already detached, which stop() would have done.
+            static_cast<void>(engine_.detach_audio_sink(node->vrx, route->sink));
+        }
+    }
+
+    // Closed last, and it waits for a sink call that is already running. The
+    // detach above is asynchronous, so a dispatch recorded before it can
+    // still arrive; its node list is empty by then, so it queues nothing
+    // either way.
+    const std::scoped_lock owned(route->lock);
+    route->owner = nullptr;
+}
+
+void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, std::string_view reason) {
+    auto found = audio_routes_.find(vrx.value);
+    if (found == audio_routes_.end()) {
+        return;
+    }
+
+    std::vector<std::shared_ptr<AudioNode>> nodes;
+    {
+        const std::scoped_lock held(found->second->lock);
+        nodes = found->second->nodes;
+    }
+
+    for (const auto& node : nodes) {
+        // Best effort, which the schema says rather than promises. At most
+        // once per subscription, and never for a cancel the client asked
+        // for: this path is only reached when something else ended the
+        // stream.
+        if (!node->cancelled && !node->ended_sent && sends_ != nullptr) {
+            node->ended_sent = true;
+            auto request = node->receiver.endedRequest();
+            request.setReason(kj::StringPtr(reason.data(), reason.size()));
+            sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+        }
+        end_audio(node);
+    }
+}
+
 void ServerImpl::add_subscription(std::shared_ptr<Subscription> subscription) {
     subscriptions_.push_back(std::move(subscription));
     refresh_subscriber_summary();
@@ -1764,6 +2317,18 @@ void ServerImpl::stop() {
     }
     passband_sinks_.clear();
     passband_nodes_.clear();
+
+    // The same, for every receiver this server was carrying audio from. Each
+    // route's owner is cleared under its own lock, which is what makes a
+    // sink call already inside on_audio_chunk finish before this returns.
+    for (const auto& entry : audio_routes_) {
+        static_cast<void>(
+            engine_.detach_audio_sink(engine::VrxId{entry.first}, entry.second->sink));
+        const std::scoped_lock owned(entry.second->lock);
+        entry.second->owner = nullptr;
+        entry.second->nodes.clear();
+    }
+    audio_routes_.clear();
 
     {
         std::scoped_lock held(frame_lock_);
