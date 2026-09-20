@@ -20,12 +20,42 @@
 //   7. a raw tap with no demodulator             refused, in the server's words
 //   8. a squelched receiver                      zeros at the full rate
 //
-// Three of them share one case where sharing is the point: shape 3 is
-// asserted alongside a sink attached directly to the engine, because "two
-// clients work" and "a client does not take the loudspeaker" are the same
+// Two of them share one case where sharing is the point: shape 3 is asserted
+// alongside a sink attached directly to the engine, because "two clients
+// work" and "a client does not take the local consumer's audio" are the same
 // property seen from two sides. Shape 5's control arm is a fast subscriber on
 // the SAME receiver in the SAME run, which is what separates a drop counter
 // that moved because of the drop from one that moved because of the run.
+//
+// WHAT SHAPE 3'S CASE USED TO CLAIM, WHICH WAS NOT A HAZARD AT ALL
+//
+// It said the local sink was the loudspeaker-theft case: "before the
+// composition seam, the first subscribeAudio below would have replaced this
+// and nothing anywhere would have said so". Nothing there can be stolen.
+// Both the local sink and the server's are members of the same AudioFanout,
+// which tests/engine/test_audio_fanout.cpp referees property by property, so
+// the case certified a bar that could not fail while its own comment cited
+// it as the guard.
+//
+// The shape that can still lose audio is a caller reaching
+// Engine::set_audio_sink directly, which displaces the whole fan-out and
+// tells nobody. core/engine/engine.h says so in as many words and, until
+// 2026-09-20, tools/cli/main.cpp did exactly that. The case below the shapes
+// pins the displacement instead of asserting around it.
+//
+// FOUR CASES THAT ARE NOT SHAPES OF A SUBSCRIPTION
+//
+// These are properties of the server and of the engine's seam rather than of
+// one stream, so they are listed apart rather than renumbered in:
+//
+//   the receiver removed, then polled     audio_stats refuses, and does not
+//                                         answer from the dead subscription
+//   set_audio_sink reached directly       every other consumer goes silent,
+//                                         with no ended() and no error
+//   a chunk longer than the depth asked   the two-chunk floor is what is
+//                                         enforced, not the milliseconds
+//   a fan-out outliving its receiver      a later attach is refused rather
+//                                         than joining a dead one
 //
 // THE SOURCE IS PACED, as it is in test_rpc_spectrum.cpp and nowhere else in
 // this suite. An unthrottled synthetic source retires in tens of
@@ -92,6 +122,33 @@ void bring_up_running(Harness& harness, const HarnessOptions& options) {
     const auto started = harness.start_engine();
     INFO(test::message_of(started));
     REQUIRE(started.has_value());
+}
+
+// A local consumer's frame count, and the sink that fills it.
+//
+// Held through a shared_ptr the sink captures BY VALUE, for the reason
+// AudioLog gives and one of its own. A sink handed to the engine outlives
+// the statement that attached it and is released through a control operation
+// the completion thread applies, so a count that was an ordinary local would
+// be a pointer into a stack frame the engine has not finished with: locals
+// declared after the Harness are destroyed before it, and the engine is
+// still running at that point.
+using FrameCount = std::shared_ptr<std::atomic<std::uint64_t>>;
+
+[[nodiscard]] FrameCount counting() {
+    return std::make_shared<std::atomic<std::uint64_t>>(0);
+}
+
+[[nodiscard]] engine::AudioSink count_into(FrameCount count) {
+    return [count](const engine::AudioChunk& chunk) -> Status {
+        count->fetch_add(chunk.samples.size() / std::max(chunk.channels, 1U),
+                         std::memory_order_relaxed);
+        return {};
+    };
+}
+
+[[nodiscard]] engine::VrxId engine_id(std::uint64_t vrx) {
+    return engine::VrxId{static_cast<std::uint32_t>(vrx)};
 }
 
 [[nodiscard]] rpc::VrxParams nfm_receiver() {
@@ -572,18 +629,23 @@ TEST_CASE("two clients and a local sink share one receiver's audio",
     INFO(test::message_of(vrx));
     REQUIRE(vrx.has_value());
 
-    // Attached FIRST and directly on the engine, which is what a host playing
-    // audio out of a sound card in the same process looks like. Before the
-    // composition seam, the first subscribeAudio below would have replaced
-    // this and nothing anywhere would have said so.
-    std::atomic<std::uint64_t> local_frames{0};
-    auto token = harness.engine().attach_audio_sink(
-        engine::VrxId{static_cast<std::uint32_t>(*vrx)},
-        [&local_frames](const engine::AudioChunk& chunk) -> Status {
-            local_frames.fetch_add(chunk.samples.size() / std::max(chunk.channels, 1U),
-                                   std::memory_order_relaxed);
-            return {};
-        });
+    // Attached FIRST and directly on the engine, which is what a host
+    // playing audio out of a sound card in the same process looks like.
+    //
+    // THIS COMMENT USED TO SAY the first subscribeAudio below would have
+    // replaced this before the composition seam and that nothing anywhere
+    // would have said so. That is history and it is not what this case
+    // checks, because after the seam neither of these can displace the
+    // other: both are members of one AudioFanout and joining one is all
+    // either of them does. The case that can lose audio reaches
+    // set_audio_sink and is the next one in this file.
+    //
+    // What is left here is worth checking on its own terms: a host consumer
+    // and two wire subscribers on one receiver, all three fed from a single
+    // engine sink, each leaving without taking the others with it.
+    auto local_frames = counting();
+    auto token =
+        harness.engine().attach_audio_sink(engine_id(*vrx), count_into(local_frames));
     INFO(test::message_of(token));
     REQUIRE(token.has_value());
 
@@ -605,7 +667,7 @@ TEST_CASE("two clients and a local sink share one receiver's audio",
     REQUIRE(wait_for_chunks(*mine, 40, 4000) >= 40);
     REQUIRE(wait_for_chunks(*theirs, 40, 4000) >= 40);
 
-    const std::uint64_t local_at_check = local_frames.load(std::memory_order_relaxed);
+    const std::uint64_t local_at_check = local_frames->load(std::memory_order_relaxed);
     CHECK(local_at_check > 0);
 
     // Both wire subscriptions saw the same stream, whole.
@@ -619,22 +681,110 @@ TEST_CASE("two clients and a local sink share one receiver's audio",
 
     // And the local sink is still being fed, which is the whole point.
     harness.client().unsubscribe_audio(*vrx);
-    const std::uint64_t local_after = local_frames.load(std::memory_order_relaxed);
+    const std::uint64_t local_after = local_frames->load(std::memory_order_relaxed);
     CHECK(local_after > local_at_check);
 
     // The last wire subscription going away detached the server's entry and
     // only the server's: this token is still live, so the fan-out is still
     // there and still holding it.
-    auto detached = harness.engine().detach_audio_sink(
-        engine::VrxId{static_cast<std::uint32_t>(*vrx)}, *token);
+    auto detached = harness.engine().detach_audio_sink(engine_id(*vrx), *token);
     INFO(test::message_of(detached));
     CHECK(detached.has_value());
 
     // With nothing left attached the fan-out is gone, so the same token
     // detaches nothing rather than finding a stale one.
-    auto again = harness.engine().detach_audio_sink(
-        engine::VrxId{static_cast<std::uint32_t>(*vrx)}, *token);
+    auto again = harness.engine().detach_audio_sink(engine_id(*vrx), *token);
     CHECK_FALSE(again.has_value());
+}
+
+// --- the seam's remaining hazard, which is set_audio_sink ------------------
+
+TEST_CASE("a caller reaching set_audio_sink directly silences everything else",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    // A host consumer and a wire subscriber, both through the seam, both
+    // being fed. This is the state the case above leaves the world in.
+    auto attached_frames = counting();
+    auto token =
+        harness.engine().attach_audio_sink(engine_id(*vrx), count_into(attached_frames));
+    INFO(test::message_of(token));
+    REQUIRE(token.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto opened = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    REQUIRE(wait_for_chunks(*log, 20, 4000) >= 20);
+    const std::uint64_t attached_before = attached_frames->load(std::memory_order_relaxed);
+    CHECK(attached_before > 0);
+
+    // THE HAZARD, EXERCISED RATHER THAN DESCRIBED. The slot holds one sink
+    // and this replaces it, so the fan-out with both consumers in it comes
+    // off the receiver entirely. core/engine/engine.h says a caller reaching
+    // here displaces everything the fan-out was holding and is not told it
+    // did; this is that sentence as a case.
+    auto thief_frames = counting();
+    const auto stolen = harness.engine().set_audio_sink(engine_id(*vrx),
+                                                        count_into(thief_frames));
+    INFO(test::message_of(stolen));
+    REQUIRE(stolen.has_value());
+
+    // The displacement travels as a control operation the completion thread
+    // applies, so both consumers may see a chunk or two after the call
+    // returns. Read a settled state rather than an instantaneous one.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const std::uint64_t attached_at_rest = attached_frames->load(std::memory_order_relaxed);
+    const std::size_t wire_at_rest = log->size();
+    const std::uint64_t thief_at_rest = thief_frames->load(std::memory_order_relaxed);
+    REQUIRE(thief_at_rest > 0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // Both go silent. The attached consumer and the wire subscriber are
+    // members of one fan-out and the fan-out is what was displaced, so this
+    // is one fact seen twice rather than two.
+    CHECK(attached_frames->load(std::memory_order_relaxed) == attached_at_rest);
+    CHECK(log->size() == wire_at_rest);
+
+    // AND NOBODY IS TOLD. No ended(), because the server was not asked to
+    // end anything and does not know: the engine stopped calling its sink
+    // and a sink that is not called looks exactly like a receiver with
+    // nothing on it. The subscription is still live and still reports itself
+    // healthy, which is precisely why a VU meter or a decoder tap wired with
+    // set_audio_sink would kill every wire subscriber with a green suite.
+    CHECK_FALSE(log->ended());
+
+    auto stats = harness.client().audio_stats(*vrx);
+    INFO(test::message_of(stats));
+    REQUIRE(stats.has_value());
+    CHECK(stats->frames_dropped == 0);
+    CHECK(stats->drop_events == 0);
+
+    // The thief, meanwhile, is the only consumer there is.
+    CHECK(thief_frames->load(std::memory_order_relaxed) > thief_at_rest);
+
+    harness.client().unsubscribe_audio(*vrx);
+
+    // Cleared through the seam, which takes the displacing sink off with it:
+    // the token's fan-out is empty once this returns, so detach_audio_sink
+    // puts an empty sink in the slot. Done here rather than left to teardown
+    // so nothing is still being called while this case's locals unwind.
+    auto detached = harness.engine().detach_audio_sink(engine_id(*vrx), *token);
+    INFO(test::message_of(detached));
+    CHECK(detached.has_value());
+
+    const auto stopped = harness.stop_engine();
+    INFO(test::message_of(stopped));
+    CHECK(stopped.has_value());
 }
 
 // --- shape 4 ----------------------------------------------------------------

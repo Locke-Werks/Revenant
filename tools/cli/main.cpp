@@ -2089,36 +2089,54 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 primary_sink.error(), std::format("sink for receiver {}", i + 1)));
         }
 
+        // attach_audio_sink AND NOT set_audio_sink, WHICH IS THE WHOLE POINT
+        //
+        // This used to call set_audio_sink and, when there was a monitor
+        // alongside a recording, hand it a lambda that called the two sinks
+        // itself. core/engine/engine.h named that lambda as the shape of the
+        // problem AudioFanout was built to end, and it was still here after
+        // the fan-out landed. The slot holds one sink: whatever filled it
+        // last wins, silently, so this process and any wire subscriber were
+        // one call away from taking each other's audio with nothing said.
+        //
+        // Attaching leaves the ordering and the failure rule in one place
+        // rather than two. The hand-rolled version returned at the first
+        // refusal and the monitor never saw that chunk; the fan-out calls
+        // every consumer and hands back the first error, so a disk that
+        // filled up no longer silences the loudspeaker on the way out.
+        //
+        // Nothing detaches. These live for the run and the engine goes with
+        // the process; detaching on the way out would be the same file
+        // operations in reverse for no reader.
+        if (auto wired = eng.attach_audio_sink(receiver.id, std::move(*primary_sink));
+            !wired) {
+            return std::unexpected(with_context(
+                wired.error(), std::format("wiring receiver {}", i + 1)));
+        }
+
         if (receiver.monitor.valid()) {
             auto monitor_sink = egress.sink_for(receiver.monitor);
             if (!monitor_sink) {
                 return std::unexpected(with_context(
                     monitor_sink.error(), std::format("monitor sink for receiver {}", i + 1)));
             }
-            // Two publishes, no copy of the samples: publish() takes the span
-            // and does the copy itself, into each ring. Both run on the
-            // readback thread and neither blocks.
+
+            // The monitor is registered with the egress under an id of its
+            // own, so the chunk it is handed has to carry that id. The
+            // samples are not copied: the span is borrowed and publish()
+            // does its own copy into the ring.
             const engine::VrxId monitor_id = receiver.monitor;
-            engine::AudioSink recorded = std::move(*primary_sink);
             engine::AudioSink monitored = std::move(*monitor_sink);
-            if (auto wired = eng.set_audio_sink(
+            if (auto wired = eng.attach_audio_sink(
                     receiver.id,
-                    [recorded, monitored, monitor_id](const engine::AudioChunk& chunk) -> Status {
-                        if (auto to_file = recorded(chunk); !to_file) {
-                            return to_file;
-                        }
+                    [monitored, monitor_id](const engine::AudioChunk& chunk) -> Status {
                         engine::AudioChunk copy = chunk;
                         copy.vrx = monitor_id;
                         return monitored(copy);
                     });
                 !wired) {
                 return std::unexpected(with_context(
-                    wired.error(), std::format("wiring receiver {}", i + 1)));
-            }
-        } else {
-            if (auto wired = eng.set_audio_sink(receiver.id, std::move(*primary_sink)); !wired) {
-                return std::unexpected(with_context(
-                    wired.error(), std::format("wiring receiver {}", i + 1)));
+                    wired.error(), std::format("wiring the monitor for receiver {}", i + 1)));
             }
         }
 

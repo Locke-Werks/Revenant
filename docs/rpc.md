@@ -328,6 +328,26 @@ the fan-out installs itself into; a caller reaching it directly still displaces
 everything. The server attaches once per receiver however many clients are
 listening, and detaches with the last of them.
 
+**Reaching `set_audio_sink` directly is the one way left to lose audio, and it
+is a case rather than a warning.** No caller in this tree does it any more:
+`tools/cli/main.cpp` was the last and moved to `attach_audio_sink` on
+2026-09-20, so its recording and its monitor are two consumers of one fan-out
+instead of a two-way one hand-rolled in a lambda.
+`tests/rpc/test_rpc_audio.cpp` pins what happens to anyone who does reach the
+slot: every other consumer goes silent, no `ended` is sent, and
+`AudioSubscription.stats` goes on reporting a healthy subscription, because the
+server was not asked to end anything and a sink that stops being called looks
+exactly like a receiver nobody is transmitting on. A VU meter or a decoder tap
+wired that way kills every wire subscriber with a green suite.
+
+**A fan-out can outlive its receiver.** `Engine` keys them by receiver id and
+nothing prunes that map on `remove_vrx`, so a receiver removed while a consumer
+is still attached leaves its entry behind. A later `attach_audio_sink` on that
+id is refused in the engine's own words rather than joining a fan-out no chunk
+will ever reach, and the stale entry is dropped on the way out. Ids are
+monotonic and never reused within one engine, so the only caller who can reach
+one is a caller attaching to an id it removed itself.
+
 **This section used to say the method was refused.** Until 2026-09-20: "the
 engine holds one `AudioSink` per receiver and a second `set_audio_sink`
 replaces the first, so fanning audio out to subscribers means changing

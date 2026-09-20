@@ -387,9 +387,14 @@ using AudioSinkId = std::uint64_t;
 // that built the engine; it stops being survivable the moment a second one
 // can ask for audio over the wire, because the first subscribeAudio on a
 // host that is also recording or playing locally takes the sound card and
-// nothing anywhere says so. tools/cli/main.cpp already hand-rolls a two-way
-// version of this in a lambda, which is the shape of the problem rather than
-// a solution to it.
+// nothing anywhere says so.
+//
+// This paragraph used to end "tools/cli/main.cpp already hand-rolls a
+// two-way version of this in a lambda, which is the shape of the problem
+// rather than a solution to it". It did, and it stopped on 2026-09-20: the
+// CLI attaches its recording and its monitor as two consumers here, so the
+// example of the problem is gone and the sentence would now point a reader
+// at code that does the right thing.
 //
 // ORDERING. Sinks are called in attach order, in one pass, on the producer
 // thread, and every one of them is called: a sink that fails does not stop
