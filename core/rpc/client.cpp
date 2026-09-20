@@ -100,13 +100,29 @@ static_assert(static_cast<std::uint16_t>(schema::Demod::CW) ==
 //
 // core/decode/rds_groups.h holds the third member of this chain, Region, and
 // nothing asserts against it here: core/rpc/types.h may not include anything
-// under core/decode any more than under core/engine. The branch that serves
-// rdsStation adds that assert in core/rpc/convert.h, which is the file
-// allowed to see both.
+// under core/decode any more than under core/engine. core/rpc/convert.h
+// carries that assert, which is the file allowed to see both.
 static_assert(static_cast<std::uint16_t>(schema::RdsRegion::RDS) ==
               static_cast<std::uint16_t>(RdsRegion::Rds));
 static_assert(static_cast<std::uint16_t>(schema::RdsRegion::RBDS) ==
               static_cast<std::uint16_t>(RdsRegion::Rbds));
+
+// And for the two decoder states. Read and never written back, so a
+// renumbering would not retune anything, and it would still be silent: an
+// acquiring decoder drawn as locked is a display showing text that nothing
+// produced.
+static_assert(static_cast<std::uint16_t>(schema::RdsLock::UNLOCKED) ==
+              static_cast<std::uint16_t>(RdsLock::Unlocked));
+static_assert(static_cast<std::uint16_t>(schema::RdsLock::ACQUIRING) ==
+              static_cast<std::uint16_t>(RdsLock::Acquiring));
+static_assert(static_cast<std::uint16_t>(schema::RdsLock::LOCKED) ==
+              static_cast<std::uint16_t>(RdsLock::Locked));
+static_assert(static_cast<std::uint16_t>(schema::RdsSync::HUNTING) ==
+              static_cast<std::uint16_t>(RdsSync::Hunting));
+static_assert(static_cast<std::uint16_t>(schema::RdsSync::PRE_SYNC) ==
+              static_cast<std::uint16_t>(RdsSync::PreSync));
+static_assert(static_cast<std::uint16_t>(schema::RdsSync::SYNCED) ==
+              static_cast<std::uint16_t>(RdsSync::Synced));
 
 // The same pair for the detector's track state, used by read_track_state.
 static_assert(static_cast<std::uint16_t>(schema::TrackState::PENDING) ==
@@ -408,6 +424,220 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+// The four text fields of an RdsStation are Data and are copied byte for
+// byte, because they are EN 50067 Annex E code points rather than UTF-8. See
+// the note on rpc::RdsStation::ps: transcoding belongs where a font is being
+// chosen.
+[[nodiscard]] std::vector<std::uint8_t> read_bytes(capnp::Data::Reader in) {
+    return std::vector<std::uint8_t>(in.begin(), in.end());
+}
+
+[[nodiscard]] std::vector<std::int64_t> read_frequencies(
+    capnp::List<std::int64_t>::Reader in) {
+    std::vector<std::int64_t> out;
+    out.reserve(in.size());
+    for (const std::int64_t hz : in) {
+        out.push_back(hz);
+    }
+    return out;
+}
+
+// Rejected rather than cast, on the same terms read_track_state is. A Cap'n
+// Proto enum field can legally hold an ordinal this build has never heard
+// of, which is how a newer engine reaches an older client, and a blind cast
+// turns "a state added later" into whichever of these three sits at that
+// number.
+[[nodiscard]] Expected<RdsLock> read_rds_lock(schema::RdsLock in) {
+    const auto ordinal = static_cast<std::uint16_t>(in);
+    if (ordinal > static_cast<std::uint16_t>(RdsLock::Locked)) {
+        return fail(std::format(
+            "RDS lock ordinal {} is not one this client knows; the engine was built against a "
+            "newer schema",
+            ordinal));
+    }
+    return static_cast<RdsLock>(ordinal);
+}
+
+[[nodiscard]] Expected<RdsSync> read_rds_sync(schema::RdsSync in) {
+    const auto ordinal = static_cast<std::uint16_t>(in);
+    if (ordinal > static_cast<std::uint16_t>(RdsSync::Synced)) {
+        return fail(std::format(
+            "RDS sync ordinal {} is not one this client knows; the engine was built against a "
+            "newer schema",
+            ordinal));
+    }
+    return static_cast<RdsSync>(ordinal);
+}
+
+[[nodiscard]] Expected<RdsRegion> read_rds_region(schema::RdsRegion in) {
+    const auto ordinal = static_cast<std::uint16_t>(in);
+    if (ordinal > static_cast<std::uint16_t>(RdsRegion::Rbds)) {
+        return fail(std::format(
+            "RDS region ordinal {} is not one this client knows; the engine was built against "
+            "a newer schema",
+            ordinal));
+    }
+    return static_cast<RdsRegion>(ordinal);
+}
+
+[[nodiscard]] Expected<RdsHealth> read_rds_health(schema::RdsHealth::Reader in) {
+    auto lock = read_rds_lock(in.getLock());
+    if (!lock) {
+        return std::unexpected(lock.error());
+    }
+    auto sync = read_rds_sync(in.getSync());
+    if (!sync) {
+        return std::unexpected(sync.error());
+    }
+
+    RdsHealth out;
+    out.lock = *lock;
+    out.sync = *sync;
+    out.quality = in.getQuality();
+    out.biphase_consistency = in.getBiphaseConsistency();
+    out.carrier_coherence = in.getCarrierCoherence();
+    out.carrier_offset_hz = in.getCarrierOffsetHz();
+    out.bit_rate_hz = in.getBitRateHz();
+    out.pilot_locked = in.getPilotLocked();
+    out.pilot_level = in.getPilotLevel();
+    out.samples_consumed = in.getSamplesConsumed();
+    out.bits_emitted = in.getBitsEmitted();
+    out.reacquisitions = in.getReacquisitions();
+    out.bits_fed = in.getBitsFed();
+    out.groups_decoded = in.getGroupsDecoded();
+    out.blocks_good = in.getBlocksGood();
+    out.blocks_corrected = in.getBlocksCorrected();
+    out.blocks_dropped = in.getBlocksDropped();
+    out.sync_acquisitions = in.getSyncAcquisitions();
+    out.sync_losses = in.getSyncLosses();
+    return out;
+}
+
+[[nodiscard]] RdsClockTime read_rds_clock(schema::RdsClockTime::Reader in) {
+    RdsClockTime out;
+    out.mjd = in.getMjd();
+    out.year = in.getYear();
+    out.month = in.getMonth();
+    out.day = in.getDay();
+    out.hour = in.getHour();
+    out.minute = in.getMinute();
+    out.offset_half_hours = in.getOffsetHalfHours();
+    out.valid = in.getValid();
+    return out;
+}
+
+[[nodiscard]] Expected<RdsStation> read_rds_station(schema::RdsStation::Reader in) {
+    auto region = read_rds_region(in.getRegion());
+    if (!region) {
+        return std::unexpected(region.error());
+    }
+    auto health = read_rds_health(in.getHealth());
+    if (!health) {
+        return std::unexpected(health.error());
+    }
+
+    RdsStation out;
+    out.vrx = in.getVrx();
+    out.region = *region;
+
+    out.pi = in.getPi();
+    out.pi_valid = in.getPiValid();
+    out.call_sign = in.getCallSign();
+
+    out.pty = in.getPty();
+    out.pty_valid = in.getPtyValid();
+    out.pty_short_name = in.getPtyShortName();
+    out.pty_long_name = in.getPtyLongName();
+
+    out.tp = in.getTp();
+    out.tp_valid = in.getTpValid();
+    out.ta = in.getTa();
+    out.ta_valid = in.getTaValid();
+    out.ta_changed_at = in.getTaChangedAt();
+
+    out.music = in.getMusic();
+    out.music_valid = in.getMusicValid();
+
+    out.di_stereo = in.getDiStereo();
+    out.di_artificial_head = in.getDiArtificialHead();
+    out.di_compressed = in.getDiCompressed();
+    out.di_dynamic_pty = in.getDiDynamicPty();
+    out.di_received = in.getDiReceived();
+
+    out.ps = read_bytes(in.getPs());
+    out.ps_received = in.getPsReceived();
+    out.rt = read_bytes(in.getRt());
+    out.rt_received = in.getRtReceived();
+    out.rt_length = in.getRtLength();
+    out.rt_ab = in.getRtAb();
+    out.rt_ab_valid = in.getRtAbValid();
+    out.rt_version_b = in.getRtVersionB();
+
+    out.ptyn = read_bytes(in.getPtyn());
+    out.ptyn_received = in.getPtynReceived();
+    out.ptyn_ab = in.getPtynAb();
+    out.ptyn_ab_valid = in.getPtynAbValid();
+
+    out.clock = read_rds_clock(in.getClock());
+
+    out.pin_day = in.getPinDay();
+    out.pin_hour = in.getPinHour();
+    out.pin_minute = in.getPinMinute();
+    out.pin_valid = in.getPinValid();
+
+    out.ecc = in.getEcc();
+    out.ecc_valid = in.getEccValid();
+    out.ecc_contradicts_region = in.getEccContradictsRegion();
+
+    out.language = in.getLanguage();
+    out.language_valid = in.getLanguageValid();
+
+    out.linkage_actuator = in.getLinkageActuator();
+    out.linkage_actuator_valid = in.getLinkageActuatorValid();
+
+    out.af = read_frequencies(in.getAf());
+    out.af_announced = in.getAfAnnounced();
+    out.af_repeats = in.getAfRepeats();
+
+    auto odas = in.getOda();
+    out.oda.reserve(odas.size());
+    for (auto row : odas) {
+        RdsOda entry;
+        entry.group_type = row.getGroupType();
+        entry.version_b = row.getVersionB();
+        entry.message = row.getMessage();
+        entry.aid = row.getAid();
+        out.oda.push_back(entry);
+    }
+
+    auto networks = in.getEon();
+    out.eon.reserve(networks.size());
+    for (auto row : networks) {
+        RdsEonEntry entry;
+        entry.pi = row.getPi();
+        entry.ps = read_bytes(row.getPs());
+        entry.ps_received = row.getPsReceived();
+        entry.tp = row.getTp();
+        entry.ta = row.getTa();
+        entry.ta_valid = row.getTaValid();
+        entry.pty = row.getPty();
+        entry.pty_valid = row.getPtyValid();
+        entry.linkage = row.getLinkage();
+        entry.linkage_valid = row.getLinkageValid();
+        entry.af = read_frequencies(row.getAf());
+        out.eon.push_back(std::move(entry));
+    }
+
+    out.health = *health;
+    out.composite_rate = in.getCompositeRate();
+    out.last_group_sample = in.getLastGroupSample();
+    return out;
+}
+
 // Fills a caller-owned frame rather than returning one, so the bins buffer can
 // be reused across frames. The callback holds a const reference for the length
 // of the call and copies whatever it keeps, which client.h already requires of
@@ -597,7 +827,7 @@ public:
     void unsubscribe_audio(std::uint64_t vrx) override;
     [[nodiscard]] Expected<AudioStats> audio_stats(std::uint64_t vrx) override;
 
-    [[nodiscard]] Status rds_station(std::uint64_t vrx) override;
+    [[nodiscard]] Expected<RdsStation> rds_station(std::uint64_t vrx) override;
     [[nodiscard]] Status set_rds_region(std::uint64_t vrx, RdsRegion region) override;
 
     [[nodiscard]] std::uint64_t frames_received() const override;
@@ -1037,20 +1267,27 @@ Status ClientImpl::set_detection_threshold(double threshold_db) {
     });
 }
 
-// The two the engine does not serve. Each one makes the real call and hands
-// back the server's refusal, rather than short-circuiting here.
-//
-// Refusing locally would be cheaper and would be wrong twice over. It would
-// put the "not wired yet" sentence in two places that have to be changed
-// together, and it would mean tests/rpc asserting against this file instead
-// of against the server, so a branch that served the surface would have a
-// green test and a client that still said no.
-Status ClientImpl::rds_station(std::uint64_t vrx) {
-    return on_loop("rds_station", [vrx](LoopState& state) {
+// Nothing is checked here and everything is checked at the server, which is
+// the same arrangement detections has. A receiver that cannot carry a
+// composite is refused by the one side that can see the placement, and a
+// copy of the four conditions in this file would be a second policy that
+// could disagree with the first.
+Expected<RdsStation> ClientImpl::rds_station(std::uint64_t vrx) {
+    // Two Expecteds deep and flattened, the same shape as detections and for
+    // the same reason: the outer one is whether the call happened, the inner
+    // one is whether every enum in the reply carried an ordinal this build
+    // can name.
+    auto response = on_loop("rds_station", [vrx](LoopState& state) {
         auto request = state.session.rdsStationRequest();
         request.setVrx(vrx);
-        return request.send().ignoreResult();
+        return request.send().then(
+            [](auto&& reply) { return read_rds_station(reply.getStation()); });
     });
+
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    return std::move(*response);
 }
 
 Status ClientImpl::set_rds_region(std::uint64_t vrx, RdsRegion region) {

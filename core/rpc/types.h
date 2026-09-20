@@ -405,10 +405,9 @@ struct AudioStats {
 // RDS decoder is configured for.
 //
 // Ordinal for ordinal with schema::RdsRegion and with
-// revenant::decode::Region, on the terms the schema states: the ordering is
-// matched here so that the conversion can be a cast once the branch that
-// serves rdsStation writes one, and it is not enforced yet because nothing
-// converts it yet.
+// revenant::decode::Region, on the terms the schema states. The conversion
+// on the server's side is a cast with a static_assert over it, in
+// core/rpc/convert.h, which is the file allowed to see the decoder.
 //
 // A SETTING AND NEVER AN INFERENCE. core/decode/rds_groups.h has the argument
 // and core/rpc/revenant.capnp repeats it: no field names the region, the PI
@@ -418,19 +417,312 @@ struct AudioStats {
 // from the tuned frequency as long as it shows it as something the operator
 // can override.
 //
-// WHY THERE IS NO RdsStation STRUCT HERE
+// WHAT THIS PARAGRAPH USED TO SAY
 //
-// The RDS surface is not served. A mirror of it would be a hundred lines of
-// conversion no test could exercise and nothing could populate, sitting in
-// the one header whose whole job is to be the contract a UI compiles
-// against. This enum is here because Client::set_rds_region needs an
-// argument to take; the payload half arrives with the branch that fills it,
-// and Client::rds_station returning Status rather than a struct is where the
-// compiler will point that branch.
-//
-// This note used to say "AND NO AudioChunk" on the same terms. Audio is
-// served, so AudioChunk and AudioStats are above, populated by
-// core/rpc/client.cpp and exercised by tests/rpc/test_rpc_audio.cpp.
+// Until 2026-09-20 it carried a section headed "WHY THERE IS NO RdsStation
+// STRUCT HERE", which argued that a mirror of the schema struct would be a
+// hundred lines of conversion no test could exercise and nothing could
+// populate, and that Client::rds_station returning Status rather than a
+// struct was where the compiler would point the branch that served it. It
+// pointed exactly there. The struct is below, core/rpc/client.cpp populates
+// it and tests/rpc/test_rpc_rds.cpp drives it through a real engine, so the
+// paragraph is retracted rather than deleted: a reader arriving from the
+// schema's own note is owed the reason it is no longer true.
 enum class RdsRegion : std::uint8_t { Rds, Rbds };
+
+// The physical layer's state. Ordinal for ordinal with schema::RdsLock and
+// with revenant::decode::RdsLock, asserted in core/rpc/client.cpp against
+// the schema and in core/rpc/convert.h against the decoder.
+//
+// NO BITS ARE EMITTED IN EITHER OF THE FIRST TWO. An acquiring decoder is
+// measuring biphase consistency and has not reached its threshold; it is not
+// one that is half working, so a display drawing partial text from one would
+// be drawing text nothing produced.
+enum class RdsLock : std::uint8_t { Unlocked, Acquiring, Locked };
+
+// The BLOCK layer's state, which is a different thing from the bit layer's
+// lock above: a decoder can be locked to the subcarrier and still hunting
+// for the offset words, which is what the first second after a tune looks
+// like.
+enum class RdsSync : std::uint8_t { Hunting, PreSync, Synced };
+
+// EN 50067 clause 3.1.5.6 clock time, as the transmitter stated it.
+//
+// THE ENGINE READS NO CLOCK AND NOTHING HERE IS VERIFIED AGAINST ONE. A
+// client that wants to know whether the station's clock is right compares it
+// against its own.
+struct RdsClockTime {
+    std::int32_t mjd = 0;
+
+    // The Gregorian date the MJD converts to, UTC. Carried as well as the
+    // MJD because the conversion is Annex G arithmetic and a client that
+    // re-derived it would be writing that arithmetic a second time.
+    std::int32_t year = 0;
+    std::int32_t month = 0;
+    std::int32_t day = 0;
+
+    std::int32_t hour = 0;
+    std::int32_t minute = 0;
+
+    // Local time offset in signed half hours.
+    std::int32_t offset_half_hours = 0;
+
+    // Nothing above means anything unless this is set. A group 4A arrives
+    // about once a minute, so this is false for the first minute of every
+    // tune on a station that sends clock time at all, and forever on one
+    // that does not.
+    bool valid = false;
+};
+
+// What the physical and block layers are doing, which is what tells a stale
+// display from a dead signal.
+//
+// EVERY COUNTER IS CUMULATIVE FROM THE MOMENT THE DECODER WAS BUILT and
+// there is deliberately no rate here. A rate over that whole window is not
+// the rate now: a station that faded five minutes ago and has been clean
+// since reads badly forever. A client differences two polls and divides by
+// the gap, which RdsStation::last_group_sample gives it.
+struct RdsHealth {
+    RdsLock lock = RdsLock::Unlocked;
+    RdsSync sync = RdsSync::Hunting;
+
+    // Biphase sign consistency mapped onto [0, 1]. Zero is indistinguishable
+    // from noise and one is a clean eye. This is the quality figure to draw:
+    // clause 1.7 makes every symbol an odd impulse pair, so the two halves
+    // of a bit always have opposite signs whatever the payload is, which
+    // makes it mean the same thing at every SNR.
+    double quality = 0.0;
+    double biphase_consistency = 0.5;
+
+    // |E[z^2]| / E[|z|^2] on the derotated baseband, which equals
+    // SNR/(1 + SNR) in the post-filter bandwidth.
+    double carrier_coherence = 0.0;
+
+    // Measurements and not tuning requests, which is why these two are
+    // doubles where every frequency in this header is a rational: clause 1.1
+    // allows the subcarrier plus or minus 6 Hz and rounding a measurement to
+    // whole hertz throws away the evidence a drifting transmitter leaves.
+    double carrier_offset_hz = 0.0;
+    double bit_rate_hz = 0.0;
+
+    // Clause 1.1 permits a mono transmission to carry RDS with no pilot at
+    // all, so an absent pilot is not a fault.
+    bool pilot_locked = false;
+    double pilot_level = 0.0;
+
+    std::uint64_t samples_consumed = 0;
+
+    // THE BIT STREAM HAS GAPS AND NOTHING MARKS THEM: the decoder stops
+    // emitting when lock falls away and starts again wherever it relocks, so
+    // bits_emitted is not elapsed time. Sample reacquisitions beside it.
+    std::uint64_t bits_emitted = 0;
+    std::uint64_t reacquisitions = 0;
+
+    std::uint64_t bits_fed = 0;
+    std::uint64_t groups_decoded = 0;
+    std::uint64_t blocks_good = 0;
+
+    // Blocks where a burst was repaired rather than received clean, so they
+    // are trusted less than blocks_good rather than equally.
+    std::uint64_t blocks_corrected = 0;
+    std::uint64_t blocks_dropped = 0;
+    std::uint64_t sync_acquisitions = 0;
+    std::uint64_t sync_losses = 0;
+};
+
+// An Open Data Application announcement from a type 3A group.
+struct RdsOda {
+    std::uint8_t group_type = 0;
+    bool version_b = false;
+    std::uint16_t message = 0;
+
+    // 0x0000 means the group is used for its normal feature rather than for
+    // an application.
+    std::uint16_t aid = 0;
+};
+
+// One Enhanced Other Networks entry: what this station says about another.
+struct RdsEonEntry {
+    std::uint16_t pi = 0;
+
+    // Annex E code points, not UTF-8. See the note on RdsStation::ps.
+    std::vector<std::uint8_t> ps;
+    std::uint8_t ps_received = 0;
+
+    bool tp = false;
+    bool ta = false;
+    bool ta_valid = false;
+
+    std::uint8_t pty = 0;
+    bool pty_valid = false;
+
+    std::uint16_t linkage = 0;
+    bool linkage_valid = false;
+
+    std::vector<std::int64_t> af;
+};
+
+// One station's accumulated RDS state, as a display needs it.
+//
+// EVERY FIELD HAS A VALIDITY COMPANION AND A READER MUST CHECK IT. There is
+// no sentinel meaning "not received" for most of these: PTY 0 is a real
+// programme type, TA false is a real state, and a PI of zero is what an
+// uninitialised struct holds. The flags are the only honest answer, and a
+// client that draws the value without them shows a station that has sent
+// nothing as a station announcing no traffic.
+struct RdsStation {
+    // Echoed so a poll's answer names the receiver it came from, which
+    // matters to a client polling several.
+    std::uint64_t vrx = 0;
+
+    // Read back rather than assumed: it is engine-side state and a second
+    // client may have set it.
+    RdsRegion region = RdsRegion::Rds;
+
+    // The raw 16 bits, not split into country code, coverage area and
+    // reference, because those three are a pure function of this.
+    std::uint16_t pi = 0;
+    bool pi_valid = false;
+
+    // Derived from the PI under the region's own rules. Empty means NO CALL
+    // SIGN IS DERIVABLE from this PI in this region, which is a different
+    // thing from "PI not yet received": pi_valid answers that one. A string
+    // and not bytes, unlike the four fields below, because the derivation
+    // produces ASCII letters by construction.
+    std::string call_sign;
+
+    std::uint8_t pty = 0;
+    bool pty_valid = false;
+
+    // The PTY's display name under the configured region, at the widths
+    // clause 3.2.1.1 specifies. Carried rather than left to the client
+    // because half the table differs between RDS and RBDS: a client with one
+    // hardcoded table shows the wrong genre on the other continent and
+    // nothing faults.
+    std::string pty_short_name;  // 8 characters
+    std::string pty_long_name;   // 16 characters
+
+    bool tp = false;
+    bool tp_valid = false;
+    bool ta = false;
+    bool ta_valid = false;
+
+    // Composite sample index at which ta last changed, or zero if it never
+    // has. THIS IS WHY THIS SURFACE CAN STAY A POLL: everything else here
+    // persists once received, and a traffic announcement is an event that
+    // can begin and end between two polls. Differencing this against the
+    // previous poll's value says one happened.
+    std::uint64_t ta_changed_at = 0;
+
+    bool music = false;
+    bool music_valid = false;
+
+    // Decoder Identification. di_received has bit n set once d(n) has
+    // arrived, because the four flags come one per group over four groups
+    // and a client showing "mono" before the bit arrived is showing this
+    // struct's default.
+    bool di_stereo = false;
+    bool di_artificial_head = false;
+    bool di_compressed = false;
+    bool di_dynamic_pty = false;
+    std::uint8_t di_received = 0;
+
+    // Programme Service name, eight bytes, and RadioText, up to 64.
+    //
+    // BYTES AND NOT A STRING, WHICH IS A CORRECTNESS DECISION AND NOT A
+    // STYLE ONE. These are EN 50067 Annex E code points, an 8-bit repertoire
+    // that is not ASCII above 0x7F and is not UTF-8 anywhere. The decoder
+    // stores what was received and transcodes nothing, and transcoding
+    // belongs where a font is being chosen, which is the client.
+    //
+    // The masks are not optional extras. PS arrives as four two-character
+    // segments and RadioText as sixteen, so a partially received one holds
+    // real characters beside placeholders and the placeholders are not
+    // distinguishable from transmitted spaces. ps_received has one bit per
+    // segment 0..3, rt_received one bit per segment 0..15.
+    std::vector<std::uint8_t> ps;
+    std::uint8_t ps_received = 0;
+
+    std::vector<std::uint8_t> rt;
+    std::uint32_t rt_received = 0;
+
+    // Position of the 0x0D terminator once one has arrived, or the highest
+    // character index received plus one until then. Carried because the
+    // terminator is inside the payload and a client scanning for it cannot
+    // tell an unreceived byte from a transmitted one.
+    std::uint32_t rt_length = 0;
+
+    // A TOGGLE OF rt_ab IS THE ONLY SIGNAL THAT THE MESSAGE CHANGED, and a
+    // client that does not watch it renders one message overwritten
+    // character by character by the next.
+    bool rt_ab = false;
+    bool rt_ab_valid = false;
+    bool rt_version_b = false;
+
+    std::vector<std::uint8_t> ptyn;
+    std::uint8_t ptyn_received = 0;
+    bool ptyn_ab = false;
+    bool ptyn_ab_valid = false;
+
+    RdsClockTime clock;
+
+    // Programme Item Number, clause 3.1.5.6.
+    std::int32_t pin_day = 0;
+    std::int32_t pin_hour = 0;
+    std::int32_t pin_minute = 0;
+    bool pin_valid = false;
+
+    std::uint8_t ecc = 0;
+    bool ecc_valid = false;
+
+    // Raised when the ECC says ITU region 2 and the decoder is configured
+    // for RDS. A DIAGNOSTIC FOR AN OPERATOR AND NEVER A SWITCH: the decoder
+    // does not change region on its own and neither should a client, because
+    // the converse is deliberately not raised.
+    bool ecc_contradicts_region = false;
+
+    std::uint8_t language = 0;
+    bool language_valid = false;
+
+    bool linkage_actuator = false;
+    bool linkage_actuator_valid = false;
+
+    // Alternative frequencies, VHF and LF/MF, deduplicated, in hertz.
+    // Integers and not rationals: these are channel-plan frequencies the
+    // standard states as whole numbers, so nothing exact is being rounded.
+    std::vector<std::int64_t> af;
+
+    // The transmitter's own statement of how many alternatives exist, from a
+    // count code 225..249. Zero if none was seen. Comparing it against
+    // af.size() is how a client knows the list is still filling.
+    std::uint8_t af_announced = 0;
+
+    // AN INDICATOR, NOT A DETERMINATION. A nonzero count is consistent with
+    // both AF methods; only a count that stays at zero says anything, and
+    // what it says is that the list has not wrapped yet.
+    std::uint32_t af_repeats = 0;
+
+    std::vector<RdsOda> oda;
+    std::vector<RdsEonEntry> eon;
+
+    RdsHealth health;
+
+    // The composite rate this station is being decoded at, which is the
+    // receiver's audio rate. Carried so the two sample indices below have a
+    // stated unit.
+    std::uint32_t composite_rate = 0;
+
+    // Composite sample index at which the most recently completed group
+    // finished, or zero if none has. This is the equivalent of
+    // DetectionList::last_decision: it lets a client tell a repeated answer
+    // from a fresh one without diffing the whole struct, and it is the
+    // denominator for differencing the cumulative counters in health between
+    // two polls.
+    //
+    // NOT a source sample index. The decoder counts in the samples it is fed
+    // and has no access to the source timeline. Divide by composite_rate for
+    // seconds.
+    std::uint64_t last_group_sample = 0;
+};
 
 }  // namespace revenant::rpc

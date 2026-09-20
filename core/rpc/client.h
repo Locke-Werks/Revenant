@@ -216,28 +216,59 @@ public:
     // exist.
     [[nodiscard]] virtual Expected<AudioStats> audio_stats(std::uint64_t vrx) = 0;
 
-    // The RDS surface, which the schema carries and the engine does not
-    // serve. Both reach the server and both come back refused, in a sentence
-    // saying the surface exists and is not wired. They are here so that a
-    // client has something to call and tests/rpc has something to assert,
-    // and so that the branch that serves them starts from a compile error in
-    // the right place rather than from nothing.
+    // What the RDS decoder on one receiver has accumulated.
     //
-    // THE SIGNATURES ARE THE ARGUMENT HALF ONLY, DELIBERATELY
+    // A POLL AND NOT A SUBSCRIPTION, on the same argument detections is:
+    // this is a STATE. PI, PS, RadioText, PTY and the AF list accumulate and
+    // are retained, a group completes at most every 87.6 ms, an older
+    // snapshot is of no use, and a display redraws on its own timer.
     //
-    // rds_station hands back Status rather than a station struct, because
-    // the payload type would be a mirror of a schema struct nothing can
-    // populate: a hundred lines of conversion in core/rpc/types.h that no
-    // test could exercise, in the one header whose job is to be the contract
-    // a UI compiles against. The branch that serves RDS changes this return
-    // type, and the change fails to compile at every caller, which is where
-    // it should fail.
+    // THE FIRST CALL IS WHAT STARTS THE DECODER, the same way the first
+    // detections call builds the detector. It joins that receiver's audio
+    // fan-out, builds the physical and group layers, and answers with an
+    // unlocked decoder and zero groups, because it cannot answer otherwise.
+    // A caller polls again.
     //
-    // subscribe_audio was the third of these and is served. It took no
-    // callback on the same argument and now takes two; this paragraph said
-    // that the branch serving it would add one and break every caller, and
-    // that is what happened.
-    [[nodiscard]] virtual Status rds_station(std::uint64_t vrx) = 0;
+    // Refused, in the engine's own words, for a receiver that does not
+    // exist, and in the server's for a receiver that cannot carry a
+    // composite. There are FOUR conditions and not the one the audio rate
+    // suggests: the demodulator has to be nfm or wfm, the audio has to be
+    // real and mono, the audio rate has to clear the receiver's own bound,
+    // and the granted passband has to reach 59375 Hz either side of the mix
+    // centre. core/rpc/revenant.capnp has all four in full, and the refusal
+    // names which one failed rather than saying the receiver is unsuitable.
+    //
+    // THE RECEIVER THIS NAMES IS NOT THE ONE BEING LISTENED TO, in practice
+    // and not by rule. A listening receiver runs at 48 kHz, where the audio
+    // decimation filter has already destroyed the 57 kHz subcarrier, so it
+    // fails the rate condition. A caller points a DEDICATED receiver at the
+    // station: demod wfm, audio_rate 171000, the station's centre.
+    //
+    // subscribe_audio and this pair were the three unserved surfaces. All
+    // three are served now, and this paragraph used to say that the branch
+    // serving RDS would change the return type and break every caller. It
+    // did.
+    [[nodiscard]] virtual Expected<RdsStation> rds_station(std::uint64_t vrx) = 0;
+
+    // The region the decoder for this receiver uses, which defaults to
+    // RdsRegion::Rds.
+    //
+    // Settable before the first rds_station call, so a client does not have
+    // to poll once at the wrong region and then correct it. It builds the
+    // decoder if there is not one yet, and checks the same four conditions,
+    // so a receiver that cannot carry a composite is refused here too rather
+    // than at the first poll.
+    //
+    // Called on a receiver whose decoder already exists, it REBUILDS IT AND
+    // CLEARS THE ACCUMULATED STATE. The PTY table and the call sign
+    // derivation are both region dependent, so keeping the old state would
+    // mix two readings of the same bytes in one struct. A caller that sets
+    // the region it already had pays that reset anyway, which is why a
+    // client seeding this from the tuned frequency should do it once.
+    //
+    // Per receiver and not engine-wide, unlike set_detection_threshold. Two
+    // receivers can sit on two stations and there is no reason in the
+    // standard why they share a continent.
     [[nodiscard]] virtual Status set_rds_region(std::uint64_t vrx, RdsRegion region) = 0;
 
     // Frames this client was sent.
