@@ -249,6 +249,66 @@ public:
     // Decision instant of bit i as a fractional position in the output.
     [[nodiscard]] double bit_instant_samples(std::size_t bit) const;
 
+    // ---------------------------------------------------------------------
+    // What an FM modulator upstream of this needs
+    // ---------------------------------------------------------------------
+    //
+    // core/dsp/synth/wfm_mod.h puts this composite on an FM carrier. Doing
+    // that needs two things from here that render() alone cannot supply, and
+    // both are exposed rather than reconstructed on the other side, because
+    // reconstructing either is copying arithmetic that the standard says is
+    // shared.
+
+    // Turns of the 19 kHz pilot at an absolute sample index, unreduced, on
+    // the same time base render() uses: start_offset_samples included,
+    // clock_error_ppm included.
+    //
+    // The FM stereo subcarrier is the SECOND harmonic of this pilot and the
+    // RDS subcarrier is the third, so a composite that generates its own
+    // 38 kHz from a nominal 38000 Hz stops being coherent with the data the
+    // moment clock_error_ppm is non-zero. That failure is silent: the stereo
+    // decoder still works, the RDS decoder still works, and the one property
+    // clause 1.5 is about is gone.
+    [[nodiscard]] double pilot_turns_at(SampleIndex index) const;
+    [[nodiscard]] double pilot_turns_per_sample() const { return pilot_turns_per_sample_; }
+
+    // The time integral of render(), in SAMPLES, from the buffer's own origin
+    // to the given index. Exactly zero at index zero.
+    //
+    // FM is the integral of the modulating signal, so this is what an FM
+    // modulator needs in order to stay a pure function of the absolute sample
+    // index. Accumulating the integral at render time instead would make the
+    // output depend on where the caller's blocks fell, and tabulating it
+    // per sample would cost eight bytes a sample for a signal that has to run
+    // for hours in a wideband scene.
+    //
+    // It is not an approximation of the integral of the samples render()
+    // writes. It is the exact integral of the continuous signal those samples
+    // are point evaluations of, which is a different and stricter claim: the
+    // pilot and the mono tone integrate in closed form, and the RDS term
+    // integrates in closed form too, for the reason under
+    // subcarrier_offset_hz below.
+    //
+    // WHAT THIS COSTS WHEN subcarrier_offset_hz IS NON-ZERO: nothing is
+    // returned, because nothing correct can be. See the note on
+    // supports_integral().
+    [[nodiscard]] double composite_integral(SampleIndex index) const;
+
+    // False when subcarrier_offset_hz is non-zero, and composite_integral()
+    // must not be called in that case.
+    //
+    // The RDS term integrates in closed form only because EN 50067:1998
+    // clause 1.5 makes the subcarrier exactly 48 times the bit rate. Bit i's
+    // shaped impulse pair therefore sits under a subcarrier whose phase at
+    // the bit's own centre is the same for every i, so one tabulated running
+    // integral serves every bit and the sum is over the same bounded
+    // window data_signal() already walks. subcarrier_offset_hz is the one
+    // field that deliberately breaks that coherence, and with it broken each
+    // bit would need its own integral. clock_error_ppm does NOT break it: it
+    // scales the subcarrier and the bit clock together, which is the whole
+    // point of that field.
+    [[nodiscard]] bool supports_integral() const { return integrable_; }
+
 private:
     RdsModulator() = default;
 
@@ -257,6 +317,11 @@ private:
     [[nodiscard]] double data_signal(SampleIndex index) const;
 
     [[nodiscard]] double shaping_at(double bit_periods) const;
+
+    // The time integral of render_rds_only(), in samples, from minus infinity
+    // to the given index. Bounded work, and identically zero before the first
+    // bit's shaping tail and after the last one's.
+    [[nodiscard]] double rds_integral(SampleIndex index) const;
 
     RdsModSpec spec_{};
     std::vector<std::uint8_t> encoded_{};
@@ -284,6 +349,40 @@ private:
     std::vector<double> shaping_table_{};
     double shaping_steps_per_bit_ = 0.0;
     double shaping_span_bits_ = 0.0;
+
+    // What composite_integral() is built on, on a grid running from
+    // -shaping_span_bits_ to +shaping_span_bits_ + 0.5 at
+    // shaping_steps_per_bit_ steps per bit period. Both empty when the spec
+    // is not integrable.
+    //
+    // subcarrier_pair_ is the shaped impulse pair itself at the grid points,
+    // which is piecewise linear between them because shaping_at() is.
+    // subcarrier_integral_ is its running integral against the modulated
+    // subcarrier, which is exact at every grid point.
+    //
+    // THE TABLE IS NOT INTERPOLATED BETWEEN GRID POINTS AND MUST NOT BE.
+    // The subcarrier turns 48 times per bit period and the grid is 512 steps
+    // per bit period, so it is sampled ten times a cycle: a straight line
+    // between two grid points of the integral has a derivative that is the
+    // average of the oscillation over the step rather than its value, and
+    // the error is 30 percent of the RDS term. Measured, not estimated. What
+    // the lookup does instead is add the remaining part-interval in closed
+    // form, from the pair's two endpoints, which is exact for the piecewise
+    // linear pair and costs no table at all.
+    std::vector<double> subcarrier_pair_{};
+    std::vector<double> subcarrier_integral_{};
+
+    // Grid steps per bit period as an integer, so that one bit period is an
+    // exact stride through both tables.
+    std::size_t subcarrier_steps_per_bit_ = 0;
+
+    // The subcarrier phase at a bit's own centre, which EN 50067 clause 1.5's
+    // coherence makes the same for every bit. Folded into the table above,
+    // which is why there is one table and not a sine one and a cosine one.
+    double subcarrier_anchor_phase_ = 0.0;
+
+    double integral_base_ = 0.0;  // composite_integral() at index zero
+    bool integrable_ = false;
 };
 
 // ---------------------------------------------------------------------------

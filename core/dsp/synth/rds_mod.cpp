@@ -64,6 +64,43 @@ struct GaussianPair {
     return std::sin(kTwoPi * (turns - std::floor(turns)));
 }
 
+[[nodiscard]] double turns_to_cosine(double turns)
+{
+    return std::cos(kTwoPi * (turns - std::floor(turns)));
+}
+
+// The integral of (g0 + slope*s) * sin(phase_a + omega*s) over s in
+// [0, width], where phase_b is phase_a + omega*width already reduced.
+//
+// Closed form rather than quadrature, and that is not an optimisation. The
+// integrand here is a smooth envelope times a sinusoid running 48 cycles per
+// bit period, sampled on a grid of 512 steps per bit period, so any rule
+// that treats the integrand as slowly varying over a step is out by tens of
+// percent.
+[[nodiscard]] double integrate_ramp_against_sine(double g0, double slope, double width,
+                                                 double omega, double phase_a,
+                                                 double phase_b)
+{
+    const double sin_a = std::sin(phase_a);
+    const double cos_a = std::cos(phase_a);
+    const double sin_b = std::sin(phase_b);
+    const double cos_b = std::cos(phase_b);
+    return g0 * (cos_a - cos_b) / omega +
+           slope * ((sin_b - sin_a) / (omega * omega) - width * cos_b / omega);
+}
+
+// The integral of a*sin(2*pi*f*t) with respect to t, as an antiderivative
+// with no constant. f is in turns per sample, so the result is in samples.
+// Zero frequency means a signal that is identically zero, not a constant, so
+// it integrates to zero.
+[[nodiscard]] double sine_antiderivative(double amplitude, double turns_per_sample, double t)
+{
+    if (amplitude == 0.0 || turns_per_sample == 0.0) {
+        return 0.0;
+    }
+    return -amplitude * turns_to_cosine(turns_per_sample * t) / (kTwoPi * turns_per_sample);
+}
+
 }  // namespace
 
 double real_mean_power(dsp::ConstRealSpan samples)
@@ -223,6 +260,105 @@ Expected<RdsModulator> RdsModulator::create(RdsModSpec spec)
         }
     }
 
+    // Tabulate the two running integrals the FM modulator upstream needs, for
+    // the reason rds_mod.h gives on composite_integral().
+    //
+    // WHY ONE TABLE SERVES EVERY BIT
+    //
+    // The RDS component is the shaped impulse pair of each bit multiplied by
+    // the subcarrier. EN 50067:1998 clause 1.5 makes the subcarrier exactly
+    // kSubcarrierBitRateDivisor cycles per bit period, so shifting the window
+    // from bit i to bit i+1 shifts the subcarrier by a whole number of cycles
+    // and leaves its phase where it was. Every bit therefore integrates
+    // against the same kernel, the subcarrier measured from the bit's own
+    // centre with subcarrier_phase_radians already folded in, and the only
+    // per-bit quantities left are the symbol sign and where the bit sits
+    // relative to the sample.
+    //
+    // The integral of the pair over its whole support is exactly zero, which
+    // is what keeps the sum bounded. The pair is h(u) - h(u - 1/2) bit
+    // periods, the subcarrier advances by half of kSubcarrierBitRateDivisor
+    // cycles over that half bit, and that is a whole number of cycles, so the
+    // two terms integrate to the same thing and cancel. Nothing about the
+    // shape of h is used, so the cancellation survives the truncation and the
+    // linear interpolation the table below is made of. That matters: a
+    // residue here would be a constant per bit, which is a frequency error
+    // that grows with the length of the payload rather than an amplitude
+    // error anyone would see.
+    mod.integrable_ = (mod.spec_.subcarrier_offset_hz == 0);
+    if (mod.integrable_) {
+        const double steps = kShapingStepsPerBit;
+        const double span = static_cast<double>(kShapingSpanBits);
+        const double step = 1.0 / steps;
+        mod.subcarrier_steps_per_bit_ = static_cast<std::size_t>(kShapingStepsPerBit);
+
+        // The pair reaches from -span to +span + 1/2 bit periods.
+        const auto intervals = static_cast<std::size_t>(
+            std::llround((2.0 * span + 0.5) * steps));
+
+        const double omega =
+            kTwoPi * static_cast<double>(decode::kSubcarrierBitRateDivisor);
+
+        // The subcarrier phase at a bit's own centre. Bit zero sits
+        // shaping_span_bits_ into the buffer, and that offset is carried
+        // through rather than assumed to be a whole number of bit periods.
+        const double anchor_turns =
+            static_cast<double>(decode::kSubcarrierBitRateDivisor) * span;
+        mod.subcarrier_anchor_phase_ = kTwoPi * (anchor_turns - std::floor(anchor_turns)) +
+                                       mod.spec_.subcarrier_phase_radians;
+
+        mod.subcarrier_pair_.assign(intervals + 1, 0.0);
+        for (std::size_t k = 0; k <= intervals; ++k) {
+            const double u = static_cast<double>(k) * step - span;
+            mod.subcarrier_pair_[k] = mod.shaping_at(u) - mod.shaping_at(u - 0.5);
+        }
+
+        // Grid phase, reduced before the sine is taken. The unreduced
+        // argument reaches 2*pi*48*8, and rounding it would break the
+        // half-bit cancellation above by leaving the two terms evaluated at
+        // arguments that differ by a whole number of turns only
+        // approximately.
+        const auto phase_at = [&](std::size_t k) {
+            const double u = static_cast<double>(k) * step - span;
+            const double turns =
+                static_cast<double>(decode::kSubcarrierBitRateDivisor) * u;
+            return kTwoPi * (turns - std::floor(turns)) + mod.subcarrier_anchor_phase_;
+        };
+
+        mod.subcarrier_integral_.assign(intervals + 1, 0.0);
+        for (std::size_t k = 0; k < intervals; ++k) {
+            const double phase_a = phase_at(k);
+            const double phase_b = phase_at(k + 1);
+
+            // The pair is linear between grid points, because shaping_at is,
+            // so each interval integrates in closed form and the table is the
+            // exact integral of the signal render() evaluates rather than a
+            // quadrature of it. A trapezoid here would be sampling a 48
+            // cycle per bit oscillation ten times a cycle.
+            const double slope =
+                (mod.subcarrier_pair_[k + 1] - mod.subcarrier_pair_[k]) * steps;
+            mod.subcarrier_integral_[k + 1] =
+                mod.subcarrier_integral_[k] +
+                integrate_ramp_against_sine(mod.subcarrier_pair_[k], slope, step, omega,
+                                            phase_a, phase_b);
+        }
+
+        // The cancellation argument above says this is zero. Here is what
+        // happens if it is ever not: refuse, rather than carry a per-bit
+        // constant into an FM phase.
+        constexpr double kResidueCeiling = 1e-9;
+        const double residue = mod.subcarrier_integral_.back();
+        if (std::abs(residue) > kResidueCeiling) {
+            return fail(std::format(
+                "the RDS subcarrier integral does not close: residue {:.3e} against a "
+                "ceiling of {:.0e}. The shaped impulse pair must integrate to zero against "
+                "the subcarrier, and a residue is a constant per bit, so an FM phase built "
+                "on this would drift with the payload length.",
+                residue, kResidueCeiling));
+        }
+        mod.subcarrier_integral_.back() = 0.0;
+    }
+
     Expected<std::size_t> count = rds_nominal_sample_count(mod.spec_);
     if (!count) {
         return std::unexpected(count.error());
@@ -246,6 +382,15 @@ Expected<RdsModulator> RdsModulator::create(RdsModSpec spec)
     }
     mod.envelope_peak_ = static_cast<double>(mod.spec_.rds_deviation_hz) / peak_deviation;
     mod.rds_scale_ = mod.envelope_peak_ / data_peak;
+
+    // composite_integral() subtracts this so that it is exactly zero at index
+    // zero. It is read while still zero, which is the whole trick: the call
+    // below therefore returns the bare antiderivative, which is what has to
+    // be subtracted from every later one.
+    mod.integral_base_ = 0.0;
+    if (mod.integrable_) {
+        mod.integral_base_ = mod.composite_integral(0);
+    }
 
     return mod;
 }
@@ -308,6 +453,103 @@ double RdsModulator::data_signal(SampleIndex index) const
         sum += symbol * (shaping_at(offset) - shaping_at(offset - 0.5));
     }
     return sum * rds_scale_;
+}
+
+double RdsModulator::pilot_turns_at(SampleIndex index) const
+{
+    return pilot_turns_per_sample_ *
+           (static_cast<double>(index) + spec_.start_offset_samples);
+}
+
+double RdsModulator::rds_integral(SampleIndex index) const
+{
+    if (subcarrier_integral_.empty()) {
+        return 0.0;
+    }
+
+    const double t = static_cast<double>(index) + spec_.start_offset_samples;
+
+    // The same position and the same window data_signal() walks. Outside it
+    // the kernel is zero: before, because the bit has not started, and
+    // after, because the integral over the whole impulse pair cancels.
+    const double position = t / samples_per_bit_ - shaping_span_bits_;
+
+    // ONE GRID POSITION SERVES EVERY BIT, and this is where clause 1.5's
+    // coherence pays for itself a second time. Bit i is read at
+    // position - i, and one bit period is exactly
+    // subcarrier_steps_per_bit_ grid steps, so the fractional part of the
+    // grid position is the same for every bit and the whole part just walks
+    // back by that stride. Computing the position per bit instead would
+    // round each one differently and cost a floor per bit.
+    const double base = (position + shaping_span_bits_) *
+                        static_cast<double>(subcarrier_steps_per_bit_);
+    const double base_floor = std::floor(base);
+    const double mu = base - base_floor;
+    const auto base_index = static_cast<std::int64_t>(base_floor);
+    const auto stride = static_cast<std::int64_t>(subcarrier_steps_per_bit_);
+
+    // The subcarrier phase at this sample, by the same expression
+    // render_rds_only() uses, so that the integral's derivative agrees with
+    // the rendered value rather than merely being close to it.
+    const double sub_turns = 3.0 * pilot_turns_per_sample_ * t +
+                             spec_.subcarrier_phase_radians / kTwoPi;
+    const double phase_here = kTwoPi * (sub_turns - std::floor(sub_turns));
+
+    // The grid point below this sample sits mu steps earlier, so the phase
+    // there is behind by that fraction of the subcarrier's per-step advance.
+    const double omega = kTwoPi * static_cast<double>(decode::kSubcarrierBitRateDivisor);
+    const double width = mu / static_cast<double>(subcarrier_steps_per_bit_);
+    const double phase_below = phase_here - omega * width;
+
+    const double low = position - shaping_span_bits_;
+    const double high = position + shaping_span_bits_;
+    const auto first = static_cast<std::int64_t>(std::ceil(low - 0.5));
+    const auto last = static_cast<std::int64_t>(std::floor(high));
+
+    const auto count = static_cast<std::int64_t>(encoded_.size());
+    const std::int64_t begin = std::max<std::int64_t>(0, first);
+    const std::int64_t end = std::min<std::int64_t>(count - 1, last);
+    const auto intervals = static_cast<std::int64_t>(subcarrier_integral_.size() - 1);
+
+    double sum = 0.0;
+    for (std::int64_t i = begin; i <= end; ++i) {
+        const std::int64_t k = base_index - i * stride;
+        if (k < 0 || k >= intervals) {
+            continue;
+        }
+        const auto slot = static_cast<std::size_t>(k);
+        const double g0 = subcarrier_pair_[slot];
+        const double slope = (subcarrier_pair_[slot + 1] - g0) *
+                             static_cast<double>(subcarrier_steps_per_bit_);
+        const double value =
+            subcarrier_integral_[slot] +
+            integrate_ramp_against_sine(g0, slope, width, omega, phase_below, phase_here);
+
+        const double symbol = (encoded_[static_cast<std::size_t>(i)] != 0) ? 1.0 : -1.0;
+        sum += symbol * value;
+    }
+
+    // The table is an integral with respect to bit periods; the contract is
+    // samples.
+    return sum * rds_scale_ * samples_per_bit_;
+}
+
+double RdsModulator::composite_integral(SampleIndex index) const
+{
+    if (!integrable_) {
+        // Not an integral, and deliberately not a plausible number either.
+        // subcarrier_offset_hz breaks the coherence the closed form rests on,
+        // and a caller that reached here past supports_integral() gets a NaN
+        // through its whole output rather than a signal that looks right.
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double t = static_cast<double>(index) + spec_.start_offset_samples;
+
+    double total = rds_integral(index);
+    total += sine_antiderivative(pilot_amplitude_, pilot_turns_per_sample_, t);
+    total += sine_antiderivative(mono_amplitude_, mono_turns_per_sample_, t);
+    return total - integral_base_;
 }
 
 void RdsModulator::render_rds_only(SampleIndex start, dsp::RealSpan out) const
