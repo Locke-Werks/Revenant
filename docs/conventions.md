@@ -254,18 +254,28 @@ What that means in practice:
   conversion is known to be safe, and not with a blanket cast at the top
 - narrowing: explicit, or change the type
 - shadowing: rename, including a parameter shadowing a member
-- a switch that must be exhaustive writes no `default`. `/w14062` is on at
-  level 1 in `cmake/CompilerFlags.cmake` and makes a new enumerator a build
-  error there. C4062 is off by default at `/W4`, which is not obvious and was
-  got wrong here once, and it fires only on a switch with no default label: a
-  switch that omits an enumerator and carries a default stays silent. A
-  switch that legitimately handles a subset writes a default that does
-  something defensible, and nothing checks it for you.
+- a switch that must be exhaustive writes no `default`. `/w14062` is on in
+  `cmake/CompilerFlags.cmake` and raises a new enumerator to a level 1
+  warning. It becomes a build error in CI and only in CI, through the `/WX`
+  the paragraph above puts behind `REVENANT_WERROR`; on a developer's machine
+  an unhandled enumerator scrolls past with everything else. C4062 is off by
+  default at `/W4`, which is not obvious and was got wrong here once, and it
+  fires only on a switch with no default label: a switch that omits an
+  enumerator and carries a default stays silent. A switch that legitimately
+  handles a subset writes a default that does something defensible, and
+  nothing checks it for you.
 
 That last rule is the one this section left out until 2026-09-20. The other
 four are cleanups applied to code already written; this one changes how a
 switch is written in the first place, and the defect it exists to catch was a
 comment in this tree claiming a guard that was not on.
+
+**The sentence that added it said "makes a new enumerator a build error
+there", and that was the same mistake one round later.** `/w14062` sets a
+warning level, not an error; nothing but `/WX` makes any warning fatal, and
+this section had already said `/WX` is CI-only two paragraphs earlier.
+Corrected in place rather than reworded, because a reader who took it at face
+value is expecting their own build to stop and it will not.
 
 ## Commits
 
