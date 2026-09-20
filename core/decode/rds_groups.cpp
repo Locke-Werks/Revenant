@@ -953,7 +953,8 @@ void RdsDecoder::receive_block() {
     // and 4, 51 are correctable here, and one more is the arithmetic
     // coincidence where offset C XOR offset C' is exactly the error. That
     // one is a clean codeword and not a correction, and apply_group refuses
-    // to read a PI out of it.
+    // to read a PI out of it. All four of those counts are swept in
+    // test_rds_groups.cpp rather than reasoned about here.
     //
     // WHAT THIS COMMENT USED TO SAY. Until 2026-09-20 it said "only a lost
     // block 2 leaves block 3's own syndrome to answer, and then both offsets

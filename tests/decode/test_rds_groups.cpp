@@ -391,6 +391,44 @@ TEST_CASE("the corrector fixes every burst it claims and refuses every one it do
     }
 }
 
+TEST_CASE("every block position accepts the same fifty-one wrong syndromes", "[rds]") {
+    // The baseline the next test measures block 3 against, measured rather
+    // than assumed. Both rds_groups.h and rds_groups.cpp name blocks 1, 2 and
+    // 4 in that claim and only block 1 was ever swept, so two thirds of the
+    // number block 3 is judged by was a number nobody had run.
+    //
+    // 26 single-bit errors and 25 adjacent pairs is the whole of what the
+    // span-2 default can repair, and every burst of span 5 or less has a
+    // syndrome of its own, so 51 of the 1023 nonzero syndromes are accepted
+    // and the other 972 are refused. Blocks 1, 2 and 4 have one candidate
+    // offset each and no way to get a second attempt, which is why the same
+    // arithmetic has to come out of all three.
+    for (const std::size_t index : {std::size_t{0}, std::size_t{1}, std::size_t{3}}) {
+        int accepted = 0;
+        for (std::uint32_t error = 1; error < 1024; ++error) {
+            RdsDecoder decoder;
+            prime(decoder);
+
+            const GroupWords words{0x2345, type0_block2(10, true, false, true, false, 0),
+                                   0xE0E0, 0x2020, false};
+            auto blocks = encode_group(words);
+            blocks[index] ^= error;
+            for (const std::uint32_t block : blocks) {
+                feed_word(decoder, block);
+            }
+
+            INFO(std::format("block {} error {:03X}", index + 1, error));
+            REQUIRE(decoder.last_group().has_value());
+            if (decoder.last_group()->blocks[index].valid) {
+                ++accepted;
+            }
+        }
+
+        INFO(std::format("block {}", index + 1));
+        CHECK(accepted == 51);
+    }
+}
+
 TEST_CASE("block 3 gets no more chances at a correction than any other block", "[rds]") {
     // THE BAR, and it is a table of shapes rather than a pair of counts.
     //

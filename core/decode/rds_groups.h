@@ -376,7 +376,8 @@ struct Group {
     // allowed to choose. Block 3 was tested against C and then, on failure,
     // against C', so it had two chances at a correctable residue where every
     // other block gets one: 101 of the 1023 ways a block can arrive with a
-    // wrong syndrome were accepted there against 51 for blocks 1, 2 and 4.
+    // wrong syndrome were accepted there against 51 for blocks 1, 2 and 4,
+    // all four counts swept in test_rds_groups.cpp.
     // Fifty of the extra come back flagged C', and a C' block 3 rewrote the
     // station PI with block 3's payload, so the widened acceptance landed on
     // the one field the whole decode keys off.
