@@ -339,6 +339,20 @@ bool EngineLink::attempt_connect()
     posted_audio_fault_.clear();
     posted_audio_ended_.clear();
     posted_audio_stats_ = {};
+
+    // The ended that the event loop thread raised and nobody picked up.
+    // It is the only piece of audio state that survived a reconnect,
+    // because everything else here is the supervisor's own and this pair
+    // is written from the Cap'n Proto thread under audio_mutex_. An ended
+    // arriving just before the connection dropped would be found by the
+    // first apply_audio_request on the NEW engine, which would then switch
+    // the listen control off and put the previous engine's sentence about
+    // a receiver that no longer exists onto this connection's status line.
+    {
+        const std::lock_guard<std::mutex> lock(audio_mutex_);
+        audio_ended_pending_ = false;
+        audio_ended_text_.clear();
+    }
     {
         const std::lock_guard<std::mutex> lock(swap_mutex_);
         has_ready_ = false;
