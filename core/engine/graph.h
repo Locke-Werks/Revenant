@@ -443,6 +443,19 @@ struct GraphStats {
     std::uint64_t passband_frames = 0;
     std::uint64_t passband_skipped = 0;
 
+    // Retunes a stage refused after set_vrx_params had already accepted
+    // them. MUST BE ZERO. Both sides ask dsp::vrx_shape_for the same
+    // question, so a count above zero means the graph and the stage have
+    // come apart about what a rebuild is, and the symptom on the far side
+    // is a client told its change took effect over a receiver still running
+    // the old filter.
+    //
+    // A counter rather than a log line, for the reason every other loss
+    // here is one, and a counter rather than nothing because the refusal
+    // arrives on the recording thread with no caller left to return it to.
+    // Discarding it silently is what let the two lists differ unnoticed.
+    std::uint64_t vrx_retune_refusals = 0;
+
     dsp::SampleIndex write_index = 0;
     dsp::SampleIndex retired_index = 0;
     dsp::SampleIndex next_output_block = 0;

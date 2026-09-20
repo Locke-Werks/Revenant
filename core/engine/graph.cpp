@@ -605,25 +605,29 @@ struct Graph::Impl {
         VrxParams params;
         VrxPlacement placement;
 
-        // The rate the fine stage resampled to, recomputed whenever params
-        // or placement change. Control plane only, like the two above.
+        // What this receiver's pipeline was built as, recomputed whenever
+        // params or placement change. Control plane only, like the two
+        // above, and the thing set_vrx_params compares a request against to
+        // tell a push constant from a rebuild.
         //
         // Cached rather than asked of the stage, because the graph's own raw
-        // tap has no plan to ask and because dsp::demod_rate_for is the same
-        // arithmetic plan_vrx does without designing three filter tables.
-        // Zero when the request could not be resolved at all, which is a
-        // request add_vrx would already have refused.
-        dsp::SampleRate demod_rate = 0;
+        // tap has no plan to ask, and computed by dsp::vrx_shape_for, which
+        // is plan_vrx's arithmetic without the three filter tables.
+        //
+        // WHAT THIS USED TO BE, BECAUSE THE SHORTFALL WAS REACHABLE. Two
+        // fields, a demodulation rate and a tap count, compared against two
+        // fields of a plan. DemodStage::retune compared six. A retune that
+        // moved only the audio rate could leave both of these exactly where
+        // they were while moving the decimation and the output rate, so the
+        // graph accepted it and the stage refused it where no caller was
+        // left. dsp::VrxShape is now the whole question and both ask it.
+        dsp::VrxShape shape{};
 
-        // Taps per polyphase branch in the fine filter, which is the other
-        // half of what makes a retune a rebuild. It moves with the
-        // passband's WIDTH, because Kaiser sets the length from the
-        // transition and the transition is half a width: a narrower filter
-        // wants more taps, the tap buffer changes size, and the pipeline's
-        // specialization constant changes with it. Panning a filter of a
-        // fixed width leaves both alone, which is why a pan is free and a
-        // widen is not.
-        std::uint32_t fine_taps = 0;
+        // False until the request has been planned once. A receiver whose
+        // request could not be resolved at all is one add_vrx would already
+        // have refused, so this is false only for the graph's own raw tap
+        // built before a placement could be planned.
+        bool shape_known = false;
 
         // The recording thread's own copy, so that a retune landing while a
         // block is being recorded cannot tear a field out from under it. The
@@ -902,6 +906,7 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> spectrum_skipped{0};
     std::atomic<std::uint64_t> passband_frames{0};
     std::atomic<std::uint64_t> passband_skipped{0};
+    std::atomic<std::uint64_t> vrx_retune_refusals{0};
 
     ~Impl() { destroy(); }
 
@@ -1005,13 +1010,19 @@ struct Graph::Impl {
                     if (slot->id == op.id) {
                         slot->recording_params = op.params;
 
-                        // Still discarded, and still for the reason below,
-                        // but this is now the unreachable case rather than
-                        // the ordinary one: set_vrx_params refuses a change
-                        // that moves the demodulation rate before the op is
-                        // ever queued, which is the shape change a caller
-                        // can actually produce. What is left here is a
-                        // stage refusing for some other reason of its own.
+                        // COUNTED, NOT DISCARDED. There is no caller left
+                        // to return this to: the op is on the recording
+                        // thread and set_vrx_params returned success a
+                        // round trip ago. But "no caller" is not "no
+                        // reader", and dropping it on the floor is what let
+                        // the graph's idea of a shape change differ from
+                        // the stage's for as long as it did.
+                        //
+                        // set_vrx_params asks dsp::vrx_shape_for the same
+                        // question before queueing, so this counter is
+                        // required to stay at zero and a nonzero value
+                        // means the two have come apart. GraphStats::
+                        // vrx_retune_refusals says what it means to read.
                         //
                         // A stage that cannot retune keeps its old tuning,
                         // which is wrong but audible, where dropping the
@@ -1028,7 +1039,9 @@ struct Graph::Impl {
                         // the request echoed back, heard no change, and had
                         // nothing anywhere to tell it why. The refusal in
                         // set_vrx_params is what closes that.
-                        (void)slot->stage->retune(op.params, op.placement);
+                        if (!slot->stage->retune(op.params, op.placement)) {
+                            vrx_retune_refusals.fetch_add(1, std::memory_order_relaxed);
+                        }
                     }
                 }
                 return;
@@ -2844,9 +2857,10 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     slot->params = params;
     slot->placement = placement;
     slot->recording_params = params;
-    if (auto planned = dsp::plan_vrx(impl.grid, impl.config.source_rate, params, placement)) {
-        slot->demod_rate = planned->demod_rate;
-        slot->fine_taps = planned->fine.taps;
+    if (auto shape = dsp::vrx_shape_for(impl.grid, impl.config.source_rate, resolved,
+                                        placement)) {
+        slot->shape = *shape;
+        slot->shape_known = true;
     }
     slot->stage = std::move(stage);
     slot->audio_bytes = slot->stage->audio_bytes_for(impl.geometry.max_blocks_per_dispatch);
@@ -2948,37 +2962,43 @@ Status Graph::set_vrx_params(VrxId id, const VrxParams& params, const VrxPlaceme
         // to be asked here, where there is still a caller to answer.
         //
         // Asked OF THE PLANNER rather than of a rule written out again
-        // here. Two places deciding what counts as a shape change is how
-        // one of them comes to differ from the stage, and the difference
-        // would be a retune this method accepted and the stage silently
-        // dropped, which is the failure this whole check exists to end.
-        // The cost is designing three filter tables per call, on the
-        // control plane and not on the sample path.
+        // here, and asked as ONE PREDICATE the stage also asks. Two places
+        // deciding what counts as a shape change is how one of them comes
+        // to differ from the other, and the difference is a retune this
+        // method accepts and the stage silently drops, which is the failure
+        // this check exists to end. dsp::VrxShape carries the whole
+        // question; see its header.
         //
-        // Moving the dial is not this. A retune that keeps the rate and the
-        // tap count is a push constant and a new tap table, which is free,
-        // and that is exactly what panning a filter of a fixed width is.
-        // Changing its WIDTH moves the tap count, because Kaiser sets the
-        // length from the transition and the transition is half a width, so
-        // a widen is a remove and an add however small it is.
-        auto planned = dsp::plan_vrx(impl.grid, impl.config.source_rate, params, placement);
+        // Through vrx_shape_for and not plan_vrx, so the control plane pays
+        // for two Kaiser order estimates rather than for three designed
+        // filter tables. A passband drag asks this once per gesture and the
+        // keyboard once per keystroke.
+        //
+        // The audio rate is resolved first, for the reason with_audio_rate
+        // gives: a graph whose default is not 48000 would otherwise compare
+        // a request against a shape derived from a rate the stage never ran
+        // at.
+        //
+        // Moving the dial is not this. A retune that keeps the shape is a
+        // push constant and a new tap table, which is free, and that is
+        // exactly what panning a filter of a fixed width is. Changing its
+        // WIDTH moves the tap count, because Kaiser sets the length from
+        // the transition and the transition is half a width, so a widen is
+        // a remove and an add however small it is.
+        const VrxParams resolved = with_audio_rate(params, impl.config.audio_rate);
+        auto planned =
+            dsp::vrx_shape_for(impl.grid, impl.config.source_rate, resolved, placement);
         if (!planned) {
             return std::unexpected(with_context(planned.error(), "Graph::set_vrx_params"));
         }
-        if (slot->demod_rate != 0 && (planned->demod_rate != slot->demod_rate ||
-                                      planned->fine.taps != slot->fine_taps)) {
-            return fail(std::format(
-                "this retune changes the receiver's filter shape, not just where it is "
-                "pointed: {} taps at {} S/s becomes {} taps at {} S/s. Moving the dial is a "
-                "push constant and a new tap table, which is free; changing the bandwidth or "
-                "the audio rate is a remove and an add",
-                slot->fine_taps, slot->demod_rate, planned->fine.taps, planned->demod_rate));
+        if (slot->shape_known && *planned != slot->shape) {
+            return fail(dsp::describe_shape_change(slot->shape, *planned));
         }
 
         slot->params = params;
         slot->placement = placement;
-        slot->demod_rate = planned->demod_rate;
-        slot->fine_taps = planned->fine.taps;
+        slot->shape = *planned;
+        slot->shape_known = true;
     }
 
     auto* op = new (std::nothrow) Impl::ControlOp();
@@ -3107,7 +3127,7 @@ Expected<VrxStatus> Graph::vrx_status(VrxId id) const {
     status.id = slot->id;
     status.params = slot->params;
     status.placement = slot->placement;
-    status.demod_rate = slot->demod_rate;
+    status.demod_rate = slot->shape.demod_rate;
     status.level_dbfs = slot->load_level();
     status.squelch_open = slot->squelch_open.load(std::memory_order_relaxed);
     status.audio_samples = slot->audio_samples.load(std::memory_order_relaxed);
@@ -3735,6 +3755,7 @@ GraphStats Graph::stats() const {
     out.spectrum_skipped = impl.spectrum_skipped.load(std::memory_order_relaxed);
     out.passband_frames = impl.passband_frames.load(std::memory_order_relaxed);
     out.passband_skipped = impl.passband_skipped.load(std::memory_order_relaxed);
+    out.vrx_retune_refusals = impl.vrx_retune_refusals.load(std::memory_order_relaxed);
     if (impl.ring != nullptr) {
         out.write_index = impl.ring->write_index();
         const auto cursor = impl.ring->cursor(impl.consumer);

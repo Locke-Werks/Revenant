@@ -153,15 +153,6 @@ constexpr std::uint32_t kMinFineCapacity = 1U << 10;
     return whole * fd + (part * fd + fc - 1U) / fc;
 }
 
-[[nodiscard]] bool same_shape(const dsp::VrxFineConfig& a, const dsp::VrxFineConfig& b) {
-    return a.taps == b.taps && a.phases == b.phases && a.nco_log2 == b.nco_log2;
-}
-
-[[nodiscard]] bool same_shape(const dsp::VrxDemodConfig& a, const dsp::VrxDemodConfig& b) {
-    return a.mode == b.mode && a.decimation == b.decimation && a.audio_taps == b.audio_taps &&
-           a.dc_taps == b.dc_taps;
-}
-
 // ---------------------------------------------------------------------------
 // The shared NCO circle
 // ---------------------------------------------------------------------------
@@ -906,24 +897,24 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
     // and this stage cannot see when those complete. So it is refused for the
     // same reason and in the same words the graph refuses a mode change.
     //
-    // This refusal now reaches nobody, and that is deliberate rather than an
-    // oversight. Graph::set_vrx_params asks the planner the same question
-    // before it queues the control op, so a caller gets the refusal on its
-    // own call with the numbers in it; by the time execution arrives here
-    // the op is on the recording thread and there is no caller left to
-    // answer. Kept because it is this stage's own invariant and the graph's
-    // check is not allowed to be the only thing holding it: a second entry
-    // point, or a graph edited to ask a looser question, would find this.
-    if (!same_shape(next.fine, plan_.fine) || !same_shape(next.demod, plan_.demod) ||
-        next.channel_rate != plan_.channel_rate || next.demod_rate != plan_.demod_rate ||
-        next.output_rate != plan_.output_rate ||
-        next.fine_taps.size() != plan_.fine_taps.size()) {
-        return fail(std::format(
-            "this retune changes the receiver's filter shape, not just where it is pointed: "
-            "{} taps at {} S/s becomes {} taps at {} S/s. Moving the dial is a push constant "
-            "and a new tap table, which is free; changing the bandwidth or the audio rate is a "
-            "remove and an add",
-            plan_.fine.taps, plan_.demod_rate, next.fine.taps, next.demod_rate));
+    // Graph::set_vrx_params asks THE SAME PREDICATE before it queues the
+    // control op, so a caller normally gets this refusal on its own call
+    // with the numbers in it. Kept because it is this stage's own invariant
+    // and the graph's check is not allowed to be the only thing holding it:
+    // a second entry point, or a graph edited to ask a looser question,
+    // would find this.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: that the refusal "now reaches
+    // nobody". It reached nobody and it was not unreachable, because the
+    // two checks were two hand-kept lists of fields and the graph's was
+    // four entries shorter. dsp::VrxShape is now the one list and both
+    // sides ask it, so arriving here means the two have come apart. The
+    // graph counts it as GraphStats::vrx_retune_refusals rather than
+    // dropping it on the floor.
+    const dsp::VrxShape want = dsp::shape_of(next);
+    const dsp::VrxShape have = dsp::shape_of(plan_);
+    if (want != have) {
+        return fail(dsp::describe_shape_change(have, want));
     }
 
     // Everything that survives is the tuning: the tap table's modulation, the

@@ -13,6 +13,7 @@
 #include <format>
 #include <numbers>
 #include <numeric>
+#include <string>
 
 #include "core/dsp/denormal_mode.h"
 
@@ -1380,9 +1381,23 @@ std::vector<float> design_dc_weights(std::uint32_t taps) {
     return result;
 }
 
-Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
-                           const engine::VrxParams& params,
-                           const engine::VrxPlacement& placement) {
+namespace {
+
+// Everything plan_vrx derives that is not one of the three filter tables.
+//
+// The split exists so vrx_shape_for can answer "is this a rebuild" without
+// designing a Kaiser-windowed sinc per polyphase branch. It returns a VrxPlan
+// rather than a smaller struct because the tables are the only fields it
+// leaves empty and because a second struct carrying half the plan's fields is
+// the kind of parallel list this whole change is removing.
+//
+// Errors are still reported as plan_vrx's, since both public entry points
+// are the same arithmetic and a caller reading "vrx_shape_for" in one message
+// and "plan_vrx" in another for the identical refusal learns nothing from the
+// difference.
+[[nodiscard]] Expected<VrxPlan> design_vrx(const GridParams& grid, SampleRate rate,
+                                           const engine::VrxParams& params,
+                                           const engine::VrxPlacement& placement) {
     if (const Status valid = validate(grid); !valid) {
         return std::unexpected(with_context(valid.error(), "plan_vrx grid"));
     }
@@ -1555,24 +1570,6 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
     reduce_rational(plan.filter_numerator, plan.filter_denominator);
     reduce_rational(plan.mix_numerator, plan.mix_denominator);
 
-    // The half-width truncates on an odd width, as it always has: the
-    // planner passed bandwidth/2 here before edges existed and this is the
-    // same quantity. The centre is exact, so an odd width costs half a hertz
-    // of width and nothing of position.
-    auto taps = design_fine_taps(plan.fine, plan.channel_rate, plan.bandwidth / 2,
-                                 plan.filter_numerator, plan.filter_denominator,
-                                 kFineAttenuationDb);
-    if (!taps) {
-        return std::unexpected(with_context(taps.error(), "plan_vrx fine taps"));
-    }
-    plan.fine_taps = std::move(*taps);
-
-    auto delta = nco_delta(plan.mix_numerator, plan.mix_denominator, plan.demod_rate);
-    if (!delta) {
-        return std::unexpected(with_context(delta.error(), "plan_vrx mixer"));
-    }
-    plan.fine_nco_delta = *delta;
-
     // The demodulator.
     plan.demod.mode = plan.mode;
 
@@ -1614,6 +1611,41 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
         plan.demod.dc_taps = 1U;
     }
 
+    plan.deviation = fm_deviation(plan.mode, plan.bandwidth);
+    plan.demod_gain = vrx_demod_gain(plan.mode, plan.demod_rate, plan.deviation);
+
+    return plan;
+}
+
+}  // namespace
+
+Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
+                           const engine::VrxParams& params,
+                           const engine::VrxPlacement& placement) {
+    auto designed = design_vrx(grid, rate, params, placement);
+    if (!designed) {
+        return designed;
+    }
+    VrxPlan plan = std::move(*designed);
+
+    // The half-width truncates on an odd width, as it always has: the
+    // planner passed bandwidth/2 here before edges existed and this is the
+    // same quantity. The centre is exact, so an odd width costs half a hertz
+    // of width and nothing of position.
+    auto taps = design_fine_taps(plan.fine, plan.channel_rate, plan.bandwidth / 2,
+                                 plan.filter_numerator, plan.filter_denominator,
+                                 kFineAttenuationDb);
+    if (!taps) {
+        return std::unexpected(with_context(taps.error(), "plan_vrx fine taps"));
+    }
+    plan.fine_taps = std::move(*taps);
+
+    auto delta = nco_delta(plan.mix_numerator, plan.mix_denominator, plan.demod_rate);
+    if (!delta) {
+        return std::unexpected(with_context(delta.error(), "plan_vrx mixer"));
+    }
+    plan.fine_nco_delta = *delta;
+
     auto audio_taps_table = design_audio_taps(plan.demod.audio_taps, plan.demod_rate,
                                               plan.audio_rate, kAudioAttenuationDb);
     if (!audio_taps_table) {
@@ -1626,10 +1658,41 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
                               audio_taps_table->end());
     plan.demod_weights.insert(plan.demod_weights.end(), dc_weights.begin(), dc_weights.end());
 
-    plan.deviation = fm_deviation(plan.mode, plan.bandwidth);
-    plan.demod_gain = vrx_demod_gain(plan.mode, plan.demod_rate, plan.deviation);
-
     return plan;
+}
+
+// ---------------------------------------------------------------------------
+// The pipeline's shape
+// ---------------------------------------------------------------------------
+
+VrxShape shape_of(const VrxPlan& plan) {
+    VrxShape shape;
+    shape.fine = plan.fine;
+    shape.demod = plan.demod;
+    shape.channel_rate = plan.channel_rate;
+    shape.demod_rate = plan.demod_rate;
+    shape.output_rate = plan.output_rate;
+    return shape;
+}
+
+Expected<VrxShape> vrx_shape_for(const GridParams& grid, SampleRate rate,
+                                 const engine::VrxParams& params,
+                                 const engine::VrxPlacement& placement) {
+    auto designed = design_vrx(grid, rate, params, placement);
+    if (!designed) {
+        return std::unexpected(designed.error());
+    }
+    return shape_of(*designed);
+}
+
+std::string describe_shape_change(const VrxShape& from, const VrxShape& to) {
+    return std::format(
+        "this retune changes the receiver's filter shape, not just where it is pointed: "
+        "{} taps at {} S/s out at {} S/s becomes {} taps at {} S/s out at {} S/s. Moving the "
+        "dial is a push constant and a new tap table, which is free; changing the bandwidth "
+        "or the audio rate is a remove and an add",
+        from.fine.taps, from.demod_rate, from.output_rate, to.fine.taps, to.demod_rate,
+        to.output_rate);
 }
 
 // ---------------------------------------------------------------------------

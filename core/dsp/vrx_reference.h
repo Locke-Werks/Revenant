@@ -37,6 +37,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "core/dsp/pfb.h"
@@ -181,10 +182,26 @@ struct VrxFineConfig {
 
     // log2 of the shared NCO table's length.
     std::uint32_t nco_log2 = 16;
+
+    // Memberwise, because these three ARE the pipeline's specialization
+    // constants: two configs that compare equal specialize to the same
+    // pipeline and bind the same buffer sizes. See VrxShape.
+    friend constexpr bool operator==(const VrxFineConfig&, const VrxFineConfig&) = default;
 };
 
 inline constexpr std::uint32_t kMaxFineTaps = 256;
 inline constexpr std::uint32_t kMaxFinePhases = 4096;
+
+// Complex values in the tap buffer a fine pipeline binds: P*T + 1, the extra
+// entry being the zero the kernel's interpolation reads at the last branch of
+// the last tap.
+//
+// A function of the config and nothing else, which is why VrxShape does not
+// carry the length separately. It used to be compared separately, in
+// DemodStage::retune, alongside the config that determines it.
+[[nodiscard]] constexpr std::size_t fine_tap_table_size(const VrxFineConfig& config) {
+    return static_cast<std::size_t>(config.phases) * static_cast<std::size_t>(config.taps) + 1U;
+}
 
 // The thirteen values core/shaders/vrx_fine.comp takes as push constants, in
 // the order it declares them. Thirteen tightly packed 32-bit words is the
@@ -313,6 +330,9 @@ struct VrxDemodConfig {
     // Length of the AM DC-removal window. Only the AM branch reads it, but it
     // is always at least one so the weights buffer is never empty.
     std::uint32_t dc_taps = 1;
+
+    // Memberwise, for the same reason VrxFineConfig's is. See VrxShape.
+    friend constexpr bool operator==(const VrxDemodConfig&, const VrxDemodConfig&) = default;
 };
 
 // The four values core/shaders/vrx_demod.comp takes as push constants, in the
@@ -582,11 +602,23 @@ struct Passband {
 // The demodulation rate a request will actually run at: the minimum above,
 // rounded up to a whole multiple of the audio rate.
 //
-// Split out of plan_vrx because it is the one number a caller needs before
-// it can tell a retune that is a push constant from one that is a remove and
-// an add, and plan_vrx is far too expensive to call for it: it designs three
-// filter tables. A drag on the passband display asks this question on every
-// frame of the gesture.
+// Split out of plan_vrx so the rate a caller can get cheaply and the rate
+// the planner builds a filter for are one piece of arithmetic rather than
+// two copies of it. plan_vrx calls this; so does vrx_shape_for, which is
+// what the graph and the stage ask.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, AND WHY IT WAS NEVER TRUE. It called
+// this "the one number a caller needs before it can tell a retune that is a
+// push constant from one that is a remove and an add", and said
+// Graph::set_vrx_params asks it on every retune. It does not, and it must
+// not: the demodulation rate is one of five things a rebuild depends on,
+// and answering that question from the rate alone is exactly the two-entry
+// list VrxShape exists to replace. set_vrx_params asks vrx_shape_for.
+//
+// It remains the right question for a client that wants the rate ITSELF
+// rather than a verdict: the passband display's pane spans the
+// demodulation rate, so a surface that wants to know how wide the pane will
+// be before the engine answers asks this.
 //
 // Shares plan_vrx's resolution and fit, so the two cannot answer differently.
 [[nodiscard]] Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
@@ -734,6 +766,76 @@ struct VrxPlan {
 [[nodiscard]] Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
                                          const engine::VrxParams& params,
                                          const engine::VrxPlacement& placement);
+
+// ---------------------------------------------------------------------------
+// The pipeline's shape
+// ---------------------------------------------------------------------------
+
+// Everything about a plan that a running receiver cannot be changed to
+// without being rebuilt.
+//
+// A retune either is or is not a rebuild, and this type is the whole of that
+// question. Two plans with equal shapes differ only in tuning: a re-modulated
+// tap table copied into the buffer the kernel already reads, a new mixer
+// increment, a channel index and a detector gain, all of which a stage
+// applies under a command buffer already in flight. Two plans with different
+// shapes need a different pipeline, a different ring or a different buffer
+// size, and destroying either while an earlier frame still names it is the
+// one thing the graph promises never to do.
+//
+// ONE PREDICATE, BECAUSE TWO LISTS IS HOW THIS WENT WRONG. Graph::set_vrx_-
+// params and DemodStage::retune both have to answer it, and they used to
+// answer it with two hand-kept lists of fields. The graph's list was two
+// entries long, the stage's six, and the difference was reachable: a
+// set_vrx_params carrying nothing but a new audio rate can leave the
+// demodulation rate and the tap count exactly where they were while moving
+// the output rate and the decimation, so the graph accepted it, stored it,
+// echoed it back, and the stage refused it on the recording thread where
+// there was no caller left to tell. Anything a rebuild depends on belongs in
+// this struct and nowhere else.
+//
+// The fine tap TABLE's length is not a member. It is P*T + 1 and therefore a
+// function of `fine`, which fine_tap_table_size states; comparing it as well
+// would be a second list again.
+struct VrxShape {
+    VrxFineConfig fine{};
+    VrxDemodConfig demod{};
+
+    SampleRate channel_rate = 0;
+    SampleRate demod_rate = 0;
+    SampleRate output_rate = 0;
+
+    friend bool operator==(const VrxShape&, const VrxShape&) = default;
+};
+
+[[nodiscard]] VrxShape shape_of(const VrxPlan& plan);
+
+// The shape a request would produce, WITHOUT designing the three filter
+// tables plan_vrx designs.
+//
+// Same resolution, same fit and same arithmetic as plan_vrx, which calls
+// this and then fills the tables in. What it skips is the only expensive
+// part: a Kaiser-windowed sinc per polyphase branch, the audio decimation
+// filter and the DC-removal window, which together are the reason a planner
+// is too heavy to call on the control plane. Everything here is integer
+// arithmetic and two order estimates.
+//
+// This is what a caller asks when the question is "can this change be
+// applied in place", which is a question asked once per retune and, on a
+// passband drag, once per gesture.
+[[nodiscard]] Expected<VrxShape> vrx_shape_for(const GridParams& grid, SampleRate rate,
+                                               const engine::VrxParams& params,
+                                               const engine::VrxPlacement& placement);
+
+// The refusal both callers give, in one wording, because a client recognises
+// it by its words.
+//
+// ui/models/receiver_link.cpp matches on "remove and an add" to turn the
+// refusal into a rebuild that keeps the pane's identity: the wire carries no
+// error code, so the phrase is the contract. Two copies of it in two
+// translation units is one copy away from a client that stops recognising
+// half of them.
+[[nodiscard]] std::string describe_shape_change(const VrxShape& from, const VrxShape& to);
 
 // ---------------------------------------------------------------------------
 // Per-block parameters
