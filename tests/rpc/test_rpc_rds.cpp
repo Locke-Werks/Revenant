@@ -1515,16 +1515,22 @@ TEST_CASE("a retune while the decoder is running clears it and refills it",
     // THE FENCE, AND THIS IS THE ASSERTION WITH TEETH IN IT.
     //
     // Engine::set_vrx_params queues the retune, so the server clears the
-    // decoder and then tells the sample path to discard until it crosses
-    // the tuning boundary AudioChunk::tuning_epoch marks. A fence that never
-    // disarms is the failure that arrangement can have, and it is what an
-    // off-by-one in the pending count or an epoch the graph forgot to stamp
-    // produces: the decoder is fed nothing for the rest of the run and the
-    // struct stays at the zeros checked above, which every assertion before
-    // this one would happily pass.
+    // decoder and then tells the sample path to discard until it reaches
+    // the epoch VrxStatus::tuning_epoch names. A fence that never disarms
+    // is the failure that arrangement can have, and an epoch the graph
+    // forgot to stamp produces it: the decoder is fed nothing for the rest
+    // of the run and the struct stays at the zeros checked above, which
+    // every assertion before this one would happily pass.
     //
     // So the decoder has to be seen consuming AGAIN, from zero, after the
     // retune. It is a positive assertion for that reason.
+    //
+    // ONE RETUNE ONLY, WHICH IS WHAT THIS CASE CANNOT REACH. The paragraph
+    // here used to name "an off-by-one in the pending count" as a failure
+    // this case would catch. It would not have: the count came adrift only
+    // when two retunes shared a control drain, and one retune is one
+    // boundary however the arithmetic is written. The burst case below is
+    // the one that reaches it.
     auto refilling = poll_until(harness, *vrx, [](const rpc::RdsStation& station) {
         return station.health.samples_consumed > 0;
     });
