@@ -305,6 +305,13 @@ and gives the right answer again immediately. Nothing is carried forward, so
 "state surviving between dispatches" is withdrawn. The majority answer was
 the twin's answer in every case, at every shape.
 
+That number reproduces and it is not a property of the kernel. Re-measured
+later the same day, 87 disagreements in 160,000 unbatched spectrum
+dispatches, one in 1,839. It is a property of dispatching one at a time:
+put twenty-four in a command buffer and it is one in 9. The subsection after
+next has the curve, and it replaces "the rate" with "the rate at this
+submission pattern" everywhere in this section.
+
 **It is not confined to narrow grids.** M=64 N=2048 L=256, which is what the
 graph dispatches, is in the list and is hit. So is M=64 N=256 L=128. There is
 no narrow-grid effect to explain; the earlier runs saw it at M=8 because M=8
@@ -337,6 +344,9 @@ waits on a fence. The engine's pattern is the one that decides whether the
 product is affected, and it is the one this tool does not reproduce. Anyone
 picking the question back up should add that mode rather than re-run the
 sweep.
+
+That was the right guess and the mode was added the same day. It is the
+whole difference: see "2026-09-19, second sitting" below.
 
 ### What the failures look like from the inside
 
@@ -392,6 +402,177 @@ well as in synchronisation, and the two cannot be separated by this
 experiment alone. It does not weaken the conclusion that the fault needs
 concurrency. It does leave open whether the mechanism is inside the
 workgroup or in how several are scheduled together.
+
+The trigger, at least, is now known to be outside the workgroup. The rate
+depends on how many other dispatches share the command buffer, which nothing
+inside one workgroup can see or influence. Where the damage lands is still
+open and may well be a workgroup's own shared memory. The next subsection
+has the measurement.
+
+### 2026-09-19, second sitting: many dispatches in one command buffer
+
+The subsection above ends by naming the one structural difference left
+between the tool and the engine and predicting it would matter. It is the
+whole thing.
+
+`gpustress --batch <n>` records n dispatches into one command buffer with a
+global memory barrier between each pair and submits the lot behind a single
+fence, which is what `core/engine/graph.cpp` does, through the same
+`core/engine/record_util.h` helpers the graph and the receiver stages record
+through. Every slot in a batch owns its output and readback buffer, so all n
+answers are compared against their twins rather than only the last. The
+pipelines and the input buffers are built once, as the engine builds them.
+
+```
+build/stress/tools/gpustress/gpustress --gpu 1 --rounds 4000 --batch 24
+```
+
+**Batching is the variable and it is worth two orders of magnitude.** Twelve
+shapes in rotation on the integrated Radeon, two passes over the depth list
+in opposite order so that a drift over the afternoon would not read as a
+depth effect, 160,000 spectrum dispatches pooled at every depth.
+
+| dispatches per command buffer | disagreeing, of 160,000 | rate | command buffers | carrying a wrong dispatch |
+| --- | --- | --- | --- | --- |
+| unbatched, `run_kernel` | 87 | 1 in 1,839 | 160,000 | 87 |
+| 1 | 84 | 1 in 1,905 | 192,000 | 84 |
+| 2 | 198 | 1 in 808 | 96,000 | 123, 0.1% |
+| 4 | 163 | 1 in 982 | 48,000 | 73, 0.2% |
+| 8 | 119 | 1 in 1,345 | 24,000 | 38, 0.2% |
+| 12 | 10 | 1 in 16,000 | 16,000 | 2, 0.01% |
+| 16 | 647 | 1 in 247 | 12,000 | 269, 2% |
+| 24 | 17,380 | **1 in 9** | 8,000 | **3,486, 44%** |
+| 32 | 7,972 | 1 in 20 | 6,000 | 2,475, 41% |
+| 48 | 13,067 | 1 in 12 | 4,000 | **3,409, 85%** |
+| 64 | 582 | 1 in 275 | 3,000 | 269, 9% |
+| 96 | 46 | 1 in 3,478 | 2,000 | 44, 2% |
+| 128 | 286 | 1 in 559 | 1,500 | 184, 12% |
+| 192 | 0 | none seen | 1,000 | 0 |
+| 256 | 0 | none seen | 750 | 0 |
+
+**It is not the plumbing, and row two is why that can be said.** At one
+dispatch per command buffer, through persistent pipelines and persistent
+buffers and one submission where `run_kernel` makes four, the rate is one in
+1,905. `run_kernel`'s own rate measured beside it is one in 1,839 and the
+published figure was one in 1,900. Three ways of counting agree, so nothing
+about leaving `run_kernel` changes anything. Every row below is the effect of
+putting more than one dispatch in a submission.
+
+**The shipped shape turns on at five.** The rotation above mixes twelve
+shapes into every command buffer, which says nothing about the depth the
+graph's own shape needs. M=64 N=2048 L=256 alone, 48,000 dispatches at each
+depth:
+
+| dispatches per command buffer | disagreeing, of 48,000 | command buffers | carrying a wrong dispatch |
+| --- | --- | --- | --- |
+| 1 | 18 | 48,000 | 18, 0.04% |
+| 2 | 20 | 24,000 | 14, 0.06% |
+| 3 | 51 | 16,000 | 38, 0.2% |
+| 4 | 222 | 12,000 | 140, 1.2% |
+| 5 | 3,203 | 9,600 | 1,821, **19%** |
+| 6 | 7,415 | 8,000 | 6,784, **85%** |
+| 8 | 6,045 | 6,000 | 5,999, **100%** |
+| 12 | 3,352 | 4,000 | 3,342, 84% |
+| 16 | 2,722 | 3,000 | 2,468, 82% |
+| 24 | 2,186 | 2,000 | 1,997, 100% |
+
+Four is a percent and six is most of them. Re-measured at the end of the
+session on a later build of the tool, at half the sample size, the same four
+points came back 0.004%, 0.8%, 18% and 92%.
+
+**The engine records five compute
+dispatches per command buffer with no receivers**, convert, `pfb_branch`,
+`pfb_fft`, spectrum and the percentile, and two more for every receiver. A
+cf32 source drops the convert and makes it four. That is exactly the width of
+the cliff, which is why the eyeball count of one corrupted waterfall row in
+four no longer needs explaining away as three orders of magnitude off. It is
+not the same experiment: five copies of the spectrum kernel is not five
+different kernels, and this does not prove the engine's five are what does
+it. It does put the engine's shape and the engine's depth on the wrong side
+of a cliff that is real, reproducible and two hundred times the unbatched
+rate.
+
+**At depth six and above it is one bad dispatch per bad command buffer.**
+6,045 wrong dispatches across 5,999 wrong command buffers at depth eight, so
+the submission goes wrong rather than the dispatch, and then one dispatch in
+it carries the damage.
+
+**And it is the dispatch at the front.** Where the wrong dispatch sat in its
+command buffer, same shape, 24,000 dispatches at each depth:
+
+| depth | events | slot 0 | slot 1 | slot 2 | later slots |
+| --- | --- | --- | --- | --- | --- |
+| 5 | 1,649 | 720 | 905 | 24 | 0 |
+| 6 | 4,680 | 3,568 | 1,111 | 1 | 0 |
+| 8 | 3,192 | 2,707 | 485 | 0 | 0 |
+
+The first dispatch is wrong more often the more work is recorded *after* it,
+which is the shape of the finding. At depth one that same dispatch, with the
+same fill and the same barrier in front of it, is wrong 18 times in 48,000.
+Nothing ahead of it changed; only what follows it did.
+
+**The kernel finishes, and computes the wrong answer.** Every output buffer
+is filled with zero at the top of its command buffer, so a readback that
+overtook the kernel would show up as wrong values that are still exactly
+zero. Of 8,915,610 wrong values across 3,632 events at depth eight, **zero
+were the fill**. Every one is a decibel number, and 0 of 3,632 events were
+nothing but fill. So this is not a visibility hazard on the copy and not a
+barrier that failed to make writes available. The transform ran to the end
+and produced the wrong numbers.
+
+**The recording is not at fault, as far as the validation layer can tell.**
+`VK_LAYER_KHRONOS_validation` with `VALIDATE_SYNC` on, over the batched
+recording, reports no message of any kind, while 39 of 320 dispatches in that
+same run disagreed with the twin.
+
+**The discrete card is exact through all of it.** The same binary, the same
+sweeps, every depth: 3,696,256 dispatches on the RTX 4090, zero
+disagreements. Whatever this is, it is not the recording and it is not the
+kernel's arithmetic.
+
+**`pfb_branch` is still exact, in the command buffers that are corrupting the
+spectrum dispatches beside it.** 528,000 branch dispatches counted on the
+integrated device across every depth in the tables here, and more in the
+runs not tabulated, zero disagreements, including at depth 48 where
+85% of the command buffers they are in carry a wrong spectrum dispatch. It
+has no shared-memory transform. That is now a much sharper statement than it
+was: the command buffer as a whole is not being mishandled, because some of
+what is in it is right every time.
+
+**Which shape it is matters, and small is not safe, only slower to show.**
+At 24 dispatches per command buffer, 48,000 dispatches each:
+
+| what is in the command buffer | command buffers | carrying a wrong dispatch |
+| --- | --- | --- |
+| M=64 N=2048 L=256 only, the shipped shape | 2,000 | 1,884, 94% |
+| all twelve shapes in rotation | 2,000 | 698, 35% |
+| M=8 N=512 L=128 only | 2,000 | 0 |
+| M=8 N=256 L=1 only | 2,000 | 0 |
+| the two `pfb_branch` shapes only | 2,000 | 0 |
+
+The narrow shape is clean at 24 and is not clean deeper: at 192 dispatches
+per command buffer it takes 113 of 250, and at 256 it takes 181 of 188. So
+the depth at which a shape turns on scales with how much work each dispatch
+is, and the shipped shape is the largest one this engine has.
+
+**Two things are not explained and should not be dressed up.** The first is
+the collapse at the bottom of the first table: the twelve-shape rotation is
+85% bad at depth 48 and clean at 192 and 256, in both passes, while the
+narrow shape alone is worst at exactly those depths. Command-buffer length in
+some other currency than dispatch count is doing something, and the obvious
+guess, that the driver splits a very long command buffer and hands back the
+safety, is untested. The second is the mechanism itself. What is established
+is the class: the fault needs several dispatches in one submission, it lands
+on the first of them, and it corrupts the transform rather than its delivery.
+
+**What this still does not cover, and it is now the short list.**
+`core/engine/graph.cpp` records frame k+1 and submits it while frame k is
+still executing, with no semaphore between them, and `gpustress` fences every
+submission before recording the next. The engine also runs `pfb_fft`, a
+second shared-memory transform, immediately before the spectrum dispatch in
+the same command buffer, and `gpustress` has no `pfb_fft` shape at all.
+Either could raise the rate further and neither is measured. Both are one
+afternoon of work in the same tool.
 
 ### The control experiment, run, and inconclusive
 

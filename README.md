@@ -57,15 +57,20 @@ and went away, every transmission matching a shape. The question moves from
 "what is on this frequency right now" to "what happened in this band, and
 when".
 
-Those are the design's reasons for existing. None of them is a benchmark, and
-nothing here has been measured yet.
+Those are the design's reasons for existing. None of them is a benchmark. What
+has been measured is below, with the numbers rather than the adjectives.
 
 ## Status
 
-M1. There is something to run, and it is a command line.
+M1 is done and M2 is under way. There is something to run, and it is a
+command line.
 
 ```
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto"              --vrx 98.1M:wfm:200k --play --record fm.wav
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto" \
+    --vrx 98.1M:wfm:200k --play --record fm.wav
+
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto" \
+    --spectrum --detect
 ```
 
 That path is real and measured: bytes from the dongle cross the bus once as
@@ -76,20 +81,67 @@ broadcast FM through it recorded with every drop counter at zero, checked by
 measuring the 19 kHz stereo pilot against its own neighbourhood rather than by
 listening: 1037x on the station against 2.86x on an empty channel.
 
+The second draws the whole 2.4 MHz as a waterfall in the terminal and lists
+what it finds in it. Both ends of the colour map track the band on their own,
+from percentiles measured on the device rather than from extremes, expanding
+in a frame or two and contracting over thirty seconds. `--spectrum-floor` and
+`--spectrum-ceiling` hold either end still, which is what comparing two
+captures needs.
+
 What exists: the Vulkan context and allocator, the shader build, the
 polyphase channelizer, eight demodulators, the per-receiver fine stage, audio
 egress to WAV and to the sound card, a synthetic wideband source, a file
-source, an RTL-SDR backend, and the conformance suite that diffs every GPU
-kernel against a scalar twin and demands identical bits. 94 tests pass on an
-RTX 4090 and an integrated Radeon across three build presets.
+source, an RTL-SDR backend, the full-span spectrum with a waterfall in the
+terminal, auto-scaling measured on the device, the wideband detector, and the
+conformance suite that diffs every GPU kernel against a scalar twin and
+demands identical bits. 139 tests pass on an RTX 4090 and an integrated
+Radeon across three build presets.
 
-What does not: any graphical interface, the full-span spectrum and waterfall,
-detection, and every decoder. Those are M2 and beyond.
+What does not: any graphical interface, and every decoder.
 
-**The first public release is M3.** Until then the layout moves and there are
+### What has been measured
+
+Fifty receivers on one 20 MHz grid run at 3.28x realtime with every overrun
+counter at zero. The claim a channelizer exists to make is that the coarse
+chain does not care how many receivers hang off it, and it holds: 10.0
+microseconds at zero receivers and 10.2 at a hundred. What is not free is the
+per-receiver fine stage, linear at about 18 microseconds each, which dominates
+above a handful. The FFT stage reaches 68.1% of VkFFT's 790 GB/s on the grid
+the engine actually runs, and 60.2% at its worst size.
+
+The conformance suite is bit-exact, not close, and the RTX 4090 stays that
+way under 3.7 million dispatches of deliberate abuse.
+
+The integrated Radeon does not, and the size of that is the thing to state
+plainly. One dispatch per submission, it computes a wrong spectrum frame
+about once in 1,900. Share a command buffer between several dispatches, which
+is what the engine records, and the rate climbs by two orders of magnitude:
+at the five dispatches per frame the graph actually submits, the shipped
+transform shape is wrong 19% of the time, and at six it is 85%. Nothing else
+changes, and the channelizer's branch filter in the same command buffers
+never fails once in 528,000 dispatches.
+
+So the spectrum kernel is refereed on the discrete card and skipped
+elsewhere, and on that device the waterfall is not to be trusted. The cause
+is narrowed to a concurrency fault in that driver rather than identified.
+`docs/fft.md` carries the measurements and `tools/gpustress` is the
+instrument, so the next person reruns it against a new driver instead of
+re-arguing it.
+
+### Where it is going
+
+**M2, in progress.** The graphical client. It runs as its own process and
+reaches the engine over a Cap'n Proto service, because the engine is headless
+by design and because it has to be: the engine is built against the static C
+runtime and ships as one self-contained signed binary, and Qt is not.
+`docs/rpc.md` has the reasoning and the alternatives that were rejected.
+
+**M3 is the first public release.** Until then the layout moves and there are
 no binaries. The repository is public because the licence made it the
 straightforward way to satisfy the source obligation, not because anything
 here is finished.
+
+**M4 and beyond:** the decoders, and search over stored captures.
 
 ## Requirements
 
