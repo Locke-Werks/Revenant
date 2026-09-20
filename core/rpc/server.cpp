@@ -2157,6 +2157,24 @@ Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
     return out;
 }
 
+// ENGINE-WIDE THROUGH THE RECEIVER, which is a decision and not an oversight.
+//
+// rds_routes_ is keyed by receiver and not by session, so two clients polling
+// one receiver share one decoder and this call from either clears what the
+// other accumulated. set_detection_threshold is engine-wide and says so; this
+// is the same choice made at the width of the thing it configures. There is
+// one detector, so a threshold is per engine. There is one decoder per
+// receiver, so a region is per receiver.
+//
+// The receiver is what makes that right. It is already shared state: two
+// sessions on one share its centre, its filter and its squelch, and
+// setVrxParams from either already clears the other's station through
+// reset_rds_for_vrx. A per-session decoder would put one decode per client
+// per receiver on the completion thread, which is the cost the whole
+// build-on-first-ask arrangement exists to hold down, and it would let two
+// clients disagree about a station that is one station. A client that wants
+// its own region adds its own receiver, which it is already doing to reach a
+// composite rate.
 Status ServerImpl::set_rds_region(engine::VrxId vrx, decode::Region region) {
     auto status = engine_.vrx_status(vrx);
     if (!status) {

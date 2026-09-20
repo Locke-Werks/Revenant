@@ -522,8 +522,9 @@ back to back wait for two boundaries. The one case it does not fence is a
 retune arriving before the decoder has seen a single chunk, where there is no
 epoch to fence against and nothing accumulated to protect.
 
-**The region defaults to `rds` and is per receiver**, unlike
-`setDetectionThreshold`, because two receivers can sit on two continents.
+**The region defaults to `rds` and is per receiver**, where
+`setDetectionThreshold` is per engine. Both are as wide as the thing they
+configure: there is one detector, and there is one decoder per receiver.
 Nothing infers it: no field names the region, the PI cannot decide it because
 the US call sign range collides with European country codes, and getting it
 wrong is silent, since PTY 26 draws as National Music in one region and Hip-Hop
@@ -533,6 +534,25 @@ exists clears everything accumulated, INCLUDING the physical layer, which the
 region does not reach: every counter in `RdsHealth` is cumulative from the
 moment the decoder was built, and clearing one layer would leave one struct
 holding two epochs.
+
+**Per receiver means shared by every session on that receiver**, which is the
+half "per receiver" does not say and which one client can feel through
+another. Two sessions polling one receiver hold one decoder between them, so
+`setRdsRegion` from either clears what the other had accumulated, with no
+notification and no way to tell it from a station that went off the air.
+
+That is the same answer as `setDetectionThreshold` rather than a different
+one, and the deciding argument is the same argument. A receiver is engine-wide
+state: two sessions on one already share its centre, its filter and its
+squelch, and either of them calling `setVrxParams` clears the other's station
+too. Nobody would call that a bug, because the receiver is the shared thing
+and the decoder hangs off it. A per-session decoder would mean one decode per
+client per receiver on the completion thread, which is the cost the whole
+"nobody asked, nothing runs" arrangement exists to keep down, and it would
+make two clients disagree about a station that is one station. A client that
+needs a region of its own creates a receiver of its own. It is already
+creating a dedicated one to get the 171 kHz rate, so this costs nothing it was
+not already paying.
 
 **`RdsStation::fault` is how a decoder says it stopped.** Empty while it runs.
 Non-empty means the receiver delivered a chunk the decoder was not built for,

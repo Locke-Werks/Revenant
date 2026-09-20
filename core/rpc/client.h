@@ -278,9 +278,19 @@ public:
     // the region it already had pays that reset anyway, which is why a
     // client seeding this from the tuned frequency should do it once.
     //
-    // Per receiver and not engine-wide, unlike set_detection_threshold. Two
-    // receivers can sit on two stations and there is no reason in the
-    // standard why they share a continent.
+    // Per receiver where set_detection_threshold is per engine. Both are as
+    // wide as the thing they configure: there is one detector, and there is
+    // one decoder per receiver. Two receivers can sit on two stations and
+    // there is no reason in the standard why they share a continent.
+    //
+    // AND PER RECEIVER MEANS SHARED BY EVERY SESSION ON THAT RECEIVER.
+    // Two clients polling one receiver hold one decoder between them, so
+    // this call from either clears what the other had accumulated, silently.
+    // That is the same choice set_detection_threshold makes and for the same
+    // reason: a receiver is engine-wide state, two sessions on one already
+    // share its tuning and its squelch, and the decoder hangs off the
+    // receiver. A client that needs a region of its own creates a receiver
+    // of its own, which it is already doing to reach 171000.
     [[nodiscard]] virtual Status set_rds_region(std::uint64_t vrx, RdsRegion region) = 0;
 
     // Frames this client was sent.

@@ -1834,9 +1834,30 @@ interface Session {
     # This paragraph used to end at "in one struct", which said what was
     # cleared and not how far the clearing reached.
     #
-    # Per receiver and not engine-wide, unlike setDetectionThreshold. Two
-    # receivers can sit on two stations and there is no reason in the standard
-    # why they share a continent; the detector's threshold is engine-wide
-    # because there is one detector.
+    # Per receiver where setDetectionThreshold is per engine. Both are as
+    # wide as the thing they configure: there is one detector, and there is
+    # one decoder per receiver. Two receivers can sit on two stations and
+    # there is no reason in the standard why they share a continent.
+    #
+    # AND PER RECEIVER MEANS SHARED BY EVERY SESSION ON THAT RECEIVER, which
+    # is the half "per receiver" does not say and which one client can feel
+    # through another. Two sessions polling one receiver hold one decoder
+    # between them, so this call from either clears what the other had
+    # accumulated, with no notification and nothing to tell it from a station
+    # that went off the air.
+    #
+    # That is deliberate and it is the same answer setDetectionThreshold
+    # gives, for the same reason. A receiver is engine-wide state: two
+    # sessions on one already share its centre, its filter and its squelch,
+    # and setVrxParams from either already clears the other's station. The
+    # decoder hangs off the receiver, so it is as shared as the receiver is.
+    # A per-session decoder would mean one decode per client per receiver on
+    # the engine's completion thread, which is the cost that "a receiver
+    # nobody asked about runs no decoder" exists to hold down, and it would
+    # let two clients disagree about a station that is one station.
+    #
+    # A client that needs a region of its own creates a receiver of its own.
+    # It is already creating a dedicated one to reach 171000, so this asks
+    # for nothing it was not already doing.
     setRdsRegion @15 (vrx :UInt64, region :RdsRegion) -> ();
 }
