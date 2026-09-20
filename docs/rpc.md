@@ -258,6 +258,57 @@ CW that is a sidetone below `VrxParams::center`, and a client that computed
 the axis from the centre would draw one mode's filter a pitch out of place
 and the other seven correctly.
 
+### The detector's tracks cross, and they are polled rather than pushed
+
+**This section did not mention the detection surface until 2026-09-20.** It
+listed spectrum, passband, audio and then "nothing else", while
+`Session::detections` had been on the wire since the schema was written and
+`revenant-ui` had been drawing the result for as long as it has existed. The
+omission is recorded rather than quietly filled, because a reader checking
+whether the detector was reachable from a client found the wire document
+saying it was not.
+
+`detections(minConfidence)` answers with a `DetectionList`: the tracks above
+that bar, ascending in frequency, plus the decision counters, the total held
+before the bar, the threshold in force and `detectorHoldSeconds`.
+
+**Polled and not subscribed**, which is the opposite of everything above it.
+A spectrum frame is produced whether anyone is looking or not and an old one
+is still a measurement of the band at that instant. A track list is state: it
+changes about ten times a second, an older one is of no use to anybody, and a
+subscription would spend the wire on revisions nobody reads. So this one call
+is a poll, and it is the only surface here that is.
+
+**The first call builds the detector and answers with nothing.** No detector
+runs until a client asks for one, because it costs the engine real CPU per
+frame, so the first call starts it and comes back empty with `decisions` at
+zero. Zero decisions is the one answer that cannot be mistaken for a quiet
+band, and it exists for that reason.
+
+**`minConfidence` is the caller's and the threshold is the engine's.** Two
+clients can hold different bars and neither sees the other's, because the bar
+only filters the answer. `setDetectionThreshold` changes what the detector
+decides at all, so it is engine-wide and the last writer wins;
+`DetectionList::detectionThresholdDb` reads back the winner rather than
+echoing a request. `ui/models/engine_link.h` holds the client half of that
+split and says the same thing from the other side.
+
+A bar of exactly one is refused rather than answered emptily. The comparison
+is `>=` and a track's confidence approaches one without arriving, so a bar of
+one lists nothing however strong the signal is, and an empty list is what a
+dead band looks like too. How near the top of that range a real signal gets
+is a separate question and not a happy one: `ui/models/engine_link.h` has the
+arithmetic, and the short version is that the last fraction of the range
+lists an unbroken carrier and nothing else.
+
+**Frequencies here are integer hertz and not `Rational`**, which is the one
+place this document's own rule does not apply. The detector rounds once, at
+measurement, out of the frame's exact rational axis. A ratio on the wire
+would dress an estimate up as a grid frequency, and a client tuning to a
+detection is asking to be put near a signal rather than on a channel centre.
+`Detection::centerHz` is absolute and `VrxParams::center` is a baseband
+offset, so tuning is `centerHz - EngineInfo::sourceCenter`.
+
 ### Audio does not cross
 
 Not yet. The CLI renders its own through WASAPI in the same process as the
@@ -273,7 +324,9 @@ metadata. The wire is downstream of that promise and does not widen it.
 
 What the schema does carry is the state a client needs to draw and control:
 `EngineInfo` with the device, grid, rates and spectrum geometry;
-`SourceDescriptor` for a picker; `SourceStats` and `VrxStatus` for the counters.
+`SourceDescriptor` for a picker; `SourceStats` and `VrxStatus` for the
+counters; and the `DetectionList` above, which is the detection metadata the
+engine's promise names and the reason that clause is in it.
 Overruns, lost samples and dropped audio samples travel because they are
 correctness events, and a remote client is exactly the caller that cannot read
 the log.
