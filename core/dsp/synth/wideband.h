@@ -127,6 +127,24 @@ struct EmitterTruth {
     // read off the RF.
     double symbol_rate_baud = 0.0;
 
+    // BroadcastFm only, and zero on a Modulated row: the largest |composite|
+    // the station's spec can reach, as a fraction of WfmSpec::
+    // peak_deviation_hz. FmComposite::peak_bound().
+    //
+    // Above 1.0 the station deviates past the figure `extent` was computed
+    // from, which is reachable on purpose and is not clamped. Carried here
+    // because a scorer otherwise reads a 268750 Hz Carson bandwidth off this
+    // row with nothing saying the deviation it was computed against is
+    // exceeded. generate_wfm() reports the same condition as a measurement
+    // over its own buffer, and a scene has no equivalent: it never renders
+    // a station on its own.
+    //
+    // A BOUND AND NOT A MEASUREMENT. It is the sum of the pilot's, the
+    // audio's and the data's own peaks, which do not occur together, so a
+    // rendered buffer always reads below it and a row at 0.99 is not a
+    // promise that the station stayed legal by a hair.
+    double composite_peak_bound = 0.0;
+
     // The payload seed, so this exact emitter can be rebuilt on its own.
     // Zero on a BroadcastFm row: that payload is a bit sequence the caller
     // handed over rather than one drawn from a seed, so the caller already

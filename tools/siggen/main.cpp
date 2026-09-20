@@ -1037,6 +1037,20 @@ struct StationOptions {
         std::print("  fm stations       {} at {}, {} RDS bits each\n",
                    spec.fm_stations.size(), *fm_offsets,
                    spec.fm_stations.front().station.rds.bits.size());
+
+        // The same report the wfm subcommand prints, off the truth rows.
+        // Without it a scene's stations can over deviate in silence, and
+        // the truth row's Carson extent is computed against a deviation the
+        // station exceeds.
+        double worst_bound = 0.0;
+        for (const siggen::EmitterTruth& record : scene->truth()) {
+            if (record.kind == siggen::EmitterKind::BroadcastFm) {
+                worst_bound = std::max(worst_bound, record.composite_peak_bound);
+            }
+        }
+        std::print("  composite peak    {:.4f} of full deviation, worst station (upper "
+                   "bound){}\n",
+                   worst_bound, (worst_bound > 1.0) ? "  OVER DEVIATING" : "");
     }
     std::print("  placement span    {} to {} Hz\n", *span_low, *span_high);
     std::print("  noise floor       {}\n",

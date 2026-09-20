@@ -134,9 +134,10 @@ constexpr double kTwoPi = 2.0 * kPi;
 // Amplitude of a tone at hz, by a single DFT bin taken at the absolute
 // sample indices the buffer holds.
 //
-// Rectangular window on purpose: kLevelWindow below is a multiple of 684, so
-// the programme tone, the 19 kHz pilot and the 57 kHz subcarrier are all
-// exact bins of it and there is nothing for a window function to suppress.
+// Rectangular window on purpose: the component-level case below runs this
+// over a multiple of 684 samples at 684000, so the programme tone, the
+// 19 kHz pilot and the 57 kHz subcarrier are all exact bins of it and there
+// is nothing for a window function to suppress.
 [[nodiscard]] double tone_amplitude(const std::vector<float>& signal,
                                     dsp::SampleIndex start, dsp::SampleRate rate,
                                     dsp::Hertz hz)
@@ -816,6 +817,120 @@ TEST_CASE("a wideband scene can carry a broadcast FM station", "[tools][wfm]")
         scene->render(kFrom + at, dsp::ComplexSpan(blocked.data() + at, length));
     }
     CHECK(blocked == from_scene);
+}
+
+TEST_CASE("a scene's truth row carries the station's deviation bound", "[tools][wfm]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // WHAT THIS CASE IS FOR
+    //
+    // generate_wfm() measures over-deviation on its own buffer and the
+    // siggen wfm report prints it. A scene had neither, so a station placed
+    // in one could deviate past WfmSpec::peak_deviation_hz in silence while
+    // its truth row carried a Carson extent computed from the deviation it
+    // was exceeding and a scorer read that as the occupied band.
+    //
+    // A scene cannot measure: it never renders a station on its own. What
+    // it can carry is FmComposite::peak_bound(), which is a property of the
+    // spec, and that is what the row and the CSV hold.
+
+    siggen::WfmSpec legal = base_station(300);
+    legal.carrier_offset = -120'000;
+
+    // Mono at 10 kHz, 60 kHz of audio through the 50 us curve: a gain of
+    // 3.297, so the audio alone asks for 2.64 of full deviation.
+    siggen::WfmSpec hot = base_station(300);
+    hot.carrier_offset = 120'000;
+    hot.programme.stereo = false;
+    hot.programme.left_tone_hz = 10000;
+    hot.programme.audio_deviation_hz = 60000;
+    hot.programme.preemphasis = siggen::Preemphasis::Eu50;
+
+    siggen::SceneSpec scene_spec;
+    scene_spec.rate = 1'000'000;
+    scene_spec.duration_samples = 20000;
+    scene_spec.add_noise = false;
+
+    // One ordinary emitter too, so the column can be seen to be empty on a
+    // row where a deviation bound means nothing.
+    siggen::EmitterPlacement carrier;
+    carrier.modulator.kind = siggen::Modulation::Cw;
+    carrier.modulator.common.carrier_offset = 300'000;
+    carrier.modulator.common.rate = scene_spec.rate;
+    carrier.modulator.common.seed = kSeed;
+    carrier.use_snr = false;
+    carrier.end_sample = scene_spec.duration_samples;
+    scene_spec.emitters.push_back(carrier);
+
+    for (const siggen::WfmSpec& station : {legal, hot}) {
+        siggen::WfmStationPlacement placement;
+        placement.station = station;
+        placement.use_snr = false;
+        placement.end_sample = scene_spec.duration_samples;
+        scene_spec.fm_stations.push_back(placement);
+    }
+
+    auto scene = siggen::Scene::create(scene_spec);
+    REQUIRE(scene.has_value());
+    REQUIRE(scene->truth().size() == 3);
+
+    const auto row_at = [&scene](dsp::Hertz offset) -> const siggen::EmitterTruth* {
+        for (const siggen::EmitterTruth& record : scene->truth()) {
+            if (record.carrier_offset_hz == offset) {
+                return &record;
+            }
+        }
+        return nullptr;
+    };
+
+    // 9 percent of pilot, 70 percent of audio through a 1.0482 gain at
+    // 1 kHz, and 2.67 percent of RDS envelope: 0.85040. Stated as the
+    // arithmetic rather than read back off peak_bound(), so the row is
+    // checked against the spec and not against the same call that filled
+    // it.
+    const siggen::EmitterTruth* legal_row = row_at(-120'000);
+    REQUIRE(legal_row != nullptr);
+    INFO(std::format("legal bound {:.6f}", legal_row->composite_peak_bound));
+    CHECK(legal_row->composite_peak_bound == Approx(0.85040).epsilon(1e-4));
+    CHECK(legal_row->composite_peak_bound < 1.0);
+
+    // 0.09 + 0.8 * 3.29691 + 0.026667 = 2.75422.
+    const siggen::EmitterTruth* hot_row = row_at(120'000);
+    REQUIRE(hot_row != nullptr);
+    INFO(std::format("hot bound {:.6f}", hot_row->composite_peak_bound));
+    CHECK(hot_row->composite_peak_bound == Approx(2.75422).epsilon(1e-4));
+    CHECK(hot_row->composite_peak_bound > 1.0);
+
+    // And the extent it is being read against is still Carson at the
+    // nominal deviation, which is the whole reason the bound has to be on
+    // the row: 268750 Hz says nothing about a station reaching 2.75 times
+    // the deviation that figure was computed from.
+    CHECK(hot_row->extent.bandwidth_hz() == 268'750);
+
+    // Meaningless on a Modulated row and left at zero there.
+    const siggen::EmitterTruth* carrier_row = row_at(300'000);
+    REQUIRE(carrier_row != nullptr);
+    CHECK(carrier_row->composite_peak_bound == 0.0);
+
+    const std::string csv = siggen::truth_csv(*scene);
+    INFO(csv);
+    CHECK(csv.find(",payload_seed,composite_peak_bound\n") != std::string::npos);
+    CHECK(csv.find(",0.8504\n") != std::string::npos);
+    CHECK(csv.find(",2.7542\n") != std::string::npos);
+
+    // The Cw row's cell is empty rather than 0.0000, which would read as a
+    // station that never deviates at all.
+    CHECK(csv.find(",cw,300000,") != std::string::npos);
+    CHECK(csv.find(",0.0000\n") == std::string::npos);
+
+    // The bound is an upper bound and a render has to stay under it, or the
+    // row is telling a scorer something a buffer can contradict.
+    auto rendered = siggen::generate_wfm(hot, 20000);
+    REQUIRE(rendered.has_value());
+    INFO(std::format("hot composite peak {:.6f}", rendered->composite_peak));
+    CHECK(rendered->over_deviated);
+    CHECK(rendered->composite_peak <= hot_row->composite_peak_bound * 1.000001);
 }
 
 TEST_CASE("the pre-emphasis names round trip", "[tools][wfm]")

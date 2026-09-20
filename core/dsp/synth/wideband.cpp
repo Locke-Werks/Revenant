@@ -341,6 +341,7 @@ Expected<Scene> Scene::create(const SceneSpec& spec)
                                          : 0.0;
         prototype.snr_in_full_band_db =
             (scene.noise_power_ > 0.0) ? power_to_db(level->power / scene.noise_power_) : 0.0;
+        prototype.composite_peak_bound = station->composite().peak_bound();
         // modulation, symbol_rate_baud and payload_seed stay at their
         // defaults. EmitterTruth says why each of the three is unreadable on
         // this kind of row.
@@ -759,7 +760,7 @@ std::string truth_csv(const Scene& scene)
     out +=
         "id,kind,modulation,carrier_offset_hz,low_hz,high_hz,center_hz,bandwidth_hz,"
         "start_sample,end_sample,mean_power,snr_in_occupied_bandwidth_db,"
-        "snr_in_full_band_db,symbol_rate_baud,payload_seed\n";
+        "snr_in_full_band_db,symbol_rate_baud,payload_seed,composite_peak_bound\n";
 
     for (const EmitterTruth& record : scene.truth()) {
         const std::string end =
@@ -772,7 +773,16 @@ std::string truth_csv(const Scene& scene)
             (record.kind == EmitterKind::Modulated) ? modulation_name(record.modulation)
                                                     : std::string_view{};
 
-        out += std::format("{},{},{},{},{},{},{},{},{},{},{:.9g},{:.4f},{:.4f},{:.6g},{}\n",
+        // Empty rather than 0.0000 on a Modulated row, for the same reason
+        // the modulation cell is empty on a station's: a zero in that column
+        // would read as a station with no deviation at all.
+        const std::string peak_bound =
+            (record.kind == EmitterKind::BroadcastFm)
+                ? std::format("{:.4f}", record.composite_peak_bound)
+                : std::string{};
+
+        out += std::format(
+            "{},{},{},{},{},{},{},{},{},{},{:.9g},{:.4f},{:.4f},{:.6g},{},{}\n",
                            record.id,
                            emitter_kind_name(record.kind),
                            modulation,
@@ -787,7 +797,8 @@ std::string truth_csv(const Scene& scene)
                            record.snr_in_occupied_bandwidth_db,
                            record.snr_in_full_band_db,
                            record.symbol_rate_baud,
-                           record.payload_seed);
+                           record.payload_seed,
+                           peak_bound);
     }
     return out;
 }
