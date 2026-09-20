@@ -517,11 +517,23 @@ TEST_CASE("reset clears the format so a new grant takes effect", "[audio][ring]"
     ring.write(make_chunk(0, 480, 0.5F));
     REQUIRE(ring.capacity_frames() == kCapacity);
 
+    const std::uint64_t before = ring.format_generation();
+
     ring.set_depth_millis(500);
     ring.reset();
+
+    // The generation does NOT move here, and a consumer must not be
+    // written as though it does. reset() leaves the format invalid, which
+    // is what says there is no stream; the bump comes from establish() on
+    // the next chunk. The header used to claim reset() bumped it and never
+    // has, so this pins which of the two was wrong.
+    CHECK(ring.format_generation() == before);
+    CHECK_FALSE(ring.format().valid());
+
     ring.write(make_chunk(0, 480, 0.5F));
 
     CHECK(ring.capacity_frames() == 24000);
+    CHECK(ring.format_generation() == before + 1);
 }
 
 TEST_CASE("a chunk longer than the ring grows it rather than resyncing", "[audio][ring]")

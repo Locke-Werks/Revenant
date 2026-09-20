@@ -291,9 +291,15 @@ public:
 
     [[nodiscard]] RingFormat format() const;
 
-    // Bumped on every format change, so a consumer holding an open sink can
-    // tell that it has to reopen without comparing structs under its own
-    // lock. Zero before the first chunk.
+    // Bumped by establish(), which is every format change, so a consumer
+    // holding an open sink can tell that it has to reopen. Zero before the
+    // first chunk.
+    //
+    // NOT BUMPED BY reset(), which leaves the format invalid and the
+    // generation where it was. A consumer polling this alone would miss a
+    // reset; it notices through format().valid() going false, and a reader
+    // mid-pull notices through ReadResult::format_moved. See the note in
+    // reset().
     [[nodiscard]] std::uint64_t format_generation() const;
 
     [[nodiscard]] RingCounts counts() const;

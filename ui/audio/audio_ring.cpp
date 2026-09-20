@@ -293,9 +293,25 @@ void AudioRing::reset()
 
     // The format goes too, which is what makes set_depth_millis take effect:
     // the next chunk then differs from format_ and re-establishes at the
-    // depth the engine has just granted. It also bumps the generation, so a
+    // depth the engine has just granted.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY
+    //
+    // Until 2026-09-20 it ended "It also bumps the generation, so a
     // consumer holding an open sink reopens rather than playing the next
-    // receiver at the last one's rate.
+    // receiver at the last one's rate." This function has never touched
+    // format_generation_. The claim was wrong and the code is right, so the
+    // sentence went rather than the behaviour, and it is recorded here
+    // because a reader who took it at face value would have concluded that
+    // format_generation() alone is enough to notice a reset.
+    //
+    // Nothing is lost by not bumping. A reset leaves format_ invalid, which
+    // AudioPlayer::tick reads as no stream and closes the sink for; the
+    // next chunk then re-establishes and THAT bumps the generation, so the
+    // reopen happens either way. A reader mid-pull is covered separately
+    // and more tightly: read() takes the format the caller is reading at
+    // and reports format_moved under its own lock, so it sees the reset on
+    // the very next pull rather than at the next timer tick.
     format_ = {};
     capacity_ = 0;
     head_ = 0;
