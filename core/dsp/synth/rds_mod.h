@@ -364,11 +364,14 @@ private:
     // The subcarrier turns 48 times per bit period and the grid is 512 steps
     // per bit period, so it is sampled ten times a cycle: a straight line
     // between two grid points of the integral has a derivative that is the
-    // average of the oscillation over the step rather than its value, and
-    // the error is 30 percent of the RDS term. Measured, not estimated. What
-    // the lookup does instead is add the remaining part-interval in closed
-    // form, from the pair's two endpoints, which is exact for the piecewise
-    // linear pair and costs no table at all.
+    // average of the oscillation over the step rather than its value. That
+    // was the first version, and differentiating it back against the
+    // rendered composite gave 8.0e-3 of error against an RDS component whose
+    // own peak is 2.7e-2, so 30 percent of the term it was carrying.
+    // Measured, not estimated. What the lookup does instead is add the
+    // remaining part-interval in closed form, from the pair's two endpoints,
+    // which is exact for the piecewise linear pair and costs no table at
+    // all.
     std::vector<double> subcarrier_pair_{};
     std::vector<double> subcarrier_integral_{};
 

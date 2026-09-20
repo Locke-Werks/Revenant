@@ -291,7 +291,11 @@ public:
     void render(SampleIndex start, dsp::RealSpan out) const;
 
     // The three parts on their own, at the scale they have in the composite.
-    // They sum to render() exactly.
+    //
+    // They sum to render() to within the float rounding and not exactly:
+    // render() adds the pilot and the data in double and rounds once, and
+    // these round each part on its own, so the sum can sit an ulp away. Do
+    // not write a test that compares the two with ==.
     void render_rds_only(SampleIndex start, dsp::RealSpan out) const;
     void render_pilot_only(SampleIndex start, dsp::RealSpan out) const;
     void render_audio_only(SampleIndex start, dsp::RealSpan out) const;

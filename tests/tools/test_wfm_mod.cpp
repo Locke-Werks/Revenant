@@ -120,10 +120,13 @@ TEST_CASE("the FM phase is the integral of the composite", "[tools][wfm]")
     // So this differentiates the integral back and compares it against the
     // composite the same object renders. Fourth order central difference,
     // whose error is O(h^4) against the fifth derivative, so it has to run
-    // at a rate where the 57 kHz subcarrier is oversampled properly: at the
-    // station rate there are twelve samples per subcarrier cycle and the
-    // difference is 0.3 percent out on its own. Sixteen times that is
-    // 192 samples a cycle and the difference error drops below 1e-7.
+    // at a rate where the 57 kHz subcarrier is oversampled properly. At the
+    // station rate there are exactly twelve samples per subcarrier cycle,
+    // which puts the difference's own error term near a quarter of a
+    // percent; sixteen times that is 192 samples a cycle and the same term
+    // is four orders smaller. The figure the run actually reaches is in the
+    // INFO line below rather than asserted as a constant here, because it
+    // is a property of the difference and not of the code under test.
     constexpr dsp::SampleRate kFineRate = 16 * kStationRate;
     constexpr std::size_t kWindow = 20000;
 
