@@ -963,6 +963,19 @@ interface AudioSubscription {
 # as of 2026-09-20, so a decoder joins whatever is already listening instead
 # of displacing it. It costs a receiver rather than a listener now.
 #
+# AND THAT RECEIVER COSTS MORE GPU THAN A LISTENING ONE, NOT LESS. The audio
+# decimation FIR runs at the OUTPUT rate, one detector evaluation per tap per
+# output sample, and for a discriminator each of those is an atan2, so the
+# count is output_rate * audio_taps:
+#
+#   listening   48000 x 353 = 16.9 M atan2/s
+#   RDS        171000 x 103 = 17.6 M atan2/s
+#
+# Fewer taps, three and a half times the rate, 3.9 percent more work. Four
+# percent is small enough that it changes nothing a client plans, which is
+# why the number is here rather than a warning; docs/rpc.md said "slightly
+# LESS GPU than a listening receiver" and the retraction is in place there.
+#
 # AND audioRate HAS TO BE STATED, not left at zero. VrxParams::audioRate is a
 # verbatim echo on the way out, so a receiver that took the engine's default
 # reads back as zero, and EngineInfo does not carry that default. The server

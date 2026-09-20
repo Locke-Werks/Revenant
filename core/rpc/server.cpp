@@ -250,6 +250,24 @@
 // has run. Eight decoders would be 1.2 ms of a 12 ms interval, still inside
 // it and no longer negligible, and that is the point at which a decoder
 // wants its own thread rather than the sink.
+//
+// AND IT COSTS MORE GPU THAN A LISTENING RECEIVER, NOT LESS
+//
+// docs/rpc.md carried "slightly LESS GPU than a listening receiver: the
+// audio FIR runs at the output rate and needs 103 taps instead of 353", and
+// the arithmetic in that same sentence disproves it. core/dsp/
+// vrx_reference.cpp runs the audio decimation FIR at the OUTPUT rate, one
+// detector evaluation per tap per output sample, and for a discriminator
+// each of those is an atan2. So the count is output_rate * audio_taps:
+//
+//   listening   48000 x 353 = 16.9 M atan2/s
+//   RDS        171000 x 103 = 17.6 M atan2/s
+//
+// Fewer taps, three and a half times the rate, and the product is 3.9
+// percent higher. Four percent is still small and small was the point being
+// made; "less" was the wrong word for it and is retracted here as well as
+// there, because a reader sizing a device off this file should not have to
+// find the doc to learn which way the inequality runs.
 
 #include "core/rpc/server.h"
 

@@ -458,9 +458,27 @@ decimates by two, so its audio filter's passband edge lands at 68400 Hz and the
 whole composite to 59375 survives. At the usual 48 kHz the demodulation rate is
 336 kHz, the passband edge is 19.2 kHz, and 57 kHz is deep in the stopband.
 171000 is three times the subcarrier and 144 times the bit rate, both exact,
-and it is `decode::RdsBitsConfig::rate`'s default. No new kernel, no readback,
-no resampling, and slightly LESS GPU than a listening receiver: the audio FIR
-runs at the output rate and needs 103 taps instead of 353.
+and it is `decode::RdsBitsConfig::rate`'s default. No new kernel, no readback
+and no resampling.
+
+**IT COSTS MORE GPU THAN A LISTENING RECEIVER, NOT LESS.** This paragraph used
+to end "slightly LESS GPU than a listening receiver: the audio FIR runs at the
+output rate and needs 103 taps instead of 353", and the arithmetic in that same
+sentence disproves it. `core/dsp/vrx_reference.cpp` runs the audio decimation
+FIR at the OUTPUT rate, one detector evaluation per tap per output sample, and
+for a discriminator each of those evaluations is an `atan2`. So the count is
+`output_rate * audio_taps`:
+
+    listening   48000 x 353 = 16.9 M atan2/s
+    RDS        171000 x 103 = 17.6 M atan2/s
+
+Fewer taps, three and a half times the rate, and the product is 3.9 percent
+higher. The tap counts are what the planner designs: 48 kHz of audio demodulates
+at 336000 and decimates by seven, 171000 demodulates at 342000 and decimates by
+two, and `kaiser_taps_for(80 dB, 0.1 * audio_rate / demod_rate)` rounded up to
+odd gives 353 and 103. The error arrived with the task brief that asked for this
+decoder and was repeated rather than checked. Four percent is still small, and
+small is the honest claim; "less" was not.
 
 **It is a dedicated receiver, and the rate is what makes it one** rather than
 the sink. The schema used to say this call took the receiver's audio sink and
