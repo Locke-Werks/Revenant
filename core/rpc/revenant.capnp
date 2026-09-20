@@ -1766,6 +1766,20 @@ interface Session {
     # it left. Every retune and not only one that moved the centre: the
     # server is handed a whole VrxParams and cannot tell a wider filter from
     # a hundred kilohertz away without keeping a copy that could go stale.
+    #
+    # AND IT CLEARS THE STREAM AND NOT ONLY THE STRUCT, which is a distinct
+    # promise and was not kept until 2026-09-20. A retune is queued to the
+    # engine's recording thread and applied at a block boundary, so the
+    # frames already recorded carry the OLD tuning and arrive after the
+    # reset. Those are discarded now rather than decoded, so the first
+    # samples this decoder sees after a retune are the first samples of the
+    # station it was moved to. Before, they were the station it left,
+    # arriving into a freshly cleared decoder and reading as the new one.
+    #
+    # What that costs a client is the reacquisition it was already paying,
+    # plus up to the engine's pipeline depth of composite. Nothing in the
+    # counters says which chunks went: samplesConsumed starts from the first
+    # one kept.
     rdsStation @14 (vrx :UInt64) -> (station :RdsStation);
 
     # The region the decoder for this receiver uses, and it defaults to rds.

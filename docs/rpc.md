@@ -508,6 +508,20 @@ filter from a hundred kilohertz away without keeping a copy that could go
 stale, and a receiver that moved is on a different transmitter whose PS and
 RadioText would otherwise be assembled over the old one's.
 
+**The reset fences the stream and not only the struct**, which is a second
+thing and was not done until 2026-09-20. `Engine::set_vrx_params` QUEUES a
+control op; the recording thread applies it at the next block boundary, and
+every frame already recorded is the old tuning and still on its way. Clearing
+the decoder on the loop thread and stopping there handed those frames to a
+decoder that had just been told it was somewhere else, so the old station's
+bits became the new station's first samples. That reads as a decode rather
+than as staleness, which is the worse of the two failures. `AudioChunk` now
+carries a per-receiver `tuning_epoch`, the graph moves it when it applies a
+retune, and the decoder discards until it crosses the boundary. Two retunes
+back to back wait for two boundaries. The one case it does not fence is a
+retune arriving before the decoder has seen a single chunk, where there is no
+epoch to fence against and nothing accumulated to protect.
+
 **The region defaults to `rds` and is per receiver**, unlike
 `setDetectionThreshold`, because two receivers can sit on two continents.
 Nothing infers it: no field names the region, the PI cannot decide it because

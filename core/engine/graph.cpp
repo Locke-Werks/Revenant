@@ -640,6 +640,12 @@ struct Graph::Impl {
         // between them.
         VrxParams recording_params;
 
+        // How many retunes have been APPLIED to this receiver, recording
+        // thread only, snapshotted into every frame and delivered on every
+        // AudioChunk. See AudioChunk::tuning_epoch for what a consumer does
+        // with it and why the boundary cannot be drawn on the control plane.
+        std::uint64_t recording_epoch = 0;
+
         std::unique_ptr<VrxStage> stage;
 
         // One per frame in flight, so a frame never waits on another frame's
@@ -732,6 +738,11 @@ struct Graph::Impl {
         std::size_t readback_index = 0;
         StageOutput output{};
         double squelch_dbfs = kSilenceFloorDbfs;
+
+        // Snapshotted with the sink and for the same reason: a retune
+        // applied while this frame is in flight must not restamp samples
+        // the old tuning produced.
+        std::uint64_t tuning_epoch = 0;
 
         // The passband this frame recorded for this receiver, if any. The
         // view is held by value in the snapshot so that a detach landing
@@ -1014,6 +1025,20 @@ struct Graph::Impl {
                 for (auto& slot : active) {
                     if (slot->id == op.id) {
                         slot->recording_params = op.params;
+
+                        // BEFORE the stage is asked, and moved whatever it
+                        // answers. This is the boundary every chunk from
+                        // here on is stamped with, and the frames already
+                        // recorded keep the old number, which is the whole
+                        // of what AudioChunk::tuning_epoch is for. Moving
+                        // it on the refusal below as well costs a consumer
+                        // one reacquisition in a case the counter under it
+                        // says must never happen; not moving it would make
+                        // the epoch mean "the tuning changed", which the
+                        // recording thread is not in a position to know
+                        // without asking the stage what it did with six
+                        // fields.
+                        ++slot->recording_epoch;
 
                         // COUNTED, NOT DISCARDED. There is no caller left
                         // to return this to: the op is on the recording
@@ -1590,6 +1615,7 @@ struct Graph::Impl {
             chunk.samples = std::span<const float>(audio.data(), audio.size());
             chunk.channels = entry.output.channels;
             chunk.squelch_open = open;
+            chunk.tuning_epoch = entry.tuning_epoch;
 
             if (entry.sink != nullptr && *entry.sink) {
                 if (auto delivered = (*entry.sink)(chunk); !delivered) {
@@ -3656,6 +3682,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
             entry.readback_index = frame_index;
             entry.output = *recorded;
             entry.squelch_dbfs = slot->recording_params.squelch_dbfs;
+            entry.tuning_epoch = slot->recording_epoch;
 
             // Snapshotted the same way the audio sink is, so detaching never
             // races a delivery already under way. The transform itself is

@@ -368,6 +368,37 @@ struct AudioChunk {
     // Defaulted true so a producer that does not gate says nothing about a
     // gate. It is not a claim that the signal was strong.
     bool squelch_open = true;
+
+    // Which tuning produced these samples. Zero when the receiver was added,
+    // and one higher for every retune the graph has APPLIED to it, so it is
+    // monotonic per receiver and means nothing across two of them.
+    //
+    // WHAT IT EXISTS TO CLOSE, WHICH IS AN ORDERING AND NOT A VALUE. A
+    // consumer that accumulates state about the transmitter it is hearing,
+    // and there is one, has to throw that state away when the receiver is
+    // pointed somewhere else. It cannot do that when set_vrx_params returns:
+    // that call only QUEUES a control op, the recording thread applies it at
+    // the next block boundary, and every frame already recorded is still the
+    // old tuning and still on its way. A consumer resetting on the call
+    // therefore resets and is then handed the old station again, which is
+    // the one arrangement worse than not resetting at all, because the
+    // result reads as the new station.
+    //
+    // So the boundary is here, on the chunk, where it is exact: the first
+    // chunk carrying a higher number is the first sample of the new tuning,
+    // and everything at or below the old number is the old one however late
+    // it arrives. core/rpc/server.cpp's RDS decoder is the consumer this was
+    // added for; a recording and a loudspeaker both ignore it, which is
+    // right, because an operator dragging a dial wants the audio to follow
+    // the dial rather than to gap.
+    //
+    // IT COUNTS APPLIED RETUNES AND NOT CHANGES OF TUNING. A retune the
+    // stage refuses still moves it, because the control op was applied and
+    // GraphStats::vrx_retune_refusals is required to stay at zero anyway. A
+    // consumer that reset for one of those pays a reacquisition on a
+    // receiver that did not move, which is the cheap direction to be wrong
+    // in when the expensive one is text from two stations in one struct.
+    std::uint64_t tuning_epoch = 0;
 };
 
 using AudioSink = std::function<Status(const AudioChunk&)>;
