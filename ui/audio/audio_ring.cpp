@@ -222,24 +222,28 @@ void AudioRing::write(const rpc::AudioChunk& chunk)
     next_index_ = chunk.sample_index + frames64;
 }
 
-ReadResult AudioRing::read(float* out, std::size_t frames)
+ReadResult AudioRing::read(float* out, std::size_t frames, const RingFormat& expect)
 {
+    const std::lock_guard<std::mutex> lock(mutex_);
+
     ReadResult result;
+
+    // Read under the same lock as the samples below, which is the whole
+    // point of expect being an argument. See THE FORMAT AND THE SAMPLES
+    // COME BACK TOGETHER on the declaration.
+    result.format = format_;
+    result.format_moved = format_ != expect;
+    result.last_source = last_source_;
+
     if (out == nullptr || frames == 0) {
-        const std::lock_guard<std::mutex> lock(mutex_);
-        result.last_source = last_source_;
         return result;
     }
 
-    const std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!format_.valid()) {
-        // No stream yet, so there is no channel count and this object does
-        // not know how long the caller's buffer is. It is LEFT UNTOUCHED
-        // and the whole request is reported as starved, which is the one
-        // exception to read() always filling; see the note on the
-        // declaration. The caller takes its format from this object, so it
-        // has nothing to have opened a sink with here.
+    if (result.format_moved || !format_.valid()) {
+        // Either the stream changed shape under the caller or there is no
+        // stream at all. Both leave the buffer ALONE, because only the
+        // caller knows how many floats it holds, and both report the whole
+        // request as starved because silence is what the card gets.
         result.frames_starved = frames;
         counts_.frames_starved += frames;
         return result;

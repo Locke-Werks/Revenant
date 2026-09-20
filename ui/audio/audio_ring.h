@@ -176,6 +176,16 @@ struct ReadResult {
     std::size_t frames_from_ring = 0;
     std::size_t frames_starved = 0;
 
+    // The format the ring held UNDER THE LOCK THIS READ TOOK, which is the
+    // only report of it a reader can act on. See THE FORMAT AND THE
+    // SAMPLES COME BACK TOGETHER on read().
+    RingFormat format;
+
+    // The ring's format is not the one the caller asked to read at, so
+    // nothing was copied and the caller's buffer was not touched. The
+    // frames are counted as starved because that is what the card plays.
+    bool format_moved = false;
+
     // What the LAST frame handed over was, which is what is about to come
     // out of the speaker rather than what most recently arrived. That is
     // the whole reason the sources are carried through the ring: an
@@ -232,21 +242,44 @@ public:
 
     // Consumer. Called on whatever thread QAudioSink pulls on.
     //
-    // ALWAYS FILLS THE WHOLE REQUEST, padding with zeros when the ring is
-    // short. A QIODevice that returns fewer bytes than asked for is a
-    // QAudioSink that goes Idle and stops, so a network hiccup would end
-    // the stream rather than dip it. The padding is counted and reported as
-    // FrameSource::starved, so a dip is visible instead of merely inaudible.
+    // THE FORMAT AND THE SAMPLES COME BACK TOGETHER, WHICH IS WHY expect IS
+    // AN ARGUMENT
     //
-    // out holds frames * channel_count floats.
+    // expect is the format the CALLER's buffer is sized for, and it is
+    // compared against the ring's inside the one lock this call takes. The
+    // reader is QAudioSink's own pull thread and the writer is the Cap'n
+    // Proto event loop, so a rate or channel-count change genuinely lands
+    // between any two calls a reader makes. Asking format() and then
+    // read() is two locked calls that can disagree, and the disagreement
+    // is a buffer sized for one channel count filled at another.
     //
-    // THE ONE EXCEPTION, stated because the sentence above would otherwise
-    // be false: with no format established there is no channel count, so
-    // this object does not know how long the caller's buffer is and LEAVES
-    // IT UNTOUCHED, reporting the whole request as starved. A caller takes
-    // its format from format() and has nothing to open a sink with at that
-    // point, so it does not reach here; RingSource checks anyway.
-    [[nodiscard]] ReadResult read(float* out, std::size_t frames);
+    // WHAT THE READER DOES WHEN IT FINDS THE FORMAT MOVED. Nothing is
+    // copied, nothing is consumed, THE CALLER'S BUFFER IS LEFT UNTOUCHED,
+    // and the result carries format_moved with the ring's new format in
+    // format. The buffer is left alone rather than zeroed for the same
+    // reason the no-stream case leaves it alone: only the caller knows how
+    // many floats the sink asked for, because the sink's channel count is
+    // not always the ring's. So the caller fills its own silence at its
+    // own width and waits for its owner to reopen at the new format. The
+    // whole request is counted as starved, because starved is what the
+    // card is about to play.
+    //
+    // ALWAYS FILLS THE WHOLE REQUEST OTHERWISE, padding with zeros when
+    // the ring is short. A QIODevice that returns fewer bytes than asked
+    // for is a QAudioSink that goes Idle and stops, so a network hiccup
+    // would end the stream rather than dip it. The padding is counted and
+    // reported as FrameSource::starved, so a dip is visible instead of
+    // merely inaudible.
+    //
+    // out holds frames * expect.channel_count floats.
+    //
+    // THE OTHER CASE THAT LEAVES THE BUFFER ALONE: with no format
+    // established there is no channel count, so this object does not know
+    // how long the caller's buffer is. A caller takes its format from a
+    // previous read or from format() and has nothing to open a sink with
+    // at that point, so it does not reach here; RingSource checks anyway.
+    [[nodiscard]] ReadResult read(float* out, std::size_t frames,
+                                  const RingFormat& expect);
 
     // Forgets the stream and everything buffered, and leaves the counters
     // where they are: they describe one subscription and reset() is called

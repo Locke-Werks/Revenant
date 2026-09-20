@@ -135,6 +135,11 @@ private:
     // after a receiver changes rate, and the byte arithmetic here has to
     // follow the sink or it writes the wrong number of bytes into a buffer
     // the sink sized.
+    //
+    // Handed to AudioRing::read rather than checked against format() first,
+    // so the comparison and the copy happen under one lock. See that
+    // declaration: the two-call form was a real race between this thread
+    // and the Cap'n Proto event loop, not a theoretical one.
     RingFormat stream_;
 
     // The sink's channel count, which is stream_.channel_count except on a

@@ -63,25 +63,34 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
     const auto out_bytes = static_cast<std::size_t>(frames) *
                            static_cast<std::size_t>(frame_bytes);
 
-    // The stream changed shape under an open sink, which is one timer tick
-    // at most: the ring re-establishes on the first chunk at the new rate
-    // and tick() reopens the sink. Silence for that tick rather than the
-    // new stream's samples, because playing them through a sink opened at
-    // the old rate is a tape at the wrong speed.
-    if (ring_.format() != stream_) {
-        std::memset(data, 0, out_bytes);
-        last_source_.store(FrameSource::starved, std::memory_order_relaxed);
-        return frames * frame_bytes;
-    }
-
     const std::size_t in_channels = stream_.channel_count;
     const std::size_t floats = frames * in_channels;
     if (scratch_.size() < floats) {
         scratch_.resize(floats);
     }
 
-    const ReadResult result = ring_.read(scratch_.data(), frames);
+    // stream_ goes IN, so the ring compares it against its own format under
+    // the one lock it takes for the copy. Asking format() first and read()
+    // second is two locked calls with a window between them, and the writer
+    // is the Cap'n Proto event loop: a receiver that changed rate in that
+    // window would be copied into scratch_ at the new channel count while
+    // every length here was worked out from the old one.
+    const ReadResult result = ring_.read(scratch_.data(), frames, stream_);
     last_source_.store(result.last_source, std::memory_order_relaxed);
+
+    if (result.format_moved) {
+        // The stream changed shape under an open sink, which is one timer
+        // tick at most: the ring re-establishes on the first chunk at the
+        // new rate and tick() reopens the sink. The ring copied nothing and
+        // left scratch_ alone, so the silence is written here at the SINK's
+        // channel count, which is the only width that fits this buffer.
+        // Silence rather than the new stream's samples, because playing
+        // those through a sink opened at the old rate is a tape at the
+        // wrong speed.
+        std::memset(data, 0, out_bytes);
+        last_source_.store(FrameSource::starved, std::memory_order_relaxed);
+        return frames * frame_bytes;
+    }
 
     if (static_cast<std::size_t>(out_channels_) == in_channels) {
         std::memcpy(data, scratch_.data(), floats * sizeof(float));

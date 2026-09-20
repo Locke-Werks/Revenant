@@ -7,14 +7,16 @@
 // behaviour. The shapes the ring can be in are enumerated at the top of
 // audio/audio_ring.h; the ones reached below are the first chunk, a
 // contiguous run, a gap from the wire, a gap from upstream, a gap that does
-// not fit, an overrun, a starve, a closed gate, a format change, a
-// malformed chunk and a backwards index.
+// not fit, an overrun, a starve, a closed gate, a format change, a read at
+// a format the ring has already left, a malformed chunk and a backwards
+// index.
 //
 // WHAT IS NOT HERE. Nothing with a sound card in it: see the block above
 // the target in ui/CMakeLists.txt.
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cstdint>
 #include <random>
 #include <vector>
@@ -26,6 +28,7 @@ using revenant::ui::AudioRing;
 using revenant::ui::FrameSource;
 using revenant::ui::ReadResult;
 using revenant::ui::RingCounts;
+using revenant::ui::RingFormat;
 
 namespace {
 
@@ -49,12 +52,14 @@ constexpr std::size_t kCapacity = 4800;
     return chunk;
 }
 
-// A ring with a stream already established, so a test that is about the
-// arithmetic does not repeat the setup.
+// Reads at whatever format the ring currently holds, which is what a test
+// about the arithmetic wants. The two calls cannot disagree here the way
+// they can in RingSource: nothing is writing to the ring on another thread.
 [[nodiscard]] ReadResult drain(AudioRing& ring, std::vector<float>& out, std::size_t frames)
 {
-    out.assign(frames, -99.0F);
-    return ring.read(out.data(), frames);
+    const revenant::ui::RingFormat format = ring.format();
+    out.assign(frames * std::max<std::size_t>(format.channel_count, 1), -99.0F);
+    return ring.read(out.data(), frames, format);
 }
 
 }  // namespace
@@ -282,12 +287,57 @@ TEST_CASE("a read before any stream leaves the buffer alone", "[audio][ring]")
     ring.set_depth_millis(kDepthMs);
 
     std::vector<float> out(64, -99.0F);
-    const ReadResult got = ring.read(out.data(), 64);
+    const ReadResult got = ring.read(out.data(), 64, RingFormat{});
 
     CHECK(got.frames_from_ring == 0);
     CHECK(got.frames_starved == 64);
     CHECK(out[0] == -99.0F);
     CHECK(out[63] == -99.0F);
+}
+
+TEST_CASE("a read at the wrong format takes nothing and says so", "[audio][ring]")
+{
+    // REJECTS: asking format() and then read(), which is what this class
+    // used to make a reader do. The reader is QAudioSink's pull thread and
+    // the writer is the Cap'n Proto event loop, so a chunk at a new channel
+    // count lands between those two calls often enough to matter: the
+    // reader sizes its buffer for one channel and the ring fills it for
+    // two, which is a write of twice the frames past the end of it. The
+    // format is an argument now so the compare and the copy are one locked
+    // call, and a reader that is behind gets nothing rather than the wrong
+    // thing.
+    AudioRing ring;
+    ring.set_depth_millis(kDepthMs);
+
+    ring.write(make_chunk(0, 480, 0.5F));
+    const RingFormat opened = ring.format();
+
+    // The receiver came back at another rate, which is a remove and an add
+    // on the engine's side and re-establishes the ring.
+    ring.write(make_chunk(0, 480, 0.75F, true, 0, 16000, 1));
+    REQUIRE(ring.format() != opened);
+
+    std::vector<float> out(240, -99.0F);
+    const ReadResult got = ring.read(out.data(), 240, opened);
+
+    CHECK(got.format_moved);
+    CHECK(got.format == ring.format());
+    CHECK(got.frames_from_ring == 0);
+    CHECK(got.frames_starved == 240);
+
+    // Untouched, because only the caller knows how many floats it holds:
+    // the sink's channel count is not always the ring's.
+    CHECK(out[0] == -99.0F);
+    CHECK(out[239] == -99.0F);
+
+    // And nothing was consumed, so the audio at the new format is still
+    // there for the reader that reopens at it.
+    CHECK(ring.frames_buffered() == 480);
+
+    const ReadResult again = drain(ring, out, 240);
+    CHECK_FALSE(again.format_moved);
+    CHECK(again.frames_from_ring == 240);
+    CHECK(out[0] == 0.75F);
 }
 
 TEST_CASE("a closed gate reads back as gated and not as audio", "[audio][ring]")
@@ -446,7 +496,7 @@ TEST_CASE("stereo is counted in frames and not in samples", "[audio][ring]")
 
     std::vector<float> out;
     out.assign(240 * 2, -99.0F);
-    const ReadResult got = ring.read(out.data(), 240);
+    const ReadResult got = ring.read(out.data(), 240, ring.format());
     CHECK(got.frames_from_ring == 240);
     CHECK(out[0] == 0.25F);
     CHECK(out[479] == 0.25F);
