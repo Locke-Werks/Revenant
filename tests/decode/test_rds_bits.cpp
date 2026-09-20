@@ -53,6 +53,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <numbers>
 #include <span>
 #include <string>
@@ -92,6 +93,50 @@ struct Decoded {
     REQUIRE(sync.has_value());
     sync->process(dsp::ConstRealSpan(composite));
     return Decoded{sync->drain(), sync->status()};
+}
+
+// A recovered bit and the input sample the decoder was on when it handed the
+// bit over. BitSink carries the bit and nothing else, so the only way to ask
+// where in a recording a bit came from is to read samples_consumed from
+// inside the sink, which is what this does.
+struct TimedBit {
+    std::uint8_t value = 0;
+    std::uint64_t sample = 0;
+};
+
+[[nodiscard]] std::vector<TimedBit> decode_timed(const std::vector<float>& composite,
+                                                 const decode::RdsBitsConfig& config,
+                                                 decode::RdsBitsStatus& status_out)
+{
+    auto sync = decode::RdsBitSync::create(config);
+    REQUIRE(sync.has_value());
+
+    std::vector<TimedBit> out;
+    const decode::BitSink sink = [&out, &sync](bool bit) {
+        out.push_back(TimedBit{static_cast<std::uint8_t>(bit ? 1 : 0),
+                               sync->status().samples_consumed});
+    };
+
+    constexpr std::size_t kChunk = 4096;
+    for (std::size_t offset = 0; offset < composite.size(); offset += kChunk) {
+        const std::size_t count = std::min(kChunk, composite.size() - offset);
+        sync->process(dsp::ConstRealSpan(composite.data() + offset, count), sink);
+    }
+    status_out = sync->status();
+    return out;
+}
+
+[[nodiscard]] std::vector<std::uint8_t> bits_between(const std::vector<TimedBit>& timed,
+                                                     std::uint64_t first,
+                                                     std::uint64_t last)
+{
+    std::vector<std::uint8_t> out;
+    for (const TimedBit& bit : timed) {
+        if (bit.sample >= first && bit.sample < last) {
+            out.push_back(bit.value);
+        }
+    }
+    return out;
 }
 
 struct Alignment {
@@ -575,6 +620,131 @@ TEST_CASE("bit error rate against Eb/N0", "[decode][rds]")
         CHECK(ber <= previous);
         previous = ber;
     }
+}
+
+TEST_CASE("a fade does not leave a stale window certifying the relock", "[decode][rds]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // WHAT THIS CASE IS FOR
+    //
+    // Losing the signal and getting it back is the one state transition a
+    // broadcast decoder makes constantly and the rest of this file never
+    // makes: every other case here starts from silence and ends locked. The
+    // failure it guards is that the two reacquisition paths in run_timing do
+    // not clear the same state. The deliberate one, the unlock run, clears
+    // the biphase consistency window along with the timing scan. The carrier
+    // coherence gate did not, so a decoder that faded out and back restarted
+    // its 96-bit scan against a window still holding 256 pre-fade hits, and
+    // the first bit after the scan read as 0.98 consistency and cleared the
+    // lock threshold before a single bit of the recovered signal had been
+    // looked at.
+    //
+    // The recovery is a ramp rather than a step because that is what puts the
+    // scan where it does damage. A signal that snaps back to full strength is
+    // scanned at full strength and the scan picks the right phase anyway; a
+    // signal climbing out of a null crosses the coherence gate while the
+    // 2:1 scan margin is still buried in noise, and the stale window then
+    // certifies whichever of the 32 candidate phases won.
+    constexpr std::size_t kBitCount = 6000;
+    const siggen::RdsModSpec spec = base_spec(kTidyRate, kBitCount);
+    siggen::RdsComposite composite;
+    render(spec, composite);
+    std::vector<float> samples = composite.samples;
+
+    const auto rate = static_cast<double>(kTidyRate);
+    const auto at = [rate](double seconds) {
+        return static_cast<std::size_t>(seconds * rate);
+    };
+
+    // The collapse is abrupt on purpose. A slow collapse lets the consistency
+    // window fall through the unlock threshold first, which reaches the
+    // reacquisition path that already cleared everything, and the case would
+    // then be exercising the path that was never broken.
+    const std::size_t fade_start = at(1.5);
+    const std::size_t ramp_start = at(2.3);
+    const std::size_t ramp_end = at(3.3);
+    constexpr float kFadeFloor = 0.001F;
+
+    for (std::size_t i = fade_start; i < std::min(ramp_end, samples.size()); ++i) {
+        float gain = kFadeFloor;
+        if (i >= ramp_start) {
+            const auto through = static_cast<float>(i - ramp_start) /
+                                 static_cast<float>(ramp_end - ramp_start);
+            gain = kFadeFloor + (1.0F - kFadeFloor) * through;
+        }
+        samples[i] *= gain;
+    }
+
+    // Away from the fade this is a channel the decoder makes no errors on, so
+    // every error counted below belongs to the fade.
+    auto report =
+        siggen::add_real_awgn(dsp::RealSpan(samples), composite.rds_mean_power,
+                              siggen::NoiseLevel::eb_over_n0_db(14.0, decode::kBitRateHz),
+                              kTidyRate, siggen::derive_seed(kSeed, 0x4641'4445));
+    REQUIRE(report.has_value());
+
+    decode::RdsBitsConfig config;
+    config.rate = kTidyRate;
+    decode::RdsBitsStatus status;
+    const std::vector<TimedBit> timed = decode_timed(samples, config, status);
+
+    INFO(std::format("lock {} bits {} reacquisitions {} quality {:.3f} coherence {:.3f}",
+                     decode::lock_name(status.lock), timed.size(), status.reacquisitions,
+                     status.quality, status.carrier_coherence));
+
+    // The fade has to be counted. status.reacquisitions is the only thing a
+    // caller can read that says the decoder threw its timing away and started
+    // again, and a fade that does not appear in it is a fade the decoder did
+    // not treat as one.
+    CHECK(status.reacquisitions >= 1);
+
+    // Before the fade, the ordinary round trip.
+    const std::vector<std::uint8_t> before = bits_between(timed, 0, fade_start);
+    REQUIRE(before.size() > 512);
+    const Alignment early = align(spec.bits, before, 256);
+    REQUIRE(early.found);
+    INFO(std::format("before: offset {} compared {} errors {}", early.offset, early.compared,
+                     early.errors));
+    CHECK(early.errors == 0);
+
+    // Nothing out of the dead stretch beyond the run-out the coherence
+    // estimator's own time constant costs, which is the same allowance the
+    // round trip makes at the end of a recording.
+    const std::vector<std::uint8_t> during = bits_between(timed, fade_start, ramp_start);
+    INFO(std::format("during the fade: {} bits", during.size()));
+    CHECK(during.size() <= kMaxOverhangBits);
+
+    // Where emission resumed, as a fraction of the way up the ramp. This is
+    // the most direct reading of the defect there is. A decoder that
+    // certifies the relock on a window it filled before the fade resumes one
+    // tracked bit after its 96-bit scan ends. One that refills the window
+    // first cannot resume for another lock_window_bits on top of that, which
+    // is 216 ms, and 216 ms of this ramp is 0.216 of full amplitude.
+    double resumed_gain = 1.0;
+    for (const TimedBit& bit : timed) {
+        if (bit.sample >= ramp_start) {
+            resumed_gain = static_cast<double>(bit.sample - ramp_start) /
+                           static_cast<double>(ramp_end - ramp_start);
+            break;
+        }
+    }
+    INFO(std::format("emission resumed at {:.3f} of the ramp", resumed_gain));
+    CHECK(resumed_gain >= 0.55);
+
+    // And once the signal is back at full strength the decoder is decoding
+    // the signal, not holding a phase it committed to while the signal was
+    // still buried.
+    const std::vector<std::uint8_t> after =
+        bits_between(timed, ramp_end, std::numeric_limits<std::uint64_t>::max());
+    REQUIRE(after.size() > 1000);
+    const Alignment late = align(spec.bits, after, 256);
+    REQUIRE(late.found);
+    const double ber =
+        static_cast<double>(late.errors) / static_cast<double>(late.compared);
+    INFO(std::format("after: offset {} compared {} errors {} overhang {} BER {:.3e}",
+                     late.offset, late.compared, late.errors, late.overhang, ber));
+    CHECK(ber <= 0.01);
 }
 
 TEST_CASE("no pilot on the composite", "[decode][rds]")

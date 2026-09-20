@@ -289,6 +289,16 @@ struct RdsBitsConfig {
     // sqrt(0.25/N), so 256 bits puts 0.60 four sigma above the 0.5 that
     // noise produces and a false lock out of reach; 128 bits would put it at
     // 2.3 sigma, which is about one false lock per hundred windows.
+    //
+    // That argument is about a window measured against the timing phase the
+    // decoder is using now, and it says nothing at all about a window carried
+    // across a reacquisition. Until 2026-09-20 the carrier-coherence gate
+    // restarted the timing scan without clearing the window, so a decoder
+    // coming out of a fade committed to a phase and then read 255 pre-fade
+    // hits plus one new one as 0.99 consistency: four sigma of margin bought
+    // nothing, because the sample was not of the thing being decided.
+    // RdsBitSync::begin_reacquisition is what keeps the two together, and
+    // both ways out of a lock go through it.
     std::size_t lock_window_bits = 256;
 
     // Bits accumulated by the timing acquisition scan before it commits to a
@@ -451,6 +461,25 @@ private:
     // Timing acquisition scan and tracking. Called once the working-rate
     // history holds enough samples to reach the next bit's late point.
     void run_timing(const BitSink* sink);
+
+    // Throw away everything downstream of the carrier loop and start the
+    // timing scan again.
+    //
+    // Both ways out of a lock come through here, and that is the point. They
+    // used to clear different sets of state: the deliberate one cleared the
+    // consistency window with the scan, and the carrier-coherence gate
+    // cleared only the scan. A decoder that faded out and back then ran its
+    // scan against a window still holding a full 256 pre-fade hits, and the
+    // first bit after the scan read as 0.99 consistency and cleared
+    // lock_threshold before one bit of the recovered signal had been looked
+    // at. The window is the evidence the lock decision rests on, so it has to
+    // be evidence about the signal being decoded now.
+    //
+    // Idempotent, because the coherence gate calls it once per bit period for
+    // as long as the carrier stays incoherent. status_.reacquisitions is
+    // counted by the caller rather than here for that reason: one fade is one
+    // reacquisition, not one per bit of it.
+    void begin_reacquisition();
 
     void emit(bool bit, const BitSink* sink);
 

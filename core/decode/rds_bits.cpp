@@ -393,6 +393,35 @@ void RdsBitSync::reset()
     queue_.clear();
 }
 
+void RdsBitSync::begin_reacquisition()
+{
+    status_.lock = RdsLock::Unlocked;
+
+    scanning_ = true;
+    scan_bits_ = 0;
+    std::ranges::fill(scan_accumulator_, 0.0);
+
+    // The window goes with the scan. A consistency figure measured against
+    // the old timing phase says nothing about the new one, and leaving it in
+    // place is what let a relock certify itself on evidence it gathered
+    // before the signal went away.
+    std::ranges::fill(consistency_window_, static_cast<std::uint8_t>(0));
+    consistency_write_ = 0;
+    consistency_filled_ = 0;
+    consistency_hits_ = 0;
+    unlock_run_ = 0;
+
+    // Reported as the coin toss an empty window is, rather than left holding
+    // the last figure the old lock produced. A caller watching quality has to
+    // see the decoder lose confidence, not read 0.99 through a dropout.
+    status_.biphase_consistency = 0.5;
+    status_.quality = 0.0;
+
+    // Clause 1.6 decodes each bit against its predecessor, and the bit before
+    // a dropout is not the predecessor of the bit after it.
+    have_previous_ = false;
+}
+
 // ---------------------------------------------------------------------------
 // Input rate: pilot, mixer, decimator
 // ---------------------------------------------------------------------------
@@ -626,10 +655,15 @@ void RdsBitSync::run_timing(const BitSink* sink)
             // scan run against a rotating constellation picks a phase at
             // random and the tracking loop then holds it, which looks exactly
             // like a lock that will not improve.
-            status_.lock = RdsLock::Unlocked;
-            scanning_ = true;
-            scan_bits_ = 0;
-            std::ranges::fill(scan_accumulator_, 0.0);
+            //
+            // Counted only on the way in. This branch runs once per bit
+            // period for the whole length of a fade, and a counter that
+            // climbed by a thousand on one dropout would say nothing a caller
+            // could read.
+            if (!scanning_) {
+                ++status_.reacquisitions;
+            }
+            begin_reacquisition();
             bit_position_ += bit_period_;
             continue;
         }
@@ -728,15 +762,7 @@ void RdsBitSync::run_timing(const BitSink* sink)
             // that the signal is briefly weak.
             if (++unlock_run_ >= consistency_window_.size()) {
                 ++status_.reacquisitions;
-                scanning_ = true;
-                scan_bits_ = 0;
-                unlock_run_ = 0;
-                consistency_write_ = 0;
-                consistency_filled_ = 0;
-                consistency_hits_ = 0;
-                std::ranges::fill(consistency_window_, static_cast<std::uint8_t>(0));
-                std::ranges::fill(scan_accumulator_, 0.0);
-                status_.lock = RdsLock::Unlocked;
+                begin_reacquisition();
             }
         } else if (status_.lock != RdsLock::Locked) {
             status_.lock = RdsLock::Acquiring;
