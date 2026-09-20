@@ -215,6 +215,32 @@ inline constexpr SampleRate kMinimumRateHz = 125000;
 // EN 50067:1998 clause 2.2 has every information word, checkword, binary
 // number and address transmitted most significant bit first, so the group
 // layer assembles words by shifting each arriving bit in at the bottom.
+//
+// THE SEAM CARRIES NO DISCONTINUITY MARKER, AND THE READER HAS TO KNOW IT
+//
+// The decoder drops bits mid-stream. It stops emitting whenever the lock
+// falls away and starts again wherever it relocks, and it does that at every
+// fade, at every reacquisition, and for the whole of the scan and lock
+// window that follow one. Nothing in this signature says so: two bits
+// arriving back to back through this sink may be two consecutive bits off
+// the air or may have a second of dead carrier between them, and there is no
+// way to tell them apart from here.
+//
+// That is survivable and is not an oversight, because the group layer does
+// not trust bit adjacency in the first place. EN 50067 clause 2.3 frames on
+// the offset words, and core/decode/rds_groups.h hunts for a syndrome match
+// and confirms it block by block before it declares sync. A gap costs it the
+// re-hunt it would have paid anyway on a bad patch, and an unmarked gap
+// costs the same as a marked one.
+//
+// What it is NOT survivable for is anything that reads the bit stream as a
+// continuous recording: counting elapsed bits as elapsed time, timing a
+// clock-time group against the bits either side of it, or measuring a bit
+// error rate against a reference sequence. A caller doing any of those wants
+// RdsBitsStatus::reacquisitions sampled beside the bits, which does move on
+// every drop, or it wants the sink overload and its own timestamping. Stated
+// here rather than fixed with a marker on the seam, because adding one would
+// change the contract for a group layer that does not need it.
 using BitSink = std::function<void(bool)>;
 
 // ---------------------------------------------------------------------------
