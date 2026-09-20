@@ -137,6 +137,88 @@ struct VrxStatus {
     std::uint64_t audio_dropped = 0;
 };
 
+// Mirrors revenant::detect::TrackState ordinal for ordinal, and the schema's
+// TrackState with it. core/rpc/convert.h holds the schema-to-engine asserts
+// and core/rpc/client.cpp holds the schema-to-here ones, which is the same
+// arrangement Demod has above.
+//
+// Pending is here so the ordinals line up and never arrives: the detector
+// publishes Live, Held and Merged only.
+enum class TrackState : std::uint8_t { Pending, Live, Held, Merged };
+
+[[nodiscard]] constexpr const char* track_state_name(TrackState state) {
+    switch (state) {
+        case TrackState::Pending: return "pending";
+        case TrackState::Live: return "live";
+        case TrackState::Held: return "held";
+        case TrackState::Merged: return "merged";
+    }
+    return "unknown";
+}
+
+// One thing the wideband detector is tracking. See the long note on the
+// schema's Detection for what is deliberately absent, which is the tracker's
+// working state and a logical centre nothing can compute yet.
+struct Detection {
+    std::uint64_t id = 0;
+
+    // Absolute radio frequency and occupied bandwidth, integer hertz. Not
+    // Rational, and that is not this layer rounding: the detector rounds once
+    // at measurement out of the frame's exact rational axis, so a ratio here
+    // would dress an estimate up as a grid frequency.
+    //
+    // VrxParams::center is a BASEBAND offset despite what the engine header
+    // calls it, so tuning to this detection is
+    // `params.center = center_hz - info.source_center`. On a source with no
+    // declared centre the two are equal and getting it wrong costs nothing,
+    // which is exactly why it has to be written down.
+    std::int64_t center_hz = 0;
+    std::int64_t bandwidth_hz = 0;
+
+    double snr_2500_db = 0.0;
+    double confidence = 0.0;
+    TrackState state = TrackState::Pending;
+
+    // Absolute source sample indices. Seconds are a difference over
+    // EngineInfo::source_rate, which is the only clock the detector has.
+    std::uint64_t first_seen = 0;
+    std::uint64_t last_seen = 0;
+    std::uint64_t last_detected = 0;
+
+    // Meaningless unless channel_valid.
+    std::uint32_t channel = 0;
+    bool channel_valid = false;
+
+    // Non-zero only while state is Merged.
+    std::uint64_t merged_into = 0;
+
+    [[nodiscard]] constexpr std::uint64_t age_samples() const {
+        return last_seen - first_seen;
+    }
+
+    // Zero while Live.
+    [[nodiscard]] constexpr std::uint64_t silent_samples() const {
+        return last_seen - last_detected;
+    }
+};
+
+struct DetectionList {
+    // Ascending in frequency, and already filtered to the bar the call asked
+    // for.
+    std::vector<Detection> detections;
+
+    // Zero decisions means the detector has not decided yet, which is what
+    // the call that built it answers with. It is not an empty band.
+    std::uint64_t decisions = 0;
+    std::uint64_t last_decision = 0;
+
+    // What the detector holds before the confidence bar, so a short list and
+    // a filtered one are distinguishable.
+    std::uint32_t total = 0;
+
+    double detection_threshold_db = 0.0;
+};
+
 // Unlike engine::SpectrumFrame, this one owns its bins.
 //
 // The engine's version hands out a span valid only for the duration of the

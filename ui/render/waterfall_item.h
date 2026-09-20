@@ -24,6 +24,7 @@
 
 #include <QImage>
 #include <QQuickPaintedItem>
+#include <QSize>
 #include <QtQmlIntegration>
 
 #include <vector>
@@ -66,7 +67,18 @@ protected:
 
 private:
     void takeFrame();
+    void onConnectionChanged();
     void rebuild(int columns, int rows, std::size_t bins);
+
+    // The ring is sized in physical pixels, not logical ones, so one stored
+    // pixel is one screen pixel. QQuickPaintedItem paints into a texture the
+    // size of the item times the window's device pixel ratio, and a ring
+    // built at logical size is therefore blown up on the way out: on the
+    // 1.25 scaling this was checked on it put each column across a pixel and
+    // a quarter, which nearest-neighbour turns into a column repeated at
+    // uneven intervals. Smoothing it instead would smear a one-bin carrier
+    // into something that reads as bandwidth, which is why setSmooth is off.
+    [[nodiscard]] QSize deviceSize() const;
 
     EngineLink* link_ = nullptr;
 

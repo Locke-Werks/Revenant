@@ -71,6 +71,37 @@ public:
     [[nodiscard]] virtual Expected<VrxStatus> vrx_status(std::uint64_t id) = 0;
     [[nodiscard]] virtual Expected<std::vector<std::uint64_t>> vrx_ids() = 0;
 
+    // What the engine's wideband detector is tracking, filtered to this
+    // caller's confidence bar. Polled rather than subscribed: a track list is
+    // a state that changes ten times a second and an older one is of no use,
+    // where a spectrum frame is produced whether anyone looks or not.
+    //
+    // THE FIRST CALL BUILDS THE DETECTOR AND ANSWERS WITH NOTHING
+    //
+    // No detector runs until somebody asks for one, because it costs the
+    // engine real CPU per frame. So the first call starts it and comes back
+    // with an empty list and DetectionList::decisions at zero, which is the
+    // one answer that cannot be confused with a quiet band. Poll again.
+    //
+    // min_confidence is from 0 up to but not including 1, and 1 is refused
+    // rather than answered emptily: a track's confidence approaches 1 without
+    // reaching it, so a bar of 1 would list nothing however strong the signal
+    // is, and an empty list is what a dead band looks like too.
+    //
+    // Fails on an engine built with no spectrum stage, in that engine's own
+    // words, because the detector works on spectrum frames.
+    [[nodiscard]] virtual Expected<DetectionList> detections(double min_confidence) = 0;
+
+    // The detector's other threshold, in dB of SNR in the 2500 Hz reference
+    // bandwidth, and the one that changes what the detector FINDS rather than
+    // what this caller is shown. Engine-wide, so two clients setting it
+    // fight; DetectionList::detection_threshold_db reads back the winner.
+    //
+    // Builds the detector on first use, like detections above, so a client
+    // can set its threshold before polling rather than polling once at the
+    // wrong one.
+    [[nodiscard]] virtual Status set_detection_threshold(double threshold_db) = 0;
+
     // Invoked on the event loop thread. See THREADING above.
     using FrameCallback = std::function<void(const SpectrumFrame&)>;
 

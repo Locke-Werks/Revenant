@@ -1,11 +1,13 @@
 #include "render/waterfall_item.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 
 #include <QColor>
 #include <QPainter>
-#include <QRect>
+#include <QQuickWindow>
+#include <QRectF>
 
 namespace revenant::ui {
 
@@ -18,6 +20,11 @@ WaterfallItem::WaterfallItem(QQuickItem* parent) : QQuickPaintedItem(parent)
     // single bright pixel into a smear that reads as bandwidth.
     setSmooth(false);
     setAntialiasing(false);
+    // Every pixel of this item is written every paint, by an opaque fill
+    // followed by two blits from an RGB32 image with no alpha in it, so the
+    // scene graph does not need to blend the item over what is behind it.
+    // Declaring that is the only way it can know.
+    setOpaquePainting(true);
 }
 
 void WaterfallItem::setLink(EngineLink* link)
@@ -31,6 +38,8 @@ void WaterfallItem::setLink(EngineLink* link)
     link_ = link;
     if (link_ != nullptr) {
         connect(link_, &EngineLink::frameChanged, this, &WaterfallItem::takeFrame);
+        connect(link_, &EngineLink::connectionChanged, this,
+                &WaterfallItem::onConnectionChanged);
     }
     filled_rows_ = 0;
     write_row_ = 0;
@@ -38,14 +47,46 @@ void WaterfallItem::setLink(EngineLink* link)
     update();
 }
 
+void WaterfallItem::onConnectionChanged()
+{
+    if (link_ == nullptr || !link_->connected()) {
+        // History from a link that has just gone away is still history, and
+        // it is what the engine said while it was there. It stays until the
+        // next engine pushes it off the top.
+        return;
+    }
+
+    // A new engine, and the axis under this item has changed with it. Every
+    // stored row was drawn against the previous span, so keeping them would
+    // put a signal at a frequency it was never at. That is the same reason
+    // this file's header gives for discarding history on a resize, and it
+    // applies harder here: a resize keeps the band and only moves the
+    // pixels, where a new engine can be tuned somewhere else entirely.
+    if (!history_.isNull()) {
+        history_.fill(QColor(4, 6, 16));
+    }
+    write_row_ = 0;
+    filled_rows_ = 0;
+    reduced_bins_ = 0;
+    update();
+}
+
 void WaterfallItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry)
 {
     QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.size() != oldGeometry.size()) {
-        rebuild(static_cast<int>(newGeometry.width()), static_cast<int>(newGeometry.height()),
-                reduced_bins_);
+        const QSize wanted = deviceSize();
+        rebuild(wanted.width(), wanted.height(), reduced_bins_);
         update();
     }
+}
+
+QSize WaterfallItem::deviceSize() const
+{
+    const QQuickWindow* const host = window();
+    const qreal ratio = host == nullptr ? 1.0 : host->effectiveDevicePixelRatio();
+    return QSize(std::max(static_cast<int>(std::lround(width() * ratio)), 1),
+                 std::max(static_cast<int>(std::lround(height() * ratio)), 1));
 }
 
 void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
@@ -80,8 +121,12 @@ void WaterfallItem::takeFrame()
         return;
     }
 
-    const int wide = std::max(static_cast<int>(width()), 1);
-    const int tall = std::max(static_cast<int>(height()), 1);
+    // Recomputed per frame rather than only on a resize, because the device
+    // pixel ratio changes with no geometry change at all when the window is
+    // dragged onto a display with another scale factor.
+    const QSize wanted = deviceSize();
+    const int wide = wanted.width();
+    const int tall = wanted.height();
     if (history_.width() != wide || history_.height() != tall ||
         reduced_bins_ != frame.power_db.size()) {
         rebuild(wide, tall, frame.power_db.size());
@@ -125,12 +170,23 @@ void WaterfallItem::paint(QPainter* painter)
     // and together they read top to bottom as oldest to newest.
     const int upper = tall - write_row_;
 
+    // The destination is in the item's own coordinates, which are logical,
+    // and the ring is in physical pixels, so the whole image maps onto the
+    // whole item and the scale works out to one to one. The split between
+    // the two pieces is placed by proportion rather than by counting rows,
+    // because at a fractional device pixel ratio there is no whole logical
+    // row to count: an integer split leaves a seam of background showing
+    // through at the join.
+    const qreal split = height() * static_cast<qreal>(upper) / static_cast<qreal>(tall);
+
     painter->setRenderHint(QPainter::SmoothPixmapTransform, false);
-    painter->drawImage(QRect(0, 0, wide, upper), history_,
-                       QRect(0, write_row_, wide, upper));
+    painter->drawImage(QRectF(0.0, 0.0, width(), split), history_,
+                       QRectF(0.0, static_cast<qreal>(write_row_), static_cast<qreal>(wide),
+                              static_cast<qreal>(upper)));
     if (write_row_ > 0) {
-        painter->drawImage(QRect(0, upper, wide, write_row_), history_,
-                           QRect(0, 0, wide, write_row_));
+        painter->drawImage(
+            QRectF(0.0, split, width(), height() - split), history_,
+            QRectF(0.0, 0.0, static_cast<qreal>(wide), static_cast<qreal>(write_row_)));
     }
 }
 

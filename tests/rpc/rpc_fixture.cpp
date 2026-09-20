@@ -16,9 +16,9 @@ constexpr const char* kSceneShape =
 
 }  // namespace
 
-std::string scene_uri(dsp::SampleIndex samples) {
-    return std::format("synthetic:wideband?rate={}{}&samples={}", kSourceRate, kSceneShape,
-                       samples);
+std::string scene_uri(dsp::SampleIndex samples, dsp::Hertz center_hz) {
+    return std::format("synthetic:wideband?rate={}{}&samples={}&center={}", kSourceRate,
+                       kSceneShape, samples, center_hz);
 }
 
 Harness::~Harness() { shutdown(); }
@@ -39,7 +39,8 @@ Status Harness::open(const HarnessOptions& options) {
     }
     engine_ = std::move(*created);
 
-    if (auto opened = engine_->open_source(scene_uri(options.samples)); !opened) {
+    if (auto opened = engine_->open_source(scene_uri(options.samples, options.center_hz));
+        !opened) {
         return std::unexpected(with_context(opened.error(), "opening the scene"));
     }
 

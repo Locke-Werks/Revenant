@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "core/detect/detector.h"
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
 #include "core/rpc/revenant.capnp.h"
@@ -49,7 +50,22 @@ static_assert(static_cast<std::uint16_t>(schema::Demod::DSB) ==
 static_assert(static_cast<std::uint16_t>(schema::Demod::CW) ==
               static_cast<std::uint16_t>(engine::Demod::Cw));
 
+// The same check for the detector's track state. It matters less than the
+// demodulator's, because a state is read and never written back, but it fails
+// the same silent way: a renumbering makes a held track draw as live, and a
+// display that stopped decaying held tracks would look right until somebody
+// noticed it never removes anything.
+static_assert(static_cast<std::uint16_t>(schema::TrackState::PENDING) ==
+              static_cast<std::uint16_t>(detect::TrackState::Pending));
+static_assert(static_cast<std::uint16_t>(schema::TrackState::LIVE) ==
+              static_cast<std::uint16_t>(detect::TrackState::Live));
+static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
+              static_cast<std::uint16_t>(detect::TrackState::Held));
+static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
+              static_cast<std::uint16_t>(detect::TrackState::Merged));
+
 [[nodiscard]] schema::Demod to_schema(engine::Demod mode);
+[[nodiscard]] schema::TrackState to_schema(detect::TrackState state);
 
 // Rejects an out-of-range ordinal rather than casting it.
 //
@@ -82,6 +98,11 @@ void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& i
 // the copy is not an inefficiency to be optimised away later.
 void write_spectrum_frame(schema::SpectrumFrame::Builder out,
                           const engine::SpectrumFrame& in);
+
+// One track, as the wire carries it. Deliberately lossy: see the note on
+// schema::Detection for which fields of detect::Track are left behind and
+// why.
+void write_detection(schema::Detection::Builder out, const detect::Track& in);
 
 [[nodiscard]] Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in);
 

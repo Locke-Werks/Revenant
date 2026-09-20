@@ -62,6 +62,15 @@ protected:
 
 private:
     void takeFrame();
+    void onConnectionChanged();
+
+    // One column per physical pixel, not per logical one. QQuickPaintedItem
+    // paints into a texture the size of the item times the window's device
+    // pixel ratio, so a trace built at logical width throws away a fifth of
+    // the columns on the 1.25 scaling this was checked on, and does it by
+    // widening each column's bin run rather than by blurring, which is a
+    // real loss of resolution rather than a soft picture.
+    [[nodiscard]] int deviceColumns() const;
 
     // Recomputes the reduction headroom for the current column count. The
     // correction is a function of how many bins one column covers, so it

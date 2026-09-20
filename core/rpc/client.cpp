@@ -93,6 +93,16 @@ static_assert(static_cast<std::uint16_t>(schema::Demod::DSB) ==
 static_assert(static_cast<std::uint16_t>(schema::Demod::CW) ==
               static_cast<std::uint16_t>(Demod::Cw));
 
+// The same pair for the detector's track state, used by read_track_state.
+static_assert(static_cast<std::uint16_t>(schema::TrackState::PENDING) ==
+              static_cast<std::uint16_t>(TrackState::Pending));
+static_assert(static_cast<std::uint16_t>(schema::TrackState::LIVE) ==
+              static_cast<std::uint16_t>(TrackState::Live));
+static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
+              static_cast<std::uint16_t>(TrackState::Held));
+static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
+              static_cast<std::uint16_t>(TrackState::Merged));
+
 // Sets a field for the length of a scope and puts it back on the way out,
 // including out of an exception. Both uses are loop-thread-only fields whose
 // stale value would be read by code running after the scope: a dangling
@@ -318,6 +328,63 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     return out;
 }
 
+// An ordinal with no enumerator is rejected rather than cast, the same as
+// read_demod above. The consequence is quieter here and still wrong: an
+// unknown state would land on whichever of live, held and merged happens to
+// sit at that ordinal, and a display that drew a held track as live would
+// stop decaying anything without ever looking broken.
+[[nodiscard]] Expected<TrackState> read_track_state(schema::TrackState state) {
+    const auto ordinal = static_cast<std::uint16_t>(state);
+    if (ordinal > static_cast<std::uint16_t>(TrackState::Merged)) {
+        return fail(std::format(
+            "track state ordinal {} is not one this client knows; the engine was built against "
+            "a newer schema",
+            ordinal));
+    }
+    return static_cast<TrackState>(ordinal);
+}
+
+[[nodiscard]] Expected<Detection> read_detection(schema::Detection::Reader in) {
+    auto state = read_track_state(in.getState());
+    if (!state) {
+        return std::unexpected(state.error());
+    }
+
+    Detection out;
+    out.id = in.getId();
+    out.center_hz = in.getCenterHz();
+    out.bandwidth_hz = in.getBandwidthHz();
+    out.snr_2500_db = in.getSnr2500Db();
+    out.confidence = in.getConfidence();
+    out.state = *state;
+    out.first_seen = in.getFirstSeen();
+    out.last_seen = in.getLastSeen();
+    out.last_detected = in.getLastDetected();
+    out.channel = in.getChannel();
+    out.channel_valid = in.getChannelValid();
+    out.merged_into = in.getMergedInto();
+    return out;
+}
+
+[[nodiscard]] Expected<DetectionList> read_detection_list(schema::DetectionList::Reader in) {
+    auto rows = in.getDetections();
+
+    DetectionList out;
+    out.detections.reserve(rows.size());
+    for (auto row : rows) {
+        auto detection = read_detection(row);
+        if (!detection) {
+            return std::unexpected(detection.error());
+        }
+        out.detections.push_back(std::move(*detection));
+    }
+    out.decisions = in.getDecisions();
+    out.last_decision = in.getLastDecision();
+    out.total = in.getTotal();
+    out.detection_threshold_db = in.getDetectionThresholdDb();
+    return out;
+}
+
 // Fills a caller-owned frame rather than returning one, so the bins buffer can
 // be reused across frames. The callback holds a const reference for the length
 // of the call and copies whatever it keeps, which client.h already requires of
@@ -398,6 +465,9 @@ public:
     [[nodiscard]] Status set_vrx_params(std::uint64_t id, const VrxParams& params) override;
     [[nodiscard]] Expected<VrxStatus> vrx_status(std::uint64_t id) override;
     [[nodiscard]] Expected<std::vector<std::uint64_t>> vrx_ids() override;
+
+    [[nodiscard]] Expected<DetectionList> detections(double min_confidence) override;
+    [[nodiscard]] Status set_detection_threshold(double threshold_db) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
                                             FrameCallback callback) override;
@@ -718,6 +788,31 @@ Expected<std::vector<std::uint64_t>> ClientImpl::vrx_ids() {
             }
             return out;
         });
+    });
+}
+
+Expected<DetectionList> ClientImpl::detections(double min_confidence) {
+    // Two Expecteds deep and flattened, the same shape as vrx_status and for
+    // the same reason: the outer one is whether the call happened, the inner
+    // one is whether every row carried a state this build can name.
+    auto response = on_loop("detections", [min_confidence](LoopState& state) {
+        auto request = state.session.detectionsRequest();
+        request.setMinConfidence(min_confidence);
+        return request.send().then(
+            [](auto&& reply) { return read_detection_list(reply.getDetections()); });
+    });
+
+    if (!response) {
+        return std::unexpected(response.error());
+    }
+    return std::move(*response);
+}
+
+Status ClientImpl::set_detection_threshold(double threshold_db) {
+    return on_loop("set_detection_threshold", [threshold_db](LoopState& state) {
+        auto request = state.session.setDetectionThresholdRequest();
+        request.setThresholdDb(threshold_db);
+        return request.send().ignoreResult();
     });
 }
 

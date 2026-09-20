@@ -29,6 +29,7 @@ if(TARGET revenant_rpc_server)
         ../support/no_modal_dialogs.cpp
         ../reference/gpu_fixture.cpp
         rpc_fixture.cpp
+        test_rpc_detect.cpp
         test_rpc_session.cpp
         test_rpc_spectrum.cpp
     )

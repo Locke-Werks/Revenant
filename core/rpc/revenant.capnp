@@ -155,7 +155,23 @@ struct SourceStats {
 }
 
 struct VrxParams {
+    # An offset from the source's baseband DC, NOT an absolute radio
+    # frequency, and it is bounded by plus and minus half the source rate.
+    #
+    # Said here because the engine's own header says the opposite and the code
+    # does this: engine::place reads it as an offset, nothing rebases it, and
+    # tools/cli/main.cpp converts on the way in with
+    # `baseband = absolute - source_center`. Baseband is the only frame the
+    # grid has, which is why it wins.
+    #
+    # The consequence that matters for click-to-tune: a Detection's centerHz
+    # is ABSOLUTE and cannot be assigned to this field. Subtract
+    # EngineInfo::sourceCenter first. On a source that declares no centre the
+    # two are the same number and the mistake is invisible; on a radio it is
+    # either a receiver tuned megahertz away or an outright refusal, so it is
+    # not a mistake that shows up gently.
     center @0 :Int64;
+
     bandwidth @1 :Int64;
     demod @2 :Demod;
     audioRate @3 :UInt32;
@@ -221,6 +237,186 @@ struct SpectrumFrame {
     percentileHighDb @8 :Float32;
 }
 
+# Where a detection is in its life, ordinal for ordinal with
+# revenant::detect::TrackState. Same arrangement as Demod above and for the
+# same reason: core/rpc/convert.h static_asserts every pair, so a state
+# renumbered on one side and not the other stops the build rather than making
+# a held track read as a live one.
+enum TrackState {
+    # Never appears on the wire. Detector::tracks() publishes Live, Held and
+    # Merged only, because a pending candidate has not earned an identity yet
+    # and a display that drew one would be drawing the false alarms the birth
+    # rule exists to discard. It is here so the ordinals match, not because a
+    # reader will see it.
+    pending @0;
+
+    live @1;
+
+    # Not detected at the most recent decision, inside its hold, decaying.
+    # docs/ui-spectrum.md wants this drawn rather than dropped: almost
+    # everything worth detecting is intermittent, and a display that removed a
+    # track the moment it went quiet would flicker through CW keying and put a
+    # click on something that had just vanished.
+    held @2;
+
+    # Not detected because another track's band swallowed it. Distinct from
+    # held on purpose: a merged track has evidence, it is simply inside
+    # somebody else's measurement, so it is not decaying. Collapsing the two
+    # loses every id on the far side of a merge.
+    merged @3;
+}
+
+# One thing the wideband detector is tracking, as a display needs it.
+#
+# NOT EVERY FIELD OF revenant::detect::Track, WHICH IS THE POINT
+#
+# Track carries the tracker's own working state as well: hit and miss counts,
+# the signed pre-reduction channel index the hysteresis is carried in, and a
+# classification enum with exactly one value in it. None of that is something
+# a display draws or a click resolves against, and a schema is a contract
+# rather than a mirror. What is here is what docs/ui-spectrum.md asks for:
+# draw every detection above an operator-set confidence, hold it while it
+# decays instead of flickering, and let a click tune to it.
+#
+# THE CENTRE IS A MEASUREMENT AND NOT A TUNING TARGET
+#
+# centerHz is the centre of the measured occupied band, which is what the
+# detector computes and all it computes. docs/ui-spectrum.md is explicit that
+# this is not where a receiver wants to sit for several modes: RTTY is two
+# tones about 170 Hz apart and which one is radiating depends on the character
+# being sent, so a click that lands on the measured centre wobbles with the
+# mark-to-space ratio, and one that lands on the peak dances between the two.
+# SSB is worse and quieter, because the suppressed carrier the receiver is
+# trying to hold sits at the edge of the passband rather than in it.
+#
+# The logical centre those cases want is a property of the MODULATION, and
+# deriving it needs a classification. core/detect/detector.h leaves
+# Track::classification as a deliberate seam that nothing fills, and
+# docs/ui-spectrum.md notes that the enumeration would have to grow before
+# RTTY and its shift were even expressible in VrxParams. So there is no
+# logicalCentreHz field here: it would be a field nothing could fill, and a
+# client reading a measured centre out of a field named "logical" would tune
+# wrong with the wire telling it it was right.
+#
+# What a click-to-tune surface should do with this today is what AFT does with
+# an unidentified signal in docs/ui-spectrum.md: take the measured centre,
+# and hold still rather than guess.
+struct Detection {
+    # Issued in order from one and never reused, so an id names one signal for
+    # the life of the engine process. This is what a click resolves against
+    # and what a display keys a row on across polls.
+    id @0 :UInt64;
+
+    # Absolute radio frequency, EngineInfo::sourceCenter already added.
+    #
+    # Int64 and not a Rational, and that is not the schema rounding. The
+    # detector rounds to integer hertz once, at measurement, out of the exact
+    # rational frequency axis the frame carries, because a centre derived from
+    # a bin index and an occupied-power fraction is an estimate to well under
+    # a bin and carrying it as a ratio would dress a measurement up as an
+    # exact grid frequency. This is the same distinction the note at the top
+    # of this file draws for channelSpacing and channelRate: a Rational here
+    # would claim an exactness that does not exist upstream of the wire.
+    #
+    # ABSOLUTE IS NOT THE FRAME VrxParams IS IN. Tuning a receiver to this
+    # detection means `VrxParams::center = centerHz - EngineInfo::sourceCenter`,
+    # because the grid works in baseband and nothing rebases for a caller.
+    # See the note on VrxParams::center above, which is where that is settled.
+    centerHz @1 :Int64;
+
+    # Occupied bandwidth: the span holding the detector's occupied-power
+    # fraction of the band's excess over the noise floor, bounded by fine
+    # bins. Integer hertz for the same reason as the centre.
+    #
+    # A click-to-tune surface passes this to VrxParams::bandwidth and then has
+    # to read VrxPlacement::bandwidthClamped back, because a bandwidth wider
+    # than one grid channel does not fail: place() clamps and succeeds, and
+    # the operator gets a receiver narrower than the signal they clicked with
+    # nothing anywhere saying so. docs/detection.md names that as the failure
+    # this pair exists to prevent.
+    bandwidthHz @2 :Int64;
+
+    # Signal to noise in the project's 2500 Hz reference bandwidth, per
+    # docs/snr-convention.md. Stated in that bandwidth rather than per bin
+    # because a per-bin peak is not comparable across bandwidths, which is
+    # exactly what a list holding a 50 Hz carrier and a 200 kHz broadcast
+    # needs it to be.
+    snr2500Db @3 :Float64;
+
+    # Zero to one, rising on evidence and decaying on silence. The track's own
+    # and not any single frame's, which is what makes it worth thresholding:
+    # a transmission does not change modulation halfway through, so a track
+    # that has been up for five seconds has had five seconds of evidence.
+    #
+    # It approaches one without arriving. See Session::detections, which
+    # refuses a bar of one for that reason.
+    confidence @4 :Float64;
+
+    state @5 :TrackState;
+
+    # Absolute source sample indices, the way docs/conventions.md indexes
+    # time. Seconds are (index difference) / EngineInfo::sourceRate, computed
+    # by whoever is drawing rather than here, because the detector reads no
+    # clock at all: every interval it knows is a difference of sample indices
+    # taken from the frames themselves, which is what lets a capture replayed
+    # at forty times realtime produce the same tracks with the same ages.
+    #
+    # lastSeen minus lastDetected is how long this has been holding, and is
+    # zero while it is live. lastSeen minus firstSeen is its age.
+    firstSeen @6 :UInt64;
+    lastSeen @7 :UInt64;
+    lastDetected @8 :UInt64;
+
+    # The coarse channel a receiver on this track would read, with the
+    # hysteresis docs/detection.md requires: place() takes the nearest channel
+    # by rounding, so a track parked on a boundary flips on measurement noise
+    # and each flip is a different tap table and a half-megabyte upload.
+    #
+    # Meaningless unless channelValid, which needs the engine's grid, so a
+    # reader checks the flag rather than the value. A display uses it to warn
+    # that a track sits where a small retune is expensive.
+    channel @9 :UInt32;
+    channelValid @10 :Bool;
+
+    # The track this one was merged into, while state is merged. Zero
+    # otherwise, and never a valid id, because ids are issued from one.
+    mergedInto @11 :UInt64;
+}
+
+# One answer to Session::detections.
+struct DetectionList {
+    # Ascending in frequency, holding those detections whose confidence
+    # reaches the bar the request asked for.
+    detections @0 :List(Detection);
+
+    # Decisions the detector has taken since this server built it, and the
+    # source sample index the most recent one was taken at.
+    #
+    # Both are here because an empty list has two causes a client cannot
+    # otherwise tell apart. A detector that has not decided yet reports zero
+    # decisions; one that has decided and found nothing reports a count and a
+    # band that is genuinely quiet. The first server call that asks for
+    # detections is what builds the detector, so the very first answer is
+    # always the former.
+    #
+    # lastDecision also lets a client tell a repeated answer from a fresh one
+    # without diffing the list, which is what a poll wants.
+    decisions @1 :UInt64;
+    lastDecision @2 :UInt64;
+
+    # Detections the detector holds at that decision, before the request's
+    # confidence bar was applied. A short list and a filtered one look
+    # identical without it.
+    total @3 :UInt32;
+
+    # What the detector's detection threshold is set to, in dB of SNR in the
+    # reference bandwidth. Read back rather than assumed: it is engine-wide
+    # mutable state, so a second client may have moved it, and a display that
+    # showed its own last request would be showing a number the detector is
+    # not using.
+    detectionThresholdDb @4 :Float64;
+}
+
 # What a subscriber implements. The engine calls this; the client does not
 # poll, because a poll either lags the frame rate or busies a thread.
 interface SpectrumReceiver {
@@ -253,4 +449,59 @@ interface Session {
     # would have paid for the copy already.
     subscribeSpectrum @9 (receiver :SpectrumReceiver, everyNth :UInt32)
         -> (subscription :SpectrumSubscription);
+
+    # What the wideband detector is tracking right now.
+    #
+    # A poll rather than a subscription, which is the opposite of the choice
+    # made for spectrum frames one method above, so the difference is worth
+    # stating. A spectrum frame is produced whether anyone looks or not and is
+    # worthless a fraction of a second later, so a poll would either lag the
+    # frame rate or tear a frame. A track list is a STATE: it changes ten
+    # times a second at the detector's default decision interval, an older one
+    # is of no use, and a display redraws it on its own timer anyway. Polling
+    # a state costs one small message per poll and needs no capability, no
+    # backpressure rule and no fan-out.
+    #
+    # THE FIRST CALL IS WHAT STARTS THE DETECTOR
+    #
+    # Nothing runs a detector until somebody asks for one, the same way the
+    # server does not start its source-enumeration thread until the first
+    # listSources. The detector costs real CPU on the engine's completion
+    # thread for every frame once it exists, and a headless engine serving a
+    # recorder should not pay it. So the first call installs the spectrum sink
+    # if it is not installed, builds the detector, and answers with zero
+    # decisions: it cannot answer otherwise, because the detector has seen no
+    # frames yet. A client polls again.
+    #
+    # It is refused, with the engine's own words, on an engine built with no
+    # spectrum stage. The detector works on spectrum frames and there are
+    # none, which is a different thing from a quiet band.
+    #
+    # minConfidence is THIS CALLER'S bar and is not stored anywhere. Two
+    # displays with different thresholds get different lists from one
+    # detector, which is what docs/detection.md means by the confidence
+    # threshold belonging to the display: nothing in the detector drops a
+    # track for failing it. Zero passes everything the detector holds.
+    #
+    # A bar of one, or above, is refused rather than answered with an empty
+    # list. A track's confidence rises by a fraction of its remaining distance
+    # to one, so it approaches one and never arrives, and a bar of one lists
+    # nothing however strong the signal is. An empty list is also what a dead
+    # band looks like, so the failure would be invisible.
+    detections @10 (minConfidence :Float64) -> (detections :DetectionList);
+
+    # The detector's other knob, in dB of SNR in the 2500 Hz reference
+    # bandwidth. docs/detection.md: both thresholds belong to the operator,
+    # and neither has a right value that suits a quiet VHF band and an HF
+    # evening at the same time.
+    #
+    # Unlike minConfidence this is engine-wide, because it changes what the
+    # detector FINDS rather than what a caller is shown, and there is one
+    # detector. Two clients setting it fight, and the loser finds out by
+    # reading DetectionList::detectionThresholdDb back.
+    #
+    # It builds the detector on first use, exactly as detections does, so a
+    # client may set a threshold before it polls rather than having to poll
+    # once at the wrong one.
+    setDetectionThreshold @11 (thresholdDb :Float64) -> ();
 }

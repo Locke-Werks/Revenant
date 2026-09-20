@@ -184,6 +184,73 @@ set_target_properties(revenant_ui PROPERTIES
     OUTPUT_NAME revenant-ui
 )
 
+# ---------------------------------------------------------------------------
+# Qt laid down beside the binary, so running it is one command
+# ---------------------------------------------------------------------------
+#
+# The link above resolves Qt6Core.dll and friends from C:/Qt, and nothing
+# puts that directory on PATH. Without this the binary builds, and then
+# double-clicking it raises a loader dialog naming one DLL, which reads as a
+# broken build rather than as a missing environment. Running it from a shell
+# that has been set up by hand works, which is worse: it means the failure
+# only shows up for whoever did not do that.
+#
+# windeployqt copies the Qt DLLs, the platform plugin and the QML runtime the
+# module imports next to the executable. It is a POST_BUILD step rather than
+# an install rule because the build tree is where this gets run from during
+# development, and an install step nobody invokes deploys nothing.
+if(WIN32)
+    get_target_property(revenant_qmake_path Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(revenant_qt_bin "${revenant_qmake_path}" DIRECTORY)
+    find_program(REVENANT_WINDEPLOYQT
+        NAMES windeployqt windeployqt6
+        HINTS "${revenant_qt_bin}"
+    )
+
+    if(REVENANT_WINDEPLOYQT)
+        # --no-compiler-runtime because windeployqt copies the MSVC
+        # redistributable out of VCINSTALLDIR, which is only set inside a
+        # developer prompt, and the vs preset's whole point is that it works
+        # from any shell. Asked for it anyway, it prints a warning and
+        # carries on, which is a warning on every build for a file CMake can
+        # find properly on its own. The copy below is that.
+        add_custom_command(TARGET revenant_ui POST_BUILD
+            COMMAND "${REVENANT_WINDEPLOYQT}"
+                    --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/qml"
+                    --no-translations
+                    --no-system-d3d-compiler
+                    --no-compiler-runtime
+                    "$<TARGET_FILE:revenant_ui>"
+            COMMENT "Deploying Qt beside revenant-ui"
+            VERBATIM
+        )
+
+        # This target is /MD, unlike everything in the engine tree, so it
+        # needs MSVCP140.dll and the VCRUNTIME140 pair beside it on a machine
+        # with no Visual Studio and no redistributable installed. Skipping
+        # the install rules and taking only the list is the documented way to
+        # use this module for a copy.
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+        include(InstallRequiredSystemLibraries)
+        if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+            add_custom_command(TARGET revenant_ui POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+                        "$<TARGET_FILE_DIR:revenant_ui>"
+                COMMENT "Copying the MSVC runtime beside revenant-ui"
+                VERBATIM
+            )
+        endif()
+    else()
+        # A warning and not an error. The binary is correct; it is only
+        # unrunnable without Qt's bin directory on PATH, and someone building
+        # against a Qt that ships no windeployqt can still do that.
+        message(WARNING
+            "windeployqt was not found near ${revenant_qt_bin}. revenant-ui will "
+            "build, and running it will need C:/Qt/.../bin on PATH.")
+    endif()
+endif()
+
 message(STATUS "revenant_ui")
 message(STATUS "  engine tree  ${REVENANT_SOURCE_DIR}")
 message(STATUS "  Qt           ${Qt6_VERSION} at ${QT6_INSTALL_PREFIX}")

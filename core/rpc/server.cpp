@@ -91,11 +91,58 @@
 // engine::Engine has no way to ask whether a spectrum sink is already
 // installed: set_spectrum_sink replaces silently. The file-scope claim list
 // below is the only place that question can be answered.
+//
+// THE DETECTOR LIVES HERE, NOT IN THE ENGINE, AND IT IS BUILT ON DEMAND
+//
+// core/detect/detector.h works on spectrum frames and nothing else, and this
+// server already receives every one of them. There is no detector on
+// engine::Engine and no Engine method that returns tracks, which
+// docs/detection.md lists as one of the things click-to-tune is waiting for;
+// tools/cli/main.cpp solves it by owning a Detector beside its own spectrum
+// sink, and this is the same arrangement one process further out.
+//
+// It is built at the first detections or setDetectionThreshold call rather
+// than at startup, the same way the listing thread is started at the first
+// listSources. A detector is not free: core/detect/detector.h budgets its
+// per-frame accumulation and its ten-a-second decision against 65536 bins,
+// and a headless engine feeding a recorder should not pay either of them for
+// a track list nobody has asked to see.
+//
+// ONE LOCK AROUND THE WHOLE DETECTOR, AND WHY THAT IS THE CHEAP ANSWER
+//
+// The detector is written on the engine's completion thread, inside
+// on_frame, and read on the event loop thread, inside a call. Its own header
+// says one thread owns a Detector and there is no lock inside it, so the lock
+// has to be here.
+//
+// It covers the whole of consume(), which is the expensive half, and that
+// looks like the wrong shape until the other side is counted. The loop thread
+// holds it only to copy a bounded vector of tracks out, or to set one double;
+// neither allocates beyond that copy and neither does I/O. So the completion
+// thread waits for a memcpy and the loop thread waits for at most one
+// consume(). The alternatives are worse in ways that matter: a deferred
+// threshold applied on the completion thread cannot report that the value was
+// out of range, and a published snapshot copied per decision pays a copy on
+// the sample path for every decision whether or not anyone polls.
+//
+// Nothing takes sink_lock_ while holding detect_lock_, which is what keeps
+// ensure_detector's two locks from closing a cycle against stop().
+//
+// A DETECTOR FAILURE MUST NOT TAKE THE ENGINE DOWN
+//
+// The spectrum sink's Status is the engine's: core/engine/graph.cpp turns a
+// failing sink into a failing dispatch, which ends the run. So a consume()
+// that refuses a frame is recorded, detection is switched off, and the sink
+// still returns success. The next detections call reports what happened. The
+// only way consume() can refuse is a geometry that is not the one the
+// detector was built against, which would mean two engines rather than one,
+// and losing the track list is the right price for not losing the radio.
 
 #include "core/rpc/server.h"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -106,6 +153,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -119,6 +167,7 @@
 #include <kj/exception.h>
 #include <kj/memory.h>
 
+#include "core/detect/detector.h"
 #include "core/rpc/convert.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
@@ -229,6 +278,33 @@ constexpr std::size_t kFrameBuffers = 3;
 using SourceListing = std::vector<source::SourceCapabilities>;
 using ListingFulfiller = kj::Own<kj::CrossThreadPromiseFulfiller<SourceListing>>;
 
+// The bounds this file checks a threshold against before it reaches the
+// detector, which checks its own as well.
+//
+// Duplicated on purpose and duplicated NARROWER. Detector::set_thresholds
+// accepts -200 to 200 dB, which are the bounds of the arithmetic rather than
+// of anything an operator means; tools/cli/main.cpp refuses outside -60 to
+// 120 on the command line and this is the same interval said to a GUI. The
+// wider check downstream still runs, so a value this accepts and the detector
+// refuses is a mistake in this file rather than a client's, and the message
+// will say so.
+constexpr double kMinDetectionThresholdDb = -60.0;
+constexpr double kMaxDetectionThresholdDb = 120.0;
+
+// What one detections call takes off the detector, on the loop thread, under
+// detect_lock_.
+//
+// The tracks are copied rather than spanned. Detector::tracks() is valid only
+// until the next consume(), which the completion thread may reach the instant
+// the lock is released, and the capnp message is written after that.
+struct DetectionSnapshot {
+    std::vector<detect::Track> tracks;
+    std::uint64_t decisions = 0;
+    std::uint64_t last_decision = 0;
+    std::uint32_t total = 0;
+    double threshold_db = 0.0;
+};
+
 // One subscriber. Touched only on the event loop thread, so none of it is
 // atomic and none of it is locked.
 //
@@ -318,6 +394,12 @@ public:
     // loop must stay free while it runs.
     [[nodiscard]] kj::Promise<SourceListing> list_sources();
 
+    // Event loop thread, all three. See the detector notes at the top of the
+    // file for why the object is built on demand and locked as a whole.
+    [[nodiscard]] Status ensure_detector();
+    [[nodiscard]] Expected<DetectionSnapshot> detections(double min_confidence);
+    [[nodiscard]] Status set_detection_threshold(double threshold_db);
+
 private:
     void serve(ServerOptions options);
     void announce(Status status);
@@ -366,6 +448,22 @@ private:
     std::condition_variable listing_wake_;
     std::deque<ListingFulfiller> listings_;
     bool listings_closed_ = false;
+
+    // The wideband detector, and everything about it.
+    //
+    // detecting_ is the completion thread's cheap way to skip the lock
+    // entirely on a server nobody has asked for detections. It is set once,
+    // after the detector exists, and cleared once if the detector ever
+    // refuses a frame, so a relaxed load is ordering enough: the worst a
+    // stale read does is feed or skip one frame at the edge.
+    std::mutex detect_lock_;
+    std::atomic<bool> detecting_{false};
+    std::optional<detect::Detector> detector_;
+
+    // Why detection stopped, empty while it has not. See the note at the top:
+    // a detector that refuses a frame must not fail the sink, so the reason
+    // is kept here and reported to the next caller instead.
+    std::string detector_fault_;  // detect_lock_
 
     std::atomic<std::uint16_t> port_{0};
     std::atomic<std::uint64_t> frames_sent_{0};
@@ -555,6 +653,46 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> detections(DetectionsContext context) override {
+        const double bar = context.getParams().getMinConfidence();
+
+        // Refused rather than answered with an empty list, because an empty
+        // list is also what a quiet band looks like and the caller would have
+        // no way to tell. The schema says why one is unreachable.
+        if (!std::isfinite(bar) || bar < 0.0 || bar >= 1.0) {
+            return to_exception(Error{std::format(
+                "minConfidence was {}, and it has to be from 0 up to but not including 1. A "
+                "track's confidence approaches 1 without ever reaching it, so a bar of 1 lists "
+                "nothing however strong the signal is",
+                bar)});
+        }
+
+        auto taken = owner_.detections(bar);
+        if (!taken) {
+            return to_exception(taken.error());
+        }
+
+        auto out = context.getResults().initDetections();
+        auto rows = out.initDetections(static_cast<unsigned>(taken->tracks.size()));
+        for (unsigned i = 0; i < rows.size(); ++i) {
+            write_detection(rows[i], taken->tracks[i]);
+        }
+        out.setDecisions(taken->decisions);
+        out.setLastDecision(taken->last_decision);
+        out.setTotal(taken->total);
+        out.setDetectionThresholdDb(taken->threshold_db);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setDetectionThreshold(SetDetectionThresholdContext context) override {
+        if (auto applied = owner_.set_detection_threshold(
+                context.getParams().getThresholdDb());
+            !applied) {
+            return to_exception(applied.error());
+        }
+        return kj::READY_NOW;
+    }
+
 private:
     ServerImpl& owner_;
 };
@@ -687,10 +825,133 @@ Status ServerImpl::ensure_sink() {
     return {};
 }
 
+Status ServerImpl::ensure_detector() {
+    // The sink first, and its error rather than the detector's. An engine
+    // built with no spectrum stage refuses here in its own words, which names
+    // the config field that has to change; a detector built against an empty
+    // geometry would refuse in terms of bin counts instead.
+    if (auto ready = ensure_sink(); !ready) {
+        return ready;
+    }
+
+    std::scoped_lock held(detect_lock_);
+    if (!detector_fault_.empty()) {
+        return fail(detector_fault_);
+    }
+    if (detector_.has_value()) {
+        return {};
+    }
+
+    const engine::EngineInfo& info = engine_.info();
+
+    detect::DetectorConfig config;
+    config.source_rate = info.source_rate;
+    config.source_center = info.source_center;
+    config.grid_channels = info.grid.channels;
+
+    // Left at its default, and inert. Nothing inside the detector drops a
+    // track for failing it, and every caller of Session::detections passes
+    // its own bar, which is what docs/detection.md means by the confidence
+    // threshold belonging to the display. Setting it from the first caller
+    // would make one client's preference the server's.
+    config.confidence_threshold = detect::DetectorConfig{}.confidence_threshold;
+
+    auto made = detect::Detector::create(config, info.spectrum);
+    if (!made) {
+        return std::unexpected(with_context(made.error(), "building the wideband detector"));
+    }
+    detector_ = std::move(*made);
+
+    // Published last, so the completion thread cannot find a detector that is
+    // still being constructed.
+    detecting_.store(true, std::memory_order_relaxed);
+    return {};
+}
+
+Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence) {
+    if (auto ready = ensure_detector(); !ready) {
+        return std::unexpected(ready.error());
+    }
+
+    std::scoped_lock held(detect_lock_);
+    if (!detector_fault_.empty()) {
+        return fail(detector_fault_);
+    }
+    if (!detector_.has_value()) {
+        return fail("the wideband detector is not running");
+    }
+
+    const std::span<const detect::Track> tracks = detector_->tracks();
+
+    DetectionSnapshot out;
+    out.decisions = detector_->stats().decisions;
+    out.last_decision = detector_->last_decision();
+    out.total = static_cast<std::uint32_t>(tracks.size());
+    out.threshold_db = detector_->config().detection_threshold_db;
+
+    // Filtered here rather than on the client so that a busy band does not
+    // put five hundred rows on the wire for a display that asked for the
+    // handful above its bar. tracks() is already ascending in frequency and a
+    // filter preserves that.
+    out.tracks.reserve(tracks.size());
+    for (const detect::Track& track : tracks) {
+        if (track.confidence >= min_confidence) {
+            out.tracks.push_back(track);
+        }
+    }
+    return out;
+}
+
+Status ServerImpl::set_detection_threshold(double threshold_db) {
+    if (!std::isfinite(threshold_db) || threshold_db < kMinDetectionThresholdDb ||
+        threshold_db > kMaxDetectionThresholdDb) {
+        return fail(std::format(
+            "the detection threshold was {} and it has to be between {} and {} dB of SNR in "
+            "the 2500 Hz reference bandwidth",
+            threshold_db, kMinDetectionThresholdDb, kMaxDetectionThresholdDb));
+    }
+
+    if (auto ready = ensure_detector(); !ready) {
+        return ready;
+    }
+
+    std::scoped_lock held(detect_lock_);
+    if (!detector_fault_.empty()) {
+        return fail(detector_fault_);
+    }
+    if (!detector_.has_value()) {
+        return fail("the wideband detector is not running");
+    }
+
+    // The confidence threshold is passed back unchanged. set_thresholds takes
+    // both because the detector validates them as a pair, and this call is
+    // about the other one.
+    return detector_->set_thresholds(threshold_db, detector_->config().confidence_threshold);
+}
+
 Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
     // The engine's completion thread. It touches no capability and it never
     // waits on the loop thread, which is serving every other client and owes
     // this thread nothing.
+
+    // Before every early return below, because the detector integrates over
+    // about a second and a frame skipped here is energy it never sees. What
+    // the subscribers wanted and what the detector needs are different
+    // questions: a client can ask for every tenth frame and still expect the
+    // track list to be built out of all of them.
+    if (detecting_.load(std::memory_order_relaxed)) {
+        std::scoped_lock held(detect_lock_);
+        if (detector_.has_value()) {
+            if (auto fed = detector_->consume(frame); !fed) {
+                // Recorded and switched off rather than returned. See the
+                // note at the top: this Status is the engine's, and failing
+                // it here would end the run over a track list.
+                detecting_.store(false, std::memory_order_relaxed);
+                detector_fault_ = fed.error().message;
+            }
+        }
+    }
+
     const auto subscribers = subscribers_.load(std::memory_order_relaxed);
     if (subscribers == 0) {
         return {};
@@ -1010,6 +1271,17 @@ void ServerImpl::stop() {
         std::scoped_lock held(frame_lock_);
         pending_.reset();
         spare_.clear();
+    }
+
+    // Released here rather than left to the destructor, for the same reason
+    // the frame buffers are: the detector holds several arrays of one double
+    // per bin, and a Server kept alive after stop() should not be holding a
+    // frame's worth of them. Safe only now, with the gate closed and the loop
+    // joined, because those are the two threads that could be inside it.
+    {
+        std::scoped_lock held(detect_lock_);
+        detecting_.store(false, std::memory_order_relaxed);
+        detector_.reset();
     }
 
     release_engine(engine_);

@@ -72,7 +72,14 @@ inline constexpr std::uint32_t kSpectrumTransform = 256;
 // A scene with something in it. The bins have to carry structure for a case
 // to be able to say they arrived intact, and a frame of pure noise would let
 // a truncated copy pass.
-[[nodiscard]] std::string scene_uri(dsp::SampleIndex samples);
+//
+// center_hz is the real radio frequency baseband DC is a label for, and it
+// reaches EngineInfo::source_center. Zero for every case that does not care,
+// which is most of them; the detection cases pass a real one because a
+// detection is documented as carrying ABSOLUTE frequency with source_center
+// already added, and at a centre of zero absolute and baseband are the same
+// number and the case would prove nothing.
+[[nodiscard]] std::string scene_uri(dsp::SampleIndex samples, dsp::Hertz center_hz = 0);
 
 struct HarnessOptions {
     // Zero builds no spectrum stage, which is what the session cases want:
@@ -108,6 +115,11 @@ struct HarnessOptions {
     // request, and the clamp case's control arm is the only proof that this
     // suite's clamp assertions are not asserting a field that is always set.
     double ring_seconds = 0.5;
+
+    // What baseband DC is a label for, in real radio frequency. See
+    // scene_uri: zero everywhere except the detection cases, which need
+    // absolute and baseband to be different numbers.
+    dsp::Hertz center_hz = 0;
 
     // False leaves the client unconnected, for the cases that are about
     // connecting.

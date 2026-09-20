@@ -57,6 +57,29 @@ schema::Demod to_schema(engine::Demod mode) {
     return schema::Demod::RAW;
 }
 
+schema::TrackState to_schema(detect::TrackState state) {
+    // Exhaustive with no default, for the reason the switch above gives: the
+    // asserts in convert.h catch a renumbering and cannot catch a state added
+    // to detect::TrackState alone, and /w14062 on this target is what turns
+    // that into a build error.
+    //
+    // Pending is mapped rather than rejected even though Detector::tracks()
+    // never publishes one. A function that refused it would need an error
+    // path on a value that cannot arrive, and the state it would have to
+    // invent instead is exactly the one a display would then draw wrong.
+    switch (state) {
+        case detect::TrackState::Pending: return schema::TrackState::PENDING;
+        case detect::TrackState::Live:    return schema::TrackState::LIVE;
+        case detect::TrackState::Held:    return schema::TrackState::HELD;
+        case detect::TrackState::Merged:  return schema::TrackState::MERGED;
+    }
+    // Unreachable for any value that was ever a valid TrackState. Present
+    // because MSVC cannot prove a switch over a scoped enum is exhaustive,
+    // the underlying type being able to hold values that are not
+    // enumerators, and C4715 fires without it.
+    return schema::TrackState::PENDING;
+}
+
 Expected<engine::Demod> from_schema(schema::Demod mode) {
     const auto ordinal = static_cast<std::uint16_t>(mode);
     if (ordinal > static_cast<std::uint16_t>(engine::Demod::Cw)) {
@@ -177,6 +200,21 @@ void write_spectrum_frame(schema::SpectrumFrame::Builder out,
     out.setCeilingDb(in.ceiling_db);
     out.setPercentileLowDb(in.percentile_low_db);
     out.setPercentileHighDb(in.percentile_high_db);
+}
+
+void write_detection(schema::Detection::Builder out, const detect::Track& in) {
+    out.setId(in.id);
+    out.setCenterHz(in.center);
+    out.setBandwidthHz(in.bandwidth);
+    out.setSnr2500Db(in.snr_2500_db);
+    out.setConfidence(in.confidence);
+    out.setState(to_schema(in.state));
+    out.setFirstSeen(in.first_seen);
+    out.setLastSeen(in.last_seen);
+    out.setLastDetected(in.last_detected);
+    out.setChannel(in.channel);
+    out.setChannelValid(in.channel_valid);
+    out.setMergedInto(in.merged_into);
 }
 
 Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {

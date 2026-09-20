@@ -38,10 +38,22 @@ namespace {
 // number replaces this and this constant goes away.
 constexpr std::uint16_t kDefaultPort = 17690;
 
-// Thirty a second from an engine making three hundred. The engine drops the
-// rest before copying them, so asking for fewer costs it less rather than
-// more, and thirty is already past what a waterfall shows a person.
-constexpr std::uint32_t kDefaultEveryNth = 10;
+// Every frame.
+//
+// This was ten, on the belief that the engine makes three hundred frames a
+// second and a waterfall wants about thirty. It does not. A frame covers one
+// uploaded block, and at the defaults revenant-engine runs, 2.4 MS/s in
+// 65536-sample blocks, that is 36.6 a second: measured on an RTL-SDR v3 at
+// 98.1 MHz as 633 frames sent over 172 s with this client asking for one in
+// ten, which is 3.7 a second reaching the display. A waterfall at 3.7 rows a
+// second takes over two minutes to fill a 600-row item and does not read as
+// a live radio while it does.
+//
+// So one, and the engine's own block size is what sets the rate. A client on
+// a slower machine, or one watching a much faster source, turns it down with
+// --every-nth; the engine drops what is not asked for before copying it, so
+// that costs the engine less rather than more.
+constexpr std::uint32_t kDefaultEveryNth = 1;
 
 [[nodiscard]] bool parse_u32(std::string_view text, std::uint32_t& out)
 {
@@ -97,14 +109,17 @@ int main(int argc, char* argv[])
 
     // Constructed here rather than by QML so the address from argv reaches
     // it, and parented to nothing so its destructor runs before the Qt
-    // event loop is gone: it ends the subscription and joins the Cap'n
-    // Proto loop thread, and both want a live process around them.
+    // event loop is gone: it stops the supervisor, ends the subscription and
+    // joins the Cap'n Proto loop thread, and all three want a live process
+    // around them.
     revenant::ui::EngineLink link;
 
-    // A refused connection is not a startup failure. The engine is often
-    // not running yet, and a window that comes up and says so is more use
-    // than an exit code nobody sees: this is a GUI subsystem binary.
-    static_cast<void>(link.open(address, port, every_nth));
+    // A refused connection is not a startup failure and never was. The
+    // engine is often not running yet, and this returns either way: the
+    // supervisor goes on trying, and the window comes up saying what it is
+    // waiting for. Starting the engine second is a supported order, and so
+    // is stopping and restarting it under a running window.
+    link.start(address, port, every_nth);
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
