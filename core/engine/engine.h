@@ -416,10 +416,38 @@ using AudioSinkId = std::uint64_t;
 // AudioEgress::publish writes into a lock-free ring, and the RPC server's
 // copies into that subscription's own queue.
 //
-// THREAD SAFETY. attach, detach and empty are the control thread and take a
-// lock. deliver is the producer thread, takes no lock and allocates nothing:
-// it loads one shared_ptr to an immutable list, which a concurrent attach
-// replaces rather than mutates.
+// THREAD SAFETY. attach, detach and empty are the control thread and take
+// lock_. deliver is the producer thread: it allocates nothing and copies
+// nothing, loading one shared_ptr to an immutable list that a concurrent
+// attach replaces rather than mutates.
+//
+// THIS PARAGRAPH USED TO SAY deliver "takes no lock". It takes one, and the
+// correction matters because the sentence was being read as a promise about
+// the thread retiring GPU readbacks.
+//
+// std::atomic<std::shared_ptr<T>> is not lock free anywhere. MSVC's
+// is_always_lock_free is a hardcoded false and load() calls
+// _Repptr._Lock_and_load(), which spins on a lock bit stashed in the
+// control-block pointer, copies the pointer pair, increments the refcount
+// and unlocks. So the producer takes a spin lock, an atomic increment and a
+// release on every chunk.
+//
+// THE SHAPE STANDS, and the reason is the rate rather than the cost. The
+// lock bit lives in this object, not in a process-wide table, so the only
+// thing that can contend for it is an attach, a detach or another deliver on
+// THIS fan-out. attach and detach are control plane, meaning an operator
+// action or a client subscribing, and they hold it for the length of a
+// pointer swap. deliver runs once per chunk per receiver, which at
+// 16384-sample blocks on a 2.4 MS/s source is 146 times a second: an
+// uncontended lock bit against an interval of 6.8 milliseconds. Neither
+// alternative is better. A std::mutex here puts a real lock on the same
+// thread and blocks it behind an attach; giving the producer its own
+// unsynchronised copy needs a reclamation scheme for the list the control
+// thread just replaced, which is the problem shared_ptr is already solving.
+//
+// What would change the answer is a per-sample or per-frame fan-out rather
+// than a per-chunk one. It is not that, and AudioChunk is the only thing
+// this class carries.
 class AudioFanout {
 public:
     AudioFanout() = default;
