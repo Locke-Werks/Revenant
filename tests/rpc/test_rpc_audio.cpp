@@ -787,6 +787,71 @@ TEST_CASE("a caller reaching set_audio_sink directly silences everything else",
     CHECK(stopped.has_value());
 }
 
+// --- the fan-out that outlives its receiver --------------------------------
+
+TEST_CASE("attaching to a receiver that has been removed is refused",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    auto doomed = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(doomed));
+    REQUIRE(doomed.has_value());
+
+    auto survivor = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(survivor));
+    REQUIRE(survivor.has_value());
+
+    auto frames = counting();
+    auto token = harness.engine().attach_audio_sink(engine_id(*doomed), count_into(frames));
+    INFO(test::message_of(token));
+    REQUIRE(token.has_value());
+
+    // Removed with the consumer still attached, which is the ordinary
+    // teardown order rather than a mistake, and the one that leaves the
+    // fan-out in Engine's map: nothing prunes it there, because remove_vrx
+    // does not pass through the code that owns the map.
+    const auto removed = harness.client().remove_vrx(*doomed);
+    INFO(test::message_of(removed));
+    REQUIRE(removed.has_value());
+
+    // Until 2026-09-20 this handed back a token and reported success,
+    // because a fan-out that already exists is joined without anything being
+    // asked of the graph. The consumer would then have waited for audio from
+    // a receiver that no longer existed, for the life of the engine.
+    auto late = harness.engine().attach_audio_sink(engine_id(*doomed), count_into(frames));
+    INFO(test::message_of(late));
+    REQUIRE_FALSE(late.has_value());
+    CHECK(late.error().message.find(std::to_string(*doomed)) != std::string::npos);
+    CHECK(late.error().message.find("is registered") != std::string::npos);
+
+    // AND THE STALE ENTRY IS GONE, which is what separates a refusal from a
+    // refusal plus a prune. The token issued before the removal named a
+    // fan-out that was still in the map; the refusal above dropped it, so
+    // detaching now finds no fan-out at all rather than an orphaned one.
+    auto orphan = harness.engine().detach_audio_sink(engine_id(*doomed), *token);
+    INFO(test::message_of(orphan));
+    REQUIRE_FALSE(orphan.has_value());
+    CHECK(orphan.error().message.find("no attached audio consumers") != std::string::npos);
+
+    // THE CONTROL. A receiver that is still there takes a second consumer
+    // exactly as it did before, so the check above refuses the dead receiver
+    // rather than every second attach.
+    auto first = harness.engine().attach_audio_sink(engine_id(*survivor), count_into(frames));
+    INFO(test::message_of(first));
+    REQUIRE(first.has_value());
+
+    auto second = harness.engine().attach_audio_sink(engine_id(*survivor), count_into(frames));
+    INFO(test::message_of(second));
+    REQUIRE(second.has_value());
+    CHECK(*first != *second);
+
+    CHECK(harness.engine().detach_audio_sink(engine_id(*survivor), *first).has_value());
+    CHECK(harness.engine().detach_audio_sink(engine_id(*survivor), *second).has_value());
+}
+
 // --- shape 4 ----------------------------------------------------------------
 
 TEST_CASE("removing a receiver mid-stream tells its listeners in words",

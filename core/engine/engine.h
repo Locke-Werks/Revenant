@@ -758,13 +758,21 @@ public:
     // others, which is the part a caller has to design around.
     //
     // Refused in the engine's own words for a receiver that does not exist
-    // and before a source is open, because both refusals come back out of
-    // set_audio_sink unchanged.
+    // and before a source is open. The first attach on a receiver gets that
+    // refusal out of set_audio_sink; a later one gets it out of vrx_status,
+    // because a fan-out outlives the receiver it was installed on and
+    // joining a stale one would report success and deliver nothing. The body
+    // has the whole of that, including the residual: this map is not pruned
+    // when a receiver is removed, and a stale entry is dropped when somebody
+    // next asks about that id rather than when the receiver goes.
     //
     // WHAT IT CANNOT DO. It cannot stop a caller from reaching
     // set_audio_sink directly and throwing the fan-out away; nothing can,
-    // short of removing that method, and it is the only way to fill the slot.
-    // tools/cli/main.cpp is the remaining direct caller in this tree.
+    // short of removing that method, and it is the only way to fill the
+    // slot. No caller in this tree does it any more: tools/cli/main.cpp was
+    // the last one and moved to this method on 2026-09-20.
+    // tests/rpc/test_rpc_audio.cpp pins the displacement, so the hazard this
+    // paragraph describes is a case rather than a warning.
     [[nodiscard]] Expected<AudioSinkId> attach_audio_sink(VrxId id, AudioSink sink);
 
     // Removes one consumer. The token is the one attach_audio_sink returned.
@@ -833,14 +841,38 @@ inline Expected<AudioSinkId> Engine::attach_audio_sink(VrxId id, AudioSink sink)
     const std::scoped_lock held(audio_fanout_lock_);
 
     auto found = audio_fanouts_.find(id.value);
-    const bool fresh = found == audio_fanouts_.end();
-    std::shared_ptr<AudioFanout> fanout =
-        fresh ? std::make_shared<AudioFanout>() : found->second;
-
-    const AudioSinkId token = fanout->attach(std::move(sink));
-    if (!fresh) {
-        return token;
+    if (found != audio_fanouts_.end()) {
+        // A FAN-OUT CAN OUTLIVE ITS RECEIVER, SO JOINING ONE HAS TO ASK
+        //
+        // Nothing prunes this map on remove_vrx. remove_vrx is pure virtual
+        // and the implementation does not pass through here, so a receiver
+        // removed while a consumer was still attached leaves its entry
+        // behind; the entry goes only when that consumer detaches, and a
+        // consumer that never does leaves it forever.
+        //
+        // Without this check the branch below would hand back a token and
+        // report success for a receiver the graph has already torn down, and
+        // that consumer would then hear nothing for the life of the engine.
+        // The comment on this method promises a refusal in the engine's own
+        // words for a receiver that does not exist, and until 2026-09-20 it
+        // only delivered one on the first attach, where set_audio_sink was
+        // the thing being asked.
+        //
+        // Asked of vrx_status rather than tracked here, because this class
+        // has no hook on a removal to track it with. The stale entry is
+        // dropped on the way out, which is the only pruning there is: the
+        // ids Engine issues are monotonic and never reused, so the only
+        // caller who can reach a stale fan-out is one attaching to an id it
+        // removed itself.
+        if (auto alive = vrx_status(id); !alive) {
+            audio_fanouts_.erase(found);
+            return std::unexpected(alive.error());
+        }
+        return found->second->attach(std::move(sink));
     }
+
+    std::shared_ptr<AudioFanout> fanout = std::make_shared<AudioFanout>();
+    const AudioSinkId token = fanout->attach(std::move(sink));
 
     // The slot is filled before the map records it, so a refusal leaves this
     // engine exactly as it was: the local fan-out dies here with the sink
