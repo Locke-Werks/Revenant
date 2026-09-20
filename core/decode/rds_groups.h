@@ -544,10 +544,32 @@ struct StationState {
     // AF method A against method B is not signalled. EN 50067 clause 3.2.1.6.5:
     // it "can easily be deduced by receivers from the frequent repetition of
     // the tuning frequency in the transmitted AF pairs in the case of AF method
-    // B". af_repeats counts how often one frequency reappeared as the first of
-    // a pair, which is the evidence that deduction rests on. It is reported
-    // rather than acted on, because acting on it needs the tuned frequency and
-    // this decoder is not told what the radio is tuned to.
+    // B". af_repeats counts how often the first frequency ever seen at the head
+    // of a pair reappeared there.
+    //
+    // AN INDICATOR, NOT A DETERMINATION, AND THE DIFFERENCE IS NOT SUBTLE.
+    // Nothing here separates the two methods and nothing here should be read
+    // as having done so. Two reasons, and either one is enough on its own.
+    //
+    // A method A list repeats too. Method A is a flat list sent round and
+    // round, so as soon as the transmitter wraps, whichever frequency happened
+    // to land at the head of a pair first lands there again, and this counts
+    // it. On a short list that happens within a second. A nonzero count is
+    // consistent with both methods and only a count that stays at zero says
+    // anything, and it says the list has not wrapped yet rather than that the
+    // method is A.
+    //
+    // And the frequency tracked is not known to be the tuning frequency. Only
+    // the first one seen at the head of a pair is ever tracked, because the
+    // decoder is never told what the radio is tuned to and has nothing to
+    // compare against. Under method B on a transmission joined mid-list, the
+    // first head-of-pair seen is the tuning frequency and the count is the
+    // right one; joined at the wrong moment, or with block 3 lost on the group
+    // that carried it, it is some other frequency and the count is of
+    // something else.
+    //
+    // A caller that knows the tuning frequency and wants the determination
+    // should do it from the af list and its own knowledge of what it tuned.
     std::uint32_t af_repeats = 0;
 
     std::vector<OdaAnnouncement> oda;

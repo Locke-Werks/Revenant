@@ -1512,7 +1512,10 @@ void RdsDecoder::apply_af_pair(std::uint16_t pair) {
             // repetition of the tuning frequency as the first of a pair. This
             // counts that repetition and reports it, and does not act on it,
             // because acting on it needs the frequency the radio is tuned to
-            // and this decoder is never told what that is.
+            // and this decoder is never told what that is. A method A list
+            // that has wrapped raises the count as well; see the comment on
+            // StationState::af_repeats for what the number can and cannot be
+            // read to mean.
             if (af_first_of_pair_ == hz) {
                 ++state_.af_repeats;
             } else if (af_first_of_pair_ == 0) {

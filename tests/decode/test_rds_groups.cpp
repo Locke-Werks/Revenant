@@ -1147,6 +1147,61 @@ TEST_CASE("AF codes in a type 0A group become a frequency list", "[rds]") {
     CHECK(state.af.size() == 3);
 }
 
+TEST_CASE("af_repeats counts head-of-pair repetition and nothing finer", "[rds]") {
+    // What this asserts is the limit rather than the feature. The counter is
+    // reported so a caller who knows the tuning frequency can use it, and the
+    // number on its own cannot separate AF method A from method B. Both
+    // halves are pinned here so nobody downstream builds a method test out of
+    // it.
+    auto send_pairs = [](RdsDecoder& decoder,
+                         const std::vector<std::pair<std::uint8_t, std::uint8_t>>& pairs) {
+        for (const auto& [first, second] : pairs) {
+            feed_group(decoder,
+                       GroupWords{0x2345, type0_block2(0, false, false, true, false, 0),
+                                  static_cast<std::uint16_t>((first << 8) | second), 0x2020,
+                                  false});
+        }
+    };
+
+    SECTION("method B puts the tuning frequency at the head of every pair") {
+        RdsDecoder decoder;
+        prime(decoder);
+        send_pairs(decoder, {{100, 1}, {100, 20}, {100, 33}});
+        CHECK(decoder.state().af_repeats == 2);
+        CHECK(decoder.state().af.size() == 4);
+    }
+
+    SECTION("a method A list that has not wrapped yet counts nothing") {
+        RdsDecoder decoder;
+        prime(decoder);
+        send_pairs(decoder, {{1, 2}, {3, 4}, {5, 6}});
+        CHECK(decoder.state().af_repeats == 0);
+    }
+
+    SECTION("and the same method A list raises the count as soon as it wraps") {
+        // THE REASON THIS IS NOT A METHOD TEST. Method A is a flat list sent
+        // round and round, so the head of a pair repeats on the second pass
+        // whatever the method is. A nonzero count is consistent with both.
+        RdsDecoder decoder;
+        prime(decoder);
+        send_pairs(decoder, {{1, 2}, {3, 4}, {1, 2}, {3, 4}});
+        CHECK(decoder.state().af_repeats == 1);
+        CHECK(decoder.state().af.size() == 4);
+    }
+
+    SECTION("only the first frequency seen at the head of a pair is tracked") {
+        // Under method B, a decoder that joined the list one group late sees
+        // the tuning frequency at the head of every pair from then on and
+        // counts it. Joined with that group's block 3 lost, the frequency it
+        // latches is whatever arrived first, and here that is the tuning
+        // frequency's partner rather than the tuning frequency.
+        RdsDecoder decoder;
+        prime(decoder);
+        send_pairs(decoder, {{7, 100}, {100, 20}, {100, 33}});
+        CHECK(decoder.state().af_repeats == 0);
+    }
+}
+
 TEST_CASE("the ECC cross-check reports a region contradiction and never acts on it", "[rds]") {
     // EN 50067 Annex N clause N.3: USA A0, Canada A1, Mexico A5.
     auto send_ecc = [](RdsDecoder& decoder, std::uint8_t ecc) {
