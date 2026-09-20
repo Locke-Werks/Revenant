@@ -195,13 +195,92 @@ struct EmitterScore {
     // was on, over the number of decisions it was on. One is a track that
     // lasted the whole transmission.
     double best_lifetime_fraction = 0.0;
+
+    // ---- the window after the emitter stops -------------------------------
+    //
+    // Everything above is scored while the emitter is transmitting, and for a
+    // long time that was the whole instrument: observe() returned early on
+    // every decision outside [truth_start, truth_end], so what a track did
+    // after its signal stopped was not measured at all.
+    //
+    // It needs scoring differently rather than more of the same. After the
+    // stop there is nothing left to be right ABOUT, so coverage against truth
+    // is not the question. The questions are whether the row went away on
+    // time and whether it moved while it was waiting, because a row in a
+    // client is clickable and a click tunes a receiver to its centre at its
+    // bandwidth.
+    //
+    // Followed by ID, not by band. A neighbour's genuine track can overlap
+    // this emitter's extent and is not this emitter's ghost, and following
+    // the id is also what keeps a ghost visible in the numbers as it walks
+    // away from the band it was born in.
+
+    // The window that was asked for, in source seconds past truth_end. Zero
+    // for an emitter that never stops, and for a scorer built without one.
+    double post_window_seconds = 0.0;
+
+    // Decisions inside the window, and the ones the carried id was still in
+    // the published list at.
+    std::size_t after_decisions = 0;
+    std::size_t after_published = 0;
+
+    // Source seconds from truth_end to the last decision the carried id was
+    // still published. Zero when it was already gone at the first decision
+    // past the stop, which is the wanted answer for an emitter whose
+    // detection ends with it.
+    double residual_seconds = 0.0;
+
+    // Time the carried id spent in each state inside the window. Held is the
+    // hold doing its job. Live after the signal stopped is the row claiming
+    // present-tense evidence it does not have, which is the state a consumer
+    // cannot see through: silent_samples() is zero and confidence is rising.
+    double after_live_seconds = 0.0;
+    double after_held_seconds = 0.0;
+
+    // Still published at the last decision the window contained, which means
+    // the window truncated the answer and residual_seconds is a lower bound
+    // rather than a measurement.
+    bool still_published_at_window_end = false;
+
+    // The carried id's geometry at the last decision inside the
+    // transmission. This is the last reading taken with a signal under it,
+    // and it is what the two figures below are measured against rather than
+    // against truth: the question is whether the row MOVED after its
+    // evidence ran out.
+    dsp::Hertz on_centre_hz = 0;
+    dsp::Hertz on_bandwidth_hz = 0;
+
+    // Worst inside the window, and at the last decision the id was alive.
+    // The bandwidth figures are ratios to on_bandwidth_hz, and the worst one
+    // is whichever is furthest from one in either direction: a band that
+    // collapses is as wrong as one that inflates, and the measured drift on
+    // a shaped signal went narrow rather than wide.
+    dsp::Hertz after_worst_centre_error_hz = 0;
+    double after_worst_bandwidth_ratio = 1.0;
+    dsp::Hertz after_last_centre_error_hz = 0;
+    double after_last_bandwidth_ratio = 1.0;
+
+    // What the carried id's state was at the worst centre error, which is
+    // what says whether the drift happened in the hold or before it.
+    detect::TrackState after_state_at_worst = detect::TrackState::Pending;
+
+    // Ids other than the carried one that overlapped the truth band inside
+    // the window. Anything above zero is a track born out of the residual
+    // after the first one was dropped.
+    std::size_t after_new_ids = 0;
 };
 
 // Scores a whole run. Constructed from the scene's truth, then fed the track
 // list at every decision.
 class SceneScorer {
 public:
-    SceneScorer(const siggen::Scene& scene, dsp::Hertz source_center);
+    // post_window_seconds is how far past each emitter's stop the scorer
+    // keeps watching, in source seconds. Zero scores the transmission only,
+    // which is what every case that predates the post-stop fields wants. It
+    // has to be long enough to contain the whole answer, because a row still
+    // published when the window closes makes residual_seconds a lower bound.
+    SceneScorer(const siggen::Scene& scene, dsp::Hertz source_center,
+                double post_window_seconds = 0.0);
 
     // Call once per decision, after the detector has taken it. `now` is
     // Detector::last_decision().
@@ -217,6 +296,15 @@ private:
         std::size_t run_length = 0;
         std::size_t best_run = 0;
 
+        // The id that was best at the last decision inside the
+        // transmission, which is the one the post-stop window follows, plus
+        // the ids that turned up in the band after it and the previous
+        // decision the window saw.
+        std::uint64_t carried_id = 0;
+        std::vector<std::uint64_t> after_ids;
+        dsp::SampleIndex after_previous = 0;
+        double worst_bandwidth_excursion = 0.0;
+
         // The best-overlapping track at the previous decision, for the
         // step-to-step figures. Valid only while `have_previous` is set,
         // which a gap in the transmission clears.
@@ -228,7 +316,12 @@ private:
         std::size_t steps = 0;
     };
 
+    void observe_after(Live& live, dsp::SampleIndex now,
+                       std::span<const detect::Track> tracks) const;
+
     std::vector<Live> emitters_;
+    double source_rate_ = 1.0;
+    dsp::SampleIndex post_window_samples_ = 0;
 };
 
 }  // namespace revenant::test

@@ -195,9 +195,15 @@ inline constexpr std::array<double, 3> kRolloffs{0.2, 0.35, 0.5};
     spec.noise_power_full_band_dbfs = kNoiseDbfs;
     spec.worker_threads = 1;
 
+    // Keyed, every station stops in the first sixty percent of the scene and
+    // the three stops are staggered. The windows they leave behind are what
+    // the post-stop bar scores, so each one has to be longer than the hold
+    // plus the decisions the residual rule needs, and the shortest of the
+    // three is the binding one. On-times are a little over three seconds,
+    // which is three times the default average_seconds.
     const dsp::Hertz offsets[] = {-1'000'000, 0, 750'000};
-    const double starts[] = {0.0, 0.20, 0.45};
-    const double stops[] = {0.65, 1.0, 0.90};
+    const double starts[] = {0.0, 0.10, 0.20};
+    const double stops[] = {0.35, 0.45, 0.55};
 
     for (std::size_t i = 0; i < 3; ++i) {
         siggen::EmitterPlacement placement;
@@ -311,7 +317,11 @@ public:
         return cache;
     }
 
-    [[nodiscard]] RunResult run(const detect::DetectorConfig& overrides) const {
+    // post_window_seconds is passed straight to the scorer: zero scores only
+    // what happens while each emitter transmits, which is what every case
+    // but the post-stop bar wants.
+    [[nodiscard]] RunResult run(const detect::DetectorConfig& overrides,
+                                double post_window_seconds = 0.0) const {
         detect::DetectorConfig config = overrides;
         config.source_rate = geometry_.rate;
         config.source_center = center_;
@@ -323,7 +333,7 @@ public:
         }
         detect::Detector& detector = *made;
 
-        test::SceneScorer scorer(*scene_, center_);
+        test::SceneScorer scorer(*scene_, center_, post_window_seconds);
         dsp::SampleIndex previous_decision = 0;
         RunResult result;
         double consume_ns = 0.0;
@@ -409,6 +419,29 @@ void print_scores(const std::string& title, const RunResult& result) {
                  result.stats.peaks_overflowed);
     std::println("  {:.3f} ms per frame, {:.1f} ms of it per decision (test clock, this machine)",
                  result.frame_ms, result.decision_ms);
+}
+
+// The same run, scored over the window after each emitter stops. Separate
+// from print_scores because the two are answering different questions and a
+// dozen columns of one answer is easier to read than twenty of both.
+void print_post_stop(const std::string& title, const RunResult& result) {
+    std::println("");
+    std::println("{}", title);
+    std::println("  {:>10} {:>6} {:>7} {:>7} {:>7} {:>6} {:>9} {:>7} {:>5} {:>4}", "truth BW",
+                 "mode", "window", "outlive", "live", "held", "worst ce", "worst bw", "state",
+                 "new");
+    for (const test::EmitterScore& score : result.scores) {
+        if (score.post_window_seconds <= 0.0) {
+            continue;
+        }
+        std::println("  {:>10} {:>6} {:>7.2f} {:>7.2f} {:>7.2f} {:>6.2f} {:>9} {:>7.2f} {:>5} "
+                     "{:>4}",
+                     score.truth_bandwidth_hz, siggen::modulation_name(score.modulation),
+                     score.post_window_seconds, score.residual_seconds,
+                     score.after_live_seconds, score.after_held_seconds,
+                     score.after_worst_centre_error_hz, score.after_worst_bandwidth_ratio,
+                     detect::track_state_name(score.after_state_at_worst), score.after_new_ids);
+    }
 }
 
 // The summed-bin search, recomputed outside the detector from the integrated
@@ -806,6 +839,126 @@ TEST_CASE("an emitter of known extent reads as one track of that extent", "[dete
     }
     CHECK(scored == 4 * kRolloffs.size());
     CHECK(failures == kKnownSplits);
+}
+
+// THE OTHER HALF OF THE BAR: what a track reports once its signal stops.
+//
+// The bar above scores each emitter while it transmits and stops there,
+// which is where the instrument stopped too: SceneScorer::observe returned
+// early on every decision outside the transmission, so nothing in the tree
+// had ever looked at the window after a stop. broadcast_scene has taken a
+// `keyed` flag since it was written and both call sites passed false, so the
+// scene this case needs already existed and had never been instantiated.
+//
+// Three real stations, 111 kbaud QPSK at 30 dB in a 149.85 kHz occupied
+// bandwidth, which is 47.7 dB in the 2500 Hz reference. That level is the
+// point: the post-stop tail is (snr - threshold) over the decay rate, so the
+// loudest station leaves the longest ghost and a marginal one would have
+// shown nothing.
+//
+// Measured on this scene before the residual rule, at the shipped
+// average_seconds of 1.0: the first station stayed LIVE for 9.06 s after it
+// stopped and Held for a further 2.95 s, twelve seconds of published row
+// against a three second hold. Every one of the 83 Live decisions carried
+// confidence 1.00 and silent_samples() of 0.00 s, so no consumer could tell
+// the row was stale, and the geometry frozen into the hold was taken at the
+// lowest residual of the burst: 5783 Hz of centre error and 125023 Hz of
+// bandwidth against 129857 Hz measured on signal.
+//
+// Measured here 2026-09-20. With the residual rule on, the three stations
+// outlive their signals by 3.19, 3.28 and 3.27 s, of which 0.24, 0.33 and
+// 0.32 s are Live and 2.95 s is the hold, at worst centre errors of 12, -19
+// and -3 Hz and a bandwidth ratio of 1.00 on all three. With it off, by
+// setting residual_decisions to zero, all three are still Live and still
+// published when the four second window closes and nine of the twenty-two
+// assertions below fail. That is what makes this a bar and not a report.
+TEST_CASE("a stopped emitter stops being published", "[detect][scene-bar]") {
+    const test::SceneGeometry geometry;
+
+    // Ten seconds so the last station stops at 5.5 s and the shortest
+    // post-stop window is 4.5 s. The window has to be longer than the whole
+    // answer or residual_seconds is a lower bound and the case proves
+    // nothing, which is what still_published_at_window_end is checked for.
+    const siggen::SceneSpec spec = broadcast_scene(10.0, true);
+    const FrameCache cache = FrameCache::render(geometry, spec);
+
+    detect::DetectorConfig config;
+    config.detection_threshold_db = 6.0;
+    const double window = 4.0;
+    const RunResult result = cache.run(config, window);
+    print_scores("the post-stop bar, three keyed broadcast stations", result);
+    print_post_stop("the post-stop bar, after each station stops", result);
+
+    // How long a row may outlive its signal, and where the number is from.
+    //
+    // The hold is deliberate and stays: detector.h fixes it at three seconds
+    // for FT8's 2.4 second silence, and a row that vanishes inside a gap
+    // cannot be clicked between transmissions. So the hold is the floor.
+    //
+    // On top of it, the residual rule needs residual_decisions consecutive
+    // falls to be sure, and the first fall cannot be judged until a second
+    // decision exists. Three further intervals are allowed for the decision
+    // that straddles the stop, for the ramp as the average starts to empty,
+    // and for one run reset on noise. Anything past that is the row
+    // outliving its evidence, which is the defect this case exists for.
+    const double allowed =
+        config.bootstrap_hold_seconds +
+        static_cast<double>(config.residual_decisions + 4) * config.decision_interval_seconds;
+
+    std::size_t scored = 0;
+    for (const test::EmitterScore& score : result.scores) {
+        if (score.post_window_seconds <= 0.0) {
+            continue;
+        }
+        ++scored;
+        INFO(std::format("emitter {} of {} Hz: outlived its signal by {:.2f} s ({:.2f} live, "
+                         "{:.2f} held) in a {:.2f} s window, worst centre error {} Hz at {}, "
+                         "worst bandwidth ratio {:.2f}, last ratio {:.2f}, {} new ids, "
+                         "published at {} of {} decisions",
+                         score.emitter_id, score.truth_bandwidth_hz, score.residual_seconds,
+                         score.after_live_seconds, score.after_held_seconds,
+                         score.post_window_seconds, score.after_worst_centre_error_hz,
+                         detect::track_state_name(score.after_state_at_worst),
+                         score.after_worst_bandwidth_ratio, score.after_last_bandwidth_ratio,
+                         score.after_new_ids, score.after_published, score.after_decisions));
+
+        // The window has to be big enough to hold the answer, or every
+        // figure below is truncated rather than measured.
+        CHECK_FALSE(score.still_published_at_window_end);
+        CHECK(score.residual_seconds <= allowed);
+
+        // The Live part of the tail is the part nothing on the wire marks:
+        // silent_samples() is zero and confidence is rising for as long as
+        // the row is Live, so a client has no way to fade it or to know not
+        // to trust it. It has to be the short end of the split.
+        CHECK(score.after_live_seconds < config.bootstrap_hold_seconds);
+
+        // Geometry a client can act on must come from a decision that saw
+        // the signal, because a detection row is clickable and a click tunes
+        // a receiver to that centre at that bandwidth. A tenth of the
+        // emitter's own bandwidth is the same figure the live bar uses for
+        // centre error, and it is about ten kilohertz here, which is a
+        // receiver still inside a 150 kHz station rather than next to it.
+        CHECK(std::abs(static_cast<double>(score.after_worst_centre_error_hz)) <=
+              0.10 * static_cast<double>(score.truth_bandwidth_hz));
+
+        // A factor of two either way. Not tighter, because a stopped signal
+        // has a decision or two of decay under it before the rule fires and
+        // the measurement moves a little; not looser, because the bandwidth
+        // sizes both the click target and the waterfall rectangle, and a
+        // band off by more than that draws a box over history the signal was
+        // never that wide in.
+        CHECK(score.after_worst_bandwidth_ratio >= 0.5);
+        CHECK(score.after_worst_bandwidth_ratio <= 2.0);
+
+        // Nothing may be born out of the residual once the first track is
+        // dropped. This is the check that forced the suppression onto the
+        // candidate rather than onto the track: a track-level rule leaves
+        // the candidate free, so a fresh id appears in the same band a few
+        // decisions after each drop and the band never goes quiet.
+        CHECK(score.after_new_ids == 0);
+    }
+    CHECK(scored == 3);
 }
 
 // Where the wide end stops working, on the shipped grid.

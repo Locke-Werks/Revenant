@@ -228,10 +228,18 @@ Expected<engine::SpectrumFrame> SceneFrames::next() {
     return frame;
 }
 
-SceneScorer::SceneScorer(const siggen::Scene& scene, dsp::Hertz source_center) {
+SceneScorer::SceneScorer(const siggen::Scene& scene, dsp::Hertz source_center,
+                         double post_window_seconds) {
+    source_rate_ = static_cast<double>(std::max<dsp::SampleRate>(1, scene.rate()));
+    post_window_samples_ =
+        static_cast<dsp::SampleIndex>(std::llround(std::max(0.0, post_window_seconds) *
+                                                   source_rate_));
+
     emitters_.reserve(scene.truth().size());
     for (const siggen::EmitterTruth& truth : scene.truth()) {
         Live live;
+        live.score.post_window_seconds =
+            truth.end_sample == siggen::kAlwaysOn ? 0.0 : std::max(0.0, post_window_seconds);
         live.score.emitter_id = truth.id;
         live.score.modulation = truth.modulation;
         live.score.truth_low_hz = source_center + truth.extent.low_hz;
@@ -256,6 +264,14 @@ void SceneScorer::observe(dsp::SampleIndex now, std::span<const detect::Track> t
             live.run_id = 0;
             live.run_length = 0;
             live.have_previous = false;
+
+            const bool after = post_window_samples_ > 0 &&
+                               live.score.truth_end != siggen::kAlwaysOn &&
+                               now > live.score.truth_end &&
+                               now <= live.score.truth_end + post_window_samples_;
+            if (after) {
+                observe_after(live, now, tracks);
+            }
             continue;
         }
         ++live.score.decisions_on;
@@ -308,6 +324,17 @@ void SceneScorer::observe(dsp::SampleIndex now, std::span<const detect::Track> t
             ++live.score.decisions_detected;
         }
 
+        // What the post-stop window follows, overwritten every decision so
+        // that what survives the loop is the last reading taken while the
+        // emitter was transmitting. Best by overlap rather than by coverage,
+        // because coverage keeps the best of the whole burst and this has to
+        // be the most recent one.
+        if (best_now != nullptr) {
+            live.carried_id = best_now->id;
+            live.score.on_centre_hz = best_now->center;
+            live.score.on_bandwidth_hz = std::max<dsp::Hertz>(1, best_now->bandwidth);
+        }
+
         const std::uint64_t id = best_now != nullptr ? best_now->id : 0;
         if (id != 0 && id == live.run_id) {
             ++live.run_length;
@@ -352,12 +379,82 @@ void SceneScorer::observe(dsp::SampleIndex now, std::span<const detect::Track> t
     }
 }
 
+void SceneScorer::observe_after(Live& live, dsp::SampleIndex now,
+                                std::span<const detect::Track> tracks) const {
+    EmitterScore& score = live.score;
+    ++score.after_decisions;
+
+    const dsp::SampleIndex previous = std::max(live.after_previous, score.truth_end);
+    const double elapsed = static_cast<double>(now - previous) / source_rate_;
+    live.after_previous = now;
+
+    const auto low = static_cast<double>(score.truth_low_hz);
+    const auto high = static_cast<double>(score.truth_high_hz);
+
+    const detect::Track* carried = nullptr;
+    for (const detect::Track& track : tracks) {
+        if (live.carried_id != 0 && track.id == live.carried_id) {
+            carried = &track;
+            continue;
+        }
+
+        // Anything else in the band is a second row for a signal that has
+        // stopped, whether it grew out of the residual or drifted in.
+        const double half = 0.5 * static_cast<double>(std::max<dsp::Hertz>(1, track.bandwidth));
+        const double track_low = static_cast<double>(track.center) - half;
+        const double track_high = static_cast<double>(track.center) + half;
+        if (std::min(high, track_high) - std::max(low, track_low) <= 0.0) {
+            continue;
+        }
+        if (std::find(live.after_ids.begin(), live.after_ids.end(), track.id) ==
+            live.after_ids.end()) {
+            live.after_ids.push_back(track.id);
+        }
+    }
+
+    // Gone. Left false so that the flag answers "was it still there when the
+    // window closed" rather than "was it ever there".
+    score.still_published_at_window_end = carried != nullptr;
+    if (carried == nullptr) {
+        return;
+    }
+
+    ++score.after_published;
+    score.residual_seconds = static_cast<double>(now - score.truth_end) / source_rate_;
+    if (carried->state == detect::TrackState::Live) {
+        score.after_live_seconds += elapsed;
+    } else {
+        score.after_held_seconds += elapsed;
+    }
+
+    const auto centre_error = static_cast<dsp::Hertz>(carried->center - score.on_centre_hz);
+    const double ratio = static_cast<double>(std::max<dsp::Hertz>(1, carried->bandwidth)) /
+                         static_cast<double>(std::max<dsp::Hertz>(1, score.on_bandwidth_hz));
+    score.after_last_centre_error_hz = centre_error;
+    score.after_last_bandwidth_ratio = ratio;
+
+    if (std::abs(centre_error) >= std::abs(score.after_worst_centre_error_hz)) {
+        score.after_worst_centre_error_hz = centre_error;
+        score.after_state_at_worst = carried->state;
+    }
+
+    // Furthest from one in either direction. A band that collapses to a
+    // tenth of what was measured is as wrong as one that inflates tenfold,
+    // and on a shaped signal the measured drift went narrow.
+    const double excursion = std::abs(std::log(std::max(ratio, 1.0e-9)));
+    if (excursion >= live.worst_bandwidth_excursion) {
+        live.worst_bandwidth_excursion = excursion;
+        score.after_worst_bandwidth_ratio = ratio;
+    }
+}
+
 std::vector<EmitterScore> SceneScorer::finish() const {
     std::vector<EmitterScore> out;
     out.reserve(emitters_.size());
     for (const Live& live : emitters_) {
         EmitterScore score = live.score;
         score.track_ids = live.seen_ids.size();
+        score.after_new_ids = live.after_ids.size();
         score.best_lifetime_fraction =
             score.decisions_on > 0
                 ? static_cast<double>(live.best_run) / static_cast<double>(score.decisions_on)
