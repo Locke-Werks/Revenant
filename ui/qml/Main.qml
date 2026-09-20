@@ -946,11 +946,39 @@ ApplicationWindow {
                 }
 
                 ComboBox {
+                    id: deviceBox
+
                     Layout.preferredWidth: 220
                     model: audioPlayer.devices
-                    currentIndex: audioPlayer.device
                     font.pixelSize: 12
                     onActivated: audioPlayer.device = currentIndex
+
+                    // NOT currentIndex: audioPlayer.device. ComboBox writes
+                    // its own currentIndex when the user picks, and a
+                    // direct assignment to a property destroys the binding
+                    // on it, so the picker followed audioPlayer.device
+                    // exactly until the first selection and never again.
+                    // After that, a device pulled out of its socket moved
+                    // the property and left the picker showing a device
+                    // that has gone.
+                    //
+                    // A Binding object is the standard answer: it WRITES
+                    // the value rather than installing a binding on the
+                    // property, so the ComboBox's own assignment does not
+                    // destroy it and it reasserts on the next change.
+                    Binding {
+                        target: deviceBox
+                        property: "currentIndex"
+                        value: audioPlayer.device
+                        restoreMode: Binding.RestoreNone
+                    }
+
+                    // And a reassert for the case the Binding cannot see:
+                    // refresh_devices can rebuild the list without moving
+                    // the selection, ComboBox resets currentIndex to 0 on
+                    // a model change, and audioPlayer.device has not
+                    // changed so nothing above re-fires.
+                    onCountChanged: currentIndex = audioPlayer.device
                 }
 
                 Item { Layout.fillWidth: true }
