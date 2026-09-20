@@ -435,6 +435,52 @@ So an id that churns on a wide signal is the search handing the tracker a
 different set of candidates each decision, not the tracker failing to match
 the same one. Look at `candidates()` before `tracks()`.
 
+### The band to point a real radio at
+
+460 to 464 MHz. US FCC Part 90 land mobile, business and industrial across
+most of it, and the standing band for anything that needs a real signal that
+starts and stops. Dispatch, site crews, hotel and store staff, on 12.5 kHz
+narrowband FM channels: a few seconds of speech at a time with long dead air
+between. Amateur repeaters and marine VHF have the same shape and are quieter
+through a working day.
+
+One 2.4 MS/s tuning does not cover it. 461 MHz and 463 MHz between them do:
+
+    revenant-cli "rtlsdr://0?freq=461M&rate=2400000&gain=auto" \
+        --spectrum --detect
+
+At 64 channels and a 2048-point second stage that is 65536 bins at 36.6 Hz. A
+narrowband channel's occupied bandwidth by Carson is about 11 kHz, 2.5 kHz
+deviation against 3 kHz of audio, which is roughly 300 bins and sits between
+the ladder's 256 and 512 rungs. A rung fits the signal, so none of the
+wide-end limits above bind and nothing here is testing the search. This band
+is for the track lifecycle.
+
+What to expect. A channel is empty until somebody keys up. A track appears a
+fraction of a second behind the carrier: `birth_hits` consecutive decisions at
+the default 0.1 second interval, on top of however much of the one second
+average the carrier has filled by then. It holds one id for the length of the
+over. A gap between overs shorter than `bootstrap_hold_seconds` keeps that id,
+so a conversation is one track rather than one per transmission, and a longer
+gap starts a new one, which is the hold working rather than failing. After the
+last over the track stays up for the hold and then goes: from a confident
+track the confidence decay would take a second or so longer, so the hold is
+what fires. The measured centre sits on the channel and does not move while
+the carrier is up.
+
+What counts as the detector getting it wrong. A new id for every over, which
+is association or hold and not the search. One 12.5 kHz channel reading as
+several tracks at once. A centre or a bandwidth that keeps changing after the
+carrier drops, which is geometry published from an average with no signal left
+in it. A track that never drops at all. Tracks on channels nobody transmitted
+on, which is the threshold rather than the tracker.
+
+This is a confirmation and not a measurement. What is on the air cannot be
+replayed and carries no truth record, so nothing here scores: the referee
+stays the seeded scenes in `tests/detect`, which know their own start and stop
+samples. What the band adds is that the keying was a person on a PTT rather
+than `siggen`.
+
 ## Identification
 
 Two tiers, split on cost.
