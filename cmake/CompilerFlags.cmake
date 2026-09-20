@@ -40,11 +40,31 @@ function(revenant_apply_warnings target)
             # enums with MAX_ENUM sentinels where a default is the correct
             # answer and the warning would be pure noise.
             #
-            # So: a switch that must be exhaustive writes no default and this
-            # option makes a new enumerator a build error. A switch that
+            # So: a switch that must be exhaustive writes no default, and a
+            # new enumerator then raises C4062 at warning level 1. A WARNING,
+            # not an error. Nothing in this file makes any warning fatal
+            # except the /WX two lines below, and only CI sets the variable
+            # behind it; on a developer's machine an unhandled enumerator
+            # scrolls past with the rest of the build output. A switch that
             # legitimately handles a subset writes a default that does
             # something defensible, and nothing checks it for you. /wd4062 is
             # not the answer to either and is not used anywhere in this tree.
+            #
+            # WHAT THIS PARAGRAPH USED TO SAY
+            #
+            # Until 2026-09-20 it said this option "makes a new enumerator a
+            # build error", forty lines under the line at the top of this file
+            # saying /WX is CI only, so the file contradicted itself. It is
+            # also the exact sentence docs/conventions.md corrected the same
+            # day, and that section now points HERE as the authority. A reader
+            # who followed the pointer to check the corrected claim landed on
+            # the uncorrected copy of it and went away expecting their own
+            # build to stop on a new enumerator. It does not.
+            #
+            # Retracted in place rather than quietly swapped, because the
+            # defect this option exists to correct was a comment promising a
+            # guard that was not switched on, and the comment introducing it
+            # made that same mistake one round later.
             /w14062
 
             $<$<BOOL:${REVENANT_WERROR}>:/WX>

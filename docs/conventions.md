@@ -277,6 +277,12 @@ this section had already said `/WX` is CI-only two paragraphs earlier.
 Corrected in place rather than reworded, because a reader who took it at face
 value is expecting their own build to stop and it will not.
 
+`cmake/CompilerFlags.cmake` carried the same wrong sentence in its own comment
+on `/w14062` until a later pass the same day. This section was corrected first
+and points at that file as the authority, so for as long as that gap lasted,
+anyone checking the correction by following the pointer read the uncorrected
+copy of it. Retracted in place there too.
+
 ## Commits
 
 Subject in the imperative, under 72 characters, no trailing period, no type
