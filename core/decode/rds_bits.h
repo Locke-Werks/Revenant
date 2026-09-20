@@ -416,8 +416,32 @@ struct RdsBitsStatus {
 // ---------------------------------------------------------------------------
 
 // Streaming, and blocking independent: feeding N samples in one call and in
-// any partition of that call produces the same bits in the same order. Nothing
-// here reads a clock, allocates after construction, or holds a lock.
+// any partition of that call produces the same bits in the same order.
+// Nothing here reads a clock or holds a lock.
+//
+// ALLOCATION
+//
+// process(mpx, sink) allocates nothing. Every filter history, every loop and
+// the scan accumulator are sized by create() and never resized, and a
+// recovered bit goes straight out through the sink. That is the overload a
+// real-time path wants and the one the property is stated for.
+//
+// process(mpx) does allocate, on the emitted bits. It appends to queue_,
+// which grows the ordinary way, and drain() hands the storage over to the
+// caller by swapping it out, so the next call starts from zero capacity and
+// grows again. That is deliberate: the queue exists so a caller can pull bits
+// on its own schedule, and a bounded ring would have to decide what to drop.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 it said "nothing here reads a clock, allocates after
+// construction, or holds a lock", flat, for the whole class. The queueing
+// overload broke it on every bit, and it is the overload the tests and the
+// simplest caller use, so the claim was false along the path most people
+// take. Recorded rather than quietly narrowed because somebody reading that
+// sentence would have put this decoder on an audio callback with drain()
+// behind it and taken an allocation per bit at 1187.5 bits a second in a
+// place where an allocation is not allowed.
 //
 // THE CHAIN, and what in the standard puts each stage there
 //
