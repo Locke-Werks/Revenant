@@ -445,6 +445,22 @@ struct Passband {
 // would be refused outright where today it is given the widest filter that
 // fits. The cost is up to 2*|residual| of band a clamped receiver could in
 // principle have had on one side.
+//
+// THE POST-CONDITION: both edges come back inside [-limit, +limit], so low
+// is never above high. A caller therefore reads a width of zero, never a
+// negative one, and "nothing fits" and "nothing was asked for" are the same
+// shape rather than two. A band lying WHOLLY past one limit collapses onto
+// that limit, and a placement one channel can carry nothing for at all
+// (max_channel_bandwidth zero) collapses to an empty band at the receiver's
+// centre.
+//
+// WHAT THIS FUNCTION USED TO DO IN THOSE TWO CASES, BECAUSE BOTH WERE
+// SILENT. It clamped the outside of each edge only, so [limit + 1000,
+// limit + 2000] came back as [limit + 1000, limit], inverted; and it
+// returned the request untouched when max_channel_bandwidth was zero, which
+// is how a receiver a channel cannot carry came to be planned and reported
+// by place() as unclamped. Neither produced an error anywhere near where it
+// happened.
 [[nodiscard]] Passband clamp_to_channel(const engine::VrxPlacement& placement, Passband band);
 
 // Widest bandwidth one grid channel can deliver to a receiver placed here.
@@ -515,10 +531,23 @@ struct Passband {
 // have: a USB band of [0, B] reaches B from the mix centre, and a CW band of
 // [-B/2, +B/2] translated by the pitch reaches pitch + B/2. With the band
 // stated rather than inferred they are the same expression, so they are one
-// line instead of three and the answer for the shapes they covered is
-// unchanged to the hertz. They are recorded here rather than deleted quietly
+// line instead of three. They are recorded here rather than deleted quietly
 // because a reader arriving from core/shaders/vrx_fine.comp's mode table
 // will be looking for them.
+//
+// HOW CLOSE "THE SAME EXPRESSION" ACTUALLY IS, SINCE IT WAS FIRST WRITTEN
+// DOWN AS "UNCHANGED TO THE HERTZ" AND IS NOT. For an even bandwidth it is
+// exact on every mode. For an ODD one it is 1 to 2 Hz lower, because the
+// shorthand expansion takes a half-width twice rather than subtracting one
+// from the other: a CW request of 501 Hz resolves to [-250, +250], so the
+// shared floor is (3*500 + 1)/2 = 750 where the old (3*501 + 1)/2 was 752,
+// and the reach term is 2*pitch + 500 where the old 2*pitch + B was
+// 2*pitch + 501. That hertz was never in the filter. The planner has always
+// passed bandwidth/2 to design_fine_taps as a half-width, so an odd request
+// has always been built one hertz narrow and only the rate it was rounded
+// up to carried the difference. It is recorded because the figure is
+// reachable from a client that sends an odd width and would otherwise look
+// like drift.
 //
 // The exhaustive switch over engine::Demod stays, and stays without a
 // default label, even though only AM now differs. It is the guard that makes
@@ -526,11 +555,22 @@ struct Passband {
 // the shared floor. See the long note beside the kDemod constants.
 //
 // Zero for an empty or inverted band. For a `mode` that is not an enumerator
-// of engine::Demod, the widest of the constraints rather than the shared
-// floor: the floor is the rate below which no mode can be filtered, not one
-// at which an unidentified detector is safe, and giving it to a folding
-// detector aliases the top of the audio band with nothing reporting it.
-// plan_vrx rejects such a mode before it reaches here.
+// of engine::Demod, the widest of the constraints THIS FUNCTION CAN SEE,
+// rather than the shared floor: the floor is the rate below which no mode
+// can be filtered, not one at which an unidentified detector is safe, and
+// giving it to a folding detector aliases the top of the audio band with
+// nothing reporting it. plan_vrx rejects such a mode before it reaches here.
+//
+// WHAT "CAN SEE" EXCLUDES, BECAUSE THIS USED TO SAY "THE WIDEST OF THE
+// CONSTRAINTS" FULL STOP AND THAT WAS ONE CONSTRAINT SHORT. The CW pitch
+// never reaches this function. It is applied by the caller, which
+// translates the band into the mix frame, and that translation is made for
+// engine::Demod::Cw and no other value, so an unidentified mode is handed
+// an untranslated band and the pitch is nowhere in the answer. A caller
+// that wants an unidentified mode covered against a pitch translates the
+// band itself before calling. Adding a pitch parameter here to close it was
+// considered and refused: it would put a second frame convention in a
+// function whose whole contract is that the caller owns the frame.
 [[nodiscard]] Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame);
 
 // The symmetric shorthand, kept so callers holding one width still have an

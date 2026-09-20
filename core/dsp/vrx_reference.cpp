@@ -873,7 +873,13 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
 Passband clamp_to_channel(const engine::VrxPlacement& placement, Passband band) {
     const Hertz widest = max_channel_bandwidth(placement);
     if (widest <= 0) {
-        return band;
+        // The channel can carry nothing at all: it has no rate, or the
+        // receiver sits a whole half-channel or more off its centre. An
+        // empty band at the receiver's own centre is the honest answer, and
+        // it is what makes every caller's width test fire. Handing the
+        // request straight back instead was how a receiver a channel cannot
+        // carry came to be planned, with place() reporting it unclamped.
+        return Passband{};
     }
 
     // ONE LIMIT, APPLIED TO EACH EDGE ON ITS OWN.
@@ -895,15 +901,22 @@ Passband clamp_to_channel(const engine::VrxPlacement& placement, Passband band) 
     // INDEPENDENTLY: a request too wide at the top keeps its lower edge
     // where the operator put it instead of losing the same amount at both
     // ends, which is what one width could only ever do.
+    //
+    // BOTH EDGES ARE FITTED INTO THE SAME INTERVAL, WHICH IS THE
+    // POST-CONDITION. Each edge lands inside [-limit, +limit], so low <=
+    // high always holds and the result is a band a caller can measure.
+    // Clamping only the outside of each edge was not enough: a band lying
+    // wholly above the channel, say [limit + 1000, limit + 2000], left its
+    // low edge alone and pulled its high edge down to the limit, which
+    // comes back INVERTED. Every caller then read a negative width and
+    // reported a channel that had nothing left in it, when what had
+    // happened was that the request was somewhere the channel does not
+    // reach.
     const Hertz limit = widest / 2;
 
-    Passband out = band;
-    if (out.low < -limit) {
-        out.low = -limit;
-    }
-    if (out.high > limit) {
-        out.high = limit;
-    }
+    Passband out;
+    out.low = std::clamp(band.low, -limit, limit);
+    out.high = std::clamp(band.high, -limit, limit);
     return out;
 }
 
@@ -924,6 +937,48 @@ Hertz max_channel_bandwidth(const engine::VrxPlacement& placement) {
     }
     return scaled / denominator;
 }
+
+namespace {
+
+// Refuses a request one channel cannot deliver, with the geometry in the
+// message.
+//
+// Two failures, and they are different enough that reporting them the same
+// way was how one of them went missing. The channel can carry nothing at
+// all: max_channel_bandwidth is zero, which is where the guard plan_vrx
+// used to have went when clamp_to_channel took over the fit. Or the channel
+// carries something and the request is not inside it, either because it is
+// wider than the limit on both sides or because it lies wholly past one of
+// them.
+//
+// The message names WHERE THE REQUEST WAS against the limit, and only then
+// the residual. Naming the residual first said the channel was full when
+// the truth was usually that the receiver had been pointed outside it, and
+// a residual over a denominator is not a number anyone reads a position off.
+[[nodiscard]] Status channel_carries(const engine::VrxPlacement& placement, Passband band) {
+    const Hertz widest = max_channel_bandwidth(placement);
+    if (widest <= 0) {
+        return fail(std::format(
+            "one grid channel can carry nothing for a receiver placed here: a {} S/s channel "
+            "with a residual of {}/{} Hz leaves no usable width at all, so the receiver is at "
+            "least half a channel from the channel's own centre",
+            placement.channel_rate, placement.residual_numerator,
+            placement.residual_denominator));
+    }
+
+    if (clamp_to_channel(placement, band).width() > 0) {
+        return {};
+    }
+
+    const Hertz limit = widest / 2;
+    return fail(std::format(
+        "a passband of {} to {} Hz has nothing inside the {} to {} Hz one grid channel can "
+        "carry for a receiver placed here: a {} S/s channel with a residual of {}/{} Hz",
+        band.low, band.high, -limit, limit, placement.channel_rate,
+        placement.residual_numerator, placement.residual_denominator));
+}
+
+}  // namespace
 
 Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
     if (bandwidth <= 0) {
@@ -1084,14 +1139,10 @@ Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
     if (!band) {
         return std::unexpected(with_context(band.error(), "demod_rate_for"));
     }
-    const Passband granted = clamp_to_channel(placement, *band);
-    if (granted.width() <= 0) {
-        return fail(std::format(
-            "demod_rate_for: the residual of {}/{} Hz leaves nothing of a {} S/s channel for "
-            "a passband of {} to {} Hz",
-            placement.residual_numerator, placement.residual_denominator,
-            placement.channel_rate, band->low, band->high));
+    if (const Status fits = channel_carries(placement, *band); !fits) {
+        return std::unexpected(with_context(fits.error(), "demod_rate_for"));
     }
+    const Passband granted = clamp_to_channel(placement, *band);
 
     const Hertz required =
         minimum_demod_rate(mode, mix_frame(granted, mode, std::max<Hertz>(0, params.cw_pitch)));
@@ -1365,16 +1416,13 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
         return std::unexpected(with_context(requested.error(), "plan_vrx"));
     }
 
+    if (const Status fits = channel_carries(placement, *requested); !fits) {
+        return std::unexpected(with_context(fits.error(), "plan_vrx"));
+    }
+
     plan.passband = clamp_to_channel(placement, *requested);
     plan.bandwidth = plan.passband.width();
     plan.bandwidth_clamped = plan.passband != *requested;
-    if (plan.bandwidth <= 0) {
-        return fail(std::format(
-            "plan_vrx: the residual of {}/{} Hz leaves nothing of a {} S/s channel for a "
-            "passband of {} to {} Hz",
-            placement.residual_numerator, placement.residual_denominator,
-            placement.channel_rate, requested->low, requested->high));
-    }
 
     const Hertz cw_pitch = std::max<Hertz>(0, params.cw_pitch);
     const Passband mixed = mix_frame(plan.passband, plan.mode, cw_pitch);

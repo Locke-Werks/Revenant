@@ -542,6 +542,197 @@ TEST_CASE("the channel fit moves the edge that does not fit and leaves the other
     // A band inside the limit on both sides comes back untouched.
     const dsp::Passband inside{-limit, limit};
     CHECK(dsp::clamp_to_channel(*placed, inside) == inside);
+
+    // THE LOW EDGE, WHICH NOTHING EXERCISED. The case above and every RPC
+    // case moved the high edge, so the mirror branch was live code with no
+    // test behind it. LSB is the mode that reaches that way by default, so
+    // it is the one asked here.
+    const dsp::Passband asked_low{-limit - 5'000, 1'000};
+    const dsp::Passband got_low = dsp::clamp_to_channel(*placed, asked_low);
+    CHECK(got_low.low == -limit);
+    CHECK(got_low.high == 1'000);
+
+    // Both at once: a request wider than the channel on both sides keeps
+    // its centre and loses the same amount at each end, which is exactly
+    // what the one-width clamp this replaced always did.
+    const dsp::Passband asked_both{-limit - 5'000, limit + 5'000};
+    const dsp::Passband got_both = dsp::clamp_to_channel(*placed, asked_both);
+    CHECK(got_both.low == -limit);
+    CHECK(got_both.high == limit);
+}
+
+TEST_CASE("a band the channel cannot reach comes back empty rather than inverted",
+          "[vrx][m1]") {
+    // The post-condition. Clamping only the outside of each edge left a
+    // band lying wholly past one limit inverted, so every caller measured a
+    // negative width and reported a full channel when the truth was a
+    // receiver pointed somewhere the channel does not reach.
+    engine::VrxParams params;
+    params.center = 196'500;
+    params.demod = engine::Demod::Usb;
+    params.passband_low = 300;
+    params.passband_high = 2'700;
+
+    auto placed = engine::place(kGrid, kSourceRate, params);
+    REQUIRE(placed.has_value());
+
+    const dsp::Hertz limit = dsp::max_channel_bandwidth(*placed) / 2;
+    REQUIRE(limit > 0);
+
+    const dsp::Passband above{limit + 1'000, limit + 2'000};
+    const dsp::Passband got_above = dsp::clamp_to_channel(*placed, above);
+    CHECK(got_above.low <= got_above.high);
+    CHECK(got_above.width() == 0);
+
+    const dsp::Passband below{-limit - 2'000, -limit - 1'000};
+    const dsp::Passband got_below = dsp::clamp_to_channel(*placed, below);
+    CHECK(got_below.low <= got_below.high);
+    CHECK(got_below.width() == 0);
+
+    // And the planner refuses it naming where the request was, not the
+    // residual. The residual is a rational nobody reads a position off, and
+    // leading with it said the channel was full when the receiver had been
+    // pointed out of it.
+    engine::VrxParams outside = params;
+    outside.passband_low = limit + 1'000;
+    outside.passband_high = limit + 2'000;
+
+    auto refused = dsp::plan_vrx(kGrid, kSourceRate, outside, *placed);
+    REQUIRE_FALSE(refused.has_value());
+    const std::string text = test::message_of(refused);
+    INFO(text);
+    CHECK(text.find(std::to_string(limit + 1'000)) != std::string::npos);
+    CHECK(text.find(std::to_string(limit)) != std::string::npos);
+
+    // The cheap query refuses the same request, because the two share the
+    // fit rather than each carrying their own copy of it.
+    auto query = dsp::demod_rate_for(outside, *placed, 48'000);
+    CHECK_FALSE(query.has_value());
+}
+
+TEST_CASE("a placement one channel can carry nothing for is refused, not planned",
+          "[vrx][m1]") {
+    // max_channel_bandwidth is zero when the receiver sits a whole half
+    // channel or more off the channel's centre, and plan_vrx used to have
+    // its own guard against that. The guard went when clamp_to_channel took
+    // over the fit, and because the clamp handed the request straight back
+    // in that case the receiver was planned instead of refused and place()
+    // called it unclamped.
+    //
+    // place() cannot produce this placement: it puts a receiver on the
+    // NEAREST channel, so on the 2x-oversampled grid the residual is at
+    // most a quarter of a channel rate. A caller that builds a placement by
+    // hand can, and the RPC surface takes one from the wire.
+    engine::VrxPlacement broken;
+    broken.channel = 3;
+    broken.channel_rate = 75'000;
+    broken.residual_numerator = 40'000;
+    broken.residual_denominator = 1;
+    REQUIRE(dsp::max_channel_bandwidth(broken) == 0);
+
+    const dsp::Passband band{-4'000, 4'000};
+    CHECK(dsp::clamp_to_channel(broken, band).width() == 0);
+
+    engine::VrxParams params;
+    params.center = 196'500;
+    params.demod = engine::Demod::Nfm;
+    params.passband_low = band.low;
+    params.passband_high = band.high;
+
+    auto refused = dsp::plan_vrx(kGrid, kSourceRate, params, broken);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(test::message_of(refused));
+    CHECK(test::message_of(refused).find("nothing") != std::string::npos);
+
+    CHECK_FALSE(dsp::demod_rate_for(params, broken, 48'000).has_value());
+}
+
+TEST_CASE("the cheap demodulation rate query answers what the planner builds",
+          "[vrx][m1]") {
+    // demod_rate_for exists so a client dragging a passband can tell a
+    // retune that is a push constant from one that is a rebuild without
+    // paying for three filter tables per frame of the gesture. That claim
+    // is only worth anything if the two agree, so it is checked across
+    // every mode rather than asserted in the header.
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz low;
+        dsp::Hertz high;
+        dsp::SampleRate audio_rate;
+    };
+
+    const Case cases[] = {
+        {engine::Demod::Raw, -6'000, 6'000, 48'000},
+        {engine::Demod::Am, -5'000, 5'000, 48'000},
+        {engine::Demod::Nfm, -8'000, 8'000, 48'000},
+        {engine::Demod::Usb, 300, 2'700, 48'000},
+        {engine::Demod::Lsb, -2'700, -300, 16'000},
+        {engine::Demod::Dsb, -3'000, 3'000, 24'000},
+        {engine::Demod::Cw, -250, 250, 8'000},
+
+        // Off-centre, so the reach term rather than the shape floor is what
+        // decides, and asymmetric so the two edges cannot cancel.
+        {engine::Demod::Nfm, 1'000, 9'000, 16'000},
+        {engine::Demod::Usb, -9'000, -1'000, 12'000},
+    };
+
+    for (const auto& want : cases) {
+        INFO("mode " << engine::demod_name(want.mode) << " [" << want.low << ", " << want.high
+                     << "] at " << want.audio_rate << " S/s");
+        engine::VrxParams params;
+        params.center = 196'500;
+        params.demod = want.mode;
+        params.passband_low = want.low;
+        params.passband_high = want.high;
+        params.audio_rate = want.audio_rate;
+
+        auto placed = engine::place(kGrid, kSourceRate, params);
+        REQUIRE(placed.has_value());
+
+        auto cheap = dsp::demod_rate_for(params, *placed, want.audio_rate);
+        INFO(test::message_of(cheap));
+        REQUIRE(cheap.has_value());
+
+        auto planned = dsp::plan_vrx(kGrid, kSourceRate, params, *placed);
+        INFO(test::message_of(planned));
+        REQUIRE(planned.has_value());
+
+        CHECK(*cheap == planned->demod_rate);
+
+        // A whole multiple of the audio rate, which is the property that
+        // makes the decimation an integer.
+        CHECK(*cheap % want.audio_rate == 0);
+    }
+}
+
+TEST_CASE("the generalised minimum rate matches the shorthand it replaced, to within the "
+          "odd hertz",
+          "[vrx][m1]") {
+    // The claim first written down was that the generalisation produces the
+    // same hertz as the three cases it replaced. It does for an even
+    // bandwidth and not for an odd one, because the shorthand takes a
+    // half-width twice rather than subtracting one from the other, so an
+    // odd request resolves one hertz narrow. The hertz was never in the
+    // filter: the planner has always passed bandwidth/2 to design_fine_taps
+    // as a half-width. It IS in the rate, so it is pinned here rather than
+    // left as a sentence.
+    constexpr dsp::Hertz kPitch = 700;
+
+    for (dsp::Hertz bandwidth : {500, 501, 3'000, 3'001, 12'000, 12'001}) {
+        INFO("bandwidth " << bandwidth);
+
+        const dsp::Hertz cw =
+            dsp::minimum_demod_rate(dsp::kDemodCw, bandwidth, kPitch);
+        const dsp::Hertz cw_was =
+            std::max((3 * bandwidth + 1) / 2, 2 * kPitch + bandwidth);
+        CHECK(cw <= cw_was);
+        CHECK(cw_was - cw <= 2);
+        CHECK((bandwidth % 2 == 0) == (cw == cw_was));
+
+        const dsp::Hertz usb = dsp::minimum_demod_rate(dsp::kDemodUsb, bandwidth, 0);
+        const dsp::Hertz usb_was = std::max((3 * bandwidth + 1) / 2, 2 * bandwidth);
+        CHECK(usb == usb_was);
+    }
 }
 
 // ---------------------------------------------------------------------------
