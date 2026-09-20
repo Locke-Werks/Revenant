@@ -2084,7 +2084,12 @@ Status ServerImpl::set_rds_region(engine::VrxId vrx, decode::Region region) {
     route->ta_changed_at = 0;
     route->ta_seen = false;
     route->last_ta = false;
-    route->fault.clear();
+
+    // The fault is NOT cleared, on the same terms reset_rds_for_vrx states:
+    // a fault here means the receiver delivered a chunk that was not what
+    // the decoder was built for, the two things that can be wrong are both
+    // shape, and a region is not a shape. Clearing it would let a receiver
+    // that has already delivered the wrong thing look healthy for one poll.
     return {};
 }
 
@@ -2092,13 +2097,6 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatu
                                                           decode::Region region) {
     if (auto suitable = rds_receiver_is_suitable(status); !suitable) {
         return std::unexpected(suitable.error());
-    }
-
-    {
-        const std::scoped_lock held(sink_lock_);
-        if (sink_closed_) {
-            return fail("this server is stopping and will install no further sinks");
-        }
     }
 
     decode::RdsBitsConfig config;
@@ -2114,6 +2112,20 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatu
     auto route = std::make_shared<RdsRoute>(
         status.id, static_cast<std::uint32_t>(status.params.audio_rate), region,
         std::move(*sync));
+
+    // sink_lock_ is held ACROSS the attach and not merely checked before it,
+    // which is what add_audio does and for the same reason. stop() sets
+    // sink_closed_ under this lock while the loop thread is still running,
+    // so a check that released the lock first would leave a window in which
+    // this installs a sink stop() had already decided to install no more of.
+    // That window closes either way here, because stop() joins the loop
+    // before it walks rds_routes_ and would find the late entry, but a
+    // correctness argument that rests on the order of two unrelated
+    // functions is the kind that stops being true when one of them moves.
+    const std::scoped_lock held(sink_lock_);
+    if (sink_closed_) {
+        return fail("this server is stopping and will install no further sinks");
+    }
 
     // attach rather than set, which is the seam core/engine/engine.h exists
     // for: a recording, a loudspeaker or an audio subscription already on
