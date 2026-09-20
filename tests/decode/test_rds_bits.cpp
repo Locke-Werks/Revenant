@@ -63,7 +63,9 @@
 #include "core/dsp/synth/channel.h"
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/rds_mod.h"
+#include "core/dsp/synth/wfm_mod.h"
 #include "core/dsp/types.h"
+#include "core/dsp/vrx_reference.h"
 
 using namespace revenant;
 using Catch::Approx;
@@ -1107,4 +1109,447 @@ TEST_CASE("the decoder refuses a rate it cannot carry the subcarrier at", "[deco
 
     config.rate = decode::kMinimumRateHz;
     CHECK(decode::RdsBitSync::create(config).has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Off a carrier, through a discriminator
+// ---------------------------------------------------------------------------
+//
+// WHAT CHANGES HERE, AND WHY IT IS A DIFFERENT TEST FROM EVERY CASE ABOVE
+//
+// Everything above hands the decoder a composite that core/dsp/synth/
+// rds_mod.h wrote directly. That scores the decoder against a transmitter
+// written from the same clauses, which is the clean-room check the file
+// exists for, and it is the whole of what it is. No radio is in the path. A
+// composite that arrives from a receiver has been through a carrier, a
+// discriminator and an audio filter first, and none of those three had ever
+// produced one in this tree.
+//
+// core/dsp/synth/wfm_mod.h is what closes that. It puts the composite on an
+// FM carrier, and the twin of the kernel that demodulates it,
+// dsp::reference_vrx_demod in core/dsp/vrx_reference.h, takes it off again.
+// A payload that survives that round trip has been through the same
+// arithmetic the GPU runs, bit for bit, because that twin is the definition
+// of what the kernel is allowed to do.
+//
+// THE CONFIGURATION IS THE ONE core/decode/rds_bits.h CLAIMS WORKS
+//
+// That header states that a WFM receiver whose audio_rate is 171000 emits
+// the composite intact through the ordinary audio path, because the audio
+// decimation filter's passband edge lands at 68400 Hz and the composite
+// reaches 59375. Until now that was an argument about a filter nobody had
+// run. The cases below run it: demodulation at 684000, decimation by four to
+// 171000, and dsp::design_audio_taps for the filter in between, which is the
+// same designer the planner calls. The bare discriminator at 684000 with no
+// audio filter is covered too, in the waveform case, so a failure separates
+// into "the FM link is wrong" and "the audio filter ate the data".
+//
+// WHAT IS STILL NOT COVERED, so the pair above is not read as more than it
+// is. Nothing here runs the polyphase channelizer or the fine stage: the IQ
+// goes straight into the demodulator, so a station is always exactly on the
+// receiver's own grid and nothing resamples it. The offset case below moves
+// the carrier away from baseband DC, which is the part of that a
+// discriminator can be asked about on its own, and it is not the same thing
+// as a receiver placed off-channel. An engine-level case belongs in
+// tests/engine and does not exist yet.
+
+namespace {
+
+// Four times the audio rate rds_bits.h names. The station occupies 268750 Hz
+// by Carson, so this is the lowest multiple of 171000 that carries it with
+// the aliased residue far below the data.
+constexpr dsp::SampleRate kStationRate = 684000;
+constexpr dsp::SampleRate kReceiverAudioRate = 171000;
+
+// Length of the audio decimation filter. plan_vrx sizes this from the
+// transition width it needs; 129 taps at a decimation of four is comfortably
+// more than it would choose and is fixed here so the case does not move when
+// the planner's sizing rule does.
+constexpr std::uint32_t kAudioTaps = 129;
+constexpr double kAudioStopbandDb = 60.0;
+
+// A payload long enough that the decoder's acquisition scan and its 256 bit
+// lock window both fit with several hundred bits of scored stream left over.
+constexpr std::size_t kStationBits = 1200;
+
+[[nodiscard]] siggen::WfmSpec base_station()
+{
+    siggen::WfmSpec spec;
+    spec.rate = kStationRate;
+    spec.rds.bits = siggen::random_bits(kStationBits, kSeed);
+    spec.rds.rds_deviation_hz = 2000;
+    spec.programme.stereo = true;
+    spec.programme.left_tone_hz = 1000;
+    spec.programme.right_tone_hz = 3300;
+    spec.programme.preemphasis = siggen::Preemphasis::Eu50;
+    spec.programme.audio_deviation_hz = 45000;
+    return spec;
+}
+
+// The WFM branch of core/shaders/vrx_demod.comp's twin, run over a whole
+// buffer at once.
+//
+// The ring is sized to hold the signal plus the one sample of history the
+// discriminator reads below its first output, and sample zero is duplicated
+// into the slot below so the first output is a phase step within the signal
+// rather than one out of silence.
+//
+// gain is what vrx_demod_gain computes for the mode, which puts peak
+// deviation on +/-1. Handed the station's own peak deviation, that is
+// exactly rds_mod.h's composite scale, so what comes back is directly
+// comparable with FmComposite::render().
+[[nodiscard]] std::vector<float> wfm_demodulate(const std::vector<dsp::Complex32>& iq,
+                                                dsp::SampleRate demod_rate,
+                                                dsp::Hertz peak_deviation_hz,
+                                                std::uint32_t decimation,
+                                                std::uint32_t audio_taps)
+{
+    REQUIRE(!iq.empty());
+    REQUIRE(decimation >= 1);
+    REQUIRE(audio_taps >= 1);
+
+    std::size_t capacity = 1;
+    while (capacity < iq.size() + 1) {
+        capacity <<= 1U;
+    }
+
+    std::vector<dsp::Complex32> ring(capacity, dsp::Complex32{});
+    ring[0] = iq.front();
+    std::copy(iq.begin(), iq.end(), ring.begin() + 1);
+
+    dsp::VrxDemodConfig config;
+    config.mode = dsp::kDemodWfm;
+    config.decimation = decimation;
+    config.audio_taps = audio_taps;
+    config.dc_taps = 1;
+
+    std::vector<float> weights;
+    if (audio_taps == 1) {
+        weights.push_back(1.0F);
+    } else {
+        auto designed = dsp::design_audio_taps(audio_taps, demod_rate,
+                                               demod_rate / static_cast<int>(decimation),
+                                               kAudioStopbandDb);
+        REQUIRE(designed.has_value());
+        weights = *designed;
+    }
+    // The kernel binds one weights buffer: the audio taps, then the AM DC
+    // window. AM is the only mode that reads the second part and this is not
+    // AM, but the buffer still has to be the length the config declares.
+    weights.push_back(0.0F);
+
+    // Output zero detects at ring slot one, and the decimation filter reads
+    // audio_taps - 1 slots below that, so the first outputs would reach
+    // under the buffer. Start far enough in that they do not, which costs a
+    // fixed few hundred samples of the recording and nothing else.
+    const std::uint32_t skip = audio_taps;
+    REQUIRE(iq.size() > static_cast<std::size_t>(skip) + decimation);
+    const auto count = static_cast<std::uint32_t>((iq.size() - skip) / decimation);
+
+    dsp::VrxDemodParams params;
+    params.in_mask = static_cast<std::uint32_t>(capacity - 1);
+    params.in_offset = 1U + skip;
+    params.count = count;
+    params.gain = dsp::vrx_demod_gain(dsp::kDemodWfm, demod_rate, peak_deviation_hz);
+
+    std::vector<float> composite(count, 0.0F);
+    const Status ran = dsp::reference_vrx_demod(config, params,
+                                                dsp::ConstComplexSpan(ring),
+                                                dsp::ConstRealSpan(weights),
+                                                dsp::RealSpan(composite));
+    REQUIRE(ran.has_value());
+    return composite;
+}
+
+}  // namespace
+
+TEST_CASE("the discriminator gives back the composite the FM phase was built from",
+          "[decode][rds][wfm]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // WHAT THIS CASE IS FOR
+    //
+    // The bit cases below can pass with the composite recovered at the wrong
+    // level or with the audio and the data in the wrong ratio, because the
+    // decoder normalises everything it measures. This one checks the
+    // waveform, which is where a scale error is visible.
+    //
+    // The bar is not the composite at sample n. A discriminator returns the
+    // phase ADVANCE across a sample, and the phase is the integral of the
+    // composite, so what it returns is the composite averaged over one
+    // sample period rather than sampled at an instant. That is what an FM
+    // link does and not an artifact of this one: the difference is a
+    // half-sample delay and a sinc rolloff, 0.1 dB at 57 kHz at this rate,
+    // and it would still be there with a perfect modulator. So the bar is
+    // the integral's own first difference, which is that average exactly.
+
+    siggen::WfmSpec spec = base_station();
+    auto modulator = siggen::WfmModulator::create(spec);
+    REQUIRE(modulator.has_value());
+
+    constexpr std::size_t kCount = 60000;
+    std::vector<dsp::Complex32> iq(kCount);
+    modulator->render(0, dsp::ComplexSpan(iq));
+
+    // Decimation one and a single unit tap: the bare discriminator, with no
+    // audio filter in the way.
+    const std::vector<float> recovered =
+        wfm_demodulate(iq, spec.rate, spec.peak_deviation_hz, 1, 1);
+
+    const siggen::FmComposite& composite = modulator->composite();
+
+    // Output i is the phase step from absolute sample i to i + 1. The ring
+    // slot the detector reads is 1 + skip + i, skip is the one audio tap
+    // wfm_demodulate was given, and slot j holds absolute sample j - 1.
+    constexpr dsp::SampleIndex kFirst = 1;
+    double worst = 0.0;
+    double peak = 0.0;
+    for (std::size_t i = 100; i < recovered.size(); ++i) {
+        const dsp::SampleIndex index = kFirst + i;
+        const double expected = composite.integral(index) - composite.integral(index - 1);
+        worst = std::max(worst, std::abs(expected - static_cast<double>(recovered[i])));
+        peak = std::max(peak, std::abs(expected));
+    }
+
+    INFO(std::format("worst |discriminator - d(integral)| {:.3e} over a peak of {:.4f}",
+                     worst, peak));
+    REQUIRE(peak > 0.1);
+
+    // det_atan2 is specified to 9.6e-08 radian and the IQ is stored as
+    // float32, so a phase step of about half a radian carries roughly 1e-7
+    // of its own before anything here contributes. Two orders above that is
+    // a bar a scale error cannot slip under and float noise cannot trip.
+    CHECK(worst < 1e-5);
+
+    // And the one thing a carrier offset does to a discriminator: it adds a
+    // constant, of exactly the offset over the peak deviation. A receiver
+    // that is not on the station's centre sees the whole composite ride on
+    // that, and the RDS decoder has to be untroubled by it, which the offset
+    // shape in the case below is what actually asserts.
+    siggen::WfmSpec offset = spec;
+    offset.carrier_offset = 40'000;
+    auto offset_modulator = siggen::WfmModulator::create(offset);
+    REQUIRE(offset_modulator.has_value());
+
+    std::vector<dsp::Complex32> offset_iq(kCount);
+    offset_modulator->render(0, dsp::ComplexSpan(offset_iq));
+    const std::vector<float> offset_recovered =
+        wfm_demodulate(offset_iq, offset.rate, offset.peak_deviation_hz, 1, 1);
+
+    double mean_difference = 0.0;
+    for (std::size_t i = 100; i < recovered.size(); ++i) {
+        mean_difference += static_cast<double>(offset_recovered[i]) -
+                           static_cast<double>(recovered[i]);
+    }
+    mean_difference /= static_cast<double>(recovered.size() - 100);
+
+    const double expected_dc = static_cast<double>(offset.carrier_offset) /
+                               static_cast<double>(offset.peak_deviation_hz);
+    INFO(std::format("offset DC {:.6f} against {:.6f}", mean_difference, expected_dc));
+    CHECK(mean_difference == Approx(expected_dc).epsilon(1e-4));
+}
+
+TEST_CASE("an RDS payload survives an FM link and a WFM receiver's audio path",
+          "[decode][rds][wfm]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // THE SHAPES, ENUMERATED BEFORE THE BAR
+    //
+    // A station can be stereo or mono, can run either pre-emphasis curve or
+    // none, can sit on the receiver's centre or off it, and can inject the
+    // subcarrier anywhere in the range EN 50067 clause 1.3 permits. Each of
+    // those reaches the decoder differently and each is below.
+    //
+    //   Stereo with 50 us, on centre. The ordinary European broadcast.
+    //   Stereo with 75 us, on centre. The same station in North America,
+    //     and the case that would fail if the curve were run over the
+    //     composite instead of over the audio: the subcarrier would arrive
+    //     25 dB hot and the injection ratio would be a lie.
+    //   Stereo with no pre-emphasis. The reference the other two move away
+    //     from, and the only one where the audio deviation is what the spec
+    //     says it is.
+    //   Mono with no pilot. EN 50067 clause 1.1 permits RDS on a mono
+    //     transmission, so the decoder's free-running subcarrier path has to
+    //     work through an FM link too and not only off a bare composite.
+    //   Stereo at a 40 kHz carrier offset. The discriminator turns that into
+    //     a large DC term on the composite, 0.53 of full deviation, which
+    //     the decoder has to be indifferent to.
+    //   Clause 1.3's two ends, 1 kHz and 7.5 kHz of injection, so the bar is
+    //     not pinned to the 2 kHz the clause recommends.
+    //
+    // Noise is the case after this one, because it needs its own bar.
+
+    struct Shape {
+        const char* name;
+        bool stereo;
+        siggen::Preemphasis preemphasis;
+        bool pilot;
+        dsp::Hertz carrier_offset;
+        dsp::Hertz injection_hz;
+    };
+
+    const Shape shapes[] = {
+        {"stereo, 50us, on centre", true, siggen::Preemphasis::Eu50, true, 0, 2000},
+        {"stereo, 75us, on centre", true, siggen::Preemphasis::Us75, true, 0, 2000},
+        {"stereo, flat, on centre", true, siggen::Preemphasis::None, true, 0, 2000},
+        {"mono, no pilot", false, siggen::Preemphasis::None, false, 0, 2000},
+        {"stereo, 50us, 40 kHz off centre", true, siggen::Preemphasis::Eu50, true, 40'000,
+         2000},
+        {"stereo, 50us, clause 1.3 floor", true, siggen::Preemphasis::Eu50, true, 0, 1000},
+        {"stereo, 50us, clause 1.3 ceiling", true, siggen::Preemphasis::Eu50, true, 0, 7500},
+    };
+
+    for (const Shape& shape : shapes) {
+        INFO(shape.name);
+
+        siggen::WfmSpec spec = base_station();
+        spec.programme.stereo = shape.stereo;
+        spec.programme.preemphasis = shape.preemphasis;
+        spec.rds.pilot_enabled = shape.pilot;
+        spec.carrier_offset = shape.carrier_offset;
+        spec.rds.rds_deviation_hz = shape.injection_hz;
+
+        auto modulator = siggen::WfmModulator::create(spec);
+        REQUIRE(modulator.has_value());
+
+        std::vector<dsp::Complex32> iq(modulator->nominal_sample_count());
+        modulator->render(0, dsp::ComplexSpan(iq));
+
+        // The receiver: discriminate at 684000, decimate by four through the
+        // planner's own audio filter, hand the decoder 171000. This is the
+        // configuration core/decode/rds_bits.h says carries the composite.
+        const std::vector<float> composite =
+            wfm_demodulate(iq, spec.rate, spec.peak_deviation_hz, 4, kAudioTaps);
+
+        decode::RdsBitsConfig config;
+        config.rate = kReceiverAudioRate;
+        const Decoded decoded = decode_all(composite, config);
+
+        const Alignment match = align(spec.rds.bits, decoded.bits, 256);
+
+        INFO(std::format(
+            "lock {} quality {:.3f} pilot {} coherence {:.3f} carrier error {:.2f} Hz, "
+            "{} bits compared, {} errors, overhang {}",
+            decode::lock_name(decoded.status.lock), decoded.status.quality,
+            decoded.status.pilot_locked ? "locked" : "absent",
+            decoded.status.carrier_coherence, decoded.status.carrier_offset_hz,
+            match.compared, match.errors, match.overhang));
+
+        REQUIRE(decoded.status.lock == decode::RdsLock::Locked);
+        REQUIRE(match.found);
+
+        // Bit exact. There is no noise in this path, so a single error is a
+        // defect in the link and not a sensitivity result.
+        CHECK(match.errors == 0);
+        CHECK(match.compared > kStationBits / 3);
+        CHECK(match.overhang <= kMaxOverhangBits);
+
+        // The pilot is the other half of the mono case: with it off the
+        // decoder has to run its subcarrier free and say so, rather than
+        // reporting a lock on something that is not there.
+        CHECK(decoded.status.pilot_locked == shape.pilot);
+    }
+}
+
+TEST_CASE("the FM link has an SNR below which the payload does not come back",
+          "[decode][rds][wfm]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // WHAT THIS CASE IS FOR
+    //
+    // A round trip with no noise in it cannot fail for the reason a radio
+    // fails, and a bar made only of clean round trips certifies a link that
+    // might have no margin at all. This is the pair that gives the case
+    // above a floor to stand on: one channel where the payload comes back
+    // whole, and one where the decoder is asked to produce nothing and does.
+    //
+    // The level is stated as carrier to noise in the station's own occupied
+    // bandwidth, 268750 Hz by Carson, because that is the ratio the FM
+    // threshold is a property of. An FM link does not degrade gracefully:
+    // above the threshold the discriminator's output noise is small and
+    // triangular with frequency, and below it the phase starts making whole
+    // turns between samples and the composite is destroyed rather than
+    // dimmed. The two points below sit either side of that.
+
+    struct Point {
+        const char* name;
+        double cnr_db;
+        bool expect_bits;
+    };
+
+    // WHERE THE KNEE ACTUALLY IS, MEASURED
+    //
+    // Swept on this payload with this seed, at 1 dB steps between the two
+    // points below: 25 dB decodes with no errors, 20 dB decodes at a quality
+    // of 0.95, 15 dB still locks at a quality of 0.70 and emits 277 bits,
+    // and 12 dB and everything below it never locks and emits nothing at
+    // all. That is the FM threshold arriving, and it arrives over about
+    // three decibels.
+    //
+    // The two points kept are well clear of it on both sides, because a bar
+    // sitting on a knee is a bar that fails for the weather. What they
+    // assert is that the link has margin and that the decoder shuts up when
+    // it runs out, not where the knee is: the knee is a number this case
+    // records rather than one it defends.
+    const Point points[] = {
+        {"well above the FM threshold", 25.0, true},
+        {"well below it", 6.0, false},
+    };
+
+    siggen::WfmSpec spec = base_station();
+    auto modulator = siggen::WfmModulator::create(spec);
+    REQUIRE(modulator.has_value());
+
+    auto extent = siggen::occupied_extent(spec);
+    REQUIRE(extent.has_value());
+
+    std::vector<dsp::Complex32> clean(modulator->nominal_sample_count());
+    modulator->render(0, dsp::ComplexSpan(clean));
+
+    for (const Point& point : points) {
+        INFO(point.name);
+
+        std::vector<dsp::Complex32> iq = clean;
+        const siggen::NoiseLevel level = siggen::NoiseLevel::snr_in_reference_bandwidth_db(
+            point.cnr_db, extent->bandwidth_hz());
+        auto report = siggen::add_awgn(dsp::ComplexSpan(iq), level, spec.rate,
+                                       siggen::derive_seed(kSeed, 0x5746'4d00));
+        REQUIRE(report.has_value());
+
+        const std::vector<float> composite =
+            wfm_demodulate(iq, spec.rate, spec.peak_deviation_hz, 4, kAudioTaps);
+
+        decode::RdsBitsConfig config;
+        config.rate = kReceiverAudioRate;
+        const Decoded decoded = decode_all(composite, config);
+
+        const Alignment match = align(spec.rds.bits, decoded.bits, 256);
+        const double ber = (match.compared > 0)
+                               ? static_cast<double>(match.errors) /
+                                     static_cast<double>(match.compared)
+                               : 1.0;
+
+        INFO(std::format(
+            "CNR {:.1f} dB in {} Hz (full band {:.2f} dB): lock {} quality {:.3f}, {} bits "
+            "emitted, {} compared, {} errors, BER {:.3e}",
+            point.cnr_db, extent->bandwidth_hz(), report->snr_in_full_band_db,
+            decode::lock_name(decoded.status.lock), decoded.status.quality,
+            decoded.bits.size(), match.compared, match.errors, ber));
+
+        if (point.expect_bits) {
+            REQUIRE(decoded.status.lock == decode::RdsLock::Locked);
+            REQUIRE(match.compared > kStationBits / 3);
+            CHECK(ber < 0.01);
+        } else {
+            // The contract the group layer depends on: an unlocked decoder
+            // emits nothing rather than handing noise to the block layer,
+            // which would otherwise spend its whole error-correction budget
+            // on it and then report a station that is not there.
+            CHECK(decoded.status.lock != decode::RdsLock::Locked);
+            CHECK(decoded.bits.empty());
+        }
+    }
 }
