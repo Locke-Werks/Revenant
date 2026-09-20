@@ -624,6 +624,27 @@ void PassbandItem::armRescale()
     // Starting the animation blind instead would be worse. It would ease
     // towards a span that is about to change, and the change would land
     // mid-ease.
+    //
+    // THE THREE FIELDS ARE CLEARED ON EVERY PATH, INCLUDING THE ONE THAT
+    // GIVES UP, BECAUSE beginRescale DID AND THE REWRITE STOPPED.
+    //
+    // Whether that leaked a running timer was worked out rather than
+    // guessed, and it did not. Both callers are gated on grab_ being a
+    // real grab, grab_ is set only by mousePressEvent, and mousePressEvent
+    // clears these same three fields before it sets it. Nothing between a
+    // press and a release can put them back: tryRescale is the only thing
+    // that starts the tick and it returns at once unless rescale_armed_ is
+    // set, which only this function sets. The early return below could not
+    // even be reached, because frozen_ is written in exactly one place and
+    // that place refuses the gesture when the axis comes back invalid.
+    //
+    // That is four non-local facts holding up one early return, in a
+    // function whose whole subject is a timer. Restating the clear costs
+    // two statements and a stop on an already-stopped QTimer, and it makes
+    // the function answer for its own state instead of the caller's.
+    rescaling_ = false;
+    rescale_tick_.stop();
+
     if (!frozen_.valid()) {
         rescale_armed_ = false;
         return;
