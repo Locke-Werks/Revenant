@@ -207,8 +207,16 @@ constexpr std::array<PtyEntry, 32> kPtyRbds = {{
 // worse than a blank one, and inventing rows would be the one thing
 // docs/clean-room.md most clearly forbids.
 //
-// Sorted by PI so the lookups below can binary search, and the test asserts
-// the ordering so an inserted row cannot silently break it.
+// Sorted by PI so the lookups below can binary search.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it said the test asserted
+// the ordering. No test did. std::lower_bound on an unsorted range has
+// undefined behaviour, and the visible shape of it here is quiet: a row placed
+// out of order stops being found and its station returns no call sign, which
+// looks exactly like one of the 36 rows nobody transcribed. The ordering is
+// asserted at build time now, which is where a table literal belongs, and
+// test_rds_groups.cpp walks the whole reserved range and counts the rows it
+// can reach.
 struct CallsignException {
     std::uint16_t pi;
     std::string_view call;  // the whole three-letter call sign, prefix included
@@ -225,6 +233,22 @@ constexpr std::array<CallsignException, 36> kCallsignExceptions = {{
     {0x999D, "WIL"},  {0x99A5, "KBW"},  {0x99A6, "KCY"},  {0x99A7, "KDF"},
     {0x99AA, "KLZ"},  {0x99AB, "KOB"},  {0x99B5, "WJZ"},  {0x99B9, "WRC"},
 }};
+
+// Strictly increasing, so the binary search is well defined and no PI appears
+// twice with two different call signs.
+[[nodiscard]] constexpr bool callsign_exceptions_ordered() noexcept {
+    for (std::size_t i = 1; i < kCallsignExceptions.size(); ++i) {
+        if (kCallsignExceptions[i - 1].pi >= kCallsignExceptions[i].pi) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(callsign_exceptions_ordered(),
+              "kCallsignExceptions must stay strictly increasing by PI: callsign_from_pi "
+              "binary searches it, and a row out of order is a station that silently "
+              "stops resolving");
 
 // NRSC-4-B section D.7.1 step 3. The two ranges are exactly contiguous:
 // KZZZ = 0x54A7 and WAAA = 0x54A8, and the reserved three-letter range starts

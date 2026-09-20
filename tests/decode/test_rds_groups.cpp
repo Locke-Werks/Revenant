@@ -994,6 +994,34 @@ TEST_CASE("call signs come back out of North American PI codes", "[rds]") {
     CHECK_FALSE(callsign_from_pi(Region::kRds, 0x21C7).has_value());
 }
 
+TEST_CASE("every transcribed three-letter row is reachable and round trips", "[rds]") {
+    // The hand-assigned rows are a sorted table that callsign_from_pi binary
+    // searches. A row placed out of order stops being found and its station
+    // answers with nothing, which is indistinguishable from one of the 36 rows
+    // that were never transcribed. The ordering is a build error in
+    // rds_groups.cpp; this walks the reserved range end to end and counts what
+    // actually comes back, so a row that goes missing for any other reason is
+    // caught too.
+    //
+    // NRSC-4-B Table D.7 continued holds 72 rows in 0x9950 to 0x9EFF and 36 of
+    // them were transcribed. See the note on kCallsignExceptions for why the
+    // other 36 answer with nothing rather than with a guess.
+    int found = 0;
+    for (int pi = 0x9950; pi <= 0x9EFF; ++pi) {
+        const auto call =
+            revenant::decode::callsign_from_pi(Region::kRbds, static_cast<std::uint16_t>(pi));
+        if (!call) {
+            continue;
+        }
+        ++found;
+        INFO(std::format("PI {:04X} call {}", pi, *call));
+        CHECK(call->size() == 3);
+        CHECK(revenant::decode::pi_from_callsign(*call) ==
+              static_cast<std::uint16_t>(pi));
+    }
+    CHECK(found == 36);
+}
+
 TEST_CASE("coverage area codes mean something everywhere in RDS and only in B, D and E here",
           "[rds]") {
     // NRSC-4-B sections D.7 and D.7.3 call this a subtle yet significant
