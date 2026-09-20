@@ -53,6 +53,7 @@
 //   9. Two of them, on two regions, at once.         both decode
 //  10. It is removed while decoding.                 decoder goes with it
 //  11. It is retuned while decoding.                 state clears
+//  12. Its traffic flag moves mid-recording.         the change is timed
 //
 // Shapes 7 and 8 are the ones that matter most and the ones a bar reaches
 // last. A decoder that silently never locks looks exactly like a station
@@ -159,6 +160,15 @@ constexpr std::string_view kStationRt = "GPU RESIDENT SDR";
 // which is one group.
 constexpr int kStationCycles = 4;
 
+// One group in composite samples, which is the unit the timing assertions
+// below are stated in. 171000 is 144 times 1187.5 exactly, which is the
+// whole reason the rate was chosen, so a 104-bit group is 14976 samples with
+// nothing rounded.
+constexpr std::uint64_t kSamplesPerBit = 144;
+static_assert(kSamplesPerBit * 2375 == static_cast<std::uint64_t>(kCompositeRate) * 2,
+              "171000 has to be 144 times 1187.5 for the assertions below to be exact");
+constexpr std::uint64_t kGroupSamples = 104 * kSamplesPerBit;
+
 // The seed for the noise in the weak-station case. Fixed and PRINTED, per
 // the house rule: a case that fails on an unrepeatable draw cannot be
 // debugged.
@@ -236,11 +246,21 @@ void push_group(std::vector<std::uint8_t>& bits, const GroupWords& words) {
 // removes it again. Handing it bits that were already differentially encoded
 // would produce a transmission whose blocks fail the checkword, which is a
 // mistake that looks exactly like a decoder that cannot decode.
-[[nodiscard]] std::vector<std::uint8_t> station_bits() {
-    std::vector<std::uint8_t> bits;
-    bits.reserve(static_cast<std::size_t>(kStationCycles) * 8U * 104U);
+//
+// ta_from_cycle is the cycle at which the traffic announcement flag turns
+// on, and kNoTrafficAnnouncement leaves it off for the whole transmission.
+// A station that announces from the first group is not a change, which is
+// the distinction the timing case rests on: the first valid TA a decoder
+// sees is the state the station was already in.
+constexpr int kNoTrafficAnnouncement = -1;
 
-    for (int cycle = 0; cycle < kStationCycles; ++cycle) {
+[[nodiscard]] std::vector<std::uint8_t> station_bits(
+    int cycles = kStationCycles, int ta_from_cycle = kNoTrafficAnnouncement) {
+    std::vector<std::uint8_t> bits;
+    bits.reserve(static_cast<std::size_t>(cycles) * 8U * 104U);
+
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        const bool ta = ta_from_cycle != kNoTrafficAnnouncement && cycle >= ta_from_cycle;
         for (std::uint8_t segment = 0; segment < 4; ++segment) {
             // The DI bits are addressed by the same C1 C0 that addresses the
             // PS segment, transmitted d3 first. 0b1000 makes the station
@@ -249,7 +269,7 @@ void push_group(std::vector<std::uint8_t>& bits, const GroupWords& words) {
             const bool di_bit = segment == 3;
             push_group(bits, GroupWords{
                                  kStationPi,
-                                 type0_block2(kStationPty, true, false, true, di_bit,
+                                 type0_block2(kStationPty, true, ta, true, di_bit,
                                               segment),
                                  0xE0E0,  // two "no alternative exists" AF codes
                                  chars_to_word(kStationPs[segment * 2U],
@@ -303,7 +323,8 @@ void push_group(std::vector<std::uint8_t>& bits, const GroupWords& words) {
 // left to suppress. The one bit that does go out carries 1 Hz of deviation
 // against the 75000 the composite is scaled to, which is 97 dB under the
 // programme, over 842 microseconds of a three second recording.
-[[nodiscard]] siggen::WfmSpec station_spec(bool with_rds) {
+[[nodiscard]] siggen::WfmSpec station_spec(bool with_rds, int cycles = kStationCycles,
+                                           int ta_from_cycle = kNoTrafficAnnouncement) {
     siggen::WfmSpec spec;
     spec.rate = kRdsSourceRate;
     spec.carrier_offset = 0;
@@ -316,7 +337,8 @@ void push_group(std::vector<std::uint8_t>& bits, const GroupWords& words) {
 
     spec.rds.pilot_enabled = true;
     spec.rds.rds_deviation_hz = with_rds ? 2000 : 1;
-    spec.rds.bits = with_rds ? station_bits() : std::vector<std::uint8_t>{0};
+    spec.rds.bits = with_rds ? station_bits(cycles, ta_from_cycle)
+                             : std::vector<std::uint8_t>{0};
     return spec;
 }
 
@@ -559,6 +581,13 @@ TEST_CASE("a synthetic station's PI, PS and RadioText come back over the wire",
     // TA arrived false and never moved, so nothing changed and the index
     // stays at zero. The first valid value is deliberately not recorded as a
     // change: see the note on RdsRoute::ta_changed_at.
+    //
+    // ON ITS OWN THIS ASSERTION HAS NO TEETH, and it is kept for the half it
+    // does cover rather than mistaken for the whole. An implementation that
+    // deleted ta_seen, last_ta and the whole change path would leave the
+    // field at its default and pass here. What rejects that one is the
+    // separate case below, where the flag actually moves mid-recording and
+    // the index has to land on the group it moved in.
     CHECK(station->ta_changed_at == 0);
 
     CHECK(station->ps_received == 0x0F);
@@ -1120,6 +1149,81 @@ TEST_CASE("setting a region on a decoder that has one clears what it accumulated
     CHECK(after->health.samples_consumed == 0);
     CHECK(after->health.bits_emitted == 0);
     CHECK(after->health.lock == rpc::RdsLock::Unlocked);
+}
+
+TEST_CASE("a traffic announcement that starts mid-recording is timed to its group",
+          "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    // WHAT THIS EXISTS TO REJECT, stated as the implementation it rejects.
+    // taChangedAt had one assertion anywhere in the suite and it was
+    // `== 0`, against a station whose TA never moved. Deleting RdsRoute's
+    // ta_seen, last_ta and the whole change path passes that: the field is
+    // zero because nothing ever writes it. So does the other obvious wrong
+    // implementation, which records the FIRST valid TA as a change, since
+    // this station's first valid TA is false and false is the default.
+    //
+    // Here the flag is false for six cycles and true for the rest, so both
+    // of those produce a wrong answer that is easy to name. The deleted
+    // path leaves zero. The first-valid-is-a-change one lands at the first
+    // group the decoder completed, which is a couple of groups after the
+    // physical layer locks and is nowhere near the sixth cycle.
+    constexpr int kQuietCycles = 6;
+    constexpr int kCycles = 12;
+
+    StationFile file("ta");
+    const auto written = file.write(station_spec(true, kCycles, kQuietCycles), 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    bring_up(harness, rds_options(file.uri()));
+
+    auto vrx = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto built = harness.client().rds_station(*vrx);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+    REQUIRE(built->ta_changed_at == 0);
+
+    run_to_completion(harness, file.samples(), 240'000);
+
+    auto station = harness.client().rds_station(*vrx);
+    INFO(test::message_of(station));
+    REQUIRE(station.has_value());
+
+    // The announcement is on at the end, which is the state the flag itself
+    // reports and the thing the index below is the timing of.
+    REQUIRE(station->ta_valid);
+    CHECK(station->ta);
+
+    // WHERE IT HAS TO LAND. Groups go out in order, eight to a cycle, and
+    // the first group carrying TA true is group 8 * kQuietCycles = 48. Its
+    // last bit leaves the modulator at the end of group 48, so the index is
+    // 49 group-lengths into the composite, which is 49 * 14976 = 733824.
+    //
+    // The window is two groups either side. It absorbs the modulator's
+    // shaping span, the channelizer and fine filter group delays and the
+    // audio FIR's, all of which are tens to hundreds of samples against a
+    // group's 14976, and it absorbs the decoder missing the first announcing
+    // group and taking the second. It does not absorb either wrong
+    // implementation: the deleted path gives zero, and first-valid-is-a-
+    // change gives about group 6.
+    const std::uint64_t announced_at = (8ULL * kQuietCycles + 1ULL) * kGroupSamples;
+    const std::uint64_t slack = 2ULL * kGroupSamples;
+    INFO(std::format("taChangedAt {} against {} plus or minus {}, consumed {}",
+                     station->ta_changed_at, announced_at, slack,
+                     station->health.samples_consumed));
+    CHECK(station->ta_changed_at > announced_at - slack);
+    CHECK(station->ta_changed_at < announced_at + slack);
+
+    // And it is inside the recording rather than past its end, which is what
+    // catches an index counted in the wrong unit. Divide by compositeRate
+    // for seconds, as the schema says.
+    CHECK(station->ta_changed_at < station->health.samples_consumed);
+    CHECK(station->composite_rate == kCompositeRate);
 }
 
 // ---------------------------------------------------------------------------
