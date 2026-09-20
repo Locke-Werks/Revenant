@@ -433,10 +433,22 @@ struct AudioNode : std::enable_shared_from_this<AudioNode> {
               std::uint32_t millis)
         : receiver(kj::mv(client)), vrx(which), granted_millis(millis) {}
 
+    // Set here and never written again, which is what makes it legal for
+    // on_audio_chunk to read them on the engine's completion thread. They
+    // were both filed under "Loop thread only" below until 2026-09-20, and
+    // granted_millis is read by that other thread on every chunk: a label
+    // saying a field belongs to one thread while another reads it is worse
+    // than no label, because the next person to add a field copies the
+    // neighbour that looks closest.
+    //
+    // The node is constructed and only then handed to add_audio, so the
+    // completion thread cannot see either of these before the constructor
+    // has finished with them.
+    const engine::VrxId vrx;
+    const std::uint32_t granted_millis = 0;
+
     // Loop thread only.
     schema::AudioReceiver::Client receiver;
-    engine::VrxId vrx;
-    std::uint32_t granted_millis = 0;
     bool in_flight = false;
     bool cancelled = false;
     bool ended_sent = false;
