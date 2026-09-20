@@ -603,8 +603,13 @@ struct Passband {
 // B = 1 is its own row and is not 1 to 2 Hz off anything. The six symmetric
 // modes expand it to [0, 0], an empty band, so the empty-band rule further
 // down answers 0 rather than a rate. Against the old figures that is 2 Hz
-// low for five of them and 2P + 1 Hz low for CW, which at the default
-// 700 Hz pitch is 1401 Hz. Nothing is lost by it: the planner refuses a
+// low for five of them and max(2, 2P + 1) Hz low for CW, which at the
+// default 700 Hz pitch is 1401 Hz and at a pitch of ZERO is 2, the same as
+// the other five, because there the shape floor wins the maximum instead of
+// the pitch term. An earlier draft of this sentence wrote the CW gap as
+// 2P + 1 flat, which is right for every pitch the mode is useful at and
+// wrong at the one the table also sweeps. Nothing is lost by it: the
+// planner refuses a
 // one-hertz symmetric request as well, because channel_carries is handed a
 // band with no width. USB and LSB expand B = 1 to a real one-hertz band and
 // answer 2, the same as before.

@@ -800,8 +800,19 @@ TEST_CASE("the generalised minimum rate against the shorthand it replaced, mode 
                     // empty-band rule answers before any mode's case runs.
                     // CW's closed form would say 2*pitch here and does not
                     // get the chance.
+                    //
+                    // The gap is stated in closed form rather than as
+                    // `before`, which is what it said until 2026-09-20.
+                    // Taking it from `before` made the bound whatever the
+                    // retired function happened to return, so the header's
+                    // figure for this row could be wrong and this assertion
+                    // could not notice. It was: the header read the CW gap
+                    // as 2P + 1, which is 1 at a pitch of zero, where the
+                    // shape floor of 2 actually wins.
                     expect = 0;
-                    gap_low = gap_high = before;
+                    gap_low = gap_high = mode == dsp::kDemodCw
+                                             ? std::max<dsp::Hertz>(2, 2 * pitch + 1)
+                                             : 2;
                 }
 
                 CHECK(now == expect);
