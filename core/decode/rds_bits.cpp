@@ -433,11 +433,36 @@ void RdsBitSync::push_input(float sample, const BitSink* sink)
     composite_power_ += composite_alpha_ * (x * x - composite_power_);
     const double composite_rms = std::sqrt(std::max(composite_power_, 1e-30));
 
-    // Pilot loop. The phase is advanced first and corrected afterwards so that
-    // the subcarrier reference this sample uses and the one the phase detector
-    // measured against are the same phase.
+    // The pilot phase this sample is measured and mixed against. Both the
+    // phase detector below and the subcarrier reference read it, so the error
+    // the detector reports is the error in the reference that produced this
+    // sample's data rather than the error in the one before it. The loop
+    // correction and the nominal advance both land at the bottom of this
+    // function, where they reach the NEXT sample.
+    //
+    // WHAT THIS COMMENT USED TO SAY
+    //
+    // Until 2026-09-20 it said "the phase is advanced first and corrected
+    // afterwards so that the subcarrier reference this sample uses and the
+    // one the phase detector measured against are the same phase". The
+    // intent was right and the order was backwards twice over: the code
+    // corrected first and advanced second, and the subcarrier reference was
+    // then taken from the ADVANCED phase while the detector had measured
+    // against the one before it. At 171000 Hz one input sample is a third of
+    // a turn at 57 kHz, so the data baseband arrived rotated by 120 degrees
+    // against the phase the pilot loop thought it had put it at.
+    //
+    // Nothing decoded wrong because of it. Clause 1.2 lets a transmitter pick
+    // either of two subcarrier phases and the BPSK carrier loop below
+    // resolves whatever constant rotation it is handed, so a fixed 120
+    // degrees is indistinguishable from a transmitter that chose it. It is
+    // corrected because a comment describing the opposite of the code is how
+    // the next person reasoning about the pilot arm gets a real phase error
+    // wrong, not because this one cost anything.
+    const double reference_turns = pilot_phase_;
+
     if (config_.track_pilot) {
-        const double angle = kTwoPi * pilot_phase_;
+        const double angle = kTwoPi * reference_turns;
         const double c = std::cos(angle);
         const double s = std::sin(angle);
 
@@ -495,18 +520,20 @@ void RdsBitSync::push_input(float sample, const BitSink* sink)
         }
     }
 
-    pilot_phase_ += pilot_increment_ + pilot_freq_;
-    pilot_phase_ -= std::floor(pilot_phase_);
-
     // EN 50067:1998 clause 1.1: the subcarrier is the third harmonic of the
     // pilot. Tripling a phase already reduced into [0, 1) is exact, which is
     // why the pilot phase is carried in turns.
-    double sub_turns = 3.0 * pilot_phase_;
+    double sub_turns = 3.0 * reference_turns;
     sub_turns -= std::floor(sub_turns);
     const double sub_angle = kTwoPi * sub_turns;
 
     const double mix_real = x * std::cos(sub_angle);
     const double mix_imag = -x * std::sin(sub_angle);
+
+    // Now advance, for the next sample. pilot_phase_ already carries this
+    // sample's loop correction; the nominal increment goes on top of it.
+    pilot_phase_ += pilot_increment_ + pilot_freq_;
+    pilot_phase_ -= std::floor(pilot_phase_);
 
     decim_real_[decim_write_] = mix_real;
     decim_imag_[decim_write_] = mix_imag;
