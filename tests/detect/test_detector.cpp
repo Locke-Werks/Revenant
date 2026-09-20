@@ -1201,10 +1201,14 @@ TEST_CASE("a fading signal keeps its track", "[detect]") {
 // rising towards it rather than starting there. Two things follow, and they
 // are the two axes:
 //
-//   RATE decides whether the rule ever fires. The measured rate converges to
-//   the input rate when b tau < 1 and to 1/tau when b tau >= 1, so a fade
-//   slower than the window's lower edge never reaches the window at any
-//   depth, and a fade faster than it always does eventually.
+//   RATE decides whether the measured rate can reach the window at all. It
+//   converges to the input rate when b tau < 1 and to 1/tau when b tau >= 1,
+//   so a fade slower than the window's lower edge never reaches it at any
+//   depth. Past that edge it converges, but converging takes several time
+//   constants and a fade only lasts depth/rate. The 8 dB row of the sweep
+//   below is 0.00 s starved at 3.60, 4.34 and 6.00 dB/s, all past the edge,
+//   because at 6.00 the fade ends after 1.33 s with the measured rate still
+//   at 3.07 dB/s.
 //
 //   DEPTH decides how long it stays fired. When the fade stops, the average
 //   is left above the input by however far it lagged, which grows with the

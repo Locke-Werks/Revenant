@@ -663,11 +663,25 @@ struct DetectorConfig {
     // so the average sits above the input throughout and the measured fall
     // TRAILS the input's, rising towards it rather than starting there.
     //
-    //   RATE decides whether the rule ever fires. The measured rate converges
-    //   to the input rate when b tau < 1 and to 1/tau when b tau >= 1, so a
-    //   fade slower than the window's lower edge, 0.75 * 4.343 = 3.26 dB/s at
-    //   the shipped second, never reaches the window at any depth, and a fade
-    //   faster than it reaches the window eventually whatever its depth.
+    //   RATE decides whether the measured rate can reach the window at all.
+    //   It converges to the input rate when b tau < 1 and to 1/tau when
+    //   b tau >= 1, so a fade slower than the window's lower edge,
+    //   0.75 * 4.343 = 3.26 dB/s at the shipped second, never reaches it at
+    //   any depth.
+    //
+    //   Past that edge it converges, but converging takes several time
+    //   constants and a fade only lasts depth/rate, so being able to reach
+    //   the window is not the same as having time to. Read the 8 dB row
+    //   below: 0.00 s starved at 3.60, 4.34 and 6.00 dB/s, every one of them
+    //   past the edge. At 6.00 the fade is over in 1.33 s with the measured
+    //   rate still at 3.07 dB/s and the rule has never fired.
+    //
+    //   An earlier draft of this bullet said a fade faster than the edge
+    //   reaches the window "eventually whatever its depth", which the table
+    //   three lines below it contradicts. That is the THIRD statement of
+    //   this rule's cost to over-generalise one axis, after the two
+    //   retracted above, so treat the table as the answer and this prose as
+    //   a reading of it.
     //
     //   DEPTH decides how long it stays fired. When the fade stops, the
     //   average is left above the input by however far it lagged, which grows
