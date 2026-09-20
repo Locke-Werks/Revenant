@@ -502,10 +502,6 @@ void EngineLink::adopt()
         pending_receiver_id_ = 0;
     }
 
-    // Whether the pane HAD a receiver, which is the test for putting one
-    // back. Not "wanted_.center is non-zero": a receiver tuned exactly to
-    // the source's own centre is an ordinary thing to want and would never
-    // have been restored.
     // The audio goes with the connection on both edges, for the reason
     // the receiver does: the subscription was on an id one engine issued.
     // The SWITCH is kept, the same way the receiver's request is, so an
@@ -527,6 +523,10 @@ void EngineLink::adopt()
     audio_stats_ = {};
     emit audioChanged();
 
+    // Whether the pane HAD a receiver, which is the test for putting one
+    // back. Not "wanted_.center is non-zero": a receiver tuned exactly to
+    // the source's own centre is an ordinary thing to want and would never
+    // have been restored.
     const bool had_receiver = receiver_id_ != 0;
     receiver_id_ = 0;
     receiver_status_ = {};
