@@ -42,10 +42,20 @@ namespace {
 {
     switch (state) {
         case rpc::TrackState::Merged:
-            // Inside another track's band. A different hue rather than a
-            // different alpha, because a merged track is not a faint one:
-            // core/detect/detector.h says it has evidence and does not
-            // decay, so fading it would say the opposite of what is true.
+            // Inside another track's band. The hue carries that, because it
+            // is a statement about where the track is rather than about how
+            // fresh it is, and the two are independent.
+            //
+            // It used to carry the freshness as well, on the grounds that
+            // core/detect/detector.h says a merged track has evidence and
+            // does not decay. That conflated two things. What does not
+            // decay is its CONFIDENCE: core/detect/detector.cpp skips both
+            // the miss count and the confidence decay for a merged track.
+            // Its last_detected still ages exactly like anything else's,
+            // and measured against a bursty scene a merged track's trails
+            // the newest frame by 50 rows at the median and 110 at the
+            // worst, the same distribution as a held one. So it fades on
+            // silence with the rest, and only the hue is special.
             return QColor(154, 108, 255);
         case rpc::TrackState::Pending:
         case rpc::TrackState::Live:
@@ -383,7 +393,9 @@ void build_detection_boxes(const EngineLink& link, double width_px,
         box.left_px = (centre - half - low_hz) / span_hz * width_px;
         box.right_px = (centre + half - low_hz) / span_hz * width_px;
 
-        if (detection.state == rpc::TrackState::Held && sample_rate > 0.0) {
+        const bool ages =
+            detection.state == rpc::TrackState::Held || detection.state == rpc::TrackState::Merged;
+        if (ages && sample_rate > 0.0) {
             // Two clocks say how long this has been quiet and neither is
             // wrong. The detector's own pair is the authority and the frame
             // clock is the finer of the two, so the later of them moves at

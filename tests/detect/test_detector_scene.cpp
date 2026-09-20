@@ -21,6 +21,7 @@
 //
 // The regression case below is not hidden and runs a shorter scene.
 
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -34,6 +35,7 @@
 #include <print>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/detect/detector.h"
@@ -66,15 +68,30 @@ struct LadderRung {
     dsp::Hertz expected_bandwidth_hz;
 };
 
+// The three rolloffs core/dsp/synth/wideband.cpp's random population picks
+// from, which is the set a scene can actually contain.
+//
+// The bar below used to fix this at 0.35 and certify one of the three. A
+// root raised cosine occupies (1 + rolloff) times the symbol rate, so the
+// other two are a different width for the same baud AND a different skirt
+// shape, and the second of those is what a detector growing a seed outward
+// has to cope with. Certifying the middle one and calling the rule proved
+// is how a bar reads as settled while two thirds of the cases go untested.
+inline constexpr std::array<double, 3> kRolloffs{0.2, 0.35, 0.5};
+
+[[nodiscard]] dsp::Hertz psk_bandwidth_of(double symbol_rate, double rolloff) {
+    return static_cast<dsp::Hertz>(std::llround((1.0 + rolloff) * symbol_rate));
+}
+
 [[nodiscard]] siggen::ModulatorSpec psk_of(double symbol_rate, dsp::Hertz offset,
-                                           std::uint64_t seed) {
+                                           std::uint64_t seed, double rolloff = 0.35) {
     siggen::ModulatorSpec spec;
     spec.kind = siggen::Modulation::Qpsk;
     spec.common.rate = kRate;
     spec.common.carrier_offset = offset;
     spec.common.seed = seed;
     spec.psk.symbol_rate = symbol_rate;
-    spec.psk.rolloff = 0.35;
+    spec.psk.rolloff = rolloff;
     spec.psk.symbol_count = 4096;
     return spec;
 }
@@ -88,7 +105,7 @@ struct LadderRung {
 // bin and a tone-modulated FM signal is a Bessel comb with nulls between its
 // lines, and a detector that only works on filled blocks has to be caught
 // saying so.
-[[nodiscard]] std::vector<LadderRung> ladder() {
+[[nodiscard]] std::vector<LadderRung> ladder(double rolloff = 0.35) {
     std::vector<LadderRung> rungs;
 
     {
@@ -108,7 +125,8 @@ struct LadderRung {
         spec.common.seed = 12;
         rungs.push_back(LadderRung{"usb voice", -820'000, spec, 2'700});
     }
-    rungs.push_back(LadderRung{"qpsk 4k8", -640'000, psk_of(4'800.0, -640'000, 13), 6'480});
+    rungs.push_back(LadderRung{"qpsk 4k8", -640'000, psk_of(4'800.0, -640'000, 13, rolloff),
+                               psk_bandwidth_of(4'800.0, rolloff)});
     {
         siggen::ModulatorSpec spec;
         spec.kind = siggen::Modulation::Nfm;
@@ -119,9 +137,12 @@ struct LadderRung {
         spec.nfm.tone_hz = 3'000;
         rungs.push_back(LadderRung{"nfm 16k", -440'000, spec, 16'000});
     }
-    rungs.push_back(LadderRung{"qpsk 20k", -200'000, psk_of(20'000.0, -200'000, 15), 27'000});
-    rungs.push_back(LadderRung{"qpsk 56k", 100'000, psk_of(56'000.0, 100'000, 16), 75'600});
-    rungs.push_back(LadderRung{"qpsk 111k", 480'000, psk_of(111'000.0, 480'000, 17), 149'850});
+    rungs.push_back(LadderRung{"qpsk 20k", -200'000, psk_of(20'000.0, -200'000, 15, rolloff),
+                               psk_bandwidth_of(20'000.0, rolloff)});
+    rungs.push_back(LadderRung{"qpsk 56k", 100'000, psk_of(56'000.0, 100'000, 16, rolloff),
+                               psk_bandwidth_of(56'000.0, rolloff)});
+    rungs.push_back(LadderRung{"qpsk 111k", 480'000, psk_of(111'000.0, 480'000, 17, rolloff),
+                               psk_bandwidth_of(111'000.0, rolloff)});
     {
         siggen::ModulatorSpec spec;
         spec.kind = siggen::Modulation::Nfm;
@@ -137,7 +158,7 @@ struct LadderRung {
 }
 
 // Every rung on for the whole scene.
-[[nodiscard]] siggen::SceneSpec continuous_scene(double seconds) {
+[[nodiscard]] siggen::SceneSpec continuous_scene(double seconds, double rolloff = 0.35) {
     siggen::SceneSpec spec;
     spec.rate = kRate;
     spec.center_hz = 0;
@@ -147,7 +168,7 @@ struct LadderRung {
     spec.noise_power_full_band_dbfs = kNoiseDbfs;
     spec.worker_threads = 1;
 
-    for (const LadderRung& rung : ladder()) {
+    for (const LadderRung& rung : ladder(rolloff)) {
         siggen::EmitterPlacement placement;
         placement.modulator = rung.spec;
         placement.use_snr = true;
@@ -203,8 +224,8 @@ struct LadderRung {
 // starts and the stops are staggered rather than simultaneous: a detector that
 // only works when the whole band changes at once would pass a scene where
 // everything keys together.
-[[nodiscard]] siggen::SceneSpec keyed_scene(double seconds) {
-    siggen::SceneSpec spec = continuous_scene(seconds);
+[[nodiscard]] siggen::SceneSpec keyed_scene(double seconds, double rolloff = 0.35) {
+    siggen::SceneSpec spec = continuous_scene(seconds, rolloff);
     const auto total = static_cast<double>(spec.duration_samples);
 
     // Fractions of the scene. Every burst is at least a second long at the
@@ -701,16 +722,41 @@ TEST_CASE("what the peak budget evicts", "[.scene][detect]") {
 // cases above; it is not turned into a threshold here.
 TEST_CASE("an emitter of known extent reads as one track of that extent", "[detect][scene-bar]") {
     const test::SceneGeometry geometry;
-    const siggen::SceneSpec spec = keyed_scene(6.0);
+
+    // Swept over every rolloff the generator can produce, not just the
+    // middle one. A root raised cosine at 0.5 is both wider for the same
+    // baud and more gradual at its shoulders than one at 0.2, and a
+    // detector that grows a seed outward from a peak meets that difference
+    // directly. Certifying 0.35 alone left two thirds of the reachable
+    // shapes unmeasured while the bar read as settled.
+    // Known failures, and the bar is a ratchet in BOTH directions: a new one
+    // fails CI, and so does fixing one of these without striking it out.
+    //
+    // Measured 2026-09-20. At rolloff 0.5 the 30 kHz and 166.5 kHz emitters
+    // each come back as three tracks at once, coverage 0.77 and 0.83, spill
+    // 0.00, centre error under 140 Hz. Spill at zero says every piece is
+    // inside the emitter, so the detector is splitting a signal it has
+    // located correctly rather than finding something else. The same baud at
+    // rolloff 0.2 and 0.35 passes, and the other two rungs pass at all three,
+    // so it is neither bandwidth alone nor rolloff alone.
+    //
+    // Not fixed here. The last fragmentation cause took a measurement pass of
+    // its own to find and was not any of the three things first suspected, so
+    // this is recorded as a reproducible failure rather than guessed at.
+    const std::vector<std::pair<double, dsp::Hertz>> kKnownSplits{{0.5, 30'000}, {0.5, 166'500}};
+
+    std::vector<std::pair<double, dsp::Hertz>> failures;
+    std::size_t scored = 0;
+    std::size_t passed = 0;
+    for (const double rolloff : kRolloffs) {
+    const siggen::SceneSpec spec = keyed_scene(6.0, rolloff);
     const FrameCache cache = FrameCache::render(geometry, spec);
 
     detect::DetectorConfig config;
     config.detection_threshold_db = 6.0;
     const RunResult result = cache.run(config);
-    print_scores("the bar, keyed ladder at 6 dB", result);
+    print_scores(std::format("the bar, keyed ladder at 6 dB, rolloff {:.2f}", rolloff), result);
 
-    std::size_t scored = 0;
-    std::size_t passed = 0;
     for (const test::EmitterScore& score : result.scores) {
         if (score.modulation != siggen::Modulation::Qpsk) {
             continue;
@@ -729,22 +775,30 @@ TEST_CASE("an emitter of known extent reads as one track of that extent", "[dete
             ++passed;
             continue;
         }
+        failures.emplace_back(rolloff, score.truth_bandwidth_hz);
         // Named rather than counted, so a regression says which bandwidth
         // stopped working instead of only that the rate fell.
-        WARN(std::format("emitter of {} Hz failed the bar: {} ids, {} at once, cover {:.2f}, "
-                         "spill {:.2f}, seen {:.2f}, life {:.2f}, centre error {} Hz",
-                         score.truth_bandwidth_hz, score.track_ids, score.peak_simultaneous,
-                         score.best_coverage, score.best_spill, seen,
+        WARN(std::format("rolloff {:.2f}: emitter of {} Hz failed the bar: {} ids, {} at once, "
+                         "cover {:.2f}, spill {:.2f}, seen {:.2f}, life {:.2f}, "
+                         "centre error {} Hz",
+                         rolloff, score.truth_bandwidth_hz, score.track_ids,
+                         score.peak_simultaneous, score.best_coverage, score.best_spill, seen,
                          score.best_lifetime_fraction, score.best_centre_error_hz));
+    }
     }
 
     // Four QPSK rungs from 6.5 kHz to 150 kHz, every one of them keyed on and
     // off inside the scene. All four passed when this was written; the bar is
     // all of them, because three out of four means one bandwidth stopped
     // working and the scene is small enough to say which.
-    INFO(std::format("{} of {} filled emitters passed", passed, scored));
-    CHECK(scored == 4);
-    CHECK(passed == scored);
+    std::ranges::sort(failures);
+    INFO(std::format("{} of {} filled emitters passed across {} rolloffs", passed, scored,
+                     kRolloffs.size()));
+    for (const auto& [rolloff, width] : failures) {
+        INFO(std::format("  failed: rolloff {:.2f}, {} Hz", rolloff, width));
+    }
+    CHECK(scored == 4 * kRolloffs.size());
+    CHECK(failures == kKnownSplits);
 }
 
 // Where the wide end stops working, on the shipped grid.
