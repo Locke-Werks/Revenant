@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -152,6 +153,19 @@ struct EmitterTruth {
     std::uint64_t payload_seed = 0;
 
     [[nodiscard]] bool open_ended() const { return end_sample == kAlwaysOn; }
+
+    // The modulation field with the kind check attached, so a reader cannot
+    // take it off a row where it means nothing. Nullopt on a BroadcastFm
+    // row.
+    //
+    // The bare field stays public because it is what the generator fills
+    // in, and because a struct of plain data is what the truth record is.
+    // Every consumer in the tree goes through this.
+    [[nodiscard]] std::optional<Modulation> readable_modulation() const
+    {
+        return (kind == EmitterKind::Modulated) ? std::optional<Modulation>{modulation}
+                                                : std::nullopt;
+    }
 };
 
 struct EmitterPlacement {

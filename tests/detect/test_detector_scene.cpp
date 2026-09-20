@@ -462,6 +462,14 @@ private:
     dsp::Hertz center_ = 0;
 };
 
+// The mode column. EmitterScore::modulation is nullopt on a row the
+// question does not apply to, and the generator's name goes there instead
+// of a mode the row never had.
+[[nodiscard]] std::string_view mode_column(const test::EmitterScore& score) {
+    return score.modulation ? siggen::modulation_name(*score.modulation)
+                            : siggen::emitter_kind_name(score.kind);
+}
+
 void print_scores(const std::string& title, const RunResult& result) {
     std::println("");
     std::println("{}", title);
@@ -475,7 +483,7 @@ void print_scores(const std::string& title, const RunResult& result) {
                                    : 0.0;
         std::println("  {:>10} {:>6} {:>4} {:>4} {:>9} {:>6.2f} {:>9} {:>6.2f} {:>5.2f} {:>5.2f} "
                      "{:>9.0f} {:>9.0f} {:>6.2f}",
-                     score.truth_bandwidth_hz, siggen::modulation_name(score.modulation),
+                     score.truth_bandwidth_hz, mode_column(score),
                      score.track_ids, score.peak_simultaneous, score.best_bandwidth_hz,
                      score.best_coverage, score.best_centre_error_hz, score.best_spill,
                      score.best_lifetime_fraction, seen, score.centre_step_mean_hz,
@@ -509,7 +517,7 @@ void print_post_stop(const std::string& title, const RunResult& result) {
         }
         std::println("  {:>10} {:>6} {:>7.2f} {:>7.2f} {:>7.2f} {:>6.2f} {:>9} {:>7.2f} {:>5} "
                      "{:>4}",
-                     score.truth_bandwidth_hz, siggen::modulation_name(score.modulation),
+                     score.truth_bandwidth_hz, mode_column(score),
                      score.post_window_seconds, score.residual_seconds,
                      score.after_live_seconds, score.after_held_seconds,
                      score.after_worst_centre_error_hz, score.after_worst_bandwidth_ratio,

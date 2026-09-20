@@ -241,7 +241,8 @@ SceneScorer::SceneScorer(const siggen::Scene& scene, dsp::Hertz source_center,
         live.score.post_window_seconds =
             truth.end_sample == siggen::kAlwaysOn ? 0.0 : std::max(0.0, post_window_seconds);
         live.score.emitter_id = truth.id;
-        live.score.modulation = truth.modulation;
+        live.score.kind = truth.kind;
+        live.score.modulation = truth.readable_modulation();
         live.score.truth_low_hz = source_center + truth.extent.low_hz;
         live.score.truth_high_hz = source_center + truth.extent.high_hz;
         live.score.truth_bandwidth_hz = truth.extent.bandwidth_hz();

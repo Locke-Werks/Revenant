@@ -34,6 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -140,7 +141,13 @@ private:
 // What the detector said about one emitter, scored against its truth record.
 struct EmitterScore {
     std::uint32_t emitter_id = 0;
-    siggen::Modulation modulation = siggen::Modulation::Cw;
+
+    // Which generator made the emitter, and its mode when that question has
+    // an answer. Nullopt on a broadcast FM row: siggen::EmitterTruth's
+    // modulation field is meaningless there and reads as Cw, so copying it
+    // unguarded would score a 268750 Hz station as a keyed carrier.
+    siggen::EmitterKind kind = siggen::EmitterKind::Modulated;
+    std::optional<siggen::Modulation> modulation{};
 
     // From the truth record, absolute hertz in the frame the detector reports.
     dsp::Hertz truth_low_hz = 0;

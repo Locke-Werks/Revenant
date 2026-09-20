@@ -769,9 +769,9 @@ std::string truth_csv(const Scene& scene)
         // Empty rather than "cw" on a station's row. EmitterTruth::modulation
         // is meaningless there and a scorer reading a mode name off it would
         // score a 268 kHz broadcast station as a keyed carrier.
+        const std::optional<Modulation> readable = record.readable_modulation();
         const std::string_view modulation =
-            (record.kind == EmitterKind::Modulated) ? modulation_name(record.modulation)
-                                                    : std::string_view{};
+            readable ? modulation_name(*readable) : std::string_view{};
 
         // Empty rather than 0.0000 on a Modulated row, for the same reason
         // the modulation cell is empty on a station's: a zero in that column
