@@ -472,7 +472,18 @@ void EngineLink::apply_receiver_request()
             // showing the engine is elsewhere, and endReceiverDrag posts
             // the final position, which is the one rebuild the gesture
             // actually needs. See EngineLink::receiver_drag_live_.
+            //
+            // Clear the fault on the way out. Deferring a rebuild is not a
+            // fault, and every other exit from this function writes the
+            // string it means, so returning without writing one leaves
+            // whatever the last pass said. Concretely: cross a shape
+            // boundary once, release, and the rebuild posts "the audio
+            // restarted". Start a second drag and that sentence stays on
+            // screen for the whole gesture while nothing has restarted,
+            // because this return is the only path that does not rewrite
+            // it.
             if (receiver_drag_live_.load(std::memory_order_acquire)) {
+                note_receiver_fault(QString{});
                 return;
             }
             if (recreate_receiver(params)) {
