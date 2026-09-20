@@ -98,14 +98,33 @@ using dsp::SampleRate;
 // touch the pilot, it does not touch the 38 kHz stereo subcarrier, and it
 // does not touch the 57 kHz RDS subcarrier. A generator that ran the curve
 // over the finished composite instead would boost the RDS subcarrier by
-// sqrt(1 + (2*pi*57000*50e-6)^2), which is 25 dB, and the resulting signal
-// would decode perfectly while carrying an injection level nothing in the
-// standard permits. Nothing downstream would complain: the decoder would
-// report a clean eye and a high quality figure, and every sensitivity number
-// measured against that signal would be 25 dB optimistic.
+// sqrt(1 + (2*pi*57000*tau)^2), which is 25.1 dB at 50 us and 28.6 dB at
+// 75 us, and the resulting signal would decode perfectly while carrying an
+// injection level nothing in the standard permits. Nothing downstream would
+// complain: the decoder would report a clean eye and a high quality figure,
+// and every sensitivity number measured against that signal would be
+// optimistic by that much.
 //
-// tests/tools/test_wfm_mod.cpp asserts the RDS component is bit-identical
-// with the curve on and off, which is the shape of that mistake.
+// tests/tools/test_wfm_mod.cpp measures the RDS component's level IN THE
+// COMPOSITE render() produces, by projecting that composite onto
+// render_rds_only(), and asserts the level is unchanged across the three
+// curves while the audio's own level in the same composite moves by the
+// curve's gain. The pilot's level is measured the same way, because the
+// curve reaches it too at 15.6 dB.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 the sentence above read "tests/tools/test_wfm_mod.cpp
+// asserts the RDS component is bit-identical with the curve on and off,
+// which is the shape of that mistake." The test did compare exactly that,
+// and it could not fail: render_rds_only() forwards to RdsModulator,
+// RdsModSpec has no pre-emphasis field, and the three iterations were the
+// same computation on the same inputs. Changing FmComposite::render to
+// out[i] = float((rds + audio) * preemphasis_gain(curve, 57000)), which is
+// the mistake this paragraph describes, left the comparison passing bit for
+// bit. Anyone who read this header and concluded a regression guard existed
+// is owed the retraction rather than a claim quietly swapped for a better
+// one.
 enum class Preemphasis : std::uint8_t {
     // No pre-emphasis. Not a broadcast station, and useful precisely because
     // it is the reference the other two are measured against.

@@ -15,7 +15,8 @@
 //   Constant envelope. The stereo matrix against a hand computation that
 //   includes the 38 kHz subcarrier's coherence with the pilot under a clock
 //   error. Mono against stereo carrying the same programme on both channels.
-//   All three pre-emphasis curves, on the audio and NOT on the data. The
+//   All three pre-emphasis curves, as component levels measured in the
+//   rendered composite: on the audio, and on neither subcarrier. The
 //   over-deviation report. Carson's rule. Every refusal validate() makes.
 //   A station placed in a wideband scene, which is dispatch and a truth row
 //   rather than any new arithmetic.
@@ -98,6 +99,55 @@ constexpr double kTwoPi = 2.0 * kPi;
     std::vector<float> out(count, 0.0F);
     composite.render_audio_only(start, dsp::RealSpan(out));
     return out;
+}
+
+[[nodiscard]] std::vector<float> render_pilot(const siggen::FmComposite& composite,
+                                              dsp::SampleIndex start, std::size_t count)
+{
+    std::vector<float> out(count, 0.0F);
+    composite.render_pilot_only(start, dsp::RealSpan(out));
+    return out;
+}
+
+// The scalar multiple of `part` that best fits `whole`, least squares. For a
+// component the composite is supposed to carry at unit scale this reads 1.0,
+// and a generator that scaled that component reads back the scale it used.
+//
+// It is a measurement of the whole composite and needs no assumption about
+// where a scaling mistake was made, which is the difference between it and
+// subtracting the other components off first.
+[[nodiscard]] double component_level(const std::vector<float>& whole,
+                                     const std::vector<float>& part)
+{
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (std::size_t i = 0; i < part.size(); ++i) {
+        numerator += static_cast<double>(whole[i]) * static_cast<double>(part[i]);
+        denominator += static_cast<double>(part[i]) * static_cast<double>(part[i]);
+    }
+    return (denominator > 0.0) ? numerator / denominator : 0.0;
+}
+
+// Amplitude of a tone at hz, by a single DFT bin taken at the absolute
+// sample indices the buffer holds.
+//
+// Rectangular window on purpose: kLevelWindow below is a multiple of 684, so
+// the programme tone, the 19 kHz pilot and the 57 kHz subcarrier are all
+// exact bins of it and there is nothing for a window function to suppress.
+[[nodiscard]] double tone_amplitude(const std::vector<float>& signal,
+                                    dsp::SampleIndex start, dsp::SampleRate rate,
+                                    dsp::Hertz hz)
+{
+    const double turns_per_sample = static_cast<double>(hz) / static_cast<double>(rate);
+    double real = 0.0;
+    double imaginary = 0.0;
+    for (std::size_t i = 0; i < signal.size(); ++i) {
+        const double turns = turns_per_sample * static_cast<double>(start + i);
+        const double angle = kTwoPi * (turns - std::floor(turns));
+        real += static_cast<double>(signal[i]) * std::cos(angle);
+        imaginary += static_cast<double>(signal[i]) * std::sin(angle);
+    }
+    return 2.0 * std::hypot(real, imaginary) / static_cast<double>(signal.size());
 }
 
 }  // namespace
@@ -192,80 +242,121 @@ TEST_CASE("the FM phase is the integral of the composite", "[tools][wfm]")
     }
 }
 
-TEST_CASE("pre-emphasis lands on the audio and nowhere else", "[tools][wfm]")
+TEST_CASE("the curve moves the audio's level in the composite and not the subcarriers'",
+          "[tools][wfm]")
 {
     INFO(std::format("seed {}", kSeed));
 
     // WHAT THIS CASE IS FOR
     //
     // Running the curve over the finished composite instead of over L and R
-    // is a one-line mistake that produces a working station. It boosts the
-    // 57 kHz subcarrier by sqrt(1 + (2*pi*57000*50e-6)^2), which is 25 dB,
-    // and the decoder downstream reports a clean eye and a high quality
-    // figure because it has no idea what injection level it was promised.
-    // Every sensitivity number measured against that signal would be 25 dB
-    // optimistic and nothing would say so.
+    // is a one-line mistake that produces a working station. It lifts the
+    // 57 kHz subcarrier by sqrt(1 + (2*pi*57000*tau)^2), 25.1 dB at 50 us
+    // and 28.6 dB at 75 us, and the decoder downstream reports a clean eye
+    // and a high quality figure because it has no idea what injection level
+    // it was promised. Every sensitivity number measured against that signal
+    // would be optimistic by that much and nothing would say so.
     //
-    // So the data is compared sample for sample across the three curves,
-    // with no tolerance, and the audio is compared against the gain the
-    // curve is defined by.
+    // WHAT CARRIES THE RISK, AND WHERE THE BAR THEREFORE GOES
+    //
+    // The quantity that moves under that mistake is the RDS subcarrier's
+    // LEVEL IN THE COMPOSITE THAT REACHES THE MODULATOR, which is
+    // FmComposite::render(). It is not render_rds_only(): that forwards
+    // straight to RdsModulator, RdsModSpec has no pre-emphasis field, and
+    // comparing it across curves is the same computation on the same inputs
+    // three times.
+    //
+    // WHAT THIS CASE USED TO DO
+    //
+    // Until 2026-09-20 it did exactly that: render_rds_only() across the
+    // three curves, compared with ==, under a comment saying the tolerance
+    // was zero on purpose. It could not fail for any implementation this
+    // design admits. Rewriting FmComposite::render as
+    // out[i] = float((rds + audio) * preemphasis_gain(curve, 57000)) left it
+    // passing bit for bit, and wfm_mod.h cited it as the guard against that
+    // exact mistake.
+    //
+    // So the composite is projected onto each of its three components and
+    // the coefficient is what gets asserted. A component the composite is
+    // supposed to carry at unit scale reads 1.0; a generator that scaled it
+    // reads back the scale. The data and the pilot must read 1.0 under every
+    // curve, and the audio must move by the curve's own gain.
 
-    constexpr std::size_t kWindow = 8192;
+    // A multiple of 684, so 4 kHz, 19 kHz and 57 kHz are all exact bins and
+    // the pilot and the programme tone cannot leak into each other's
+    // measurement. Long enough, too, that the audio-against-data cross term
+    // in the projection stays near 1e-4: the product of a 4 kHz tone and a
+    // 57 kHz subcarrier has no DC component, so its running sum is bounded
+    // and the mean of it falls as 1/N.
+    constexpr std::size_t kWindow = 684 * 192;
     constexpr dsp::SampleIndex kFrom = 300000;
+
+    // Enough bits that the payload is still running at the far end of the
+    // window: 1200 bits is 1.01 s and the window ends at 0.63 s.
+    constexpr std::size_t kBits = 1200;
+
+    constexpr dsp::Hertz kTone = 4000;
+    constexpr dsp::Hertz kAudioDeviation = 30000;
 
     const siggen::Preemphasis curves[] = {siggen::Preemphasis::None,
                                           siggen::Preemphasis::Us75,
                                           siggen::Preemphasis::Eu50};
 
-    std::vector<float> reference_rds;
+    const double level = static_cast<double>(kAudioDeviation) /
+                         static_cast<double>(siggen::kCompositePeakDeviationHz);
+
     for (const siggen::Preemphasis curve : curves) {
         INFO(siggen::preemphasis_name(curve));
 
         // Mono, one tone, so the audio channel is exactly one sinusoid and
-        // its peak is the gain under test with nothing else in the way.
-        siggen::WfmSpec spec = base_station();
+        // the DFT bin below reads the gain under test with nothing else in
+        // the way.
+        siggen::WfmSpec spec = base_station(kBits);
         spec.programme.stereo = false;
         spec.programme.preemphasis = curve;
-        spec.programme.left_tone_hz = 4000;
-        spec.programme.audio_deviation_hz = 30000;
+        spec.programme.left_tone_hz = kTone;
+        spec.programme.audio_deviation_hz = kAudioDeviation;
         spec.rds.pilot_enabled = true;
 
         auto composite = siggen::FmComposite::create(spec);
         REQUIRE(composite.has_value());
 
+        const std::vector<float> whole = render_real(*composite, kFrom, kWindow);
         const std::vector<float> rds = render_rds(*composite, kFrom, kWindow);
-        if (reference_rds.empty()) {
-            reference_rds = rds;
-        } else {
-            // Bit for bit. The curve must not reach the subcarrier at all,
-            // and "close enough" is not the property: a 25 dB error and a
-            // 0.1 dB error are the same bug caught at different tolerances.
-            CHECK(rds == reference_rds);
-        }
+        const std::vector<float> pilot = render_pilot(*composite, kFrom, kWindow);
 
-        const std::vector<float> audio = render_audio(*composite, kFrom, kWindow);
-        double measured = 0.0;
-        for (const float value : audio) {
-            measured = std::max(measured, std::abs(static_cast<double>(value)));
-        }
+        // The component has to be present at all, or a projection onto a
+        // buffer of zeros reads 0.0 and the assertion below would pass on an
+        // empty signal.
+        REQUIRE(component_level(rds, rds) == Approx(1.0).epsilon(1e-12));
+        REQUIRE(component_level(pilot, pilot) == Approx(1.0).epsilon(1e-12));
 
-        const double gain = siggen::preemphasis_gain(curve, spec.programme.left_tone_hz);
-        const double expected =
-            gain * static_cast<double>(spec.programme.audio_deviation_hz) /
-            static_cast<double>(siggen::kCompositePeakDeviationHz);
+        const double data_level = component_level(whole, rds);
+        const double pilot_level = component_level(whole, pilot);
+        const double audio_level =
+            tone_amplitude(whole, kFrom, spec.rate, kTone) / level;
 
-        INFO(std::format("gain {:.4f}, audio peak {:.6f} against {:.6f}", gain, measured,
-                         expected));
+        const double gain = siggen::preemphasis_gain(curve, kTone);
+        INFO(std::format("data x{:.6f}, pilot x{:.6f}, audio x{:.6f} against a curve gain "
+                         "of {:.6f} at the tone and {:.4f} at 57 kHz",
+                         data_level, pilot_level, audio_level, gain,
+                         siggen::preemphasis_gain(curve, 57000)));
 
-        // The tolerance is the sample grid, not the arithmetic: a 4 kHz tone
-        // at this rate has 171 samples a cycle, so the largest sample sits
-        // below the true crest by about (2*pi/171)^2/2, which is 7e-4
-        // relative.
-        CHECK(measured == Approx(expected).epsilon(2e-3));
+        // The two subcarriers, unscaled. The tolerance is the cross term
+        // between the components, not the arithmetic: the smallest mistake
+        // this is guarding against is a factor of 6.05, at the pilot under
+        // 50 us, and the largest is 26.9 at the data under 75 us.
+        CHECK(data_level == Approx(1.0).epsilon(5e-3));
+        CHECK(pilot_level == Approx(1.0).epsilon(5e-3));
+
+        // And the audio, which the curve is supposed to move. This is the
+        // half that fails if the curve is not applied at all.
+        CHECK(audio_level == Approx(gain).epsilon(1e-3));
     }
 
-    // And the figures themselves, so that a curve swapped between the two
-    // regions is caught here rather than as a level that looks plausible.
+    // The figures the paragraph above is stated in, pinned, so that a curve
+    // swapped between the two regions is caught here rather than as a level
+    // that looks plausible.
     CHECK(siggen::preemphasis_seconds(siggen::Preemphasis::Us75) == Approx(75e-6));
     CHECK(siggen::preemphasis_seconds(siggen::Preemphasis::Eu50) == Approx(50e-6));
     CHECK(siggen::preemphasis_seconds(siggen::Preemphasis::None) == 0.0);
@@ -277,6 +368,16 @@ TEST_CASE("pre-emphasis lands on the audio and nowhere else", "[tools][wfm]")
     // it is why audio_deviation_hz defaults below the 75 kHz cap.
     CHECK(siggen::preemphasis_gain(siggen::Preemphasis::Eu50, 15000) ==
           Approx(4.81733).epsilon(1e-5));
+
+    // The size of the mistake the projections above are guarding against,
+    // which is what wfm_mod.h states in decibels: 17.935 is 25.07 dB and
+    // 26.879 is 28.59 dB.
+    CHECK(siggen::preemphasis_gain(siggen::Preemphasis::Eu50, 57000) ==
+          Approx(17.93498).epsilon(1e-6));
+    CHECK(siggen::preemphasis_gain(siggen::Preemphasis::Us75, 57000) ==
+          Approx(26.87923).epsilon(1e-6));
+    CHECK(siggen::preemphasis_gain(siggen::Preemphasis::Eu50, 19000) ==
+          Approx(6.05221).epsilon(1e-6));
 }
 
 TEST_CASE("the stereo matrix is the pilot's second harmonic, under a clock error",
