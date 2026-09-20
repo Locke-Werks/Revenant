@@ -17,14 +17,17 @@
 //   error. Mono against stereo carrying the same programme on both channels.
 //   All three pre-emphasis curves, on the audio and NOT on the data. The
 //   over-deviation report. Carson's rule. Every refusal validate() makes.
+//   A station placed in a wideband scene, which is dispatch and a truth row
+//   rather than any new arithmetic.
 //
 //   Covered in tests/decode/test_rds_bits.cpp instead, because it needs the
 //   discriminator and the decoder: whether any of this comes back as bits.
 //
 //   Not covered anywhere yet, and listed so nobody reads the pair above as
-//   complete. A station rendered into a wideband scene and then channelized
-//   by the engine's own receiver, rather than discriminated directly by the
-//   CPU twin. A programme that is audio rather than tones, which the
+//   complete. A station channelized by the engine's own receiver, rather
+//   than discriminated directly by the CPU twin: the scene case below
+//   renders one and compares samples, and nothing runs the polyphase stage
+//   over it. A programme that is audio rather than tones, which the
 //   generator does not offer. Deviation other than 75 kHz, which rescales
 //   every stated level and is exercised nowhere.
 //
@@ -46,6 +49,7 @@
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/rds_mod.h"
 #include "core/dsp/synth/wfm_mod.h"
+#include "core/dsp/synth/wideband.h"
 #include "core/dsp/types.h"
 
 using namespace revenant;
@@ -608,6 +612,76 @@ TEST_CASE("the station refuses what it cannot render", "[tools][wfm]")
         spec.rds.bits.clear();
         CHECK_FALSE(siggen::validate(spec).has_value());
     }
+}
+
+TEST_CASE("a wideband scene can carry a broadcast FM station", "[tools][wfm]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // WHAT THIS CASE IS FOR
+    //
+    // The scene is where a station has to arrive for the engine to see one,
+    // and the wiring has two things that can be silently wrong: which
+    // generator a burst dispatches to, and what the truth table says the
+    // burst was. The second is the one that would not show up as a broken
+    // signal. EmitterTruth carries a Modulation field that means nothing on
+    // a station's row, and a scorer that read it would score a 268 kHz
+    // broadcast station as a keyed carrier, so the row has to say which kind
+    // it is and the CSV has to leave that cell empty.
+
+    siggen::WfmSpec station = base_station(300);
+    station.carrier_offset = 0;
+
+    siggen::SceneSpec scene_spec;
+    scene_spec.rate = kStationRate;
+    scene_spec.duration_samples = 40000;
+    scene_spec.add_noise = false;
+
+    siggen::WfmStationPlacement placement;
+    placement.station = station;
+    placement.use_snr = false;
+    placement.end_sample = scene_spec.duration_samples;
+    scene_spec.fm_stations.push_back(placement);
+
+    auto scene = siggen::Scene::create(scene_spec);
+    REQUIRE(scene.has_value());
+
+    REQUIRE(scene->truth().size() == 1);
+    const siggen::EmitterTruth& truth = scene->truth().front();
+    CHECK(truth.kind == siggen::EmitterKind::BroadcastFm);
+    CHECK(truth.extent.bandwidth_hz() == 268'750);
+    CHECK(truth.carrier_offset_hz == 0);
+    CHECK(truth.start_sample == 0);
+    CHECK(truth.end_sample == scene_spec.duration_samples);
+    CHECK(truth.symbol_rate_baud == 0.0);
+
+    // The row names the generator, and the modulation cell is empty rather
+    // than carrying the enum's default.
+    const std::string csv = siggen::truth_csv(*scene);
+    INFO(csv);
+    CHECK(csv.find("id,kind,modulation,") == 0);
+    CHECK(csv.find("\n0,wfm,,0,") != std::string::npos);
+
+    // With no noise and a unit gain, the scene is the station and nothing
+    // else, sample for sample.
+    auto modulator = siggen::WfmModulator::create(station);
+    REQUIRE(modulator.has_value());
+
+    constexpr std::size_t kWindow = 8192;
+    constexpr dsp::SampleIndex kFrom = 12000;
+    std::vector<dsp::Complex32> from_scene(kWindow);
+    std::vector<dsp::Complex32> from_modulator(kWindow);
+    scene->render(kFrom, dsp::ComplexSpan(from_scene));
+    modulator->render(kFrom, dsp::ComplexSpan(from_modulator));
+    CHECK(from_scene == from_modulator);
+
+    // And blocking independence survives the scene's own worker split.
+    std::vector<dsp::Complex32> blocked(kWindow);
+    for (std::size_t at = 0; at < kWindow; at += 701) {
+        const std::size_t length = std::min<std::size_t>(701, kWindow - at);
+        scene->render(kFrom + at, dsp::ComplexSpan(blocked.data() + at, length));
+    }
+    CHECK(blocked == from_scene);
 }
 
 TEST_CASE("the pre-emphasis names round trip", "[tools][wfm]")

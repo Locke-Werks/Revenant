@@ -39,11 +39,13 @@
 #include <functional>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/dsp/types.h"
 #include "core/error.h"
 #include "core/dsp/synth/modulators.h"
+#include "core/dsp/synth/wfm_mod.h"
 
 namespace revenant::siggen {
 
@@ -58,8 +60,39 @@ inline constexpr SampleIndex kAlwaysOn = std::numeric_limits<SampleIndex>::max()
 // holds just as much here: a signal to noise ratio with no bandwidth attached
 // is three different numbers, and at 20 MS/s the gap between the full-band
 // figure and the in-band one runs to 40 dB.
+// Which generator produced a transmission.
+//
+// Two, because a broadcast FM station is not a Modulation. core/dsp/synth/
+// wfm_mod.h says at length why it is not, and the consequence lands here:
+// EmitterTruth carries one field that is only readable for one of the two
+// kinds, so the kind has to be readable first.
+enum class EmitterKind : std::uint8_t {
+    // core/dsp/synth/modulators.h's Modulator, in one of the eight modes.
+    // EmitterTruth::modulation names it.
+    Modulated = 0,
+
+    // core/dsp/synth/wfm_mod.h's WfmModulator: a broadcast FM station,
+    // composite, pilot, RDS and all.
+    BroadcastFm,
+};
+
+[[nodiscard]] std::string_view emitter_kind_name(EmitterKind kind);
+
 struct EmitterTruth {
     std::uint32_t id = 0;
+
+    EmitterKind kind = EmitterKind::Modulated;
+
+    // READ kind FIRST. This field is meaningless on a BroadcastFm row and is
+    // left at its default there, which reads as Cw. There is no Modulation
+    // member for a broadcast station and adding one would put an RDS payload
+    // into every emitter a random population draws, so the alternatives were
+    // a field that lies on one kind of row or an enum that lies about the
+    // generator; this is the first, made visible.
+    //
+    // truth_csv() leaves the modulation cell EMPTY on such a row rather than
+    // printing "cw", so a scorer reading the file cannot make the mistake
+    // this comment is warning an in-memory reader about.
     Modulation modulation = Modulation::Cw;
 
     // Where the carrier sits relative to the scene centre. For the
@@ -89,10 +122,15 @@ struct EmitterTruth {
     // measurement over the raw buffer would report.
     double snr_in_full_band_db = 0.0;
 
-    // Zero for the modes with no symbol rate.
+    // Zero for the modes with no symbol rate, and for a broadcast FM
+    // station, whose RDS bit clock is not a symbol rate a classifier could
+    // read off the RF.
     double symbol_rate_baud = 0.0;
 
     // The payload seed, so this exact emitter can be rebuilt on its own.
+    // Zero on a BroadcastFm row: that payload is a bit sequence the caller
+    // handed over rather than one drawn from a seed, so the caller already
+    // has it and there is no number here that would reproduce it.
     std::uint64_t payload_seed = 0;
 
     [[nodiscard]] bool open_ended() const { return end_sample == kAlwaysOn; }
@@ -107,6 +145,29 @@ struct EmitterPlacement {
     // knowing what the noise is doing.
     bool use_snr = true;
     double snr_in_occupied_bandwidth_db = 20.0;
+
+    SampleIndex start_sample = 0;
+    SampleIndex end_sample = kAlwaysOn;
+};
+
+// A broadcast FM station in the scene, carrying a known RDS bitstream.
+//
+// Placed by hand and never drawn by RandomPopulation. A station is 268750 Hz
+// wide, it carries a payload somebody chose, and there is no sensible random
+// bit sequence to give one, so it is not in the palette and Modulation has
+// no member for it. Put the offsets where you want them.
+struct WfmStationPlacement {
+    WfmSpec station{};
+
+    // Overwritten with the scene's rate, for the reason WfmSpec::rds.rate is
+    // overwritten with the station's: one stream, one sample rate. A station
+    // wider than the scene, or one whose skirt reaches past Nyquist at the
+    // offset given, is refused by WfmSpec's own validate() with the numbers
+    // in the message.
+    //
+    // Same meaning as EmitterPlacement's two fields.
+    bool use_snr = true;
+    double snr_in_occupied_bandwidth_db = 30.0;
 
     SampleIndex start_sample = 0;
     SampleIndex end_sample = kAlwaysOn;
@@ -170,6 +231,7 @@ struct SceneSpec {
     double noise_power_full_band_dbfs = -60.0;
 
     std::vector<EmitterPlacement> emitters{};
+    std::vector<WfmStationPlacement> fm_stations{};
     RandomPopulation random{};
 
     // Zero means one per hardware thread. The output does not depend on this.
@@ -201,7 +263,9 @@ private:
     Scene() = default;
 
     struct Burst {
+        // Index into modulators_ or into stations_, according to kind.
         std::size_t modulator = 0;
+        EmitterKind kind = EmitterKind::Modulated;
         SampleIndex start = 0;
         SampleIndex end = 0;
         double gain = 1.0;
@@ -226,6 +290,12 @@ private:
     // modulator per slot rather than per burst is what keeps a scene with a
     // hundred thousand bursts inside a few megabytes.
     std::vector<Modulator> modulators_{};
+
+    // Broadcast FM stations, indexed by a Burst whose kind is BroadcastFm.
+    // A separate vector rather than a variant because the two generators
+    // have nothing in common beyond accumulate(), and a station is placed by
+    // hand so there are never many of them.
+    std::vector<WfmModulator> stations_{};
 
     // Sorted by start_sample, with truth_ held in the same order so an index
     // means the same thing in both.

@@ -202,13 +202,78 @@ Expected<Scene> Scene::create(const SceneSpec& spec)
     // each is Gaussian with variance noise_power/2.
     scene.noise_sigma_ = std::sqrt(scene.noise_power_ * 0.5);
 
+    // The level one emitter is placed at, and the noise it is placed
+    // against. Shared by the Modulator path and the broadcast FM path, which
+    // differ in what they render and in nothing about how they are levelled.
+    struct Level {
+        double gain = 1.0;
+        double power = 0.0;
+        double noise_in_band = 0.0;
+    };
+
+    const auto level_for = [&scene](const SpectralExtent& extent, double nominal,
+                                    bool use_snr,
+                                    double requested_snr_db) -> Expected<Level> {
+        // Noise in the emitter's own band, which is the denominator a
+        // detector's sensitivity figure is quoted against.
+        const double bandwidth = std::max(1.0, static_cast<double>(extent.bandwidth_hz()));
+
+        Level level;
+        level.noise_in_band =
+            scene.noise_power_ * bandwidth / static_cast<double>(scene.rate_);
+        level.power = nominal;
+
+        if (use_snr) {
+            if (scene.noise_power_ <= 0.0) {
+                return fail("an emitter placed by SNR needs a noise floor to be placed against");
+            }
+            level.power = level.noise_in_band * db_to_power(requested_snr_db);
+            level.gain = (nominal > 0.0) ? std::sqrt(level.power / nominal) : 0.0;
+            if (nominal <= 0.0) {
+                level.power = 0.0;
+            }
+        }
+        return level;
+    };
+
+    // Turns one emitter's truth prototype and its windows into rows, clamped
+    // to the scene. Shared for the same reason level_for is: two kinds of
+    // emitter, one truth table, and a second copy of this is a second
+    // chance for the two to disagree about what a burst is.
+    const auto add_bursts =
+        [&scene, &spec](const EmitterTruth& prototype, std::size_t index, EmitterKind kind,
+                        double gain,
+                        const std::vector<std::pair<SampleIndex, SampleIndex>>& windows) {
+            for (const auto& window : windows) {
+                SampleIndex start = window.first;
+                SampleIndex end = window.second;
+                if (spec.duration_samples > 0) {
+                    if (start >= spec.duration_samples) {
+                        continue;  // entirely past the end of the scene
+                    }
+                    end = std::min(end, spec.duration_samples);
+                }
+                if (end <= start) {
+                    continue;
+                }
+
+                EmitterTruth record = prototype;
+                record.start_sample = start;
+                record.end_sample = end;
+
+                scene.truth_.push_back(record);
+                scene.bursts_.push_back(Burst{index, kind, start, end, gain});
+            }
+        };
+
     // Adds one slot's modulator and the bursts that run it. Shared by the
     // explicit and the random paths so both produce identical truth records.
-    const auto add_slot = [&scene, &spec](ModulatorSpec modulator_spec,
-                                          bool use_snr,
-                                          double requested_snr_db,
-                                          std::uint64_t payload_seed,
-                                          const std::vector<std::pair<SampleIndex, SampleIndex>>& windows)
+    const auto add_slot = [&scene, &level_for, &add_bursts](
+                              ModulatorSpec modulator_spec,
+                              bool use_snr,
+                              double requested_snr_db,
+                              std::uint64_t payload_seed,
+                              const std::vector<std::pair<SampleIndex, SampleIndex>>& windows)
         -> Status {
         auto modulator = Modulator::create(std::move(modulator_spec));
         if (!modulator) {
@@ -216,67 +281,76 @@ Expected<Scene> Scene::create(const SceneSpec& spec)
         }
 
         const SpectralExtent extent = modulator->occupied_extent();
-        const double nominal = modulator->nominal_mean_power();
-
-        double gain = 1.0;
-        double power = nominal;
-        if (use_snr) {
-            if (scene.noise_power_ <= 0.0) {
-                return fail("an emitter placed by SNR needs a noise floor to be placed against");
-            }
-            // Noise in the emitter's own band, which is the denominator a
-            // detector's sensitivity figure is quoted against.
-            const double bandwidth =
-                std::max(1.0, static_cast<double>(extent.bandwidth_hz()));
-            const double noise_in_band =
-                scene.noise_power_ * bandwidth / static_cast<double>(scene.rate_);
-            power = noise_in_band * db_to_power(requested_snr_db);
-            gain = (nominal > 0.0) ? std::sqrt(power / nominal) : 0.0;
-            if (nominal <= 0.0) {
-                power = 0.0;
-            }
+        Expected<Level> level =
+            level_for(extent, modulator->nominal_mean_power(), use_snr, requested_snr_db);
+        if (!level) {
+            return std::unexpected(level.error());
         }
 
-        const double bandwidth = std::max(1.0, static_cast<double>(extent.bandwidth_hz()));
-        const double noise_in_band =
-            scene.noise_power_ * bandwidth / static_cast<double>(scene.rate_);
+        EmitterTruth prototype;
+        prototype.kind = EmitterKind::Modulated;
+        prototype.modulation = modulator->kind();
+        prototype.carrier_offset_hz = modulator->spec().common.carrier_offset;
+        prototype.extent = extent;
+        prototype.mean_power = level->power;
+        prototype.snr_in_occupied_bandwidth_db =
+            (level->noise_in_band > 0.0) ? power_to_db(level->power / level->noise_in_band)
+                                         : 0.0;
+        prototype.snr_in_full_band_db =
+            (scene.noise_power_ > 0.0) ? power_to_db(level->power / scene.noise_power_) : 0.0;
+        prototype.symbol_rate_baud = modulator->effective_symbol_rate();
+        prototype.payload_seed = payload_seed;
 
-        const std::size_t modulator_index = scene.modulators_.size();
-        const double symbol_rate = modulator->effective_symbol_rate();
-        const Modulation kind = modulator->kind();
-        const Hertz carrier = modulator->spec().common.carrier_offset;
+        const std::size_t index = scene.modulators_.size();
         scene.modulators_.push_back(std::move(*modulator));
+        add_bursts(prototype, index, EmitterKind::Modulated, level->gain, windows);
+        return Status{};
+    };
 
-        for (const auto& window : windows) {
-            SampleIndex start = window.first;
-            SampleIndex end = window.second;
-            if (spec.duration_samples > 0) {
-                if (start >= spec.duration_samples) {
-                    continue;  // entirely past the end of the scene
-                }
-                end = std::min(end, spec.duration_samples);
-            }
-            if (end <= start) {
-                continue;
-            }
-
-            EmitterTruth record;
-            record.modulation = kind;
-            record.carrier_offset_hz = carrier;
-            record.extent = extent;
-            record.start_sample = start;
-            record.end_sample = end;
-            record.mean_power = power;
-            record.snr_in_occupied_bandwidth_db =
-                (noise_in_band > 0.0) ? power_to_db(power / noise_in_band) : 0.0;
-            record.snr_in_full_band_db =
-                (scene.noise_power_ > 0.0) ? power_to_db(power / scene.noise_power_) : 0.0;
-            record.symbol_rate_baud = symbol_rate;
-            record.payload_seed = payload_seed;
-
-            scene.truth_.push_back(record);
-            scene.bursts_.push_back(Burst{modulator_index, start, end, gain});
+    // And the same for a broadcast FM station. Placed by hand only: see
+    // WfmStationPlacement for why there is no random path here.
+    const auto add_station = [&scene, &spec, &level_for, &add_bursts](
+                                 WfmStationPlacement placement) -> Status {
+        if (placement.end_sample <= placement.start_sample) {
+            return fail(std::format("FM station window [{}, {}) is empty",
+                                    placement.start_sample, placement.end_sample));
         }
+
+        // One stream, one sample rate.
+        placement.station.rate = spec.rate;
+        auto station = WfmModulator::create(std::move(placement.station));
+        if (!station) {
+            return std::unexpected(station.error());
+        }
+
+        const SpectralExtent extent = station->occupied_extent();
+        Expected<Level> level = level_for(extent, station->nominal_mean_power(),
+                                          placement.use_snr,
+                                          placement.snr_in_occupied_bandwidth_db);
+        if (!level) {
+            return std::unexpected(level.error());
+        }
+
+        EmitterTruth prototype;
+        prototype.kind = EmitterKind::BroadcastFm;
+        prototype.carrier_offset_hz = station->spec().carrier_offset;
+        prototype.extent = extent;
+        prototype.mean_power = level->power;
+        prototype.snr_in_occupied_bandwidth_db =
+            (level->noise_in_band > 0.0) ? power_to_db(level->power / level->noise_in_band)
+                                         : 0.0;
+        prototype.snr_in_full_band_db =
+            (scene.noise_power_ > 0.0) ? power_to_db(level->power / scene.noise_power_) : 0.0;
+        // modulation, symbol_rate_baud and payload_seed stay at their
+        // defaults. EmitterTruth says why each of the three is unreadable on
+        // this kind of row.
+
+        const std::vector<std::pair<SampleIndex, SampleIndex>> windows{
+            {placement.start_sample, placement.end_sample}};
+
+        const std::size_t index = scene.stations_.size();
+        scene.stations_.push_back(std::move(*station));
+        add_bursts(prototype, index, EmitterKind::BroadcastFm, level->gain, windows);
         return Status{};
     };
 
@@ -292,6 +366,12 @@ Expected<Scene> Scene::create(const SceneSpec& spec)
                               placement.modulator.common.seed, windows);
         if (!added) {
             return std::unexpected(with_context(added.error(), "siggen scene emitter"));
+        }
+    }
+
+    for (const WfmStationPlacement& placement : spec.fm_stations) {
+        if (Status added = add_station(placement); !added) {
+            return std::unexpected(with_context(added.error(), "siggen scene FM station"));
         }
     }
 
@@ -527,11 +607,19 @@ void Scene::render_range(SampleIndex start, ComplexSpan out) const
         if (low >= high) {
             continue;
         }
-        modulators_[it->modulator].accumulate(
-            low - it->start,
-            out.subspan(static_cast<std::size_t>(low - start),
-                        static_cast<std::size_t>(high - low)),
-            it->gain);
+        const ComplexSpan slice = out.subspan(static_cast<std::size_t>(low - start),
+                                              static_cast<std::size_t>(high - low));
+
+        // No default label: /w14062 makes a third emitter kind a build error
+        // here rather than a transmission that renders as silence.
+        switch (it->kind) {
+            case EmitterKind::Modulated:
+                modulators_[it->modulator].accumulate(low - it->start, slice, it->gain);
+                break;
+            case EmitterKind::BroadcastFm:
+                stations_[it->modulator].accumulate(low - it->start, slice, it->gain);
+                break;
+        }
     }
 }
 
@@ -653,21 +741,41 @@ Status stream_scene(const Scene& scene,
     return {};
 }
 
+std::string_view emitter_kind_name(EmitterKind kind)
+{
+    // No default label. A third kind has to be named here before it can be
+    // written into a truth file as a blank.
+    switch (kind) {
+        case EmitterKind::Modulated: return "modulated";
+        case EmitterKind::BroadcastFm: return "wfm";
+    }
+    return "unknown";
+}
+
 std::string truth_csv(const Scene& scene)
 {
     std::string out;
     out.reserve(128 + scene.truth().size() * 128);
     out +=
-        "id,modulation,carrier_offset_hz,low_hz,high_hz,center_hz,bandwidth_hz,"
+        "id,kind,modulation,carrier_offset_hz,low_hz,high_hz,center_hz,bandwidth_hz,"
         "start_sample,end_sample,mean_power,snr_in_occupied_bandwidth_db,"
         "snr_in_full_band_db,symbol_rate_baud,payload_seed\n";
 
     for (const EmitterTruth& record : scene.truth()) {
         const std::string end =
             record.open_ended() ? std::string{} : std::format("{}", record.end_sample);
-        out += std::format("{},{},{},{},{},{},{},{},{},{:.9g},{:.4f},{:.4f},{:.6g},{}\n",
+
+        // Empty rather than "cw" on a station's row. EmitterTruth::modulation
+        // is meaningless there and a scorer reading a mode name off it would
+        // score a 268 kHz broadcast station as a keyed carrier.
+        const std::string_view modulation =
+            (record.kind == EmitterKind::Modulated) ? modulation_name(record.modulation)
+                                                    : std::string_view{};
+
+        out += std::format("{},{},{},{},{},{},{},{},{},{},{:.9g},{:.4f},{:.4f},{:.6g},{}\n",
                            record.id,
-                           modulation_name(record.modulation),
+                           emitter_kind_name(record.kind),
+                           modulation,
                            record.carrier_offset_hz,
                            record.extent.low_hz,
                            record.extent.high_hz,
