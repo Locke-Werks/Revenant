@@ -1139,7 +1139,14 @@ TEST_CASE("one RDS decoder's cost per second of composite is measured", "[rds][c
     // against is an order of magnitude rather than a percentage: a decoder
     // costing a whole core per receiver would change where this code can
     // run, and that is the finding worth a red test.
-    INFO(std::format("seed {}", kNoiseSeed));
+    //
+    // NO SEED IS PRINTED HERE, and one used to be. Nothing in this case
+    // draws a random number: generate_rds renders the payload below
+    // deterministically and no noise is added, so a seed in the output named
+    // a value that could not have affected the result and invited whoever
+    // read a failure to go looking for a draw that had gone badly. The
+    // cases that DO add noise print kNoiseSeed, which is where that rule
+    // belongs.
 
     siggen::RdsModSpec spec;
     spec.rate = kCompositeRate;
