@@ -922,8 +922,15 @@ TEST_CASE("noise alone does not produce decoded groups for long", "[rds]") {
     // decoder was not synced on the last bit and that no PI had landed. A
     // decoder that had spent the whole second in sync emitting groups passed
     // it as long as it had dropped out again by the end, which is the one
-    // outcome the name promises against. groups_decoded() is asserted now, and
-    // the run is ten seconds rather than one.
+    // outcome the name promises against. groups_decoded() is asserted now,
+    // and the run is a hundred and one seconds rather than one.
+    //
+    // AND WHAT IT USED TO SAY ABOUT THAT. The sentence above said ten seconds
+    // and the comment below said ten more, while the loop has always fed
+    // 118750 bits, which is a hundred seconds at 1187.5 bit/s. The INFO said
+    // eleven. Three statements of a duration, all of them a tenth of the real
+    // one, in the one test whose whole claim is how long the decoder holds
+    // out.
     //
     // The bit comes off the generator's low bit rather than through a
     // uniform_int_distribution, because that distribution's mapping is not
@@ -945,13 +952,13 @@ TEST_CASE("noise alone does not produce decoded groups for long", "[rds]") {
     CHECK(decoder.groups_decoded() == 0);
     CHECK(decoder.blocks_good() == 0);
 
-    // Ten more seconds, so clause C.2's false anchor has had something like
-    // sixty chances at the four-block rule rather than six. This is the "for
-    // long" in the name.
+    // A hundred more seconds, so clause C.2's false anchor has had something
+    // like six hundred chances at the four-block rule rather than six. This
+    // is the "for long" in the name.
     for (int i = 0; i < 118750; ++i) {
         decoder.feed((generator() & 1u) != 0);
     }
-    INFO(std::format("after eleven seconds: acquisitions {} groups {}",
+    INFO(std::format("after a hundred and one seconds: acquisitions {} groups {}",
                      decoder.sync_acquisitions(), decoder.groups_decoded()));
     CHECK_FALSE(decoder.synced());
     CHECK(decoder.sync_acquisitions() == 0);
