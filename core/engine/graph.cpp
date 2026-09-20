@@ -148,6 +148,32 @@ struct FftPushConstants {
 static_assert(sizeof(FftPushConstants) == 4 * sizeof(std::uint32_t),
               "the FFT push block is four packed uint32 in core/shaders/pfb_fft.comp");
 
+// The request with its audio rate filled in, which is what the graph plans
+// against.
+//
+// VrxParams::audio_rate of zero means "the engine's default", and the engine
+// default is GraphConfig::audio_rate. The planner does not know that: given
+// a zero it falls back to dsp's own kDefaultAudioRate of 48000, which is a
+// different number the moment a graph is built with anything else.
+//
+// WHAT THAT COST BEFORE THIS FUNCTION EXISTED, BECAUSE IT WAS SILENT AND THE
+// QT CLIENT ALWAYS TOOK THE PATH. add_vrx resolved the rate for the STAGE,
+// through VrxStageRequest::audio_rate, and then planned with the caller's
+// raw params. So a graph at 16000 built a stage running at 16000 and cached
+// a demodulation rate derived from 48000. Every later retune was then
+// compared against the wrong basis: a widen that moves the rate at 16000 and
+// not at 48000 looked like no change at all, set_vrx_params returned success
+// and stored the request, DemodStage::retune refused it on the recording
+// thread where nobody was left to hear, and the caller got its own request
+// echoed back over a stage still running the old filter.
+[[nodiscard]] VrxParams with_audio_rate(const VrxParams& params, dsp::SampleRate fallback) {
+    VrxParams resolved = params;
+    if (resolved.audio_rate == 0) {
+        resolved.audio_rate = fallback;
+    }
+    return resolved;
+}
+
 // The spectrum kernel's push-constant block, exactly as
 // core/shaders/spectrum.comp declares it. dsp::SpectrumParams carries the
 // three specialization constants alongside these three, which is why both
@@ -2771,6 +2797,10 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
         return fail("Graph::add_vrx with a zero id");
     }
 
+    // Resolved once, here, so the stage and the plan cannot be built against
+    // two different audio rates. See with_audio_rate.
+    const VrxParams resolved = with_audio_rate(params, impl.config.audio_rate);
+
     VrxStageRequest request;
     request.context = impl.context;
     request.id = id;
@@ -2786,7 +2816,7 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     request.max_blocks_per_dispatch = impl.geometry.max_blocks_per_dispatch;
     request.frames_in_flight = impl.geometry.frames_in_flight;
     request.local_size_x = impl.geometry.local_size_x;
-    request.audio_rate = params.audio_rate != 0 ? params.audio_rate : impl.config.audio_rate;
+    request.audio_rate = resolved.audio_rate;
     request.passband_transform = impl.geometry.passband_transform;
 
     std::unique_ptr<VrxStage> stage;
