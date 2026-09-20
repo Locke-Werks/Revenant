@@ -1268,12 +1268,34 @@ TEST_CASE("the discriminator gives back the composite the FM phase was built fro
 {
     INFO(std::format("seed {}", kSeed));
 
-    // WHAT THIS CASE IS FOR
+    // WHAT THIS CASE IS FOR, AND WHAT IT CANNOT REACH
     //
-    // The bit cases below can pass with the composite recovered at the wrong
-    // level or with the audio and the data in the wrong ratio, because the
-    // decoder normalises everything it measures. This one checks the
-    // waveform, which is where a scale error is visible.
+    // The bit cases below can pass with the composite recovered at the
+    // wrong level, because the decoder normalises everything it measures.
+    // This one checks the waveform, where a level error is visible.
+    //
+    // BOTH SIDES OF THE COMPARISON COME FROM FmComposite::integral. The IQ
+    // is rendered as phase_scale_ times that integral, and the expected
+    // value below is that same integral's first difference. So what this
+    // reaches is everything between the two: phase_scale_ against
+    // vrx_demod_gain, exact_phase, the float32 the IQ is stored in,
+    // det_atan2, the ring indexing and the decimation stage. A constant of
+    // the wrong size anywhere in that chain shows up here and nowhere else.
+    //
+    // What it cannot reach is a wrong composite. A station whose audio and
+    // data are in the wrong ratio inside integral() moves both sides of
+    // this comparison together and passes. The bar on that is "the FM phase
+    // is the integral of the composite" in tests/tools/test_wfm_mod.cpp,
+    // which differentiates integral() back against FmComposite::render().
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY
+    //
+    // Until 2026-09-20 it read that the bit cases "can pass with the
+    // composite recovered at the wrong level or with the audio and the data
+    // in the wrong ratio" and that this case checks the waveform. The
+    // second half of that list was never reachable from here, for the
+    // reason above, and a reader looking for the ratio's guard would have
+    // stopped at this case and found nothing holding it.
     //
     // The bar is not the composite at sample n. A discriminator returns the
     // phase ADVANCE across a sample, and the phase is the integral of the
