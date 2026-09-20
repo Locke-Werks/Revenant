@@ -43,6 +43,7 @@ add_library(revenant_core STATIC
     dsp/synth/channel.cpp
     dsp/synth/modulators.cpp
     dsp/synth/rds_mod.cpp
+    dsp/synth/wfm_mod.cpp
     dsp/synth/wideband.cpp
     engine/audio_egress.cpp
     engine/audio_wasapi.cpp

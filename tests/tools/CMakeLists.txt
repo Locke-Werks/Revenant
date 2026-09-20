@@ -5,6 +5,7 @@ if(TARGET revenant_core)
     add_executable(revenant_tool_tests
         ../support/no_modal_dialogs.cpp
         test_channel.cpp
+        test_wfm_mod.cpp
     )
 
     target_link_libraries(revenant_tool_tests PRIVATE
