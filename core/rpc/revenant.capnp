@@ -995,14 +995,29 @@ interface AudioSubscription {
 
 enum RdsRegion {
     # The ordinals match revenant::decode::Region, which is kRds then kRbds.
-    # core/rpc/convert.h asserts the pair and core/rpc/convert.cpp converts
-    # it through an exhaustive switch rather than the cast the assert would
-    # allow, because an assert catches a REORDER and cannot catch a third
-    # region added to the decoder alone.
+    # core/rpc/convert.h asserts the pair, and core/rpc/convert.cpp converts
+    # it in two directions that are deliberately not the same code.
+    #
+    # OUT, decode::Region to this enum, is an exhaustive switch with no
+    # default rather than the cast the assert would allow, because an assert
+    # catches a REORDER and cannot catch a third region added to the decoder
+    # alone: that one would reach the wire as an ordinal no reader has a name
+    # for, and the reader that matters is the one deciding which PTY table to
+    # draw.
+    #
+    # IN, this enum to decode::Region, is a range check that REFUSES anything
+    # above rbds and then a cast. A Cap'n Proto enum field may legally hold a
+    # value the reader's schema has never heard of, which is how a client
+    # built against a newer schema reaches an older engine, and the switch
+    # has no case to put that in.
     #
     # This note used to end "what is here today is a matched ordering and not
     # an enforced one", which was true while nothing converted it. It is
-    # enforced now.
+    # enforced now. It then said, until 2026-09-20, that the file "converts
+    # it through an exhaustive switch rather than the cast" without saying
+    # which direction; the inbound half is the cast, guarded, and reading
+    # that sentence as covering both is how the refusal came to be missing
+    # from core/rpc/types.h's copy of it.
     #
     # A SETTING AND NEVER AN INFERENCE, and core/decode/rds_groups.h has the
     # argument at length. No field names the region; the nearest thing is an

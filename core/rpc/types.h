@@ -405,9 +405,29 @@ struct AudioStats {
 // RDS decoder is configured for.
 //
 // Ordinal for ordinal with schema::RdsRegion and with
-// revenant::decode::Region, on the terms the schema states. The conversion
+// revenant::decode::Region, on the terms the schema states.
+//
+// THE SERVER CONVERTS IT IN TWO DIRECTIONS AND THEY ARE NOT THE SAME CODE,
+// both in core/rpc/convert.cpp, declared in core/rpc/convert.h, which is the
+// file allowed to see the decoder. Outbound, decode::Region to
+// schema::RdsRegion, is an exhaustive switch with no default, so a third
+// region added to the decoder alone stops compiling rather than reaching the
+// wire as an ordinal no reader has a name for. Inbound, schema::RdsRegion to
+// decode::Region, is a range check that REFUSES an ordinal above kRbds and
+// then a cast, because a Cap'n Proto enum field can legally carry a value
+// the reader's schema has never heard of and a newer client is how it gets
+// there. The static_asserts in core/rpc/convert.h are what make the inbound
+// cast safe once the range holds; they catch a renumbering and they cannot
+// catch either of the two cases above.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it read "the conversion
 // on the server's side is a cast with a static_assert over it, in
-// core/rpc/convert.h, which is the file allowed to see the decoder.
+// core/rpc/convert.h". Two things wrong with it: neither conversion is in
+// that header, and describing the inbound one as a bare cast lost the
+// refusal, which is the whole of what stops an unknown ordinal being decoded
+// as whichever region happens to sit at it. core/rpc/revenant.capnp carried
+// the mirror image of the same mistake, describing both directions as the
+// switch, and is corrected too.
 //
 // A SETTING AND NEVER AN INFERENCE. core/decode/rds_groups.h has the argument
 // and core/rpc/revenant.capnp repeats it: no field names the region, the PI
