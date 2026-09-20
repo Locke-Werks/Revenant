@@ -126,6 +126,26 @@ struct TimedBit {
     return out;
 }
 
+// Whether the pilot arm ever reported a lock, rather than whether it happens
+// to be reporting one at the end. Sampled per chunk, because status() is only
+// readable between calls.
+[[nodiscard]] bool ever_pilot_locked(const std::vector<float>& composite,
+                                     const decode::RdsBitsConfig& config)
+{
+    auto sync = decode::RdsBitSync::create(config);
+    REQUIRE(sync.has_value());
+
+    constexpr std::size_t kChunk = 512;
+    bool ever = false;
+    for (std::size_t offset = 0; offset < composite.size(); offset += kChunk) {
+        const std::size_t count = std::min(kChunk, composite.size() - offset);
+        sync->process(dsp::ConstRealSpan(composite.data() + offset, count));
+        ever = ever || sync->status().pilot_locked;
+        (void)sync->drain();
+    }
+    return ever;
+}
+
 [[nodiscard]] std::vector<std::uint8_t> bits_between(const std::vector<TimedBit>& timed,
                                                      std::uint64_t first,
                                                      std::uint64_t last)
@@ -868,7 +888,15 @@ TEST_CASE("no pilot on the composite", "[decode][rds]")
     // EN 50067:1998 clause 1.1 puts the subcarrier at 57 kHz +/- 6 Hz during
     // MONOPHONIC transmission, where there is no pilot to lock it to. A
     // decoder that needs one is wrong about the standard, so the contract is
-    // that it either locks or says plainly that it did not.
+    // that a mono composite decodes.
+    //
+    // This case used to accept either outcome: it locked and the bits were
+    // checked, or it did not lock and the bits had to be empty. Both branches
+    // passed, so a regression that stopped the mono composite decoding at all
+    // went green down the second one, and the second branch is also what the
+    // "noise alone" case already asserts. A case that cannot fail is not a
+    // case. The decoder does lock here, with the carrier loop absorbing the
+    // offset the absent pilot no longer pins, so that is what is required.
     siggen::RdsModSpec spec = base_spec(kTidyRate, 2400);
     spec.pilot_enabled = false;
     spec.mono_deviation_hz = 40000;
@@ -890,22 +918,22 @@ TEST_CASE("no pilot on the composite", "[decode][rds]")
                      decoded.status.pilot_level, decoded.bits.size(),
                      decoded.status.carrier_offset_hz));
 
-    // The pilot report has to be honest whichever way the decode went.
+    // The pilot report has to be honest, and honest at every point rather
+    // than only at the end. A pilot arm that latches onto noise for a second
+    // and lets go lets a loop random-walk, and the walk is tripled on the way
+    // to the subcarrier, so a final reading of false says nothing about what
+    // the carrier loop was chasing while the recording ran.
     CHECK_FALSE(decoded.status.pilot_locked);
+    CHECK_FALSE(ever_pilot_locked(samples, config));
 
-    if (decoded.status.lock == decode::RdsLock::Locked) {
-        const Alignment match = align(spec.bits, decoded.bits, 256);
-        REQUIRE(match.found);
-        INFO(std::format("offset {} compared {} errors {} overhang {}", match.offset,
-                         match.compared, match.errors, match.overhang));
-        CHECK(match.errors == 0);
-        CHECK(match.overhang <= kMaxOverhangBits);
-    } else {
-        // The other half of the contract, and the one that matters more: a
-        // decoder that did not lock hands the group layer nothing rather than
-        // handing it noise.
-        CHECK(decoded.bits.empty());
-    }
+    REQUIRE(decoded.status.lock == decode::RdsLock::Locked);
+    const Alignment mono = align(spec.bits, decoded.bits, 256);
+    REQUIRE(mono.found);
+    INFO(std::format("offset {} compared {} errors {} overhang {}", mono.offset,
+                     mono.compared, mono.errors, mono.overhang));
+    CHECK(mono.errors == 0);
+    CHECK(mono.compared > spec.bits.size() / 2);
+    CHECK(mono.overhang <= kMaxOverhangBits);
 
     // And the same composite must still decode when the decoder is told not
     // to look for a pilot at all, which is the configuration a mono-only
