@@ -161,9 +161,11 @@ docs/rpc.md has the reasoning, the `dumpbin` measurements behind it, and the
 rule about what `core/rpc/client.cpp` is allowed to include.
 
 `REVENANT_BUILD_UI` in the root `CMakeLists.txt` is not the switch for this. It
-fails the configure with a message saying the QML client arrives at M2, and it
-will not become the switch, because the main tree's cache holds the wrong
-triplet and the wrong runtime library.
+fails the configure and says to configure `ui/` separately, and it will not
+become the switch, because the main tree's cache holds the wrong triplet and
+the wrong runtime library. Until 2026-09-20 the message it printed said the
+QML client arrives at M2, which stopped being the reason once the client was
+built; the refusal was right either way.
 
 From an x64 Native Tools prompt, same as `dev` and `ci`, for the same
 Strawberry Perl reason:
@@ -193,9 +195,12 @@ Two ways to get it wrong:
   generated schema sources itself. Build the main tree first regardless, since
   that is what proves the schema still generates.
 
-`ui/` currently holds three placeholders naming what goes in `ui/models`,
-`ui/qml` and `ui/render`. There is no `ui/CMakeLists.txt` yet, so the commands
-above are the shape of that build and not something that runs today.
+`ui/CMakePresets.json` holds `vs`, `ninja` and `ninja-debug`, all against
+`x64-windows` and the dynamic CRT, so `cmake --preset vs` from inside `ui/` is
+the short form of the command above. This paragraph used to say `ui/` held
+three placeholders, that there was no `ui/CMakeLists.txt`, and that the
+commands above were the shape of a build rather than one that runs. All three
+were true until the client was built and none is now.
 
 ## Signing
 

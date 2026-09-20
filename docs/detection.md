@@ -9,8 +9,16 @@ Written before any of it existed, because several conclusions below constrain
 the spectrum stage, which was the next thing to build. Since then the spectrum
 stage and `core/detect/detector.cpp` have both been written, so the sections
 that describe them now describe code rather than intent. Where a number
-appears below it was measured; the tracker, identification and click-to-tune
-are still design.
+appears below it was measured. The tracker is written too, in the same file,
+and click-to-tune is built in `ui/`; identification is the part that is still
+design, and `Track::classification` is the seam nothing fills.
+
+That sentence read "the tracker, identification and click-to-tune are still
+design" until 2026-09-20, in the same breath as conceding that
+`core/detect/detector.cpp` had been written. The tracker is that file, states
+and all, and `ui/render/spectrum_item.cpp` resolves a click and emits
+`tuneRequested`. A reader planning work off the old sentence would have set
+out to build two things that exist.
 
 A first draft of this document was checked against the code and got four
 things wrong in ways that mattered: it specified a transform the project's own
@@ -596,18 +604,28 @@ gets a receiver narrower than the signal they clicked with no error anywhere,
 and `VrxStatus::params` reports the bandwidth asked for rather than the one
 delivered. Click-to-tune has to read `placement.bandwidth_clamped` and say so.
 
-**There is no Engine surface for any of this yet.** `Engine` has no method
-returning a spectrum frame, none returning detections or tracks, and no route
-for complex baseband to a classifier. The click resolves against a track list
-that nothing currently exposes.
+**What a click resolves against exists; what it cannot reach is the
+classifier.** `Engine::set_spectrum_sink` delivers the frames, the detector
+runs on them on the RPC server's side, and `Session::detections` publishes the
+track list a client filters by confidence. `ui/render/spectrum_item.cpp`
+resolves a click against it and tunes a receiver. What there is still no route
+for is complex baseband to a classifier.
+
+This paragraph used to say there was no Engine surface for any of it and that
+the track list was exposed by nothing. That was true when it was written and
+stopped being true with the RPC session. It is retracted here rather than
+deleted, because a reader taking it at face value would go and build a second
+surface beside the one that exists.
 
 ## What has to exist first
 
-The spectrum stage, as a second-stage transform of the channelizer's output
-rather than a transform of the whole span, sized from the table above and
-keeping the central half of each channel's bins.
-
-An Engine surface carrying spectrum frames and, later, tracks.
+The spectrum stage and an Engine surface carrying spectrum frames were both on
+this list and are both done: the stage is the per-channel second transform
+`EngineConfig::spectrum_transform` sizes, and the surface is
+`Engine::set_spectrum_sink`, with `Session::detections` carrying the tracks
+the rest of the way. They are struck here rather than dropped, because the
+sizing argument above was written to constrain a stage that did not exist and
+reads differently once it does.
 
 `Demod` gaining the modes this document keeps using as examples. It currently
 holds `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`: no RTTY, no FSK, no PSK. The

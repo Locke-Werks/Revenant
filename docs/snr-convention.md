@@ -128,8 +128,8 @@ the bandwidth or the bit rate it was measured against, in the same sentence.
 
 ## In code
 
-`tools/siggen/channel.h`. No parameter in that API is called `snr_db`: each one
-names its basis.
+`core/dsp/synth/channel.h`. No parameter in that API is called `snr_db`: each
+one names its basis.
 
     NoiseLevel::snr_in_2500_hz_db(-24.0)
     NoiseLevel::snr_in_reference_bandwidth_db(-24.0, 3000)

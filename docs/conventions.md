@@ -254,6 +254,18 @@ What that means in practice:
   conversion is known to be safe, and not with a blanket cast at the top
 - narrowing: explicit, or change the type
 - shadowing: rename, including a parameter shadowing a member
+- a switch that must be exhaustive writes no `default`. `/w14062` is on at
+  level 1 in `cmake/CompilerFlags.cmake` and makes a new enumerator a build
+  error there. C4062 is off by default at `/W4`, which is not obvious and was
+  got wrong here once, and it fires only on a switch with no default label: a
+  switch that omits an enumerator and carries a default stays silent. A
+  switch that legitimately handles a subset writes a default that does
+  something defensible, and nothing checks it for you.
+
+That last rule is the one this section left out until 2026-09-20. The other
+four are cleanups applied to code already written; this one changes how a
+switch is written in the first place, and the defect it exists to catch was a
+comment in this tree claiming a guard that was not on.
 
 ## Commits
 

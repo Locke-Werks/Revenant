@@ -426,6 +426,19 @@ standing between the engine and its first live signal.
 
 ---
 
+## What was actually done
+
+The recommendation above was not taken. Revenant links librtlsdr and moved to
+GPL-3.0-or-later to do it, which finding 2 is the evidence for: the datasheet
+specifies the transport and no raw IQ mode, so there was nothing to write a
+native backend from. No RSPdx was bought and no `rtltcp://` backend was
+written. The section above is left standing because it is the reasoning as it
+stood on 2026-09-18 and `docs/clean-room.md` cites it, but it is advice the
+project declined and not a plan anyone should pick up. The "73 tests" figure
+in it is a count from that day; the suite is at 203.
+
+---
+
 ## What could not be sourced
 
 Every item here is a gap in the published record, not a gap in the search.

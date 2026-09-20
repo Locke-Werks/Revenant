@@ -108,9 +108,17 @@ if(REVENANT_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# The refusal is permanent, and the reason it gives changed on 2026-09-20. It
+# used to say the QML client arrives at M2, which was true when written and
+# would now send a reader looking for something that is already built. ui/ is
+# its own CMake project against x64-windows and the dynamic CRT; this cache
+# holds x64-windows-static and MultiThreaded, and one cache cannot hold both.
 if(REVENANT_BUILD_UI)
     message(FATAL_ERROR
-        "REVENANT_BUILD_UI is on but there is no UI yet. The QML client arrives at M2.")
+        "REVENANT_BUILD_UI cannot build the client from this tree. ui/ is its "
+        "own CMake project against x64-windows and the dynamic CRT, and this "
+        "cache holds x64-windows-static and MultiThreaded. Configure ui/ "
+        "separately: cmake --preset vs from inside ui/. See docs/building.md.")
 endif()
 
 message(STATUS "Revenant ${REVENANT_VERSION}")
