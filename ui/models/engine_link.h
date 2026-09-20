@@ -178,9 +178,24 @@ namespace revenant::ui {
 // qFuzzyCompare-equal to the value the property holds, `to` starts at one,
 // and this constant is 1.1e-16 short of one, so the slider's top of travel
 // is exactly one: measured on Qt 6.8.3, where a `to` of 1 - 1e-11 is taken
-// and 1 - 1e-12 is not. setConfidenceBar below is therefore what stands
+// and 1 - 1e-12 is not. So the slider's RANGE does not keep a refused bar
+// off the wire, and anything relying on `to` for that is relying on nothing.
+//
+// What does keep it off is the `bar` expression in ui/qml/Main.qml, which
+// pins any handle position at or past the stop to maxConfidenceBar before
+// the property is ever written. setConfidenceBar's clamp sits behind that
+// as a backstop for a writer that is not the slider.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 it ended "setConfidenceBar below is therefore what stands
 // between a handle at full travel and the bar the engine refuses. It is not
-// a second line behind the slider's range. It is the only line.
+// a second line behind the slider's range. It is the only line." The first
+// half of that was true when it was written and the QML pin landed in the
+// same branch a commit later, which made it the second line rather than the
+// only one, and the one that no longer fires on a drag. Recorded rather than
+// swapped because a reader tracing what the UI actually sends at full travel
+// would have been sent to the wrong file.
 //
 // epsilon is 2^-52 and the spacing of doubles just below one is 2^-53, so
 // this is exactly std::nextafter(1.0, 0.0), written in a form that is

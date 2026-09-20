@@ -601,9 +601,22 @@ void EngineLink::setConfidenceBar(double bar)
     // reading it invites. A Slider whose `to` is bound to maxConfidenceBar
     // keeps a `to` of exactly one, because QQuickSlider::setTo drops an
     // assignment within 1e-12 of the value it holds; measured on Qt 6.8.3
-    // and written up on kMaxConfidenceBar. So one arrives here on every drag
-    // to full travel and this line is what turns it into a bar the engine
-    // accepts.
+    // and written up on kMaxConfidenceBar.
+    //
+    // The slider is no longer what this catches, though. ui/qml/Main.qml's
+    // `bar` expression pins a handle at or past the stop to
+    // maxConfidenceBar before writing the property, so the drag path arrives
+    // here already inside the range and the clamp is a no-op on it. What is
+    // left for the clamp is every other writer: a QML binding somewhere
+    // else, a test, a future settings restore.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY
+    //
+    // Until 2026-09-20 it ended "So one arrives here on every drag to full
+    // travel and this line is what turns it into a bar the engine accepts."
+    // That was written after the QML pin had already landed in the same
+    // branch, so it described a path that no longer existed and made this
+    // line look load-bearing for a case it never sees.
     //
     // NaN is dealt with before the clamp because it compares false against
     // both bounds and would pass straight through, which is the same defect
