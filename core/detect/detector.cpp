@@ -186,7 +186,7 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
         !ok) {
         return std::unexpected(ok.error());
     }
-    if (auto ok = require_range(config.edge_excess_fraction, 0.001, 1.0, "edge_excess_fraction");
+    if (auto ok = require_range(config.edge_floor_fraction, 0.001, 100.0, "edge_floor_fraction");
         !ok) {
         return std::unexpected(ok.error());
     }
@@ -671,6 +671,17 @@ void Detector::find_candidates() {
     // over ungrown seeds accepts them as separate detections sitting on the
     // shoulders of the real one. Growing the winner first makes them overlap
     // something already taken, which is what removes them.
+    //
+    // That contract has a precondition the paragraph above did not state and
+    // an earlier growth rule did not meet: the winner has to grow all the way
+    // to its own shoulders. It cannot suppress what it does not reach. The
+    // level below was once a fraction of the seed's own mean excess, which on
+    // a loud emitter sits tens of times over the noise, and a root raised
+    // cosine at rolloff 0.5 has two thirds of its occupied band below that.
+    // The skirt stayed outside accepted_, the clash test at the top of this
+    // loop rejects a peak only where it OVERLAPS an accepted band, and each
+    // shoulder was duly found again as its own candidate. See
+    // edge_floor_fraction in detector.h for the measurements.
     accepted_.clear();
     for (const Peak& peak : peaks_) {
         std::size_t begin = peak.start;
@@ -692,9 +703,9 @@ void Detector::find_candidates() {
         // Bounded by the seed's own width on each side, so a detection cannot
         // run away across the span, and by whatever is already accepted
         // either side of it, so the set stays disjoint.
-        const double seed_excess = excess_cumulative_[end] - excess_cumulative_[begin];
+        const double seed_floor = floor_cumulative_[end] - floor_cumulative_[begin];
         const double level =
-            config_.edge_excess_fraction * seed_excess / static_cast<double>(peak.width);
+            config_.edge_floor_fraction * seed_floor / static_cast<double>(peak.width);
         const std::size_t reach = peak.width;
         const std::size_t low_limit =
             at == accepted_.begin()

@@ -378,17 +378,50 @@ struct DetectorConfig {
     // a whole emitter. The frame, not the budget, is what this stage costs.
     std::uint32_t max_peaks = 0;
 
-    // How far below a detection's own mean per-bin excess a neighbouring bin
-    // may sit and still be grown into it.
+    // How far above the local noise floor a neighbouring bin must sit to be
+    // grown into a detection, as a multiple of the mean per-bin floor over
+    // the seed.
     //
     // The ladder is powers of two, so the window that wins on a 21-bin signal
     // is 16 bins and sits wholly inside it. Every position from bin 0 to bin
     // 5 of that signal scores identically, so the window's placement inside
     // the signal is arbitrary and its edges are the ladder's, not the
-    // signal's. Growing outward on the signal's own level is what turns a
-    // detection back into a measurement; the occupied-bandwidth trim below
-    // then takes off whatever the growth overshot into the noise.
-    double edge_excess_fraction = 0.25;
+    // signal's. Growing outward until the excess reaches the noise is what
+    // turns a detection back into a measurement; the occupied-bandwidth trim
+    // below then takes off whatever the growth overshot.
+    //
+    // One is the mean floor itself, so growth stops at 3 dB over the floor.
+    // Measured 2026-09-20 on the keyed ladder, 0.25, 0.5, 1.0, 2.0 and 4.0
+    // all produce the same tracks at all three rolloffs, so this is not a
+    // tuned number. What it must not be is signal-relative, per the
+    // retraction below.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. This knob was edge_excess_fraction,
+    // default 0.25, and the level was that fraction of the SEED'S OWN mean
+    // excess: "how far below a detection's own mean per-bin excess a
+    // neighbouring bin may sit and still be grown into it". The reasoning
+    // above about the ladder's edges being arbitrary was and is right. The
+    // bar it set was wrong, and it was wrong in a way that only a shaped
+    // spectrum exposes. A signal-relative level is high when the signal is
+    // loud: measured on the 20 dB ladder it landed 27.7 to 35.2 times the
+    // local noise floor, so growth stopped wherever the signal fell 6 dB
+    // under its own mean rather than where the signal ended. A root raised
+    // cosine at rolloff 0.5 spends two thirds of its occupied band in
+    // transition skirt, so growth stopped well inside it: the 166.5 kHz
+    // emitter's 4096-bin rung grew by exactly zero bins against 4546 bins of
+    // truth on 128 of 128 decisions, and the 30 kHz emitter's 512-bin rung
+    // reached 650 against 819. The skirt left outside the accepted band was
+    // then found again on each side as its own candidate, which is the
+    // three-way split the bar recorded at rolloff 0.5.
+    //
+    // Simply lowering the old fraction does not work and was measured too.
+    // The lowest value that clears the 166.5 kHz emitter is about 0.001, and
+    // there the tone-driven 16 kHz NFM comb goes from 5 track ids to 7 with
+    // spill rising from 0.00 to 0.44, because growth with no absolute floor
+    // under it crosses a Bessel comb's nulls. The two requirements pull in
+    // opposite directions on a signal-relative bar and in the same direction
+    // on a noise-relative one.
+    double edge_floor_fraction = 1.0;
 
     // Fraction of a detection's excess power its reported bandwidth holds.
     // The ITU occupied-bandwidth definition, which is a measurement rather

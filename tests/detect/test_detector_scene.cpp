@@ -732,18 +732,25 @@ TEST_CASE("an emitter of known extent reads as one track of that extent", "[dete
     // Known failures, and the bar is a ratchet in BOTH directions: a new one
     // fails CI, and so does fixing one of these without striking it out.
     //
-    // Measured 2026-09-20. At rolloff 0.5 the 30 kHz and 166.5 kHz emitters
-    // each come back as three tracks at once, coverage 0.77 and 0.83, spill
-    // 0.00, centre error under 140 Hz. Spill at zero says every piece is
-    // inside the emitter, so the detector is splitting a signal it has
-    // located correctly rather than finding something else. The same baud at
-    // rolloff 0.2 and 0.35 passes, and the other two rungs pass at all three,
-    // so it is neither bandwidth alone nor rolloff alone.
+    // Empty since 2026-09-20. It held {0.5, 30000} and {0.5, 166500}: at
+    // rolloff 0.5 those two emitters each came back as three tracks at once,
+    // coverage 0.77 and 0.83, spill 0.00. Both were the same fault, and it
+    // was in the seed-growth edge rule rather than in the split or the trim.
+    // Growth stopped at a fraction of the seed's OWN mean excess, which on a
+    // 20 dB emitter is 27.7 to 35.2 times the noise floor, so it stopped
+    // inside the transition skirt a root raised cosine at 0.5 spends two
+    // thirds of its occupied band in, and each shoulder was then found again
+    // as its own candidate. Growing on a multiple of the local noise floor
+    // instead collapses both to one track: see edge_floor_fraction in
+    // detector.h.
     //
-    // Not fixed here. The last fragmentation cause took a measurement pass of
-    // its own to find and was not any of the three things first suspected, so
-    // this is recorded as a reproducible failure rather than guessed at.
-    const std::vector<std::pair<double, dsp::Hertz>> kKnownSplits{{0.5, 30'000}, {0.5, 166'500}};
+    // Coverage at rolloff 0.5 now reads 0.84 to 0.85 on all four rungs,
+    // against 0.77 and 0.83 before. That is the ceiling and not a shortfall:
+    // integrating the raised-cosine power spectrum, the symmetric interval
+    // holding 99 percent of the power is 0.845 of (1 + rolloff) / T at
+    // rolloff 0.5, so occupied_power_fraction is what sets it and the 0.70
+    // floor below keeps 0.145 of headroom at the worst rolloff.
+    const std::vector<std::pair<double, dsp::Hertz>> kKnownSplits{};
 
     std::vector<std::pair<double, dsp::Hertz>> failures;
     std::size_t scored = 0;
@@ -880,13 +887,13 @@ TEST_CASE("what fragments a signal with interior nulls", "[.scene][detect]") {
         // seed is winning the ranking and then being unable to reach the rest
         // of its own signal, this restores it.
         detect::DetectorConfig config = base;
-        config.edge_excess_fraction = 0.001;
+        config.edge_floor_fraction = 0.001;
         variants.push_back(Variant{"edge fraction 0.001", config});
     }
     {
         detect::DetectorConfig config = base;
         config.split_gap_bins = 1'000'000;
-        config.edge_excess_fraction = 0.001;
+        config.edge_floor_fraction = 0.001;
         variants.push_back(Variant{"neither", config});
     }
 
