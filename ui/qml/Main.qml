@@ -349,9 +349,10 @@ ApplicationWindow {
         // One more difference is visible in how the two behave, and the row
         // reads the two numbers from different places because of it. The
         // confidence bar is local, so the handle is the value and the label
-        // is taken from the handle. The dB threshold is a round trip and a
-        // poll, so the handle is a request, the label is taken from the
-        // link, and a third label appears if those two part company.
+        // is taken from the handle, through the one expression that also
+        // writes the link. The dB threshold is a round trip and a poll, so
+        // the handle is a request, the label is taken from the link, and a
+        // third label appears if those two part company.
         RowLayout {
             Layout.fillWidth: true
             spacing: 10
@@ -384,24 +385,70 @@ ApplicationWindow {
                 // because a track's confidence approaches 1 without reaching
                 // it, so a bar of 1 lists nothing however strong the signal
                 // is and an empty list is what a dead band looks like too.
-                // maxConfidenceBar is the largest double below 1, which is
-                // the same constant setConfidenceBar clamps to, so the handle
-                // cannot reach a value the link would quietly pull back.
-                // This read 0.95 until 2026-09-20: a round number that was
-                // not the engine's rule and could only drift from it.
+                // maxConfidenceBar is the largest double below 1. This read
+                // 0.95 until 2026-09-20: a round number that was not the
+                // engine's rule and could only drift from it.
                 //
-                // The stop is accepted by the engine and is still nearly as
-                // strict as the value it refuses, for the reason the readout
-                // below carries. The range is this wide because the engine's
-                // bound is where it is, not because the top of it is a
-                // setting anybody should leave a display on.
+                // The range is this wide because the engine's bound is where
+                // it is, not because the top of it is a setting anybody
+                // should leave a display on.
+                //
+                // WHAT THIS PARAGRAPH USED TO SAY
+                //
+                // Until 2026-09-20 it finished "which is the same constant
+                // setConfidenceBar clamps to, so the handle cannot reach a
+                // value the link would quietly pull back". The handle reaches
+                // exactly 1 and the link does quietly pull it back.
+                //
+                // Slider will not hold this number. QQuickSlider::setTo drops
+                // an assignment that is qFuzzyCompare-equal to the value the
+                // property already holds, the property starts at 1, and
+                // maxConfidenceBar is 1.1e-16 short of 1. Measured on Qt
+                // 6.8.3: a `to` of 1 - 1e-11 is taken and reads back, a `to`
+                // of 1 - 1e-12 is dropped and `to` stays exactly 1, three
+                // ways of writing it (this binding, a literal, an imperative
+                // assignment) all reading back 1. So the top of the travel is
+                // 1, which is the one value the engine refuses, and what
+                // makes the stop legal is setConfidenceBar's clamp and
+                // nothing here.
+                //
+                // The binding stays anyway. It is inert only for a bound
+                // within 1e-12 of 1; move the engine's bound anywhere a
+                // person would actually move it and this follows it, which a
+                // hardcoded number would not.
                 to: engineLink.maxConfidenceBar
                 stepSize: 0.01
                 // EngineLink starts the bar at zero, which is everything
                 // the engine will send, and the handle starts there with
                 // it.
                 value: 0.0
-                onMoved: engineLink.confidenceBar = value
+
+                // The bar this handle is asking for. The label prints this
+                // and the link is written this, from one expression, so the
+                // number on screen is the number the next poll carries
+                // instead of a rounded picture of it.
+                //
+                // Two things it has to survive, neither of which the handle
+                // position guarantees on its own. A value at or past the stop
+                // becomes the stop exactly, because that is what
+                // setConfidenceBar clamps it to and the label would otherwise
+                // be naming a bar the link never used. Everything below is
+                // quantised to the control's own step, and capped one step
+                // short of 1, so no position can produce a bar that prints as
+                // the refused value. Today stepSize already makes every
+                // reachable position a hundredth, measured; this holds if
+                // that stops being true.
+                readonly property double bar: {
+                    if (confidenceSlider.value >= engineLink.maxConfidenceBar) {
+                        return engineLink.maxConfidenceBar
+                    }
+                    const step = confidenceSlider.stepSize > 0
+                                 ? confidenceSlider.stepSize : 0.01
+                    return Math.min(Math.round(confidenceSlider.value / step) * step,
+                                    1.0 - step)
+                }
+
+                onMoved: engineLink.confidenceBar = confidenceSlider.bar
 
                 ToolTip.visible: hovered
                 ToolTip.delay: 400
@@ -424,13 +471,40 @@ ApplicationWindow {
             // the only writer of that property, so the handle is the value.
             //
             // The stop gets its own text rather than a number. toFixed(2) at
-            // maxConfidenceBar prints 1.00, which is the one value the
-            // comment on the slider above says the engine refuses, so the
-            // readout was showing a bar that would have failed every poll.
-            // stepSize is 0.01 from zero, so every other reachable position
-            // is a hundredth and rounds to itself; the stop is the only
-            // value that can round up, and it is the only one that needs a
-            // word instead.
+            // the top of the travel prints 1.00, which is the one value the
+            // engine refuses, so the readout was naming a bar that would have
+            // failed every poll.
+            //
+            // WHAT THIS PARAGRAPH USED TO SAY
+            //
+            // Until 2026-09-20 it carried the reasoning: "stepSize is 0.01
+            // from zero, so every other reachable position is a hundredth and
+            // rounds to itself; the stop is the only value that can round
+            // up". The conclusion holds on this Qt. The reason given for it
+            // is not the reason it holds, which makes it a rule a reader
+            // cannot check and a reader who tried would have concluded the
+            // opposite: stepSize is documented against snapMode, this slider
+            // never set snapMode, and the default is Slider.NoSnap, first in
+            // the enum at C:/Qt/6.8.3/msvc2022_64/qml/QtQuick/Templates/
+            // plugins.qmltypes, which is the mode where a drag is supposed to
+            // be continuous.
+            //
+            // Measured rather than argued, Qt 6.8.3 offscreen, a QtTest drag
+            // and a groove click across every pixel of a 1000 px slider: the
+            // VALUE lands on a hundredth under NoSnap and under SnapAlways
+            // alike, 101 distinct values either way, top of travel exactly 1.
+            // Slider rounds the value to stepSize whichever snapMode is in
+            // force; snapMode moves the handle, not the value. The same sweep
+            // with stepSize removed gives 991 values, five of them printing
+            // 1.00 from below the stop, which is the failure this label is
+            // here to prevent.
+            //
+            // Which is why the obvious repair was not taken. Adding
+            // snapMode: Slider.SnapAlways would read as the fix and change
+            // nothing measurable. What the label rests on now is
+            // confidenceSlider.bar, the same expression the link is written,
+            // so the printed number is the bar the next poll carries whatever
+            // stepSize and snapMode do later.
             //
             // The word says what the stop does, which the number never did.
             // ui/models/engine_link.h has the arithmetic: a track reaches
@@ -440,9 +514,9 @@ ApplicationWindow {
             // because an empty list is also what a dead band looks like.
             Label {
                 Layout.minimumWidth: 0
-                text: (confidenceSlider.value >= engineLink.maxConfidenceBar
+                text: (confidenceSlider.bar >= engineLink.maxConfidenceBar
                        ? "saturated only"
-                       : confidenceSlider.value.toFixed(2)) + "  this window"
+                       : confidenceSlider.bar.toFixed(2)) + "  this window"
                 color: window.ink
                 font.pixelSize: 12
                 elide: Text.ElideRight
