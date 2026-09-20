@@ -253,27 +253,51 @@ void EngineLink::setReceiverPassband(int low, int high)
     const int width = fitted_high - fitted_low;
     if (dragging_ && sent_width_ != 0 && width != sent_width_) {
         width_uncommitted_ = true;
+        drag_changed_ = true;
         emit receiverChanged();
         return;
     }
 
     post_receiver_request(false);
+
+    // After the post, not before: post_receiver_request is what a fresh
+    // request looks like and it clears the gesture's held state, so a flag
+    // set first would be wiped by the very send it is recording.
+    if (dragging_) {
+        drag_changed_ = true;
+    }
 }
 
-void EngineLink::beginReceiverDrag() { dragging_ = true; }
+void EngineLink::beginReceiverDrag()
+{
+    dragging_ = true;
+    drag_changed_ = false;
+    receiver_drag_live_.store(true, std::memory_order_release);
+}
 
 void EngineLink::endReceiverDrag()
 {
     dragging_ = false;
+
+    // Cleared BEFORE the commit below, so the request that commit posts is
+    // the one the supervisor is allowed to rebuild for. See
+    // receiver_drag_live_.
+    receiver_drag_live_.store(false, std::memory_order_release);
     commitReceiverPassband();
 }
 
 void EngineLink::commitReceiverPassband()
 {
-    if (!width_uncommitted_) {
+    // Either a width was held back, or the gesture moved the band at all.
+    // The second is what carries a pan the engine refused mid-drag: it was
+    // sent, refused and deliberately not rebuilt for, so the release is the
+    // only thing that can apply it. A pan the engine took costs one extra
+    // retune here, which is a push constant and a new tap table.
+    if (!width_uncommitted_ && !drag_changed_) {
         return;
     }
     width_uncommitted_ = false;
+    drag_changed_ = false;
     post_receiver_request(false);
 }
 
@@ -352,6 +376,7 @@ void EngineLink::post_receiver_request(bool recreate)
     // because a tune or a mode change resolves the passband too and a
     // width remembered from before one of those is a width nobody has.
     width_uncommitted_ = false;
+    drag_changed_ = false;
     sent_width_ = static_cast<int>(wanted_.passband_high - wanted_.passband_low);
 
     {
@@ -438,6 +463,18 @@ void EngineLink::apply_receiver_request()
         // the one place that phrase is written.
         const QString message = QString::fromStdString(applied.error().message);
         if (message.contains(QStringLiteral("remove and an add"))) {
+            // NOT WHILE THE POINTER IS STILL DOWN. A pan towards the fold
+            // is refused for the same reason a widen is, and the drag
+            // re-posts it every time the pointer moves, so rebuilding here
+            // costs one teardown, one add and one passband resubscription
+            // per supervisor pass for the whole gesture. The pane keeps
+            // drawing the request either way, the granted rules keep
+            // showing the engine is elsewhere, and endReceiverDrag posts
+            // the final position, which is the one rebuild the gesture
+            // actually needs. See EngineLink::receiver_drag_live_.
+            if (receiver_drag_live_.load(std::memory_order_acquire)) {
+                return;
+            }
             if (recreate_receiver(params)) {
                 note_receiver_fault(QStringLiteral(
                     "the audio restarted: that filter width changed the demodulation rate, "

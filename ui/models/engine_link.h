@@ -711,6 +711,14 @@ public:
     // predicts it: the arithmetic lives in plan_vrx and this process links
     // none of the DSP, so the refusal is what says so and the recreate
     // behind it is what carries the gesture through.
+    //
+    // ONCE, AT THE RELEASE, WHICH IS NOT WHAT IT USED TO DO. The refusal
+    // arrives on every pass of the drag, because the pan is re-posted on
+    // every mouse move, and answering each one with a rebuild cost a
+    // teardown, an add and a passband resubscription per supervisor pass
+    // for as long as the pointer was down. Only the WIDTH was ever held
+    // back here; a fixed-width pan went out live and the refusal behind it
+    // was paid for in full. See receiver_drag_live_.
     Q_INVOKABLE void setReceiverPassband(int low, int high);
 
     // A gesture is starting and ending. Between them a width change is
@@ -1054,6 +1062,28 @@ private:
     bool dragging_ = false;
     bool width_uncommitted_ = false;
     int sent_width_ = 0;
+
+    // The gesture moved the passband at all, width or not, so the release
+    // sends the final request even when nothing was held back. A pan that
+    // the engine refused mid-drag is only applied by that send, and a pan
+    // it accepted costs one redundant retune per gesture, which is a push
+    // constant.
+    bool drag_changed_ = false;
+
+    // The same fact as dragging_, for the supervisor thread, which is the
+    // one that has to decide whether a refusal is worth a rebuild.
+    //
+    // WHY A REFUSAL MID-DRAG IS NOT A REBUILD. A pan towards the fold
+    // lengthens the filter and the engine refuses it, exactly as it does a
+    // widen, and apply_receiver_request answers a refusal by removing the
+    // receiver and adding it again. During a drag that request is
+    // re-posted every time the pointer moves, so the receiver was torn down
+    // and rebuilt once per supervisor pass for as long as the operator held
+    // the mouse: a stream of audio breaks and a passband subscription
+    // reattached each time, for a gesture that is going to end in one
+    // position. Held instead, and applied once at the release, which is
+    // what endReceiverDrag already does for a width.
+    std::atomic<bool> receiver_drag_live_{false};
 
     // Qt thread only. The engine's last answer about this receiver, and the
     // edge limit derived from it.
