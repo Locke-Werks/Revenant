@@ -118,9 +118,28 @@ struct VrxParams {
     // passband_low and passband_high are both zero, and that expansion
     // reproduces the old geometry exactly for every mode:
     // dsp::resolve_passband is the one place it happens. It is IGNORED when
-    // the pair is given. It is the granted width, high minus low, on the way
-    // back out, so a caller that only knows about this field gets the right
-    // width for an asymmetric filter and loses only the offset.
+    // the pair is given.
+    //
+    // ON THE WAY BACK OUT IT IS THE ECHO, NOT THE GRANTED WIDTH. THIS
+    // PARAGRAPH SAID THE OPPOSITE AND THE CODE NEVER DID IT. It claimed the
+    // field came back as "the granted width, high minus low, so a caller
+    // that only knows about this field gets the right width for an
+    // asymmetric filter and loses only the offset". VrxStatus hands back the
+    // params it was given, verbatim, so what a reader gets here is whatever
+    // it sent: 12000 if it sent 12000, and zero if it sent a pair.
+    //
+    // The echo is right and stays. Reading a status out and passing it
+    // straight back into set_vrx_params has to leave the receiver exactly
+    // where it was, and it cannot if the engine rewrites a field the request
+    // is resolved from: a client that sent edges and read back a bandwidth
+    // would, on the next round trip, still be sending its edges and would be
+    // fine, but a client that sent a bandwidth and was handed the CLAMPED
+    // one back would ratchet its own receiver narrower on every poll.
+    // core/rpc/revenant.capnp says the same thing about the wire field.
+    //
+    // So the granted width is VrxPlacement::granted_high minus granted_low,
+    // which is the figure the engine built a filter for, and comparing that
+    // pair against the requested one is how a display says WHICH edge moved.
     //
     // Kept rather than deleted because a saved request from before the pair
     // existed should still open, and because retiring the field would free
@@ -220,6 +239,15 @@ struct VrxStatus {
     // Exactly what was handed to add_vrx or set_vrx_params, in the same
     // frame: params.center is still baseband here. A display naming an
     // absolute frequency adds EngineInfo::source_center back.
+    //
+    // A VERBATIM ECHO, WHICH MEANS NO FIELD HERE IS A RESULT. Nothing in
+    // this struct is rewritten with what the engine decided, deliberately,
+    // so that reading a status and passing it back into set_vrx_params
+    // leaves the receiver where it was. In particular `bandwidth` reads
+    // back as whatever was sent, including zero, and is not the width the
+    // filter was built for. `placement` below is where the results are:
+    // granted_low, granted_high and bandwidth_clamped, plus demod_rate
+    // here.
     VrxParams params;
 
     VrxPlacement placement;
