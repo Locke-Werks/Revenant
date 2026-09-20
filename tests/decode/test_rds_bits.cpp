@@ -1403,6 +1403,17 @@ TEST_CASE("an RDS payload survives an FM link and a WFM receiver's audio path",
     //     the decoder has to be indifferent to.
     //   Clause 1.3's two ends, 1 kHz and 7.5 kHz of injection, so the bar is
     //     not pinned to the 2 kHz the clause recommends.
+    //   Clause 1.2's other permitted subcarrier phase, quadrature with the
+    //     third harmonic of the pilot. The clause says a transmitter may
+    //     use either and says nothing about telling the receiver which, so
+    //     a decoder that only worked in phase would be conformant with
+    //     nothing.
+    //   A fractional start offset, so the transmitter's bit grid does not
+    //     line up with the receiver's sample grid. Those last two are also
+    //     the two fields FmComposite's closed-form integral has to carry;
+    //     the integral itself is differentiated back against the rendered
+    //     composite in tests/tools/test_wfm_mod.cpp, and what is here is
+    //     whether the payload survives the whole link with them set.
     //
     // Noise is the case after this one, because it needs its own bar.
 
@@ -1413,17 +1424,28 @@ TEST_CASE("an RDS payload survives an FM link and a WFM receiver's audio path",
         bool pilot;
         dsp::Hertz carrier_offset;
         dsp::Hertz injection_hz;
+        double subcarrier_phase_radians;
+        double start_offset_samples;
     };
 
     const Shape shapes[] = {
-        {"stereo, 50us, on centre", true, siggen::Preemphasis::Eu50, true, 0, 2000},
-        {"stereo, 75us, on centre", true, siggen::Preemphasis::Us75, true, 0, 2000},
-        {"stereo, flat, on centre", true, siggen::Preemphasis::None, true, 0, 2000},
-        {"mono, no pilot", false, siggen::Preemphasis::None, false, 0, 2000},
+        {"stereo, 50us, on centre", true, siggen::Preemphasis::Eu50, true, 0, 2000, 0.0,
+         0.0},
+        {"stereo, 75us, on centre", true, siggen::Preemphasis::Us75, true, 0, 2000, 0.0,
+         0.0},
+        {"stereo, flat, on centre", true, siggen::Preemphasis::None, true, 0, 2000, 0.0,
+         0.0},
+        {"mono, no pilot", false, siggen::Preemphasis::None, false, 0, 2000, 0.0, 0.0},
         {"stereo, 50us, 40 kHz off centre", true, siggen::Preemphasis::Eu50, true, 40'000,
-         2000},
-        {"stereo, 50us, clause 1.3 floor", true, siggen::Preemphasis::Eu50, true, 0, 1000},
-        {"stereo, 50us, clause 1.3 ceiling", true, siggen::Preemphasis::Eu50, true, 0, 7500},
+         2000, 0.0, 0.0},
+        {"stereo, 50us, clause 1.3 floor", true, siggen::Preemphasis::Eu50, true, 0, 1000,
+         0.0, 0.0},
+        {"stereo, 50us, clause 1.3 ceiling", true, siggen::Preemphasis::Eu50, true, 0, 7500,
+         0.0, 0.0},
+        {"stereo, 50us, clause 1.2 quadrature subcarrier", true, siggen::Preemphasis::Eu50,
+         true, 0, 2000, std::numbers::pi / 2.0, 0.0},
+        {"stereo, 50us, 0.37 of a sample of start offset", true, siggen::Preemphasis::Eu50,
+         true, 0, 2000, 0.0, 0.37},
     };
 
     for (const Shape& shape : shapes) {
@@ -1435,6 +1457,8 @@ TEST_CASE("an RDS payload survives an FM link and a WFM receiver's audio path",
         spec.rds.pilot_enabled = shape.pilot;
         spec.carrier_offset = shape.carrier_offset;
         spec.rds.rds_deviation_hz = shape.injection_hz;
+        spec.rds.subcarrier_phase_radians = shape.subcarrier_phase_radians;
+        spec.rds.start_offset_samples = shape.start_offset_samples;
 
         auto modulator = siggen::WfmModulator::create(spec);
         REQUIRE(modulator.has_value());

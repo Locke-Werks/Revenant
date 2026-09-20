@@ -11,7 +11,10 @@
 // project keeps having, so here is what is covered and what is not.
 //
 //   Covered here. The FM phase against the composite, at a rate where a
-//   fourth order difference resolves the subcarrier. Blocking independence.
+//   fourth order difference resolves the subcarrier, including at clause
+//   1.2's quadrature subcarrier phase and at a fractional start offset,
+//   which are the two RdsModSpec fields the closed form rests on and that
+//   nothing else reaches. Blocking independence.
 //   Constant envelope. The stereo matrix against a hand computation that
 //   includes the 38 kHz subcarrier's coherence with the pilot under a clock
 //   error. Mono against stereo carrying the same programme on both channels.
@@ -192,14 +195,37 @@ TEST_CASE("the FM phase is the integral of the composite", "[tools][wfm]")
         siggen::Preemphasis preemphasis;
         bool pilot;
         double clock_error_ppm;
+        double subcarrier_phase_radians;
+        double start_offset_samples;
     };
 
+    // The last two rows are the two RdsModSpec fields the closed form has to
+    // carry and that nothing else here reaches.
+    //
+    // subcarrier_phase_radians is folded into RdsModulator's tabulated
+    // anchor phase at construction AND read again per sample in
+    // rds_integral(), so a version that applied it in one place and not the
+    // other renders a correct composite and integrates a different signal.
+    // Clause 1.2 permits quadrature, which is the far end of the field's
+    // range and therefore the value that separates the two.
+    //
+    // start_offset_samples shifts the time base of the programme tones, the
+    // pilot and the grid position rds_integral() reads, and the fraction is
+    // deliberately not a round number of grid steps: 0.37 of a sample at
+    // 512 steps per bit period lands between table entries, which is the
+    // part-interval the closed form adds in closed form rather than
+    // interpolating.
     const Shape shapes[] = {
-        {"stereo, 50us", true, siggen::Preemphasis::Eu50, true, 0.0},
-        {"stereo, 75us", true, siggen::Preemphasis::Us75, true, 0.0},
-        {"stereo, flat", true, siggen::Preemphasis::None, true, 0.0},
-        {"mono, no pilot", false, siggen::Preemphasis::None, false, 0.0},
-        {"stereo, 40 ppm clock error", true, siggen::Preemphasis::Eu50, true, 40.0},
+        {"stereo, 50us", true, siggen::Preemphasis::Eu50, true, 0.0, 0.0, 0.0},
+        {"stereo, 75us", true, siggen::Preemphasis::Us75, true, 0.0, 0.0, 0.0},
+        {"stereo, flat", true, siggen::Preemphasis::None, true, 0.0, 0.0, 0.0},
+        {"mono, no pilot", false, siggen::Preemphasis::None, false, 0.0, 0.0, 0.0},
+        {"stereo, 40 ppm clock error", true, siggen::Preemphasis::Eu50, true, 40.0, 0.0,
+         0.0},
+        {"stereo, quadrature subcarrier", true, siggen::Preemphasis::Eu50, true, 0.0,
+         kPi / 2.0, 0.0},
+        {"stereo, 0.37 of a sample of start offset", true, siggen::Preemphasis::Eu50, true,
+         0.0, 0.0, 0.37},
     };
 
     for (const Shape& shape : shapes) {
@@ -213,6 +239,8 @@ TEST_CASE("the FM phase is the integral of the composite", "[tools][wfm]")
         spec.programme.right_tone_hz = shape.stereo ? 3300 : 1000;
         spec.rds.pilot_enabled = shape.pilot;
         spec.rds.clock_error_ppm = shape.clock_error_ppm;
+        spec.rds.subcarrier_phase_radians = shape.subcarrier_phase_radians;
+        spec.rds.start_offset_samples = shape.start_offset_samples;
 
         auto composite = siggen::FmComposite::create(spec);
         REQUIRE(composite.has_value());
