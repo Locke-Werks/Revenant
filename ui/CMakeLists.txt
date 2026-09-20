@@ -69,7 +69,18 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
 endif()
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick QuickControls2)
+# Multimedia is here for QAudioSink and nothing else. It brings QMediaDevices
+# and QAudioDevice with it, which is the device picker, and it brings a
+# backend plugin that windeployqt copies below.
+#
+# WHICH BACKEND PLUGIN ACTUALLY MATTERS HERE. Qt 6.8.3 ships two,
+# windowsmediaplugin and ffmpegmediaplugin. Raw PCM through QAudioSink is
+# served by the windows platform backend, so nothing on this path depends on
+# FFmpeg or on the five shared libraries beside it. Both plugins are present
+# at C:/Qt/6.8.3/msvc2022_64 and windeployqt copies what it finds; an install
+# that carries only the windows one still plays audio, which is worth knowing
+# before the Forge installer's payload is decided.
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Multimedia Quick QuickControls2)
 find_package(CapnProto CONFIG REQUIRED)
 
 # ui/tests, which is a separate executable that links no Qt at all. Optional,
@@ -131,6 +142,8 @@ endif()
 # ---------------------------------------------------------------------------
 qt_add_executable(revenant_ui
     main.cpp
+    audio/audio_player.cpp
+    audio/audio_player.h
     audio/audio_ring.cpp
     audio/audio_ring.h
     models/audio_link.cpp
@@ -190,6 +203,7 @@ target_link_libraries(revenant_ui
     PRIVATE
         Qt6::Core
         Qt6::Gui
+        Qt6::Multimedia
         Qt6::Quick
         Qt6::QuickControls2
         CapnProto::capnp-rpc

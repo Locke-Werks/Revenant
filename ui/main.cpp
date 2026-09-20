@@ -27,6 +27,7 @@
 #include <QQuickStyle>
 #include <QStringList>
 
+#include "audio/audio_player.h"
 #include "models/engine_link.h"
 
 namespace {
@@ -121,8 +122,19 @@ int main(int argc, char* argv[])
     // is stopping and restarting it under a running window.
     link.start(address, port, every_nth);
 
+    // DECLARED AFTER THE LINK ON PURPOSE, so it is destroyed BEFORE it.
+    //
+    // The player owns the QAudioSink, and stopping a sink is what joins the
+    // thread Qt has pulling through the ring. The ring belongs to the link.
+    // The other order leaves that thread reading a ring whose owner is
+    // being destroyed, which is a crash on exit that only happens while
+    // audio is actually playing.
+    revenant::ui::AudioPlayer player(link);
+    player.start();
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
+    engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
