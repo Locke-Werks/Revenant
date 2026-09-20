@@ -32,6 +32,7 @@ endif()
 add_library(revenant_rpc_client STATIC
     ${revenant_capnp_sources}
     client.cpp
+    token.cpp
 )
 
 target_link_libraries(revenant_rpc_client
@@ -41,6 +42,21 @@ target_link_libraries(revenant_rpc_client
         CapnProto::kj-async
         CapnProto::kj
 )
+
+# token.cpp only, and all four are Windows SDK import libraries rather than
+# dependencies: bcrypt for BCryptGenRandom, shell32 and ole32 for
+# SHGetKnownFolderPath and the CoTaskMemFree that pairs with it, advapi32 for
+# the token file's ACL. Nothing is added to vcpkg.json, the x64-windows-static
+# triplet is unaffected, and the one-file signed binary gains four OS imports.
+# core/CMakeLists.txt links ole32 and avrt on exactly these terms.
+#
+# ui/CMakeLists.txt compiles these same sources in a separate project under the
+# dynamic triplet and needs the same four. That is a second edit in a file
+# sharing no code with this one, and forgetting it fails at link naming a token
+# function rather than naming the omission.
+if(WIN32)
+    target_link_libraries(revenant_rpc_client PRIVATE bcrypt shell32 ole32 advapi32)
+endif()
 
 target_include_directories(revenant_rpc_client
     PUBLIC

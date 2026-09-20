@@ -37,11 +37,13 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "core/error.h"
+#include "core/rpc/token.h"
 #include "core/rpc/types.h"
 
 namespace revenant::rpc {
@@ -50,8 +52,33 @@ class Client {
 public:
     // address is a host or literal address; the engine binds loopback by
     // default and a remote engine is an explicit choice, not an accident.
-    [[nodiscard]] static Expected<std::unique_ptr<Client>> connect(std::string_view address,
-                                                                    std::uint16_t port);
+    //
+    // token is the engine's pre-shared token, exactly kTokenBytes of it. See
+    // core/rpc/token.h for where the file lives and how to read it; a caller
+    // that wants the ordinary case, one operator with the engine and the UI
+    // running as the same account, passes load_token(default_token_path()).
+    //
+    // THIS CALL NOW ROUND-TRIPS, WHICH IT DID NOT BEFORE
+    //
+    // The bootstrap capability is lazy in Cap'n Proto, so until 2026-09-20
+    // connect() returned the moment the TCP connect did and nothing was
+    // exchanged. It now sends Authenticator.login and waits for the answer,
+    // so a wrong token is a connect failure carrying the engine's refusal
+    // rather than a surprise on the first real call. Session calls are still
+    // pipelined on the login result, so a good token costs no extra round
+    // trip afterwards.
+    //
+    // A WRONG TOKEN IS PERMANENT AND THIS INTERFACE CANNOT SAY SO
+    //
+    // core/error.h carries a message and an originating API code with no
+    // category, so a caller reconnecting in a loop cannot tell this refusal
+    // from a connection refused by a server that is not up yet, except by
+    // matching on the message text. ui/models/engine_link.cpp retries every
+    // failure identically and will spin against a wrong token. Widening
+    // Error with a category touches every user of Expected in the tree and
+    // is the right fix rather than this one; it is not on this branch.
+    [[nodiscard]] static Expected<std::unique_ptr<Client>> connect(
+        std::string_view address, std::uint16_t port, std::span<const std::uint8_t> token);
 
     virtual ~Client() = default;
 

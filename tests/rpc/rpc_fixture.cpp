@@ -16,6 +16,25 @@ constexpr const char* kSceneShape =
 
 }  // namespace
 
+rpc::Token test_token() {
+    rpc::Token token{};
+    for (std::size_t i = 0; i < token.size(); ++i) {
+        token[i] = static_cast<std::uint8_t>(0xA0U + i);
+    }
+    return token;
+}
+
+rpc::Token wrong_test_token() {
+    rpc::Token token = test_token();
+    // The LAST byte, deliberately. A compare that returned at the first
+    // difference would refuse this just as it refuses a token that differs at
+    // byte zero, so this does not prove the loop is constant time. What it
+    // does prove is that the loop reaches the end at all, which a compare
+    // written against the first eight bytes would fail.
+    token.back() = static_cast<std::uint8_t>(token.back() ^ 0x01U);
+    return token;
+}
+
 std::string scene_uri(dsp::SampleIndex samples, dsp::Hertz center_hz) {
     return std::format("synthetic:wideband?rate={}{}&samples={}&center={}", kSourceRate,
                        kSceneShape, samples, center_hz);
@@ -49,6 +68,13 @@ Status Harness::open(const HarnessOptions& options) {
     // collide. ServerOptions::port defaults to zero for that reason and
     // Server::port() reports what was bound.
     rpc::ServerOptions server_options;
+
+    // Never empty. Server::create refuses an empty token outright, because
+    // "no token" meaning "no authentication" is the one convenience in this
+    // design that would ship an engine anyone can drive.
+    const rpc::Token token = test_token();
+    server_options.token.assign(token.begin(), token.end());
+
     auto served = rpc::Server::create(*engine_, server_options);
     if (!served) {
         return std::unexpected(with_context(served.error(), "starting the server"));
@@ -60,7 +86,7 @@ Status Harness::open(const HarnessOptions& options) {
         return {};
     }
 
-    auto connected = rpc::Client::connect("127.0.0.1", port_);
+    auto connected = rpc::Client::connect("127.0.0.1", port_, token);
     if (!connected) {
         return std::unexpected(with_context(connected.error(), "connecting the client"));
     }
@@ -69,7 +95,13 @@ Status Harness::open(const HarnessOptions& options) {
 }
 
 Expected<std::unique_ptr<rpc::Client>> Harness::connect_another() {
-    return rpc::Client::connect("127.0.0.1", port_);
+    const rpc::Token token = test_token();
+    return rpc::Client::connect("127.0.0.1", port_, token);
+}
+
+Expected<std::unique_ptr<rpc::Client>> Harness::connect_with(
+    std::span<const std::uint8_t> token) {
+    return rpc::Client::connect("127.0.0.1", port_, token);
 }
 
 Status Harness::start_engine() {

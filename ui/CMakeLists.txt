@@ -95,9 +95,21 @@ capnp_generate_cpp(revenant_capnp_sources revenant_capnp_headers
 # ---------------------------------------------------------------------------
 # The client half of the wire, compiled from the main tree by path
 # ---------------------------------------------------------------------------
-set(revenant_rpc_client_sources "${REVENANT_SOURCE_DIR}/core/rpc/client.cpp")
+#
+# TWO FILES AND NOT ONE, AND THE SECOND IS EASY TO FORGET
+#
+# core/rpc/token.cpp is the other half of revenant_rpc_client: it reads the
+# pre-shared token this process has to hand Authenticator.login before it
+# holds a Session at all. It is listed here by hand, exactly as client.cpp is,
+# because this project shares no code with core/rpc/CMakeLists.txt and CI never
+# configures it. A file added there and not here fails at link naming
+# revenant::rpc::load_token, which is true and does not say that the omission
+# was in this list.
+set(revenant_rpc_client_sources
+    "${REVENANT_SOURCE_DIR}/core/rpc/client.cpp"
+    "${REVENANT_SOURCE_DIR}/core/rpc/token.cpp")
 
-if(NOT EXISTS "${revenant_rpc_client_sources}")
+if(NOT EXISTS "${REVENANT_SOURCE_DIR}/core/rpc/client.cpp")
     # Configure still succeeds, because getting this far is worth knowing even
     # while the client implementation is being written. The link is what
     # fails, and it fails naming Client::connect, which is the truth.
@@ -174,6 +186,14 @@ target_link_libraries(revenant_ui
         CapnProto::capnp
         CapnProto::kj-async
         CapnProto::kj
+
+        # core/rpc/token.cpp's, and Windows SDK import libraries rather than
+        # dependencies. The same four are in core/rpc/CMakeLists.txt; see the
+        # note above the source list for why this is a second edit.
+        bcrypt
+        shell32
+        ole32
+        advapi32
 )
 
 revenant_apply_warnings(revenant_ui)

@@ -963,7 +963,15 @@ TEST_CASE("one engine serves one server, and is free again when it stops", "[gpu
     REQUIRE(created.has_value());
     engine::Engine& eng = **created;
 
-    auto first = rpc::Server::create(eng, rpc::ServerOptions{});
+    // Every create here carries a token, because Server::create refuses an
+    // empty one BEFORE it claims the engine. Passing ServerOptions{} would
+    // make the second create below fail for the wrong reason and the case
+    // would pass while proving nothing about the claim.
+    const rpc::Token token = test::test_token();
+    rpc::ServerOptions options;
+    options.token.assign(token.begin(), token.end());
+
+    auto first = rpc::Server::create(eng, options);
     INFO(test::message_of(first));
     REQUIRE(first.has_value());
     CHECK((*first)->port() != 0);
@@ -972,7 +980,7 @@ TEST_CASE("one engine serves one server, and is free again when it stops", "[gpu
     // would then hold subscriptions that never receive another frame. That
     // is silent, so it is refused here rather than discovered by a display
     // that stopped drawing.
-    auto second = rpc::Server::create(eng, rpc::ServerOptions{});
+    auto second = rpc::Server::create(eng, options);
     REQUIRE_FALSE(second.has_value());
     INFO(second.error().message);
     CHECK(second.error().message.find("already has an RPC server") != std::string::npos);
@@ -982,16 +990,18 @@ TEST_CASE("one engine serves one server, and is free again when it stops", "[gpu
     // And the claim is released rather than held for the life of the
     // process, so a service that restarts its listener does not have to
     // rebuild the engine to do it.
-    auto again = rpc::Server::create(eng, rpc::ServerOptions{});
+    auto again = rpc::Server::create(eng, options);
     INFO(test::message_of(again));
     REQUIRE(again.has_value());
     CHECK((*again)->port() != 0);
 }
 
 TEST_CASE("connect refuses what cannot be a connection", "[rpc][m1]") {
+    const rpc::Token token = test::test_token();
+
     // No GPU and no engine. These are argument errors the client answers on
     // its own, and answering them before a thread is started is the point.
-    auto no_address = rpc::Client::connect("", 47'000);
+    auto no_address = rpc::Client::connect("", 47'000, token);
     REQUIRE_FALSE(no_address.has_value());
     INFO(no_address.error().message);
     CHECK(no_address.error().message.find("no address") != std::string::npos);
@@ -999,7 +1009,7 @@ TEST_CASE("connect refuses what cannot be a connection", "[rpc][m1]") {
     // ServerOptions::port defaults to zero meaning "bind whatever is free",
     // so a caller forwarding its own options here would otherwise ask the OS
     // to connect to port zero and get a message about nothing listening.
-    auto zero_port = rpc::Client::connect("127.0.0.1", 0);
+    auto zero_port = rpc::Client::connect("127.0.0.1", 0, token);
     REQUIRE_FALSE(zero_port.has_value());
     INFO(zero_port.error().message);
     CHECK(zero_port.error().message.find("Server::port()") != std::string::npos);
@@ -1019,7 +1029,7 @@ TEST_CASE("connect reports a refused connection rather than a call that fails la
         REQUIRE(port != 0);
     }
 
-    auto refused = rpc::Client::connect("127.0.0.1", port);
+    auto refused = rpc::Client::connect("127.0.0.1", port, test::test_token());
 
     // The whole reason client.cpp connects on the loop thread and waits
     // rather than using EzRpcClient: a client that connected in the

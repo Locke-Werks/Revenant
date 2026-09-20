@@ -862,6 +862,59 @@ private:
     ServerImpl& owner_;
 };
 
+// The bootstrap capability, and the only thing an unauthenticated connection
+// holds.
+//
+// ONE OF THESE IS SHARED BY EVERY CONNECTION, WHICH IS SAFE BECAUSE IT HAS NO
+// STATE
+//
+// capnp 1.4.0's TwoPartyServer takes exactly one Capability::Client and has no
+// BootstrapFactory overload; the factory exists on RpcSystem alone. Getting a
+// bootstrap per connection would mean replacing rpc.listen with a hand-written
+// accept loop inside serve(), which is already the hardest function in this
+// file. It is not needed: this object holds a reference and 32 bytes, both set
+// on the loop thread before the listener exists, so login needs no lock and
+// adds no thread.
+//
+// LOGIN MINTS A FRESH SESSION PER CALL
+//
+// SessionImpl's only member is ServerImpl&, so a second one costs nothing and
+// two of them cannot disagree. That is what makes a second login on one
+// connection an ordinary success rather than a case to defend against: the
+// caller has already proved it holds the token, and a second capability grants
+// it nothing it did not have. The Session's lifetime becomes the client's, and
+// any still alive at shutdown die with the TwoPartyServer local, on this
+// thread, exactly as the single bootstrap Session used to.
+class AuthenticatorImpl final : public schema::Authenticator::Server {
+public:
+    AuthenticatorImpl(ServerImpl& owner, Token token) : owner_(owner), token_(token) {}
+
+    kj::Promise<void> login(LoginContext context) override {
+        const capnp::Data::Reader offered = context.getParams().getToken();
+        const std::span<const std::uint8_t> bytes(
+            static_cast<const std::uint8_t*>(offered.begin()), offered.size());
+
+        if (!tokens_equal(bytes, std::span<const std::uint8_t>(token_))) {
+            // The rejection says nothing about the token, and not because the
+            // length is a secret: it is in the schema, in docs/rpc.md and in
+            // the size of the file. There is simply nothing else true to say,
+            // and "too short" would invite a caller to treat the length as
+            // the thing to get right.
+            return to_exception(Error{
+                "login was refused: that is not this engine's token. The engine keeps it in "
+                "the file it named at startup; pass those bytes, or --token-file, to the "
+                "client"});
+        }
+
+        context.getResults().setSession(kj::heap<SessionImpl>(owner_));
+        return kj::READY_NOW;
+    }
+
+private:
+    ServerImpl& owner_;
+    Token token_;
+};
+
 Status ServerImpl::start(const ServerOptions& options) {
     auto ready = ready_.get_future();
     try {
@@ -915,7 +968,14 @@ void ServerImpl::serve(ServerOptions options) {
         auto shutdown = kj::newPromiseAndCrossThreadFulfiller<void>();
         shutdown_ = kj::mv(shutdown.fulfiller);
 
-        capnp::TwoPartyServer rpc(kj::heap<SessionImpl>(*this));
+        // The bootstrap is an Authenticator, not a Session. Server::create
+        // has already refused a token that is not exactly kTokenBytes, so
+        // this copy cannot be short, and it is a copy because `options` is a
+        // by-value parameter whose lifetime ends with this function while the
+        // capability's does not.
+        Token token{};
+        std::copy_n(options.token.begin(), kTokenBytes, token.begin());
+        capnp::TwoPartyServer rpc(kj::heap<AuthenticatorImpl>(*this, token));
 
         // After the RPC system so that outstanding sends are cancelled before
         // the system they were issued through is torn down.
@@ -1691,6 +1751,26 @@ void ServerImpl::stop() {
 
 Expected<std::unique_ptr<Server>> Server::create(engine::Engine& engine,
                                                  const ServerOptions& options) {
+    // Before the engine is claimed and before a port is bound, so a caller
+    // that got this wrong has no half-built server to tidy up.
+    //
+    // There is no unauthenticated path and this is what makes that true. An
+    // empty token meaning "serve anybody" would be a one-line convenience
+    // that ships an engine the whole machine can drive, out of code that
+    // reads as configured. See ServerOptions::token.
+    if (options.token.empty()) {
+        return fail(std::format(
+            "the RPC server was given no token, and there is no unauthenticated mode. Put {} "
+            "bytes in ServerOptions::token; core/rpc/token.h mints and loads a file holding "
+            "them",
+            kTokenBytes));
+    }
+    if (options.token.size() != kTokenBytes) {
+        return fail(std::format(
+            "the RPC server was given a {}-byte token and it has to be exactly {}",
+            options.token.size(), kTokenBytes));
+    }
+
     if (auto claim = claim_engine(engine); !claim) {
         return std::unexpected(claim.error());
     }

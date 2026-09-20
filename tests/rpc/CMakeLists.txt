@@ -29,9 +29,11 @@ if(TARGET revenant_rpc_server)
         ../support/no_modal_dialogs.cpp
         ../reference/gpu_fixture.cpp
         rpc_fixture.cpp
+        test_rpc_auth.cpp
         test_rpc_detect.cpp
         test_rpc_session.cpp
         test_rpc_spectrum.cpp
+        test_rpc_token.cpp
     )
 
     target_link_libraries(revenant_rpc_tests PRIVATE
@@ -64,6 +66,11 @@ endif()
 # --duration rather than an interrupt. The console handler is the one path
 # CTest cannot drive: sending a real Ctrl-C to a child would reach the whole
 # process group, this runner included.
+#
+# --token-file into the build tree, because the default is
+# %LOCALAPPDATA%\Revenant\rpc-token and a test suite has no business minting a
+# token into a real user profile and leaving it there. It also keeps this
+# entry from sharing a file with an engine the operator is actually running.
 if(TARGET revenant-engine)
     add_test(
         NAME engined_serves_and_reports_its_port
@@ -74,6 +81,7 @@ if(TARGET revenant-engine)
                 --block-samples 16384
                 --duration 0.5
                 --quiet
+                --token-file "${CMAKE_CURRENT_BINARY_DIR}/engined-test-token"
     )
     set_tests_properties(engined_serves_and_reports_its_port PROPERTIES
         LABELS "rpc"

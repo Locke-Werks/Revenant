@@ -5,9 +5,12 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iterator>
 #include <optional>
 #include <utility>
+
+#include "core/rpc/token.h"
 
 #include <QMetaObject>
 #include <QString>
@@ -203,9 +206,58 @@ void EngineLink::supervise()
     }
 }
 
+namespace {
+
+// The engine's token, in the order an operator would expect it to be found.
+//
+// REVENANT_RPC_TOKEN holds the hex and wins, which is what a launcher or a
+// test harness sets. REVENANT_RPC_TOKEN_FILE names a file, which is what the
+// engine's own --token-file produces when it runs as a service and its local
+// app data is not somewhere this process can read. Neither set means the
+// default path, which is the ordinary case: one operator with the engine and
+// this window running as the same account, and nothing to configure.
+//
+// The precedent for reading configuration out of the environment here is
+// REVENANT_GPU_INDEX at core/gpu/context.cpp.
+[[nodiscard]] Expected<rpc::Token> resolve_token()
+{
+    if (const char* hex = std::getenv("REVENANT_RPC_TOKEN"); hex != nullptr) {
+        return rpc::token_from_hex(hex);
+    }
+    if (const char* named = std::getenv("REVENANT_RPC_TOKEN_FILE"); named != nullptr) {
+        return rpc::load_token(named);
+    }
+    auto path = rpc::default_token_path();
+    if (!path) {
+        return std::unexpected(path.error());
+    }
+    return rpc::load_token(*path);
+}
+
+}  // namespace
+
 bool EngineLink::attempt_connect()
 {
-    auto client = rpc::Client::connect(address_.toStdString(), port_);
+    // Resolved per attempt rather than once, so an operator who minted a
+    // token after starting this window gets picked up by the next pass of the
+    // supervisor loop instead of having to restart it.
+    auto token = resolve_token();
+    if (!token) {
+        publish(false, QString::fromStdString(token.error().message));
+        return false;
+    }
+
+    // A REFUSED TOKEN IS PERMANENT AND THIS LOOP RETRIES IT ANYWAY
+    //
+    // The supervisor above treats every failure as transient, so a wrong
+    // token writes the same line once a second forever rather than stopping.
+    // core/error.h carries a message and an originating API code with no
+    // category, so there is nothing to branch on here except the message
+    // text, which would break the first time the wording improved. Widening
+    // Error is the right fix and it touches every user of Expected in the
+    // tree; it is not on this branch, and this comment is here so the next
+    // person to see the loop spin knows it is known.
+    auto client = rpc::Client::connect(address_.toStdString(), port_, *token);
     if (!client) {
         publish(false, QString::fromStdString(client.error().message));
         return false;

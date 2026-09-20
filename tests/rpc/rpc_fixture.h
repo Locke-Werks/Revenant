@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,8 +36,30 @@
 #include "core/error.h"
 #include "core/rpc/client.h"
 #include "core/rpc/server.h"
+#include "core/rpc/token.h"
 
 namespace revenant::test {
+
+// The token every case in this suite serves and presents.
+//
+// A FIXED VALUE AND NOT THE FILE, WHICH IS THE WHOLE POINT
+//
+// ServerOptions::token is bytes rather than a path precisely so that the wire
+// cases never touch a real user profile. These run in CI, several at once,
+// and must not read %LOCALAPPDATA%, must not collide between cases, and must
+// leave nothing behind. The file format has its own cases against a temporary
+// directory; these are about the protocol.
+//
+// Recognisable on sight in a hex dump, because a case that got the wrong
+// buffer should look wrong rather than look random.
+[[nodiscard]] rpc::Token test_token();
+
+// The same bytes with one flipped, for the cases about a token that is the
+// right length and the wrong value. A single bit rather than a wholly
+// different array: the constant-time compare has no early exit, so a token
+// differing only in its last byte has to be refused exactly as one differing
+// in its first, and a case built on an all-zeros array would not say that.
+[[nodiscard]] rpc::Token wrong_test_token();
 
 // A source rate the channel count does not divide, chosen for that reason
 // and constrained by one rule that is not obvious.
@@ -178,6 +201,13 @@ public:
     // by the caller and destroyed before the harness, which the caller gets
     // for free by declaring it after.
     [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> connect_another();
+
+    // The same, with a token of the caller's choosing, for the cases that are
+    // about the login itself. A span rather than a Token so that a case can
+    // hand over nothing at all, or the wrong number of bytes, and see which
+    // layer refuses it.
+    [[nodiscard]] Expected<std::unique_ptr<rpc::Client>> connect_with(
+        std::span<const std::uint8_t> token);
 
     // Runs the engine on its own thread. Every spectrum case needs this,
     // because run() blocks until the source ends and the client has to be

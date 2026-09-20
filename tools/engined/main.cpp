@@ -7,7 +7,18 @@
 // several. Receivers are not configured here at all: a client adds them over
 // the session, and this program never learns what they were for.
 //
-// Four things in here are decisions rather than transcription.
+// Five things in here are decisions rather than transcription.
+//
+// THE TOKEN IS RESOLVED BEFORE THE ENGINE IS BUILT, AND NEVER PRINTED
+//
+// A client holds nothing until it has passed Authenticator.login, so this
+// program has to have the token before it can serve anything. It is resolved
+// first, ahead of Engine::create, so that a missing folder or a token file
+// somebody else can read is reported before a radio is opened and then shut
+// again. The PATH is printed in the startup block and the token is not:
+// stdout here is scrollback, a supervisor's log and CI output at once, and a
+// secret written to any of those has left the machine. There is deliberately
+// no --print-token; `type` on the file is the way to read it.
 //
 // THE PORT IS PRINTED AND FLUSHED, AND THAT IS NOT DECORATION
 //
@@ -170,6 +181,15 @@ struct Options {
     // second one fail. The bound port is printed either way.
     std::uint16_t port = 0;
 
+    // Empty asks core/rpc/token.h for %LOCALAPPDATA%\Revenant\rpc-token.
+    // Named when the engine runs as a service, where that path resolves
+    // inside C:\Windows\System32\config\systemprofile and the operator's
+    // client cannot read it.
+    std::string token_file;
+
+    // Mint over whatever is there, rather than loading it.
+    bool new_token = false;
+
     std::uint32_t channels = 64;
     std::uint32_t taps_per_branch = 17;
     SampleRate audio_rate = 48'000;
@@ -215,12 +235,27 @@ void print_usage()
         "core/rpc/revenant.capnp for what the session offers.\n"
         "\n"
         "Serving:\n"
-        "  --bind <address>    Interface to listen on, default 127.0.0.1. There is no\n"
-        "                      authentication on this interface, so serving it to a\n"
-        "                      network is a decision rather than a default.\n"
+        "  --bind <address>    Interface to listen on, default 127.0.0.1. A client has\n"
+        "                      to present the token below, but this wire is plaintext,\n"
+        "                      so a token crossing a network is readable and replayable\n"
+        "                      by anything on the path. Off loopback still means a\n"
+        "                      tunnel; binding elsewhere prints a warning saying so.\n"
         "  --port <n>          Port, default 0, which binds whatever is free. The bound\n"
         "                      port is printed on startup either way, because an\n"
         "                      ephemeral one is otherwise unknowable to a client.\n"
+        "  --token-file <path> Where the pre-shared token lives. Default is\n"
+        "                      %LOCALAPPDATA%\\Revenant\\rpc-token, which is minted on\n"
+        "                      first run readable only by you and SYSTEM. Name a path\n"
+        "                      when this runs as a service, because LocalSystem's local\n"
+        "                      app data is not somewhere your client can read.\n"
+        "                      The path is printed on startup and the token never is;\n"
+        "                      run `type` on the file when you need the bytes.\n"
+        "  --new-token         Mint a fresh token over the existing file.\n"
+        "                      ROTATING DOES NOT DISCONNECT ANYBODY. A session already\n"
+        "                      granted is a capability and capabilities do not\n"
+        "                      re-check, so rotating because a token leaked means\n"
+        "                      restarting the engine to kill the sessions the leak\n"
+        "                      already bought.\n"
         "\n"
         "Engine:\n"
         "  --channels <n>      Channelizer channel count, default 64. A power of two.\n"
@@ -343,6 +378,23 @@ void print_usage()
                 return std::unexpected(number.error());
             }
             options.port = static_cast<std::uint16_t>(*number);
+            continue;
+        }
+
+        if (arg == "--token-file") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (text->empty()) {
+                return fail("--token-file needs a path");
+            }
+            options.token_file = *text;
+            continue;
+        }
+
+        if (arg == "--new-token") {
+            options.new_token = true;
             continue;
         }
 
@@ -653,8 +705,48 @@ void print_engine_block(const engine::Engine& eng)
 // Serving
 // ---------------------------------------------------------------------------
 
+// Loopback in the only two spellings a bind address can have here, because
+// the warning has to fire for a LAN address and must not fire for the
+// default. parseAddress accepts a hostname too, so this is a check on what
+// was asked for rather than on what was resolved; anything it does not
+// recognise gets the warning, which is the safe direction.
+[[nodiscard]] bool is_loopback(std::string_view address)
+{
+    return address == "127.0.0.1" || address == "::1" || address == "localhost";
+}
+
+// The token, before the engine is built, so a token problem is reported
+// before a device is opened.
+//
+// The path is printed by the caller and the token never is. stdout here is
+// scrollback, a supervisor's log and CI output all at once, and a secret
+// written to any of those has left the machine. An operator who needs the
+// bytes runs `type` on the file, which is why there is no --print-token.
+[[nodiscard]] Expected<std::pair<std::string, rpc::Token>> resolve_token(const Options& options)
+{
+    std::string path = options.token_file;
+    if (path.empty()) {
+        auto resolved = rpc::default_token_path();
+        if (!resolved) {
+            return std::unexpected(resolved.error());
+        }
+        path = std::move(*resolved);
+    }
+
+    auto token = options.new_token ? rpc::rotate_token(path) : rpc::load_or_mint_token(path);
+    if (!token) {
+        return std::unexpected(token.error());
+    }
+    return std::pair<std::string, rpc::Token>{std::move(path), *token};
+}
+
 [[nodiscard]] Status serve(const Options& options)
 {
+    auto token = resolve_token(options);
+    if (!token) {
+        return std::unexpected(with_context(token.error(), "preparing the RPC token"));
+    }
+
     engine::EngineConfig config;
     config.gpu_index = options.gpu;
     config.ring_seconds = options.ring_seconds;
@@ -685,15 +777,30 @@ void print_engine_block(const engine::Engine& eng)
     rpc::ServerOptions server_options;
     server_options.bind_address = options.bind;
     server_options.port = options.port;
+    server_options.token.assign(token->second.begin(), token->second.end());
 
     auto server = rpc::Server::create(eng, server_options);
     if (!server) {
         return std::unexpected(with_context(server.error(), "starting the RPC server"));
     }
 
+    std::println("");
+    std::println("token file      {}", token->first);
+
+    // One line on stderr and no second flag. Two flags that have to agree are
+    // two flags that get out of sync, and the token does not make this wire
+    // safe to put on a network: it is plaintext, so anything on the path can
+    // read the token as it goes by and replay it.
+    if (!is_loopback(options.bind)) {
+        std::println(stderr,
+                     "warning: bound to {}, which is not loopback. This wire is not "
+                     "encrypted, so the token crosses in the clear and anything on the path "
+                     "can read it and reuse it. Put a tunnel in front of this.",
+                     options.bind);
+    }
+
     // The one line a supervisor parses, and the reason for the flush. See the
     // note at the top of the file.
-    std::println("");
     std::println("listening on {}:{}", options.bind, (*server)->port());
     std::fflush(stdout);
 

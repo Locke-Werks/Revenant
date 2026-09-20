@@ -382,13 +382,15 @@ public:
         }
 
         rpc::ServerOptions server_options;
+        const rpc::Token token = test::test_token();
+        server_options.token.assign(token.begin(), token.end());
         auto served = rpc::Server::create(*engine_, server_options);
         if (!served) {
             return std::unexpected(with_context(served.error(), "starting the server"));
         }
         server_ = std::move(*served);
 
-        auto connected = rpc::Client::connect("127.0.0.1", server_->port());
+        auto connected = rpc::Client::connect("127.0.0.1", server_->port(), token);
         if (!connected) {
             return std::unexpected(with_context(connected.error(), "connecting the client"));
         }

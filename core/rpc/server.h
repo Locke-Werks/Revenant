@@ -1,8 +1,15 @@
 // The engine side of the wire.
 //
 // Holds a reference to a running (or not yet running) Engine and serves the
-// Session interface over a socket. Unlike core/rpc/client.h this one does
-// link revenant_core, because its whole job is to be the engine's mouth.
+// Authenticator interface over a socket. Unlike core/rpc/client.h this one
+// does link revenant_core, because its whole job is to be the engine's mouth.
+//
+// The bootstrap capability is an Authenticator and not a Session. A caller
+// that has not passed ServerOptions::token holds one method and no radio, so
+// there is no Session in its capability table to refuse. login mints a fresh
+// Session per call, which costs nothing because that object is stateless: its
+// only member is a reference to this server. See core/rpc/revenant.capnp,
+// which has the argument for the shape.
 //
 // THREADING, WHICH IS THE ONLY HARD PART IN HERE
 //
@@ -76,22 +83,52 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/engine/engine.h"
 #include "core/error.h"
+#include "core/rpc/token.h"
 
 namespace revenant::rpc {
 
 struct ServerOptions {
-    // Loopback by default. Serving an engine to the network is a decision
-    // somebody makes on purpose, and there is no authentication on this
-    // interface yet, so the default must not be the one that exposes it.
+    // Loopback by default, and that has not changed now that there is a
+    // token.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "there is no authentication on this
+    // interface yet, so the default must not be the one that exposes it".
+    // There is authentication now, and the default still must not be the one
+    // that exposes it, for a narrower reason. This wire is plaintext: TLS with
+    // client certificates was refused as the wrong shape for one operator with
+    // one radio, and the consequence is that a token crossing a routable
+    // interface is readable and replayable by anything on the path. A
+    // pre-shared token over cleartext on a LAN is not authentication.
+    //
+    // So what login changed is what a second process on THIS machine can do.
+    // Off loopback still means a tunnel. Recorded rather than quietly
+    // rewritten, because docs/rpc.md and the schema both said the absence was
+    // the whole of the story and a reader who took the loopback default as the
+    // control is owed the reason it survives.
     std::string bind_address = "127.0.0.1";
 
     // Zero binds an ephemeral port, which the test suite needs so that two
     // runs on one machine do not collide. Server::port() reports what was
     // actually bound.
     std::uint16_t port = 0;
+
+    // The pre-shared token Authenticator.login compares against, exactly
+    // kTokenBytes of it. See core/rpc/token.h for where the file lives and how
+    // a host gets the bytes out of it.
+    //
+    // EMPTY IS A create() FAILURE AND NEVER "NO AUTHENTICATION"
+    //
+    // This is the single most dangerous default this design could have had. If
+    // empty meant unauthenticated, a caller that forgot the field would get an
+    // engine anyone on the machine can drive, out of code that reads as though
+    // it were configured. There is no off switch and no --no-auth for the same
+    // reason: an off switch is the thing that ends up on by accident.
+    // Supplying 32 bytes in a test is one line.
+    std::vector<std::uint8_t> token;
 };
 
 class Server {

@@ -46,6 +46,7 @@
 
 #include "core/rpc/client.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <format>
@@ -53,6 +54,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -510,7 +512,7 @@ public:
     // which is the misuse client.h already rules out.
     ~ClientImpl() noexcept override;
 
-    [[nodiscard]] Status start(std::string address, std::uint16_t port);
+    [[nodiscard]] Status start(std::string address, std::uint16_t port, Token token);
 
     [[nodiscard]] Expected<EngineInfo> info() override;
     [[nodiscard]] Expected<bool> running() override;
@@ -545,6 +547,10 @@ public:
 
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
+
+    // Read on the loop thread during the login handshake and never written
+    // again after start() hands it over.
+    Token token_{};
 
     // Loop thread only.
     [[nodiscard]] kj::Promise<void> end_subscription(LoopState& state);
@@ -684,7 +690,9 @@ ClientImpl::~ClientImpl() noexcept {
     }
 }
 
-Status ClientImpl::start(std::string address, std::uint16_t port) {
+Status ClientImpl::start(std::string address, std::uint16_t port, Token token) {
+    token_ = token;
+
     std::promise<Status> ready;
     std::future<Status> settled = ready.get_future();
 
@@ -739,10 +747,30 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         capnp::TwoPartyClient rpc(*stream);
         auto shutdown = kj::newPromiseAndFulfiller<void>();
 
+        // THE BOOTSTRAP IS AN Authenticator AND THE SESSION IS PIPELINED ON
+        // THE LOGIN THAT HAS NOT COME BACK YET
+        //
+        // Until 2026-09-20 this line was
+        // rpc.bootstrap().castAs<schema::Session>() and opening the socket
+        // was the whole of the authorisation.
+        //
+        // getSession() before the answer arrives is not an optimisation and
+        // not a shortcut. It is what Cap'n Proto is for: Session calls made
+        // on it travel behind the login rather than after it, so a good token
+        // costs one round trip in total. Nothing leaks by doing it. When
+        // login fails, capnp breaks this capability with login's own
+        // exception and every call on it fails with that exception WITHOUT
+        // the engine's Session implementation being entered, which is the
+        // property the whole single-check design rests on.
+        auto login = rpc.bootstrap().castAs<schema::Authenticator>().loginRequest();
+        login.setToken(capnp::Data::Reader(
+            reinterpret_cast<const kj::byte*>(token_.data()), token_.size()));
+        auto pending = login.send();
+
         // The empty brace is a null kj::Own: its constructor from nullptr is
         // explicit, so it cannot be spelled here.
         LoopState state{
-            rpc.bootstrap().castAs<schema::Session>(),
+            pending.getSession(),
             kj::mv(shutdown.fulfiller),
             {},
         };
@@ -755,6 +783,17 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
 
         loop_id_ = std::this_thread::get_id();
         executor_ = kj::getCurrentThreadExecutor().addRef();
+
+        // WAITING HERE IS WHAT MAKES A WRONG TOKEN A CONNECT FAILURE
+        //
+        // Dropping this wait would still be correct in the capability sense:
+        // the pipelined session is already broken and every later call would
+        // carry the refusal. It would just carry it at a time the caller
+        // cannot act on. A supervisor loop wants to hear about a permanent
+        // refusal where it asked to connect, so the round trip is paid once,
+        // here, and the throw lands in the catch below with the engine's own
+        // sentence in it.
+        pending.wait(io.waitScope);
 
         announce(Status{});
 
@@ -1099,9 +1138,18 @@ void ClientImpl::deliver(schema::SpectrumFrame::Reader in) {
 
 }  // namespace
 
-Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std::uint16_t port) {
+Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std::uint16_t port,
+                                                  std::span<const std::uint8_t> token) {
     if (address.empty()) {
         return fail("cannot connect: no address was given");
+    }
+    // Before the socket, so a caller that forgot the token does not get a
+    // refusal from the far end that reads like the engine's fault.
+    if (token.size() != kTokenBytes) {
+        return fail(std::format(
+            "cannot connect: the token is {} bytes and it has to be exactly {}. "
+            "core/rpc/token.h reads the engine's token file into that shape",
+            token.size(), kTokenBytes));
     }
     if (port == 0) {
         // ServerOptions::port defaults to zero meaning "bind whatever is
@@ -1112,8 +1160,11 @@ Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std:
                     "ephemeral port reports the real one through Server::port()");
     }
 
+    Token copied{};
+    std::copy_n(token.begin(), kTokenBytes, copied.begin());
+
     auto client = std::make_unique<ClientImpl>();
-    if (auto started = client->start(std::string(address), port); !started) {
+    if (auto started = client->start(std::string(address), port, copied); !started) {
         return std::unexpected(started.error());
     }
     return std::unique_ptr<Client>(std::move(client));
