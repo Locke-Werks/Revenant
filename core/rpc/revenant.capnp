@@ -37,9 +37,36 @@
 # shipped geometry against the 80 MB/s the engine produces. The handle is an
 # optimisation on a path that has to exist and be correct either way.
 #
-# Audio does not cross at all yet. The CLI renders its own through WASAPI in
-# the same process as the engine, and a remote client wanting audio needs a
-# codec decision this does not have to make today.
+# Audio crosses as raw float32 PCM, per receiver and opt in, and the codec
+# question has been answered rather than deferred: there is no codec. About
+# 1.5 Mbit/s for a mono 48 kHz receiver is free on loopback and on a LAN, and
+# that is the deployment that exists. Opus was refused on two counts, 20 ms or
+# more of added latency and a lossy stage in the middle of a chain whose whole
+# claim is that it is bit exact end to end. 16-bit PCM was refused because it
+# adds a quantisation and a dither decision and clips the headroom a settling
+# AGC uses. AudioChunk and Session::subscribeAudio below are that decision.
+#
+# WHAT THIS PARAGRAPH USED TO SAY
+#
+# Until 2026-09-20 it read "Audio does not cross at all yet. The CLI renders
+# its own through WASAPI in the same process as the engine, and a remote
+# client wanting audio needs a codec decision this does not have to make
+# today." docs/rpc.md and README.md said the same thing in their own words, so
+# a reader who checked any of the three and concluded a remote client could
+# not listen is owed the retraction rather than a schema that reads as though
+# it never said it.
+#
+# WHAT IS ON THE WIRE HERE AND NOT YET BEHIND IT
+#
+# subscribeAudio, rdsStation and setRdsRegion are declared, ordinal-allocated
+# and refused. The engine has no wire audio fan-out and no RDS decoder wired
+# into it; both are their own lane. The refusal names the surface and says it
+# is not wired, because a method that answered with an empty stream or a
+# zeroed struct would read as a broken engine rather than as unfinished work.
+# Everything the three say about shape and about backpressure is the contract
+# those lanes implement, and the reason all three ordinals were allocated in
+# one pass is that a Cap'n Proto field number is permanent and three lanes
+# racing to append would collide.
 
 using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("revenant::rpc::schema");
@@ -668,7 +695,725 @@ interface PassbandSubscription {
     cancel @0 () -> ();
 }
 
+# ---------------------------------------------------------------------------
+# Audio
+# ---------------------------------------------------------------------------
+
+# One receiver's audio, as raw float32 PCM. The note at the top of this file
+# has the codec decision and the retraction that goes with it.
+struct AudioChunk {
+    # Interleaved when channelCount is above one. Real audio and never complex
+    # baseband: subscribeAudio refuses a raw tap, and says why.
+    #
+    # Float32, and the headroom is the reason rather than convenience. A
+    # demodulator puts a fully modulated signal at exactly full scale by
+    # convention and a settling AGC overshoots that, so samples above 1.0 are
+    # ordinary and are what a 16-bit path would clip.
+    samples @0 :List(Float32);
+
+    # IN THE STREAM AND NOT ASSUMED BY THE CLIENT, which costs six bytes a
+    # chunk and is deliberate.
+    #
+    # Both are fixed for the life of a receiver. dsp::VrxShape carries
+    # output_rate and Graph::set_vrx_params refuses a shape change in place
+    # with "remove and an add", so a client could read them once from
+    # VrxStatus and cache them. It should not, and the reason is not
+    # defensive: ui/models/receiver_link.cpp turns that very refusal into a
+    # remove and an add that keeps the pane's identity, so a pane outlives the
+    # receiver behind it and the next receiver can be at another rate. A
+    # client playing the new stream at the cached rate sounds like a tape at
+    # the wrong speed and points at nothing.
+    #
+    # channelCount reads 1 on every engine built from this tree. Every
+    # demodulator in core/engine/vrx_stage.cpp sets StageOutput::channels to
+    # 1, and the one stage that sets 2 is the raw complex tap, which cannot be
+    # subscribed to. It is on the wire for WFM stereo, which is the next thing
+    # that will change it, and because a client that hardcoded 1 would then
+    # play one channel of a pair at half speed.
+    sampleRate @1 :UInt32;
+    channelCount @2 :UInt16;
+
+    # Absolute index of the first FRAME in this chunk, from the start of this
+    # receiver's audio stream, at sampleRate. Frames and not interleaved
+    # samples, because docs/conventions.md indexes time in frames and a stereo
+    # stream indexed in samples counts every instant twice.
+    #
+    # This is what lets a client DETECT a gap instead of inferring one. The
+    # stream is contiguous when this equals the previous chunk's sampleIndex
+    # plus its frame count, and the difference when it is not is exactly how
+    # much silence keeps the timeline whole.
+    #
+    # Zero on the first chunk, which arrives later than a client expects. A
+    # demodulator produces no frames at all until its filter support is inside
+    # real samples, and core/engine/graph.cpp emits no chunk for a dispatch
+    # that produced none, so the stream opens with a silent interval that is
+    # not a loss and must not be counted as one.
+    sampleIndex @3 :UInt64;
+
+    # Frames this subscription lost ON THE WIRE between the previous chunk it
+    # was sent and this one, because its queue was full. subscribeAudio below
+    # has the queue and the depth.
+    #
+    # NOT INTERCHANGEABLE WITH A sampleIndex GAP, and carrying both is the
+    # point. A gap of exactly this many frames was lost here, by a consumer
+    # that could not keep up. A gap LARGER than this lost the remainder
+    # upstream, in the engine, where core/engine/audio_egress.cpp already
+    # separates a fill from a discontinuity from a drop. Two causes with two
+    # different fixes, so a client that wants to say which is at fault
+    # subtracts.
+    #
+    # THIS COUNTER CAN BE NON-ZERO, WHICH IS NOT TRUE OF EVERY COUNTER HERE
+    #
+    # core/rpc/client.h carries a retraction about a dropped-frame counter
+    # that is structurally always zero: its callback runs inline on the event
+    # loop thread, and that thread cannot dispatch the next frame until the
+    # callback returns, so no interleaving exists in which one could be
+    # dropped. This one is taken on the engine's completion thread at the
+    # eviction site and drained by the event loop thread at the CLIENT's pace,
+    # because the loop cannot take the next chunk off the queue until the
+    # client's chunk() promise resolves. Two threads running concurrently with
+    # the slow one outside the process is what makes the queue fill, and a
+    # client that stalls for two seconds against a 500 ms depth loses
+    # (2.0 - 0.5) * sampleRate frames, within one chunk.
+    #
+    # The eviction is from the FRONT of the queue, so the frames counted here
+    # lie exactly between the last chunk sent and this one. That makes the
+    # invariant checkable per pair:
+    #
+    #   sampleIndex == previous.sampleIndex + previous frame count
+    #                  + framesDroppedBefore
+    #
+    # and it fails loudly if eviction is ever taken from the other end.
+    framesDroppedBefore @4 :UInt64;
+
+    # The squelch gate at the moment these frames were produced.
+    #
+    # A closed gate is not a drop and not a gap. core/engine/graph.cpp fills
+    # the chunk with zeros and the chunk is sent at the full rate, so the
+    # timeline stays whole and the wire stays busy. It is on the chunk rather
+    # than left to a vrxStatus poll so an indicator follows the audio instead
+    # of lagging it, and so that a test can tell counted silence apart from a
+    # server that dropped everything on a quiet channel.
+    squelchOpen @5 :Bool;
+}
+
+# This subscription's running totals. Per subscription and not per server:
+# core/rpc/server.cpp charges one server-wide atomic for every spectrum
+# subscriber at once and its own comment admits it over-counts. Audio has no
+# shared decimation to excuse that, and a slow client's drops must never
+# appear on a fast client's status line.
+struct AudioStats {
+    framesSent @0 :UInt64;
+    framesDropped @1 :UInt64;
+
+    # Times the queue went from not evicting to evicting. One two-second stall
+    # and four hundred scattered hitches lose the same frames and sound
+    # nothing alike, so the count of events is carried beside the total.
+    dropEvents @2 :UInt64;
+
+    # In this subscription's queue right now, and the depth it was granted.
+    # Both in frames, because the depth was asked for in milliseconds and
+    # granted in whole chunks, so the millisecond figure is no longer the
+    # number the queue is enforcing.
+    backlogFrames @3 :UInt64;
+    bufferFrames @4 :UInt64;
+}
+
+# What an audio subscriber implements. The engine calls this; the client does
+# not poll, for the reason SpectrumReceiver gives.
+interface AudioReceiver {
+    chunk @0 (chunk :AudioChunk) -> ();
+
+    # No further chunk will arrive. Called at most once, after the last chunk,
+    # and never for a cancel this client asked for.
+    #
+    # WHY AUDIO HAS THIS AND THE TWO DISPLAY STREAMS DO NOT
+    #
+    # A receiver removed out from under a spectrum or passband subscription
+    # freezes a display, and a frozen display is visible from across the room.
+    # The same event on an audio subscription produces silence, and silence is
+    # what a quiet channel with the squelch shut sounds like. There is nothing
+    # else in the stream that distinguishes them, so the client is told.
+    #
+    # BEST EFFORT, stated rather than promised. A server whose event loop has
+    # already stopped cannot make this call, and a dropped connection is the
+    # other signal. reason carries the engine's own words when there are any.
+    ended @1 (reason :Text) -> ();
+}
+
+# Dropping this capability ends the subscription. There is an explicit cancel
+# as well, on the same terms as SpectrumSubscription: an explicit end reads
+# better in a log than a dropped reference, and a client shutting down cleanly
+# should not depend on collection timing to stop a stream.
+interface AudioSubscription {
+    cancel @0 () -> ();
+    stats @1 () -> (stats :AudioStats);
+}
+
+# ---------------------------------------------------------------------------
+# RDS and RBDS
+# ---------------------------------------------------------------------------
+#
+# WHICH RECEIVER, AND WHY THIS IS NOT A FLAG ON addVrx
+#
+# RDS is decoded from a receiver's audio, so every method here names one. It
+# is the same arrangement subscribePassband uses and it is there for the same
+# reason: until a client asks, that receiver runs no decoder and holds no
+# state for one, and a recorder serving eight receivers should not pay for
+# eight decoders nobody is reading.
+#
+# WHAT THE RECEIVER HAS TO BE, WHICH IS FOUR CONDITIONS AND NOT ONE
+#
+# rdsStation is refused, in the engine's own words, unless all four hold.
+# Stated here in full because the natural bar is the rate alone and the rate
+# alone certifies one reachable shape out of four:
+#
+#   1. The demodulator is nfm or wfm. Only a discriminator produces an FM
+#      composite multiplex. An envelope detector and the four product
+#      detectors produce audio with no subcarrier in it at any rate. NFM is
+#      admitted as well as WFM: core/shaders/vrx_demod.comp reaches the same
+#      atan2 branch for both, only the gain differs, and the decoder is scale
+#      invariant.
+#   2. The audio is real and mono. The raw tap writes an interleaved complex
+#      pair, and handing that to a decoder expecting a real span reads I and
+#      Q as consecutive samples of a signal that does not exist.
+#   3. The audio rate clears the RECEIVER's bound and not the decoder's.
+#      core/decode/rds_bits.h enforces 125000 because a composite from a file
+#      or a modulator went through no audio filter. A composite from a
+#      receiver did: the audio decimation filter's passband edge is 0.4 of the
+#      audio rate, so 59375 Hz is inside it only from 148438 up. The one
+#      exception is a receiver whose decimation resolved to 1, where the
+#      planner designs no filter at all and 125000 is the true bound. Both are
+#      reachable and the refusal distinguishes them. The band 125000 to 148437
+#      with decimation above one is the silent trap core/decode/rds_bits.h has
+#      now retracted twice.
+#   4. The granted passband reaches at least 59375 Hz either side of the mix
+#      centre, read off VrxPlacement::grantedLow and grantedHigh rather than
+#      off the request, because each edge is fitted on its own. This is
+#      NECESSARY AND NOT SUFFICIENT. Carson for a multiplex deviating 75 kHz
+#      and reaching 59375 Hz is about 268750 Hz, the ordinary 200 kHz
+#      broadcast passband already truncates the sidebands, and a receiver at
+#      the bare minimum will decode worse than one at 200000. The health
+#      counters below are how a client finds that out; the bar will not.
+#
+# A CLIENT SETS THIS UP ITSELF AND NEEDS NO NEW FIELD TO DO IT
+#
+# VrxParams::audioRate is already on the wire. A receiver built with
+# demod = wfm and audioRate = 171000 emits the composite through the ordinary
+# audio path with no resampling anywhere: 171000 is what
+# decode::RdsBitsConfig::rate defaults to, it is three times the 57 kHz
+# subcarrier and 144 times the 1187.5 bit/s bit rate. Point a DEDICATED
+# receiver at the station rather than reusing the one being listened to: the
+# engine allows one audio sink per receiver and setting a second replaces the
+# first, and a 171 kHz composite is not audio anybody wants to hear.
+#
+# ONE CANDIDATE THAT LOOKS OBVIOUS AND IS PHYSICALLY IMPOSSIBLE
+#
+# A narrow receiver placed 57 kHz off the station does not work at any price,
+# and core/decode/rds_bits.h says so directly. FM is not a linear modulation,
+# so a linear filter and mixer on the complex baseband picks up the upper
+# skirt of the same FM carrier rather than the data: the composite exists
+# only after the discriminator. It is written down here because it is the
+# first thing anybody proposes.
+
+enum RdsRegion {
+    # The ordinals are chosen to match revenant::decode::Region, which is
+    # kRds then kRbds, so the conversion the decode lane writes can be a cast
+    # with a static_assert over it rather than a table that can drift. It is
+    # only a cast once that lane writes it: convert.h asserts every pair it
+    # converts and this pair is not converted yet, so what is here today is a
+    # matched ordering and not an enforced one.
+    #
+    # A SETTING AND NEVER AN INFERENCE, and core/decode/rds_groups.h has the
+    # argument at length. No field names the region; the nearest thing is an
+    # optional Extended Country Code in a group type that is about a tenth of
+    # traffic. The PI code cannot decide it either, because roughly 16 percent
+    # of stations in the western USA compute to a first nibble of 0x01 and the
+    # US call sign range collides with European country codes across the
+    # board. And guessing wrong is silent: PTY 26 renders as National Music in
+    # one region and Hip-Hop in the other, both draw, and nothing downstream
+    # can tell. A client may seed this from the tuned frequency as long as it
+    # shows it as a setting that can be overridden.
+    rds @0;
+    rbds @1;
+}
+
+enum RdsLock {
+    # Matching revenant::decode::RdsLock, on the terms RdsRegion states.
+    #
+    # No bits are emitted in either of the first two states. An acquiring
+    # decoder is tracking timing and measuring biphase consistency and has not
+    # reached the lock threshold; it is not a decoder that is half working,
+    # and a display that showed partial text from one would be showing text
+    # nothing produced.
+    unlocked @0;
+    acquiring @1;
+    locked @2;
+}
+
+enum RdsSync {
+    # Matching revenant::decode::SyncState. The BLOCK layer's state, which is
+    # a different thing from the bit layer's lock above and is carried
+    # separately for that reason: a decoder can be locked to the subcarrier
+    # and still hunting for the offset words, which is what the first second
+    # after a tune looks like, and collapsing the two into one "locked" flag
+    # loses the distinction between a wrong station and a station just
+    # acquired.
+    hunting @0;
+    preSync @1;
+    synced @2;
+}
+
+# EN 50067 clause 3.1.5.6 clock time, as the transmitter stated it.
+#
+# THE ENGINE READS NO CLOCK AND THIS IS NOT VERIFIED AGAINST ONE. Nothing in
+# the DSP path reads a wall clock, deliberately, so this is the station's
+# claim and nothing has checked it. A client that wants to know whether the
+# station's clock is right compares it against its own; the engine cannot.
+struct RdsClockTime {
+    mjd @0 :Int32;
+
+    # The Gregorian date the MJD converts to, UTC. Carried as well as the MJD
+    # because the conversion is Annex G arithmetic with a validity range of
+    # 1900-03-01 to 2100-02-28, and a client that re-derived it would be
+    # writing that arithmetic a second time.
+    year @1 :Int32;   # full year, not Annex G's years since 1900
+    month @2 :Int32;
+    day @3 :Int32;
+
+    hour @4 :Int32;   # UTC
+    minute @5 :Int32; # UTC
+
+    # Local time offset in signed half hours. EN 50067 note 2 gives the range
+    # as -12 h to +12 h and NRSC-4-B, tracking IEC 62106 Edition 2.0, gives
+    # -15.5 h to +15.5 h. That is a VERSION difference rather than a region
+    # difference and the field is 6 bits either way, so the wider range is
+    # accepted in both regions rather than clamped per region.
+    offsetHalfHours @6 :Int32;
+
+    # Nothing above means anything unless this is set. A group 4A arrives
+    # about once a minute, so this is false for the first minute of every tune
+    # on a station that sends clock time at all, and forever on one that does
+    # not.
+    valid @7 :Bool;
+}
+
+# What the physical and block layers are doing, which is what tells a stale
+# display from a dead signal.
+#
+# WHY THERE IS NO blockErrorRate FIELD
+#
+# Every counter here is cumulative from the moment the decoder was built and
+# never resets short of a retune. A rate computed over that whole window is
+# not the rate now: a station that faded five minutes ago and has been clean
+# since reads badly forever. A client differences two polls and divides by the
+# gap, which RdsStation::lastGroupSample gives it. Publishing a lifetime
+# average under a name that reads like an instantaneous one is the kind of
+# number somebody acts on.
+struct RdsHealth {
+    lock @0 :RdsLock;
+    sync @1 :RdsSync;
+
+    # Biphase sign consistency mapped onto [0, 1]. Zero is indistinguishable
+    # from noise and one is a clean eye. This is the quality figure to draw,
+    # because it degrades smoothly and means the same thing at every SNR:
+    # clause 1.7 makes every symbol an odd impulse pair, so the two halves of
+    # a bit always have opposite signs whatever the payload is.
+    quality @2 :Float64;
+    biphaseConsistency @3 :Float64;
+
+    # |E[z^2]| / E[|z|^2] on the derotated baseband, which equals
+    # SNR/(1 + SNR) in the post-filter bandwidth and so is readable as a
+    # signal quality number in its own right.
+    carrierCoherence @4 :Float64;
+
+    # Residual subcarrier frequency error the carrier loop is holding, in
+    # hertz, and the recovered bit rate against a nominal 1187.5.
+    #
+    # Float64 and not Int64, which is the opposite of what the note at the top
+    # of this file says about frequencies, and deliberately so. These are
+    # MEASUREMENTS rather than tuning requests: clause 1.1 allows the
+    # subcarrier plus or minus 6 Hz, and rounding a measurement to whole hertz
+    # throws away the only evidence a drifting transmitter would leave.
+    carrierOffsetHz @5 :Float64;
+    bitRateHz @6 :Float64;
+
+    # Clause 1.1 permits a mono transmission to carry RDS with no pilot at
+    # all, so an absent pilot is not a fault and a decoder that required one
+    # would be wrong about the standard. With no pilot the subcarrier NCO runs
+    # at exactly 57000 and the carrier loop absorbs the error.
+    pilotLocked @7 :Bool;
+    pilotLevel @8 :Float64;
+
+    # Composite samples consumed, at RdsStation::compositeRate.
+    samplesConsumed @9 :UInt64;
+
+    # Bits the physical layer emitted, and the times it gave up and re-ran
+    # timing acquisition. A climbing reacquisition count with bits still
+    # flowing is a marginal signal; a climbing count with no bits is the wrong
+    # station.
+    #
+    # THE BIT STREAM HAS GAPS AND NOTHING MARKS THEM. The decoder stops
+    # emitting when lock falls away and starts again wherever it relocks, so
+    # bitsEmitted is not elapsed time and two bits either side of a fade are
+    # indistinguishable from two consecutive ones. That is survivable for the
+    # group layer, which frames on the offset words and does not trust bit
+    # adjacency, and it is NOT survivable for anything measuring a bit error
+    # rate against a reference or timing a clock-time group against its
+    # neighbours. Sample reacquisitions beside the bits if that is the
+    # question being asked.
+    bitsEmitted @10 :UInt64;
+    reacquisitions @11 :UInt64;
+
+    # The block layer. Cumulative, for the reason above.
+    #
+    # blocksCorrected counts blocks where a burst was repaired rather than
+    # received clean, so it is trusted less than blocksGood rather than
+    # equally: a client archiving decoded text should watch this, and an
+    # archive should be taken with correction disabled.
+    bitsFed @12 :UInt64;
+    groupsDecoded @13 :UInt64;
+    blocksGood @14 :UInt64;
+    blocksCorrected @15 :UInt64;
+    blocksDropped @16 :UInt64;
+    syncAcquisitions @17 :UInt64;
+    syncLosses @18 :UInt64;
+}
+
+# One Enhanced Other Networks entry: what this station says about another.
+struct RdsEonEntry {
+    pi @0 :UInt16;
+
+    # Annex E code points, not UTF-8. See the note on RdsStation::ps.
+    ps @1 :Data;
+    psReceived @2 :UInt8;
+
+    tp @3 :Bool;
+    ta @4 :Bool;
+    taValid @5 :Bool;
+
+    pty @6 :UInt8;
+    ptyValid @7 :Bool;
+
+    linkage @8 :UInt16;
+    linkageValid @9 :Bool;
+
+    af @10 :List(Int64);
+}
+
+# An Open Data Application announcement from a type 3A group.
+struct RdsOda {
+    groupType @0 :UInt8;
+    versionB @1 :Bool;
+    message @2 :UInt16;
+
+    # 0x0000 means the group is used for its normal feature rather than for an
+    # application.
+    aid @3 :UInt16;
+}
+
+# One station's accumulated RDS state, as a display needs it.
+#
+# NOT EVERY FIELD OF revenant::decode::StationState, and that is the point,
+# the same way Detection is not every field of detect::Track. What is left out
+# is the decoder's own assembly state: the partially built AF pair, the
+# pending LF/MF flag, the leaky-bucket error credit. A schema is a contract
+# rather than a mirror.
+#
+# EVERY FIELD HAS A VALIDITY COMPANION AND A READER MUST CHECK IT. There is no
+# sentinel that means "not received" for most of these: PTY 0 is a real
+# programme type, TA false is a real state, and a PI of zero is what an
+# uninitialised struct holds. The flags are the only honest answer, and a
+# client that draws the value without them shows a station that has sent
+# nothing as a station announcing no traffic.
+struct RdsStation {
+    # Echoed so a poll's answer names the receiver it came from, which matters
+    # to a client polling several.
+    vrx @0 :UInt64;
+
+    # What the decoder was built with. Read back rather than assumed: it is
+    # engine-side state and a second client may have set it, the same reason
+    # DetectionList reads back detectionThresholdDb.
+    region @1 :RdsRegion;
+
+    # Programme Identification. The raw 16 bits, not split into country code,
+    # coverage area and reference, because those three are a pure function of
+    # this and splitting them here would be three fields that can disagree
+    # with the one they came from.
+    pi @2 :UInt16;
+    piValid @3 :Bool;
+
+    # Derived from the PI under the region's own rules. Empty means NO CALL
+    # SIGN IS DERIVABLE from this PI in this region, which is a different
+    # thing from "PI not yet received": piValid answers that one. Text and not
+    # Data, unlike the four fields below, because callsign_from_pi produces
+    # ASCII letters by construction.
+    callSign @4 :Text;
+
+    pty @5 :UInt8;
+    ptyValid @6 :Bool;
+
+    # The PTY's display name under the configured region, at the widths clause
+    # 3.2.1.1 specifies. Carried rather than left to the client because the
+    # table is region dependent and half of it differs between RDS and RBDS: a
+    # client with one hardcoded table shows the wrong genre on the other
+    # continent and nothing faults.
+    ptyShortName @7 :Text;   # 8 characters
+    ptyLongName @8 :Text;    # 16 characters
+
+    tp @9 :Bool;
+    tpValid @10 :Bool;
+    ta @11 :Bool;
+    taValid @12 :Bool;
+
+    # Composite sample index at which ta last changed, or zero if it never
+    # has. THIS IS WHY THIS SURFACE CAN STAY A POLL. Everything else here
+    # persists once received, but a traffic announcement is an event: it goes
+    # up, runs for seconds, and goes down, and a client polling every few
+    # seconds can see false on both sides of one. Differencing this against
+    # the previous poll's value says an announcement happened without needing
+    # a subscription, a capability and a backpressure rule to catch it.
+    taChangedAt @13 :UInt64;
+
+    music @14 :Bool;
+    musicValid @15 :Bool;
+
+    # Decoder Identification, clause 3.2.1.5. diReceived has bit n set once
+    # d(n) has arrived, because the four flags come one per group over four
+    # groups and a client showing "mono" before the bit arrived is showing the
+    # struct's default.
+    diStereo @16 :Bool;
+    diArtificialHead @17 :Bool;
+    diCompressed @18 :Bool;
+    diDynamicPty @19 :Bool;
+    diReceived @20 :UInt8;
+
+    # Programme Service name, eight characters, and RadioText, up to 64.
+    #
+    # Data AND NOT Text, WHICH IS A CORRECTNESS DECISION AND NOT A STYLE ONE
+    #
+    # These are EN 50067 Annex E code points, an 8-bit repertoire that is not
+    # ASCII above 0x7F and is not UTF-8 anywhere. core/decode/rds_groups.cpp
+    # stores the received bytes verbatim and transcodes nothing. Cap'n Proto
+    # Text is defined as NUL-terminated UTF-8, so a station transmitting an
+    # accented character would put invalid UTF-8 on the wire: the C++ runtime
+    # would not notice and a Python or Rust client would fail to decode it or
+    # silently replace it. Transcoding belongs where a font is being chosen,
+    # which is the client.
+    #
+    # The masks are not optional extras. PS arrives as four two-character
+    # segments and RadioText as sixteen segments, so a partially received one
+    # holds real characters beside placeholders, and the placeholders are not
+    # distinguishable from transmitted spaces. psReceived has one bit per
+    # segment 0..3, rtReceived one bit per segment 0..15. Unreceived RadioText
+    # bytes are NUL rather than space, so a client that ignores the mask and
+    # treats this as a C string truncates at the first gap.
+    ps @21 :Data;
+    psReceived @22 :UInt8;
+
+    rt @23 :Data;
+    rtReceived @24 :UInt32;
+
+    # Position of the 0x0D terminator once one has arrived, or the highest
+    # character index received plus one until then. Carried because the
+    # terminator is inside the payload and a client scanning for it cannot
+    # tell an unreceived NUL from a short message.
+    rtLength @25 :UInt32;
+
+    # The A/B flag. A TOGGLE OF THIS IS THE ONLY SIGNAL THAT THE MESSAGE
+    # CHANGED, and a client that does not watch it renders one message
+    # overwritten character by character by the next. rtVersionB says whether
+    # 2A or 2B is carrying it, which decides whether a segment is four
+    # characters or two.
+    rtAb @26 :Bool;
+    rtAbValid @27 :Bool;
+    rtVersionB @28 :Bool;
+
+    ptyn @29 :Data;
+    ptynReceived @30 :UInt8;
+    ptynAb @31 :Bool;
+    ptynAbValid @32 :Bool;
+
+    clock @33 :RdsClockTime;
+
+    # Programme Item Number, clause 3.1.5.6.
+    pinDay @34 :Int32;
+    pinHour @35 :Int32;
+    pinMinute @36 :Int32;
+    pinValid @37 :Bool;
+
+    ecc @38 :UInt8;
+    eccValid @39 :Bool;
+
+    # Raised when the ECC says ITU region 2 and the decoder is configured for
+    # RDS. A DIAGNOSTIC FOR AN OPERATOR AND NEVER A SWITCH: the decoder does
+    # not change region on its own and neither should a client, because the
+    # converse is deliberately not raised. Only the three region 2 allocations
+    # were read, so an ECC outside them is absence of evidence rather than
+    # evidence of Europe.
+    eccContradictsRegion @40 :Bool;
+
+    language @41 :UInt8;
+    languageValid @42 :Bool;
+
+    linkageActuator @43 :Bool;
+    linkageActuatorValid @44 :Bool;
+
+    # Alternative frequencies, VHF and LF/MF, deduplicated, in hertz.
+    #
+    # Int64 and not Rational. These are channel-plan frequencies the standard
+    # states as whole numbers and the decoder computes as whole numbers, so
+    # there is nothing exact being rounded here, the same distinction the note
+    # at the top of this file draws for channelSpacing.
+    af @45 :List(Int64);
+
+    # From a count code 225..249, so the transmitter's own statement of how
+    # many alternatives exist. Zero if none was seen. Comparing this against
+    # af.size() is how a client knows the list is still filling.
+    afAnnounced @46 :UInt8;
+
+    # How often the first frequency ever seen at the head of a pair reappeared
+    # there.
+    #
+    # AN INDICATOR, NOT A DETERMINATION, and the difference is not subtle.
+    # This does NOT say the transmission uses AF method B. A method A list is a
+    # flat list sent round and round, so as soon as it wraps whichever
+    # frequency happened to land at the head of a pair lands there again and
+    # this counts it, within a second on a short list. And the frequency
+    # tracked is not known to be the tuning frequency: the decoder is never
+    # told what the radio is tuned to. A nonzero count is consistent with both
+    # methods; only a count that stays at zero says anything, and what it says
+    # is that the list has not wrapped yet. A client that knows what it tuned
+    # can make the determination from the af list and its own knowledge.
+    afRepeats @47 :UInt32;
+
+    oda @48 :List(RdsOda);
+    eon @49 :List(RdsEonEntry);
+
+    health @50 :RdsHealth;
+
+    # The composite rate this station is being decoded at, which is the
+    # receiver's audio rate. Carried so the two sample indices have a stated
+    # unit, and so a client can see at a glance that the receiver is
+    # delivering a composite rather than audio.
+    compositeRate @51 :UInt32;
+
+    # Composite sample index at which the most recently completed group
+    # finished, or zero if none has. This is the equivalent of
+    # DetectionList::lastDecision and it is here for the same reason: it lets a
+    # client tell a repeated answer from a fresh one without diffing the whole
+    # struct, and it gives the denominator for differencing the cumulative
+    # counters in health between two polls.
+    #
+    # NOT a source sample index, unlike Detection::firstSeen. The decoder
+    # counts in the samples it is fed and has no access to the source
+    # timeline, and converting here would mean the engine asserting a ratio
+    # the decoder never saw. Divide by compositeRate for seconds.
+    lastGroupSample @52 :UInt64;
+}
+
+# ---------------------------------------------------------------------------
+# The root capability
+# ---------------------------------------------------------------------------
+
+# The only thing a connection holds before it has proved it may drive the
+# radio.
+#
+# WHY AN INTERFACE HERE AND NOT A CHECK IN EVERY METHOD
+#
+# Cap'n Proto hands the root capability to whoever opens the connection. Until
+# 2026-09-20 that root was Session itself, so opening the port was the whole
+# of the authorisation. A login method ON Session, refusing every other call
+# until it had succeeded, would also work and is the wrong shape: it puts a
+# test in front of every method added from now on, and the test is only as
+# good as the next author remembering to write it.
+#
+# So the root holds one method and no radio. A caller that has not called
+# login holds an Authenticator and nothing else. There is no Session in its
+# capability table to call, refused or otherwise, which is a different thing
+# from a Session that says no. Capability discipline carries the rest: a
+# Session reached through login is an ordinary capability, and the caller may
+# keep it, drop it, or pass it on, including dropping this Authenticator the
+# moment it has served its purpose.
+#
+# PIPELINING IS PART OF THE CONTRACT, NOT AN OPTIMISATION
+#
+# A client may send login and then send Session calls on the returned
+# capability without waiting for the first to come back, which is what Cap'n
+# Proto is for and what core/rpc/client.cpp does. Nothing leaks by allowing
+# it. When login fails, the pipelined capability is broken with login's own
+# exception, and every call made on it fails with that exception without the
+# engine's Session implementation being entered. The first thing a rejected
+# caller learns is the rejection, whatever it sent behind it.
+#
+# WHY THERE IS NOTHING ELSE ON THIS INTERFACE
+#
+# No version, no banner, no engine name. Every method here is a method an
+# unauthenticated caller can reach, and a version string is precisely what a
+# scanner is looking for. A caller already knows it reached a Cap'n Proto
+# server from the handshake, so a banner would give away something for
+# nothing.
+#
+# WHAT AUTHENTICATION DOES AND DOES NOT CHANGE
+#
+# It changes what a second process on this machine can do. It changes nothing
+# at all about a LAN: this wire is plaintext, TLS was refused as the wrong
+# shape for one operator with one radio, and a token crossing a routable
+# interface is readable and replayable by anything on the path. The bind
+# default stays loopback for that reason and not out of caution.
+interface Authenticator {
+    # The engine's pre-shared token, as the raw bytes.
+    #
+    # Data and not Text, although the token file holds printable hex so that a
+    # person can select and paste it. Hex on the wire would put two encodings
+    # of one secret into the protocol and would make "wrong token" and "wrong
+    # encoding" the same failure, at the one place that must not be ambiguous.
+    # The client decodes once on its side; the engine decodes its file once at
+    # startup.
+    #
+    # Thirty-two bytes. An unset field arrives as zero bytes and is refused
+    # like any other wrong token, and it is a different input from thirty-two
+    # zero bytes, which is also refused. The length is not a secret: it is
+    # stated here, in docs/rpc.md, and in the size of the token file. So the
+    # refusal says the token was rejected and nothing more, not because the
+    # length is hidden but because there is nothing else true to say.
+    #
+    # The comparison is constant-time over the fixed length, after a length
+    # check. A compare that returned on the first wrong byte would leak the
+    # PREFIX, which turns a 2^256 search into a 32 x 256 one. Whether that is
+    # measurable across loopback is another question and docs/rpc.md answers
+    # it honestly; the compare costs three lines and the argument does not
+    # have to be had again.
+    #
+    # Refusal is an exception, never a null session, so a caller cannot
+    # mistake a refusal for an engine with nothing to give.
+    #
+    # A second login on a connection that already holds a Session succeeds and
+    # returns another, independent one. The caller has already proved it holds
+    # the token and a second capability grants it nothing it did not have.
+    # Dropping either Session leaves the other and its subscriptions alone.
+    login @0 (token :Data) -> (session :Session);
+}
+
 interface Session {
+    # THIS INTERFACE IS NO LONGER THE ROOT. Until 2026-09-20 it was: the
+    # bootstrap capability Cap'n Proto handed to whoever opened the connection
+    # was a Session, and docs/rpc.md said in as many words that there was no
+    # authentication of any kind and that the loopback default was the whole
+    # of the control. A client now reaches this through Authenticator.login
+    # above, and holds nothing until that call returns.
+    #
+    # Recorded here rather than quietly swapped, because the old arrangement
+    # is the one an experienced reader expects from a Cap'n Proto service and
+    # because anything written against "bootstrap() is the Session" is owed
+    # the retraction. core/rpc/client.cpp cast the bootstrap straight to this
+    # interface, core/rpc/server.cpp handed one out, and core/rpc/server.h and
+    # docs/rpc.md both stated the absence as settled. All four have been
+    # corrected.
+    #
+    # Nothing about the methods below changed. Their ordinals are untouched,
+    # and a Session obtained through login behaves exactly as the bootstrap
+    # Session did.
     info @0 () -> (info :EngineInfo);
     running @1 () -> (running :Bool);
     listSources @2 () -> (sources :List(SourceDescriptor));
@@ -758,4 +1503,130 @@ interface Session {
     # come back in both cases.
     subscribePassband @12 (vrx :UInt64, receiver :PassbandReceiver, everyNth :UInt32)
         -> (subscription :PassbandSubscription);
+
+    # One receiver's audio, as raw float32 PCM. Dropping the capability ends
+    # it, cancel ends it explicitly, and the engine sink behind it is
+    # refcounted per receiver exactly as subscribePassband's is.
+    #
+    # NOT SERVED YET. The engine has one AudioSink slot per receiver and no
+    # fan-out, so the wire half cannot be built without changing the engine,
+    # and that is its own lane. This method is declared and refused, in words
+    # that say the surface exists and is not wired, because a subscription
+    # that never produced a chunk would read as a dead radio.
+    #
+    # THERE IS NO everyNth, which is the one place this departs from the two
+    # subscriptions above it, and the departure is the point. Dropping every
+    # other spectrum frame halves an update rate and loses nothing anyone
+    # wanted. Dropping every other audio chunk is a 50 percent duty cycle of
+    # silence. A client that wants less audio subscribes to fewer receivers.
+    #
+    # PER RECEIVER AND OPT IN, like subscribePassband: nothing crosses until
+    # something subscribes and the last subscription going away takes the sink
+    # off. Unlike the passband there is no device memory behind it, so what is
+    # avoided is the wire's cost rather than the GPU's.
+    #
+    # bufferMillis IS THE WHOLE OF THE BACKPRESSURE RULE
+    #
+    # It is how much audio the engine holds for this subscription before it
+    # starts discarding, and it replaces the one-frame-in-flight rule the two
+    # subscriptions above use. That rule is right for a display, where the
+    # newest frame is the one worth drawing and an older one is a redundant
+    # measurement of a band that is still there. It is wrong here: an audio
+    # chunk is the only copy of that instant and the newest one is worth no
+    # more than the one before it.
+    #
+    # Zero asks for the default, 500. The queue evicts from the FRONT, the
+    # oldest chunk not yet sent, for the reason core/engine/audio_wasapi.h
+    # gives about its own backlog: late audio is worse than no audio when the
+    # point is to hear what the radio is doing now. Front eviction is also
+    # what makes AudioChunk::framesDroppedBefore exact rather than
+    # approximate, because the frames it discards lie precisely between the
+    # last chunk sent and the next one.
+    #
+    # THE DEPTH IS CLAMPED, AND THE FLOOR BEATS THE CEILING
+    #
+    # A depth under one chunk evicts every chunk before the loop thread can
+    # send it. The client hears nothing at all, the counters climb at the full
+    # sample rate, and every other check still passes. So the floor is two
+    # chunks, and it is a clamp rather than advice.
+    #
+    # A chunk is block_samples / sourceRate long, independent of the audio
+    # rate, and that is 27 ms at the engine defaults on a 2.4 MS/s source and
+    # 262 ms on a 250 kS/s dongle at the same block size. Two chunks can
+    # therefore exceed the 5000 ms ceiling, so the effective maximum is 5000
+    # or two chunks, whichever is larger. On a slow source the DEFAULT is
+    # clamped up as well, which a client did not ask for and has to be told
+    # about.
+    #
+    # bufferMillisGranted is what is actually in force. Reported rather than
+    # applied silently, on the EngineInfo::ringClamped precedent: a depth that
+    # was quietly changed is a dropout nobody can trace.
+    #
+    # Refused, with the engine's own words, for a receiver that does not
+    # exist, on an engine whose source is not open, and for a raw tap. The raw
+    # tap is refused because RawTapStage hands back interleaved complex I/Q at
+    # the coarse channel rate rather than audio. A client playing that as
+    # two-channel PCM plays noise at the wrong speed, and the rate is tens of
+    # times the 1.5 Mbit/s this design was costed at. An I/Q subscription is a
+    # separate method that does not exist yet, and putting it behind this name
+    # is the only thing that would make it look like one.
+    subscribeAudio @13 (vrx :UInt64, receiver :AudioReceiver,
+                        bufferMillis :UInt32)
+        -> (subscription :AudioSubscription, bufferMillisGranted :UInt32);
+
+    # What the RDS decoder on one receiver has accumulated.
+    #
+    # NOT SERVED YET, on the same terms subscribeAudio states. The decoder
+    # exists in core/decode and nothing in core/engine feeds it; wiring it in
+    # is its own lane. Refused, naming the surface.
+    #
+    # A poll rather than a subscription, on exactly the argument
+    # Session::detections makes above and for the same reason a track list is
+    # polled: this is a STATE. PI, PS, RadioText, PTY and the AF list are
+    # accumulated and retained, a group completes at most every 87.6 ms, an
+    # older snapshot is of no use, and a display redraws on its own timer.
+    # Polling a state costs one small message per poll and needs no
+    # capability, no backpressure rule and no fan-out.
+    #
+    # The one field with an event character is TA, and it is answered with
+    # RdsStation::taChangedAt rather than with a subscription. A traffic
+    # announcement that began and ended between two polls leaves a changed
+    # index behind it; nothing else here can be missed by polling slowly, only
+    # seen late.
+    #
+    # THE FIRST CALL IS WHAT STARTS THE DECODER, the same way the first
+    # detections call builds the detector and the first listSources starts the
+    # enumeration thread. It installs an audio sink on that receiver, builds
+    # the physical and group layers, and answers with an unlocked decoder and
+    # zero groups, because it cannot answer otherwise. A client polls again.
+    # From then on the decoder runs on the engine's completion thread for the
+    # life of that receiver whether or not anyone is still reading, for the
+    # reason the detector does: tearing it down at the last reader would throw
+    # away accumulated station state that the disconnecting client does not
+    # own.
+    #
+    # IT TAKES THE RECEIVER'S AUDIO SINK. There is one sink per receiver and
+    # setting a second replaces the first, so this call is refused on a
+    # receiver that already has one rather than displacing it. Point it at a
+    # receiver created for the purpose: demod = wfm, audioRate = 171000, on
+    # the station's frequency. The four conditions in the RDS section above
+    # are what the refusal checks, and the refusal names which one failed.
+    rdsStation @14 (vrx :UInt64) -> (station :RdsStation);
+
+    # The region the decoder for this receiver uses. NOT SERVED YET, on the
+    # same terms as rdsStation.
+    #
+    # Settable before the first rdsStation call, so a client does not have to
+    # poll once at the wrong region and then correct it, which is the same
+    # arrangement setDetectionThreshold has with detections. Called on a
+    # receiver whose decoder already exists, it rebuilds it and clears the
+    # accumulated state: the PTY table and the call sign derivation are both
+    # region dependent, so keeping the old state would mix two readings of the
+    # same bytes in one struct.
+    #
+    # Per receiver and not engine-wide, unlike setDetectionThreshold. Two
+    # receivers can sit on two stations and there is no reason in the standard
+    # why they share a continent; the detector's threshold is engine-wide
+    # because there is one detector.
+    setRdsRegion @15 (vrx :UInt64, region :RdsRegion) -> ();
 }
