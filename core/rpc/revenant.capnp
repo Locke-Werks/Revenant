@@ -1607,6 +1607,15 @@ interface Session {
     # client reads the depth that is actually enforcing, and it is zero until
     # the first chunk has arrived to set it.
     #
+    # The floor went unexercised until 2026-09-20, which is worth recording
+    # because this paragraph is the whole reason the retraction below exists.
+    # Reaching it needs a chunk longer than the shortest depth a client can
+    # ask for, and at the test fixture's 16384-sample blocks two chunks are
+    # 13.7 ms against a 20 ms floor, so every case in the suite read the
+    # millisecond figure straight back out and none of them touched this.
+    # tests/rpc/test_rpc_audio.cpp now runs one at 32768-sample blocks, where
+    # two chunks are 27.3 ms and the floor is what is enforced.
+    #
     # WHAT THIS PARAGRAPH USED TO SAY, AND WHAT THE CODE PROVED WRONG. Until
     # 2026-09-20 it read: "Two chunks can therefore exceed the 5000 ms
     # ceiling, so the effective maximum is 5000 or two chunks, whichever is

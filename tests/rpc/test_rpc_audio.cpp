@@ -99,6 +99,18 @@ namespace {
 constexpr dsp::SampleIndex kRunSamples = 4'800'064;
 constexpr std::uint32_t kBlockSamples = 16'384;
 
+// Blocks long enough that two chunks are more audio than the shortest depth
+// a client can ask for, which is the only way to reach the two-chunk floor.
+//
+// The floor binds when 2 * frames_per_chunk exceeds millis * rate / 1000.
+// frames_per_chunk is block_samples * rate / source_rate, so the audio rate
+// cancels out of both sides and the condition is 2 * block_samples /
+// source_rate > millis / 1000, which at the clamp's own 20 ms floor and this
+// fixture's source rate is block_samples above 24000. At 16384 it is not
+// even close, which is why every other case here reads the millisecond depth
+// straight back out.
+constexpr std::uint32_t kLongBlockSamples = 32'768;
+
 // A receiver on one of the scene's emitters, in the baseband frame the whole
 // suite uses.
 constexpr std::int64_t kReceiverCenter = 131'072;
@@ -850,6 +862,92 @@ TEST_CASE("attaching to a receiver that has been removed is refused",
 
     CHECK(harness.engine().detach_audio_sink(engine_id(*survivor), *first).has_value());
     CHECK(harness.engine().detach_audio_sink(engine_id(*survivor), *second).has_value());
+}
+
+// --- the two-chunk floor ----------------------------------------------------
+
+TEST_CASE("the two-chunk floor overrides a depth shorter than two chunks",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    HarnessOptions options = streaming_options();
+    options.block_samples = kLongBlockSamples;
+
+    Harness harness;
+    bring_up_running(harness, options);
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+
+    // The shortest depth the millisecond clamp allows, so the answer on the
+    // wire is 20 and the floor applied later is the only thing that can
+    // change what is enforced.
+    auto granted = harness.client().subscribe_audio(*vrx, 20, into(log), ending(log));
+    INFO(test::message_of(granted));
+    REQUIRE(granted.has_value());
+    CHECK(*granted == 20);
+
+    REQUIRE(wait_for_chunks(*log, 20, 6000) >= 20);
+    const auto chunks = log->chunks();
+    REQUIRE_FALSE(chunks.empty());
+
+    // A chunk is not a whole number of frames at this fixture's rates: 1024
+    // channel samples resampled from 75001 to 48000 is 655.36, so the stream
+    // alternates between two lengths and the floor is twice whichever one
+    // the server saw last.
+    //
+    // THE FIRST CHUNK IS SHORT and is left out of the range on purpose. A
+    // demodulator produces no frames until its filter support is inside real
+    // samples, so the stream opens with a partial chunk (592 frames against
+    // a steady 655 or 656, measured 2026-09-20). Counting it would widen the
+    // window below by a tenth and admit a floor taken from a length this
+    // stream produces exactly once.
+    REQUIRE(chunks.size() > 2);
+    std::uint64_t shortest = chunks[1].frames;
+    std::uint64_t longest = chunks[1].frames;
+    for (std::size_t i = 1; i < chunks.size(); ++i) {
+        shortest = std::min(shortest, chunks[i].frames);
+        longest = std::max(longest, chunks[i].frames);
+    }
+    for (const ChunkRecord& chunk : chunks) {
+        CHECK(chunk.rate == 48'000);
+    }
+    INFO("the first chunk was " << chunks.front().frames << " frames and the rest ran "
+                                << shortest << " to " << longest);
+
+    auto stats = harness.client().audio_stats(*vrx);
+    INFO(test::message_of(stats));
+    REQUIRE(stats.has_value());
+
+    // What 20 ms converts to at this receiver's rate, which is what the
+    // queue would enforce if the floor did not exist. The slow-subscriber
+    // case above reads exactly this number back at the default block size,
+    // where two chunks are well under it; that case is this one's control
+    // arm and the reason a constant cannot satisfy both.
+    const std::uint64_t millisecond_depth = 20ULL * 48'000 / 1000;
+    INFO("enforced " << stats->buffer_frames << " frames against a millisecond depth of "
+                     << millisecond_depth);
+    CHECK(stats->buffer_frames > millisecond_depth);
+
+    // And it is two chunks rather than some other number of them. Even, and
+    // half of it is a length this stream actually produced.
+    REQUIRE(stats->buffer_frames % 2 == 0);
+    const std::uint64_t implied = stats->buffer_frames / 2;
+    CHECK(implied >= shortest);
+    CHECK(implied <= longest);
+
+    // WHY THE FLOOR IS THERE AT ALL. A depth under two chunks cannot hold
+    // the one being sent and the one that arrived behind it, so a subscriber
+    // keeping up perfectly would still evict on every push. This one is
+    // keeping up, and the counters say so.
+    CHECK(check_contiguous(chunks) == 0);
+    CHECK(stats->frames_dropped == 0);
+    CHECK(stats->drop_events == 0);
+
+    harness.client().unsubscribe_audio(*vrx);
 }
 
 // --- shape 4 ----------------------------------------------------------------

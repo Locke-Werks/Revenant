@@ -1901,9 +1901,19 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
         // the server knows what a chunk is. See the schema on subscribeAudio:
         // the length needs block_samples and the conversion from
         // milliseconds needs the receiver's audio rate, and EngineInfo
-        // carries neither. Re-checked on every chunk rather than only the
-        // first, because a retune is a remove and an add and the replacement
-        // can be at another rate.
+        // carries neither.
+        //
+        // WHY IT RUNS ON EVERY CHUNK AND NOT ONLY THE FIRST. This used to say
+        // "because a retune is a remove and an add and the replacement can be
+        // at another rate", which argues against itself: a remove ends this
+        // subscription through end_audio_for_vrx and the node dies with it,
+        // so no live AudioNode can ever see a second rate. Nothing else moves
+        // one either, because Graph::set_vrx_params refuses a shape change in
+        // place. The honest reason is that both inputs are already in hand on
+        // this line and the arithmetic is two multiplies, so skipping it
+        // would cost a "have I seen a chunk yet" flag to save nothing.
+        // Recomputing an answer that cannot change is the cheap half of that
+        // trade and it needs no state.
         const std::uint64_t depth =
             static_cast<std::uint64_t>(node->granted_millis) * chunk.rate / 1000U;
         const std::uint64_t floor = 2ULL * frames;

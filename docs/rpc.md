@@ -384,6 +384,14 @@ receiver that took that default. `AudioStats::bufferFrames` is the depth
 actually enforcing and is zero until the first chunk sets it. The schema's note
 on `subscribeAudio` records what it used to claim instead.
 
+The floor went untested until 2026-09-20, which is why the retraction in the
+schema outlived the code that was wrong. Reaching it needs a chunk longer than
+the shortest depth a client can ask for, and at the test fixture's
+16384-sample blocks two chunks are 13.7 ms against a 20 ms floor, so every case
+read the millisecond figure straight back out. One case now runs at
+32768-sample blocks, where two chunks are 27.3 ms and the floor is what
+`bufferFrames` reports.
+
 **`AudioStats` is per subscription.** `Server::frames_dropped` is server-wide
 and its own comment admits it over-counts across spectrum subscribers; a slow
 client's drops must never appear on a fast client's status line, and audio has
