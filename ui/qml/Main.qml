@@ -389,6 +389,12 @@ ApplicationWindow {
                 // cannot reach a value the link would quietly pull back.
                 // This read 0.95 until 2026-09-20: a round number that was
                 // not the engine's rule and could only drift from it.
+                //
+                // The stop is accepted by the engine and is still nearly as
+                // strict as the value it refuses, for the reason the readout
+                // below carries. The range is this wide because the engine's
+                // bound is where it is, not because the top of it is a
+                // setting anybody should leave a display on.
                 to: engineLink.maxConfidenceBar
                 stepSize: 0.01
                 // EngineLink starts the bar at zero, which is everything
@@ -400,7 +406,11 @@ ApplicationWindow {
                 ToolTip.visible: hovered
                 ToolTip.delay: 400
                 ToolTip.text: "This window only. Filters what the engine sends back; "
-                              + "the detector still tracks everything below it."
+                              + "the detector still tracks everything below it.\n"
+                              + "At the right-hand stop only a saturated track clears it: "
+                              + "85 consecutive detections, about 8.4 s of unbroken carrier "
+                              + "at the shipped settings, and one missed decision costs most "
+                              + "of that back. A bursty signal never reaches it."
             }
 
             // From the handle and not from the link, which is the opposite
@@ -412,9 +422,27 @@ ApplicationWindow {
             // back different, and a window reading it would show a stale
             // number over a band where nothing was changing. This window is
             // the only writer of that property, so the handle is the value.
+            //
+            // The stop gets its own text rather than a number. toFixed(2) at
+            // maxConfidenceBar prints 1.00, which is the one value the
+            // comment on the slider above says the engine refuses, so the
+            // readout was showing a bar that would have failed every poll.
+            // stepSize is 0.01 from zero, so every other reachable position
+            // is a hundredth and rounds to itself; the stop is the only
+            // value that can round up, and it is the only one that needs a
+            // word instead.
+            //
+            // The word says what the stop does, which the number never did.
+            // ui/models/engine_link.h has the arithmetic: a track reaches
+            // this bar after 85 consecutive detections and no sooner, so
+            // what is listed here is a carrier that has not stopped, and a
+            // band of bursty traffic reads as empty. That is worth a label
+            // because an empty list is also what a dead band looks like.
             Label {
                 Layout.minimumWidth: 0
-                text: confidenceSlider.value.toFixed(2) + "  this window"
+                text: (confidenceSlider.value >= engineLink.maxConfidenceBar
+                       ? "saturated only"
+                       : confidenceSlider.value.toFixed(2)) + "  this window"
                 color: window.ink
                 font.pixelSize: 12
                 elide: Text.ElideRight

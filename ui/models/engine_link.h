@@ -167,19 +167,100 @@ namespace revenant::ui {
 // this is exactly std::nextafter(1.0, 0.0), written in a form that is
 // constexpr rather than depending on constexpr <cmath>.
 //
-// The top of the slider's travel is therefore a live position rather than a
-// dead stop, which is not obvious and was expected to go the other way.
-// core/detect/detector.cpp raises a track's confidence by confidence_rise of
-// its remaining distance to one on every detection, and at the shipped 0.35
-// that iteration's fixed point in double arithmetic is exactly this value:
-// one is never reached, and the double just below it is. server.cpp compares
-// with >=, so a saturated track sits on the bar and is still listed.
-// Measured 2026-09-20 against a synthetic wideband scene, eight emitters,
-// seed 4242: nine of nine tracks shown at full travel. A slider bound to 1.0
-// instead would list nothing there, which is the failure this constant
-// exists to prevent, and it is prevented by a margin of one ulp.
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 it called the top of the slider's travel "a live position
+// rather than a dead stop": that core/detect/detector.cpp's iteration has
+// its fixed point at exactly this value, that core/rpc/server.cpp compares
+// with >= so a saturated track sits on the bar and is still listed, and that
+// an empty list at full travel "is prevented by a margin of one ulp". The
+// fixed point is real and is asserted below. The general claim built on it
+// is false, and it was measured on the one scene that cannot show the
+// failure: a synthetic wideband scene, eight emitters, seed 4242, whose
+// emitters never stop transmitting.
+//
+// What saturation costs. A track is born at confidence_rise and then takes
+// confidence_rise of its remaining distance to one on every detection, so
+// that distance multiplies by 1 - rise per hit. At the shipped 0.35 the
+// fixed point is 84 detections past birth, 85 in all, which is 8.4 seconds
+// at decision_interval_seconds = 0.1. They have to be consecutive. A
+// decision a track is not detected in multiplies its confidence by
+// 2^(-elapsed / confidence_half_life_seconds), and from the fixed point one
+// missed decision at those settings costs 78 of the 84 back.
+//
+// So the top of the travel lists a carrier that has been up for 8.4 seconds
+// without a gap in it, and lists nothing else. The band this project tests
+// against is the counter-example rather than an edge case: 461 MHz, a two
+// second PTT over, 20 decisions and 21 detections counting birth, so
+// confidence is 1 - 0.65^21, which is 1 - 1.2e-4 and below the bar. The row
+// reads 0 of 1 tracks shown, which is the empty-list-looks-like-a-dead-band
+// failure this constant is named for, reached from the other side.
+// docs/detection.md describes that traffic exactly: a few seconds of speech
+// at a time with long dead air between.
+//
+// The stop stays reachable and the range stays this wide. Clamping lower
+// means choosing a confidence a burst can clear, and that number is a guess
+// about traffic a client cannot make: the detector's rise, its half life and
+// the band all move it, and two of the three can change under a client that
+// never hears about it. What changed instead is that the control says what
+// it does there. ui/qml/Main.qml prints the stop as a saturation bar rather
+// than as toFixed(2)'s 1.00, which was the one value the engine refuses.
 inline constexpr double kMaxConfidenceBar =
     1.0 - std::numeric_limits<double>::epsilon() / 2.0;
+
+// Where detector.cpp's confidence iteration settles, in the arithmetic it
+// runs in rather than in the limit.
+//
+// A track is born at `rise` and every detection replaces c with
+// c + (1 - c) * rise. In real arithmetic that approaches one forever. In
+// doubles it stops, because past some point the increment rounds away, and
+// where it stops is not one value for all rise: the paragraph above turns on
+// it being exactly kMaxConfidenceBar and nothing checked that.
+[[nodiscard]] constexpr double confidence_fixed_point(double rise) {
+    double confidence = rise;
+    // Bounded so a rise near the detector's 0.001 floor cannot hang a
+    // compile; every call here converges in under 200 steps.
+    for (int step = 0; step < 100000; ++step) {
+        const double next = confidence + (1.0 - confidence) * rise;
+        if (next == confidence) {
+            break;
+        }
+        confidence = next;
+    }
+    return confidence;
+}
+
+// core/detect/DetectorConfig::confidence_rise, copied rather than included.
+//
+// ui/CMakeLists.txt links no part of the engine on purpose, so detector.h is
+// not reachable from this project and cannot be made reachable without
+// giving up the two-runtime split that file argues for. The copy can go
+// stale against the engine; what the assertions below catch is the
+// arithmetic moving out from under the constant, which is the failure that
+// has no other witness.
+inline constexpr double kDetectorConfidenceRise = 0.35;
+
+// The identity the comment on kMaxConfidenceBar depends on. It holds over a
+// narrow band of rise and the two bounds are asserted beside it, because a
+// reader otherwise has to rederive where it stops holding.
+static_assert(confidence_fixed_point(kDetectorConfidenceRise) == kMaxConfidenceBar,
+              "The detector's confidence no longer settles on kMaxConfidenceBar, so the top of "
+              "the slider's travel is a bar no track can reach and the list there is empty for "
+              "every signal. Read the comment above and fix the claim before the constant.");
+
+// Below a quarter the increment from one ulp lower rounds down or ties to
+// even, so the iteration stalls two ulps below one and never reaches the
+// bar at all.
+static_assert(confidence_fixed_point(0.25) < kMaxConfidenceBar,
+              "confidence_fixed_point disagrees with the measured break point at rise 0.25");
+
+// At a half and above the increment from one ulp below rounds up, so a
+// saturated track lands on exactly one. The bar still lists it, because the
+// comparison is >=, but the engine's "one is never reached" stops being
+// true and core/detect/detector.cpp's refusal of a threshold of one becomes
+// wrong rather than conservative.
+static_assert(confidence_fixed_point(0.5) == 1.0,
+              "confidence_fixed_point disagrees with the measured break point at rise 0.5");
 
 // The narrowest passband a drag will produce, in hertz.
 //
