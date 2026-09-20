@@ -433,10 +433,24 @@ std::optional<std::string> callsign_from_pi(Region region, std::uint16_t pi) {
     // through 0x9000 were remapped twice on the way out (P1 0 0 0 becomes
     // A P1 0 0 becomes A F A P1) and have to be unwound in the opposite order.
     // NRSC-4-B section D.7.1 exception 2 and its NOTE.
-    bool undid_exception_two = false;
+    //
+    // BOTH EXCEPTIONS LEAVE A HOLE IN THE PI SPACE, AND THE HOLES HAVE TO BE
+    // REFUSED RATHER THAN ANSWERED.
+    //
+    // Each exception rewrites a band of computed codes into somewhere else
+    // before they are ever transmitted, so the band it rewrote is not a band a
+    // station can be heard on. The arithmetic below runs happily on one of
+    // those codes and produces the same four letters as the code that replaced
+    // it, which puts two PI codes on one call sign. A wrong call sign on a
+    // display is worse than a blank one, and two PI codes on one call sign is
+    // the version of that with no way to tell which station is on the air.
     if ((value & 0xFF00) == 0xAF00) {
         value = static_cast<std::uint16_t>((value & 0x00FF) << 8);
-        undid_exception_two = true;
+    } else if ((value & 0x00FF) == 0) {
+        // Exception 2's hole. A computed PI with a zero low byte became
+        // 0xAF P1 P2 before transmission, so 0x1100 is not a code off the air
+        // and 0xAF11 is the one that answers for it.
+        return std::nullopt;
     }
 
     // Exception 1: a computed PI whose second nibble is zero was reassigned so
@@ -449,15 +463,20 @@ std::optional<std::string> callsign_from_pi(Region region, std::uint16_t pi) {
             // A0xx and AAxx through AExx are not codes the algorithm produces.
             return std::nullopt;
         }
-        if ((value & 0x00FF) == 0 && !undid_exception_two) {
-            // A P1 0 0 straight off the air would have been rewritten by
-            // exception 2 before transmission, so it is unreachable. It is
-            // reachable here only as the intermediate step of the nine
-            // double-remapped codes, which is what the flag distinguishes.
-            return std::nullopt;
-        }
         value = static_cast<std::uint16_t>((static_cast<std::uint16_t>(second) << 12) |
                                            (value & 0x00FF));
+    } else if (pi_coverage_area(value) == 0) {
+        // Exception 1's hole, and it is the larger of the two: 2304 codes.
+        // 0x1050 was reassigned to 0xA150 before transmission, so 0xA150 is
+        // the code that answers "KADC".
+        //
+        // Nine of these arrive by way of the exception 2 undo above rather
+        // than off the air directly. 0xAF10 through 0xAF90 unwind to 0x1000
+        // through 0x9000, which exception 1 had already taken to 0xA100
+        // through 0xA900, and each of the nine answered with the same call
+        // sign as the reachable 0xAFA1 through 0xAFA9. Exception 2's NOTE
+        // says outright that those nine went through exception 1 first.
+        return std::nullopt;
     }
 
     if (value >= kPiExceptionLow && value <= kPiExceptionHigh) {

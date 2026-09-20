@@ -18,6 +18,7 @@
 #include <array>
 #include <cstdint>
 #include <format>
+#include <map>
 #include <random>
 #include <set>
 #include <string>
@@ -992,6 +993,64 @@ TEST_CASE("call signs come back out of North American PI codes", "[rds]") {
     // And none of it applies in Europe, where the same sixteen bits are a
     // country code and a programme reference.
     CHECK_FALSE(callsign_from_pi(Region::kRds, 0x21C7).has_value());
+}
+
+TEST_CASE("no two PI codes answer with the same call sign", "[rds]") {
+    // THE BAR. A call sign on a display is an identity, so two PI codes
+    // resolving to one call sign is worse than a blank: the operator sees a
+    // station that is not there and has nothing to tell them so.
+    //
+    // NRSC-4-B section D.7.1's two exceptions rewrite codes before they are
+    // transmitted, and both rewrites leave holes in the PI space. Exception 1
+    // takes every computed PI whose second nibble is zero into the 0xA block,
+    // so 0x1050 and its 2304 neighbours are codes no station sends. Exception
+    // 2 takes a PI with a zero low byte into the 0xAF block, so 0x1100 is not
+    // a code either. The nine that satisfy both rules land on 0xAFA1 through
+    // 0xAFA9, and undoing exception 2 on 0xAF10 through 0xAF90 walks back
+    // into the first hole.
+    //
+    // Exhaustive rather than sampled: the collisions live in two thin bands
+    // and every one of them was reachable only by a code that looks ordinary.
+    std::map<std::string, std::uint16_t> seen;
+    int answered = 0;
+    for (int pi = 0; pi <= 0xFFFF; ++pi) {
+        const auto call =
+            revenant::decode::callsign_from_pi(Region::kRbds, static_cast<std::uint16_t>(pi));
+        if (!call) {
+            continue;
+        }
+        ++answered;
+        const auto [it, inserted] = seen.emplace(*call, static_cast<std::uint16_t>(pi));
+        INFO(std::format("PI {:04X} and PI {:04X} both answer {}", it->second, pi, *call));
+        CHECK(inserted);
+    }
+
+    // 2 * 26^3 four-letter call signs plus the 36 transcribed three-letter
+    // rows, and every one of them reachable from exactly one PI.
+    CHECK(answered == 2 * 26 * 26 * 26 + 36);
+
+    // The nine that collided. Each of these unwinds to a PI whose second
+    // nibble is zero, which exception 1 had already rewritten, so the code
+    // cannot come off the air.
+    for (int high = 1; high <= 9; ++high) {
+        const auto pi = static_cast<std::uint16_t>(0xAF00 | (high << 4));
+        INFO(std::format("PI {:04X}", pi));
+        CHECK_FALSE(revenant::decode::callsign_from_pi(Region::kRbds, pi).has_value());
+    }
+    // 0xAFA1 is the reachable code they collided with, and it still answers.
+    CHECK(revenant::decode::callsign_from_pi(Region::kRbds, 0xAFA1) == "KAAA");
+
+    // The larger hole behind them: 0x1050 was rewritten to 0xA150 before
+    // transmission, and 0xA150 is the code that answers.
+    CHECK_FALSE(revenant::decode::callsign_from_pi(Region::kRbds, 0x1050).has_value());
+    CHECK(revenant::decode::callsign_from_pi(Region::kRbds, 0xA150) == "KADC");
+    CHECK(revenant::decode::pi_from_callsign("KADC") == 0xA150);
+
+    // A zero low byte with a nonzero second nibble went through exception 2
+    // alone, so the 0xAF form is the reachable one and the raw form is not.
+    CHECK(revenant::decode::callsign_from_pi(Region::kRbds, 0xAF11) == "KAJW");
+    CHECK(revenant::decode::pi_from_callsign("KAJW") == 0xAF11);
+    CHECK_FALSE(revenant::decode::callsign_from_pi(Region::kRbds, 0x1100).has_value());
 }
 
 TEST_CASE("every transcribed three-letter row is reachable and round trips", "[rds]") {

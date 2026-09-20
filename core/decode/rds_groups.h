@@ -278,6 +278,13 @@ struct PtyEntry {
 
 // North American PI to call sign and back, NRSC-4-B section D.7.1. Nullopt in
 // kRds, and in kRbds for any PI outside the call sign space.
+//
+// The space excludes the codes the algorithm's own exceptions rewrote before
+// transmission. A computed PI whose second nibble is zero was reassigned into
+// the 0xA block by exception 1, so 0x1050 is not a code a station sends and
+// answering it would give the same four letters as the 0xA150 that replaced
+// it. callsign_from_pi is injective over all 65536 codes, which the tests
+// assert exhaustively rather than by sampling.
 [[nodiscard]] std::optional<std::string> callsign_from_pi(Region region, std::uint16_t pi);
 [[nodiscard]] std::optional<std::uint16_t> pi_from_callsign(std::string_view call);
 
