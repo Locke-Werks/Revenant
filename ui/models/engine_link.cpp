@@ -130,11 +130,19 @@ void EngineLink::supervise()
             // interval, so this is the path a moving filter edge takes and
             // the status poll behind it is what reads the grant back.
             apply_receiver_request();
+
+            // After the receiver work and before the status poll. A
+            // rebuild issues a new receiver id, and reconciling against
+            // the old one would leave the audio on a receiver that no
+            // longer exists until the next pass.
+            apply_audio_request();
             poll_receiver_status();
             poll_detections();
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
             supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
-                return stopping_ || (receiver_work_pending_ && client_ != nullptr);
+                return stopping_ ||
+                       ((receiver_work_pending_ || audio_work_pending_) &&
+                        client_ != nullptr);
             });
             if (stopping_) {
                 break;
@@ -155,6 +163,18 @@ void EngineLink::supervise()
             // to stop claiming to be about a live receiver, and the next
             // engine will not have one at that id.
             live_receiver_id_ = 0;
+
+            // The audio subscription goes the same way, and WITHOUT an
+            // unsubscribe: there is no engine to cancel against, and
+            // Client::unsubscribe_audio on a dead connection would block
+            // the supervisor for a round trip that cannot happen. The
+            // ring is emptied so that reconnecting does not play the
+            // previous engine's last quarter second before the new
+            // stream starts.
+            live_audio_vrx_ = 0;
+            live_audio_granted_ = 0;
+            audio_ring_.reset();
+            work_audio_stats_ = {};
 
             client_->unsubscribe_spectrum();
             client_.reset();
@@ -178,7 +198,14 @@ void EngineLink::supervise()
             // frozen at whatever it last was.
             note_running(*alive);
             apply_receiver_request();
+            apply_audio_request();
             poll_receiver_status();
+
+            // On the probe pass only, so once a second. These are a
+            // status line and nothing acts on them, so polling them at
+            // the detection rate would buy three extra round trips a
+            // second and no information.
+            poll_audio_stats();
             poll_detections();
         }
 
@@ -192,7 +219,8 @@ void EngineLink::supervise()
         // client_ is the supervisor's own and is read here on its own
         // thread.
         supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
-            return stopping_ || (receiver_work_pending_ && client_ != nullptr);
+            return stopping_ ||
+                   ((receiver_work_pending_ || audio_work_pending_) && client_ != nullptr);
         });
         if (stopping_) {
             break;
@@ -200,6 +228,8 @@ void EngineLink::supervise()
     }
 
     if (client_ != nullptr) {
+        // drop_receiver stops the audio first, so the tail here needs no
+        // separate call. See receiver_link.cpp.
         drop_receiver();
         client_->unsubscribe_spectrum();
         client_.reset();
@@ -294,6 +324,21 @@ bool EngineLink::attempt_connect()
     first_sequence_ = 0;
     delivered_ = 0;
     have_span_ = false;
+
+    // The supervisor's own shadow of what it last told the Qt thread about
+    // audio. Zeroed here rather than left, because adopt() has just
+    // cleared the Qt side for the same reason and a shadow that still held
+    // the previous engine's values would suppress the first hand-off on
+    // this one: note_audio compares against it and posts nothing when they
+    // match.
+    work_audio_fault_.clear();
+    work_audio_ended_.clear();
+    work_audio_stats_ = {};
+    posted_audio_vrx_ = 0;
+    posted_audio_granted_ = 0;
+    posted_audio_fault_.clear();
+    posted_audio_ended_.clear();
+    posted_audio_stats_ = {};
     {
         const std::lock_guard<std::mutex> lock(swap_mutex_);
         has_ready_ = false;
@@ -447,6 +492,27 @@ void EngineLink::adopt()
     // back. Not "wanted_.center is non-zero": a receiver tuned exactly to
     // the source's own centre is an ordinary thing to want and would never
     // have been restored.
+    // The audio goes with the connection on both edges, for the reason
+    // the receiver does: the subscription was on an id one engine issued.
+    // The SWITCH is kept, the same way the receiver's request is, so an
+    // operator who was listening is listening again once the receiver is
+    // back. The reconcile in apply_audio_request is what puts it back, and
+    // it needs no help here.
+    //
+    // audio_ended_reason_ is cleared rather than left. It names a receiver
+    // on an engine that is gone, and leaving it would sit beside
+    // "disconnected" claiming the current engine said something.
+    {
+        const std::lock_guard<std::mutex> lock(audio_mutex_);
+        has_audio_handover_ = false;
+    }
+    audio_vrx_ = 0;
+    audio_granted_millis_ = 0;
+    audio_fault_.clear();
+    audio_ended_reason_.clear();
+    audio_stats_ = {};
+    emit audioChanged();
+
     const bool had_receiver = receiver_id_ != 0;
     receiver_id_ = 0;
     receiver_status_ = {};

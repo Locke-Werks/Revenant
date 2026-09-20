@@ -537,6 +537,22 @@ bool EngineLink::recreate_receiver(const rpc::VrxParams& params)
 
 void EngineLink::drop_receiver()
 {
+    // AUDIO FIRST, AND OUTSIDE THE EARLY RETURN BELOW.
+    //
+    // The order matters and the placement does too. The engine sends
+    // ended() for a subscription whose receiver goes away and never for a
+    // cancel this client asked for, so removing the receiver before
+    // cancelling delivers an ended for a removal this client performed.
+    // The window would then announce that the receiver went away on every
+    // mode change, because a mode change is a remove and an add.
+    //
+    // Above the early return because the audio subscription and the
+    // receiver id are separate pieces of state, and a path that clears one
+    // without the other leaves a stream running against an id nothing is
+    // tracking. stop_audio returns immediately when there is nothing to
+    // stop.
+    stop_audio();
+
     if (live_receiver_id_ == 0 || client_ == nullptr) {
         live_receiver_id_ = 0;
         return;

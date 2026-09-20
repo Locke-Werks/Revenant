@@ -131,6 +131,9 @@ endif()
 # ---------------------------------------------------------------------------
 qt_add_executable(revenant_ui
     main.cpp
+    audio/audio_ring.cpp
+    audio/audio_ring.h
+    models/audio_link.cpp
     models/engine_link.cpp
     models/engine_link.h
     models/receiver_link.cpp
@@ -180,6 +183,7 @@ target_include_directories(revenant_ui
         # than the missing path.
         "${CMAKE_CURRENT_SOURCE_DIR}/models"
         "${CMAKE_CURRENT_SOURCE_DIR}/render"
+        "${CMAKE_CURRENT_SOURCE_DIR}/audio"
 )
 
 target_link_libraries(revenant_ui

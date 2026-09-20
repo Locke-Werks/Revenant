@@ -137,6 +137,7 @@
 #include <QTimer>
 #include <QtQmlIntegration>
 
+#include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
 
@@ -724,6 +725,79 @@ class EngineLink : public QObject {
     // the audio is not has to admit it.
     Q_PROPERTY(bool receiverPending READ receiverPending NOTIFY receiverChanged)
 
+    // ------------------------------------------------------------------
+    // Listening to the receiver the detail pane is on
+    // ------------------------------------------------------------------
+    //
+    // ONE RECEIVER AT A TIME, AND IT IS THE PANE'S. The engine will serve
+    // an audio subscription per receiver and this link takes exactly one,
+    // on whichever receiver the detail pane holds. That is not a limit the
+    // engine imposes: it is the same decision the pane above already makes
+    // and states, that one pane shows one receiver, extended to the one
+    // output device a machine has. Two streams mixed into one pair of
+    // speakers is a mixer with gains and a pan per source, and nothing here
+    // decides that on the operator's behalf.
+    //
+    // So moving the pane moves the audio. apply_audio_request reconciles
+    // the subscription against receiverId on every supervisor pass rather
+    // than each call site remembering to, which is what makes a retune, a
+    // mode change, a clear, a reconnect and an ended arrival all one code
+    // path.
+
+    // What the operator asked for, which is a switch and not a state: it
+    // stays on across a receiver change, a reconnect and a rebuild, and
+    // audioActive below is whether there is actually a stream.
+    Q_PROPERTY(bool audioWanted READ audioWanted WRITE setAudioWanted NOTIFY audioChanged)
+
+    // A subscription exists on the engine right now. False while the
+    // switch is on and the pane has no receiver, which is the ordinary
+    // state before anything is tuned.
+    Q_PROPERTY(bool audioActive READ audioActive NOTIFY audioChanged)
+
+    // Which receiver is being listened to, so the display can say it
+    // rather than leaving the operator to assume it is the pane's. Zero
+    // when nothing is subscribed.
+    Q_PROPERTY(qulonglong audioReceiverId READ audioReceiverId NOTIFY audioChanged)
+
+    // What the engine GRANTED, in milliseconds, which is the number every
+    // buffer on this side is derived from. The engine clamps a request to
+    // 20..5000 and reports the result, on the EngineInfo::ringClamped
+    // precedent: a depth that was quietly changed is a dropout nobody can
+    // trace. Zero when nothing is subscribed.
+    //
+    // It is not the whole clamp. A two-chunk floor is applied in FRAMES
+    // when the first chunk arrives, because the server cannot convert
+    // milliseconds to frames before it knows the receiver's audio rate.
+    // audioBufferFrames below is the depth actually being enforced.
+    Q_PROPERTY(uint audioGrantedMillis READ audioGrantedMillis NOTIFY audioChanged)
+
+    // The engine refused a subscription, in its own words. Kept apart from
+    // errorText and from receiverFault for the reason those two are kept
+    // apart: a raw tap that cannot carry audio is not a lost engine and
+    // must not read as one.
+    Q_PROPERTY(QString audioFault READ audioFault NOTIFY audioChanged)
+
+    // The receiver went away and the engine said so. This is the one
+    // failure in the whole client that has no visible symptom of its own:
+    // a spectrum subscription that dies freezes a picture and a frozen
+    // picture is obvious from across the room, and this produces silence,
+    // which is what a quiet channel with the squelch shut sounds like.
+    // core/rpc/client.h's ended callback exists for exactly that and this
+    // is where its words are shown.
+    //
+    // Never set for an unsubscribe this client asked for. Cleared when a
+    // new subscription starts.
+    Q_PROPERTY(QString audioEndedReason READ audioEndedReason NOTIFY audioChanged)
+
+    // The engine's own counters for this subscription, polled once a
+    // second. Separate from the player's counters, which describe the
+    // sound card: a wire drop and a starved card sound the same and have
+    // different fixes.
+    Q_PROPERTY(qulonglong audioFramesDropped READ audioFramesDropped NOTIFY audioChanged)
+    Q_PROPERTY(qulonglong audioDropEvents READ audioDropEvents NOTIFY audioChanged)
+    Q_PROPERTY(qulonglong audioBacklogFrames READ audioBacklogFrames NOTIFY audioChanged)
+    Q_PROPERTY(qulonglong audioBufferFrames READ audioBufferFrames NOTIFY audioChanged)
+
 public:
     explicit EngineLink(QObject* parent = nullptr);
     ~EngineLink() override;
@@ -980,6 +1054,44 @@ public:
     // until the next passbandChanged, on the same terms frame() is.
     [[nodiscard]] const rpc::PassbandFrame& passbandFrame() const { return passband_display_; }
 
+    // ------------------------------------------------------------------
+    // The audio surface
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] bool audioWanted() const { return audio_wanted_.load(); }
+    void setAudioWanted(bool wanted);
+
+    [[nodiscard]] bool audioActive() const { return audio_vrx_ != 0; }
+    [[nodiscard]] qulonglong audioReceiverId() const { return audio_vrx_; }
+    [[nodiscard]] uint audioGrantedMillis() const { return audio_granted_millis_; }
+    [[nodiscard]] QString audioFault() const { return audio_fault_; }
+    [[nodiscard]] QString audioEndedReason() const { return audio_ended_reason_; }
+
+    [[nodiscard]] qulonglong audioFramesDropped() const {
+        return static_cast<qulonglong>(audio_stats_.frames_dropped);
+    }
+    [[nodiscard]] qulonglong audioDropEvents() const {
+        return static_cast<qulonglong>(audio_stats_.drop_events);
+    }
+    [[nodiscard]] qulonglong audioBacklogFrames() const {
+        return static_cast<qulonglong>(audio_stats_.backlog_frames);
+    }
+    [[nodiscard]] qulonglong audioBufferFrames() const {
+        return static_cast<qulonglong>(audio_stats_.buffer_frames);
+    }
+
+    // The hand-off the Cap'n Proto event loop thread writes chunks into
+    // and the sound card's thread drains. It lives HERE and not on the
+    // player, because the callback that writes it is owned by the Client,
+    // the Client is owned by the supervisor thread, and this destructor is
+    // what joins that thread. A ring owned by the player would be
+    // destroyed while a callback could still be writing to it, on an
+    // object-destruction order QML and main() both get to influence.
+    //
+    // Both threads that touch it hold its own lock, so this accessor hands
+    // out a reference and not a copy. See audio/audio_ring.h.
+    [[nodiscard]] AudioRing& audioRing() { return audio_ring_; }
+
 signals:
     // The link came up or went away. An item holding history keyed to one
     // engine's geometry clears it here, on the edge into connected: the next
@@ -1037,6 +1149,12 @@ signals:
     void passbandChanged();
 
     void receiverFaultChanged();
+
+    // The audio subscription changed: it started, it stopped, the engine
+    // refused it, the receiver went away, or the engine's counters moved.
+    // One signal for all of them, because every one of them is read by the
+    // same status strip and none of them repaints anything.
+    void audioChanged();
 
 private:
     // The supervisor thread, and the two halves of what it does.
@@ -1343,6 +1461,106 @@ private:
     // the loop rather than on the next poll interval: 250 ms of latency on
     // a filter edge is felt as the handle sticking.
     bool receiver_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // ------------------------------------------------------------------
+    // Audio. Implemented in ui/models/audio_link.cpp.
+    // ------------------------------------------------------------------
+
+    // Supervisor thread. Reconciles the subscription against what the
+    // operator asked for and which receiver the pane holds. Every audio
+    // state change goes through this one function rather than being
+    // applied at the site that caused it: a retune, a mode change that
+    // rebuilds the receiver, a clear, a reconnect and an ended arrival all
+    // change the same two inputs, and five call sites remembering to fix
+    // the subscription is five chances to forget one.
+    void apply_audio_request();
+
+    // Supervisor thread. Reads this subscription's counters off the
+    // engine, on the probe pass rather than every pass: they are a status
+    // line and a round trip four times a second buys nothing.
+    void poll_audio_stats();
+
+    // Supervisor thread. Ends the subscription this client holds, if any,
+    // with an explicit unsubscribe.
+    //
+    // THE UNSUBSCRIBE IS WHAT KEEPS ended() MEANING WHAT IT SAYS. The
+    // schema is explicit that a client is never sent ended for a cancel it
+    // asked for, so removing a receiver without cancelling first would
+    // deliver an ended for a removal this client performed, and the window
+    // would announce that the receiver went away every time the operator
+    // changed mode. drop_receiver calls this before remove_vrx for exactly
+    // that reason.
+    void stop_audio();
+
+    // Supervisor thread. Hands the Qt thread whatever changed. Posts only
+    // when something did.
+    void note_audio();
+
+    // Qt thread, queued from note_audio.
+    void adopt_audio();
+
+    // Invoked on the Cap'n Proto event loop thread. Touches the ring and
+    // nothing else, which is the whole point of the ring.
+    void on_audio_chunk(const rpc::AudioChunk& chunk);
+
+    // Invoked on the Cap'n Proto event loop thread. Records the engine's
+    // words and wakes the supervisor; the teardown itself happens there,
+    // because client.h forbids calling back into the Client from here.
+    void on_audio_ended(const std::string& reason);
+
+    AudioRing audio_ring_;
+
+    // Written by the Qt thread, read by the supervisor. A switch and not a
+    // state; see audioWanted.
+    std::atomic<bool> audio_wanted_{false};
+
+    // Supervisor thread only: the receiver it actually holds a
+    // subscription on, and the grant that came back with it.
+    qulonglong live_audio_vrx_ = 0;
+    std::uint32_t live_audio_granted_ = 0;
+
+    // Supervisor thread only: what it currently believes, which is what
+    // note_audio hands over.
+    QString work_audio_fault_;
+    QString work_audio_ended_;
+    rpc::AudioStats work_audio_stats_;
+
+    // Supervisor thread only: the last thing handed over, so the
+    // comparison that suppresses a repeated post needs no lock and reads
+    // nothing the Qt thread owns.
+    qulonglong posted_audio_vrx_ = 0;
+    std::uint32_t posted_audio_granted_ = 0;
+    QString posted_audio_fault_;
+    QString posted_audio_ended_;
+    rpc::AudioStats posted_audio_stats_;
+
+    std::mutex audio_mutex_;
+    bool has_audio_handover_ = false;             // guarded by audio_mutex_
+    qulonglong handover_audio_vrx_ = 0;           // guarded by audio_mutex_
+    std::uint32_t handover_audio_granted_ = 0;    // guarded by audio_mutex_
+    QString handover_audio_fault_;                // guarded by audio_mutex_
+    QString handover_audio_ended_;                // guarded by audio_mutex_
+    rpc::AudioStats handover_audio_stats_;        // guarded by audio_mutex_
+
+    // Written by the EVENT LOOP thread in on_audio_ended and consumed by
+    // the supervisor. Under the same lock rather than an atomic, because
+    // the reason is a string and the flag is only meaningful with it.
+    bool audio_ended_pending_ = false;  // guarded by audio_mutex_
+    std::string audio_ended_text_;      // guarded by audio_mutex_
+
+    // Qt thread only: what the properties above hand out.
+    qulonglong audio_vrx_ = 0;
+    std::uint32_t audio_granted_millis_ = 0;
+    QString audio_fault_;
+    QString audio_ended_reason_;
+    rpc::AudioStats audio_stats_;
+
+    // Set by setAudioWanted and by on_audio_ended, cleared by the
+    // supervisor when apply_audio_request has run. In the wait predicate
+    // for the reason receiver_work_pending_ is: a quarter of a second
+    // between clicking listen and hearing anything reads as the control
+    // not working.
+    bool audio_work_pending_ = false;  // guarded by supervisor_mutex_
 };
 
 }  // namespace revenant::ui
