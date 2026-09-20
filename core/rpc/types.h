@@ -337,4 +337,32 @@ struct PassbandFrame {
     float percentile_high_db = 0.0F;
 };
 
+// Which of the two mutually incompatible readings of the same bitstream the
+// RDS decoder is configured for.
+//
+// Ordinal for ordinal with schema::RdsRegion and with
+// revenant::decode::Region, on the terms the schema states: the ordering is
+// matched here so that the conversion can be a cast once the branch that
+// serves rdsStation writes one, and it is not enforced yet because nothing
+// converts it yet.
+//
+// A SETTING AND NEVER AN INFERENCE. core/decode/rds_groups.h has the argument
+// and core/rpc/revenant.capnp repeats it: no field names the region, the PI
+// code cannot decide it because the US call sign range collides with European
+// country codes, and getting it wrong is silent because PTY 26 renders as
+// National Music in one region and Hip-Hop in the other. A client may seed it
+// from the tuned frequency as long as it shows it as something the operator
+// can override.
+//
+// WHY THERE IS NO RdsStation STRUCT HERE, AND NO AudioChunk
+//
+// Neither surface is served. A mirror of either one would be a hundred lines
+// of conversion no test could exercise and nothing could populate, sitting in
+// the one header whose whole job is to be the contract a UI compiles against.
+// This enum is here because Client::set_rds_region needs an argument to take;
+// the payload halves arrive with the branches that fill them, and
+// Client::rds_station returning Status rather than a struct is where the
+// compiler will point that branch.
+enum class RdsRegion : std::uint8_t { Rds, Rbds };
+
 }  // namespace revenant::rpc

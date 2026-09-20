@@ -858,6 +858,46 @@ public:
         return kj::READY_NOW;
     }
 
+    // The two surfaces the schema carries and the engine does not serve.
+    //
+    // Refused rather than answered, and refused BEFORE the arguments are
+    // looked at. Checking the receiver id first would produce "no receiver 9
+    // is registered" for a bad id, which reads as though a good id would have
+    // worked, and the shape of a refusal is the only thing a caller can learn
+    // from a surface that does nothing.
+    //
+    // A subscription that produced no chunk, or a station struct of zeros,
+    // would each look like a broken engine instead of unfinished work, and
+    // the person seeing it would go looking at the radio.
+    //
+    // The sentence is the same in all three so that a client can match one
+    // phrase rather than three, and so that the branch turning these green
+    // has one string to delete. core/rpc/revenant.capnp says what each of
+    // them will do.
+
+    kj::Promise<void> subscribeAudio(SubscribeAudioContext) override {
+        return to_exception(Error{
+            "subscribeAudio exists on the wire and is not wired to the engine yet. The engine "
+            "holds one audio sink per receiver and a second one replaces the first, so fanning "
+            "audio out to subscribers means changing core/engine, which is its own branch. See "
+            "core/rpc/revenant.capnp for the shape it will have"});
+    }
+
+    kj::Promise<void> rdsStation(RdsStationContext) override {
+        return to_exception(Error{
+            "rdsStation exists on the wire and is not wired to the engine yet. The decoder is "
+            "in core/decode and nothing in core/engine feeds it a composite, so serving this "
+            "means changing core/engine, which is its own branch. See "
+            "core/rpc/revenant.capnp for the four conditions the receiver will have to meet"});
+    }
+
+    kj::Promise<void> setRdsRegion(SetRdsRegionContext) override {
+        return to_exception(Error{
+            "setRdsRegion exists on the wire and is not wired to the engine yet. There is no "
+            "per-receiver RDS decoder to set a region on until rdsStation is served, and that "
+            "is its own branch. See core/rpc/revenant.capnp"});
+    }
+
 private:
     ServerImpl& owner_;
 };

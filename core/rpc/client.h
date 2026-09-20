@@ -158,6 +158,29 @@ public:
                                                      PassbandCallback callback) = 0;
     virtual void unsubscribe_passband(std::uint64_t vrx) = 0;
 
+    // The two surfaces the schema carries and the engine does not serve.
+    //
+    // All three reach the server and all three come back refused, in a
+    // sentence saying the surface exists and is not wired. They are here so
+    // that a client has something to call and tests/rpc has something to
+    // assert, and so that the branches that serve them start from a compile
+    // error in the right place rather than from nothing.
+    //
+    // THE SIGNATURES ARE THE ARGUMENT HALF ONLY, DELIBERATELY
+    //
+    // subscribe_audio takes no callback and rds_station hands back Status
+    // rather than a station struct, because the payload types would be
+    // mirrors of schema structs nothing can populate: a hundred lines of
+    // conversion in core/rpc/types.h that no test could exercise, in the one
+    // header whose job is to be the contract a UI compiles against. The
+    // branch that serves audio adds the callback and the branch that serves
+    // RDS changes this return type, and both changes fail to compile at every
+    // caller, which is where they should fail.
+    [[nodiscard]] virtual Status subscribe_audio(std::uint64_t vrx,
+                                                  std::uint32_t buffer_millis) = 0;
+    [[nodiscard]] virtual Status rds_station(std::uint64_t vrx) = 0;
+    [[nodiscard]] virtual Status set_rds_region(std::uint64_t vrx, RdsRegion region) = 0;
+
     // Frames this client was sent.
     [[nodiscard]] virtual std::uint64_t frames_received() const = 0;
 

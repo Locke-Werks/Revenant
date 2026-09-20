@@ -96,6 +96,18 @@ static_assert(static_cast<std::uint16_t>(schema::Demod::DSB) ==
 static_assert(static_cast<std::uint16_t>(schema::Demod::CW) ==
               static_cast<std::uint16_t>(Demod::Cw));
 
+// The same pair for the RDS region, used by the cast in set_rds_region.
+//
+// core/decode/rds_groups.h holds the third member of this chain, Region, and
+// nothing asserts against it here: core/rpc/types.h may not include anything
+// under core/decode any more than under core/engine. The branch that serves
+// rdsStation adds that assert in core/rpc/convert.h, which is the file
+// allowed to see both.
+static_assert(static_cast<std::uint16_t>(schema::RdsRegion::RDS) ==
+              static_cast<std::uint16_t>(RdsRegion::Rds));
+static_assert(static_cast<std::uint16_t>(schema::RdsRegion::RBDS) ==
+              static_cast<std::uint16_t>(RdsRegion::Rbds));
+
 // The same pair for the detector's track state, used by read_track_state.
 static_assert(static_cast<std::uint16_t>(schema::TrackState::PENDING) ==
               static_cast<std::uint16_t>(TrackState::Pending));
@@ -536,6 +548,11 @@ public:
                                             PassbandCallback callback) override;
     void unsubscribe_passband(std::uint64_t vrx) override;
 
+    [[nodiscard]] Status subscribe_audio(std::uint64_t vrx,
+                                         std::uint32_t buffer_millis) override;
+    [[nodiscard]] Status rds_station(std::uint64_t vrx) override;
+    [[nodiscard]] Status set_rds_region(std::uint64_t vrx, RdsRegion region) override;
+
     [[nodiscard]] std::uint64_t frames_received() const override;
     [[nodiscard]] std::uint64_t frames_dropped() const override;
 
@@ -931,6 +948,45 @@ Status ClientImpl::set_detection_threshold(double threshold_db) {
     return on_loop("set_detection_threshold", [threshold_db](LoopState& state) {
         auto request = state.session.setDetectionThresholdRequest();
         request.setThresholdDb(threshold_db);
+        return request.send().ignoreResult();
+    });
+}
+
+// The three the engine does not serve. Each one makes the real call and hands
+// back the server's refusal, rather than short-circuiting here.
+//
+// Refusing locally would be cheaper and would be wrong twice over. It would
+// put the "not wired yet" sentence in two places that have to be changed
+// together, and it would mean tests/rpc asserting against this file instead
+// of against the server, so a branch that served the surface would have a
+// green test and a client that still said no.
+Status ClientImpl::subscribe_audio(std::uint64_t vrx, std::uint32_t buffer_millis) {
+    return on_loop("subscribe_audio", [vrx, buffer_millis](LoopState& state) {
+        auto request = state.session.subscribeAudioRequest();
+        request.setVrx(vrx);
+        request.setBufferMillis(buffer_millis);
+
+        // No receiver capability is sent, because there is nothing for the
+        // engine to call. The branch that serves this passes one, and the
+        // server checks for it there; today the refusal comes first and the
+        // null pointer is never looked at.
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::rds_station(std::uint64_t vrx) {
+    return on_loop("rds_station", [vrx](LoopState& state) {
+        auto request = state.session.rdsStationRequest();
+        request.setVrx(vrx);
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::set_rds_region(std::uint64_t vrx, RdsRegion region) {
+    return on_loop("set_rds_region", [vrx, region](LoopState& state) {
+        auto request = state.session.setRdsRegionRequest();
+        request.setVrx(vrx);
+        request.setRegion(static_cast<schema::RdsRegion>(region));
         return request.send().ignoreResult();
     });
 }
