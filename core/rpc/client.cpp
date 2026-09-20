@@ -636,6 +636,8 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.composite_rate = in.getCompositeRate();
     out.last_group_sample = in.getLastGroupSample();
     out.fault = read_text(in.getFault());
+    out.discarding = in.getDiscarding();
+    out.discarded_chunks = in.getDiscardedChunks();
     return out;
 }
 

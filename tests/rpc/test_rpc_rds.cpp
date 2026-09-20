@@ -56,6 +56,8 @@
 //  12. It is removed WHILE DECODING.                 decoder goes, run lives
 //  13. It is retuned WHILE DECODING.                 state clears and refills
 //  14. Its traffic flag moves mid-recording.         the change is timed
+//  15. It is retuned FOUR TIMES back to back.        the fence still clears
+//  16. It is retuned with no chunk yet delivered.    the fence says it is up
 //
 // Shapes 7 and 8 are the ones that matter most and the ones a bar reaches
 // last. A decoder that silently never locks looks exactly like a station
@@ -87,9 +89,26 @@
 // is where a detach racing a dispatch in progress would show. 13's fence
 // assertion is the one with real teeth, and it is a POSITIVE one:
 // samplesConsumed has to climb off zero again after the retune. An
-// implementation whose fence never disarms, which is what an off-by-one in
-// the pending count or an epoch the graph forgot to stamp produces, leaves
-// it at zero for the rest of the run and fails there.
+// implementation whose fence never disarms leaves it at zero for the rest
+// of the run and fails there.
+//
+// 15 AND 16 ARE 13 WITH THE HOLE IN IT CLOSED, and it was a hole a single
+// retune could not reach. This paragraph used to say 13 caught "an
+// off-by-one in the pending count", which named the mechanism that was
+// there and not the one that broke. The fence counted resets on the loop
+// thread and took one off per observed change of AudioChunk::tuning_epoch,
+// and Graph::drain_control applies the whole queued stack in one pass, so
+// two retunes inside one block period moved the epoch twice and produced
+// one change. The count stuck above zero, the decoder discarded for the
+// rest of the run, and rdsStation answered zeros with an empty fault:
+// indistinguishable, on the wire, from a receiver pointed at a quiet
+// channel. 13 could not see it because one retune is one change.
+//
+// 15 fires four in a row so at least two share a drain, and asserts the
+// decoder relocks afterwards. 16 asserts the state is VISIBLE: RdsStation::
+// discarding is true while the fence is up, which is the field that makes
+// this failure mode reportable instead of silent, and it reads it in the
+// one arrangement where it is not a race.
 
 #include <algorithm>
 #include <chrono>
@@ -1537,6 +1556,201 @@ TEST_CASE("a retune while the decoder is running clears it and refills it",
     CHECK(ended->ps_received == 0);
     CHECK(ended->health.groups_decoded == 0);
     CHECK(ended->health.samples_consumed > 0);
+}
+
+TEST_CASE("a burst of retunes does not leave the fence permanently armed",
+          "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE REGRESSION, AND IT WAS SILENT, PERMANENT AND INDISTINGUISHABLE
+    // FROM DEAD AIR.
+    //
+    // The first fence counted the retunes the loop thread asked for and
+    // took one off per change of AudioChunk::tuning_epoch the sample path
+    // observed. Graph::drain_control applies the whole queued control stack
+    // in one pass before a frame is recorded, so two retunes for one
+    // receiver inside one block period took the epoch from 0 to 2 and
+    // produced ONE stamped change. The count went to two, came down to one
+    // and stayed there: every later chunk was discarded, RdsBitSync::
+    // process was never reached again, and rdsStation answered zeros with
+    // an empty fault for the rest of the receiver's life. Only removing the
+    // receiver recovered it.
+    //
+    // FOUR RETUNES AND NOT TWO, which is about certainty rather than
+    // severity. One block is 16384 samples of a 1368000 S/s source, which
+    // at pace 1 is 12 ms, and four round trips over the test's local
+    // connection are well inside that; two of them would almost certainly
+    // share a drain and four cannot avoid it. The case asserts what a
+    // client can see, so it does not depend on knowing which pair shared
+    // one.
+    //
+    // They also stay ON the station. The existing retune case moves 200 kHz
+    // away and asserts the decoder is fed again; this one asserts it
+    // RELOCKS, which needs a decodable signal on the far side of the fence
+    // and is the stronger statement about the samples getting through.
+    constexpr int kRetunes = 4;
+
+    StationFile file("retuneburst");
+    const auto written = file.write(station_spec(true, kRunningCycles), 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    bring_up(harness, rds_options(file.uri(), 1.0));
+
+    auto vrx = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto built = harness.client().rds_station(*vrx);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+    CHECK_FALSE(built->discarding);
+    CHECK(built->discarded_chunks == 0);
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    // Accumulated state for the retunes to destroy, so the case is not
+    // passing on a decoder that had nothing to lose.
+    auto before = poll_until(harness, *vrx, [](const rpc::RdsStation& station) {
+        return station.pi_valid && station.ps_received == 0x0F;
+    });
+    INFO(test::message_of(before));
+    REQUIRE(before.has_value());
+    CHECK_FALSE(before->discarding);
+
+    // Back to back with nothing between them: no poll, no sleep, no
+    // assertion. Anything in here would give the recording thread a block
+    // boundary to drain on and the case would stop reproducing what it is
+    // for. The moves are a few kilohertz, which keeps the shape identical
+    // so the graph applies them in place, and keeps the 200 kHz passband
+    // over the station so there is still a composite to decode.
+    for (int nth = 0; nth < kRetunes; ++nth) {
+        rpc::VrxParams moved = rds_receiver();
+        moved.center = kReceiverOffsetHz + 500 * (nth + 1);
+        const auto retuned = harness.client().set_vrx_params(*vrx, moved);
+        INFO(test::message_of(retuned));
+        REQUIRE(retuned.has_value());
+    }
+
+    // Cleared, which the old fence also managed. Everything below is what
+    // it did not.
+    auto cleared = harness.client().rds_station(*vrx);
+    INFO(test::message_of(cleared));
+    REQUIRE(cleared.has_value());
+    CHECK_FALSE(cleared->pi_valid);
+    CHECK(cleared->health.groups_decoded == 0);
+    CHECK(cleared->fault.empty());
+
+    // THE FENCE CLEARS AND SAYS SO. discarding is the field a client reads
+    // to tell this state from a receiver on an empty channel, and the
+    // assertion is that it goes false rather than that it was ever true:
+    // the first chunk of the new tuning can arrive before this poll does,
+    // and a case that demanded to catch the fence up would be asserting on
+    // the scheduler. The case below it pins the true reading, where it is
+    // not a race.
+    auto open_again = poll_until(harness, *vrx, [](const rpc::RdsStation& station) {
+        return !station.discarding;
+    });
+    INFO(test::message_of(open_again));
+    REQUIRE(open_again.has_value());
+
+    // AND THE SAMPLES GET THROUGH, which is the assertion the old code
+    // failed. samplesConsumed moving off zero means RdsBitSync::process was
+    // reached, and relocking means what reached it was the composite.
+    auto refilled = poll_until(harness, *vrx, [](const rpc::RdsStation& station) {
+        return station.pi_valid;
+    });
+    INFO(test::message_of(refilled));
+    REQUIRE(refilled.has_value());
+    CHECK(refilled->pi == kStationPi);
+    CHECK(refilled->health.samples_consumed > 0);
+    CHECK_FALSE(refilled->discarding);
+    CHECK(refilled->fault.empty());
+
+    const std::uint64_t blocks = (file.samples() + 16'383U) / 16'384U;
+    const std::uint64_t seen = harness.wait_for_blocks(blocks, 120'000);
+    INFO(std::format("{} blocks delivered of {}", seen, blocks));
+    CHECK(seen >= blocks);
+    const auto finished = harness.stop_engine();
+    INFO(test::message_of(finished));
+    CHECK(finished.has_value());
+}
+
+TEST_CASE("a decoder discarding for a retune says so rather than reading as a quiet band",
+          "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE SEVERITY OF THE BUG ABOVE WAS THAT IT LOOKED LIKE NOTHING. A
+    // decoder being fed nothing on purpose and a receiver pointed at an
+    // empty channel produce the identical struct: no PI, no PS, zero
+    // groups, zero samples consumed, empty fault. RdsStation::discarding is
+    // what tells them apart, and this case is the one that reads it true.
+    //
+    // The retune is issued BEFORE the engine runs, which makes the reading
+    // deterministic rather than a race against the first block: no chunk
+    // has been delivered, so the fence is up and stays up until one is.
+    // That is also the case the counting fence could not arm at all, by its
+    // own admission: with no epoch seen there was nothing to count from, so
+    // it left the decoder open to whatever the old tuning had already
+    // recorded. Comparing against a target has no such hole.
+    StationFile file("retunefence");
+    const auto written = file.write(station_spec(true, kStationCycles), 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    bring_up(harness, rds_options(file.uri()));
+
+    auto vrx = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    // Builds the decoder and joins it to the receiver's fan-out. A decoder
+    // on a receiver nobody has retuned is not discarding: the fence starts
+    // where the receiver is, and that is epoch zero here.
+    auto built = harness.client().rds_station(*vrx);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+    CHECK_FALSE(built->discarding);
+
+    rpc::VrxParams moved = rds_receiver();
+    moved.center = kReceiverOffsetHz + 1'000;
+    const auto retuned = harness.client().set_vrx_params(*vrx, moved);
+    INFO(test::message_of(retuned));
+    REQUIRE(retuned.has_value());
+
+    auto fenced = harness.client().rds_station(*vrx);
+    INFO(test::message_of(fenced));
+    REQUIRE(fenced.has_value());
+
+    // THE STATE AND ITS EXPLANATION, SIDE BY SIDE. Everything else here
+    // reads as a dead band, and this one field is why it does not.
+    CHECK(fenced->discarding);
+    CHECK(fenced->fault.empty());
+    CHECK_FALSE(fenced->pi_valid);
+    CHECK(fenced->health.samples_consumed == 0);
+    CHECK(fenced->health.groups_decoded == 0);
+
+    // Nothing was thrown away: the engine has not run, so no chunk reached
+    // the fence. discarding and discardedChunks answer different questions
+    // and a client watching only the counter would see none of this.
+    CHECK(fenced->discarded_chunks == 0);
+
+    run_to_completion(harness, file.samples(), 120'000);
+
+    // AND IT CLEARS BY ITSELF once the sample path delivers the tuning that
+    // was asked for. A fence that needed a second retune to unstick would
+    // pass every assertion above.
+    auto after = harness.client().rds_station(*vrx);
+    INFO(test::message_of(after));
+    REQUIRE(after.has_value());
+    CHECK_FALSE(after->discarding);
+    CHECK(after->health.samples_consumed > 0);
+    CHECK(after->pi_valid);
+    CHECK(after->pi == kStationPi);
 }
 
 // ---------------------------------------------------------------------------

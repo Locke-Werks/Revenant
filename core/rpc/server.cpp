@@ -652,10 +652,14 @@ struct RdsSnapshot {
     std::uint64_t sync_acquisitions = 0;
     std::uint64_t sync_losses = 0;
 
-    // The server's own four.
+    // The server's own six.
     std::uint32_t composite_rate = 0;
     std::uint64_t last_group_sample = 0;
     std::uint64_t ta_changed_at = 0;
+
+    // The retune fence, as a state and a size. See RdsRoute::epoch_target.
+    bool discarding = false;
+    std::uint64_t chunks_discarded = 0;
 
     // Empty while the decoder is running. See RdsRoute::fault, and
     // rds_station for why a faulted decoder answers rather than refusing.
@@ -701,33 +705,61 @@ struct RdsRoute {
     // which reads as the NEW station's first samples and is worse than not
     // clearing at all.
     //
-    // AudioChunk::tuning_epoch is where the boundary is exact. epoch is the
-    // last one this route saw, moved on every chunk including a discarded
-    // one, and retunes_pending is how many resets the loop thread has asked
-    // for that the sample path has not yet seen the boundary of. While it is
-    // above zero the sink DISCARDS, and each change of epoch takes one off
-    // it, so two retunes queued back to back consume two boundaries rather
-    // than one and the tuning in between is discarded with the rest.
+    // TWO READINGS OF ONE NUMBER, WHICH IS THE WHOLE ARRANGEMENT.
+    // epoch_target is VrxStatus::tuning_epoch read on the loop thread after
+    // the retune was queued: the epoch this receiver's chunks will carry
+    // once the graph has applied everything asked of it. epoch_reached is
+    // the highest AudioChunk::tuning_epoch the sample path has delivered. A
+    // chunk below the target is the tuning the client just left, so it is
+    // discarded; a chunk at or above it is the tuning the client asked for.
     //
-    // It cannot deadlock: the graph moves the epoch for every retune op it
-    // applies, including one the stage refuses, so every increment here has
-    // a boundary coming for it.
+    // It cannot stick. The graph moves the applied epoch for every retune
+    // op, including one the stage refuses, and it never queues an op
+    // without also moving the number vrx_status reports, so every target
+    // this route can hold is one some chunk will carry. A target set for a
+    // receiver that then stops producing chunks is not a stuck fence: there
+    // is nothing to decode either way.
     //
-    // THE ONE THING IT DOES NOT FENCE, stated rather than left to be found.
-    // A retune arriving before this route has seen a single chunk cannot be
-    // fenced, because there is no epoch yet to tell the old tuning from the
-    // new, so reset_rds_for_vrx leaves retunes_pending alone in that case.
-    // What can reach the decoder through that gap is only what was recorded
-    // between the attach and the retune, since a sink is snapshotted into a
-    // frame when the frame is recorded and never sees one older than itself,
-    // and it reaches a decoder holding nothing: the physical layer needs
-    // about half a second to lock and the group layer a group after that, so
-    // there is no accumulated text for it to be spliced onto. That is the
-    // hazard this whole fence exists for and it is absent in exactly that
-    // case.
-    std::uint64_t epoch = 0;
-    bool epoch_seen = false;
-    std::uint32_t retunes_pending = 0;
+    // WHAT THIS USED TO BE, BECAUSE IT FAILED SILENTLY AND PERMANENTLY.
+    // Until this change the loop thread counted resets into retunes_pending
+    // and the sample path took one off per OBSERVED CHANGE of chunk epoch.
+    // Graph::drain_control applies the whole queued stack in one pass
+    // before a single frame is recorded, so two retunes for one receiver
+    // inside one block period take the epoch from 0 to 2 and produce ONE
+    // stamped change. The count went to two, came down to one, and stayed
+    // there: every later chunk was discarded, bits.process was never
+    // reached again, and rdsStation answered with zeros and no fault, which
+    // on the wire is indistinguishable from a receiver pointed at a quiet
+    // channel. A dial drag reaches it, and so does any client that sets
+    // centre and bandwidth in two calls. The same count was also lost
+    // whenever an epoch landed only on a frame that produced no samples,
+    // because such a frame is never delivered and its change never
+    // observed. Comparing against a target has neither failure: it does not
+    // care how many retunes share a drain, or whether any particular epoch
+    // was ever carried by a chunk.
+    //
+    // A RETUNE BEFORE THE FIRST CHUNK IS NOW FENCED TOO, which the counting
+    // version could not do and said so. There is no "first epoch" to
+    // establish: the target is read off the receiver rather than inferred
+    // from what has been seen, so a reset arriving before any chunk fences
+    // exactly like one arriving after.
+    std::uint64_t epoch_target = 0;
+    std::uint64_t epoch_reached = 0;
+
+    // Chunks the fence threw away, cumulative for the life of this decoder.
+    //
+    // ON THE WIRE, and that is the point of it rather than a diagnostic
+    // afterthought. A decoder that is discarding looks exactly like a
+    // decoder hearing nothing: same zeros, same empty fault, same frozen
+    // counters. Reporting the state and its size is what lets a client say
+    // which, and it is what would have made the counting bug above a
+    // question somebody asked on the first poll instead of a quiet band
+    // nobody doubted.
+    std::uint64_t chunks_discarded = 0;
+
+    // Whether the fence is up right now: the sample path has not yet
+    // delivered a chunk from the tuning the client last asked for.
+    [[nodiscard]] bool discarding() const { return epoch_reached < epoch_target; }
 
     // The index at which ta last CHANGED, which is not the index at which it
     // was first received. The first valid value is the state the station was
@@ -910,7 +942,12 @@ public:
     // sink. Called after a retune: PS, RadioText and the AF list belong to
     // the station that was tuned, and a receiver moved to another frequency
     // would otherwise assemble one station's text over another's.
-    void reset_rds_for_vrx(engine::VrxId vrx);
+    // epoch_target is VrxStatus::tuning_epoch read AFTER the retune was
+    // queued. Taken as an argument rather than read here, so that a
+    // receiver that vanished between the retune and this call is reported
+    // to the caller who can still answer, instead of leaving a fence this
+    // function could only guess at.
+    void reset_rds_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target);
 
     // Builds one, attaches its sink and records it. Split out because both
     // entry points above reach it and both have already asked the engine
@@ -1307,7 +1344,18 @@ public:
         // AND fences the sample path against the frames the old tuning
         // already produced. reset_rds_for_vrx has why the clearing alone was
         // not enough.
-        owner_.reset_rds_for_vrx(*id);
+        //
+        // The status is read HERE and AFTER the retune, which is the whole
+        // of the fence: VrxStatus::tuning_epoch is the epoch this
+        // receiver's chunks will carry once the graph has applied
+        // everything queued for it, so it is the number the decoder waits
+        // to see. Reading it before the retune would fence against the
+        // tuning being left.
+        auto status = owner_.engine().vrx_status(*id);
+        if (!status) {
+            return to_exception(status.error());
+        }
+        owner_.reset_rds_for_vrx(*id, status->tuning_epoch);
         return kj::READY_NOW;
     }
 
@@ -1517,6 +1565,8 @@ public:
         out.setLastGroupSample(taken->last_group_sample);
         out.setTaChangedAt(taken->ta_changed_at);
         out.setFault(taken->fault);
+        out.setDiscarding(taken->discarding);
+        out.setDiscardedChunks(taken->chunks_discarded);
 
         auto health = out.initHealth();
         write_rds_bits_status(health, taken->bits);
@@ -2008,18 +2058,21 @@ void decode_rds_chunk(RdsRoute& route, const engine::AudioChunk& chunk) {
     // rather than a rule with an exception in front of it.
     //
     // The epoch is recorded whether the chunk is decoded or discarded,
-    // because it is what the NEXT reset fences against. See
-    // RdsRoute::retunes_pending for the whole of the arrangement.
-    const bool boundary = route.epoch_seen && chunk.tuning_epoch != route.epoch;
-    route.epoch = chunk.tuning_epoch;
-    route.epoch_seen = true;
-    if (boundary && route.retunes_pending > 0) {
-        --route.retunes_pending;
-    }
-    if (route.retunes_pending > 0) {
+    // because it is what says the fence has been crossed. See
+    // RdsRoute::epoch_target for the whole of the arrangement.
+    //
+    // A MAXIMUM AND NOT AN ASSIGNMENT. The graph delivers chunks in
+    // submission order on one completion thread, so this is nondecreasing
+    // already and the max costs a comparison; what it buys is that the
+    // fence cannot be reopened by a chunk arriving out of order, which is
+    // the failure that would be silent if the ordering guarantee ever
+    // changed.
+    route.epoch_reached = std::max(route.epoch_reached, chunk.tuning_epoch);
+    if (route.discarding()) {
         // Recorded before the retune landed. Discarding it is the point:
         // the decoder was cleared for the new tuning the moment the client
         // asked, and these samples are the transmitter it left.
+        ++route.chunks_discarded;
         return;
     }
 
@@ -2154,6 +2207,8 @@ Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
     out.composite_rate = route->composite_rate;
     out.last_group_sample = route->last_group_sample;
     out.ta_changed_at = route->ta_changed_at;
+    out.discarding = route->discarding();
+    out.chunks_discarded = route->chunks_discarded;
     return out;
 }
 
@@ -2255,6 +2310,15 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatu
         status.id, static_cast<std::uint32_t>(status.params.audio_rate), region,
         std::move(*sync));
 
+    // THE FENCE STARTS WHERE THE RECEIVER IS, not at zero. A decoder built
+    // on a receiver that has been retuned nine times must not accept a
+    // chunk stamped with an older epoch, and the attach cannot rule one out
+    // on ordering alone: it is a control op like the retune, so reasoning
+    // about which of the two the recording thread reaches first is exactly
+    // the kind of argument that stops being true when one of them moves.
+    // Reading the target off the receiver makes the question local.
+    route->epoch_target = status.tuning_epoch;
+
     // sink_lock_ is held ACROSS the attach and not merely checked before it,
     // which is what add_audio does and for the same reason. stop() sets
     // sink_closed_ under this lock while the loop thread is still running,
@@ -2332,7 +2396,7 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
     const std::scoped_lock owned(route->lock);
 }
 
-void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx) {
+void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target) {
     auto found = rds_routes_.find(vrx.value);
     if (found == rds_routes_.end()) {
         return;
@@ -2358,20 +2422,28 @@ void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx) {
     // RadioText assembled under the NEW tuning's first samples, which reads
     // as a successful decode of the station the client just tuned to.
     //
-    // So the sample path is told to discard until it crosses the boundary
-    // AudioChunk::tuning_epoch marks. Counted rather than flagged, so two
-    // retunes in quick succession wait for two boundaries and the tuning in
-    // between goes with the rest. Not armed at all when this route has yet
-    // to see a chunk, because there is then no epoch to fence against and
-    // nothing accumulated to protect; RdsRoute::retunes_pending has that
-    // case in full.
+    // So the sample path is told to discard everything below the epoch the
+    // caller read off the receiver after queueing the retune. That number
+    // is VrxStatus::tuning_epoch, the graph's own count of retunes queued
+    // for this receiver, and AudioChunk::tuning_epoch is the same count as
+    // far as the recording thread has got, so the two are comparable by
+    // construction. Two retunes in quick succession simply raise the target
+    // twice and the tuning in between goes with the rest.
     //
-    // WHAT THIS FUNCTION USED TO BE. Until 2026-09-20 it was the clearing
-    // alone, and the comment on setVrxParams said a retune clears the
-    // decoder, which was true of the struct and false of the stream.
-    if (route->epoch_seen) {
-        ++route->retunes_pending;
-    }
+    // NEVER LOWERED. Another session may have retuned this receiver in
+    // between and read a higher number than this caller did; taking the
+    // maximum keeps the fence at the latest request rather than reopening
+    // it for a tuning somebody has already left.
+    //
+    // WHAT THIS FUNCTION USED TO BE, IN TWO STEPS. Until 2026-09-20 it was
+    // the clearing alone, and the comment on setVrxParams said a retune
+    // clears the decoder, which was true of the struct and false of the
+    // stream. The fence that closed that COUNTED resets here and took one
+    // off per observed change of chunk epoch in the sample path, which two
+    // retunes in one control drain left permanently armed. RdsRoute::
+    // epoch_target has that failure in full and why a comparison cannot
+    // have it.
+    route->epoch_target = std::max(route->epoch_target, epoch_target);
 
     // The fault is NOT cleared. A retune cannot change the audio rate or the
     // channel count: both are shape, and Graph::set_vrx_params refuses a

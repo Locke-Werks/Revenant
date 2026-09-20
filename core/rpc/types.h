@@ -756,6 +756,23 @@ struct RdsStation {
     // call did before the field existed.
     std::string fault;
 
+    // The retune fence. True means the decoder was cleared for a retune and
+    // the sample path has not yet delivered a chunk from the new tuning, so
+    // it is being fed nothing on purpose and every field above is at its
+    // default rather than at what the band holds.
+    //
+    // CHECK IT ALONGSIDE fault, FOR THE SAME REASON. A discarding decoder
+    // and a receiver on a dead channel produce the identical struct: empty
+    // fault, zero counters, nothing valid. Draw "retuning" rather than "no
+    // RDS" while this is set. It clears on its own within about a block
+    // period.
+    bool discarding = false;
+
+    // Chunks the fence threw away, cumulative for the life of the decoder.
+    // Climbing while discarding stays true is a fence that is not clearing,
+    // which is a server defect rather than a quiet band.
+    std::uint64_t discarded_chunks = 0;
+
     [[nodiscard]] bool decoding() const { return fault.empty(); }
 };
 

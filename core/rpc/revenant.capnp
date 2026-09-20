@@ -1434,6 +1434,40 @@ struct RdsStation {
     # track list no longer describes anything, where an RDS fault leaves a
     # station struct that was true when it was last written.
     fault @53 :Text;
+
+    # THE RETUNE FENCE, AS A STATE A CLIENT CAN SEE.
+    #
+    # setVrxParams only queues the retune, so the server clears this decoder
+    # and then discards every chunk the old tuning already produced. While
+    # that is happening the decoder is fed nothing, and nothing else in this
+    # struct says so: the counters are frozen, fault is empty, and what a
+    # client reads is exactly what a receiver pointed at a quiet channel
+    # reads. This is the field that tells the two apart.
+    #
+    # True means the sample path has not yet delivered a chunk from the
+    # tuning the client last asked for, so the zeros above are the fence
+    # rather than the band. It clears on its own, within about a block
+    # period, when the first chunk of the new tuning arrives. A client
+    # showing "no RDS" while this is true is showing the wrong thing;
+    # "retuning" is the honest label.
+    #
+    # WHY IT IS HERE AT ALL. A fence built by counting the retunes asked for
+    # on one side and the changes of tuning observed on the other could get
+    # permanently stuck, and did: two retunes applied in the same control
+    # drain move the tuning once, so the count never came back down and the
+    # decoder discarded for the rest of the receiver's life with nothing
+    # anywhere saying why. The fence is now a comparison and cannot stick,
+    # and this field exists so that the next thing that goes wrong in here
+    # is visible on the first poll rather than mistaken for dead air.
+    discarding @54 :Bool;
+
+    # Chunks the fence has thrown away, cumulative from the moment this
+    # decoder was built, like every counter in health. A client differencing
+    # two polls sees how much composite a retune cost it; a client that
+    # finds this climbing while discarding stays true is looking at a fence
+    # that is not clearing, which is a defect in the server and not in the
+    # signal.
+    discardedChunks @55 :UInt64;
 }
 
 # ---------------------------------------------------------------------------
