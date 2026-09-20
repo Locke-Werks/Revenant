@@ -62,8 +62,8 @@ has been measured is below, with the numbers rather than the adjectives.
 
 ## Status
 
-M1 is done and M2 is under way. There is something to run, and it is a
-command line.
+M1 is done and M2 is under way. There are two things to run: a command line,
+and a Qt client that reaches a running engine over a socket.
 
 ```
 revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto" \
@@ -81,23 +81,35 @@ broadcast FM through it recorded with every drop counter at zero, checked by
 measuring the 19 kHz stereo pilot against its own neighbourhood rather than by
 listening: 1037x on the station against 2.86x on an empty channel.
 
-The second draws the whole 2.4 MHz as a waterfall in the terminal and lists
-what it finds in it. Both ends of the colour map track the band on their own,
+The second command draws the whole 2.4 MHz as a waterfall in the terminal and
+lists what it finds in it. Both ends of the colour map track the band on their own,
 from percentiles measured on the device rather than from extremes, expanding
 in a frame or two and contracting over thirty seconds. `--spectrum-floor` and
 `--spectrum-ceiling` hold either end still, which is what comparing two
 captures needs.
 
-What exists: the Vulkan context and allocator, the shader build, the
-polyphase channelizer, eight demodulators, the per-receiver fine stage, audio
-egress to WAV and to the sound card, a synthetic wideband source, a file
-source, an RTL-SDR backend, the full-span spectrum with a waterfall in the
-terminal, auto-scaling measured on the device, the wideband detector, and the
-conformance suite that diffs every GPU kernel against a scalar twin and
-demands identical bits. 139 tests pass on an RTX 4090 and an integrated
-Radeon across three build presets.
+`revenant-engine` is the same core left running with a Cap'n Proto session on
+the front of it, and `revenant-ui` is the client. Spectrum and waterfall are
+scene graph nodes rather than rasterised images, the newest waterfall row is
+at the top, and the detector's tracks are drawn over both: a frequency marker
+that fades on the spectrum, a rectangle bounded by the rows the signal was
+actually in on the waterfall, and a click tunes a receiver to one.
 
-What does not: any graphical interface, and every decoder.
+What exists: the Vulkan context and allocator, the shader build, the polyphase
+channelizer, seven demodulators and a raw complex tap, the per-receiver fine
+stage, audio egress to WAV and to the sound card, a synthetic wideband source,
+a file source, an RTL-SDR backend, the full-span spectrum with a waterfall in
+the terminal, auto-scaling measured on the device, the per-receiver passband
+spectrum, the wideband detector, the Cap'n Proto session that carries all of
+it to another process, the Qt client that draws it, and the conformance suite
+that diffs every GPU kernel against a scalar twin and demands identical bits.
+203 tests pass on an RTX 4090.
+
+What does not: every decoder. Audio does not cross the wire, so the client is
+silent and the command line is what listens. The session has no authentication
+of any kind and binds loopback for that reason, it cannot open or stop a
+source, and nothing saves a set of receivers across a restart. `docs/rpc.md`
+carries that list and what each one is waiting on.
 
 ### What has been measured
 
@@ -232,6 +244,8 @@ table and the disclosure log.
   a library, with the measurements that decided it
 - [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
   what it does not
+- [docs/rpc.md](docs/rpc.md), why the client is a second process, what crosses
+  the wire and what does not
 - [docs/ui-spectrum.md](docs/ui-spectrum.md), how the spectrum and waterfall scale
   themselves and why the fine-tuning display transforms a different stream
 - [docs/detection.md](docs/detection.md), wideband detection and click-to-tune, and
