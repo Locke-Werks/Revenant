@@ -389,8 +389,22 @@ executable would have discharged for free. It was written down while Revenant
 was proprietary and in a private repository, where none of it had come due.
 
 Both of those facts changed on 2026-09-18, so the question is worked through
-here rather than left sitting. What follows is the reasoning, not a ruling. See
-the last subsection.
+here rather than left sitting.
+
+**Decided 2026-09-20. The obligation is discharged by section 6d, not 6a.** A
+release offers the binary and the corresponding sources from one designated
+place, which satisfies LGPL-2.1 section 6d and GPL-3.0 section 6d in a single
+act. The sources it carries are libusb v1.0.29 upstream, which is the complete
+corresponding source because the vcpkg port applies no patches, and the three
+vcpkg rtlsdr diffs, which are Corresponding Source for the executable under
+GPL-3.0 section 1 whatever happens on the LGPL side. Moving libusb to a DLL
+was considered and rejected: 6b would discharge the clause for free, and it
+costs the single self-contained signed binary that the static triplet was
+chosen to produce, which is a worse trade than a file in the release.
+
+The reasoning below is unchanged and is what the decision rests on. Read it to
+check the decision, not to reopen it. The last subsection says what is still
+open, which is no longer this.
 
 Everything below was checked on 2026-09-19 against the installed tree at
 `build/ci/vcpkg_installed/x64-windows-static`, against `LICENSE` in this
@@ -556,7 +570,7 @@ thing that could ship today.
 | Port | Version | Licence, as the port declares it | In the binary | What it asks of a binary release |
 | --- | --- | --- | --- | --- |
 | rtlsdr | 2.0.2 | GPL-2.0-or-later | yes, static | Corresponding Source, including the port's three diffs; licence text; notices |
-| libusb | 1.0.29 | LGPL-2.1-or-later | yes, static, pulled in by rtlsdr | section 6: notice, a copy of the LGPL, and one of 6a to 6e |
+| libusb | 1.0.29 | LGPL-2.1-or-later | yes, static, pulled in by rtlsdr | section 6: notice, a copy of the LGPL, and one of 6a to 6e. 6d, decided 2026-09-20 |
 | pthreads (pthreads4w) | 3.0.0 | Apache-2.0 | yes, static, pulled in by rtlsdr | section 4: retain the copyright, patent, trademark and attribution notices, and reproduce upstream's `NOTICE` file if it has one |
 | capnproto | 1.4.0 | MIT | yes | the copyright notice and the permission notice |
 | zlib | 1.3.1 | Zlib | yes, pulled in by capnproto | nothing on a binary; the notice requirement binds source distributions |
@@ -645,27 +659,42 @@ hosting.
 is no `installer.toml` yet, so the Forge packaging is unwritten. Whenever it is
 written, the notices file is a payload member beside the binary, not a link.
 
-### This needs Archon's confirmation before the item is marked closed
+### The relink question is closed, 2026-09-20
 
-Nobody who worked on the above is a lawyer, and neither is Archon. What this
-section is good for is that each licence's actual text has been read against
-what this project actually links, with the versions and the link line checked
-rather than remembered, so the reasoning can be confirmed or handed to somebody
-qualified without them starting from nothing.
+Archon's decision, recorded here because the analysis above is long enough
+that a reader arriving at the end of it should not have to work out which way
+it went.
 
-Three things to confirm or reject, in the order they matter:
+**The route is 6d.** A release offers the binary and the corresponding
+sources from the same designated place, and that one act satisfies LGPL-2.1
+section 6d and GPL-3.0 section 6d together. Nothing turns on whether source
+is an acceptable form under 6a, so the "and/or source code" reading above is
+corroboration rather than the thing being relied on. What the release carries
+is libusb v1.0.29 upstream source, complete because the vcpkg port applies no
+patches, and the rtlsdr port's `dependencies.diff`, `library-linkage.diff`
+and `tools.diff`, which the GPL-3.0 section 1 obligation already requires
+whatever the LGPL asks.
 
-1. That source is an acceptable form under LGPL-2.1 section 6a, so no object
-   file or relink package is needed, and that a release carrying binary and
-   source together satisfies 6d.
-2. That the Apache-2.0 finding is right, and therefore that the "or later" in
+**The DLL was considered and rejected.** Shipping libusb beside the
+executable would take the 6b route and discharge the clause with no release
+artefact at all. It costs the single self-contained signed binary the static
+triplet exists to produce, and that binary is worth more than the file it
+would save.
+
+Nobody who worked on this is a lawyer and neither is Archon. What the analysis
+above is good for is that each licence's text was read against what this
+project actually links, with the versions and the link line checked rather
+than remembered, so somebody qualified can check the decision without starting
+from nothing.
+
+Two things from this section remain unconfirmed and neither blocks a release
+on the relink question:
+
+1. That the Apache-2.0 finding is right, and therefore that the "or later" in
    librtlsdr's grant is what makes the current engine link line lawful and not
    only what keeps Qt reachable.
-3. That the four open points above are the full list, since the purpose of
+2. That the four open points above are the full list, since the purpose of
    doing this was to find what is not satisfied rather than to confirm what is.
-
-Until those are confirmed, the item stays open and the entry above is the
-analysis, not the answer.
 
 ## Disclosure log
 
