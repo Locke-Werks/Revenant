@@ -271,13 +271,30 @@ struct DetectorConfig {
     // the operator's number belongs.
     //
     // The open upper end is load-bearing rather than tidy. Confidence rises
-    // by confidence_rise of its remaining distance to one, so it approaches
-    // one and lands on it only when confidence_rise is itself one and a
-    // single detection closes the whole gap. At any smaller rise a bar of one
-    // hides every track and says nothing about why: measured against an
-    // RTL-SDR at 98.1 MHz, a five second run with the bar at one listed no
-    // tracks at any of its four intervals while 88 were born. create()
-    // refuses that pair rather than accepting a filter that can only be empty.
+    // by confidence_rise of its remaining distance to one, so in exact
+    // arithmetic it approaches one without arriving. A bar of one then hides
+    // every track and says nothing about why: measured against an RTL-SDR at
+    // 98.1 MHz, a five second run with the bar at one listed no tracks at any
+    // of its four intervals while 88 were born. create() refuses that pair
+    // rather than accepting a filter that can only be empty.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. "It approaches one and lands on it
+    // only when confidence_rise is itself one and a single detection closes
+    // the whole gap." That is the exact-arithmetic answer and this does not
+    // run in exact arithmetic. The iteration is in IEEE double, and from one
+    // ulp below one the increment rounds UP to one for any rise of 0.5 or
+    // more: at 0.5 the increment lands exactly on the midpoint and ties to
+    // even, which is one. Measured at 0.5 after 53 detections, 0.6 after 40,
+    // 0.9 after 16, and stalling one ulp below one at the next double down
+    // from 0.5. See require_reachable_confidence in detector.cpp, which held
+    // the same wrong claim and refused a bar of one in configurations that
+    // could in fact clear it.
+    //
+    // ui/models/engine_link.h reached the true answer first and carries
+    // static_asserts on both sides of the break point. It is a display and
+    // this is the authoritative place, so the fact is now stated here as
+    // well rather than living two directories away from the header that
+    // contradicted it.
     double confidence_threshold = 0.5;
 
     // ---- integration in time ---------------------------------------------

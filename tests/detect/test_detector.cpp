@@ -276,6 +276,129 @@ TEST_CASE("the detector refuses a configuration it cannot honour", "[detect]") {
     }
 }
 
+// A confidence bar of one is refused exactly when it cannot be cleared, and
+// where that line falls is a fact about IEEE double rather than about the
+// rule.
+//
+// Confidence rises by confidence_rise of its remaining distance to one, so in
+// exact arithmetic one is a limit and nothing reaches it. create() refused a
+// bar of one for any rise below one on that reasoning, and the reasoning does
+// not survive contact with the arithmetic: from one ulp below one the
+// increment rounds UP to one for every rise of 0.5 or more, so the guard was
+// turning away bars those configurations clear.
+//
+// The shape of this case is the point. It does not check the guard against a
+// constant, which would only prove that two lines of this repository were
+// typed by the same person. It runs the real iteration to its fixed point for
+// each rise and then asks whether create() agrees with what the iteration
+// did. A rise whose saturated confidence is one must be accepted with a bar
+// of one, and a rise that stalls below must be refused.
+//
+// A run that has not reached the fixed point measures nothing, so the cap is
+// a REQUIRE rather than a break: a rise that needs more decisions than the
+// cap allows fails this case instead of being recorded as a stall.
+TEST_CASE("a confidence bar of one is refused only when it is unreachable", "[detect]") {
+    constexpr std::uint64_t kSeed = 60451;
+    INFO("seed " << kSeed);
+
+    const engine::SpectrumGeometry geometry = test_geometry();
+
+    // Where the increment from one ulp below one stops rounding up. See
+    // kConfidenceRiseReachingOne in detector.cpp.
+    constexpr double kBreak = 0.5;
+
+    // Deciding on every frame, so the cap is decisions and not seconds. The
+    // slowest rise below needs about 1030 of them to settle.
+    constexpr std::size_t kFrameCap = 2000;
+
+    // Runs a steady signal until the track's confidence stops changing and
+    // returns the value it settled on, or -1 if it had not settled by the
+    // cap.
+    const auto saturate = [&](double rise) {
+        Scene scene(-90.0, kSeed);
+        scene.set({Emitter{.centre_bin = 480, .width_bins = 21, .snr_2500_db = 30.0}});
+
+        detect::DetectorConfig config = base_config();
+        config.confidence_rise = rise;
+        config.decision_interval_seconds = kFrameSeconds;
+
+        auto made = detect::Detector::create(config, scene.geometry());
+        REQUIRE(made);
+        detect::Detector detector = std::move(*made);
+
+        std::uint64_t id = 0;
+        std::uint64_t seen_decisions = 0;
+        double previous = -1.0;
+        unsigned stable = 0;
+        for (std::size_t i = 0; i < kFrameCap; ++i) {
+            auto fed = detector.consume(scene.next());
+            if (!fed) {
+                FAIL("consume refused a frame: " << fed.error().message);
+            }
+            if (detector.stats().decisions == seen_decisions) {
+                continue;
+            }
+            seen_decisions = detector.stats().decisions;
+            if (detector.tracks().empty()) {
+                continue;
+            }
+            const detect::Track& track = detector.tracks()[0];
+            if (track.id != id) {
+                // A fresh track restarts the iteration, so the count of
+                // stable decisions restarts with it.
+                id = track.id;
+                previous = -1.0;
+                stable = 0;
+            }
+            if (track.confidence == previous) {
+                ++stable;
+                if (stable >= 4) {
+                    return track.confidence;
+                }
+            } else {
+                stable = 0;
+            }
+            previous = track.confidence;
+        }
+        return -1.0;
+    };
+
+    const double rises[] = {0.05, 0.2,  0.35, 0.45, std::nextafter(kBreak, 0.0),
+                            kBreak, 0.6, 0.9,  1.0};
+
+    for (const double rise : rises) {
+        INFO("confidence_rise " << std::format("{:.17g}", rise));
+
+        const double settled = saturate(rise);
+        REQUIRE(settled >= 0.0);
+
+        const bool reaches_one = settled == 1.0;
+        CHECK(reaches_one == (rise >= kBreak));
+
+        detect::DetectorConfig config = base_config();
+        config.confidence_rise = rise;
+        config.confidence_threshold = 1.0;
+        auto made = detect::Detector::create(config, geometry);
+
+        // The guard and the arithmetic, tied together rather than agreeing by
+        // coincidence. Every consumer of the bar compares with >=, so a track
+        // that lands on one clears a bar of one.
+        CHECK(made.has_value() == reaches_one);
+        if (!made) {
+            CHECK(made.error().message.find("confidence_threshold") != std::string::npos);
+        }
+
+        // set_thresholds takes the same pair at runtime and has to answer the
+        // same way, or the CLI and the RPC surface disagree with create().
+        detect::DetectorConfig live = base_config();
+        live.confidence_rise = rise;
+        auto running = detect::Detector::create(live, geometry);
+        REQUIRE(running);
+        CHECK(running->set_thresholds(live.detection_threshold_db, 1.0).has_value() ==
+              reaches_one);
+    }
+}
+
 TEST_CASE("a frame from another geometry is refused rather than misread", "[detect]") {
     Scene scene(-90.0, 20260919);
     auto made = detect::Detector::create(base_config(), scene.geometry());

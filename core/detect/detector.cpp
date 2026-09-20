@@ -98,22 +98,45 @@ constexpr std::uint32_t kNoAssignment = 0xFFFF'FFFFU;
     return {};
 }
 
+// The smallest confidence_rise whose iteration lands on exactly 1.0.
+//
+// Confidence rises by rise of its remaining distance to one, c += (1 - c) *
+// rise, so in exact arithmetic one is a limit and not a value. In IEEE double
+// it is a value, and the break point is here rather than at a rise of one.
+//
+// From c one ulp below one, (1 - c) is 2^-53 exactly and the sum is
+// 1 - 2^-53 * (1 - rise). The two nearest doubles are 1 - 2^-53 and 1.0, so
+// the result rounds up to one when (1 - rise) < 0.5, and at rise exactly 0.5
+// it lands on the midpoint and ties to even, which is also one. Below that it
+// rounds back down and the iteration stalls one ulp short forever.
+//
+// Measured, not reasoned: 0.5 lands after 53 detections, 0.6 after 40, 0.9
+// after 16, and std::nextafter(0.5, 0.0) never lands. Rounding is
+// round-to-nearest-even under /fp:precise, and the last step needs no
+// rounding of the product, since 2^-53 * rise is exact, so a contracted
+// multiply-add gives the same answer.
+constexpr double kConfidenceRiseReachingOne = 0.5;
+
 // A confidence bar the rise can never reach hides every track and reports
 // nothing about why, which is the worst shape a bad threshold can take: the
 // list is empty and an empty list is also what a quiet band looks like. Both
 // places that accept a threshold refuse that pair here rather than take a
 // filter that can only ever be empty.
 //
-// Confidence rises by confidence_rise of its remaining distance to one, so
-// one is a limit rather than a value, and it is reached only when a single
-// detection closes the whole gap.
+// WHAT THIS FUNCTION USED TO DO. It refused a threshold of one for any rise
+// below one, on the claim that "one is a limit rather than a value, and it is
+// reached only when a single detection closes the whole gap". That is the
+// exact-arithmetic answer, and this runs in IEEE double, so the guard refused
+// every rise in [0.5, 1.0) as well: a bar those configurations clear on the
+// 53rd detection or sooner. Every consumer compares with >=, so a track at
+// exactly one passes a bar of exactly one.
 [[nodiscard]] Status require_reachable_confidence(double threshold, double rise) {
-    if (threshold >= 1.0 && rise < 1.0) {
+    if (threshold >= 1.0 && rise < kConfidenceRiseReachingOne) {
         return fail(std::format(
             "Detector: confidence_threshold is {} and confidence_rise is {}, so a track's "
-            "confidence approaches one without reaching it and nothing would ever clear the "
-            "bar. Use a threshold below one",
-            threshold, rise));
+            "confidence stalls one ulp below one and nothing would ever clear the bar. Use a "
+            "threshold below one, or a rise of {} or more",
+            threshold, rise, kConfidenceRiseReachingOne));
     }
     return {};
 }
