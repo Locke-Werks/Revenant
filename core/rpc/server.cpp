@@ -1982,6 +1982,19 @@ void ServerImpl::pump_audio(const std::shared_ptr<AudioNode>& node) {
         node->frames_sent += buffer.frames;
     }
 
+    // WRITTEN HERE AND NOT IN core/rpc/convert.cpp, WHICH IS THE ONE PLACE
+    // THIS FILE DEPARTS FROM THAT RULE
+    //
+    // The rule exists because a spectrum frame crosses as an
+    // engine::SpectrumFrame and a conversion belongs where both sides are
+    // visible. An audio chunk does not: engine::AudioChunk::samples is valid
+    // only for the duration of the sink call, so by the time a chunk reaches
+    // the wire it is an AudioChunkBuffer this file owns, queued and
+    // reordered against other chunks, and framesDroppedBefore is this
+    // subscription's own accounting rather than anything the engine said. A
+    // convert.cpp function would take seven loose arguments and convert
+    // nothing.
+    //
     // Sized up front so the samples land in one segment. Two floats to a
     // word, plus room for the six scalars and the struct itself.
     const std::uint64_t words = (buffer.samples.size() + 1) / 2 + 32;
