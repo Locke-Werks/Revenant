@@ -1002,14 +1002,31 @@ TEST_CASE("call signs come back out of North American PI codes", "[rds]") {
     CHECK(*pi_from_callsign("KZZZ") + 1 == *pi_from_callsign("WAAA"));
     CHECK(*pi_from_callsign("WZZZ") + 1 == 0x9950);
 
-    // Exception 1, section D.7.1: a computed PI with a zero second nibble is
-    // reassigned so a European receiver does not read it as a local station
-    // and refuse to AF switch.
-    CHECK(pi_from_callsign("KEOE") == 0xAF1C);  // 0x1C00, both exceptions
+    // Exception 2, section D.7.1: a computed PI with a zero LOW BYTE becomes
+    // 0xAF P1 P2. KEOE computes to 0x1C00, whose second nibble is 0xC, so
+    // exception 1 does not fire on it and exception 2 alone takes it to
+    // 0xAF1C.
+    //
+    // WHAT THIS COMMENT USED TO SAY. Until 2026-09-20 it named exception 1
+    // here and the trailing note said "both exceptions". Neither is true of
+    // this vector, and getting it wrong in a comment beside an assertion is
+    // how the next reader learns the wrong rule: exception 1 is the zero
+    // SECOND NIBBLE rule, and the vector for it is two lines down.
+    CHECK(pi_from_callsign("KEOE") == 0xAF1C);
     CHECK(callsign_from_pi(Region::kRbds, 0xAF1C) == "KEOE");
 
+    // Exception 1, and only exception 1: a computed PI whose second nibble is
+    // zero is reassigned into the 0xA block so a European receiver does not
+    // read it as a local station and refuse to AF switch. KADC computes to
+    // 0x1050, second nibble zero and low byte 0x50, so it lands on 0xA150 and
+    // stops there.
+    CHECK(pi_from_callsign("KADC") == 0xA150);
+    CHECK(callsign_from_pi(Region::kRbds, 0xA150) == "KADC");
+
     // Exception 2's NOTE: the nine codes 0x1000 through 0x9000 satisfy both
-    // rules and map twice, landing on 0xAFA1 through 0xAFA9.
+    // rules and map twice, landing on 0xAFA1 through 0xAFA9. KAAA computes to
+    // 0x1000, which exception 1 takes to 0xA100 and exception 2 then takes to
+    // 0xAFA1. This is the vector where "both exceptions" is the right phrase.
     CHECK(pi_from_callsign("KAAA") == 0xAFA1);
     CHECK(callsign_from_pi(Region::kRbds, 0xAFA1) == "KAAA");
 
