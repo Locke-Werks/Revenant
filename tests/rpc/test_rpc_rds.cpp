@@ -51,9 +51,11 @@
 //   7. It carries no RDS at all.                     runs, never locks
 //   8. It carries RDS under noise.                   runs, claims nothing
 //   9. Two of them, on two regions, at once.         both decode
-//  10. It is removed while decoding.                 decoder goes with it
-//  11. It is retuned while decoding.                 state clears
-//  12. Its traffic flag moves mid-recording.         the change is timed
+//  10. It is removed, engine stopped.                decoder goes with it
+//  11. It is retuned, engine stopped.                state clears
+//  12. It is removed WHILE DECODING.                 decoder goes, run lives
+//  13. It is retuned WHILE DECODING.                 state clears and refills
+//  14. Its traffic flag moves mid-recording.         the change is timed
 //
 // Shapes 7 and 8 are the ones that matter most and the ones a bar reaches
 // last. A decoder that silently never locks looks exactly like a station
@@ -61,6 +63,33 @@
 // that was never transmitted. The cases for both assert that NOTHING is
 // claimed, because claiming something wrong is the failure and claiming
 // nothing is the correct answer.
+//
+// 10 AND 11 USED TO BE NAMED "WHILE DECODING" AND WERE NOT
+//
+// Both ran against a STOPPED engine. 10 removed a receiver that had never
+// been fed a sample, and 11 retuned one after run_to_completion had already
+// joined the run. Nothing was decoding in either, so neither exercised the
+// interleaving its name claimed, and the two names between them read as
+// though the concurrency was covered. They are renamed to what they check,
+// which is worth keeping: the control-plane bookkeeping is where a decoder
+// outliving its receiver would show up, and it is cheap.
+//
+// 12 and 13 are the cases the old names promised. Each one proves the
+// overlap rather than hoping for it: the engine is running, and the case
+// polls until the decoder's own samplesConsumed has MOVED BETWEEN TWO POLLS
+// before it touches anything, so the completion thread is demonstrably
+// inside the sink when the removal or the retune is issued.
+//
+// WHAT THEY CANNOT PIN, so the names do not overclaim a second time. A test
+// cannot choose the interleaving, so neither case proves the absence of a
+// race; what each one pins is that the operation is reachable under load and
+// that the state afterwards is right, including that the run survives, which
+// is where a detach racing a dispatch in progress would show. 13's fence
+// assertion is the one with real teeth, and it is a POSITIVE one:
+// samplesConsumed has to climb off zero again after the retune. An
+// implementation whose fence never disarms, which is what an off-by-one in
+// the pending count or an epoch the graph forgot to stamp produces, leaves
+// it at zero for the rest of the run and fails there.
 
 #include <algorithm>
 #include <chrono>
@@ -159,6 +188,14 @@ constexpr std::string_view kStationRt = "GPU RESIDENT SDR";
 // layer's acquisition, which is about 350 bits, and the block layer's hunt,
 // which is one group.
 constexpr int kStationCycles = 4;
+
+// Ten for the cases that have to act on a RUNNING engine, which those play
+// at realtime rather than unthrottled. One cycle is 8 groups and a group is
+// 87.6 ms, so ten cycles is 7.0 seconds: about a second and a half to
+// acquire and fill PS, a window in the middle to issue a removal or a
+// retune, and enough left afterwards for the decoder to be visibly fed
+// again. Four cycles is 2.8 seconds and most of that is acquisition.
+constexpr int kRunningCycles = 10;
 
 // One group in composite samples, which is the unit the timing assertions
 // below are stated in. 171000 is 144 times 1187.5 exactly, which is the
@@ -437,16 +474,21 @@ private:
 // Driving the engine
 // ---------------------------------------------------------------------------
 
-[[nodiscard]] HarnessOptions rds_options(const std::string& uri) {
+// Unthrottled by default. Every other case in this suite runs at pace = 1 so
+// there is a window to subscribe inside; there is nothing to subscribe to
+// here, the decoder is installed before the engine starts, and a three
+// second station at realtime would be three seconds of test.
+//
+// The two cases that act WHILE THE DECODER IS RUNNING pass pace = 1, and
+// that is not a convenience either. Unthrottled, a file source delivers the
+// whole recording faster than a client can poll twice, so a case trying to
+// remove or retune "during" the decode would in practice be doing it after,
+// which is exactly the defect those two cases were written to stop having.
+[[nodiscard]] HarnessOptions rds_options(const std::string& uri, double pace = 0.0) {
     HarnessOptions options;
     options.source_uri = uri;
     options.channels = kRdsChannels;
-
-    // Unthrottled. Every other case in this suite runs at pace = 1 so there
-    // is a window to subscribe inside; there is nothing to subscribe to
-    // here, the decoder is installed before the engine starts, and a three
-    // second station at realtime would be three seconds of test.
-    options.pace = 0.0;
+    options.pace = pace;
     options.block_samples = 16'384;
     return options;
 }
@@ -485,6 +527,84 @@ void run_to_completion(Harness& harness, dsp::SampleIndex samples, int timeout_m
     const auto finished = harness.stop_engine();
     INFO(test::message_of(finished));
     CHECK(finished.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// Acting while the decoder is running
+// ---------------------------------------------------------------------------
+//
+// THE OVERLAP IS PROVED AND NOT ASSUMED, which is the whole difference
+// between these two cases and the pair they replaced. A case that starts the
+// engine and then acts immediately is a case that usually acts before the
+// first chunk has retired, which is a stopped engine with extra steps.
+//
+// poll_until below is the instrument: it asks the decoder itself, over the
+// wire, until the decoder's own answer satisfies a predicate or a deadline
+// passes. Every wait here is bounded and every one of them reports what it
+// last saw, so a timeout says which condition was not met rather than
+// hanging.
+
+// How long any of these waits will sit before giving up. Generous against a
+// loaded CI machine: the longest condition here is a locked decoder with a
+// full PS, which is about 1.5 seconds of a realtime recording.
+constexpr int kDecodeWaitMs = 30'000;
+
+// The interval between polls. Short against a group's 87.6 ms, so a wait
+// that is satisfied mid-recording does not overshoot by a whole group and
+// spend the window it was opening.
+constexpr int kPollIntervalMs = 5;
+
+// Polls rds_station until want() is happy, and hands back the last answer
+// either way. A refusal ends the wait immediately: every predicate here is
+// about a decoder that exists, so a receiver that went is a failure to
+// report rather than a condition to keep waiting for.
+template <typename Predicate>
+[[nodiscard]] Expected<rpc::RdsStation> poll_until(Harness& harness, std::uint64_t vrx,
+                                                   Predicate want) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kDecodeWaitMs);
+    for (;;) {
+        auto station = harness.client().rds_station(vrx);
+        if (!station) {
+            return station;
+        }
+        if (want(*station)) {
+            return station;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return fail(std::format(
+                "waited {} ms and the decoder never reached the condition: consumed {}, "
+                "groups {}, lock {}, piValid {}",
+                kDecodeWaitMs, station->health.samples_consumed,
+                station->health.groups_decoded, static_cast<int>(station->health.lock),
+                station->pi_valid));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
+    }
+}
+
+// Waits until the decoder has consumed composite BETWEEN TWO POLLS, which is
+// the evidence that the engine's completion thread is inside this sink right
+// now rather than that it was at some point.
+//
+// Two polls and not one. A single samplesConsumed above zero proves only
+// that a chunk arrived once, which is also true of a run that has already
+// ended; a count that MOVED proves the stream is live.
+[[nodiscard]] Status wait_until_decoding(Harness& harness, std::uint64_t vrx) {
+    auto first = poll_until(harness, vrx, [](const rpc::RdsStation& station) {
+        return station.health.samples_consumed > 0;
+    });
+    if (!first) {
+        return std::unexpected(first.error());
+    }
+    const std::uint64_t mark = first->health.samples_consumed;
+    auto moved = poll_until(harness, vrx, [mark](const rpc::RdsStation& station) {
+        return station.health.samples_consumed > mark;
+    });
+    if (!moved) {
+        return std::unexpected(moved.error());
+    }
+    return {};
 }
 
 [[nodiscard]] std::string text_of(const std::vector<std::uint8_t>& bytes, std::size_t count) {
@@ -980,8 +1100,17 @@ TEST_CASE("an unsuitable receiver is refused in terms of the condition it failed
     CHECK(ids->size() == 5);
 }
 
-TEST_CASE("a decoder goes when its receiver does", "[gpu][rpc][rds]") {
+TEST_CASE("removing a receiver takes its decoder with it, engine stopped",
+          "[gpu][rpc][rds]") {
     REVENANT_NEEDS_GPU();
+
+    // NAMED FOR WHAT IT CHECKS. This was "a decoder goes when its receiver
+    // does" and was listed as the "removed while decoding" case, which it is
+    // not: the engine has never been started when the removal happens, so
+    // nothing is decoding and no interleaving is exercised. What it does
+    // check is the control-plane bookkeeping, which is worth a case of its
+    // own and is cheap, and the case that does run against a live decoder is
+    // below.
 
     // THE BUG THIS IS AGAINST IS ONE THIS TREE HAS ALREADY HAD. An audio
     // subscription outlived the receiver it was on and reported healthy
@@ -1039,9 +1168,16 @@ TEST_CASE("a decoder goes when its receiver does", "[gpu][rpc][rds]") {
     run_to_completion(harness, kRdsSourceRate, 60'000);
 }
 
-TEST_CASE("a retune clears the station the decoder had accumulated",
+TEST_CASE("a retune clears the station the decoder had accumulated, engine stopped",
           "[gpu][rpc][rds]") {
     REVENANT_NEEDS_GPU();
+
+    // NAMED FOR WHAT IT CHECKS, on the same terms as the removal case above.
+    // run_to_completion has already joined the run before the retune below,
+    // so this is the clearing and nothing else: no chunk can arrive after
+    // it, which is precisely the interleaving the "retuned while decoding"
+    // name promised and this arrangement cannot produce. The live case is
+    // below and the fence it exercises did not exist when this was written.
 
     StationFile file("retune");
     const auto written = file.write(station_spec(true), 0.0);
@@ -1172,7 +1308,8 @@ TEST_CASE("a traffic announcement that starts mid-recording is timed to its grou
     constexpr int kCycles = 12;
 
     StationFile file("ta");
-    const auto written = file.write(station_spec(true, kCycles, kQuietCycles), 0.0);
+    const auto written =
+        file.write(station_spec(true, kCycles, kQuietCycles), 0.0);
     INFO(test::message_of(written));
     REQUIRE(written.has_value());
 
@@ -1224,6 +1361,182 @@ TEST_CASE("a traffic announcement that starts mid-recording is timed to its grou
     // for seconds, as the schema says.
     CHECK(station->ta_changed_at < station->health.samples_consumed);
     CHECK(station->composite_rate == kCompositeRate);
+}
+
+// ---------------------------------------------------------------------------
+// The two that run against a live decoder
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a receiver removed while its decoder is running takes it with it",
+          "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    StationFile file("removelive");
+    const auto written = file.write(station_spec(true, kRunningCycles), 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    // Realtime, so there is a middle of the recording to act in. See
+    // rds_options: unthrottled, the whole file is delivered faster than a
+    // client can poll twice and "while decoding" becomes "after decoding".
+    Harness harness;
+    bring_up(harness, rds_options(file.uri(), 1.0));
+
+    auto vrx = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto built = harness.client().rds_station(*vrx);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    // THE OVERLAP, PROVED. Nothing below means anything until the decoder is
+    // demonstrably being fed: this waits for its own sample count to move
+    // between two polls, so the completion thread is inside this sink.
+    const auto live = wait_until_decoding(harness, *vrx);
+    INFO(test::message_of(live));
+    REQUIRE(live.has_value());
+
+    const auto removed = harness.client().remove_vrx(*vrx);
+    INFO(test::message_of(removed));
+    REQUIRE(removed.has_value());
+
+    // The engine's own sentence, as in the stopped case, and now against a
+    // decoder that was mid-chunk rather than one that had never run.
+    auto after = harness.client().rds_station(*vrx);
+    REQUIRE_FALSE(after.has_value());
+    INFO(after.error().message);
+    CHECK(after.error().message.find("registered") != std::string::npos);
+
+    // A SECOND RECEIVER DECODES ON THE SAME RUNNING ENGINE. This is what
+    // catches a removal that left the fan-out or the sink list in a state
+    // the next attach cannot join, which a stopped engine cannot show
+    // because nothing dispatches through it afterwards.
+    auto second = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(second));
+    REQUIRE(second.has_value());
+
+    auto rebuilt = harness.client().rds_station(*second);
+    INFO(test::message_of(rebuilt));
+    REQUIRE(rebuilt.has_value());
+    CHECK(rebuilt->vrx == *second);
+
+    const auto second_live = wait_until_decoding(harness, *second);
+    INFO(test::message_of(second_live));
+    REQUIRE(second_live.has_value());
+
+    // AND THE RUN SURVIVES, which is the assertion the detach is really
+    // being held to. A sink still attached to a receiver the graph has
+    // dropped, or a route freed while a dispatch was inside it, fails the
+    // dispatch and ends the run, and that arrives here rather than as a
+    // leak nobody notices.
+    const auto finished = harness.stop_engine();
+    INFO(test::message_of(finished));
+    CHECK(finished.has_value());
+}
+
+TEST_CASE("a retune while the decoder is running clears it and refills it",
+          "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    StationFile file("retunelive");
+    const auto written = file.write(station_spec(true, kRunningCycles), 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    bring_up(harness, rds_options(file.uri(), 1.0));
+
+    auto vrx = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto built = harness.client().rds_station(*vrx);
+    INFO(test::message_of(built));
+    REQUIRE(built.has_value());
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    // Not merely decoding: LOCKED, with the whole of PS assembled. There has
+    // to be accumulated state for the retune to destroy, or the case passes
+    // on a decoder that had nothing to lose.
+    auto before = poll_until(harness, *vrx, [](const rpc::RdsStation& station) {
+        return station.pi_valid && station.ps_received == 0x0F;
+    });
+    INFO(test::message_of(before));
+    REQUIRE(before.has_value());
+    REQUIRE(before->health.lock == rpc::RdsLock::Locked);
+    REQUIRE(text_of(before->ps, 8) == kStationPs);
+
+    // A retune the engine applies in place: same mode, same audio rate, same
+    // bandwidth, a different centre. The only station in the file is at
+    // baseband DC and the receiver lands 200 kHz off it, so what it hears
+    // from here on carries no subcarrier at all.
+    rpc::VrxParams moved = rds_receiver();
+    moved.center = kReceiverOffsetHz + 200'000;
+    const auto retuned = harness.client().set_vrx_params(*vrx, moved);
+    INFO(test::message_of(retuned));
+    REQUIRE(retuned.has_value());
+
+    auto cleared = harness.client().rds_station(*vrx);
+    INFO(test::message_of(cleared));
+    REQUIRE(cleared.has_value());
+    CHECK_FALSE(cleared->pi_valid);
+    CHECK(cleared->ps_received == 0);
+    CHECK(cleared->health.groups_decoded == 0);
+    CHECK(cleared->last_group_sample == 0);
+    CHECK(cleared->region == before->region);
+
+    // THE FENCE, AND THIS IS THE ASSERTION WITH TEETH IN IT.
+    //
+    // Engine::set_vrx_params queues the retune, so the server clears the
+    // decoder and then tells the sample path to discard until it crosses
+    // the tuning boundary AudioChunk::tuning_epoch marks. A fence that never
+    // disarms is the failure that arrangement can have, and it is what an
+    // off-by-one in the pending count or an epoch the graph forgot to stamp
+    // produces: the decoder is fed nothing for the rest of the run and the
+    // struct stays at the zeros checked above, which every assertion before
+    // this one would happily pass.
+    //
+    // So the decoder has to be seen consuming AGAIN, from zero, after the
+    // retune. It is a positive assertion for that reason.
+    auto refilling = poll_until(harness, *vrx, [](const rpc::RdsStation& station) {
+        return station.health.samples_consumed > 0;
+    });
+    INFO(test::message_of(refilling));
+    REQUIRE(refilling.has_value());
+
+    const std::uint64_t blocks = (file.samples() + 16'383U) / 16'384U;
+    const std::uint64_t seen = harness.wait_for_blocks(blocks, 120'000);
+    INFO(std::format("{} blocks delivered of {}", seen, blocks));
+    CHECK(seen >= blocks);
+    const auto finished = harness.stop_engine();
+    INFO(test::message_of(finished));
+    CHECK(finished.has_value());
+
+    // And the station it left never comes back. WHAT THIS DOES AND DOES NOT
+    // SAY: the receiver is 200 kHz off the only transmitter in the file, so
+    // this is a statement about the new tuning carrying nothing rather than
+    // proof that the fence discarded the old tuning's last few chunks. Those
+    // are at most the engine's pipeline depth of composite, which is under a
+    // group, and they reach a physical layer that has just been reset and
+    // needs about half a second to lock, so they cannot complete a group
+    // either way. The fence is what stops them being counted; the assertion
+    // that it is working is the one above.
+    auto ended = harness.client().rds_station(*vrx);
+    INFO(test::message_of(ended));
+    REQUIRE(ended.has_value());
+    CHECK(ended->fault.empty());
+    CHECK_FALSE(ended->pi_valid);
+    CHECK(ended->ps_received == 0);
+    CHECK(ended->health.groups_decoded == 0);
+    CHECK(ended->health.samples_consumed > 0);
 }
 
 // ---------------------------------------------------------------------------
