@@ -371,8 +371,17 @@ struct Group {
     bool version_b = false;  // B0 from block 2
     bool type_valid = false;
 
-    // Set when the group was framed correctly but every block in it carried
-    // offset E. MMBS traffic in North America, not RDS. See RdsDecoder.
+    // Set when at least one block in the group carried offset E. MMBS traffic
+    // in North America, not RDS. See RdsDecoder.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it said "every block
+    // in it carried offset E", and the decoder sets the flag on the first
+    // block that does. The two readings differ exactly where it matters: EN
+    // 50067 Annex A footnote 1 has MMBS arriving in multiples of four blocks,
+    // so a group with one or two E blocks in it is a group where the multiple
+    // is not aligned to this decoder's framing, which is the case a reader
+    // most wants the flag raised on. The code is the reading worth keeping
+    // and the sentence was the half that was wrong.
     bool mmbs = false;
 };
 

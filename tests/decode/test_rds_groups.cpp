@@ -1200,6 +1200,33 @@ TEST_CASE("offset word E is MMBS in North America and an error in Europe", "[rds
         CHECK(decoder.sync_losses() == 0);
     }
 
+    SECTION("one E block in a group is enough to flag it") {
+        // Annex A footnote 1 has MMBS arriving in multiples of four blocks. A
+        // group holding one is a group where the multiple does not line up
+        // with this decoder's framing, so the flag has to be reachable from a
+        // single block or the case it most needs to report is the case it
+        // stays silent on.
+        RdsDecoder decoder(Region::kRbds);
+        prime(decoder);
+
+        auto blocks = encode_group(
+            GroupWords{0x2345, type0_block2(10, true, false, true, false, 0), 0xE0E0,
+                       chars_to_word('R', 'E'), false});
+        blocks[2] = mmbs;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.last_group().has_value());
+        CHECK(decoder.last_group()->mmbs);
+        CHECK_FALSE(decoder.last_group()->blocks[2].valid);
+        CHECK(decoder.mmbs_blocks() == 1);
+        CHECK(decoder.blocks_dropped() == 0);
+        // The three RDS blocks around it still decode.
+        CHECK(decoder.state().pi == 0x2345);
+        CHECK(decoder.state().ps_text() == "RE      ");
+    }
+
     SECTION("Europe treats them as errors") {
         RdsDecoder decoder(Region::kRds);
         prime(decoder);
