@@ -206,6 +206,11 @@ class AudioPlayer : public QObject {
     // there is nothing wrong. Separate from EngineLink::audioFault, which
     // is the engine refusing a subscription: one is fixed by picking
     // another output and the other is not.
+    //
+    // WHAT SURVIVES A REOPEN AND WHAT DOES NOT. Two faults are kept behind
+    // this one string because they have different lifetimes, and merging
+    // them is how the more important one got erased. See device_fault_ and
+    // sink_fault_ below.
     Q_PROPERTY(QString fault READ fault NOTIFY statusChanged)
 
     // Something the player ADAPTED rather than something wrong: today the
@@ -258,7 +263,7 @@ public:
     [[nodiscard]] bool playing() const { return sink_ != nullptr; }
     [[nodiscard]] QString source() const;
     [[nodiscard]] bool squelchOpen() const;
-    [[nodiscard]] QString fault() const { return fault_; }
+    [[nodiscard]] QString fault() const;
     [[nodiscard]] QString note() const { return note_; }
 
     [[nodiscard]] int bufferedMillis() const { return buffered_millis_; }
@@ -331,7 +336,29 @@ private:
     QByteArray wanted_device_id_;
 
     QString active_device_;
-    QString fault_;
+
+    // THE TWO FAULTS, AND THE ONE THAT USED TO BE ERASED
+    //
+    // A fault about the SELECTION: the operator's chosen output has gone
+    // and the player is on the system default instead. Reopening a sink
+    // does not answer it, because the sink that opens is on the fallback
+    // device and the operator still needs to know their pick is not what
+    // is playing. It is written by refresh_devices and by open_sink's own
+    // fall-back branch, and it is cleared by exactly two things: the
+    // operator picking a device, and the device coming back.
+    //
+    // open_sink used to clear one shared fault_ unconditionally on every
+    // successful open. refresh_devices writes this sentence and closes the
+    // sink, tick() reopens on the fallback a few tens of milliseconds
+    // later, and the clear wiped the only notice the operator ever got.
+    QString device_fault_;
+
+    // A fault about the SINK: the last open attempt was refused, or the
+    // running sink stopped with an error. This one IS the reopen's own
+    // verdict, so it is cleared at the top of every open attempt and
+    // rewritten if that attempt fails.
+    QString sink_fault_;
+
     QString note_;
     qreal volume_ = 0.7;
     bool muted_ = false;

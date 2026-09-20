@@ -182,12 +182,21 @@ void AudioPlayer::refresh_devices()
             // than silently falling back, because falling back silently is
             // how audio ends up coming out of a laptop speaker in a room
             // where that matters.
-            fault_ = QStringLiteral(
+            //
+            // In device_fault_ and not in sink_fault_, which is what makes
+            // it survive the reopen that follows a few tens of
+            // milliseconds later. See the two-fault note in the header.
+            device_fault_ = QStringLiteral(
                 "the output device that was selected has gone; playing on the system "
                 "default");
             close_sink();
-            emit statusChanged();
+        } else {
+            // It is back, and the selection points at it again, so the
+            // sentence above has been answered. This is one of the two
+            // things that clears it; setDevice is the other.
+            device_fault_.clear();
         }
+        emit statusChanged();
     }
 
     emit devicesChanged();
@@ -209,7 +218,12 @@ void AudioPlayer::setDevice(int index)
     // A device change is a new sink. The ring is not touched, so the audio
     // buffered for the old device is played out of the new one rather than
     // thrown away.
-    fault_.clear();
+    //
+    // Both faults go. The operator has just answered the question either
+    // of them was asking, which is which output to use, and holding a
+    // sentence about a device they have moved off is holding a stale one.
+    device_fault_.clear();
+    sink_fault_.clear();
     close_sink();
     emit deviceChanged();
     emit statusChanged();
@@ -277,10 +291,16 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
 {
     close_sink();
 
+    // This attempt's own verdict, cleared before the attempt so whichever
+    // way it goes only its verdict is left behind. device_fault_ is NOT
+    // touched: it describes the selection, which this attempt does not
+    // change. See the two-fault note in the header.
+    sink_fault_.clear();
+
     bool fell_back = false;
     const QAudioDevice out = resolve_device(fell_back);
     if (out.isNull()) {
-        fault_ = QStringLiteral("this machine has no audio output device");
+        sink_fault_ = QStringLiteral("this machine has no audio output device");
         return;
     }
 
@@ -340,7 +360,7 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
             //
             // So the operator is told which device refused what, and what
             // that device does want, and picks another output.
-            fault_ = QStringLiteral(
+            sink_fault_ = QStringLiteral(
                          "%1 will not take 32-bit float at %2 Hz on %3 channel(s). It "
                          "offers %4 Hz on %5. Pick another output.")
                          .arg(out.description())
@@ -377,8 +397,6 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
     open_generation_ = generation;
     active_device_ = out.description();
 
-    // A sink is open, so whatever the last attempt left behind is answered.
-    //
     // The widening is a NOTE and not a fault, kept apart because the two
     // mean opposite things to the operator: a fault is something to act on
     // and this is a statement that nothing needs acting on, the audio is
@@ -386,11 +404,30 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
     // than one channel. Filing it as a fault would train the operator to
     // ignore the line that also carries a device that has gone.
     note_ = widened;
-    fault_.clear();
+
     if (fell_back) {
-        fault_ = QStringLiteral(
+        // resolve_device could not use the selection, so this sink is on
+        // the fallback. Same sentence refresh_devices writes and the same
+        // field, so the two paths cannot overwrite each other with
+        // different words for the same condition.
+        device_fault_ = QStringLiteral(
             "the output device that was selected has gone; playing on the system default");
     }
+}
+
+QString AudioPlayer::fault() const
+{
+    // Both, when both hold. The selection fault and the sink fault are
+    // separate conditions and an operator whose chosen headset has gone AND
+    // whose fallback refuses the format needs to read both sentences to
+    // know what to do.
+    if (device_fault_.isEmpty()) {
+        return sink_fault_;
+    }
+    if (sink_fault_.isEmpty()) {
+        return device_fault_;
+    }
+    return device_fault_ + QStringLiteral("  ") + sink_fault_;
 }
 
 void AudioPlayer::close_sink()
@@ -406,9 +443,10 @@ void AudioPlayer::close_sink()
     active_device_.clear();
     sink_millis_ = 0;
 
-    // The note describes the sink that is going, so it goes with it. The
-    // fault does NOT: close_sink is on the path a refused format takes,
-    // and clearing here would erase the sentence that said why.
+    // The note describes the sink that is going, so it goes with it.
+    // Neither fault does: close_sink is on the path a refused format takes
+    // and on the path a vanished device takes, and clearing here would
+    // erase the sentence that said why in both cases.
     note_.clear();
 }
 
@@ -435,10 +473,10 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
             // Said in words, because a sink that has stopped is silence and
             // silence is what a quiet channel sounds like: the same
             // argument core/rpc/client.h makes for the ended callback.
-            fault_ = QStringLiteral(
-                         "the output device stopped (%1). Pick another output, or plug it "
-                         "back in and pick it again.")
-                         .arg(static_cast<int>(why));
+            sink_fault_ = QStringLiteral(
+                              "the output device stopped (%1). Pick another output, or "
+                              "plug it back in and pick it again.")
+                              .arg(static_cast<int>(why));
             emit statusChanged();
             break;
         }
@@ -463,9 +501,11 @@ void AudioPlayer::tick()
         // resampled, for the reason the header gives: this process holds no
         // DSP.
         //
-        // fault_ is NOT cleared here. A device that refused the format
+        // Neither fault is cleared here. A device that refused the format
         // refuses it again on the next tick, so clearing would flicker the
-        // message twenty times a second; open_sink rewrites it either way.
+        // message twenty times a second; open_sink owns sink_fault_ and
+        // rewrites it either way, and device_fault_ outlives the open on
+        // purpose.
         open_sink(format, generation);
     }
 
