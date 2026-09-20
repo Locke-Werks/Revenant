@@ -640,10 +640,24 @@ struct Graph::Impl {
         // between them.
         VrxParams recording_params;
 
-        // How many retunes have been APPLIED to this receiver, recording
-        // thread only, snapshotted into every frame and delivered on every
+        // How many retunes have been QUEUED for this receiver, control plane
+        // only, under control_lock. Stamped onto the retune op as it is
+        // queued and reported by vrx_status, so a consumer knows the number
+        // the chunks are heading for before any chunk carries it.
+        std::uint64_t queued_epoch = 0;
+
+        // The same number, as far as the recording thread has got: the
+        // queued_epoch of the last retune op it applied. Recording thread
+        // only, snapshotted into every frame and delivered on every
         // AudioChunk. See AudioChunk::tuning_epoch for what a consumer does
         // with it and why the boundary cannot be drawn on the control plane.
+        //
+        // ASSIGNED FROM THE OP AND NOT INCREMENTED HERE, which is what makes
+        // the two sides one number rather than two counts that agree until
+        // they do not. Incrementing meant the control plane knew how many
+        // retunes it had asked for and the sample path knew how many it had
+        // applied, and nothing anywhere held the value that says whether a
+        // given chunk is before or after a given request.
         std::uint64_t recording_epoch = 0;
 
         std::unique_ptr<VrxStage> stage;
@@ -715,6 +729,13 @@ struct Graph::Impl {
         VrxId id;
         VrxParams params;
         VrxPlacement placement;
+
+        // Retune only: the receiver's queued_epoch at the moment this op was
+        // pushed, which the recording thread copies onto the slot when it
+        // applies it. Carried on the op rather than recomputed, so that the
+        // number vrx_status handed a caller before the drain is the number
+        // the chunks after the drain carry.
+        std::uint64_t tuning_epoch = 0;
         std::shared_ptr<VrxSlot> slot;
         std::shared_ptr<AudioSink> sink;
         std::shared_ptr<SpectrumSink> spectrum_sink;
@@ -1038,7 +1059,18 @@ struct Graph::Impl {
                         // recording thread is not in a position to know
                         // without asking the stage what it did with six
                         // fields.
-                        ++slot->recording_epoch;
+                        //
+                        // ASSIGNED AND NOT INCREMENTED. Two retunes drained
+                        // in one pass both land here before a single frame
+                        // is recorded, so the epoch arrives at the second
+                        // op's number either way; what assignment adds is
+                        // that VrxStatus::tuning_epoch already held that
+                        // number, so a consumer can compare rather than
+                        // count the boundaries it sees. Counting is what
+                        // broke: one drain of two ops produces one stamped
+                        // change, so a consumer waiting for two waited for
+                        // ever.
+                        slot->recording_epoch = op.tuning_epoch;
 
                         // COUNTED, NOT DISCARDED. There is no caller left
                         // to return this to: the op is on the recording
@@ -3001,6 +3033,20 @@ Status Graph::remove_vrx(VrxId id) {
 
 Status Graph::set_vrx_params(VrxId id, const VrxParams& params, const VrxPlacement& placement) {
     auto& impl = *impl_;
+
+    // ALLOCATED BEFORE THE LOCK IS TAKEN, which is the opposite order from
+    // add_vrx and is required rather than tidier. The locked section below
+    // moves the receiver's queued_epoch, and that number is what a consumer
+    // fences against: an allocation failing after it moved would leave a
+    // receiver whose status promises a retune that will never be applied,
+    // and every consumer comparing against it discards for the rest of the
+    // run. Allocating first means the only two outcomes are a refusal that
+    // moved nothing and an op that carries the number it moved to.
+    auto op = std::unique_ptr<Impl::ControlOp>(new (std::nothrow) Impl::ControlOp());
+    if (op == nullptr) {
+        return fail("Graph::set_vrx_params could not allocate the control operation");
+    }
+
     {
         std::scoped_lock lock(impl.control_lock);
         auto slot = impl.find_known(id);
@@ -3060,17 +3106,20 @@ Status Graph::set_vrx_params(VrxId id, const VrxParams& params, const VrxPlaceme
         slot->placement = placement;
         slot->shape = *planned;
         slot->shape_known = true;
+
+        // MOVED HERE, UNDER THE LOCK AND AFTER THE LAST REFUSAL, so that
+        // vrx_status called the instant this returns already reports the
+        // number the chunks are heading for. A refused retune queues no op
+        // and must not move it, or a consumer fences against an epoch no
+        // chunk will ever carry and discards for ever.
+        op->tuning_epoch = ++slot->queued_epoch;
     }
 
-    auto* op = new (std::nothrow) Impl::ControlOp();
-    if (op == nullptr) {
-        return fail("Graph::set_vrx_params could not allocate the control operation");
-    }
     op->kind = Impl::ControlOp::Kind::Retune;
     op->id = id;
     op->params = params;
     op->placement = placement;
-    impl.push_control(op);
+    impl.push_control(op.release());
     return {};
 }
 
@@ -3189,6 +3238,7 @@ Expected<VrxStatus> Graph::vrx_status(VrxId id) const {
     status.params = slot->params;
     status.placement = slot->placement;
     status.demod_rate = slot->shape.demod_rate;
+    status.tuning_epoch = slot->queued_epoch;
     status.level_dbfs = slot->load_level();
     status.squelch_open = slot->squelch_open.load(std::memory_order_relaxed);
     status.audio_samples = slot->audio_samples.load(std::memory_order_relaxed);

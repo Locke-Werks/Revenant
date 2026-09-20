@@ -444,6 +444,110 @@ TEST_CASE("a receiver keeps producing audio across a retune", "[gpu][engine][m1]
     CHECK(status->params.center == kOffset + 300);
 }
 
+TEST_CASE("two retunes drained together move the tuning epoch by two and stamp one number",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // WHAT A CONSUMER OF AudioChunk::tuning_epoch MUST NOT DO, pinned so it
+    // cannot come back. Graph::drain_control applies the whole queued stack
+    // in one pass before a single frame is recorded, so two retunes queued
+    // inside one block period move the epoch twice and produce exactly ONE
+    // number on the wire. A consumer that fenced by counting the changes it
+    // observed therefore waited for two and saw one, and waited for ever;
+    // core/rpc/server.cpp's RDS decoder did exactly that and answered with
+    // zeros and no fault for the rest of the run, which reads as a quiet
+    // band.
+    //
+    // Both retunes are queued BEFORE the engine runs, so the pass that
+    // applies them is the first drain and there is no scheduling in the
+    // assertion: every chunk this test sees carries the same epoch, and
+    // that epoch is two.
+    constexpr dsp::Hertz kOffset = 37'500 * 4;
+
+    auto created = engine::Engine::create(default_config());
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    REQUIRE(eng.open_source(nfm_uri(kOffset, 1'200'000)).has_value());
+
+    engine::VrxParams params;
+    params.center = kOffset;
+    params.bandwidth = 25'000;
+    params.demod = engine::Demod::Nfm;
+
+    const auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    const auto fresh = eng.vrx_status(*added);
+    REQUIRE(fresh.has_value());
+    CHECK(fresh->tuning_epoch == 0);
+
+    // Two in-place moves: the centre shifts a few hundred hertz and every
+    // rate and tap count stays where it was, which is the retune a stage
+    // takes without a rebuild.
+    engine::VrxParams first = params;
+    first.center = kOffset + 300;
+    const auto moved_once = eng.set_vrx_params(*added, first);
+    INFO(test::message_of(moved_once));
+    REQUIRE(moved_once.has_value());
+
+    engine::VrxParams second = params;
+    second.center = kOffset + 600;
+    const auto moved_twice = eng.set_vrx_params(*added, second);
+    INFO(test::message_of(moved_twice));
+    REQUIRE(moved_twice.has_value());
+
+    // THE TARGET IS KNOWABLE BEFORE ANY CHUNK CARRIES IT. This is the whole
+    // of what makes a fence a comparison rather than a count: the number
+    // the chunks are heading for is on the receiver the instant the retune
+    // is accepted.
+    const auto queued = eng.vrx_status(*added);
+    REQUIRE(queued.has_value());
+    CHECK(queued->tuning_epoch == 2);
+
+    // A retune the graph REFUSES must not move it. A fence set against an
+    // epoch no chunk will ever carry is the same permanent discard by
+    // another route, so this is a correctness assertion and not tidiness.
+    engine::VrxParams wider = params;
+    wider.bandwidth = 50'000;
+    const auto refused = eng.set_vrx_params(*added, wider);
+    CHECK_FALSE(refused.has_value());
+    const auto unmoved = eng.vrx_status(*added);
+    REQUIRE(unmoved.has_value());
+    CHECK(unmoved->tuning_epoch == 2);
+
+    std::mutex lock;
+    std::vector<std::uint64_t> epochs;
+    std::size_t chunks = 0;
+
+    REQUIRE(eng.set_audio_sink(*added, [&](const engine::AudioChunk& chunk) -> Status {
+                 const std::lock_guard<std::mutex> guard(lock);
+                 ++chunks;
+                 if (epochs.empty() || epochs.back() != chunk.tuning_epoch) {
+                     epochs.push_back(chunk.tuning_epoch);
+                 }
+                 return {};
+             }).has_value());
+
+    const auto ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    const std::lock_guard<std::mutex> guard(lock);
+    INFO(chunks << " chunks carrying " << epochs.size() << " distinct epochs");
+    REQUIRE(chunks > 0);
+
+    // ONE VALUE, WHICH IS TWO. Not "the last one is two": the point of the
+    // case is that the run contains no change of epoch at all, so a
+    // consumer watching for changes has nothing to watch and a consumer
+    // comparing against the target it read is already satisfied.
+    REQUIRE(epochs.size() == 1);
+    CHECK(epochs.front() == 2);
+    CHECK(epochs.front() == queued->tuning_epoch);
+}
+
 TEST_CASE("a receiver that names no audio rate is planned at the engine's, not at 48 kHz",
           "[gpu][engine][m1]") {
     REVENANT_NEEDS_GPU();

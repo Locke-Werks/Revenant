@@ -392,6 +392,19 @@ struct AudioChunk {
     // right, because an operator dragging a dial wants the audio to follow
     // the dial rather than to gap.
     //
+    // COMPARE IT AGAINST VrxStatus::tuning_epoch, AND DO NOT COUNT THE
+    // TIMES IT CHANGES. Both numbers are the same monotonic per-receiver
+    // count of queued retunes, read at the two ends of the control queue,
+    // so a consumer reads the status after set_vrx_params returns and
+    // discards every chunk below what it read. Counting the changes it
+    // observes instead is wrong twice over, and both were reachable and
+    // both were silent. Two retunes drained in one pass move this by two
+    // and produce ONE change, so a consumer waiting for two changes waits
+    // for ever. And a frame that produces no samples is never delivered, so
+    // an epoch that lands only on a silent frame is never observed at all.
+    // A consumer that got either wrong stopped decoding permanently and
+    // read, on the wire, as a receiver pointed at a quiet band.
+    //
     // IT COUNTS APPLIED RETUNES AND NOT CHANGES OF TUNING. A retune the
     // stage refuses still moves it, because the control op was applied and
     // GraphStats::vrx_retune_refusals is required to stay at zero anyway. A

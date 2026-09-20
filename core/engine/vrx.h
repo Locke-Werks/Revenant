@@ -301,6 +301,31 @@ struct VrxStatus {
 
     bool squelch_open = false;
 
+    // The tuning epoch this receiver will be at once every retune QUEUED so
+    // far has been applied, which is the number of retunes the control plane
+    // has accepted for it. Zero for a receiver that has never been retuned.
+    //
+    // THIS IS THE TARGET AudioChunk::tuning_epoch CONVERGES UP TO, and it is
+    // the only honest way for a consumer to fence its own state against a
+    // retune. set_vrx_params only queues a control op, so a consumer that
+    // clears itself when the call returns is then handed the old tuning's
+    // frames, which is worse than not clearing at all. It reads this number
+    // after the call and discards every chunk carrying less.
+    //
+    // A TARGET AND NOT A COUNT OF EVENTS TO WAIT FOR, which is the whole
+    // reason it is here. core/rpc/server.cpp used to count the retunes it
+    // had asked for and take one off per observed change of chunk epoch.
+    // Two retunes applied in one control drain move the epoch by two and
+    // produce ONE change, so the count never reached zero and that consumer
+    // discarded for the rest of the run, silently. A comparison cannot go
+    // wrong that way: it is right however many retunes land in one drain,
+    // and it is right when the epoch a chunk would have carried lands on a
+    // frame that produced no samples and so was never delivered.
+    //
+    // Read under the same lock as `params`, so it is at least as new as the
+    // retune the caller just queued.
+    std::uint64_t tuning_epoch = 0;
+
     // Audio FRAMES this receiver produced, and frames it produced that
     // reached nothing.
     //
