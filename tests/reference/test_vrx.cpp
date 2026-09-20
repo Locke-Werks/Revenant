@@ -823,6 +823,17 @@ TEST_CASE("the generalised minimum rate against the shorthand it replaced, mode 
     CHECK(narrow_place->granted_high == narrow_place->granted_low);
     CHECK_FALSE(dsp::plan_vrx(kGrid, kSourceRate, narrow, *narrow_place).has_value());
     CHECK_FALSE(dsp::demod_rate_for(narrow, *narrow_place, 48'000).has_value());
+
+    // A pitch below zero is read as zero, the way plan_vrx and
+    // demod_rate_for read VrxParams::cw_pitch. Passed through signed it
+    // translated the band the wrong way: -3000 on a 1 kHz request reaches
+    // 3500 Hz from the mix centre and asked for 7000 S/s where the engine
+    // runs at 1500.
+    for (dsp::Hertz bandwidth : {1'000, 3'000}) {
+        INFO("bandwidth " << bandwidth);
+        CHECK(dsp::minimum_demod_rate(dsp::kDemodCw, bandwidth, -3'000) ==
+              dsp::minimum_demod_rate(dsp::kDemodCw, bandwidth, 0));
+    }
 }
 
 // ---------------------------------------------------------------------------

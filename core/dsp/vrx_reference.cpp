@@ -1108,9 +1108,15 @@ Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
         return 0;
     }
 
+    // Clamped here for the same reason plan_vrx and demod_rate_for clamp
+    // it: a pitch is a distance below the tuned frequency, so a negative
+    // one translated literally moves the band the wrong way and asks for a
+    // rate the engine will never run. See the header for the figures.
+    const Hertz pitch = std::max<Hertz>(0, cw_pitch);
+
     engine::VrxParams shorthand;
     shorthand.bandwidth = bandwidth;
-    shorthand.cw_pitch = cw_pitch;
+    shorthand.cw_pitch = pitch;
     if (mode <= kDemodCw) {
         shorthand.demod = static_cast<engine::Demod>(mode);
     }
@@ -1119,7 +1125,7 @@ Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
     if (!band) {
         return 0;
     }
-    return minimum_demod_rate(mode, mix_frame(*band, mode, cw_pitch));
+    return minimum_demod_rate(mode, mix_frame(*band, mode, pitch));
 }
 
 Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,

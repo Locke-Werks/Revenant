@@ -631,6 +631,16 @@ struct Passband {
 // answer and so the generalisation above can be checked against what it
 // replaced. Exactly minimum_demod_rate(mode, band) for the band the mode's
 // shorthand rule expands `bandwidth` to, translated by the pitch for CW.
+//
+// A pitch below zero is read as zero, which is what plan_vrx and
+// demod_rate_for both do with VrxParams::cw_pitch. It used to be passed
+// through signed, and that made this overload answer a different number
+// from the engine for the one input the engine clamps: a pitch of -3000 on
+// a 1 kHz CW request translates the band to [-3500, -2500], which reaches
+// 3500 Hz from the mix centre and so asks for 7000 S/s, where the engine
+// mixes at no pitch at all and runs at 1500. Neither figure was wrong
+// about its own band. They were about different bands, which is worse in a
+// function whose stated job is to answer what the engine will do.
 [[nodiscard]] Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch);
 
 // The demodulation rate a request will actually run at: the minimum above,
