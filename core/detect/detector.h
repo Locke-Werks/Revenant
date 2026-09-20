@@ -131,6 +131,14 @@ enum class TrackState : std::uint8_t {
     Live = 1,
 
     // Not detected, inside its hold, decaying.
+    //
+    // A Held track's center, bandwidth and snr_2500_db are the last ones a
+    // decision measured and nothing rewrites them, so they are stale by
+    // construction and correct as far as they go. That is deliberate: a
+    // click on a held row tunes a receiver to where the signal was, which is
+    // where it comes back, and both the spectrum marker and the waterfall
+    // rectangle size themselves from the bandwidth. A blanked geometry is an
+    // unclickable, invisible row.
     Held = 2,
 
     // Not detected because another track's candidate swallowed it.
@@ -465,6 +473,50 @@ struct DetectorConfig {
     // classification exists, and nothing sets one yet.
     double bootstrap_hold_seconds = 3.0;
 
+    // ---- telling a stopped signal from its own echo -----------------------
+
+    // When a transmission stops, its energy does not leave the integrated
+    // spectrum; it decays out of the exponential average. The detection test
+    // cannot tell the difference, so the band keeps clearing the threshold
+    // and keeps being published as a live detection for as long as the
+    // residual stays above it. That is (snr_2500_db - detection_threshold_db)
+    // divided by the decay rate, and on a broadcast station it is far longer
+    // than the hold: measured 2026-09-20 on a 111 kbaud QPSK emitter at 30 dB
+    // in 149.85 kHz, the row stayed Live for 9.06 s after the emitter
+    // stopped, then Held for 2.95 s. Twelve seconds of published row against
+    // a three second hold, the first nine of it at confidence 1.00 with
+    // silent_samples() at zero, so nothing on the wire marked it stale.
+    //
+    // The discriminator is the decay rate itself. An exponential average with
+    // time constant average_seconds falls at 10/ln(10) / average_seconds dB
+    // per second once its input goes to zero, and nothing else falls at
+    // exactly that rate. Measured 4.26, 5.39 and 11.0 dB/s at average_seconds
+    // 1.0, 0.8 and 0.4 against a predicted 4.34, 5.43 and 10.86: within two
+    // percent over a factor of 2.5 in the time constant.
+    //
+    // A candidate is suppressed when its SNR has fallen at residual_decisions
+    // consecutive decisions and the total fall over that run is at least
+    // residual_decay_fraction of what pure decay would produce. Suppression
+    // is at the candidate and not at the track on purpose: a track-level rule
+    // leaves the candidate free, and a new track is then born from it every
+    // time the old one times out.
+    //
+    // Only a lower bound on the rate, and that is not an oversight. Pure
+    // decay is the FASTEST the average can fall, because it is what the
+    // average does with no input at all, so anything falling faster has no
+    // input either.
+    //
+    // The cost of a false positive is bounded and small. A genuine signal
+    // fading at that rate is suppressed, its track goes Held rather than
+    // being dropped, and the first decision at which the SNR stops falling
+    // publishes the candidate again and the track keeps its id. So the
+    // failure mode is a momentary Held state, not a lost track.
+    //
+    // Zero decisions switches the rule off entirely, which is what a case
+    // isolating some other behaviour wants.
+    double residual_decay_fraction = 0.6;
+    std::uint32_t residual_decisions = 4;
+
     // Minimum band overlap, as a fraction of the narrower band, for a
     // candidate and a track to be considered the same signal.
     double association_overlap = 0.3;
@@ -509,6 +561,13 @@ struct DetectorStats {
     // narrow ones. It says the frame is busy enough that raising max_peaks
     // would change what is reported.
     std::uint64_t peaks_overflowed = 0;
+
+    // Candidates withheld because their SNR was falling at the exponential
+    // average's own decay rate, so the energy behind them was a residual
+    // rather than a transmission. Counted per candidate per decision, so a
+    // station that stops once contributes one per decision for the rest of
+    // its decay.
+    std::uint64_t candidates_residual = 0;
 };
 
 class Detector {
@@ -568,6 +627,10 @@ private:
     // Says whether it did, because the gap split has to know whether any of
     // its segments survived before it falls back to the whole band.
     [[nodiscard]] bool emit_candidate(std::size_t first, std::size_t last);
+
+    // Drops the candidates whose energy is the exponential average's own
+    // residual. See residual_decay_fraction.
+    void reject_residual(double elapsed_seconds);
 
     void update_tracks(dsp::SampleIndex now, double elapsed_seconds);
     void update_channel(Track& track) const;
@@ -636,6 +699,27 @@ private:
     std::vector<Peak> accepted_;
 
     std::vector<Candidate> candidates_;
+
+    // One band the previous decision measured, carried forward so this
+    // decision can ask whether it is still falling. Held per band rather than
+    // per track because the suppression has to happen before anything has an
+    // identity, and rebuilt every decision: an entry no candidate matches is
+    // stale and goes.
+    struct Decaying {
+        std::uint32_t first_bin = 0;
+        std::uint32_t last_bin = 0;
+
+        // The previous decision's SNR, which is what "still falling" is
+        // measured against, and the SNR the current run of falls started
+        // from with the source seconds it has spanned, which is what the
+        // rate is measured over.
+        double snr_db = 0.0;
+        double run_snr_db = 0.0;
+        double run_seconds = 0.0;
+        std::uint32_t run = 0;
+    };
+    std::vector<Decaying> decaying_;
+    std::vector<Decaying> decaying_next_;
 
     // Every track including Pending ones. tracks_ is the published subset.
     std::vector<Track> all_;

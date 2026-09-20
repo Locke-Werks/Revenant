@@ -190,6 +190,11 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
         !ok) {
         return std::unexpected(ok.error());
     }
+    if (auto ok = require_range(config.residual_decay_fraction, 0.0, 10.0,
+                                "residual_decay_fraction");
+        !ok) {
+        return std::unexpected(ok.error());
+    }
     if (auto ok = require_range(config.split_gap_db, 0.0, 60.0, "split_gap_db"); !ok) {
         return std::unexpected(ok.error());
     }
@@ -421,6 +426,7 @@ void Detector::accumulate(const engine::SpectrumFrame& frame, double alpha) {
 void Detector::decide(dsp::SampleIndex now, double elapsed_seconds) {
     estimate_noise_floor();
     find_candidates();
+    reject_residual(elapsed_seconds);
     update_tracks(now, elapsed_seconds);
 
     last_decision_ = now;
@@ -905,6 +911,82 @@ bool Detector::emit_candidate(std::size_t first, std::size_t last) {
     candidate.bandwidth = static_cast<dsp::Hertz>(std::llround(high_edge - low_edge));
     candidates_.push_back(candidate);
     return true;
+}
+
+void Detector::reject_residual(double elapsed_seconds) {
+    // 10/ln(10). An exponential average with no input left decays by one
+    // neper per time constant, and a neper is this many decibels, so this
+    // over average_seconds is the dB per second a band falls at once the
+    // thing that filled it has stopped. Nothing that is still transmitting
+    // falls at exactly that rate, which is the whole discriminator. See
+    // DetectorConfig::residual_decay_fraction.
+    constexpr double kDbPerNeper = 4.342944819032518;
+
+    decaying_next_.clear();
+    decaying_next_.reserve(candidates_.size());
+
+    std::size_t kept = 0;
+    for (std::size_t c = 0; c < candidates_.size(); ++c) {
+        const Candidate candidate = candidates_[c];
+
+        // Matched by bin overlap rather than by identity, because this runs
+        // before anything has one. Largest overlap wins, so a band that
+        // splits while it decays does not hand its history to whichever
+        // piece the sweep reached first.
+        const Decaying* matched = nullptr;
+        std::uint32_t best_overlap = 0;
+        for (const Decaying& held : decaying_) {
+            if (held.last_bin < candidate.first_bin || held.first_bin > candidate.last_bin) {
+                continue;
+            }
+            const std::uint32_t overlap = std::min(held.last_bin, candidate.last_bin) -
+                                          std::max(held.first_bin, candidate.first_bin) + 1U;
+            if (overlap > best_overlap) {
+                best_overlap = overlap;
+                matched = &held;
+            }
+        }
+
+        Decaying now{.first_bin = candidate.first_bin,
+                     .last_bin = candidate.last_bin,
+                     .snr_db = candidate.snr_2500_db,
+                     .run_snr_db = candidate.snr_2500_db,
+                     .run_seconds = 0.0,
+                     .run = 0};
+
+        // A run is consecutive STRICT falls, and the rate is measured over
+        // the whole run rather than step by step. Per-decision SNR carries
+        // the averaged noise's own ripple, which on a narrow band is a
+        // sizeable fraction of one decision's worth of decay, so a
+        // step-by-step rate test would need a tolerance wide enough to catch
+        // anything. Over four decisions the ripple averages down and the
+        // decay does not.
+        if (matched != nullptr && candidate.snr_2500_db < matched->snr_db) {
+            now.run = matched->run + 1;
+            now.run_snr_db = matched->run_snr_db;
+            now.run_seconds = matched->run_seconds + elapsed_seconds;
+        }
+        decaying_next_.push_back(now);
+
+        const double expected = kDbPerNeper * now.run_seconds / config_.average_seconds;
+        const bool residual = config_.residual_decisions > 0 &&
+                              now.run >= config_.residual_decisions &&
+                              (now.run_snr_db - candidate.snr_2500_db) >=
+                                  config_.residual_decay_fraction * expected;
+        if (residual) {
+            ++stats_.candidates_residual;
+            continue;
+        }
+        candidates_[kept] = candidate;
+        ++kept;
+    }
+
+    candidates_.resize(kept);
+
+    // An entry no candidate matched this decision is stale and is not
+    // carried: the band it described is gone, and a run that resumed against
+    // it later would be measuring across a hole.
+    decaying_.swap(decaying_next_);
 }
 
 void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {

@@ -710,6 +710,151 @@ TEST_CASE("a track holds through a gap and decays after one", "[detect]") {
     CHECK(detector.stats().tracks_dropped >= 1);
 }
 
+// What a track reports after its signal stops, and for how long.
+//
+// The case above proves the hold survives a gap, which is what it is for.
+// This one asks the opposite question, which nothing asked before it: once
+// the signal is gone for good, how long does the row stay on the wire and
+// what geometry does it carry while it is there.
+//
+// Measured 2026-09-20 before the residual rule existed, on this fixture at
+// average_seconds 0.8: the row stayed LIVE for 6.08 s after the emitter
+// stopped, then Held for 2.96 s, and went at 9.04 s. Nine seconds of
+// published row against a three second hold. It was Live because the
+// exponential average's residual keeps clearing the detection bar, so
+// last_detected kept advancing, silent_samples() read 0.00 s throughout and
+// confidence stayed at one: nothing on the published surface said the row
+// was stale, and a client that sizes a click target and a waterfall
+// rectangle from it had no way to know. Halving average_seconds to 0.4
+// halved the Live tail to 3.04 s and left the hold at 2.96, which is the
+// signature that separates the two clocks.
+//
+// A 40 dB emitter is deliberate. The tail is (snr - threshold) over the
+// decay rate, so the loudest signals produce the longest ghosts, which is
+// the opposite of how a defect usually scales and is why a marginal
+// detection would have hidden this.
+TEST_CASE("a track stops being published soon after its signal stops", "[detect]") {
+    constexpr std::uint64_t kSeed = 24680;
+    INFO("seed " << kSeed);
+
+    constexpr std::size_t kCentreBin = 500;
+    constexpr std::size_t kWidthBins = 64;
+
+    Scene scene(-90.0, kSeed);
+    const Emitter emitter{
+        .centre_bin = kCentreBin, .width_bins = kWidthBins, .snr_2500_db = 40.0};
+    scene.set({emitter});
+
+    detect::DetectorConfig config = base_config();
+    config.bootstrap_hold_seconds = 3.0;
+    auto made = detect::Detector::create(config, scene.geometry());
+    REQUIRE(made);
+    detect::Detector& detector = *made;
+
+    run_for(detector, scene, 3.0);
+    REQUIRE(detector.tracks().size() == 1);
+    const std::uint64_t id = detector.tracks()[0].id;
+    const auto on_centre = static_cast<double>(detector.tracks()[0].center);
+    const auto on_bandwidth = static_cast<double>(detector.tracks()[0].bandwidth);
+
+    const auto low = static_cast<double>(scene.frequency_of(kCentreBin - kWidthBins / 2));
+    const auto high = static_cast<double>(scene.frequency_of(kCentreBin + kWidthBins / 2));
+
+    scene.silence();
+    const dsp::SampleIndex stopped = scene.index();
+
+    double live_seconds = 0.0;
+    double held_seconds = 0.0;
+    double life_seconds = 0.0;
+    double worst_centre_error = 0.0;
+    double worst_bandwidth_ratio = 1.0;
+    double last_centre_error = 0.0;
+    double last_bandwidth_ratio = 1.0;
+    std::size_t new_ids = 0;
+    bool gone = false;
+
+    // Twelve seconds, which is four times the hold and twice the Live tail
+    // this produced before the fix, so a failure reports a number rather
+    // than running out of scene.
+    for (int step = 0; step < 150 && !gone; ++step) {
+        run_for(detector, scene, config.decision_interval_seconds);
+        const double since =
+            static_cast<double>(scene.index() - stopped) / static_cast<double>(kRate);
+
+        const detect::Track* found = nullptr;
+        for (const detect::Track& track : detector.tracks()) {
+            if (track.id == id) {
+                found = &track;
+                continue;
+            }
+            const double half = 0.5 * static_cast<double>(track.bandwidth);
+            if (static_cast<double>(track.center) + half > low &&
+                static_cast<double>(track.center) - half < high) {
+                ++new_ids;
+            }
+        }
+        if (found == nullptr) {
+            gone = true;
+            break;
+        }
+
+        life_seconds = since;
+        if (found->state == detect::TrackState::Live) {
+            live_seconds = since;
+        } else {
+            held_seconds = since - live_seconds;
+        }
+        last_centre_error = static_cast<double>(found->center) - on_centre;
+        last_bandwidth_ratio = static_cast<double>(found->bandwidth) / on_bandwidth;
+        worst_centre_error = std::max(worst_centre_error, std::abs(last_centre_error));
+        worst_bandwidth_ratio = std::max(worst_bandwidth_ratio, last_bandwidth_ratio);
+        worst_bandwidth_ratio = std::max(worst_bandwidth_ratio, 1.0 / last_bandwidth_ratio);
+    }
+
+    INFO(std::format("after the stop: live {:.2f} s, held {:.2f} s, last published at {:.2f} s, "
+                     "worst centre error {:.0f} Hz, worst bandwidth ratio {:.2f}, "
+                     "last centre error {:.0f} Hz, last bandwidth ratio {:.2f}, "
+                     "{} new ids in the band, {} candidates withheld as residual",
+                     live_seconds, held_seconds, life_seconds, worst_centre_error,
+                     worst_bandwidth_ratio, last_centre_error, last_bandwidth_ratio, new_ids,
+                     detector.stats().candidates_residual));
+
+    CHECK(gone);
+
+    // The bar, and where each number comes from.
+    //
+    // The row may outlive its signal by the hold, plus the decisions the
+    // residual rule needs to be sure. That rule wants residual_decisions
+    // consecutive falls and the first of them cannot be judged until a
+    // second decision exists, so the floor is (residual_decisions + 1)
+    // intervals; two more are allowed for the decision that straddles the
+    // stop and for a run reset on noise. Anything past that is the row
+    // outliving its evidence, which is the defect.
+    const double allowed =
+        config.bootstrap_hold_seconds +
+        static_cast<double>(config.residual_decisions + 3) * config.decision_interval_seconds;
+    CHECK(life_seconds <= allowed);
+
+    // And the Live part of it is what a consumer cannot see through:
+    // silent_samples() is zero and confidence is rising for as long as the
+    // row is Live, so that window is the one with no signal on the wire at
+    // all. It has to be the short end of the split, not the long one.
+    CHECK(live_seconds < config.bootstrap_hold_seconds);
+
+    // Geometry a client can act on has to come from a decision that saw the
+    // signal. A tenth of the emitter's own bandwidth is the same figure the
+    // scene bar uses for centre error, and the band may neither double nor
+    // halve.
+    CHECK(worst_centre_error <= 0.10 * on_bandwidth);
+    CHECK(worst_bandwidth_ratio <= 2.0);
+
+    // Nothing may be born from the residual after the track is dropped. This
+    // is what forced the suppression to sit on the candidate rather than on
+    // the track: a track-level rule leaves the candidate free and a fresh id
+    // appears in the same band a few decisions later, forever.
+    CHECK(new_ids == 0);
+}
+
 TEST_CASE("two signals merge into one track and split back into two", "[detect]") {
     constexpr std::uint64_t kSeed = 86420;
     INFO("seed " << kSeed);
