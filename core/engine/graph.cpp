@@ -1361,7 +1361,17 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         }
         spectrum_twiddle_table = std::move(*circle);
 
-        auto window = dsp::build_spectrum_window(points);
+        // The tap count matters and the attenuation is the default.
+        //
+        // The window's second half is a correction for the prototype filter's
+        // own droop across each channel's kept band, so it has to be built
+        // for the prototype this grid actually has. engine.cpp designs that
+        // one with design_prototype(grid), which takes the default 120 dB,
+        // so only the tap count needs carrying. Leaving it defaulted was
+        // correct at --taps 17 and silently wrong anywhere else: measured,
+        // 9 taps against 17 is 0.93 dB of residual droop near every seam and
+        // 33 taps is 1.75 dB, which lands straight in a reported SNR.
+        auto window = dsp::build_spectrum_window(points, impl.grid.taps_per_branch);
         if (!window) {
             return std::unexpected(with_context(window.error(), "Graph::prepare spectrum"));
         }

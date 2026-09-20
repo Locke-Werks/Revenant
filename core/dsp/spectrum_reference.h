@@ -17,6 +17,13 @@
 // every frequency exactly one owner. docs/detection.md, "Where the spectrum
 // comes from", is the decision and the arithmetic behind it.
 //
+// Those N/4 bins either side reach exactly as far as the prototype's cutoff,
+// so each channel arrives about 6 dB down at both ends of its own band and the
+// span shows that droop once per channel. build_spectrum_window below carries
+// the per-bin gain that divides it out, and docs/detection.md, "The channel
+// shape, and why it is a measurement error", is why it is not only a display
+// problem.
+//
 // The transform itself is reference_fft_radix2 from
 // core/dsp/pfb_fft_reference.h, unchanged. That is the point: the kernel's
 // butterfly graph is core/shaders/pfb_fft.comp's, already proved bit-exact on
@@ -35,6 +42,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "core/dsp/pfb.h"
 #include "core/dsp/pfb_fft_reference.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -96,9 +104,30 @@ inline constexpr std::uint32_t kDefaultSpectrumTransform = 2048;
 inline constexpr float kSpectrumPowerFloor = 1.0e-20F;
 inline constexpr float kSpectrumFloorDb = -200.0F;
 
+// Ceiling on the channel-shape correction below, in decibels of power.
+//
+// A guard against a table entry that is not a number, not a working part.
+// Every prototype design_prototype builds puts its cutoff at half a channel
+// spacing, which is exactly where the kept band ends, so what the correction
+// has to undo is the cutoff and never the stopband. Measured at a 120 dB
+// target and a 2048-point transform, the deepest point in the kept band is
+// -6.0206 dB at taps_per_branch of 4, 5, 8, 12, 16, 17, 24, 33, 48, 64 and
+// 129, and the one outlier is a three-tap branch at -8.0045 dB. So 12 dB
+// clears the worst of those by four decibels and the clamp never fires; it
+// exists because a response of zero would put an infinity in an array that
+// gets uploaded to a device, and an infinity there poisons a whole frame
+// rather than one bin.
+inline constexpr float kMaxSpectrumCorrectionDb = 12.0F;
+
 // Bins one channel contributes: the central half of its transform.
 [[nodiscard]] constexpr std::uint32_t spectrum_bins_per_channel(std::uint32_t transform) {
     return transform / 2;
+}
+
+// Floats in the buffer build_spectrum_window produces, which is the analysis
+// window followed by the channel-shape correction. See that function.
+[[nodiscard]] constexpr std::uint32_t spectrum_window_length(std::uint32_t transform) {
+    return transform + spectrum_bins_per_channel(transform);
 }
 
 // Bins in one whole frame, across the whole span.
@@ -142,8 +171,18 @@ inline constexpr float kSpectrumFloorDb = -200.0F;
 // Rejects a parameter set the kernel cannot run.
 [[nodiscard]] Status validate(const SpectrumParams& params);
 
-// The analysis window, N real taps, normalised so that its coherent gain is
-// one: a full-scale tone at a bin centre then reads 0 dB.
+// The spectrum stage's two host-built tables, in one array, because the kernel
+// reads them from one binding. spectrum_window_length(N) floats:
+//
+//   [0, N)              the analysis window, one tap per transform input.
+//   [N, N + N/2)        the channel-shape correction, one power gain per kept
+//                       output bin, in the same ascending order the frame is
+//                       written in.
+//
+// THE WINDOW
+//
+// N real taps, normalised so that its coherent gain is one: a full-scale tone
+// at a bin centre then reads 0 dB.
 //
 // Four-term Blackman-Harris, periodic rather than symmetric because this is a
 // transform of a continuing stream and not of an isolated record. Its
@@ -152,10 +191,56 @@ inline constexpr float kSpectrumFloorDb = -200.0F;
 // whole display, which reads as a noisy receiver rather than as an artefact of
 // not windowing.
 //
-// The window is built on the host in double and rounded to float once, for the
-// same reason the prototype filter and the twiddle table are: nothing that
+// THE CORRECTION, AND WHY IT IS NOT PART OF THE WINDOW
+//
+// The channelizer's prototype has its cutoff at rate/(2M), so adjacent
+// channels cross at half amplitude there. The kept band is the central half of
+// a transform of a channel running at 2*rate/M, which is +/- rate/(2M) around
+// the channel centre. Those are the same frequency, so each channel's kept
+// band ends exactly on the prototype's cutoff and every channel's contribution
+// droops toward both of its own edges. Measured on white noise through the
+// channelizer twins at M = 64, N = 2048, 49152 averages per bin: 0 dB across
+// the middle, -1.82 dB at 0.4375 of a channel spacing from the centre,
+// -3.44 dB at 0.4688, and -5.99 dB in the outermost kept bin. The whole curve
+// matched the prototype's own magnitude response to within 0.076 dB, so the
+// droop is the filter and nothing else.
+//
+// Dividing it out is one gain per kept bin, and that CANNOT be folded into the
+// window. The window multiplies the transform's input, indexed over N time
+// samples; the correction scales the transform's output, indexed over the N/2
+// kept bins. A per-sample multiply is a convolution in frequency, not a
+// per-bin gain, and the two index spaces are not even the same length. So the
+// correction is a separate table applied after the transform, and it rides in
+// this buffer only because the kernel has four bindings and adding a fifth is
+// a change to the graph that dispatches it.
+//
+// GRID DEPENDENCE, MEASURED
+//
+// The correction inverts the prototype, so it is a property of the grid. Which
+// part of the grid matters is a measurement rather than a guess. Expressed
+// against offset in channel spacings, which is how the kept band is indexed,
+// the response does not depend on the channel count at all: at 17 taps per
+// branch, designs at M = 8, 16, 32, 128, 256 and 1024 against M = 64 differ by
+// 0.0000 dB across all 1024 kept bins of a 2048-point transform, and the same
+// holds at 9, 33 and 65 taps. It does depend on the prototype length and the
+// stopband target, because those set how far the transition has settled by the
+// band edge: against the canonical 17 taps at 120 dB, 9 taps differ by
+// 0.93 dB, 33 taps by 1.75 dB and an 80 dB target by 0.58 dB.
+//
+// So the parameters here are the two that were measured to matter, and their
+// defaults are the canonical grid's: 17 is what GridParams and EngineConfig
+// both hold, and 120 dB is design_prototype's own default, which is what
+// core/engine/engine.cpp asks for. A caller running a different prototype
+// length has to pass it. core/engine/graph.cpp does not yet, so
+// `revenant-engine --taps` away from 17 leaves up to about 1.8 dB of the droop
+// uncorrected near the seams; closing that is one argument at its call site.
+//
+// Both halves are built on the host in double and rounded to float once, for
+// the same reason the prototype filter and the twiddle table are: nothing that
 // feeds a bit-exact comparison is computed in a shader.
-[[nodiscard]] Expected<std::vector<float>> build_spectrum_window(std::uint32_t size);
+[[nodiscard]] Expected<std::vector<float>> build_spectrum_window(
+    std::uint32_t size, std::uint32_t taps_per_branch = GridParams{}.taps_per_branch,
+    double attenuation_db = 120.0);
 
 // log2(value) for a positive normal value, deterministically.
 //
@@ -175,9 +260,10 @@ inline constexpr float kSpectrumFloorDb = -200.0F;
 // channel_ring is the channelizer's output, channel-major at
 // k * chan_blocks + (m & chan_mask), exactly as core/shaders/pfb_fft.comp
 // wrote it. twiddles is the N-entry circle from build_twiddles(N), the same
-// float array the device was given, and window the N taps from
-// build_spectrum_window(N). frame receives channels * N/2 decibel values,
-// ascending in frequency across the whole span.
+// float array the device was given, and window the spectrum_window_length(N)
+// floats from build_spectrum_window(N), which is the analysis window followed
+// by the channel-shape correction. frame receives channels * N/2 decibel
+// values, ascending in frequency across the whole span.
 [[nodiscard]] Status reference_spectrum(const SpectrumParams& params,
                                         ConstComplexSpan channel_ring,
                                         ConstComplexSpan twiddles,

@@ -5,10 +5,12 @@ identify every signal detected above a confidence threshold the operator sets,
 hold each identification for a while after the signal stops and let it decay,
 and let a click on any live detection tune a receiver to it.
 
-Nothing here exists. `core/detect/` is an empty directory and the full-span
-spectrum path it depends on has not been written either. This is written now
-because several conclusions below constrain the spectrum stage, which is the
-next thing to build.
+Written before any of it existed, because several conclusions below constrain
+the spectrum stage, which was the next thing to build. Since then the spectrum
+stage and `core/detect/detector.cpp` have both been written, so the sections
+that describe them now describe code rather than intent. Where a number
+appears below it was measured; the tracker, identification and click-to-tune
+are still design.
 
 A first draft of this document was checked against the code and got four
 things wrong in ways that mattered: it specified a transform the project's own
@@ -52,6 +54,102 @@ first place: no signal sits on a boundary in the half that gets used.
 This also means the detection spectrum is per channel and inherently parallel,
 which suits the hardware, and that it reuses a kernel already proved bit-exact
 against a twin rather than introducing one that is not.
+
+## The channel shape, and why it is a measurement error
+
+The central half tiles the span exactly once because it is one channel spacing
+wide. One channel spacing wide is also where the prototype's cutoff is. The
+section above states the first half of that and stops, and the second half is
+an artifact that was visible in the display for as long as the display existed.
+
+`core/dsp/pfb.h` puts the prototype's cutoff at `rate/(2M)`, so adjacent
+channels cross at half amplitude there. The channelizer decimates by `D = M/2`,
+so a channel runs at `2*rate/M` and an N-point transform of it spans that much
+bandwidth. Keeping the central half of that transform keeps `+/- rate/(2M)`
+around the channel centre. Those are the same frequency. Every channel's kept
+band therefore ends on the prototype's cutoff at both ends, every channel
+arrives about 6 dB down at both of its own edges, and the frame tiles that
+droop once per coarse channel.
+
+Measured, not derived. White noise through the channelizer twins and the
+spectrum twin, mean linear power per bin position within a channel, averaged
+over all channels and frames:
+
+| | measured |
+| --- | --- |
+| Outermost kept bin, M = 64, N = 2048, 8192 averages per bin | -5.96 dB |
+| Peak to peak across one channel | 6.13 dB |
+| Agreement with the prototype's own magnitude response, 49152 averages | 0.076 dB |
+| Bins more than 0.1 dB down | 30 percent |
+| Bins more than 1 dB down | 17 percent |
+| Bins more than 3 dB down | 8 percent |
+| Mean level across a whole channel | -0.43 dB |
+
+On a waterfall that is a vertical striation every channel spacing. On a trace
+it is a scallop with a cusp at every seam, which reads as a binned or
+quantised display rather than as a filter.
+
+**It is not only a display problem.** A candidate's SNR in the 2500 Hz
+reference bandwidth is a signal level over an estimated noise floor, and the
+floor is estimated at `noise_knots` points across the span from a window of
+`noise_window_knots` knot spacings. At the defaults that is 32 knots and a
+window a quarter of the span wide, which on the shipped grid is sixteen coarse
+channels. A droop that repeats once per channel repeats sixteen times inside
+one of those windows, so the floor estimate averages it flat. The candidate's
+own peak does not. The same signal therefore reports up to 6 dB less SNR at a
+seam than at a channel centre, and whether a marginal one crosses the
+operator's threshold depends on where in the grid it happened to land rather
+than on anything about the signal.
+
+Widening or narrowing the floor's window does not fix that. The window is sized
+by the widest signal that must not hide its own floor, which is the argument in
+`core/detect/detector.h`, and a window narrow enough to follow the droop would
+be narrower than a broadcast carrier.
+
+**The correction.** `build_spectrum_window` in
+`core/dsp/spectrum_reference.h` evaluates the prototype's magnitude response at
+each of the `bins_per_channel` kept offsets, in double, rounds once, and hands
+the kernel one power gain per bin alongside the analysis window.
+`core/shaders/spectrum.comp` multiplies each bin's power by it before the floor
+and the logarithm. The same measurement after: 0.15 dB peak to peak at N = 256
+with 32768 averages per bin, 0.33 dB at N = 2048 with 8192. Both are what the
+estimation noise leaves behind at that many averages rather than residual
+droop.
+
+It could not be folded into the analysis window, which would have been free.
+The window multiplies the transform's input and the correction scales its
+output. A per-sample multiply is a convolution in frequency, not a per-bin
+gain, and the two are not even the same length.
+
+The correction rides in the window's buffer instead of one of its own, because
+the spectrum kernel has four bindings and `core/engine/graph.cpp` declares
+four. One open end goes with that. The table inverts the prototype, so it
+depends on the prototype length: measured against the canonical 17 taps per
+branch, 9 taps differ by 0.93 dB and 33 taps by 1.75 dB. The channel count does
+not matter at all, measured at 0.0000 dB from M = 8 to M = 1024.
+`build_spectrum_window` takes the length as an argument and defaults it to 17,
+and `graph.cpp` calls it without one, so `revenant-engine --taps` away from 17
+leaves up to about 1.8 dB of droop near the seams. Closing that is one argument
+at the call site.
+
+**What the correction does at the edges.** It amplifies, so the question is how
+far. Not far: the kept band ends at the cutoff and never reaches the stopband,
+which starts at `0.75/M` while the band ends at `0.5/M`. The deepest point is
+6.02 dB, the largest gain is a factor of four in power, and nothing is divided
+by anything near zero. Measured at a 120 dB target at 4, 5, 8, 12, 16, 17, 24,
+33, 48, 64 and 129 taps per branch, the deepest point in the kept band is
+-6.0206 dB every time; the one outlier is a three-tap branch at -8.0045 dB.
+`kMaxSpectrumCorrectionDb` clamps at 12 dB, and it is a guard against putting a
+non-finite number in a table that gets uploaded to a device rather than a
+working part of the design.
+
+**What it costs.** The noise at a seam is lifted by the same factor as the
+signal, so the correction buys no sensitivity: a signal at a channel edge is
+exactly as detectable as it was. What it fixes is the number. And in decibels
+the lift costs nothing, because an unaveraged power bin is exponentially
+distributed and its spread in decibels does not depend on its level. Measured
+per-bin standard deviation across a channel, uncorrected and corrected: 5.570
+dB and 5.570 dB. The mean goes flat and the display gets no noisier.
 
 ## Resolution: two jobs, two bin widths
 
@@ -123,6 +221,10 @@ modes.
 Candidates therefore carry SNR in the project's 2500 Hz reference bandwidth,
 converted from whatever bin sum produced the detection. That is what makes a
 single operator-set threshold mean one thing across the whole span.
+
+One threshold meaning one thing also requires the level it is measured against
+to be free of grid position, which is what "The channel shape, and why it is a
+measurement error" above is about.
 
 ### The threshold is the operator's
 

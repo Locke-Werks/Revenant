@@ -10,11 +10,13 @@
 
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <format>
 #include <numbers>
 #include <vector>
 
 #include "core/dsp/denormal_mode.h"
+#include "core/dsp/pfb.h"
 #include "core/dsp/vrx_reference.h"
 
 namespace revenant::dsp {
@@ -52,6 +54,69 @@ constexpr double kBlackmanHarrisA0 = 0.35875;
 constexpr double kBlackmanHarrisA1 = 0.48829;
 constexpr double kBlackmanHarrisA2 = 0.14128;
 constexpr double kBlackmanHarrisA3 = 0.01168;
+
+// The channel count the correction's prototype is designed at.
+//
+// The canonical grid's, so that at the shipped configuration this is literally
+// the prototype the channelizer is running. A caller on another channel count
+// still gets the right table, which is the measurement recorded in the header:
+// the response is fixed in units of channel spacings and the kept band is one
+// channel spacing wide whatever M is. Measured across all 1024 kept bins of a
+// 2048-point transform, designs at M = 8, 16, 32, 128, 256 and 1024 differ
+// from this one by 0.0000 dB at the canonical 17 taps per branch, and at M =
+// 8, 16, 256 and 1024 by 0.0000 dB at 9, 33 and 65 taps as well.
+//
+// The one length where the channel count does show is three taps per branch,
+// where M = 8 differs from M = 64 by 0.059 dB in the outermost bin. That is a
+// degenerate design nobody runs and it is the reason to spend the larger
+// count here rather than the cheapest valid one: the prototype is M*(L+1)
+// taps and the evaluation below walks all of them once per kept bin, so this
+// choice is the difference between a measured 2.0 ms and a measured 15.6 ms
+// per call at a 2048-point transform, against a call that happens once per
+// graph rebuild.
+constexpr std::uint32_t kCorrectionDesignChannels = GridParams{}.channels;
+
+// |H(x)| / |H(0)| for a prototype, with x an offset from the channel centre in
+// channel spacings.
+//
+// x/M is the offset in cycles per input sample, so the phase of tap n is
+// -2*pi*x*n/M. The multiply is reduced to a remainder in integers before it
+// reaches a transcendental: at a 2048-point transform the largest n is in the
+// tens of thousands and the largest product is far outside the range where
+// std::sin holds its argument, and a phase that has lost its low bits is a
+// response with a floor that is not the filter's.
+[[nodiscard]] double prototype_magnitude(const std::vector<float>& taps, std::uint32_t channels,
+                                         std::int64_t numerator, std::int64_t denominator) {
+    double real = 0.0;
+    double imaginary = 0.0;
+    double direct = 0.0;
+
+    constexpr double kTwoPi = 2.0 * std::numbers::pi;
+    const auto scale = static_cast<double>(denominator) *
+                       static_cast<double>(channels);
+
+    for (std::size_t n = 0; n < taps.size(); ++n) {
+        const double tap = static_cast<double>(taps[n]);
+        direct += tap;
+        if (tap == 0.0) {
+            continue;
+        }
+        // (numerator * n) mod (denominator * M), in integers, so the angle
+        // handed to the transcendentals is always inside one turn.
+        const std::int64_t span = denominator * static_cast<std::int64_t>(channels);
+        std::int64_t reduced = (numerator * static_cast<std::int64_t>(n)) % span;
+        if (reduced < 0) {
+            reduced += span;
+        }
+        const double angle = -kTwoPi * static_cast<double>(reduced) / scale;
+        real += tap * std::cos(angle);
+        imaginary += tap * std::sin(angle);
+    }
+
+    const double magnitude = std::sqrt(real * real + imaginary * imaginary);
+    const double reference = std::abs(direct);
+    return (reference > 0.0) ? magnitude / reference : 0.0;
+}
 
 }  // namespace
 
@@ -127,7 +192,9 @@ Status validate(const SpectrumParams& params) {
     return {};
 }
 
-Expected<std::vector<float>> build_spectrum_window(std::uint32_t size) {
+Expected<std::vector<float>> build_spectrum_window(std::uint32_t size,
+                                                   std::uint32_t taps_per_branch,
+                                                   double attenuation_db) {
     if (size < 4 || !is_power_of_two(size)) {
         return fail(std::format(
             "build_spectrum_window: {} is not a power of two of at least 4", size));
@@ -161,11 +228,59 @@ Expected<std::vector<float>> build_spectrum_window(std::uint32_t size) {
     // bin centre then transforms to magnitude A, so full scale reads 0 dB and
     // the decibel figures in a frame mean dBFS rather than dB relative to
     // whichever window happened to be chosen.
-    std::vector<float> normalised(size, 0.0F);
+    std::vector<float> built(spectrum_window_length(size), 0.0F);
     for (std::uint32_t n = 0; n < size; ++n) {
-        normalised[n] = static_cast<float>(taps[n] / sum);
+        built[n] = static_cast<float>(taps[n] / sum);
     }
-    return normalised;
+
+    // The correction. The prototype is designed here rather than handed in
+    // because design_prototype is deterministic: the same (M, L, A) gives the
+    // same float array on every machine that builds it, so a prototype
+    // designed here from the same parameters is the one the branch kernel is
+    // running, bit for bit.
+    const GridParams correction_grid{
+        .channels = kCorrectionDesignChannels,
+        .taps_per_branch = taps_per_branch,
+        .decimation = kCorrectionDesignChannels / 2,
+    };
+    auto prototype = design_prototype(correction_grid, attenuation_db);
+    if (!prototype) {
+        return std::unexpected(with_context(
+            prototype.error(),
+            std::format("build_spectrum_window: designing the prototype whose channel shape the "
+                        "correction inverts, {} taps per branch at {} dB",
+                        taps_per_branch, attenuation_db)));
+    }
+
+    const std::uint32_t kept = spectrum_bins_per_channel(size);
+    const double ceiling = std::pow(10.0, static_cast<double>(kMaxSpectrumCorrectionDb) / 10.0);
+
+    for (std::uint32_t bin = 0; bin < kept; ++bin) {
+        // Kept bin j comes from transform bin j - N/4, and a channel runs at
+        // twice the channel spacing, so the offset from the channel centre is
+        // (2j - N/2)/N spacings. Kept as an exact rational because the phase
+        // reduction below is done in integers.
+        const auto numerator = 2 * static_cast<std::int64_t>(bin) -
+                               static_cast<std::int64_t>(size) / 2;
+        const auto denominator = static_cast<std::int64_t>(size);
+
+        const double response =
+            prototype_magnitude(prototype->taps, kCorrectionDesignChannels, numerator,
+                                denominator);
+
+        // Power, because the kernel applies this to a power and a decibel
+        // figure here is 10*log10 of it. The clamp is the guard described at
+        // kMaxSpectrumCorrectionDb; it is written as a comparison against the
+        // ceiling rather than std::min so that a response of zero, which gives
+        // an infinity, and a response that is somehow not a number both land
+        // on the ceiling instead of propagating into the table.
+        const double gain = 1.0 / (response * response);
+        const double limited = (gain > ceiling || !std::isfinite(gain)) ? ceiling : gain;
+
+        built[size + bin] = static_cast<float>(limited);
+    }
+
+    return built;
 }
 
 Status reference_spectrum(const SpectrumParams& params,
@@ -185,9 +300,12 @@ Status reference_spectrum(const SpectrumParams& params,
                                 "transform, got {}",
                                 transform, transform, twiddles.size()));
     }
-    if (window.size() != transform) {
-        return fail(std::format("reference_spectrum needs exactly {} window taps, got {}",
-                                transform, window.size()));
+    if (window.size() != spectrum_window_length(params.transform)) {
+        return fail(std::format("reference_spectrum needs exactly {} floats from "
+                                "build_spectrum_window, {} window taps followed by {} correction "
+                                "gains, got {}",
+                                spectrum_window_length(params.transform), transform,
+                                spectrum_bins_per_channel(params.transform), window.size()));
     }
     const std::size_t ring_size = channels * static_cast<std::size_t>(params.chan_blocks);
     if (channel_ring.size() < ring_size) {
@@ -249,12 +367,22 @@ Status reference_spectrum(const SpectrumParams& params,
 
             const float power = value.real() * value.real() + value.imag() * value.imag();
 
+            // Divide out the prototype's shape across this channel's kept
+            // band. Applied here rather than folded into the window because
+            // the window multiplies the transform's input and this scales its
+            // output; see build_spectrum_window. Applied to the power rather
+            // than to the decibel figure so that a dead channel still floors
+            // at exactly -200 dB instead of reading the correction curve
+            // stamped into its own silence.
+            const float flattened = power * window[transform + bin];
+
             // GLSL's max(x, y) is specified as "y if x < y, otherwise x",
             // written out here rather than called as std::fmax, which carries
             // NaN rules GLSL does not. On the finite values a transform of
             // real samples produces the two agree, and writing the comparison
             // makes that visible rather than assumed.
-            const float floored = (power < kSpectrumPowerFloor) ? kSpectrumPowerFloor : power;
+            const float floored =
+                (flattened < kSpectrumPowerFloor) ? kSpectrumPowerFloor : flattened;
 
             frame[out_origin + bin] = det_log2(floored) * kDecibelsPerOctave;
         }

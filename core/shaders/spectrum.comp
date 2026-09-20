@@ -36,6 +36,12 @@
 // producing a plausible-looking frame with the wrong frequency axis. See
 // validate() in core/dsp/spectrum_reference.h.
 //
+// The tiling being exact is also what makes the correction below necessary.
+// One channel spacing wide means the kept band ends exactly where the
+// prototype's cutoff is, so every channel arrives about 6 dB down at both of
+// its own edges and the display tiles that droop once per channel. The host
+// hands down a per-bin gain that divides it out; see the Window binding.
+//
 // THE OUTPUT ORDER
 //
 // Ascending in frequency across the whole span, so a consumer draws it left to
@@ -96,11 +102,29 @@ layout(std430, binding = 1) readonly buffer Twiddles {
     vec2 w[];
 } tw;
 
-// The analysis window, N real taps, already normalised on the host so that a
+// Two host-built tables in one binding, N + N/2 floats from
+// build_spectrum_window() in core/dsp/spectrum_reference.h.
+//
+// taps[0 .. N-1] is the analysis window, already normalised so that a
 // full-scale tone at a bin centre reads 0 dB. Without a window the transform's
 // rectangular sidelobes are 13 dB down and one broadcast carrier smears across
 // the whole display, which reads as a noisy receiver rather than as a
 // measurement artefact.
+//
+// taps[N .. N + N/2 - 1] is the channel-shape correction, one power gain per
+// kept output bin. It undoes the prototype's droop across this channel's own
+// band: the prototype's cutoff is at half a channel spacing and the kept band
+// is exactly one channel spacing wide, so both of its edges sit on the cutoff
+// and each channel arrives 6 dB down at both ends of its own contribution.
+// Measured on white noise through the channelizer at M = 64, N = 2048: -5.99
+// dB in the outermost kept bin against the channel centre, repeating once per
+// channel across the whole span. See the header of
+// core/dsp/spectrum_reference.h for the measurement and for why this cannot be
+// folded into the window instead.
+//
+// Both halves live in one buffer because this kernel has four bindings and the
+// graph that dispatches it declares four; a fifth is a change there rather
+// than here.
 layout(std430, binding = 2) readonly buffer Window {
     float taps[];
 } win;
@@ -301,8 +325,18 @@ void main() {
     for (uint j = tid; j < half_bins; j += threads) {
         const vec2 v = scratch[(j + kTransform - quarter) & (kTransform - 1u)];
 
+        // The correction is a separate `precise` statement rather than a term
+        // folded into the line above it, for the same reason every line in
+        // the butterfly is one: a product added to a product is the shape a
+        // shader compiler fuses, and a fused multiply-add rounds once where
+        // the twin rounds twice.
+        //
+        // It multiplies the power before the floor, not the decibel figure
+        // after the logarithm, so a dead channel still reads exactly -200 dB
+        // rather than reading the correction curve stamped into its silence.
         precise float power = v.x * v.x + v.y * v.y;
-        precise float floored = max(power, kPowerFloor);
+        precise float flattened = power * win.taps[kTransform + j];
+        precise float floored = max(flattened, kPowerFloor);
         precise float db = det_log2(floored) * kDecibelsPerOctave;
 
         frame.power_db[out_origin + j] = db;

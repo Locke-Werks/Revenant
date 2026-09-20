@@ -39,6 +39,7 @@
 #include <format>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "core/dsp/pfb.h"
@@ -280,6 +281,123 @@ std::vector<dsp::Complex32> channelise_tone(double frequency, std::uint32_t tran
     return channel_ring;
 }
 
+// Mean power at each bin position WITHIN a coarse channel, averaged over
+// every channel and every frame, from a source whose true spectrum is flat.
+//
+// This is the measurement the channel-shape correction exists for, and it is
+// run through the real channelizer twins rather than by feeding the spectrum
+// stage noise directly. Feeding it noise directly would show nothing: the
+// droop is the prototype's, so a channel stream that never went through the
+// prototype has no droop to find and the correction would invent one.
+//
+// Linear power is accumulated, not decibels. The mean of a logarithm is not
+// the logarithm of a mean, and an unaveraged power bin is exponentially
+// distributed, so averaging in decibels lands about 2.5 dB under the level
+// being measured and lands there uniformly, which hides nothing but reports
+// the wrong number.
+struct ChannelShape {
+    std::vector<double> power;
+    std::uint64_t averages = 0;
+
+    // Decibels relative to the mean of the bins nearest the channel centre,
+    // so the reference is not one noisy bin.
+    [[nodiscard]] std::vector<double> decibels() const {
+        const std::size_t centre = power.size() / 2;
+        const std::size_t span = std::min<std::size_t>(8, centre);
+        double reference = 0.0;
+        for (std::size_t i = centre - span; i < centre + span; ++i) {
+            reference += power[i];
+        }
+        reference /= static_cast<double>(2 * span);
+
+        std::vector<double> out(power.size(), 0.0);
+        for (std::size_t bin = 0; bin < power.size(); ++bin) {
+            out[bin] = 10.0 * std::log10(power[bin] / reference);
+        }
+        return out;
+    }
+};
+
+ChannelShape measure_channel_shape(std::uint32_t transform, std::span<const float> window,
+                                   std::uint32_t batches, std::uint64_t seed) {
+    // Eight frames out of one pass of the channelizer, which amortises the
+    // branch filter over eight transforms rather than one.
+    constexpr std::uint32_t kFramesPerBatch = 8;
+
+    const std::uint32_t blocks = transform * kFramesPerBatch;
+    const std::uint32_t input_ring = blocks * kDecimation * 2U;
+
+    auto prototype = dsp::design_prototype(kGrid, 120.0);
+    INFO(test::message_of(prototype));
+    REQUIRE(prototype.has_value());
+
+    const auto coarse_twiddles = make_twiddles(kChannels);
+    const auto fine_twiddles = make_twiddles(transform);
+
+    const std::uint32_t half_bins = dsp::spectrum_bins_per_channel(transform);
+    ChannelShape shape{std::vector<double>(half_bins, 0.0), 0};
+
+    std::vector<dsp::Complex32> branches(static_cast<std::size_t>(blocks) * kChannels);
+    std::vector<dsp::Complex32> channel_ring(static_cast<std::size_t>(kChannels) * blocks);
+    std::vector<float> frame(dsp::spectrum_bin_count(kChannels, transform));
+
+    test::SeededInput source(seed);
+
+    for (std::uint32_t batch = 0; batch < batches; ++batch) {
+        // Uniform in [-1, 1] per component, which is white: a flat true
+        // spectrum is all this measurement needs and the distribution does
+        // not matter.
+        const auto input = source.complexes(input_ring);
+
+        const dsp::PfbBranchParams branch_params{
+            .ring_mask = input_ring - 1U,
+            .base_offset = 0,
+            .block_count = blocks,
+        };
+        {
+            const auto ran = dsp::reference_pfb_branches(kGrid, prototype->taps, input,
+                                                         branch_params, branches);
+            INFO(test::message_of(ran));
+            REQUIRE(ran.has_value());
+        }
+
+        dsp::PfbFftParams fft_params;
+        fft_params.channels = kChannels;
+        fft_params.decimation = kDecimation;
+        fft_params.stages = dsp::fft_stages(kChannels);
+        fft_params.block_base = 0;
+        fft_params.block_count = blocks;
+        fft_params.out_ring_blocks = blocks;
+        fft_params.out_ring_mask = blocks - 1U;
+        {
+            const auto ran =
+                dsp::reference_pfb_fft(fft_params, branches, coarse_twiddles, channel_ring);
+            INFO(test::message_of(ran));
+            REQUIRE(ran.has_value());
+        }
+
+        for (std::uint32_t f = 0; f < kFramesPerBatch; ++f) {
+            const auto params =
+                make_params(kChannels, transform, blocks, f * transform);
+            const auto ran =
+                dsp::reference_spectrum(params, channel_ring, fine_twiddles, window, frame);
+            INFO(test::message_of(ran));
+            REQUIRE(ran.has_value());
+
+            for (std::uint32_t slot = 0; slot < kChannels; ++slot) {
+                for (std::uint32_t bin = 0; bin < half_bins; ++bin) {
+                    const double db = static_cast<double>(
+                        frame[static_cast<std::size_t>(slot) * half_bins + bin]);
+                    shape.power[bin] += std::pow(10.0, db / 10.0);
+                }
+            }
+            shape.averages += kChannels;
+        }
+    }
+
+    return shape;
+}
+
 std::size_t peak_bin(std::span<const float> frame) {
     std::size_t best = 0;
     float best_value = frame.empty() ? 0.0F : frame[0];
@@ -344,13 +462,13 @@ TEST_CASE("the deterministic logarithm agrees with the real function", "[spectru
 TEST_CASE("the analysis window has unit coherent gain", "[spectrum][m1]") {
     for (const std::uint32_t size : {16U, 256U, 2048U}) {
         const auto window = make_window(size);
-        REQUIRE(window.size() == size);
+        REQUIRE(window.size() == dsp::spectrum_window_length(size));
 
         double sum = 0.0;
         double smallest = 1.0;
-        for (const float tap : window) {
-            sum += static_cast<double>(tap);
-            smallest = std::min(smallest, static_cast<double>(tap));
+        for (std::uint32_t n = 0; n < size; ++n) {
+            sum += static_cast<double>(window[n]);
+            smallest = std::min(smallest, static_cast<double>(window[n]));
         }
 
         INFO("window of " << size << " taps sums to " << sum);
@@ -364,6 +482,91 @@ TEST_CASE("the analysis window has unit coherent gain", "[spectrum][m1]") {
         // Blackman-Harris is non-negative everywhere, which a sign error in
         // one of the four terms would break.
         CHECK(smallest >= 0.0);
+    }
+}
+
+TEST_CASE("the channel shape correction undoes the prototype's band edge", "[spectrum][m1]") {
+    // The table's own properties, checked against the design rather than
+    // against a second copy of the arithmetic. What it is FOR is measured in
+    // "a flat source reads flat across a coarse channel" at the end of this
+    // file; this case is the cheap one that says the table is the right shape
+    // before a slow measurement says it works.
+    constexpr double kDecibelCeiling = static_cast<double>(dsp::kMaxSpectrumCorrectionDb);
+
+    for (const std::uint32_t size : {16U, 256U, 2048U}) {
+        const auto window = make_window(size);
+        const std::uint32_t kept = dsp::spectrum_bins_per_channel(size);
+        const auto correction = std::span<const float>(window).subspan(size, kept);
+
+        // The channel centre. Kept bin N/4 is transform bin zero, so the
+        // prototype is evaluated at zero offset, where its response is its own
+        // DC gain and the ratio is one by construction. Exactly one, not
+        // nearly: every tap's phase is zero there, so the sum is the same
+        // double the normalisation divides by.
+        CHECK(correction[kept / 2] == 1.0F);
+
+        double deepest = 0.0;
+        double shallowest = 0.0;
+        for (std::uint32_t bin = 0; bin < kept; ++bin) {
+            const double db = 10.0 * std::log10(static_cast<double>(correction[bin]));
+            deepest = std::max(deepest, db);
+            shallowest = std::min(shallowest, db);
+            INFO("bin " << bin << " of " << kept << " corrects by " << db << " dB");
+            CHECK(std::isfinite(correction[bin]));
+            CHECK(db <= kDecibelCeiling);
+        }
+
+        INFO("N = " << size << ": the correction runs from " << shallowest << " to " << deepest
+                    << " dB");
+
+        // The outermost kept bin sits exactly on the prototype's cutoff, where
+        // the design puts the response at half amplitude. 20*log10(0.5) is
+        // -6.0206 dB, so the correction there is +6.0206 dB and the clamp at
+        // kMaxSpectrumCorrectionDb is nowhere near it.
+        CHECK(10.0 * std::log10(static_cast<double>(correction[0])) ==
+              Approx(6.0206).margin(0.01));
+        CHECK(deepest < kDecibelCeiling);
+
+        // A gain everywhere, to within the prototype's own passband ripple. A
+        // 120 dB Kaiser design ripples by far less than a float holds at unit
+        // magnitude, so the few bins that read above the DC gain do so by
+        // nothing: measured worst case across all three transform sizes here,
+        // -1.9e-6 dB. The bound is a thousand times that, and it is looking
+        // for an inverted table rather than measuring the ripple.
+        CHECK(shallowest > -1.0e-3);
+    }
+}
+
+TEST_CASE("the correction follows the prototype length it is told about", "[spectrum][m1]") {
+    // The parameter has to be live, because the default is the canonical
+    // grid's and a caller on another prototype length is the case that would
+    // silently get the wrong table. Measured against the canonical L = 17 at a
+    // 2048-point transform, L = 33 differs by 1.75 dB and L = 9 by 0.93 dB, so
+    // a table that ignored the argument would be visibly wrong here.
+    constexpr std::uint32_t kPoints = 2048;
+    const auto canonical = make_window(kPoints);
+
+    for (const std::uint32_t taps : {9U, 33U}) {
+        auto other = dsp::build_spectrum_window(kPoints, taps);
+        INFO(test::message_of(other));
+        REQUIRE(other.has_value());
+        REQUIRE(other->size() == canonical.size());
+
+        // The window half is a function of the transform size alone, so it
+        // must not have moved by one bit.
+        for (std::uint32_t n = 0; n < kPoints; ++n) {
+            REQUIRE((*other)[n] == canonical[n]);
+        }
+
+        double worst = 0.0;
+        for (std::uint32_t bin = 0; bin < dsp::spectrum_bins_per_channel(kPoints); ++bin) {
+            const double mine = 10.0 * std::log10(static_cast<double>((*other)[kPoints + bin]));
+            const double theirs =
+                10.0 * std::log10(static_cast<double>(canonical[kPoints + bin]));
+            worst = std::max(worst, std::abs(mine - theirs));
+        }
+        INFO(taps << " taps per branch differs from 17 by " << worst << " dB at worst");
+        CHECK(worst > 0.5);
     }
 }
 
@@ -789,15 +992,19 @@ TEST_CASE("a tone lands in the bin its frequency belongs to", "[gpu][spectrum][m
 
         // Unit amplitude in, so a bin-centred tone reads 0 dBFS: the
         // prototype is normalised so a tone at a channel centre has unit
-        // magnitude and the window is normalised to unit coherent gain. A
-        // tone near the edge of a channel's central half sits at the
-        // prototype's cutoff, where adjacent channels cross at the half-power
-        // point, and measures between 4 and 5 dB down there. This bound
-        // covers both and is here to catch a missing normalisation rather
-        // than to measure the filter, whose own response is asserted in
+        // magnitude and the window is normalised to unit coherent gain.
+        //
+        // This bound used to have to reach down to -6 dB, because a tone near
+        // the edge of a channel's central half sits at the prototype's cutoff
+        // and measured 4 to 5 dB down there. The channel-shape correction
+        // divides exactly that out, so a tone now reads its own amplitude
+        // wherever in the grid it falls, and the two positions near the band
+        // edges in the list above are the ones that prove it. The bound is
+        // here to catch a missing normalisation rather than to measure the
+        // filter, whose own response is asserted in
         // tests/reference/test_pfb.cpp.
         CHECK(frame[peak] < 0.5);
-        CHECK(frame[peak] > -6.0);
+        CHECK(frame[peak] > -0.5);
     }
 }
 
@@ -833,5 +1040,115 @@ TEST_CASE("the peak advances one bin at a time across a channel boundary",
                      << " from the seam: " << frequency << " Hz should be bin " << offset
                      << " and peaked at " << peak);
         CHECK(peak == offset);
+    }
+}
+
+TEST_CASE("a flat source reads flat across a coarse channel", "[spectrum][m1]") {
+    // The artifact and its fix, measured rather than derived. No GPU: this is
+    // the twin against a statistic, and the kernel is held to the twin bit for
+    // bit by the cases above.
+    //
+    // A flat source through the channelizer does NOT read flat without the
+    // correction, and the shape it reads is the prototype's. The channelizer's
+    // cutoff is at half a channel spacing and the kept band is one channel
+    // spacing wide, so both of a channel's kept edges sit exactly on the
+    // cutoff, where the design puts the response at half amplitude. The span
+    // then tiles that droop once per coarse channel, which is what a waterfall
+    // shows as vertical striations and what a spectrum trace shows as a
+    // scallop with a cusp at every seam.
+    constexpr std::uint64_t kSeed = 0x5350454300000C00ULL;
+
+    // Both transform sizes, because the correction table is indexed by kept
+    // bin and a table built against the wrong N would tile a stretched copy
+    // of the right curve. The batch counts put roughly the same number of
+    // averages behind each size: a batch is eight frames whatever N is, so
+    // the larger transform costs eight times as much per batch.
+    struct Case {
+        std::uint32_t transform;
+        std::uint32_t batches;
+    };
+    const Case cases[] = {{kTransform, 512}, {dsp::kDefaultSpectrumTransform, 128}};
+
+    const auto extremes = [](const std::vector<double>& curve) {
+        double low = curve.front();
+        double high = curve.front();
+        for (const double value : curve) {
+            low = std::min(low, value);
+            high = std::max(high, value);
+        }
+        return std::pair{low, high};
+    };
+
+    for (const Case& one : cases) {
+        const auto corrected_window = make_window(one.transform);
+
+        // The same table with the correction removed, which is what the stage
+        // did before this measurement was made. Building it this way rather
+        // than keeping a second code path means the before and after differ
+        // in exactly the N/2 floats under test.
+        std::vector<float> flat_window = corrected_window;
+        for (std::uint32_t bin = 0; bin < dsp::spectrum_bins_per_channel(one.transform); ++bin) {
+            flat_window[one.transform + bin] = 1.0F;
+        }
+
+        const auto uncorrected =
+            measure_channel_shape(one.transform, flat_window, one.batches, kSeed);
+        const auto corrected =
+            measure_channel_shape(one.transform, corrected_window, one.batches, kSeed);
+
+        const auto before = uncorrected.decibels();
+        const auto after = corrected.decibels();
+        REQUIRE(uncorrected.averages > 0);
+
+        const auto [before_low, before_high] = extremes(before);
+        const auto [after_low, after_high] = extremes(after);
+
+        // The droop is the prototype and nothing else, so the correction
+        // table is its mirror image. Comparing the measurement against the
+        // table rather than against a second evaluation of the filter's
+        // response means this file carries no copy of that arithmetic.
+        double worst_against_table = 0.0;
+        for (std::uint32_t bin = 0; bin < before.size(); ++bin) {
+            const double table_db =
+                10.0 * std::log10(static_cast<double>(corrected_window[one.transform + bin]));
+            worst_against_table = std::max(worst_against_table, std::abs(before[bin] + table_db));
+        }
+
+        // One string, built before any assertion in this iteration. Catch2
+        // reports and then clears accumulated messages, and there are
+        // REQUIREs inside measure_channel_shape, so a message posted earlier
+        // is gone before the verdicts below.
+        const std::string report = std::format(
+            "\nN = {}, {} averages per bin position."
+            "\n  uncorrected {:+.4f} to {:+.4f} dB, {:.4f} peak to peak, "
+            "outermost bins {:+.4f} and {:+.4f}"
+            "\n  corrected   {:+.4f} to {:+.4f} dB, {:.4f} peak to peak, "
+            "outermost bins {:+.4f} and {:+.4f}"
+            "\n  the measured droop differs from the correction table by at most {:.4f} dB\n",
+            one.transform, uncorrected.averages, before_low, before_high,
+            before_high - before_low, before.front(), before.back(), after_low, after_high,
+            after_high - after_low, after.front(), after.back(), worst_against_table);
+        INFO(report);
+
+        // The artifact. Both outermost kept bins sit on the prototype's
+        // cutoff, so both read about 6 dB down. The bound asserts that the
+        // droop is there and roughly that deep rather than pinning it; the
+        // table comparison below is the precise statement.
+        CHECK(before.front() < -5.0);
+        CHECK(before.back() < -5.0);
+        CHECK(before_high - before_low > 5.0);
+        CHECK(worst_against_table < 0.5);
+
+        // The fix. What is left is the noise in the estimate: an unaveraged
+        // power bin is exponentially distributed, so the mean of K of them
+        // has a relative standard error of 1/sqrt(K), which at the averages
+        // this case takes is a few hundredths of a decibel per bin, and the
+        // extreme over N/2 bins is about three times that. The bound is set
+        // well above the measured spread rather than at it, because a
+        // statistical case that passes by a hair fails on someone else's
+        // machine for no reason.
+        CHECK(after_high - after_low < 0.6);
+        CHECK(std::abs(after.front()) < 0.4);
+        CHECK(std::abs(after.back()) < 0.4);
     }
 }
