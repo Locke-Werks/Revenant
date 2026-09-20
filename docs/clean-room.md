@@ -270,7 +270,7 @@ reading the licence file in each repository:
 | `osmocom/rtl-sdr` (librtlsdr) | GPL-2.0-or-later | `COPYING` at the repository root for the version 2 text, the per-file notice for the "or later" |
 | `greatscottgadgets/hackrf` (libhackrf) | GPL-2.0 | `COPYING` at the repository root |
 | `pothosware/SoapySDR` | Boost Software License 1.0 | `LICENSE_1_0.txt` |
-| `libusb/libusb` | LGPL-2.1 | `COPYING` at the repository root |
+| `libusb/libusb` | LGPL-2.1-or-later | `COPYING` at the repository root for the version 2.1 text, the per-file notice for the "or later". The survey recorded only the root file and so recorded only "LGPL-2.1"; corrected 2026-09-19, see below |
 
 SoapySDR itself is permissive and never was the problem. Its device modules are:
 `SoapyHackRF` carries an MIT licence on its own source and then links
@@ -380,41 +380,299 @@ than policy, and the file survives as the USB-layer diagnostic for a dongle that
 will not enumerate, which is a question `librtlsdr` in the path makes harder to
 answer.
 
-## libusb, and one open item
+## The static-link relink question, and what a release owes
 
-libusb is LGPL-2.1. Linking it dynamically, unmodified, keeps the obligation
-where the LGPL puts it: the user must be able to replace the library, which a
-DLL beside the executable satisfies on its own.
+The open item, as it was recorded: the presets set `VCPKG_TARGET_TRIPLET` to
+`x64-windows-static`, which pulls libusb into the executable, and a static link
+to an LGPL library carries a relinking obligation that a DLL beside the
+executable would have discharged for free. It was written down while Revenant
+was proprietary and in a private repository, where none of it had come due.
 
-LGPL-2.1 section 3 carries the option to apply the ordinary GPL, version 2 or
-any later version, to a copy of the library. That option is what makes an
-LGPL-2.1 dependency combinable with a GPL-3.0 work, so the move to GPL-3.0
-raises no new question here. librtlsdr reaches the device through libusb as
-well, so there is now one more consumer of the same library and the same
-obligation.
+Both of those facts changed on 2026-09-18, so the question is worked through
+here rather than left sitting. What follows is the reasoning, not a ruling. See
+the last subsection.
 
-Open, and to be decided before anything is distributed: the repository's presets
-set `VCPKG_TARGET_TRIPLET` to `x64-windows-static`, which builds libusb as a
-static library and pulls it into the executable. A static link to an LGPL
-library is permitted and carries the relinking obligation, which means shipping
-object files or an equivalent mechanism so the user can relink against their own
-libusb. That is a real obligation on the release pipeline rather than a
-formality, and it is unchanged by the licence move: GPL-3.0 satisfies the
-user's freedom to modify Revenant, and the LGPL asks separately about their
-freedom to modify libusb.
+Everything below was checked on 2026-09-19 against the installed tree at
+`build/ci/vcpkg_installed/x64-windows-static`, against `LICENSE` in this
+repository, and against the LGPL-2.1 text that the libusb port ships as its own
+copyright file. Versions are the ones in `vcpkg_installed/vcpkg/status`.
 
-The two ways out are a per-port triplet that builds libusb as a DLL while the
-rest of the tree stays static, or accepting the relink obligation and building
-it into the release process. It is recorded here rather than settled quietly at
-build time, because a triplet is the kind of setting somebody changes for an
-unrelated reason without knowing a licence depends on it.
+### First correction: libusb is LGPL-2.1-or-later
+
+This document has said "LGPL-2.1" since the prior-art survey, and that was the
+root `COPYING` file being read. It is the same trap this document already
+documents two sections up for librtlsdr, applied to librtlsdr and then not
+applied here.
+
+The installed `include/libusb-1.0/libusb.h` at port version 1.0.29 reads
+"either version 2.1 of the License, or (at your option) any later version." The
+vcpkg port declares `LGPL-2.1-or-later` in its SPDX document, which corroborates
+that as the packager's reading rather than establishing it: the per-file notice
+is the grant.
+
+That matters for which argument below has to carry weight.
+
+### What LGPL-2.1 section 6 asks of somebody shipping a static binary
+
+Section 6 is the clause that governs distributing a work linked against the
+library, statically or otherwise. It asks for four things and the relink
+obligation is only the fourth of them.
+
+1. The terms the combined work goes out under must "permit modification of the
+   work for the customer's own use and reverse engineering for debugging such
+   modifications". GPL-3.0-or-later permits both without limit, so this is
+   satisfied by a wide margin rather than by a reading.
+2. Prominent notice with each copy that the library is used in the work and
+   that the library and its use are covered by the LGPL.
+3. A copy of the LGPL-2.1 text supplied with the work.
+4. One of subsections 6a through 6e.
+
+The relink obligation lives in 6a, and the reason the static triplet raises the
+question at all is that it gives up 6b, the "suitable shared library mechanism"
+route that a DLL satisfies on its own.
+
+**Whether publishing source under GPL-3.0-or-later satisfies 6a.** 6a asks for
+two separate things. The first is "the complete corresponding machine-readable
+source code for the Library including whatever changes were used in the work".
+The second is, for an executable, "the complete machine-readable 'work that
+uses the Library', **as object code and/or source code**, so that the user can
+modify the Library and then relink".
+
+The "and/or source code" is the operative phrase and it is why the original
+framing of this item, "shipping object files or an equivalent mechanism", was
+stricter than the clause. Source is a listed form, not an equivalent mechanism
+argued for. A user who has Revenant's complete source, its `vcpkg.json`, its
+`vcpkg-configuration.json` baseline and its CMake presets can build against a
+libusb they modified, which is the capability 6a exists to preserve. GPL-3.0
+already forces all of that to be published, so the second limb of 6a is
+discharged by the obligation the project is already under.
+
+The first limb is not. It asks for libusb's source, not Revenant's, and nothing
+in this repository carries it. Two facts narrow that down:
+
+- The vcpkg libusb port applies no patches. Its `vcpkg_abi_info.txt` lists a
+  portfile and no diffs, and its SPDX names the upstream download as
+  `git+https://github.com/libusb/libusb@v1.0.29`. So "whatever changes were used
+  in the work" is nothing, and upstream v1.0.29 is the complete corresponding
+  source.
+- The rtlsdr port is the opposite case and it is a GPL question rather than an
+  LGPL one. Its ABI includes `dependencies.diff`, `library-linkage.diff` and
+  `tools.diff`, so the librtlsdr compiled into the binary is a modified v2.0.2.
+  Those diffs are part of the Corresponding Source for the executable under
+  GPL-3.0 section 1. They live in the public vcpkg repository at the commit the
+  port's SPDX names, which is reachable and pinned, and that is the thing to
+  settle rather than assume.
+
+6d is the cheaper subsection and the one that matches how this project already
+satisfies the GPL: "If distribution of the work is made by offering access to
+copy from a designated place, offer equivalent access to copy the above
+specified materials from the same place." A release carrying the binary and the
+sources together satisfies 6d and GPL-3.0 section 6d by the same act. 6c, the
+three-year written offer, is the same promise the licence section above already
+rejects as the expensive option.
+
+So the static triplet is not the problem it was recorded as. It removes the free
+route and leaves a route that costs a file in the release.
+
+### Whether LGPL-2.1 and GPL-3.0-or-later combine at all
+
+Two independent routes, and the "or later" finding above means the weaker one
+does not have to hold.
+
+**Via the "or later" grant, which is the simple route.** libusb may be taken
+under LGPL-3.0 at the recipient's option. LGPL-3.0 is drafted as a set of
+additional permissions layered on GPL-3.0, so a GPL-3.0 work linking it is
+combining GPL-3.0 with GPL-3.0-plus-permissions, and GPL-3.0 section 7 says
+additional permissions may be removed from a copy. No conversion step, no
+irreversible act.
+
+**Via LGPL-2.1 section 3, which is the route this document previously named.**
+Section 3 permits applying "the ordinary GNU General Public License, version 2"
+to a given copy, and adds parenthetically that if a newer version of the
+ordinary GPL has appeared, that version may be specified instead. GPL-3.0 has
+appeared. So the option reaches GPL-3.0 and the previous wording of this
+section was right about the destination.
+
+Two cautions on that route that the previous wording left out. It is an option
+and not a requirement, so nothing is converted by accident. And section 3 says
+the change "is irreversible for that copy", so exercising it deliberately on a
+vendored copy is a decision with no undo, which is a reason to prefer the "or
+later" route that needs no exercise at all.
+
+Under LGPL-3.0 the relink clause is section 4d rather than 6a, worded
+differently and reaching the same place: 4d(0) takes the Minimal Corresponding
+Source plus the Corresponding Application Code "in a form suitable for, and
+under terms that permit, the user to recombine or relink", and source is such a
+form. 4d(1) is the shared-library route. Same shape, same answer.
+
+### librtlsdr, GPL-2.0-or-later, and why the "or later" is load-bearing
+
+GPL-2.0-only and GPL-3.0 are mutually incompatible. Each requires that the
+combined work be distributed under its own terms and neither tolerates the
+other's conditions, so there is no version of the combination that satisfies
+both. A GPL-2.0-only librtlsdr would therefore bar a GPL-3.0 Revenant outright,
+which is why the grant is checked per file rather than read off the repository
+root.
+
+It reproduces. The installed `include/rtl-sdr.h` at port version 2.0.2 reads
+"either version 2 of the License, or (at your option) any later version", the
+same as the 2026-09-18 check above, and the disclosure log records that the
+grant was confirmed in `librtlsdr.c` and `tuner_r82xx.c`, which is where it has
+to be, because a header contributes no object code. The vcpkg port declares
+`GPL-2.0-or-later`, again as corroboration and not as the grant.
+
+The licence section above gives one reason the "or later" mattered: Qt6 is
+LGPL-3.0 and a 2.0-only radio would have taken the interface with it. There is a
+second reason, which applies to the engine alone and does not need the UI to
+exist.
+
+**pthreads4w is Apache-2.0 and it is already in the engine binary.** The rtlsdr
+port depends on `libusb` and `pthreads`, and the installed
+`rtlsdrTargets.cmake` puts `PThreads4W::PThreads4W` in the interface link
+libraries, so anything linking `rtlsdr::rtlsdr_static` links it. `core/` does.
+The installed port is pthreads4w 3.0.0, SPDX `Apache-2.0`, and the static
+triplet means `pthreadVC3.lib` is copied into the executable rather than loaded
+beside it.
+
+The FSF's stated position is that Apache-2.0 is incompatible with GPL-2.0,
+because its patent termination and indemnification provisions are further
+restrictions of the kind GPL-2.0 section 6 forbids, and that it is compatible
+with GPL-3.0, whose section 7 enumerates exactly those kinds of additional term
+as permitted. Taken at face value, that means the engine as it links today would
+be an incompatible combination under GPL-2.0-only, with no Qt anywhere near it.
+The "or later" is not a convenience that bought the user interface. It is what
+makes the current link line lawful.
+
+The policy section's rule stands unchanged and now has a demonstration attached
+to it. A GPL-2.0-only library still cannot be linked, and what that would break
+is no longer hypothetical: it is the link line the engine already has.
+
+### The rest of the dependency set
+
+Read from `vcpkg_installed/vcpkg/status` and the SPDX document of each port on
+2026-09-19. "In the binary" means the static engine build, which is the only
+thing that could ship today.
+
+| Port | Version | Licence, as the port declares it | In the binary | What it asks of a binary release |
+| --- | --- | --- | --- | --- |
+| rtlsdr | 2.0.2 | GPL-2.0-or-later | yes, static | Corresponding Source, including the port's three diffs; licence text; notices |
+| libusb | 1.0.29 | LGPL-2.1-or-later | yes, static, pulled in by rtlsdr | section 6: notice, a copy of the LGPL, and one of 6a to 6e |
+| pthreads (pthreads4w) | 3.0.0 | Apache-2.0 | yes, static, pulled in by rtlsdr | section 4: retain the copyright, patent, trademark and attribution notices, and reproduce upstream's `NOTICE` file if it has one |
+| capnproto | 1.4.0 | MIT | yes | the copyright notice and the permission notice |
+| zlib | 1.3.1 | Zlib | yes, pulled in by capnproto | nothing on a binary; the notice requirement binds source distributions |
+| vulkan-memory-allocator | 3.3.0 | MIT | yes, header only | the copyright notice and the permission notice |
+| catch2 | 3.13.0 | BSL-1.0 | no, tests only | nothing: BSL-1.0 exempts machine-executable object code by its own terms |
+| pkgconf | 2.5.1 | ISC-style text, no SPDX declared | no, build tool | nothing |
+| vcpkg-cmake and the other helper ports | various | MIT, one Apache-2.0 | no, build tooling | nothing |
+
+Vulkan comes from the system SDK rather than vcpkg: `find_package(Vulkan)`
+resolves to `vulkan-1.lib`, an import library for the loader that arrives with
+the graphics driver. Whether that loader is a System Library under GPL-3.0
+section 1 does not need deciding, because the loader is Apache-2.0 and so is
+compatible either way.
+
+**Qt, which the engine does not link and the UI does.** `ui/` is a separate
+CMake project against the dynamic triplet, requiring Qt6 6.8 or newer, and it
+links `Qt6::Core`, `Qt6::Gui`, `Qt6::Quick` and `Qt6::QuickControls2`. The open
+source Qt is LGPL-3.0. Three things follow and none of them is settled, because
+nothing packages the UI yet:
+
+- The dynamic link is the LGPL-3.0 section 4d(1) route, and DLLs beside the
+  executable satisfy it without a relink package, which is the position this
+  document originally wanted for libusb. That is a property of the deployment
+  layout rather than of the licence, so a static Qt build, or any packaging that
+  stops a replaced `Qt6Core.dll` being picked up, gives it away.
+- Section 4a's notice requirement and the licence copies apply regardless of
+  which of 4d(0) and 4d(1) is used. A Qt application ships the LGPL-3.0 text
+  and the GPL-3.0 text it references.
+- Qt bundles third-party code with its own attribution requirements, Harfbuzz,
+  FreeType and PCRE2 among them. `windeployqt` copies the binaries and does not
+  generate that attribution, so a notices file built only from the vcpkg tree
+  would miss the entire Qt subtree.
+
+### What is actually still open
+
+The relink obligation is not the open item. These are.
+
+1. **There is no notices file.** Checked: no `NOTICE`, no `THIRD-PARTY-NOTICES`,
+   nothing of that shape at the root or under `docs/`. Four of the linked
+   licences ask for one, in different words.
+2. **There is no published Corresponding Source for the dependencies as built.**
+   The repository publishes Revenant's own source and a pinned vcpkg manifest.
+   A manifest is a recipe: it names upstream tags and a registry commit, which
+   is a strong argument for section 6d's "equivalent access from the same place"
+   and is not the same act as offering the source. The rtlsdr port's three
+   patches are the concrete case, because they are modifications to GPL source
+   that are in the binary and are not in this tree.
+3. **Nothing has been distributed, so nothing is in breach.** The distinction
+   the licence section above draws holds: these obligations attach to handing a
+   binary to somebody. Today the repository ships source and no binaries. The
+   deadline is the first release, not now.
+4. **The UI's Qt obligations are unexamined beyond the paragraph above**, and
+   they have their own packaging step that does not exist yet.
+
+### What a release has to carry
+
+Concretely, so that the first release is not the place this gets worked out.
+
+**A notices file, generated rather than written.** Everything it needs is
+already on disk: `vcpkg_installed/x64-windows-static/share/<port>/copyright`
+holds each port's licence text verbatim, and `vcpkg.spdx.json` beside it holds
+the name, the version and the declared SPDX identifier. A script over that
+directory produces a file that stays correct when a version moves, which a
+hand-written one does not. It carries, at minimum: each linked port with its
+version and identifier, the verbatim LGPL-2.1 text, the verbatim GPL-3.0 text,
+and the section 6 notice naming libusb specifically as a library used in the
+work and covered by the LGPL.
+
+**Where it lives.** The root or `docs/`, not `core/`, `tools/` or `ui/`. The CI
+guard greps those three directories for any SPDX identifier other than this
+project's own, so a notices file listing `MIT` and `Apache-2.0` as bare
+identifiers would fail the build if it landed in one of them. That is the guard
+working as designed and it is a cheap mistake to make once.
+
+**The source offer, as a release artefact rather than a promise.** GPL-3.0
+section 6d and LGPL-2.1 section 6d both accept equivalent access from the same
+place. A release carrying the binary, Revenant's source archive and the resolved
+dependency sources satisfies both in one act and avoids the three-year written
+offer entirely. The dependency sources are the piece that needs a build step:
+`vcpkg export` produces exactly this, and the alternative is naming the upstream
+tags and the vcpkg registry commit in the notices file and relying on those
+remaining reachable, which is a weaker promise made about somebody else's
+hosting.
+
+**In the shipped artefact.** `res/revenant.rc.in` and `signing/` exist and there
+is no `installer.toml` yet, so the Forge packaging is unwritten. Whenever it is
+written, the notices file is a payload member beside the binary, not a link.
+
+### This needs Archon's confirmation before the item is marked closed
+
+Nobody who worked on the above is a lawyer, and neither is Archon. What this
+section is good for is that each licence's actual text has been read against
+what this project actually links, with the versions and the link line checked
+rather than remembered, so the reasoning can be confirmed or handed to somebody
+qualified without them starting from nothing.
+
+Three things to confirm or reject, in the order they matter:
+
+1. That source is an acceptable form under LGPL-2.1 section 6a, so no object
+   file or relink package is needed, and that a release carrying binary and
+   source together satisfies 6d.
+2. That the Apache-2.0 finding is right, and therefore that the "or later" in
+   librtlsdr's grant is what makes the current engine link line lawful and not
+   only what keeps Qt reachable.
+3. That the four open points above are the full list, since the purpose of
+   doing this was to find what is not satisfied rather than to confirm what is.
+
+Until those are confirmed, the item stays open and the entry above is the
+analysis, not the answer.
 
 ## Disclosure log
 
 Every exposure gets recorded here, with what was seen, when, and what was done
 about it. The log stays useful after the licence change, for the same reason it
 was useful before: it is the record of what the people writing this project
-actually read. Four entries, all self-reported by the person who did it, which
+actually read. Five entries, all self-reported by the person who did it, which
 is the behaviour the practice needs to keep producing.
 
 **2026-09-18, polyphase channelizer design.** While verifying the licences of
@@ -479,6 +737,29 @@ it, and the entry exists so that a future reader can see the difference.
 
 It also demonstrates the thing the log is for: the reviewer volunteered this
 against their own work, unprompted, when the cheaper move was silence.
+
+**2026-09-19, licence audit of the installed dependency tree.** The relink
+analysis above rests on reading files from
+`build/ci/vcpkg_installed/x64-windows-static`, so what was read is recorded
+here rather than left implicit in a citation.
+
+Read in full: every `share/<port>/copyright` file, which is licence text; every
+`share/<port>/vcpkg.spdx.json`, which is package metadata; `vcpkg/status`;
+`share/rtlsdr/rtlsdrTargets.cmake` and the two `vcpkg_abi_info.txt` files,
+which are build metadata. None of that is expression of an algorithm.
+
+Read in part: the licence notice at the head of `include/rtl-sdr.h` and
+`include/libusb-1.0/libusb.h`, which is what this document instructs a reader
+to check before distributing, plus the few lines past each notice that a
+line-range read picks up. In `rtl-sdr.h` that was the include guard and the
+`extern "C"` opening; in `libusb.h` an MSVC warning pragma. No function
+declaration, no constant and no implementation file from either project.
+
+Resolution: nothing to resolve. No file in this tree claims clean-room
+provenance for anything libusb or librtlsdr does, because Revenant links both
+rather than reimplementing either. The entry exists because the analysis above
+cites those two headers as its evidence, and a reader checking that citation
+should be able to see exactly how far the read went.
 
 **What the log is for now.** Under the old rule an exposure was a contamination
 to be contained. Under the current one it still gets written down, because the
