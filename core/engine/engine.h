@@ -81,12 +81,18 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <format>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/dsp/pfb.h"
@@ -353,6 +359,137 @@ struct AudioChunk {
 
 using AudioSink = std::function<Status(const AudioChunk&)>;
 
+// One consumer's place in a receiver's audio.
+//
+// Issued by Engine::attach_audio_sink, unique for the life of one Engine and
+// never reused. A token that has already been detached therefore detaches
+// nothing, rather than detaching whichever consumer arrived next.
+using AudioSinkId = std::uint64_t;
+
+// More than one consumer on one receiver's audio.
+//
+// WHAT THIS EXISTS TO STOP. set_audio_sink below holds one sink per receiver
+// and the second call replaces the first, silently and with no way to ask
+// what was there. That is survivable while the only caller is the process
+// that built the engine; it stops being survivable the moment a second one
+// can ask for audio over the wire, because the first subscribeAudio on a
+// host that is also recording or playing locally takes the sound card and
+// nothing anywhere says so. tools/cli/main.cpp already hand-rolls a two-way
+// version of this in a lambda, which is the shape of the problem rather than
+// a solution to it.
+//
+// ORDERING. Sinks are called in attach order, in one pass, on the producer
+// thread, and every one of them is called: a sink that fails does not stop
+// the sinks behind it. Attach order is stable and is not a priority; nothing
+// here promises a recording sees a chunk before a subscriber does, only that
+// each of them sees every chunk exactly once and in stream order.
+//
+// FAILURE. The first error is remembered and returned after the pass, so the
+// caller learns that something refused while every other consumer still got
+// its samples. core/engine/graph.cpp turns that error into a failing
+// dispatch and ends the run, which is right: core/engine/audio_egress.h
+// reserves a sink error for a wiring mistake, and a consumer that merely
+// cannot keep up counts a drop of its own and returns success.
+//
+// WHAT IT DOES NOT DO, WHICH IS THE PART THAT MATTERS. A slow sink is NOT
+// isolated. The pass is synchronous on the thread that retired the GPU
+// readback, so a sink that blocks for ten milliseconds delays every sink
+// behind it and the completion thread with them. No fan-out can fix that,
+// because the buffer that absorbs a slow consumer has to be sized in that
+// consumer's own units: a recording wants seconds of disk hiccup
+// (AudioEgressConfig::ring_seconds), a loudspeaker wants one device period,
+// and a wire subscription wants the depth its client asked for. Every sink
+// attached here must therefore copy and return. The ones in this tree do:
+// AudioEgress::publish writes into a lock-free ring, and the RPC server's
+// copies into that subscription's own queue.
+//
+// THREAD SAFETY. attach, detach and empty are the control thread and take a
+// lock. deliver is the producer thread, takes no lock and allocates nothing:
+// it loads one shared_ptr to an immutable list, which a concurrent attach
+// replaces rather than mutates.
+class AudioFanout {
+public:
+    AudioFanout() = default;
+
+    AudioFanout(const AudioFanout&) = delete;
+    AudioFanout& operator=(const AudioFanout&) = delete;
+    AudioFanout(AudioFanout&&) = delete;
+    AudioFanout& operator=(AudioFanout&&) = delete;
+
+    // Control thread. Returns the token that detaches this one consumer.
+    [[nodiscard]] AudioSinkId attach(AudioSink sink) {
+        const std::scoped_lock held(lock_);
+        const AudioSinkId token = next_++;
+
+        // Copy, append, publish. The list the producer thread may be walking
+        // right now is never written to, so it needs no lock to read one.
+        auto next = std::make_shared<Entries>(*live_.load());
+        next->push_back(Entry{token, std::move(sink)});
+        live_.store(std::move(next));
+        return token;
+    }
+
+    // Control thread. False when that token is not attached, which is an
+    // ordinary answer rather than an error: a client can cancel and then drop
+    // the capability.
+    bool detach(AudioSinkId token) {
+        const std::scoped_lock held(lock_);
+        auto current = live_.load();
+        auto next = std::make_shared<Entries>();
+        next->reserve(current->size());
+        bool found = false;
+        for (const Entry& entry : *current) {
+            if (entry.id == token) {
+                found = true;
+                continue;
+            }
+            next->push_back(entry);
+        }
+        if (!found) {
+            return false;
+        }
+        live_.store(std::move(next));
+        return true;
+    }
+
+    [[nodiscard]] bool empty() const { return live_.load()->empty(); }
+    [[nodiscard]] std::size_t size() const { return live_.load()->size(); }
+
+    // The producer thread, through the one AudioSink this fan-out installs.
+    [[nodiscard]] Status deliver(const AudioChunk& chunk) const {
+        const std::shared_ptr<const Entries> entries = live_.load();
+        Status outcome;
+        for (const Entry& entry : *entries) {
+            if (!entry.sink) {
+                continue;
+            }
+            if (auto handed = entry.sink(chunk); !handed && outcome) {
+                // The first failure, kept and returned after the pass. Later
+                // ones are lost on purpose: the run is ending either way and
+                // the first message names the consumer that started it.
+                outcome = std::unexpected(handed.error());
+            }
+        }
+        return outcome;
+    }
+
+private:
+    struct Entry {
+        AudioSinkId id = 0;
+        AudioSink sink;
+    };
+    using Entries = std::vector<Entry>;
+
+    // Serialises attach against detach. The producer never takes it.
+    std::mutex lock_;
+
+    // Replaced whole rather than mutated, which is what lets deliver() read
+    // it with one atomic load and no lock. Never null.
+    std::atomic<std::shared_ptr<const Entries>> live_{std::make_shared<const Entries>()};
+
+    AudioSinkId next_ = 1;
+};
+
 // One full-span spectrum frame, handed to the caller on the host.
 //
 // One frame per dispatch, which is one per source block, so the frame rate is
@@ -546,8 +683,42 @@ public:
     [[nodiscard]] virtual std::vector<VrxId> vrx_ids() const = 0;
 
     // Routes a receiver's audio to a callback. One sink per receiver; setting
-    // a second replaces the first.
+    // a second replaces the first, and an empty one detaches.
+    //
+    // THIS IS THE SLOT AND NOT THE SEAM. It is the low-level call, kept
+    // because the graph has exactly one place to put a sink and something has
+    // to fill it. A caller that wants audio alongside whatever else is
+    // already listening uses attach_audio_sink below; a caller that reaches
+    // this directly displaces every consumer the fan-out was holding and is
+    // not told it did.
     [[nodiscard]] virtual Status set_audio_sink(VrxId id, AudioSink sink) = 0;
+
+    // Adds a consumer to this receiver's audio without displacing the ones
+    // already there, and hands back the token that removes it again.
+    //
+    // Non-virtual and written once, here, on top of set_audio_sink: the first
+    // attach on a receiver installs an AudioFanout in the slot and every
+    // attach after it joins that fan-out. The last detach takes the slot off
+    // again, so a receiver nobody is listening to costs one std::function
+    // call per dispatch and no more. AudioFanout above has the ordering and
+    // the failure semantics, including what a slow consumer does to the
+    // others, which is the part a caller has to design around.
+    //
+    // Refused in the engine's own words for a receiver that does not exist
+    // and before a source is open, because both refusals come back out of
+    // set_audio_sink unchanged.
+    //
+    // WHAT IT CANNOT DO. It cannot stop a caller from reaching
+    // set_audio_sink directly and throwing the fan-out away; nothing can,
+    // short of removing that method, and it is the only way to fill the slot.
+    // tools/cli/main.cpp is the remaining direct caller in this tree.
+    [[nodiscard]] Expected<AudioSinkId> attach_audio_sink(VrxId id, AudioSink sink);
+
+    // Removes one consumer. The token is the one attach_audio_sink returned.
+    // Detaching a token that is not attached is an error and not a silent
+    // success, because the two things it means, a double detach and a token
+    // from another receiver, are both mistakes a caller wants to hear about.
+    [[nodiscard]] Status detach_audio_sink(VrxId id, AudioSinkId sink);
 
     // Routes the full-span spectrum to a callback. One sink for the engine,
     // because there is one span; setting a second replaces the first and an
@@ -585,6 +756,83 @@ public:
 
 protected:
     Engine() = default;
+
+private:
+    // The fan-outs this engine has installed, one per receiver that has at
+    // least one attached consumer. Control-plane state on an otherwise pure
+    // interface, which is deliberate: it has to sit above set_audio_sink to
+    // be shared by every caller, and there is nowhere above Engine that every
+    // caller passes through.
+    //
+    // Keyed by VrxId::value rather than by VrxId, because VrxId has equality
+    // and no ordering and giving it one would be a comparison nobody means.
+    std::mutex audio_fanout_lock_;
+    std::map<std::uint32_t, std::shared_ptr<AudioFanout>> audio_fanouts_;
 };
+
+inline Expected<AudioSinkId> Engine::attach_audio_sink(VrxId id, AudioSink sink) {
+    if (!sink) {
+        return fail("Engine::attach_audio_sink was given an empty sink. Detaching is "
+                    "detach_audio_sink with the token attach handed back, so an empty one "
+                    "here is a caller that lost its callable rather than one asking to stop");
+    }
+
+    const std::scoped_lock held(audio_fanout_lock_);
+
+    auto found = audio_fanouts_.find(id.value);
+    const bool fresh = found == audio_fanouts_.end();
+    std::shared_ptr<AudioFanout> fanout =
+        fresh ? std::make_shared<AudioFanout>() : found->second;
+
+    const AudioSinkId token = fanout->attach(std::move(sink));
+    if (!fresh) {
+        return token;
+    }
+
+    // The slot is filled before the map records it, so a refusal leaves this
+    // engine exactly as it was: the local fan-out dies here with the sink
+    // that was just attached to it, and the receiver keeps whatever it had.
+    if (auto installed = set_audio_sink(id, [fanout](const AudioChunk& chunk) -> Status {
+            return fanout->deliver(chunk);
+        });
+        !installed) {
+        return std::unexpected(installed.error());
+    }
+
+    audio_fanouts_.emplace(id.value, std::move(fanout));
+    return token;
+}
+
+inline Status Engine::detach_audio_sink(VrxId id, AudioSinkId sink) {
+    const std::scoped_lock held(audio_fanout_lock_);
+
+    auto found = audio_fanouts_.find(id.value);
+    if (found == audio_fanouts_.end()) {
+        return fail(std::format(
+            "receiver {} has no attached audio consumers, so sink {} cannot be detached from "
+            "it",
+            id.value, sink));
+    }
+    if (!found->second->detach(sink)) {
+        return fail(std::format(
+            "sink {} is not attached to receiver {}. A token is unique for the life of an "
+            "engine, so this is either a second detach of the same one or a token issued for "
+            "another receiver",
+            sink, id.value));
+    }
+    if (!found->second->empty()) {
+        return {};
+    }
+
+    audio_fanouts_.erase(found);
+
+    // Discarded, and the one place in this pair where a refusal is not the
+    // caller's business. A receiver removed while a consumer was still
+    // attached is the ordinary teardown order and set_audio_sink refuses an
+    // id the graph no longer knows; the fan-out has already been dropped
+    // above, so there is nothing left on the receiver either way.
+    static_cast<void>(set_audio_sink(id, {}));
+    return {};
+}
 
 }  // namespace revenant::engine
