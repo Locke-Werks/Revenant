@@ -444,6 +444,148 @@ TEST_CASE("a receiver keeps producing audio across a retune", "[gpu][engine][m1]
     CHECK(status->params.center == kOffset + 300);
 }
 
+TEST_CASE("a receiver that names no audio rate is planned at the engine's, not at 48 kHz",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // VrxParams::audio_rate of zero means "the engine's default". The Qt
+    // client always sends zero, because the whole point of the field is
+    // that a client does not have to know what the engine was started
+    // with. So this is not a corner: it is the only path one of the two
+    // clients ever takes.
+    //
+    // The graph resolved it for the STAGE and then planned with the raw
+    // request, where the planner falls back to its own 48000. On a graph
+    // built with anything else the two disagreed, and the disagreement was
+    // invisible until a retune was measured against the wrong basis.
+    constexpr dsp::SampleRate kAudioRate = 16'000;
+    constexpr dsp::Hertz kOffset = 37'500 * 4;
+
+    engine::EngineConfig config = default_config();
+    config.audio_rate = kAudioRate;
+
+    auto created = engine::Engine::create(config);
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    REQUIRE(eng.open_source(nfm_uri(kOffset, 400'000)).has_value());
+
+    engine::VrxParams params;
+    params.center = kOffset;
+    params.demod = engine::Demod::Nfm;
+    params.passband_low = -4'000;
+    params.passband_high = 4'000;
+    params.audio_rate = 0;
+
+    const auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    // An 8 kHz NFM band needs 12000 by the shared floor, which rounds up to
+    // one whole audio rate at 16000 and to one at 48000 as well. The two
+    // bases therefore differ by the whole engine rate, and this is the
+    // number the passband display's axis spans.
+    const auto status = eng.vrx_status(*added);
+    REQUIRE(status.has_value());
+    CHECK(status->demod_rate == kAudioRate);
+
+    // And the retune is measured against that basis. Sliding the same 8 kHz
+    // width up to +1000..+9000 leaves the width alone and moves the reach to
+    // 9000, so the requirement goes to 18000 and the demodulation rate from
+    // 16000 to 32000. That is a rebuild, and the caller has to be told on
+    // its own call.
+    //
+    // On the 48000 basis the same slide changes nothing at all: 18000 still
+    // rounds up to 48000. So this refusal is exactly the one the wrong basis
+    // swallowed, and a success here means the graph is planning against a
+    // rate its stage never ran at.
+    engine::VrxParams slid = params;
+    slid.passband_low = 1'000;
+    slid.passband_high = 9'000;
+
+    const Status refused = eng.set_vrx_params(*added, slid);
+    INFO(test::message_of(refused));
+    CHECK_FALSE(refused.has_value());
+    if (!refused) {
+        CHECK(refused.error().message.find("remove and an add") != std::string::npos);
+    }
+
+    // Refused before anything was stored, so the status still describes the
+    // receiver that is actually running.
+    const auto after = eng.vrx_status(*added);
+    REQUIRE(after.has_value());
+    CHECK(after->params.passband_low == -4'000);
+    CHECK(after->demod_rate == kAudioRate);
+}
+
+TEST_CASE("an audio rate change that leaves the demodulation rate alone is still a rebuild",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The shape a two-field comparison could not see. At the 48000 default
+    // an NFM receiver at -10000..+10000 needs 30000, so Fd is 48000 and the
+    // decimation is 1. Ask for 24000 and Fd is 48000 again, because 30000
+    // still rounds up to two of them, and the tap count is identical
+    // because the transition depends only on Fd, the edges and the channel
+    // rate. What moves is the decimation, 1 to 2, and the output rate,
+    // 48000 to 24000: a different pipeline and a different audio rate at
+    // the sink.
+    //
+    // The graph used to accept this, store 24000, echo it back, and let
+    // DemodStage::retune refuse it on the recording thread. The sink went on
+    // emitting 48 kS/s while the client was told the rate had changed.
+    constexpr dsp::Hertz kOffset = 37'500 * 4;
+
+    auto created = engine::Engine::create(default_config());
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    REQUIRE(eng.open_source(nfm_uri(kOffset, 400'000)).has_value());
+
+    engine::VrxParams params;
+    params.center = kOffset;
+    params.demod = engine::Demod::Nfm;
+    params.passband_low = -10'000;
+    params.passband_high = 10'000;
+
+    const auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    const auto before = eng.vrx_status(*added);
+    REQUIRE(before.has_value());
+    CHECK(before->demod_rate == 48'000);
+
+    engine::VrxParams halved = params;
+    halved.audio_rate = 24'000;
+
+    const Status refused = eng.set_vrx_params(*added, halved);
+    INFO(test::message_of(refused));
+    CHECK_FALSE(refused.has_value());
+    if (!refused) {
+        CHECK(refused.error().message.find("remove and an add") != std::string::npos);
+    }
+
+    // Nothing was stored, so the echo cannot claim a rate the sink is not
+    // delivering.
+    const auto after = eng.vrx_status(*added);
+    REQUIRE(after.has_value());
+    CHECK(after->params.audio_rate == 0);
+    CHECK(after->demod_rate == 48'000);
+
+    // A pan of the same width across the same rate is still free, which is
+    // the property the refusal above must not have cost.
+    engine::VrxParams panned = params;
+    panned.passband_low = -9'500;
+    panned.passband_high = 10'500;
+
+    const Status accepted = eng.set_vrx_params(*added, panned);
+    INFO(test::message_of(accepted));
+    CHECK(accepted.has_value());
+}
+
 TEST_CASE("receivers on several modes run together", "[gpu][engine][m1]") {
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
