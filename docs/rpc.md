@@ -428,19 +428,93 @@ as two-channel PCM renders as noise at the wrong speed, at tens of times the
 rate this design was costed at. An I/Q subscription is a separate method that
 does not exist.
 
-### RDS is still declared, allocated, refused
+### RDS is served, per receiver, off the audio fan-out
 
-`Session::rdsStation` and `Session::setRdsRegion` remain unwired, with
-`RdsStation` and the six structs and enums under it. The decoder exists in
-`core/decode` and nothing in `core/engine` feeds it a composite, so both
-methods refuse in words saying the surface exists and is not wired. A struct of
-zeros would read as a broken engine rather than as unfinished work.
+This section used to be headed "RDS is still declared, allocated, refused" and
+said that `Session::rdsStation` and `Session::setRdsRegion` remained unwired
+because nothing in `core/engine` fed the decoder a composite. Both are served
+as of 2026-09-20 and nothing in `core/engine` feeds the decoder still. That
+part of the sentence was a prediction about which lane would do the work, and
+it was wrong.
+
+**The decoder lives in `core/rpc/server.cpp`**, one per receiver, built on the
+first call to either method. It joins that receiver's audio through
+`Engine::attach_audio_sink` and runs on the engine's completion thread inside
+the sink, under that route's own lock. That is the detector's shape, and the
+detector is only half an argument for it: the detector had nowhere else it
+could go, and RDS did. `core/engine` could have grown a per-receiver decode
+stage. Three things decided against it. `attach_audio_sink` is the composition
+point and it exists, so a second decoder seam inside the engine would mean the
+one written first gets deleted, which is the argument `core/engine/vrx.h`
+already made from its own side. A decoder in the engine would have to hand
+state back through an `Engine` method, which means `core/engine` depending on
+`core/decode` and an engine-level mirror of `decode::StationState` beside the
+schema's. And nothing in the engine knows a client asked, which is the whole
+saving: a receiver nobody has asked about runs no decoder.
+
+**The composite reaches it through the ordinary audio path and costs no new
+stage.** A WFM receiver whose `audioRate` is 171000 demodulates at 342000 and
+decimates by two, so its audio filter's passband edge lands at 68400 Hz and the
+whole composite to 59375 survives. At the usual 48 kHz the demodulation rate is
+336 kHz, the passband edge is 19.2 kHz, and 57 kHz is deep in the stopband.
+171000 is three times the subcarrier and 144 times the bit rate, both exact,
+and it is `decode::RdsBitsConfig::rate`'s default. No new kernel, no readback,
+no resampling, and slightly LESS GPU than a listening receiver: the audio FIR
+runs at the output rate and needs 103 taps instead of 353.
+
+**It is a dedicated receiver, and the rate is what makes it one** rather than
+the sink. The schema used to say this call took the receiver's audio sink and
+was refused on a receiver that already had one; `AudioFanout` made that false
+and the retraction is in place. What is still true is that a listening receiver
+at 48 kHz fails the rate condition, so the decode and the listening cannot
+share one receiver unless the operator is willing to listen to a composite. It
+costs one extra receiver on the grid.
+
+**Four conditions, not the one the audio rate suggests**, each refused in its
+own words naming which failed: the demodulator has to be `nfm` or `wfm`, the
+audio has to be real and mono, the audio rate has to clear 148438 when the
+planner designed an audio filter and `core/decode`'s own 125000 when the
+decimation resolved to one, and the granted passband has to reach 59375 Hz
+either side of the mix centre. A receiver that took the engine's default audio
+rate is refused as well: `VrxParams::audioRate` is a verbatim echo and comes
+back zero, `EngineInfo` does not carry the default, so it is a rate the server
+cannot name rather than one it can check. Putting the resolved rate on
+`VrxStatus` would close that and is a schema change nothing else has needed.
+
+**Lifecycle.** Every poll asks `vrx_status` first, so a receiver removed by any
+path, including one this session never saw, is answered in the engine's own
+words and its decoder dropped there. `removeVrx` takes the sink off promptly.
+`setVrxParams` resets the decoder, on every retune and not only one that moved
+the centre: the server is handed a whole `VrxParams` and cannot tell a wider
+filter from a hundred kilohertz away without keeping a copy that could go
+stale, and a receiver that moved is on a different transmitter whose PS and
+RadioText would otherwise be assembled over the old one's.
+
+**The region defaults to `rds` and is per receiver**, unlike
+`setDetectionThreshold`, because two receivers can sit on two continents.
+Nothing infers it: no field names the region, the PI cannot decide it because
+the US call sign range collides with European country codes, and getting it
+wrong is silent, since PTY 26 draws as National Music in one region and Hip-Hop
+in the other. A client may seed it from the tuned frequency as long as it shows
+it as a setting the operator can override. Setting it on a decoder that already
+exists clears everything accumulated, INCLUDING the physical layer, which the
+region does not reach: every counter in `RdsHealth` is cumulative from the
+moment the decoder was built, and clearing one layer would leave one struct
+holding two epochs.
+
+**What it costs**, measured rather than asserted: 12.07 ms of one core per
+second of composite at 171000 S/s, which is 0.145 ms per chunk against the
+detector's 0.201 ms per frame, per decoding receiver rather than per engine.
+The CPU share is not the number that matters. It runs on the thread retiring
+GPU readbacks, so what it costs is latency in front of every other sink there:
+0.145 ms inside a 12 ms chunk interval. Eight decoders would be 1.2 ms of that
+interval, still inside it and no longer negligible, which is where a decoder
+wants its own thread instead of the sink.
 
 All three ordinals were allocated in one pass with the login bootstrap because
 a Cap'n Proto field number is permanent and three branches appending to one
-schema would collide. `core/rpc/revenant.capnp` carries the full argument for
-each, including the four conditions an RDS receiver will have to meet, which
-are four and not the one the audio rate suggests.
+schema would collide. Nothing moved when each landed, which is the whole of
+what that bought.
 
 ### Nothing else crosses
 
@@ -452,8 +526,11 @@ metadata. The wire is downstream of that promise and does not widen it.
 What the schema does carry is the state a client needs to draw and control:
 `EngineInfo` with the device, grid, rates and spectrum geometry;
 `SourceDescriptor` for a picker; `SourceStats` and `VrxStatus` for the
-counters; and the `DetectionList` above, which is the detection metadata the
-engine's promise names and the reason that clause is in it.
+counters; the `DetectionList` above, which is the detection metadata the
+engine's promise names and the reason that clause is in it; and `RdsStation`,
+which is the "decoded symbols" clause of the same promise now that something
+decodes. Nothing new crosses the bus for it: the composite is audio PCM the
+engine already returns, and the decode happens on the host.
 Overruns and lost samples travel because they are correctness events, and a
 remote client is exactly the caller that cannot read the log.
 `VrxStatus::audioDropped` travels beside them and is narrower than it reads:
