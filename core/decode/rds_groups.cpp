@@ -40,20 +40,28 @@ constexpr std::uint32_t kBlockMask = 0x03FFFFFFu;  // 26 bits
 }
 
 // The 367 bursts of span 1 through 5 that fit in a 26-bit block, indexed by
-// their syndrome. Built once.
+// their syndrome.
 //
 // The table is only safe because every one of those bursts has a syndrome of
 // its own, which is EN 50067 clause 2.3's correction claim restated: ten check
 // bits, Rieger bound 2l <= n-k, so l = 5 is exactly achievable and exactly the
-// limit. The builder asserts it rather than assuming it, and
-// test_rds_groups.cpp asserts it again over the whole set.
+// limit. The two static_asserts below are that claim, checked at build time
+// against the table actually constructed, and test_rds_groups.cpp checks it
+// again from its own arithmetic over the whole set.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it said "the builder
+// asserts it rather than assuming it". The builder recorded a collision in a
+// bool and a count in an int and nothing anywhere read either of them, so a
+// colliding table would have been built in silence and the first entry to
+// reach a syndrome would have won. The fields are read now, which is what
+// made the sentence true.
 struct BurstTable {
     std::array<BurstCorrection, 1024> by_syndrome{};
     int entries = 0;
     bool collided = false;
 };
 
-[[nodiscard]] BurstTable build_burst_table() {
+[[nodiscard]] constexpr BurstTable build_burst_table() {
     BurstTable table;
     for (std::uint8_t span = 1; span <= kMaxCorrectableBurstSpan; ++span) {
         const int interior_bits = span >= 2 ? span - 2 : 0;
@@ -80,10 +88,14 @@ struct BurstTable {
     return table;
 }
 
-[[nodiscard]] const BurstTable& burst_table() {
-    static const BurstTable table = build_burst_table();
-    return table;
-}
+constexpr BurstTable kBurstTable = build_burst_table();
+
+static_assert(!kBurstTable.collided,
+              "two bursts of span 5 or less share a syndrome, so the corrector cannot tell "
+              "them apart and would rewrite blocks into the wrong codeword");
+static_assert(kBurstTable.entries == 367,
+              "26 bits hold 26 bursts of span 1, 25 of span 2, 48 of span 3, 92 of span 4 "
+              "and 176 of span 5; a different total means the builder's enumeration moved");
 
 // EN 50067 Annex F Table F.1 (normative), all 32 rows: prose name, the
 // 8-character display and the 16-character display.
@@ -330,7 +342,7 @@ std::optional<BurstCorrection> burst_for_syndrome(std::uint16_t syndrome,
     if (syndrome == 0 || max_span == 0 || syndrome >= 1024) {
         return std::nullopt;
     }
-    const BurstCorrection& slot = burst_table().by_syndrome[syndrome];
+    const BurstCorrection& slot = kBurstTable.by_syndrome[syndrome];
     if (slot.span == 0 || slot.span > max_span) {
         return std::nullopt;
     }
