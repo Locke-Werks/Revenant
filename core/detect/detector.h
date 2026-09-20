@@ -387,8 +387,9 @@ struct DetectorConfig {
     std::uint32_t max_peaks = 0;
 
     // How far above the local noise floor a neighbouring bin must sit to be
-    // grown into a detection, as a multiple of the mean per-bin floor over
-    // the seed.
+    // grown into a detection. Two bars, and the level is the larger of them:
+    // edge_floor_sigma standard deviations of the averaged noise, and
+    // edge_floor_fraction of the mean per-bin floor, both taken over the seed.
     //
     // The ladder is powers of two, so the window that wins on a 21-bin signal
     // is 16 bins and sits wholly inside it. Every position from bin 0 to bin
@@ -398,13 +399,32 @@ struct DetectorConfig {
     // turns a detection back into a measurement; the occupied-bandwidth trim
     // below then takes off whatever the growth overshot.
     //
-    // One is the mean floor itself, so growth stops at 3 dB over the floor.
-    // Measured 2026-09-20 on the keyed ladder, 0.25, 0.5, 1.0, 2.0 and 4.0
-    // all produce the same tracks at all three rolloffs, so this is not a
-    // tuned number. What it must not be is signal-relative, per the
-    // retraction below.
+    // The sigma bar carries it, and it is adaptive for the same reason
+    // noise_excision_sigma is. What a growing edge has to clear is the
+    // averaged noise's RIPPLE, not the averaged noise's POWER, and the two
+    // are a fixed ratio only at one integration time. The spread the floor
+    // estimator already measures between its two percentiles is that ripple,
+    // per bin, in the same linear units as the floor: at the shipped second
+    // of averaging it is about four percent of the floor, and at the fiftieth
+    // of a second some cases run at it is a quarter of the floor. A level
+    // stated as a multiple of it therefore means the same thing at every
+    // integration time, which a level stated as a multiple of the floor does
+    // not.
     //
-    // WHAT THIS PARAGRAPH USED TO SAY. This knob was edge_excess_fraction,
+    // Three is the multiple. It is the same argument the birth rule makes
+    // about per-decision false alarms: growth steps over a run shorter than
+    // split_gap_bins, so stopping takes eight consecutive bins under the
+    // level, and three sigma makes a noise bin clearing it a one-in-a-
+    // thousand event.
+    //
+    // edge_floor_fraction is a backstop under the sigma bar, for the case a
+    // long average drives the ripple down toward the interpolation error in
+    // floor_ itself. Zero switches the backstop off and leaves the sigma bar
+    // alone; zero in both switches growth's level off entirely, which is what
+    // a case isolating some other behaviour wants.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY, FIRST RETRACTION. This knob was
+    // edge_excess_fraction,
     // default 0.25, and the level was that fraction of the SEED'S OWN mean
     // excess: "how far below a detection's own mean per-bin excess a
     // neighbouring bin may sit and still be grown into it". The reasoning
@@ -429,7 +449,31 @@ struct DetectorConfig {
     // under it crosses a Bessel comb's nulls. The two requirements pull in
     // opposite directions on a signal-relative bar and in the same direction
     // on a noise-relative one.
-    double edge_floor_fraction = 1.0;
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY, SECOND RETRACTION. The replacement was
+    // edge_floor_fraction alone, default 1.0, and this block said: "One is
+    // the mean floor itself, so growth stops at 3 dB over the floor. Measured
+    // 2026-09-20 on the keyed ladder, 0.25, 0.5, 1.0, 2.0 and 4.0 all produce
+    // the same tracks at all three rolloffs, so this is not a tuned number."
+    // Do not act on that sentence. The sweep was run at one in-band SNR and
+    // it certified insensitivity there, not independence of level, and the
+    // bar it was run against could not see the case where the number bites.
+    //
+    // A flat emitter's per-bin excess over the floor IS its SNR in its own
+    // occupied bandwidth, exactly, whatever the bin width or the bandwidth.
+    // Every scene emitter in tests/detect was at 20 or 30 dB in occupied
+    // bandwidth, so all five swept values sat 14 to 26 dB below the signal's
+    // own flat top and none of them could stop growth anywhere but in the
+    // skirt. At 0 dB in occupied bandwidth a level of 1.0 stops growth at bin
+    // one: measured on the unit grid, a 48-bin rectangular emitter at 12 dB
+    // in the 2500 Hz reference is 0.825 of the floor per bin, it grew by
+    // exactly zero bins, and the accepted band stayed at the 32-bin ladder
+    // rung that won it. 32 kHz reported against 48 kHz of truth, coverage
+    // 0.67, under the 0.70 the scene bar itself enforces. The crossover was
+    // 12.8 dB in the reference bandwidth at that width and 17.8 dB for a
+    // 149.85 kHz station, so the whole weak-and-wide corner was lost.
+    double edge_floor_fraction = 0.0;
+    double edge_floor_sigma = 3.0;
 
     // Fraction of a detection's excess power its reported bandwidth holds.
     // The ITU occupied-bandwidth definition, which is a measurement rather
@@ -670,18 +714,24 @@ private:
     std::uint32_t peak_budget_ = 1;
     std::vector<std::uint32_t> widths_;
 
-    // Integrated linear power per bin, and the floor under it.
+    // Integrated linear power per bin, the floor under it, and the standard
+    // deviation of that floor's own ripple. All three are per fine bin and
+    // the last two are interpolated between knots. sigma_ is what the growth
+    // level is stated in, per edge_floor_sigma.
     std::vector<double> average_;
     std::vector<double> floor_;
+    std::vector<double> sigma_;
 
     // Total weight the exponential average has accumulated, which is what
     // keeps the first frames from dominating it. Rises from alpha toward one.
     double weight_ = 0.0;
 
-    // Prefix sums of excess over the floor and of the floor itself, so a
-    // summed-bin score at any position and width is two subtractions.
+    // Prefix sums of excess over the floor, of the floor itself and of its
+    // ripple, so a summed-bin score or a growth level at any position and
+    // width is two subtractions.
     std::vector<double> excess_cumulative_;
     std::vector<double> floor_cumulative_;
+    std::vector<double> sigma_cumulative_;
 
     // Per-position scratch for one width at a time.
     std::vector<float> deflection_;
@@ -690,6 +740,7 @@ private:
     // their bin positions.
     std::vector<double> window_;
     std::vector<double> knot_floor_;
+    std::vector<double> knot_sigma_;
     std::vector<double> knot_position_;
 
     // Which bins of a refined band are a gap wide enough to split it.

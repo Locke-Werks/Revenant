@@ -59,7 +59,23 @@ constexpr double kNoiseDbfs = -60.0;
 // of bandwidth and not of level. Twenty decibels is comfortably detectable at
 // the default six decibel threshold and is not so loud that its skirts become
 // the story.
+//
+// It is also the level itself, per bin, and that is why the ladder cases take
+// it as a parameter rather than fixing it here. A flat emitter's per-bin
+// excess over the noise floor IS its SNR in its own occupied bandwidth,
+// exactly: the signal power divided by the bins it fills, over the noise
+// power in one bin, is the signal power over the noise in the whole occupied
+// band whatever the bin width. So the growth rule's level, which is stated
+// against the floor, is 20 dB under everything on a ladder run at 20 dB and
+// cannot stop growth anywhere but in a skirt. Running the same ladder at a
+// low in-band SNR is the only way that rule's absolute bar is ever reached.
 constexpr double kLadderSnrDb = 20.0;
+
+// Low enough that the growth rule's bar sits inside the signal rather than
+// 20 dB under it, and high enough that every rung is still detectable at the
+// default threshold: the narrowest is 6.5 kHz, which is 10 dB of processing
+// gain over the 2500 Hz reference, so 4 dB in-band is 14 dB reported.
+constexpr double kWeakLadderSnrDb = 4.0;
 
 struct LadderRung {
     const char* name;
@@ -158,7 +174,8 @@ inline constexpr std::array<double, 3> kRolloffs{0.2, 0.35, 0.5};
 }
 
 // Every rung on for the whole scene.
-[[nodiscard]] siggen::SceneSpec continuous_scene(double seconds, double rolloff = 0.35) {
+[[nodiscard]] siggen::SceneSpec continuous_scene(double seconds, double rolloff = 0.35,
+                                                 double snr_db = kLadderSnrDb) {
     siggen::SceneSpec spec;
     spec.rate = kRate;
     spec.center_hz = 0;
@@ -172,7 +189,7 @@ inline constexpr std::array<double, 3> kRolloffs{0.2, 0.35, 0.5};
         siggen::EmitterPlacement placement;
         placement.modulator = rung.spec;
         placement.use_snr = true;
-        placement.snr_in_occupied_bandwidth_db = kLadderSnrDb;
+        placement.snr_in_occupied_bandwidth_db = snr_db;
         placement.start_sample = 0;
         placement.end_sample = spec.duration_samples;
         spec.emitters.push_back(placement);
@@ -230,8 +247,9 @@ inline constexpr std::array<double, 3> kRolloffs{0.2, 0.35, 0.5};
 // starts and the stops are staggered rather than simultaneous: a detector that
 // only works when the whole band changes at once would pass a scene where
 // everything keys together.
-[[nodiscard]] siggen::SceneSpec keyed_scene(double seconds, double rolloff = 0.35) {
-    siggen::SceneSpec spec = continuous_scene(seconds, rolloff);
+[[nodiscard]] siggen::SceneSpec keyed_scene(double seconds, double rolloff = 0.35,
+                                            double snr_db = kLadderSnrDb) {
+    siggen::SceneSpec spec = continuous_scene(seconds, rolloff, snr_db);
     const auto total = static_cast<double>(spec.duration_samples);
 
     // Fractions of the scene. Every burst is at least a second long at the
@@ -783,61 +801,105 @@ TEST_CASE("an emitter of known extent reads as one track of that extent", "[dete
     // holding 99 percent of the power is 0.845 of (1 + rolloff) / T at
     // rolloff 0.5, so occupied_power_fraction is what sets it and the 0.70
     // floor below keeps 0.145 of headroom at the worst rolloff.
-    const std::vector<std::pair<double, dsp::Hertz>> kKnownSplits{};
+    //
+    // AND SWEPT OVER LEVEL, WHICH IS THE AXIS THIS BAR DID NOT HAVE
+    //
+    // The three rolloff runs above were all at 20 dB in occupied bandwidth,
+    // and that is the number every emitter in this tree used. It is also,
+    // exactly, the per-bin excess over the noise floor: a flat emitter's
+    // excess per bin divided by the noise in one bin is its power divided by
+    // the noise in its whole occupied band, whatever the bin width. So a
+    // growth level stated against the floor sat 20 dB below every signal
+    // here and could only ever stop growth inside a skirt, and a sweep of it
+    // found nothing because the regime where it bites was not in the suite.
+    // Two of the five runs below are at 4 dB, where the level is a real bar
+    // rather than a formality.
+    //
+    // 4 dB narrows the margin here rather than closing it, and saying so is
+    // the point of the sweep. Measured on the continuous ladder at rolloff
+    // 0.5 and 4 dB in band, the old floor-relative level reported 0.76 of
+    // the 30 kHz rung's extent against 0.85 for the shipped one: worse, and
+    // still over the 0.70 floor. What crosses the floor is a signal with no
+    // skirt at all, because a shaped one always has SOME part of itself over
+    // any level. That case is a rectangle and it lives in test_detector.cpp,
+    // where a 48-bin emitter at 12 dB reported 0.67. Both belong: this says
+    // a real modulated signal still reads right when its level approaches
+    // the bar, and that one says where the bar bites.
+    struct Case {
+        double rolloff;
+        double snr_db;
+    };
+    const std::array<Case, 5> kCases{Case{0.2, kLadderSnrDb},     Case{0.35, kLadderSnrDb},
+                                     Case{0.5, kLadderSnrDb},     Case{0.2, kWeakLadderSnrDb},
+                                     Case{0.5, kWeakLadderSnrDb}};
 
-    std::vector<std::pair<double, dsp::Hertz>> failures;
+    struct Failure {
+        double rolloff;
+        double snr_db;
+        dsp::Hertz bandwidth;
+
+        [[nodiscard]] bool operator==(const Failure&) const = default;
+        [[nodiscard]] auto operator<=>(const Failure&) const = default;
+    };
+    const std::vector<Failure> kKnownSplits{};
+
+    std::vector<Failure> failures;
     std::size_t scored = 0;
     std::size_t passed = 0;
-    for (const double rolloff : kRolloffs) {
-    const siggen::SceneSpec spec = keyed_scene(6.0, rolloff);
-    const FrameCache cache = FrameCache::render(geometry, spec);
+    for (const Case& one : kCases) {
+        const siggen::SceneSpec spec = keyed_scene(6.0, one.rolloff, one.snr_db);
+        const FrameCache cache = FrameCache::render(geometry, spec);
 
-    detect::DetectorConfig config;
-    config.detection_threshold_db = 6.0;
-    const RunResult result = cache.run(config);
-    print_scores(std::format("the bar, keyed ladder at 6 dB, rolloff {:.2f}", rolloff), result);
+        detect::DetectorConfig config;
+        config.detection_threshold_db = 6.0;
+        const RunResult result = cache.run(config);
+        print_scores(std::format("the bar, keyed ladder at 6 dB, rolloff {:.2f}, {:.0f} dB in band",
+                                 one.rolloff, one.snr_db),
+                     result);
 
-    for (const test::EmitterScore& score : result.scores) {
-        if (score.modulation != siggen::Modulation::Qpsk) {
-            continue;
+        for (const test::EmitterScore& score : result.scores) {
+            if (score.modulation != siggen::Modulation::Qpsk) {
+                continue;
+            }
+            ++scored;
+            const double seen =
+                score.decisions_on > 0 ? static_cast<double>(score.decisions_detected) /
+                                             static_cast<double>(score.decisions_on)
+                                       : 0.0;
+            const bool ok = score.track_ids == 1 && score.peak_simultaneous == 1 &&
+                            score.best_coverage >= 0.70 && score.best_spill <= 0.25 &&
+                            seen >= 0.85 && score.best_lifetime_fraction >= 0.85 &&
+                            std::abs(static_cast<double>(score.best_centre_error_hz)) <=
+                                0.10 * static_cast<double>(score.truth_bandwidth_hz);
+            if (ok) {
+                ++passed;
+                continue;
+            }
+            failures.push_back(Failure{one.rolloff, one.snr_db, score.truth_bandwidth_hz});
+            // Named rather than counted, so a regression says which bandwidth
+            // stopped working instead of only that the rate fell.
+            WARN(std::format("rolloff {:.2f} at {:.0f} dB in band: emitter of {} Hz failed the "
+                             "bar: {} ids, {} at once, cover {:.2f}, spill {:.2f}, seen {:.2f}, "
+                             "life {:.2f}, centre error {} Hz",
+                             one.rolloff, one.snr_db, score.truth_bandwidth_hz, score.track_ids,
+                             score.peak_simultaneous, score.best_coverage, score.best_spill, seen,
+                             score.best_lifetime_fraction, score.best_centre_error_hz));
         }
-        ++scored;
-        const double seen =
-            score.decisions_on > 0 ? static_cast<double>(score.decisions_detected) /
-                                         static_cast<double>(score.decisions_on)
-                                   : 0.0;
-        const bool ok =
-            score.track_ids == 1 && score.peak_simultaneous == 1 && score.best_coverage >= 0.70 &&
-            score.best_spill <= 0.25 && seen >= 0.85 && score.best_lifetime_fraction >= 0.85 &&
-            std::abs(static_cast<double>(score.best_centre_error_hz)) <=
-                0.10 * static_cast<double>(score.truth_bandwidth_hz);
-        if (ok) {
-            ++passed;
-            continue;
-        }
-        failures.emplace_back(rolloff, score.truth_bandwidth_hz);
-        // Named rather than counted, so a regression says which bandwidth
-        // stopped working instead of only that the rate fell.
-        WARN(std::format("rolloff {:.2f}: emitter of {} Hz failed the bar: {} ids, {} at once, "
-                         "cover {:.2f}, spill {:.2f}, seen {:.2f}, life {:.2f}, "
-                         "centre error {} Hz",
-                         rolloff, score.truth_bandwidth_hz, score.track_ids,
-                         score.peak_simultaneous, score.best_coverage, score.best_spill, seen,
-                         score.best_lifetime_fraction, score.best_centre_error_hz));
-    }
     }
 
     // Four QPSK rungs from 6.5 kHz to 150 kHz, every one of them keyed on and
-    // off inside the scene. All four passed when this was written; the bar is
-    // all of them, because three out of four means one bandwidth stopped
-    // working and the scene is small enough to say which.
+    // off inside the scene, across five combinations of shape and level. All
+    // twenty passed when this was written; the bar is all of them, because
+    // nineteen out of twenty means one bandwidth at one level stopped working
+    // and the scene is small enough to say which.
     std::ranges::sort(failures);
-    INFO(std::format("{} of {} filled emitters passed across {} rolloffs", passed, scored,
-                     kRolloffs.size()));
-    for (const auto& [rolloff, width] : failures) {
-        INFO(std::format("  failed: rolloff {:.2f}, {} Hz", rolloff, width));
+    INFO(std::format("{} of {} filled emitters passed across {} rolloff and level combinations",
+                     passed, scored, kCases.size()));
+    for (const Failure& one : failures) {
+        INFO(std::format("  failed: rolloff {:.2f}, {:.0f} dB in band, {} Hz", one.rolloff,
+                         one.snr_db, one.bandwidth));
     }
-    CHECK(scored == 4 * kRolloffs.size());
+    CHECK(scored == 4 * kCases.size());
     CHECK(failures == kKnownSplits);
 }
 
@@ -961,6 +1023,49 @@ TEST_CASE("a stopped emitter stops being published", "[detect][scene-bar]") {
     CHECK(scored == 3);
 }
 
+// What the growth level costs at each end, over the dimension a level stated
+// against the noise floor actually depends on.
+//
+// The level has two bars and takes the larger: edge_floor_sigma times the
+// averaged noise's ripple, and edge_floor_fraction times its power. Only the
+// second of them is what a signal's own level is measured against, so only a
+// scene run at a low in-band SNR can say where it bites. Both ladders are
+// printed, because the failure at one end is a wide emitter that stops
+// growing and the failure at the other is a comb whose nulls get crossed, and
+// no single scene shows both.
+TEST_CASE("what the growth level costs at each end", "[.scene][detect]") {
+    const test::SceneGeometry geometry;
+
+    struct Level {
+        const char* name;
+        double fraction;
+        double sigma;
+    };
+    const std::array<Level, 6> levels{
+        Level{"none", 0.0, 0.0},         Level{"sigma 1", 0.0, 1.0},
+        Level{"sigma 3", 0.0, 3.0},      Level{"sigma 6", 0.0, 6.0},
+        Level{"floor 1.0, the old rule", 1.0, 0.0},
+        Level{"sigma 3 over floor 0.25", 0.25, 3.0},
+    };
+
+    for (const double snr : {kLadderSnrDb, kWeakLadderSnrDb}) {
+        const siggen::SceneSpec spec = continuous_scene(5.0, 0.5, snr);
+        const FrameCache cache = FrameCache::render(geometry, spec);
+        for (const Level& level : levels) {
+            detect::DetectorConfig config;
+            config.detection_threshold_db = 6.0;
+            config.edge_floor_fraction = level.fraction;
+            config.edge_floor_sigma = level.sigma;
+            const RunResult result = cache.run(config);
+            print_scores(std::format("continuous ladder at rolloff 0.50, {:.0f} dB in band, "
+                                     "growth level {}",
+                                     snr, level.name),
+                         result);
+            CHECK(result.decisions > 0);
+        }
+    }
+}
+
 // Where the wide end stops working, on the shipped grid.
 //
 // Two limits sit above a broadcast station and neither is the peak budget.
@@ -1040,13 +1145,15 @@ TEST_CASE("what fragments a signal with interior nulls", "[.scene][detect]") {
         // seed is winning the ranking and then being unable to reach the rest
         // of its own signal, this restores it.
         detect::DetectorConfig config = base;
-        config.edge_floor_fraction = 0.001;
-        variants.push_back(Variant{"edge fraction 0.001", config});
+        config.edge_floor_fraction = 0.0;
+        config.edge_floor_sigma = 0.0;
+        variants.push_back(Variant{"no growth level", config});
     }
     {
         detect::DetectorConfig config = base;
         config.split_gap_bins = 1'000'000;
-        config.edge_floor_fraction = 0.001;
+        config.edge_floor_fraction = 0.0;
+        config.edge_floor_sigma = 0.0;
         variants.push_back(Variant{"neither", config});
     }
 

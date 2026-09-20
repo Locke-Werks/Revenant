@@ -359,6 +359,64 @@ TEST_CASE("a known signal comes back at the right centre and bandwidth", "[detec
     CHECK(track.channel_valid);
 }
 
+// The width a weak signal comes back at, swept down through the level the
+// growth rule stops at.
+//
+// This is the dimension the growth rule's sweep did not have. A flat
+// emitter's per-bin excess over the noise floor IS its SNR in its own
+// occupied bandwidth, exactly, so the growth level is what the signal's own
+// level is measured against and every scene in this tree ran at 20 or 30 dB
+// in band, where any plausible level sits far below the signal and can only
+// ever stop growth in a skirt. There is no skirt on these rectangles at all,
+// so the level either clears the whole emitter or none of it.
+//
+// Each rung holds the reported SNR at 12 dB and doubles the width, which
+// takes the in-band figure down 3 dB a step: 5.2, 2.2, -0.8 and -3.9 dB.
+// Every one of them is a plainly detectable signal, 12 dB over an operator
+// threshold of 6, and the last two sit under their own noise floor per bin.
+//
+// Measured before the level was stated in the noise's ripple rather than its
+// power, with edge_floor_fraction at 1.0: the 48-bin rung grew by exactly
+// zero bins and came back at 32 kHz against 48 kHz of truth, a coverage of
+// 0.67 against the 0.70 the scene bar enforces, and the 96-bin rung was worse.
+// The crossover was 12.8 dB reported at 48 bins and 17.8 dB for a 149.85 kHz
+// station on the shipped grid, so the whole weak-and-wide corner was lost.
+TEST_CASE("a signal under its own noise floor per bin still comes back at its width",
+          "[detect]") {
+    constexpr std::uint64_t kSeed = 31337;
+    INFO("seed " << kSeed);
+
+    for (const std::size_t width : {std::size_t{12}, std::size_t{24}, std::size_t{48},
+                                    std::size_t{96}}) {
+        Scene scene(-90.0, kSeed);
+        scene.set({Emitter{.centre_bin = 500, .width_bins = width, .snr_2500_db = 12.0}});
+
+        auto made = detect::Detector::create(base_config(), scene.geometry());
+        REQUIRE(made);
+        detect::Detector& detector = *made;
+        run_for(detector, scene, 4.0);
+
+        const auto truth =
+            static_cast<dsp::Hertz>(std::llround(static_cast<double>(width) * scene.bin_width()));
+        const double in_band =
+            12.0 - 10.0 * std::log10(static_cast<double>(width) * scene.bin_width() /
+                                     detect::kReferenceBandwidthHz);
+
+        INFO(std::format("{} bins, {} Hz of truth, {:.1f} dB in the occupied bandwidth", width,
+                         truth, in_band));
+        INFO(describe(detector));
+
+        const detect::Track* track = find_near(detector, scene.frequency_of(500), truth);
+        REQUIRE(track != nullptr);
+
+        // The same coverage floor the scene bar uses, stated here as a
+        // fraction of the truth width because a rectangle has no skirt to
+        // lose to the 99 percent trim.
+        CHECK(static_cast<double>(track->bandwidth) >= 0.70 * static_cast<double>(truth));
+        CHECK(static_cast<double>(track->bandwidth) <= 1.30 * static_cast<double>(truth));
+    }
+}
+
 TEST_CASE("three signals at once come back as three", "[detect]") {
     constexpr std::uint64_t kSeed = 13579;
     INFO("seed " << kSeed);

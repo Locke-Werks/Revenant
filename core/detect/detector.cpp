@@ -186,8 +186,11 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
         !ok) {
         return std::unexpected(ok.error());
     }
-    if (auto ok = require_range(config.edge_floor_fraction, 0.001, 100.0, "edge_floor_fraction");
+    if (auto ok = require_range(config.edge_floor_fraction, 0.0, 100.0, "edge_floor_fraction");
         !ok) {
+        return std::unexpected(ok.error());
+    }
+    if (auto ok = require_range(config.edge_floor_sigma, 0.0, 100.0, "edge_floor_sigma"); !ok) {
         return std::unexpected(ok.error());
     }
     if (auto ok = require_range(config.residual_decay_fraction, 0.0, 10.0,
@@ -298,11 +301,14 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
 
     detector.average_.assign(detector.bins_, 0.0);
     detector.floor_.assign(detector.bins_, static_cast<double>(dsp::kSpectrumPowerFloor));
+    detector.sigma_.assign(detector.bins_, 0.0);
     detector.excess_cumulative_.assign(detector.bins_ + 1, 0.0);
     detector.floor_cumulative_.assign(detector.bins_ + 1, 0.0);
+    detector.sigma_cumulative_.assign(detector.bins_ + 1, 0.0);
     detector.deflection_.assign(detector.bins_, 0.0F);
     detector.window_.reserve(detector.noise_window_bins_);
     detector.knot_floor_.assign(knots, static_cast<double>(dsp::kSpectrumPowerFloor));
+    detector.knot_sigma_.assign(knots, 0.0);
     detector.knot_position_.assign(knots, 0.0);
     detector.separator_.reserve(detector.bins_);
     detector.peaks_.reserve(detector.peak_budget_);
@@ -449,6 +455,7 @@ void Detector::estimate_noise_floor() {
         const std::size_t count = window_.size();
         if (count == 0) {
             knot_floor_[k] = static_cast<double>(dsp::kSpectrumPowerFloor);
+            knot_sigma_[k] = 0.0;
             continue;
         }
 
@@ -493,10 +500,16 @@ void Detector::estimate_noise_floor() {
         }
         const double estimate = kept > 0 ? sum / static_cast<double>(kept) : level;
         knot_floor_[k] = std::max(estimate, static_cast<double>(dsp::kSpectrumPowerFloor));
+
+        // The same spread the excision used, kept rather than discarded. It
+        // is the averaged noise's own ripple in linear power per bin, which
+        // is what a growing edge has to clear: see edge_floor_sigma.
+        knot_sigma_[k] = deviation;
     }
 
     if (knots == 1) {
         std::fill(floor_.begin(), floor_.end(), knot_floor_[0]);
+        std::fill(sigma_.begin(), sigma_.end(), knot_sigma_[0]);
     } else {
         std::size_t k = 0;
         for (std::size_t i = 0; i < bins_; ++i) {
@@ -508,6 +521,7 @@ void Detector::estimate_noise_floor() {
             const double t = span > 0.0 ? std::clamp((position - knot_position_[k]) / span, 0.0, 1.0)
                                         : 0.0;
             floor_[i] = knot_floor_[k] + t * (knot_floor_[k + 1] - knot_floor_[k]);
+            sigma_[i] = knot_sigma_[k] + t * (knot_sigma_[k + 1] - knot_sigma_[k]);
         }
     }
 }
@@ -517,9 +531,11 @@ void Detector::find_candidates() {
 
     excess_cumulative_[0] = 0.0;
     floor_cumulative_[0] = 0.0;
+    sigma_cumulative_[0] = 0.0;
     for (std::size_t i = 0; i < bins_; ++i) {
         excess_cumulative_[i + 1] = excess_cumulative_[i] + (average_[i] - floor_[i]);
         floor_cumulative_[i + 1] = floor_cumulative_[i] + floor_[i];
+        sigma_cumulative_[i + 1] = sigma_cumulative_[i] + sigma_[i];
     }
 
     // The summed-bin search, which is the whole reason this is not a per-bin
@@ -709,9 +725,17 @@ void Detector::find_candidates() {
         // Bounded by the seed's own width on each side, so a detection cannot
         // run away across the span, and by whatever is already accepted
         // either side of it, so the set stays disjoint.
+        //
+        // The level is the larger of a multiple of the averaged noise's own
+        // ripple and a multiple of its power, both per bin and both averaged
+        // over the seed. The ripple bar is the working one and the power bar
+        // is a backstop; see edge_floor_fraction and edge_floor_sigma for why
+        // a level stated only in the second of them loses a weak wide signal.
         const double seed_floor = floor_cumulative_[end] - floor_cumulative_[begin];
-        const double level =
-            config_.edge_floor_fraction * seed_floor / static_cast<double>(peak.width);
+        const double seed_sigma = sigma_cumulative_[end] - sigma_cumulative_[begin];
+        const double level = std::max(config_.edge_floor_fraction * seed_floor,
+                                      config_.edge_floor_sigma * seed_sigma) /
+                             static_cast<double>(peak.width);
         const std::size_t reach = peak.width;
         const std::size_t low_limit =
             at == accepted_.begin()
