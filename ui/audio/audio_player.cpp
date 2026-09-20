@@ -508,6 +508,20 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
 
 void AudioPlayer::tick()
 {
+    // THE STATUS LINE IS NOT ONLY COUNTERS, so the compare at the bottom
+    // cannot be only counters either. Everything open_sink, close_sink and
+    // handle_sink_state write during this pass is snapshotted here and
+    // compared after. It used to compare the counters and the two depths
+    // alone, and every one of these changes on a pass where no frame
+    // moved: a device that refuses the format writes a fault with the ring
+    // empty and every counter still zero, and the operator was shown
+    // nothing until the next frame happened to arrive, which on a refused
+    // device is never.
+    const QString was_fault = fault();
+    const QString was_note = note_;
+    const QString was_active = active_device_;
+    const int was_sink_millis = sink_millis_;
+
     if (sink_failed_ && sink_ != nullptr) {
         // handle_sink_state saw the sink stop with an error and could not
         // take it down from inside the sink's own signal. Done here, where
@@ -563,7 +577,9 @@ void AudioPlayer::tick()
                          counts.resyncs != counts_.resyncs ||
                          counts.gap_events != counts_.gap_events ||
                          buffered_ms != buffered_millis_ || ring_ms != ring_millis_ ||
-                         showing != shown_source_;
+                         showing != shown_source_ || fault() != was_fault ||
+                         note_ != was_note || active_device_ != was_active ||
+                         sink_millis_ != was_sink_millis;
 
     counts_ = counts;
     buffered_millis_ = buffered_ms;
