@@ -360,6 +360,12 @@ void AudioRing::reset_counts()
     counts_ = {};
 }
 
+AudioRing::Snapshot AudioRing::snapshot() const
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+    return Snapshot{format_, format_generation_, counts_, buffered_, capacity_};
+}
+
 RingFormat AudioRing::format() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);

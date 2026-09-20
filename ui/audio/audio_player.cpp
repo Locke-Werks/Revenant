@@ -540,8 +540,21 @@ void AudioPlayer::tick()
     }
 
     AudioRing& r = ring();
-    const RingFormat format = r.format();
-    const std::uint64_t generation = r.format_generation();
+
+    // ONE CALL, BECAUSE THE FORMAT AND THE GENERATION HAVE TO AGREE.
+    //
+    // This was format() and then format_generation(), two locked calls with
+    // the Cap'n Proto event loop free to run between them. A chunk at a new
+    // rate landing in that window returned the OLD format with the NEW
+    // generation, and the reopen below then opened a sink at the old rate
+    // and filed it under the new generation. Nothing asked for a reopen
+    // afterwards, because the only thing that asks is a generation past the
+    // recorded one and the recorded one was already current. Every pull
+    // after that found the format moved and wrote silence, for as long as
+    // the receiver stayed at that rate. See AudioRing::Snapshot.
+    const AudioRing::Snapshot ring_state = r.snapshot();
+    const RingFormat format = ring_state.format;
+    const std::uint64_t generation = ring_state.generation;
 
     const bool want = link_.audioActive();
 
@@ -557,11 +570,22 @@ void AudioPlayer::tick()
         // cleared by the operator picking a device and by the device list
         // changing, which are the two things that make another attempt
         // worth making, and both are what the message asks for.
-    } else if (sink_ == nullptr || generation != open_generation_) {
+    } else if (sink_ == nullptr || generation != open_generation_ ||
+               (pull_ != nullptr && pull_->stream() != format)) {
         // A generation past the one the sink was opened for is a stream
         // that changed rate or channel count. Reopened rather than
         // resampled, for the reason the header gives: this process holds no
         // DSP.
+        //
+        // THE FORMAT COMPARISON IS NOT REDUNDANT WITH THE GENERATION ONE.
+        // The generation is a cheap proxy for "the ring moved", and the
+        // sink being the wrong shape for the stream is the condition that
+        // actually matters. Anything that leaves those two disagreeing is
+        // permanent silence, because the generation is the only thing the
+        // reopen used to consult and it reads as up to date. The snapshot
+        // above closes the one route in that was known; this closes the
+        // class, so the next one that gets invented costs 50 ms instead of
+        // the whole session.
         //
         // Neither fault is cleared here. A device that refused the format
         // refuses it again on the next tick, so clearing would flicker the
@@ -571,13 +595,12 @@ void AudioPlayer::tick()
         open_sink(format, generation);
     }
 
-    const RingCounts counts = r.counts();
-    const std::size_t buffered = r.frames_buffered();
+    const RingCounts counts = ring_state.counts;
     const FrameSource showing =
         pull_ == nullptr ? FrameSource::idle : pull_->last_source();
 
-    const int buffered_ms = millis_for(buffered, format.sample_rate);
-    const int ring_ms = millis_for(r.capacity_frames(), format.sample_rate);
+    const int buffered_ms = millis_for(ring_state.frames_buffered, format.sample_rate);
+    const int ring_ms = millis_for(ring_state.capacity_frames, format.sample_rate);
 
     const bool changed = counts.frames_written != counts_.frames_written ||
                          counts.frames_filled != counts_.frames_filled ||

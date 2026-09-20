@@ -294,6 +294,46 @@ public:
     // Both, which is what starting a subscription wants.
     void reset_counts();
 
+    // EVERYTHING A STATUS PASS READS, UNDER ONE LOCK, AND WHY THAT IS THE
+    // ONLY FORM A CONSUMER SHOULD USE
+    //
+    // The accessors below each take the lock on their own, so any two of
+    // them can straddle a write. read() already avoids that by taking the
+    // caller's format as an argument; this is the same rule for a consumer
+    // that is not pulling samples.
+    //
+    // It is not a tidiness argument. AudioPlayer::tick read format() and
+    // then format_generation(), and a chunk at a new rate landing between
+    // those two calls handed it the OLD format with the NEW generation. It
+    // opened a sink at the old rate, recorded the new generation as the one
+    // that sink was built for, and then never reopened, because the only
+    // thing that asks for a reopen is a generation past the recorded one.
+    // Every pull afterwards found the ring's format moved and wrote
+    // silence. Permanent, silent, and indistinguishable from a quiet band.
+    //
+    // Not a narrow window either. Measured against a writer establishing
+    // continuously, the two-call form disagreed with itself on about one
+    // read in twenty; the snapshot on none of fifty thousand. See the
+    // threads case in ui/tests/test_audio_ring.cpp, which runs both forms
+    // in the same loop against the same writer.
+    //
+    // format and generation are the pair that has to agree. The counters
+    // and the two depths ride along because a consumer wanting one wants
+    // all of them in the same pass, and a depth in milliseconds is frames
+    // divided by the sample rate, which is two of these fields.
+    struct Snapshot {
+        RingFormat format;
+        std::uint64_t generation = 0;
+        RingCounts counts;
+        std::size_t frames_buffered = 0;
+        std::size_t capacity_frames = 0;
+    };
+
+    [[nodiscard]] Snapshot snapshot() const;
+
+    // The five single-value reads. Each is honest on its own and any two of
+    // them together are not: use snapshot() the moment a second value is
+    // wanted in the same breath.
     [[nodiscard]] RingFormat format() const;
 
     // Bumped by establish(), which is every format change, so a consumer

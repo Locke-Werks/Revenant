@@ -24,12 +24,17 @@
 // this object publishes is a status line that a human reads at twenty
 // frames a second at most.
 //
-// So a 50 ms timer on the Qt thread reads the ring's counters and the
-// format generation, and the one thing it reacts to is the generation
-// changing, which is a stream that started or changed rate. The cost of
-// that is up to 50 ms between the first chunk arriving and the sink
-// opening, which is inside the ring's own depth and is therefore not a
-// dropout.
+// So a 50 ms timer on the Qt thread takes ONE snapshot of the ring, which
+// carries the format, the generation and the counters together, and the
+// one thing it reacts to is the open sink no longer matching the stream: a
+// stream that started, or changed rate or channel count. The cost of that
+// is up to 50 ms between the first chunk arriving and the sink opening,
+// which is inside the ring's own depth and is therefore not a dropout.
+//
+// One snapshot and not three reads. Two separately locked reads of a ring
+// the Cap'n Proto event loop is writing can disagree with each other, and
+// the pair that did was format and generation: see AudioRing::Snapshot for
+// what that cost.
 //
 // THE THREE BUFFER DEPTHS AND HOW THEY RELATE
 //
@@ -119,6 +124,11 @@ public:
     [[nodiscard]] FrameSource last_source() const {
         return last_source_.load(std::memory_order_relaxed);
     }
+
+    // The format this source was built for, fixed for its life, so no lock
+    // and no atomic. It is what AudioPlayer::tick compares the ring against
+    // to decide whether the open sink is still the right shape.
+    [[nodiscard]] RingFormat stream() const { return stream_; }
 
 protected:
     qint64 readData(char* data, qint64 maxlen) override;

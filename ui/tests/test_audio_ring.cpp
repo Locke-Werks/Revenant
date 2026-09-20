@@ -8,17 +8,23 @@
 // audio/audio_ring.h; the ones reached below are the first chunk, a
 // contiguous run, a gap from the wire, a gap from upstream, a gap that does
 // not fit, an overrun, a starve, a closed gate, a format change, a read at
-// a format the ring has already left, a malformed chunk and a backwards
-// index.
+// a format the ring has already left, a malformed chunk, a backwards
+// index, and a snapshot taken while the format moves under it.
 //
 // WHAT IS NOT HERE. Nothing with a sound card in it: see the block above
-// the target in ui/CMakeLists.txt.
+// the target in ui/CMakeLists.txt. That is also why the consumer half of
+// the format-snapshot defect, AudioPlayer deciding whether to reopen its
+// QAudioSink, is asserted nowhere. The accessor that decision rests on is
+// asserted below, and that is as far into the path as a test binary with
+// no audio device can reach.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "audio/audio_ring.h"
@@ -432,6 +438,90 @@ TEST_CASE("a rate change re-establishes the ring", "[audio][ring]")
 
     // What was buffered at the old rate went with it.
     CHECK(ring.frames_buffered() == 480);
+}
+
+TEST_CASE("the snapshot's format and generation come from the same write",
+          "[audio][ring][threads]")
+{
+    // REJECTS: reading format() and then format_generation(), which is
+    // what AudioPlayer::tick did. Both are honest calls and the pair is
+    // not: the Cap'n Proto event loop can establish a new format between
+    // them, and the caller then holds the OLD shape stamped with the NEW
+    // generation. tick opened a sink at the old rate, recorded the new
+    // generation against it, and the reopen branch never fired again
+    // because it only fires on a generation PAST the recorded one. Silent
+    // for the rest of the stream, with no fault and a status line saying
+    // "starving".
+    //
+    // The invariant that catches it without needing to catch the race in
+    // the act: every establish bumps the generation by exactly one, so the
+    // Nth establish's format is known in advance. Any (format, generation)
+    // pair that does not satisfy expected_rate came from two different
+    // writes.
+    constexpr int kWrites = 20000;
+
+    // Consecutive values always differ, so every write re-establishes.
+    const auto expected_rate = [](std::uint64_t generation) -> std::uint32_t {
+        return 8000U * static_cast<std::uint32_t>(1U + (generation % 5U));
+    };
+
+    AudioRing ring;
+    ring.set_depth_millis(20);
+
+    std::atomic<bool> writing{true};
+
+    std::thread writer([&] {
+        for (std::uint64_t generation = 1; generation <= kWrites; ++generation) {
+            ring.write(make_chunk(0, 64, 0.25F, true, 0, expected_rate(generation), 1));
+        }
+        writing.store(false, std::memory_order_release);
+    });
+
+    std::uint64_t snapshot_reads = 0;
+    std::uint64_t snapshot_tears = 0;
+    std::uint64_t split_reads = 0;
+    std::uint64_t split_tears = 0;
+
+    while (writing.load(std::memory_order_acquire)) {
+        const AudioRing::Snapshot state = ring.snapshot();
+        if (state.generation > 0) {
+            ++snapshot_reads;
+            if (state.format.sample_rate != expected_rate(state.generation)) {
+                ++snapshot_tears;
+            }
+        }
+
+        // The old shape, run beside the new one against the same writer so
+        // the comparison is not two different runs. Its result is reported
+        // and not asserted: a tear is a race, and a machine that happened
+        // to serialise the two threads for a whole run would see none,
+        // which would make an assertion here fail for the wrong reason.
+        const RingFormat split_format = ring.format();
+        const std::uint64_t split_generation = ring.format_generation();
+        if (split_generation > 0) {
+            ++split_reads;
+            if (split_format.sample_rate != expected_rate(split_generation)) {
+                ++split_tears;
+            }
+        }
+    }
+
+    writer.join();
+
+    REQUIRE(snapshot_reads > 0);
+    CHECK(snapshot_tears == 0);
+
+    INFO("snapshot: " << snapshot_tears << " torn of " << snapshot_reads);
+    INFO("two calls: " << split_tears << " torn of " << split_reads);
+    if (split_tears == 0) {
+        // Measured over five runs on 2026-09-20, RelWithDebInfo: the
+        // two-call form tore on 444 to 585 reads of the 8300 to 13000 it
+        // managed, about one in twenty, while the snapshot tore on none of
+        // roughly fifty thousand. A run that sees no split tear has not
+        // shown the defect gone, only that this machine did not
+        // interleave; the assertion above is what holds.
+        WARN("the two-call form did not tear in this run");
+    }
 }
 
 TEST_CASE("a malformed chunk does not tear down a healthy stream", "[audio][ring]")
