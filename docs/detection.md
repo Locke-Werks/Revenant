@@ -280,26 +280,41 @@ half of one hides its own floor, which `core/detect/detector.h` states at
 length. At 2.4 MS/s across 65536 bins those are 300 kHz and about 360 kHz.
 
 Measured against single QPSK emitters of known occupied bandwidth on that
-geometry, one per scene, 30 dB in their own bandwidth:
+geometry, one per scene, 30 dB in their own bandwidth. Re-measured 2026-09-20
+after the growth rule changed, and the retraction below says what moved:
 
-| Occupied bandwidth | Bins | Tracks | Best track covers |
-| --- | --- | --- | --- |
-| 135 kHz | 3686 | 5 | 79 percent |
-| 270 kHz | 7373 | 8 | 78 percent |
-| 338 kHz | 9216 | 5 | 84 percent |
-| 405 kHz | 11059 | 2 | 54 percent |
+| Occupied bandwidth | Bins | Tracks | Best track covers | Candidate edges |
+| --- | --- | --- | --- | --- |
+| 135 kHz | 3686 | 1 | 86 percent | one, -57.9 to 58.8 kHz |
+| 270 kHz | 7373 | 1 | 86 percent | one, -115.7 to 117.3 kHz |
+| 338 kHz | 9216 | 1 | 86 percent | one, -144.7 to 146.5 kHz |
+| 405 kHz | 11059 | 2 | 54 percent | -177.3 to 41.4, 42.4 to 184.2 kHz |
 
-The counts read worse than they are, and the candidate edges say why: below
-the widest rung the body is one candidate and the extra tracks are the
+So the wide end holds to one track past the widest rung rather than at it.
+Growth runs a seed's own width outward on each side, so the 8192-bin rung
+reaches 24576 bins between its limits and a 9216-bin signal is inside that.
+405 kHz is where it stops: the body itself comes in two, each piece about half
+of it, and above that the answer degrades to pieces about a rung wide.
+
+The reported bandwidth of a signal that IS found sits at 86 percent of the
+nominal occupied bandwidth throughout. That is the 99 percent occupied-power
+trim meeting a shaped signal, not an error: integrating the raised-cosine
+spectrum, the symmetric interval holding 99 percent of the power at rolloff
+0.35 is 0.87 of the occupied band.
+
+WHAT THIS SECTION USED TO SAY. The table read 5, 8, 5 and 2 tracks at 79, 78,
+84 and 54 percent, and the paragraph under it explained the counts: "below the
+widest rung the body is one candidate and the extra tracks are the
 root-raised-cosine skirts, which fall away smoothly and register separately
-once they drop under the growth rule's level. At 405 kHz, past the widest
-rung, it is the body itself that comes in two. Above about 300 kHz on this
-grid there is no rung that fits a signal, and the answer degrades from "one
-track plus skirt clutter" to "pieces about a rung wide".
-
-The reported bandwidth of a signal that IS found sits at 78 to 87 percent of
-the nominal occupied bandwidth throughout. That is the 99 percent
-occupied-power trim meeting a shaped signal, not an error.
+once they drop under the growth rule's level". That was true of the growth
+rule of the day and is not true now. The level was a fixed multiple of the
+mean noise floor, which a 30 dB emitter's skirt crosses well inside its own
+occupied band, so each shoulder was left outside the accepted band and found
+again as its own candidate. The level is now stated in the averaged noise's
+own ripple, which is about four percent of the floor at a second of
+integration, and the skirts stay inside the one candidate. See
+`edge_floor_sigma` in `core/detect/detector.h` for why that is the right unit
+rather than a smaller number in the old one.
 
 ### Re-running any of this
 
@@ -323,13 +338,35 @@ cost about a second and a half of wall time per second of scene:
 
     revenant_detect_tests.exe "[scene]"
 
-The bar itself is not hidden and runs with the suite: over a seeded keyed
-scene, every filled emitter must read as exactly one track, present at one
-decision in one, covering at least 70 percent of its extent with at most 25
-percent spill, detected at 85 percent of the decisions it transmits at, one
-id lasting 85 percent of the transmission, and centred within a tenth of its
-own bandwidth. Four of four pass as this is written, at coverage 0.82 to 0.86
-and spill zero.
+Three bars are not hidden and run with the suite.
+
+The first is the live one: over a seeded keyed scene, every filled emitter
+must read as exactly one track, present at one decision in one, covering at
+least 70 percent of its extent with at most 25 percent spill, detected at 85
+percent of the decisions it transmits at, one id lasting 85 percent of the
+transmission, and centred within a tenth of its own bandwidth. Twenty of
+twenty pass as this is written, at coverage 0.83 to 0.92 and spill zero: four
+QPSK rungs across five combinations of rolloff and level.
+
+Level is a dimension of that sweep and it took three goes to get there. A flat
+emitter's per-bin excess over the noise floor IS its SNR in its own occupied
+bandwidth, exactly, whatever the bin width, so any rule stated against the
+floor is measured against the signal's level and nothing else. Every emitter
+in the tree was at 20 or 30 dB in band, where such a rule sits far below the
+signal and can only ever act inside a skirt, and a sweep of the rule at that
+level certified insensitivity that did not hold anywhere else. Two of the five
+combinations now run at 4 dB.
+
+The second bar is the other end of the same transmission: after each of three
+broadcast stations stops, its row must be gone inside the hold plus the
+decisions the residual rule needs, must spend most of that in Held rather than
+Live, must not move its geometry while it waits, and must not be replaced by a
+fresh id. It carries lower bounds as well as upper ones, because a detector
+that never found the stations satisfies every upper bound there is.
+
+The third is the opposite question, and it is the one the residual rule can
+fail: a station that fades 8 dB over three seconds and keeps transmitting must
+keep its track. One birth, no drops.
 
 Tone-driven emitters are measured and deliberately not scored against that
 bar. A truth extent is the channel a mode occupies, which for QPSK is where
