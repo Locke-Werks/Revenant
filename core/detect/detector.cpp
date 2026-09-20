@@ -98,6 +98,26 @@ constexpr std::uint32_t kNoAssignment = 0xFFFF'FFFFU;
     return {};
 }
 
+// A confidence bar the rise can never reach hides every track and reports
+// nothing about why, which is the worst shape a bad threshold can take: the
+// list is empty and an empty list is also what a quiet band looks like. Both
+// places that accept a threshold refuse that pair here rather than take a
+// filter that can only ever be empty.
+//
+// Confidence rises by confidence_rise of its remaining distance to one, so
+// one is a limit rather than a value, and it is reached only when a single
+// detection closes the whole gap.
+[[nodiscard]] Status require_reachable_confidence(double threshold, double rise) {
+    if (threshold >= 1.0 && rise < 1.0) {
+        return fail(std::format(
+            "Detector: confidence_threshold is {} and confidence_rise is {}, so a track's "
+            "confidence approaches one without reaching it and nothing would ever clear the "
+            "bar. Use a threshold below one",
+            threshold, rise));
+    }
+    return {};
+}
+
 }  // namespace
 
 const char* track_state_name(TrackState state) {
@@ -178,6 +198,10 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
         return std::unexpected(ok.error());
     }
     if (auto ok = require_range(config.confidence_rise, 0.001, 1.0, "confidence_rise"); !ok) {
+        return std::unexpected(ok.error());
+    }
+    if (auto ok = require_reachable_confidence(config.confidence_threshold, config.confidence_rise);
+        !ok) {
         return std::unexpected(ok.error());
     }
     if (auto ok = require_range(config.confidence_half_life_seconds, 1.0e-6, 3600.0,
@@ -285,6 +309,10 @@ Status Detector::set_thresholds(double detection_threshold_db, double confidence
         return ok;
     }
     if (auto ok = require_range(confidence_threshold, 0.0, 1.0, "confidence_threshold"); !ok) {
+        return ok;
+    }
+    if (auto ok = require_reachable_confidence(confidence_threshold, config_.confidence_rise);
+        !ok) {
         return ok;
     }
     config_.detection_threshold_db = detection_threshold_db;

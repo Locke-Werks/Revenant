@@ -257,9 +257,19 @@ struct DetectorConfig {
     // a quiet band and will miss things on a busy one.
     double detection_threshold_db = 6.0;
 
-    // Confidence, zero to one, for whatever is filtering the track list.
-    // Nothing in this file drops a track for failing it; a display and a
-    // click-to-tune surface do, which is where the operator's number belongs.
+    // Confidence, from zero up to but not including one, for whatever is
+    // filtering the track list. Nothing in this file drops a track for
+    // failing it; a display and a click-to-tune surface do, which is where
+    // the operator's number belongs.
+    //
+    // The open upper end is load-bearing rather than tidy. Confidence rises
+    // by confidence_rise of its remaining distance to one, so it approaches
+    // one and lands on it only when confidence_rise is itself one and a
+    // single detection closes the whole gap. At any smaller rise a bar of one
+    // hides every track and says nothing about why: measured against an
+    // RTL-SDR at 98.1 MHz, a five second run with the bar at one listed no
+    // tracks at any of its four intervals while 88 were born. create()
+    // refuses that pair rather than accepting a filter that can only be empty.
     double confidence_threshold = 0.5;
 
     // ---- integration in time ---------------------------------------------

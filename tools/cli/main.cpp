@@ -401,9 +401,11 @@ void print_usage()
         "                      200 kHz broadcast. Lower finds more and invents more;\n"
         "                      where it belongs depends on the band and the antenna.\n"
         "  --detect-confidence <x>\n"
-        "                      Confidence a track needs before it is listed, 0 to 1,\n"
-        "                      default 0.5. A track earns confidence by being detected\n"
-        "                      repeatedly and loses it while it is held through a gap.\n"
+        "                      Confidence a track needs before it is listed, from 0 up to\n"
+        "                      but not including 1, default 0.5. A track earns confidence\n"
+        "                      by being detected repeatedly and loses it while it is held\n"
+        "                      through a gap, so it approaches 1 without reaching it and a\n"
+        "                      bar of exactly 1 would list nothing at all.\n"
         "\n"
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
@@ -531,8 +533,20 @@ void print_usage()
                 }
                 options.detect_threshold_db = *number;
             } else {
-                if (!std::isfinite(*number) || *number < 0.0 || *number > 1.0) {
-                    return fail("--detect-confidence takes a value between 0 and 1");
+                // The open upper end is the whole point of validating this
+                // rather than clamping it. A track's confidence rises by a
+                // fraction of its remaining distance to one, so it approaches
+                // one and never arrives, and a bar of exactly one is a bar
+                // nothing crosses. It fails as an empty list, which is also
+                // what a dead band looks like: measured against the RTL-SDR
+                // at 98.1 MHz, --detect-confidence 1 listed nothing at any of
+                // the four intervals of a five second run in which 88 tracks
+                // were born.
+                if (!std::isfinite(*number) || *number < 0.0 || *number >= 1.0) {
+                    return fail("--detect-confidence takes a value from 0 up to but not "
+                                "including 1. A track's confidence approaches 1 without ever "
+                                "reaching it, so a bar of 1 lists nothing however strong the "
+                                "signal is");
                 }
                 options.detect_confidence = *number;
             }
@@ -1255,6 +1269,13 @@ public:
         double silent_seconds;
         std::uint32_t state;
         std::uint32_t channel;
+
+        // How many tracks cleared the confidence bar at the decision this
+        // block came from, which is not the number of rows in it once more
+        // clear it than a block can carry. Written identically into every
+        // slot rather than sent beside the block, so the count and the rows
+        // it describes are the same write and cannot disagree.
+        std::uint32_t over_bar;
     };
 
     [[nodiscard]] static Expected<std::unique_ptr<DetectView>> create(
@@ -1309,13 +1330,22 @@ public:
         published_ = decided;
         decisions_.fetch_add(1, std::memory_order_relaxed);
 
+        // The bar is counted past the point the block fills up. A full block
+        // is the common case on a broadcast band: the RTL-SDR at 98.1 MHz put
+        // 64 rows, which is kRows exactly, in every table of a five second
+        // run in which 86 tracks were born. A count that stopped at the cap
+        // would report the cap as the answer and make two different
+        // thresholds look the same. The loop is over at most max_tracks
+        // entries, so counting the rest costs nothing worth measuring.
         const double confidence_bar = detector_->config().confidence_threshold;
         std::size_t used = 0;
+        std::uint32_t over_bar = 0;
         for (const detect::Track& track : detector_->tracks()) {
-            if (used == kRows) {
-                break;
-            }
             if (track.confidence < confidence_bar) {
+                continue;
+            }
+            ++over_bar;
+            if (used == kRows) {
                 continue;
             }
             produced_[used] = Row{
@@ -1333,6 +1363,12 @@ public:
         }
         for (std::size_t i = used; i < kRows; ++i) {
             produced_[i].id = 0;
+        }
+        // Every slot, including the zeroed tail, so slot zero carries the
+        // count even at a decision where nothing cleared the bar and there
+        // are no rows to hang it off.
+        for (std::size_t i = 0; i < kRows; ++i) {
+            produced_[i].over_bar = over_bar;
         }
 
         if (ring_->writable() < kRows) {
@@ -1363,6 +1399,12 @@ public:
         }
         return std::span<const Row>(held_.data(), count);
     }
+
+    // How many tracks cleared the confidence bar at the decision the held
+    // snapshot came from. Never below rows().size() and above it whenever the
+    // block filled, which is the only way an operator can tell a short list
+    // from a truncated one.
+    [[nodiscard]] std::uint32_t over_bar() const { return held_[0].over_bar; }
 
     [[nodiscard]] const detect::DetectorStats& stats() const { return detector_->stats(); }
 
@@ -1775,7 +1817,11 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         detector = std::move(*view);
 
         std::println("");
-        std::println("detector  threshold {:.1f} dB SNR in {:.0f} Hz, confidence {:.2f}",
+        // The confidence bar is printed at whatever precision it was given
+        // rather than to two places, because a bar of 0.995 is legal, a bar
+        // of 1 is refused at parse time, and rounding the first to "1.00"
+        // shows the operator the one value they cannot have asked for.
+        std::println("detector  threshold {:.1f} dB SNR in {:.0f} Hz, confidence {:g}",
                      detect_config.detection_threshold_db, detect::kReferenceBandwidthHz,
                      detect_config.confidence_threshold);
         std::println("  integration     {:.2f} s, deciding every {:.0f} ms, {} consecutive "
@@ -2157,10 +2203,20 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             // stream of "track 12 changed" is not.
             if (pending_tracks) {
                 const std::span<const DetectView::Row> rows = detector->rows();
+                // Both thresholds, because both are filtering this list and
+                // naming one of them reads as though the other were not in
+                // force. A run with the confidence bar at one printed
+                // "0 tracks over 6.0 dB" while 88 tracks were born, which
+                // blames the dB threshold for what the confidence bar did.
+                const std::uint32_t over_bar = detector->over_bar();
+                std::string capped;
+                if (over_bar > rows.size()) {
+                    capped = std::format(", {} of them listed", rows.size());
+                }
                 status_line.erase();
-                std::println("{:8.2f}s  {} track{} over {:.1f} dB",
-                             source_seconds, rows.size(), rows.size() == 1 ? "" : "s",
-                             options.detect_threshold_db);
+                std::println("{:8.2f}s  {} track{} over {:.1f} dB and {:g} confidence{}",
+                             source_seconds, over_bar, over_bar == 1 ? "" : "s",
+                             options.detect_threshold_db, options.detect_confidence, capped);
                 for (const DetectView::Row& row : rows) {
                     std::println("{}", track_line(row));
                 }
