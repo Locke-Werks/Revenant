@@ -659,6 +659,9 @@ struct DetectorStats {
     // chain, so this should stay zero and a non-zero value means two engines.
     std::uint64_t frames_rejected = 0;
 
+    // Candidates PUBLISHED, summed over decisions, which is what
+    // Detector::candidates() held at each of them. Add candidates_residual
+    // for what the search produced before the residual rule filtered it.
     std::uint64_t candidates = 0;
     std::uint64_t tracks_born = 0;
     std::uint64_t tracks_dropped = 0;
@@ -702,8 +705,15 @@ public:
     // not tracks and are not here. Valid until the next consume().
     [[nodiscard]] std::span<const Track> tracks() const { return tracks_; }
 
-    // What the most recent decision found, ascending in frequency. Empty
+    // What the most recent decision PUBLISHED, ascending in frequency. Empty
     // until the first decision.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "what the most recent decision found".
+    // It is not, and the difference is the residual rule. The search's own
+    // output is filtered by reject_residual before anything else sees it, so
+    // a band withheld as an exponential average's own echo is absent here as
+    // well as from tracks(). What the search found is this many plus that
+    // decision's share of DetectorStats::candidates_residual.
     [[nodiscard]] std::span<const Candidate> candidates() const { return candidates_; }
 
     [[nodiscard]] const DetectorStats& stats() const { return stats_; }
