@@ -983,11 +983,14 @@ ApplicationWindow {
 
                 Item { Layout.fillWidth: true }
 
-                // WHAT IS COMING OUT OF THE SPEAKER, in one word. Four of
-                // the five are silence and they are four different things:
-                // see FrameSource in ui/audio/audio_ring.h. It follows the
-                // frames reaching the card and not the newest chunk off the
-                // wire, so it is in step with what is audible.
+                // WHAT IS COMING OUT OF THE SPEAKER, in a word or two. Five
+                // of the six are silence and they are five different
+                // things: see FrameSource in ui/audio/audio_ring.h for the
+                // first five and the source property in
+                // ui/audio/audio_player.h for "format mismatch", which is
+                // the player's own. It follows the frames reaching the card
+                // and not the newest chunk off the wire, so it is in step
+                // with what is audible.
                 Label {
                     text: audioPlayer.source
                     color: audioPlayer.source === "audio" ? window.inkTune

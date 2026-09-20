@@ -21,6 +21,19 @@ constexpr int kStatusTickMs = 50;
 constexpr int kSinkDepthDivisor = 4;
 constexpr int kMinSinkMillis = 20;
 
+// How many consecutive ticks of format mismatch stop being a reopen in
+// progress and start being a fault. One tick is the ordinary cost of a
+// receiver changing rate: the ring re-establishes, the next tick reopens,
+// and the sink writes silence for the 50 ms in between.
+//
+// Ten of them is half a second in which every reopen this object made was
+// already out of date by the time the card pulled. Two things reach that:
+// a reopen that is not happening, and a receiver whose shape is changing
+// faster than a sink can be opened for it. Both are half a second of
+// silence with a healthy wire behind it, which is the state an operator
+// cannot tell from a quiet band without being told.
+constexpr int kMismatchFaultTicks = 10;
+
 [[nodiscard]] int millis_for(std::size_t frames, std::uint32_t rate)
 {
     if (rate == 0) {
@@ -89,6 +102,14 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
         // wrong speed.
         std::memset(data, 0, out_bytes);
         last_source_.store(FrameSource::starved, std::memory_order_relaxed);
+
+        // Counted, because starved is a lie about the cause here and it is
+        // the only report the ring can make: from inside the ring this is
+        // silence reaching the card, and from out here it is silence
+        // reaching the card BECAUSE THIS SINK IS THE WRONG SHAPE. tick()
+        // reads the count, says which one it is on the status line, and
+        // raises a fault if it goes on. See kMismatchFaultTicks.
+        format_moved_pulls_.fetch_add(1, std::memory_order_relaxed);
         return frames * frame_bytes;
     }
 
@@ -427,17 +448,16 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
 
 QString AudioPlayer::fault() const
 {
-    // Both, when both hold. The selection fault and the sink fault are
-    // separate conditions and an operator whose chosen headset has gone AND
-    // whose fallback refuses the format needs to read both sentences to
-    // know what to do.
-    if (device_fault_.isEmpty()) {
-        return sink_fault_;
+    // All of them, when more than one holds. They are separate conditions
+    // and an operator whose chosen headset has gone AND whose fallback
+    // refuses the format needs to read both sentences to know what to do.
+    QStringList parts;
+    for (const QString& one : {device_fault_, sink_fault_, format_fault_}) {
+        if (!one.isEmpty()) {
+            parts.append(one);
+        }
     }
-    if (sink_fault_.isEmpty()) {
-        return device_fault_;
-    }
-    return device_fault_ + QStringLiteral("  ") + sink_fault_;
+    return parts.join(QStringLiteral("  "));
 }
 
 void AudioPlayer::close_sink()
@@ -452,6 +472,16 @@ void AudioPlayer::close_sink()
     open_generation_ = 0;
     active_device_.clear();
     sink_millis_ = 0;
+
+    // The mismatch belonged to the sink that is going, and the next
+    // RingSource starts its own count at zero. Leaving moved_pulls_ where
+    // it was would read the next sink's first pull as a count going
+    // BACKWARDS, which is a difference, which is a mismatch reported on a
+    // sink that has only just opened at the right format.
+    moved_pulls_ = 0;
+    mismatch_ticks_ = 0;
+    shown_mismatch_ = false;
+    format_fault_.clear();
 
     // The note describes the sink that is going, so it goes with it.
     // Neither fault does: close_sink is on the path a refused format takes
@@ -556,6 +586,17 @@ void AudioPlayer::tick()
     const RingFormat format = ring_state.format;
     const std::uint64_t generation = ring_state.generation;
 
+    // What the sink's own thread did with the pulls since the last pass. A
+    // pull that found the format moved wrote silence at the sink's width
+    // and took nothing from the ring. Read BEFORE the reopen below, which
+    // is what ends it: the operator is still owed the truth about the 50 ms
+    // it lasted, and a mismatch that outlives several passes is a sink that
+    // is not being reopened at all.
+    const std::uint64_t moved_pulls =
+        pull_ == nullptr ? moved_pulls_ : pull_->format_moved_pulls();
+    const bool mismatch = moved_pulls != moved_pulls_;
+    moved_pulls_ = moved_pulls;
+
     const bool want = link_.audioActive();
 
     if (!want || !format.valid()) {
@@ -595,6 +636,37 @@ void AudioPlayer::tick()
         open_sink(format, generation);
     }
 
+    // THE MISMATCH, SAID IN WORDS RATHER THAN LEFT AS SILENCE.
+    //
+    // mismatch_ticks_ is the whole of the distinction between the ordinary
+    // case and the fault. A receiver changing rate costs exactly one tick
+    // of this, because the reopen above ends it; the status line says so
+    // for that 50 ms and then stops. Running for kMismatchFaultTicks is a
+    // silent sink with a healthy wire behind it, which is the state this
+    // whole change exists to stop being unreadable.
+    mismatch_ticks_ = mismatch ? mismatch_ticks_ + 1 : 0;
+
+    if (mismatch_ticks_ >= kMismatchFaultTicks && pull_ != nullptr) {
+        // NO DURATION AND NO REMEDY IN THE SENTENCE. A tick count in it
+        // would rewrite the string twenty times a second, which is the
+        // flicker the reopen branch above refuses for the same reason, and
+        // the two ways to get here want opposite advice: a sink that is
+        // not reopening wants audio toggled off and on, and a receiver
+        // whose shape is flapping wants leaving alone. Both want the fact,
+        // which is that the card is being fed silence and the wire is not
+        // the reason.
+        const RingFormat open_at = pull_->stream();
+        format_fault_ =
+            QStringLiteral("the output is open at %1 Hz on %2 channel(s) and the stream "
+                           "is %3 Hz on %4, so every frame reaching the card is silence.")
+                .arg(open_at.sample_rate)
+                .arg(open_at.channel_count)
+                .arg(format.sample_rate)
+                .arg(format.channel_count);
+    } else if (!mismatch) {
+        format_fault_.clear();
+    }
+
     const RingCounts counts = ring_state.counts;
     const FrameSource showing =
         pull_ == nullptr ? FrameSource::idle : pull_->last_source();
@@ -602,7 +674,8 @@ void AudioPlayer::tick()
     const int buffered_ms = millis_for(ring_state.frames_buffered, format.sample_rate);
     const int ring_ms = millis_for(ring_state.capacity_frames, format.sample_rate);
 
-    const bool changed = counts.frames_written != counts_.frames_written ||
+    const bool changed = mismatch != shown_mismatch_ ||
+                         counts.frames_written != counts_.frames_written ||
                          counts.frames_filled != counts_.frames_filled ||
                          counts.frames_overrun != counts_.frames_overrun ||
                          counts.frames_starved != counts_.frames_starved ||
@@ -617,6 +690,7 @@ void AudioPlayer::tick()
     buffered_millis_ = buffered_ms;
     ring_millis_ = ring_ms;
     shown_source_ = showing;
+    shown_mismatch_ = mismatch;
 
     if (changed) {
         emit statusChanged();
@@ -625,6 +699,15 @@ void AudioPlayer::tick()
 
 QString AudioPlayer::source() const
 {
+    // AHEAD OF THE FRAME SOURCES, because the ring reports this case as
+    // starved and starved is the wrong answer here. Starving means the
+    // audio is late, which points at the network or the engine. Nothing is
+    // late in a mismatch: the chunks are arriving and the sink is open at a
+    // rate they are not. Same silence, opposite place to go looking.
+    if (shown_mismatch_) {
+        return QStringLiteral("format mismatch");
+    }
+
     // No default label; see cmake/CompilerFlags.cmake.
     switch (shown_source_) {
         case FrameSource::idle:

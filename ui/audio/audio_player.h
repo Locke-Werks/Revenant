@@ -130,6 +130,20 @@ public:
     // to decide whether the open sink is still the right shape.
     [[nodiscard]] RingFormat stream() const { return stream_; }
 
+    // How many pulls have found the ring's format moved and written silence
+    // instead of audio. Written by the sink's thread, read by the Qt thread
+    // on its timer.
+    //
+    // A COUNT AND NOT A FLAG, because the Qt thread needs to know whether
+    // the mismatch is HAPPENING and not only whether it happened once. A
+    // flag it cleared would race the pull thread setting it again, and a
+    // flag it did not clear would latch on the one ordinary case, the 50 ms
+    // between a receiver changing rate and the reopen. A count moving
+    // between two ticks says the sink is writing silence right now.
+    [[nodiscard]] std::uint64_t format_moved_pulls() const {
+        return format_moved_pulls_.load(std::memory_order_relaxed);
+    }
+
 protected:
     qint64 readData(char* data, qint64 maxlen) override;
 
@@ -170,6 +184,7 @@ private:
     std::vector<float> widened_;
 
     std::atomic<FrameSource> last_source_{FrameSource::idle};
+    std::atomic<std::uint64_t> format_moved_pulls_{0};
 };
 
 class AudioPlayer : public QObject {
@@ -203,8 +218,16 @@ class AudioPlayer : public QObject {
     Q_PROPERTY(bool playing READ playing NOTIFY statusChanged)
 
     // What the LAST frame handed to the card was, in words: waiting, audio,
-    // squelched, gap, starving. Four of those are silence and they are four
-    // different things. See FrameSource in audio/audio_ring.h.
+    // squelched, gap, starving, format mismatch. Five of those six are
+    // silence and they are five different things. The first five come
+    // straight off FrameSource in audio/audio_ring.h.
+    //
+    // THE SIXTH IS THIS OBJECT'S OWN AND IT OUTRANKS THE RING'S REPORT. A
+    // pull that finds the ring's format moved writes silence and takes
+    // nothing, and the ring counts that as starved because starved is what
+    // the card plays. Starving means the audio is LATE, which sends the
+    // operator to the network, and nothing is late here: the sink is open
+    // at the wrong rate for the stream. See the mismatch branch in tick().
     Q_PROPERTY(QString source READ source NOTIFY statusChanged)
 
     // The squelch, pulled out of source as its own flag so an indicator can
@@ -217,10 +240,10 @@ class AudioPlayer : public QObject {
     // is the engine refusing a subscription: one is fixed by picking
     // another output and the other is not.
     //
-    // WHAT SURVIVES A REOPEN AND WHAT DOES NOT. Two faults are kept behind
-    // this one string because they have different lifetimes, and merging
-    // them is how the more important one got erased. See device_fault_ and
-    // sink_fault_ below.
+    // WHAT SURVIVES A REOPEN AND WHAT DOES NOT. Three faults are kept
+    // behind this one string because they have different lifetimes, and
+    // merging them is how the most important one got erased. See
+    // device_fault_, sink_fault_ and format_fault_ below.
     Q_PROPERTY(QString fault READ fault NOTIFY statusChanged)
 
     // Something the player ADAPTED rather than something wrong: today the
@@ -376,6 +399,18 @@ private:
     // rewritten if that attempt fails.
     QString sink_fault_;
 
+    // A fault about the SHAPE: the open sink's format is not the ring's,
+    // so every pull is writing silence, and it has been that way for long
+    // enough that the reopen which should have ended it plainly is not
+    // coming. Held apart from sink_fault_ because open_sink clears that one
+    // at the top of every attempt, and this condition is the attempt not
+    // being made.
+    //
+    // Written and cleared only by tick(), which is the one place that can
+    // see both formats at once. Empty in the ordinary case, including the
+    // one tick of mismatch a receiver changing rate costs.
+    QString format_fault_;
+
     QString note_;
     qreal volume_ = 0.7;
     bool muted_ = false;
@@ -385,6 +420,17 @@ private:
     int sink_millis_ = 0;
     RingCounts counts_;
     FrameSource shown_source_ = FrameSource::idle;
+
+    // The mismatch, as tick() tracks it across passes. moved_pulls_ is the
+    // pull thread's count as of the last pass, so a difference means the
+    // sink wrote silence during it; mismatch_ticks_ is how many passes
+    // running that has been true, which is what separates the ordinary
+    // reopen from a sink that is stuck; shown_mismatch_ is what source()
+    // reports. All three are reset by close_sink, because a new pull
+    // starts its count at zero.
+    std::uint64_t moved_pulls_ = 0;
+    int mismatch_ticks_ = 0;
+    bool shown_mismatch_ = false;
 };
 
 }  // namespace revenant::ui
