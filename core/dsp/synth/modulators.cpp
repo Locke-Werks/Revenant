@@ -42,29 +42,6 @@ constexpr std::size_t kRrcStepsPerSymbol = 512;
 // by cycle_samples has to stay inside 64 bits when the boundaries are laid out.
 constexpr std::size_t kMaxSymbolCount = 1'000'000;
 
-// Exact carrier phase at an absolute sample index, reduced into [0, 2pi).
-//
-// The phase is 2*pi*f*n/rate, and the only part that survives reduction is
-// (f*n) mod rate. Both f and rate are integers by project convention, so that
-// reduction is ((f mod rate) * (n mod rate)) mod rate, computed entirely in
-// integers. Nothing accumulates, so nothing drifts: the phase at sample 10^11
-// is as exact as the phase at sample 1. The same thing done by multiplying
-// doubles is off by about 5e-5 radians after an hour at 20 MS/s, which does not
-// matter until two emitters are meant to stay coherent, and then it does.
-//
-// Both operands are below rate, so the product needs rate^2 to fit in a signed
-// 64-bit integer. kMaxSampleRate is what keeps that true.
-[[nodiscard]] double exact_phase(Hertz frequency, SampleRate rate, SampleIndex index)
-{
-    std::int64_t reduced = frequency % rate;
-    if (reduced < 0) {
-        reduced += rate;
-    }
-    const auto position = static_cast<std::int64_t>(index % static_cast<SampleIndex>(rate));
-    const std::int64_t turns = (reduced * position) % rate;
-    return kTwoPi * static_cast<double>(turns) / static_cast<double>(rate);
-}
-
 [[nodiscard]] double radians_per_sample(Hertz frequency, SampleRate rate)
 {
     return kTwoPi * static_cast<double>(frequency) / static_cast<double>(rate);
@@ -453,6 +430,21 @@ double SymbolClock::effective_symbol_rate(SampleRate rate) const
     }
     return static_cast<double>(symbol_count) * static_cast<double>(rate) /
            static_cast<double>(cycle_samples);
+}
+
+// ---------------------------------------------------------------------------
+// Exact phase
+// ---------------------------------------------------------------------------
+
+double exact_phase(Hertz frequency, SampleRate rate, SampleIndex index)
+{
+    std::int64_t reduced = frequency % rate;
+    if (reduced < 0) {
+        reduced += rate;
+    }
+    const auto position = static_cast<std::int64_t>(index % static_cast<SampleIndex>(rate));
+    const std::int64_t turns = (reduced * position) % rate;
+    return kTwoPi * static_cast<double>(turns) / static_cast<double>(rate);
 }
 
 // ---------------------------------------------------------------------------

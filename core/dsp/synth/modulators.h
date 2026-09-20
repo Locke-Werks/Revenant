@@ -270,6 +270,27 @@ struct ModulatorSpec {
 // point of seeding it.
 [[nodiscard]] std::vector<std::uint8_t> random_bits(std::size_t count, std::uint64_t seed);
 
+// Exact carrier phase at an absolute sample index, in radians, reduced into
+// [0, 2pi). This is property 3 at the top of this file, as a function.
+//
+// The phase is 2*pi*f*n/rate, and the only part that survives reduction is
+// (f*n) mod rate. Both f and rate are integers by project convention, so that
+// reduction is ((f mod rate) * (n mod rate)) mod rate, computed entirely in
+// integers. Nothing accumulates, so nothing drifts: the phase at sample 10^11
+// is as exact as the phase at sample 1. The same thing done by multiplying
+// doubles is off by about 5e-5 radians after an hour at 20 MS/s, which does
+// not matter until two emitters are meant to stay coherent, and then it does.
+//
+// Both operands are below rate, so the product needs rate^2 to fit in a
+// signed 64-bit integer. kMaxSampleRate is what keeps that true, and this
+// function does not check it: validate() does, on every spec that reaches a
+// modulator.
+//
+// Declared here rather than left file-local to modulators.cpp because
+// core/dsp/synth/wfm_mod.cpp needs the same carrier and a second copy of an
+// integer reduction is a second chance to get it wrong.
+[[nodiscard]] double exact_phase(Hertz frequency, SampleRate rate, SampleIndex index);
+
 // The symbol grid a symbol-rate mode runs on.
 //
 // The payload repeats, so the signal is periodic with cycle_samples, and the
