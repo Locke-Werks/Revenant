@@ -280,10 +280,17 @@ void probe_shared_memory_once() {
     // is bit-exact at every configuration when a process dispatches one of
     // them, and wrong at a narrow configuration that follows several
     // differing ones, by about 57000 ulp with the magnitude steady. Six
-    // alternating shapes here do not reproduce it; the nine cases in
+    // alternating shapes here do not reproduce it; the gated cases in
     // tests/reference/test_spectrum.cpp do, about one run in four. A probe
     // that cannot see the fault cannot gate it, and two attempts at building
     // one is enough to stop claiming the next will work.
+    //
+    // This read "the nine cases" until 2026-09-20. That file has never held
+    // nine of anything a reader could count: three [gpu] cases and ten in
+    // total when the sentence was written, seven and thirteen now. The
+    // figure was wrong rather than stale, and what the measurement rests on
+    // is the set of dispatch shapes those cases walk, which no single number
+    // names. Counting them here again would only put the next wrong one in.
     //
     // So conformance for this kernel is asserted on discrete devices and
     // skipped elsewhere, which is a real device property rather than a name

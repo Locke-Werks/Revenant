@@ -8,10 +8,34 @@
 // WHAT IS NEW HERE, AND THEREFORE WHAT THESE CASES ARE FOR
 //
 // The kernel is not new. The passband runs core/shaders/spectrum.comp,
-// specialized at one channel instead of sixty-four, and
-// tests/reference/test_spectrum.cpp already diffs that kernel bit for bit
-// against dsp::reference_spectrum on both devices in the conformance matrix.
-// Nothing below re-proves a butterfly.
+// specialized at two channels instead of sixty-four and dispatched one
+// workgroup wide, and tests/reference/test_spectrum.cpp already diffs that
+// kernel bit for bit against dsp::reference_spectrum. Nothing below re-proves
+// a butterfly.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 it put that diff "on both devices in the conformance
+// matrix". It has never run on both. Every GPU case in test_spectrum.cpp
+// opens with REVENANT_NEEDS_REPRODUCIBLE_SHARED_MEMORY(), and the probe
+// behind it in tests/reference/gpu_fixture.cpp returns before ever setting
+// reproducible on a device that is not VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+// so the matrix's second leg skips all of them with a reason rather than
+// refereeing them. The fixture states the same thing in its own words: of the
+// two devices in the matrix, this kernel is refereed on one.
+//
+// Nothing is missing from the suite. That skip is deliberate, it is measured,
+// and docs/fft.md carries the reproduction. What was missing was the accuracy
+// of this sentence, and it matters here rather than only there: this is the
+// sentence that says why the cases below do not re-prove the transform, so a
+// reader deciding what they still owe needs the coverage number to be right.
+//
+// The specialization count was wrong in the same sentence. core/engine/
+// graph.cpp specializes the passband pipeline at TWO channels, because two is
+// the floor that core/shaders/spectrum.comp's slot arithmetic and
+// dsp::validate(SpectrumParams) both accept, and it dispatches one workgroup
+// so the second channel is never entered. The last case in this file already
+// said two, so the file contradicted itself.
 //
 // Three things ARE new, and each one fails quietly:
 //
@@ -1034,13 +1058,20 @@ TEST_CASE("a passband over a real radio shows the filter's own edges",
     // channelizer rather than out of an arithmetic expression.
     //
     // The assertion is one that holds whatever is on the air. The receiver's
-    // fine filter passes to B/2 and the frame is Fd/2 wide, so the bins
-    // beyond B/2 are that filter's stopband and have to be far below the
-    // ones inside it. A dead band makes both of them noise and the margin is
-    // the filter's attenuation; a live band makes the inside a signal and
+    // fine filter passes to B/2 and the frame reaches Fd/2 either side, so
+    // the bins beyond B/2 are that filter's stopband and have to be far below
+    // the ones inside it. A dead band makes both of them noise and the margin
+    // is the filter's attenuation; a live band makes the inside a signal and
     // widens it. Either way the display is showing where the filter's edges
     // are, which is what docs/ui-spectrum.md says the fine-tuning display is
     // for.
+    //
+    // That sentence said "the frame is Fd/2 wide" until 2026-09-20, which
+    // this file's own assertion contradicts: the case above CHECKs that the
+    // span equals kExpectedDemodRate, so the frame is Fd wide edge to edge.
+    // The old figure also made the assertion below impossible. Fd is 1.5
+    // times B at plan_vrx's floor, so a frame Fd/2 wide would reach only
+    // 0.375 B either side and hold no stopband bins at all.
     auto attached = source::enumerate_rtlsdr_devices();
     if (!attached.has_value() || attached->empty()) {
         SKIP("no RTL-SDR is attached to this machine");
