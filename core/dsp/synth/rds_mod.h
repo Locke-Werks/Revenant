@@ -347,6 +347,34 @@ struct RdsNoiseReport {
                                                      SampleRate rate,
                                                      std::uint64_t seed);
 
+// Measures what add_real_awgn actually put in the buffer, by differencing the
+// impaired composite against the clean one that went in. The real counterpart
+// of measure_snr() in channel.h, named differently for the same reason
+// real_mean_power is.
+//
+// WHY THIS EXISTS AND WHAT IT IS FOR
+//
+// Asking add_real_awgn for a level and then reading that level back out of
+// its own report proves nothing: the report computes the SNR from the same
+// noise power the request produced, so the round trip closes whatever sigma
+// the generator actually used. Changing sigma from sqrt(power) to
+// sqrt(power/2) leaves every reported figure untouched and makes every real
+// Eb/N0 3 dB better than its label, which is the exact mistake
+// docs/snr-convention.md warns a real signal costs. Only a measurement of the
+// buffer can see it, and that is this.
+//
+// signal_power is handed in rather than measured off the clean buffer, for
+// the reason add_real_awgn takes it: the wanted signal on an FM composite is
+// the RDS component alone, and the clean buffer also carries the pilot and
+// the programme audio. RdsComposite::rds_mean_power is the number to pass.
+// SnrMeasurement::signal_power echoes it back unchanged; the measurement is
+// in noise_power and everything derived from it.
+[[nodiscard]] Expected<SnrMeasurement> measure_real_snr(dsp::ConstRealSpan clean,
+                                                        dsp::ConstRealSpan impaired,
+                                                        double signal_power,
+                                                        SampleRate rate,
+                                                        double bits_per_second = 0.0);
+
 // Mean of x^2 over the buffer. Zero for an empty span. The complex
 // counterpart is mean_power() in channel.h, and this is deliberately named
 // differently rather than overloaded, because the two differ by the factor of

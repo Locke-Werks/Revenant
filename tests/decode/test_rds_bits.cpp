@@ -529,6 +529,111 @@ TEST_CASE("blocking the input does not change the bits", "[decode][rds]")
     }
 }
 
+TEST_CASE("add_real_awgn delivers the SNR it was asked for", "[decode][rds]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // The real-path counterpart of "add_awgn delivers the SNR it was asked
+    // for" in tests/tools/test_channel.cpp, guarding the same mistake at the
+    // place a real signal makes it. A complex sample carries its noise across
+    // two quadratures and a real sample does not, so sigma here is
+    // sqrt(power) rather than sqrt(power/2), and docs/snr-convention.md puts
+    // the cost of the wrong one at 3 dB.
+    //
+    // Reading the level back out of add_real_awgn's own report cannot catch
+    // that. The report's SNR is computed from the same noise power the
+    // request produced, so the round trip closes for any sigma at all: halve
+    // it and every reported figure is unchanged while every real Eb/N0 is
+    // 3 dB better than its label. What follows differences the impaired
+    // buffer against the clean one and measures what actually landed.
+    const siggen::RdsModSpec spec = base_spec(kTidyRate, 1024);
+    siggen::RdsComposite clean;
+    render(spec, clean);
+    REQUIRE(clean.samples.size() > (1U << 17U));
+
+    for (const double requested_db : {-6.0, 0.0, 6.0, 12.0, 20.0}) {
+        std::vector<float> impaired = clean.samples;
+        const siggen::NoiseLevel level =
+            siggen::NoiseLevel::eb_over_n0_db(requested_db, decode::kBitRateHz);
+
+        auto report =
+            siggen::add_real_awgn(dsp::RealSpan(impaired), clean.rds_mean_power, level,
+                                  kTidyRate, siggen::derive_seed(kSeed, 0x4341'4C00));
+        REQUIRE(report.has_value());
+
+        auto measured = siggen::measure_real_snr(dsp::ConstRealSpan(clean.samples),
+                                                 dsp::ConstRealSpan(impaired),
+                                                 clean.rds_mean_power, kTidyRate,
+                                                 decode::kBitRateHz);
+        REQUIRE(measured.has_value());
+
+        INFO(std::format("requested {:.1f} dB Eb/N0, measured {:.3f}, reported {:.3f}; "
+                         "noise power asked {:.6e} delivered {:.6e}",
+                         requested_db, measured->eb_over_n0_db, report->eb_over_n0_db,
+                         report->noise_power, measured->noise_power));
+
+        // The tolerance is the statistical spread of a finite noise sample,
+        // not slack for a calibration error. Over 149760 samples the standard
+        // error of a power estimate is 0.37 percent, which is 0.016 dB, so
+        // 0.1 dB is generous and still a thirtieth of the 3 dB this exists to
+        // catch.
+        CHECK(measured->eb_over_n0_db == Approx(requested_db).margin(0.1));
+
+        // And the same statement at the quantity sigma is derived from,
+        // which is where the factor of two would sit.
+        CHECK(measured->noise_power == Approx(report->noise_power).epsilon(0.02));
+
+        // The full-band figure is the one the two paths share, so it is
+        // checked directly rather than only through the Eb/N0 conversion.
+        CHECK(measured->snr_in_full_band_db ==
+              Approx(report->snr_in_full_band_db).margin(0.1));
+    }
+}
+
+TEST_CASE("the real noise generator is reproducible from its seed", "[decode][rds]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // Every BER figure in this file is quoted against a printed seed, so a
+    // channel that is not deterministic makes none of those reports
+    // actionable. The complex path has this case in
+    // tests/tools/test_channel.cpp and the real path had none.
+    const siggen::RdsModSpec spec = base_spec(kTidyRate, 256);
+    siggen::RdsComposite clean;
+    render(spec, clean);
+
+    const auto run = [&clean](std::uint64_t seed) {
+        std::vector<float> buffer = clean.samples;
+        auto report = siggen::add_real_awgn(
+            dsp::RealSpan(buffer), clean.rds_mean_power,
+            siggen::NoiseLevel::eb_over_n0_db(6.0, decode::kBitRateHz), kTidyRate, seed);
+        REQUIRE(report.has_value());
+        return buffer;
+    };
+
+    const std::vector<float> first = run(12345);
+    const std::vector<float> second = run(12345);
+    const std::vector<float> different = run(12346);
+
+    // Bit for bit, not to a tolerance. A generator that only agrees to six
+    // decimals is one whose seed does not fully determine it.
+    CHECK(first == second);
+
+    REQUIRE(first.size() == different.size());
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < first.size(); ++i) {
+        differing += (first[i] != different[i]) ? 1U : 0U;
+    }
+    INFO(std::format("{} of {} samples differ under the neighbouring seed", differing,
+                     first.size()));
+
+    // A neighbouring seed has to give a different stream. derive_seed mixes
+    // through the SplitMix64 finaliser precisely so that 12345 and 12346 do
+    // not share a noise realisation, and two runs a bit apart in a sweep
+    // would otherwise not be independent samples of anything.
+    CHECK(differing > first.size() / 2);
+}
+
 TEST_CASE("bit error rate against Eb/N0", "[decode][rds]")
 {
     INFO(std::format("seed {}", kSeed));
@@ -589,10 +694,19 @@ TEST_CASE("bit error rate against Eb/N0", "[decode][rds]")
                                             siggen::derive_seed(kSeed, 0x4245'5200));
         REQUIRE(report.has_value());
 
-        // The channel delivered what it was asked for. Round-tripping the
-        // request through the report is what catches a calibration that is
-        // out by the factor of two a real signal costs.
-        CHECK(report->eb_over_n0_db == Approx(point.eb_n0_db).margin(1e-6));
+        // The channel delivered what it was asked for, MEASURED against the
+        // clean buffer rather than read back out of the report. The report
+        // computes its SNR from the same noise power the request produced, so
+        // round-tripping the request through it closes identically whatever
+        // sigma the generator used and cannot see a calibration error at all.
+        // The case below this one is where that is stated on its own; here it
+        // is what makes the Eb/N0 column of the table above mean anything.
+        auto measured = siggen::measure_real_snr(dsp::ConstRealSpan(reference),
+                                                 dsp::ConstRealSpan(samples),
+                                                 clean.rds_mean_power, kTidyRate,
+                                                 decode::kBitRateHz);
+        REQUIRE(measured.has_value());
+        CHECK(measured->eb_over_n0_db == Approx(point.eb_n0_db).margin(0.1));
 
         decode::RdsBitsConfig config;
         config.rate = kTidyRate;

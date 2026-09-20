@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <numbers>
 #include <random>
 
@@ -469,6 +470,65 @@ Expected<RdsNoiseReport> add_real_awgn(dsp::RealSpan composite,
     report.eb_over_n0_db = *eb_n0;
 
     return report;
+}
+
+Expected<SnrMeasurement> measure_real_snr(dsp::ConstRealSpan clean,
+                                          dsp::ConstRealSpan impaired,
+                                          double signal_power,
+                                          SampleRate rate,
+                                          double bits_per_second)
+{
+    if (rate <= 1) {
+        return fail(std::format("measure_real_snr needs a positive sample rate, got {}", rate));
+    }
+    if (clean.size() != impaired.size()) {
+        return fail(std::format(
+            "measure_real_snr needs matching lengths, got {} clean and {} impaired",
+            clean.size(), impaired.size()));
+    }
+    if (clean.empty()) {
+        return fail("measure_real_snr was given an empty buffer");
+    }
+    if (!(signal_power > 0.0)) {
+        return fail("measure_real_snr has no SNR to report against a signal of zero power");
+    }
+
+    double noise_total = 0.0;
+    for (std::size_t i = 0; i < clean.size(); ++i) {
+        const double noise =
+            static_cast<double>(impaired[i]) - static_cast<double>(clean[i]);
+        noise_total += noise * noise;
+    }
+
+    SnrMeasurement measurement;
+    measurement.signal_power = signal_power;
+    measurement.noise_power = noise_total / static_cast<double>(clean.size());
+    measurement.snr_in_full_band_db =
+        (measurement.noise_power > 0.0)
+            ? 10.0 * std::log10(signal_power / measurement.noise_power)
+            : std::numeric_limits<double>::infinity();
+
+    // rate/2, because a real stream at `rate` represents rate/2 hertz of
+    // spectrum. Same substitution add_real_awgn makes, and it has to be the
+    // same one or the two figures stop being comparable.
+    Expected<double> reference =
+        full_band_to_reference_bandwidth_db(measurement.snr_in_full_band_db, rate / 2);
+    if (!reference) {
+        return std::unexpected(with_context(reference.error(), "measure_real_snr"));
+    }
+    measurement.snr_in_2500_hz_db = *reference;
+
+    if (bits_per_second > 0.0) {
+        Expected<double> eb_n0 = full_band_to_eb_over_n0_db(measurement.snr_in_full_band_db,
+                                                            rate / 2, bits_per_second);
+        if (!eb_n0) {
+            return std::unexpected(with_context(eb_n0.error(), "measure_real_snr"));
+        }
+        measurement.eb_over_n0_db = *eb_n0;
+        measurement.measured_eb_over_n0 = true;
+    }
+
+    return measurement;
 }
 
 }  // namespace revenant::siggen
