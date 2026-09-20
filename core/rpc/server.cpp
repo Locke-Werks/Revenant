@@ -595,7 +595,18 @@ public:
     // removed through this session: silence is what a quiet channel sounds
     // like, so a stream that simply stops is indistinguishable from one
     // nobody is talking on.
-    void end_audio_for_vrx(engine::VrxId vrx, std::string_view reason);
+    //
+    // kj::StringPtr AND NOT std::string_view, WHICH IS NOT A STYLE CHOICE
+    //
+    // This took a string_view and handed it to kj::StringPtr(const char*,
+    // size_t), whose contract is a NUL-terminated buffer: its constructor
+    // reads text[size] to assert the terminator is there. A string_view
+    // carries no such promise, so that read was one byte past the view. The
+    // one call site passes a literal and the byte it read was the literal's
+    // own NUL, which is why it never showed up. Taking kj::StringPtr moves
+    // the requirement into the type, where a caller with a std::string
+    // substring cannot satisfy it by accident.
+    void end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason);
 
     // Event loop thread. Queues a listing for the worker and hands back a
     // promise this loop resolves when the worker is done. See the note at the
@@ -2136,7 +2147,7 @@ void ServerImpl::end_audio(const std::shared_ptr<AudioNode>& node) {
     route->owner = nullptr;
 }
 
-void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, std::string_view reason) {
+void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
     auto found = audio_routes_.find(vrx.value);
     if (found == audio_routes_.end()) {
         return;
@@ -2156,7 +2167,7 @@ void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, std::string_view reason) {
         if (!node->cancelled && !node->ended_sent && sends_ != nullptr) {
             node->ended_sent = true;
             auto request = node->receiver.endedRequest();
-            request.setReason(kj::StringPtr(reason.data(), reason.size()));
+            request.setReason(reason);
             sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
         }
         end_audio(node);
