@@ -43,6 +43,7 @@ catch_discover_tests(revenant_reference_tests
 
 # Tool suites, added as each tool lands. Guarded so that a checkout mid-way
 # through M0 still configures.
+add_subdirectory(decode)
 add_subdirectory(detect)
 add_subdirectory(engine)
 

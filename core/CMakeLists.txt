@@ -17,7 +17,24 @@ find_package(Threads REQUIRED)
 # against. docs/rtlsdr-provenance.md has the finding.
 find_package(rtlsdr CONFIG REQUIRED)
 
+# The decoders. rds_bits.cpp is the RDS physical layer, subcarrier to bits;
+# rds_groups.cpp is the block and group layer above it and is landing on a
+# separate branch in the same session.
+#
+# The EXISTS guard is there so the two branches build independently and merge
+# without either one having to edit the other's line. tests/CMakeLists.txt
+# already uses the same guard on rpc/ for the same reason. Once both have
+# landed the guard can go, and a missing file would then be a broken build
+# rather than a silently absent decoder, which is the right end state.
+set(REVENANT_DECODE_SOURCES
+    decode/rds_bits.cpp
+)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/decode/rds_groups.cpp")
+    list(APPEND REVENANT_DECODE_SOURCES decode/rds_groups.cpp)
+endif()
+
 add_library(revenant_core STATIC
+    ${REVENANT_DECODE_SOURCES}
     detect/detector.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
@@ -30,6 +47,7 @@ add_library(revenant_core STATIC
     dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
     dsp/synth/modulators.cpp
+    dsp/synth/rds_mod.cpp
     dsp/synth/wideband.cpp
     engine/audio_egress.cpp
     engine/audio_wasapi.cpp
