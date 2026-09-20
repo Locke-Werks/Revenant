@@ -309,11 +309,44 @@ detection is asking to be put near a signal rather than on a channel centre.
 `Detection::centerHz` is absolute and `VrxParams::center` is a baseband
 offset, so tuning is `centerHz - EngineInfo::sourceCenter`.
 
-### Audio does not cross
+### Audio has a shape on the wire and nothing behind it
 
+`AudioChunk`, `AudioReceiver`, `AudioSubscription` and
+`Session::subscribeAudio` are in the schema as of 2026-09-20, with the codec
+question answered rather than deferred: there is no codec. Raw float32 PCM, per
+receiver, opt in, about 1.5 Mbit/s for a mono 48 kHz receiver, which is free on
+loopback and on a LAN. Opus was refused for 20 ms of added latency and for
+putting a lossy stage in the middle of a chain whose whole claim is that it is
+bit exact; 16-bit PCM was refused because it adds a quantisation and a dither
+decision and clips headroom a settling AGC uses.
+
+**The method is refused.** The engine holds one `AudioSink` per receiver and a
+second `set_audio_sink` replaces the first, so fanning audio out to subscribers
+means changing `core/engine`, and that is its own branch. `subscribeAudio`
+comes back with a sentence saying the surface exists and is not wired, before
+it looks at its arguments. A subscription that produced no chunk would read as
+a broken radio; a refusal that says why does not.
+
+**What this paragraph used to say.** Until 2026-09-20: "Audio does not cross.
 Not yet. The CLI renders its own through WASAPI in the same process as the
 engine. A remote client wanting audio needs a codec decision, and nothing today
-forces that decision to be made.
+forces that decision to be made." The decision has been made, and the
+retraction is here rather than a quiet rewrite because `README.md` and
+`core/rpc/revenant.capnp` carried the same claim and anyone who read one of the
+three concluded a remote client could not listen.
+
+### RDS is the same: declared, allocated, refused
+
+`Session::rdsStation` and `Session::setRdsRegion` land beside it, with
+`RdsStation` and the six structs and enums under it. The decoder exists in
+`core/decode` and nothing in `core/engine` feeds it a composite, so both
+methods refuse in the same words.
+
+All three ordinals were allocated in one pass with the login bootstrap because
+a Cap'n Proto field number is permanent and three branches appending to one
+schema would collide. `core/rpc/revenant.capnp` carries the full argument for
+each, including the four conditions an RDS receiver will have to meet, which
+are four and not the one the audio rate suggests.
 
 ### Nothing else crosses
 
@@ -506,18 +539,131 @@ is what that link replaced in its hand-off slot before the Qt thread came for
 it. Three causes with three different fixes, which is why each is exposed on
 its own and not only as the total `framesDropped` rolls up.
 
+## Logging in
+
+A connection holds an `Authenticator` and nothing else until it has passed the
+engine's token. `Authenticator` has one method, `login(token :Data) ->
+(session :Session)`, and no radio on it at all, so there is no `Session` in an
+unauthenticated caller's capability table to refuse. That is the difference
+between "a Session that says no" and "no Session", and it is why this is a
+bootstrap interface rather than a check at the top of every method: a check has
+to be remembered by whoever adds the next method, and this does not.
+
+**What this section used to say.** Until 2026-09-20 the "Not done yet" list
+below opened with "**There is no authentication of any kind.** Not a token, not
+a password, not a TLS client certificate. Anything that can open the port gets
+full control of the engine." That was true and is not. It is retracted here
+rather than deleted because `core/rpc/server.h` and the schema said it too, and
+because the sentence that followed it, about the loopback default, still holds
+for a reason the old text did not give.
+
+### Where the token lives
+
+`%LOCALAPPDATA%\Revenant\rpc-token`, resolved with `SHGetKnownFolderPath` and
+not `getenv`: the environment variable is absent under a service and lies under
+impersonation. Local and not Roaming, because a token identifying one machine's
+engine must not follow a domain profile to another machine.
+
+`revenant-engine` mints it on first run and prints the path, never the token.
+The file is 64 lowercase hex characters and a newline, and its ACL is built
+before `CreateFileW` and passed in `SECURITY_ATTRIBUTES` with `CREATE_NEW`, so
+it grants this account and `SYSTEM` and inherits nothing. Setting the ACL after
+writing would leave the token on disk under an inherited ACL for the length of
+the write, which passes any check that only reads the final ACL.
+
+`CREATE_NEW` rather than `CREATE_ALWAYS` for two reasons that are not caution.
+Two engines starting at once: the loser is told the file exists, loads the
+winner's and serves the same token, rather than clobbering a token the winner
+has already handed to a client. And `CREATE_NEW` will not follow a symlink
+somebody pre-placed at that path.
+
+**Loading refuses a file anything else can read**, naming the principal, and
+the refusal states the two recoveries because the operator reading it is
+looking at a headless process that would not start: delete the file so a fresh
+one is minted, or point `--token-file` somewhere private. `Administrators` is
+allowed, because an administrator can take ownership whatever the ACL says;
+`Users`, `Everyone` and `Authenticated Users` are not.
+
+### Reading it and passing it
+
+    type %LOCALAPPDATA%\Revenant\rpc-token
+
+There is no `--print-token`. `revenant-engine`'s stdout is scrollback, a
+supervisor's log and CI output at once, and a secret written to any of those
+has left the machine.
+
+`revenant-engine --token-file <path>` moves the file. Name one when the engine
+runs as a service: under LocalSystem, `FOLDERID_LocalAppData` resolves inside
+`C:\Windows\System32\config\systemprofile` and an operator's client cannot read
+it. `revenant-engine --new-token` mints a fresh one over the existing file.
+
+`revenant-ui` looks in three places, in order: `REVENANT_RPC_TOKEN` holding the
+hex, `REVENANT_RPC_TOKEN_FILE` naming a file, then the default path. The
+ordinary case, one operator with the engine and the window running as the same
+account, needs none of them.
+
+In C++, `core/rpc/token.h` is both halves of the file format in one translation
+unit, compiled into `revenant_rpc_client` so the Qt process gets it too.
+`Client::connect(address, port, token)` takes exactly 32 bytes.
+`ServerOptions::token` takes the same, and **empty is a `create()` failure
+rather than "no authentication"**: an off switch is the thing that ends up on
+by accident, so there is not one.
+
+### What it does and does not change
+
+It changes what a second process on this machine can do. It changes nothing at
+all about a LAN. This wire is plaintext; TLS with client certificates was
+refused as the wrong shape for one operator with one radio, and the consequence
+is that a token crossing a routable interface is readable and replayable by
+anything on the path. `bind_address` still defaults to `127.0.0.1`, off
+loopback still means a tunnel, and `revenant-engine` prints a warning on stderr
+when it binds anywhere else.
+
+The comparison is constant time over the fixed length, after a length check.
+Branching on the length leaks nothing, because the length is published in the
+schema, in this file, and in the size of the file on disk. What the loop
+protects is the **prefix**: a compare returning at the first wrong byte turns a
+2^256 search into a 32 x 256 one. Whether that is measurable across loopback
+under Windows scheduler jitter, from a separate process, against a
+once-per-connection call, is doubtful, and it is not the argument. 256 bits of
+entropy and the file ACL are what protect the token; the compare costs three
+lines and means a future shorter token or a per-call check would be bad rather
+than catastrophic.
+
+**Rotating does not disconnect anybody.** A `Session` already granted is a
+capability and capabilities do not re-check. An operator rotating because a
+token leaked has to restart the engine to kill the sessions the leak already
+bought.
+
+**A second login on one connection succeeds**, returning another independent
+`Session`. The caller has already proved it holds the token, so a second
+capability grants it nothing it did not have, and refusing would need
+per-connection state that capnp 1.4.0's `TwoPartyServer` does not offer: it
+takes exactly one bootstrap capability and has no `BootstrapFactory`
+constructor. `SessionImpl` is stateless, its only member a reference to the
+server, so minting one per login costs nothing and two of them cannot disagree.
+
+**A client pipelines.** `core/rpc/client.cpp` sends `login` and takes the
+`Session` off the unresolved promise, so `Session` calls travel behind the
+login rather than after it. When login fails, Cap'n Proto breaks that
+capability with login's own exception and every call on it fails with that
+exception without the engine's `Session` implementation being entered.
+`tests/rpc/test_rpc_auth.cpp` proves the second half by sending `addVrx` behind
+a bad token and then asking the engine whether a receiver appeared.
+
+`connect()` now round-trips, which it did not before: the bootstrap capability
+is lazy, so until this landed `connect` returned the moment the TCP connect did
+and nothing was exchanged. It waits for the login answer, so a wrong token is a
+connect failure carrying the engine's refusal.
+
+**A wrong token is permanent and `core/error.h` cannot say so.** `Error` has a
+message and an originating API code and no category, so
+`ui/models/engine_link.cpp`'s reconnect supervisor cannot tell a refused token
+from a server that is not up yet except by matching on message text, and it
+retries both. Widening `Error` with a category is the right fix and touches
+every user of `Expected` in the tree.
+
 ## Not done yet
-
-**There is no authentication of any kind.** Not a token, not a password, not a
-TLS client certificate. Anything that can open the port gets full control of
-the engine: add a receiver, retune it, read the spectrum. `ServerOptions`
-therefore defaults `bind_address` to `127.0.0.1`, and binding anything else is
-a deliberate act by whoever writes the argument. Do not put this on a routable
-interface and assume the network is the control. Until there is an
-authentication story, a remote client belongs behind a tunnel.
-
-**No audio on the wire.** See above. Local audio only, through WASAPI in the
-engine's own process.
 
 **No session persistence.** Nothing here saves or restores a set of receivers.
 A client reconnecting starts from whatever the engine currently holds, and an
@@ -572,4 +718,8 @@ all: `.github/workflows/ci.yml` runs the `ci` and `headless` presets from the
 root and both stop at the engine tree, so a change to `core/rpc/client.cpp` or
 to the schema can break the `/MD` build and nothing will say so until somebody
 runs `cmake --preset vs` in `ui/` by hand. Nothing binds off loopback, which is
-the right default while there is no authentication.
+still the right default now that there is a token, because the wire is
+plaintext and a token crossing a network is readable and replayable. Nothing
+exercises the off-loopback warning `revenant-engine` prints either: it is a
+property of that program's stderr rather than of this library, and would need
+another CTest entry.

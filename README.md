@@ -103,15 +103,24 @@ the terminal, auto-scaling measured on the device, the per-receiver passband
 spectrum, the wideband detector, the Cap'n Proto session that carries all of
 it to another process, the Qt client that draws it, and the conformance suite
 that diffs every GPU kernel against a scalar twin and demands identical bits.
-203 tests pass on an RTX 4090.
+307 tests pass on an RTX 4090.
 
-What does not: every decoder. Audio does not cross the wire, so the client is
-silent and the command line is what listens. The session has no authentication
-of any kind and binds loopback for that reason, it cannot open or stop a
-source, and nothing saves a set of receivers across a restart. Those four are
-in `docs/rpc.md` under "Not done yet", each with what it would take and what
-the gap costs meanwhile. The decoders are not in it, because nothing about
-them is a wire question.
+What does not: every decoder. Audio and RDS have a shape on the wire and
+nothing behind them, so the client is still silent and the command line is
+what listens; both methods refuse in words saying the surface exists and is
+not wired, because a stream that produced nothing would read as a broken
+radio. The session cannot open or stop a source, and nothing saves a set of
+receivers across a restart. Those are in `docs/rpc.md`, each with what it
+would take and what the gap costs meanwhile.
+
+A client logs in with a pre-shared token before it holds anything at all, and
+still binds loopback by default: the wire is plaintext, so a token crossing a
+network is readable and replayable, and off loopback still means a tunnel.
+`docs/rpc.md` has where the token lives and how to pass it. This paragraph
+used to say the session had no authentication of any kind and binds loopback
+for that reason; the first half is no longer true and the second half survives
+for a different reason, which is why the sentence is replaced rather than
+edited.
 
 ### What has been measured
 
