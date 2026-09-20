@@ -277,6 +277,23 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Lsb) == kDemodLsb);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Dsb) == kDemodDsb);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Cw) == kDemodCw);
 
+// What those eight catch and what they do not, because the difference has
+// already been got wrong once in this tree.
+//
+// They catch a REORDER: move Dsb above Usb and the assertion that names it
+// fails. They cannot catch an ADDITION. A ninth enumerator after Cw leaves
+// all eight true, and C++ offers no way to count an enum's enumerators, so
+// there is no assertion to write here that would not itself be a hand-kept
+// number going stale beside the one it is guarding.
+//
+// The guard for an addition is a switch instead, and it lives where the
+// answer for a new mode has to be decided rather than here: fm_deviation,
+// minimum_demod_rate and vrx_demod_gain in core/dsp/vrx_reference.cpp each
+// switch over engine::Demod with every enumerator spelled out and no default
+// label, which is the one shape /w14062 diagnoses. Adding a mode is a build
+// error in all three. Keep them that way; a default label in any of them
+// puts the silent answer back.
+
 inline constexpr std::uint32_t kMaxAudioTaps = 1024;
 inline constexpr std::uint32_t kMaxDcTaps = 4096;
 
@@ -378,6 +395,13 @@ static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
 // transition band to live in at all: the stopband edge is Fd/2 and the
 // passband edge is B/2, so Fd = B would leave no transition and no filter.
 // CW additionally needs the pitch plus half the bandwidth to fit below Fd/2.
+//
+// Zero for a non-positive bandwidth. For a `mode` that is not an enumerator
+// of engine::Demod, the widest of the three constraints rather than the
+// shared floor: the floor is the rate below which no mode can be filtered,
+// not one at which an unidentified detector is safe, and giving it to a
+// folding detector aliases the top of the audio band with nothing reporting
+// it. plan_vrx rejects such a mode before it reaches here.
 [[nodiscard]] Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch);
 
 // The mode's audio scale. The convention: a unit-amplitude signal fully

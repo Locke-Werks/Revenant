@@ -102,6 +102,16 @@ void write_spectrum_frame(schema::SpectrumFrame::Builder out,
 // One track, as the wire carries it. Deliberately lossy: see the note on
 // schema::Detection for which fields of detect::Track are left behind and
 // why.
+//
+// There is deliberately no write_detection_list beside it, and the absence
+// is stated because the rule at the top of this file would otherwise say
+// there should be. DetectionList's other five fields are not a conversion of
+// any one engine struct: they come off Detector::stats(), Detector::config()
+// and the filtering the server does per caller, and the struct holding them
+// is local to core/rpc/server.cpp. A writer here would take those five as
+// loose scalars, which is the mechanical-copy mistake this file exists to
+// make reviewable, not an instance of it. The one place they are written is
+// ServerImpl::detections, next to the code that reads them.
 void write_detection(schema::Detection::Builder out, const detect::Track& in);
 
 [[nodiscard]] Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in);

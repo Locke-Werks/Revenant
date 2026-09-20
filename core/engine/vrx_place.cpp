@@ -17,13 +17,27 @@
 // reads VrxParams::center as a frequency in the SOURCE'S OWN BASEBAND FRAME:
 // hertz from the source's centre, in [-rate/2, +rate/2].
 //
-// The comment on VrxParams::center in core/engine/vrx.h is about storage, and
-// it is right: a receiver stores the absolute frequency so that retuning the
-// source does not silently retune the receiver. The rebase from absolute to
-// baseband belongs to whoever owns the source's tuned centre, which is the
-// engine, and it is one subtraction in integer hertz that loses nothing. This
-// is stated here rather than left to be discovered because the two readings
-// differ by the whole local oscillator and the failure is silent.
+// That is the whole contract, and there is no rebase hidden behind it.
+// Engine::add_vrx passes the caller's params to this function untouched and
+// stores those same params, so VrxStatus reads back in baseband as well.
+// Converting from an absolute frequency belongs to the caller, which is the
+// only party that has EngineInfo::source_center: tools/cli/main.cpp does the
+// subtraction for a frequency the operator typed, and the bench and the
+// tests build offsets directly. core/engine/vrx.h argues why the offset is
+// the API rather than the absolute frequency the name "center" suggests.
+//
+// This is stated in both places because the two readings differ by the whole
+// local oscillator and the failure is silent on a source that declares no
+// centre, where source_center is zero and the two numbers coincide.
+//
+// The two places have not always agreed. Until 2026-09-19 core/engine/vrx.h
+// documented center as an absolute radio frequency, and core/rpc/
+// revenant.capnp, core/rpc/types.h and docs/detection.md each recorded that
+// disagreement, one of them saying the engine was expected to rebase. The
+// header was the side that was wrong. Nothing below changed when it was
+// corrected, because nothing below has ever rebased: this function is handed
+// no tuned centre to rebase against, which is the argument the paragraph
+// above makes and the reason the offset reading is the one that survived.
 
 #include "core/engine/vrx.h"
 
@@ -115,8 +129,8 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
     if (params.center > nyquist || params.center < -nyquist) {
         return fail(std::format(
             "place: centre {} Hz is outside the source's baseband span of +/-{} Hz. This "
-            "frequency is relative to the source's tuned centre, not absolute; the engine "
-            "rebases it before calling place",
+            "frequency is relative to the source's tuned centre, not absolute; subtract "
+            "EngineInfo::source_center from an absolute frequency before passing it",
             params.center, nyquist));
     }
 

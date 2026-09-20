@@ -382,6 +382,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.last_decision = in.getLastDecision();
     out.total = in.getTotal();
     out.detection_threshold_db = in.getDetectionThresholdDb();
+    out.detector_hold_seconds = in.getDetectorHoldSeconds();
     return out;
 }
 

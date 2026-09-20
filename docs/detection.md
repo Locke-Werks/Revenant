@@ -368,12 +368,27 @@ defaulted, and a classification. Three things stand between that and one call
 to `add_vrx`.
 
 **Which frequency frame the track is in has to be stated.** A detector working
-on the full span produces baseband offsets. `VrxParams::center` is documented
-as absolute while `place()` reads it as an offset and the engine is expected
-to rebase; `EngineInfo::source_center` exists so a caller can convert, and
-`revenant-cli` does. The track should carry absolute and convert at the call,
-the same as the command line, so that two places do not disagree about what a
-number means.
+on the full span produces baseband offsets and adds `source_center` before it
+publishes, so a track carries absolute radio frequency. `VrxParams::center`
+does not: it is hertz from the source's baseband DC, `place()` reads it that
+way, and nothing between a caller and the grid rebases it. Tuning a track is
+therefore `params.center = center_hz - source_center`, which is the conversion
+`revenant-cli` does for a frequency the operator types and the one
+`tests/rpc/test_rpc_detect.cpp` pins from both sides: it tunes a detection by
+subtracting, and it checks that passing the absolute centre straight through
+is refused.
+
+An earlier version of that paragraph said `VrxParams::center` "is documented as
+absolute while `place()` reads it as an offset and the engine is expected to
+rebase". Both halves are retracted. `core/engine/vrx.h` did document the field
+as absolute, and that documentation was the error rather than the code, so it
+was corrected on 2026-09-19 and the header now says baseband. The second half
+was never true at all: no build of this engine has rebased, and `place()` is
+handed the grid, the rate and the request without ever being told where the
+source is tuned, so it has nothing to rebase against. The correction is
+recorded rather than swapped in because the same claim stood in
+`core/rpc/revenant.capnp` and `core/rpc/types.h`, and a reader who took it from
+any of the three is owed the retraction.
 
 **A bandwidth wider than one channel does not fail, which is worse.**
 `place()` sets `bandwidth_clamped` and succeeds, `plan_vrx` silently takes the

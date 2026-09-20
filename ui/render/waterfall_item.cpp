@@ -5,6 +5,9 @@
 #include <cstdint>
 
 #include <QColor>
+#include <QCursor>
+#include <QHoverEvent>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QQuickWindow>
 #include <QRectF>
@@ -23,8 +26,13 @@ WaterfallItem::WaterfallItem(QQuickItem* parent) : QQuickPaintedItem(parent)
     // Every pixel of this item is written every paint, by an opaque fill
     // followed by two blits from an RGB32 image with no alpha in it, so the
     // scene graph does not need to blend the item over what is behind it.
-    // Declaring that is the only way it can know.
+    // Declaring that is the only way it can know. The detection overlay is
+    // drawn after those blits, into the same texture, so it does not change
+    // what this item presents to the scene graph.
     setOpaquePainting(true);
+
+    setAcceptedMouseButtons(Qt::LeftButton);
+    setAcceptHoverEvents(true);
 }
 
 void WaterfallItem::setLink(EngineLink* link)
@@ -40,10 +48,22 @@ void WaterfallItem::setLink(EngineLink* link)
         connect(link_, &EngineLink::frameChanged, this, &WaterfallItem::takeFrame);
         connect(link_, &EngineLink::connectionChanged, this,
                 &WaterfallItem::onConnectionChanged);
+        connect(link_, &EngineLink::detectionsChanged, this, &WaterfallItem::takeDetections);
     }
     filled_rows_ = 0;
     write_row_ = 0;
+    boxes_.clear();
     emit linkChanged();
+    update();
+}
+
+void WaterfallItem::setSelectedDetection(qulonglong id)
+{
+    if (selected_detection_ == id) {
+        return;
+    }
+    selected_detection_ = id;
+    emit selectedDetectionChanged();
     update();
 }
 
@@ -53,6 +73,13 @@ void WaterfallItem::onConnectionChanged()
         // History from a link that has just gone away is still history, and
         // it is what the engine said while it was there. It stays until the
         // next engine pushes it off the top.
+        //
+        // The detection boxes go, for the reason SpectrumItem gives at the
+        // same place: history is a record and a box is an invitation to
+        // click, and clicking a track the engine has forgotten would tune a
+        // receiver to nothing.
+        boxes_.clear();
+        update();
         return;
     }
 
@@ -68,6 +95,7 @@ void WaterfallItem::onConnectionChanged()
     write_row_ = 0;
     filled_rows_ = 0;
     reduced_bins_ = 0;
+    boxes_.clear();
     update();
 }
 
@@ -77,6 +105,7 @@ void WaterfallItem::geometryChange(const QRectF& newGeometry, const QRectF& oldG
     if (newGeometry.size() != oldGeometry.size()) {
         const QSize wanted = deviceSize();
         rebuild(wanted.width(), wanted.height(), reduced_bins_);
+        rebuildDetections();
         update();
     }
 }
@@ -111,6 +140,21 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     emit endsChanged();
 }
 
+void WaterfallItem::rebuildDetections()
+{
+    if (link_ == nullptr) {
+        boxes_.clear();
+        return;
+    }
+    build_detection_boxes(*link_, width(), boxes_);
+}
+
+void WaterfallItem::takeDetections()
+{
+    rebuildDetections();
+    update();
+}
+
 void WaterfallItem::takeFrame()
 {
     if (link_ == nullptr) {
@@ -135,6 +179,10 @@ void WaterfallItem::takeFrame()
     reduce_peak(frame.power_db, columns_);
     ends_ = map_ends(frame.floor_db, frame.ceiling_db, headroom_db_);
 
+    // This frame carries a later sample index, so every held track is that
+    // much further into its decay. See the same call in SpectrumItem.
+    rebuildDetections();
+
     const float span = ends_.span_db();
     if (span <= 0.0F) {
         return;
@@ -153,6 +201,59 @@ void WaterfallItem::takeFrame()
 
     emit endsChanged();
     update();
+}
+
+void WaterfallItem::setHovered(std::uint64_t id)
+{
+    if (hovered_detection_ == id) {
+        return;
+    }
+    hovered_detection_ = id;
+    setCursor(id == 0 ? Qt::ArrowCursor : Qt::PointingHandCursor);
+    update();
+}
+
+void WaterfallItem::hoverMoveEvent(QHoverEvent* event)
+{
+    setHovered(detection_at(boxes_, event->position().x()));
+    event->accept();
+}
+
+void WaterfallItem::hoverLeaveEvent(QHoverEvent* event)
+{
+    setHovered(0);
+    event->accept();
+}
+
+void WaterfallItem::mousePressEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+
+    // Its own cycle and not the spectrum item's, because each display has
+    // its own pointer and "the same place" is a fact about one of them. See
+    // ClickCycle in render/spectrum_item.h.
+    const double x = event->position().x();
+    const ClickResult hit = detection_clicked(boxes_, x, click_cycle_);
+    if (hit.id != 0) {
+        const auto found =
+            std::find_if(boxes_.begin(), boxes_.end(),
+                         [&hit](const DetectionBox& box) { return box.id == hit.id; });
+        if (found != boxes_.end()) {
+            emit tuneRequested(hit.id, static_cast<double>(found->center_hz),
+                               static_cast<double>(found->bandwidth_hz), hit.candidates,
+                               hit.rank);
+            event->accept();
+            return;
+        }
+    }
+
+    const double fraction = width() > 0.0 ? x / width() : 0.0;
+    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+    emit tuneRequested(0, hz, 0.0, 0, 0);
+    event->accept();
 }
 
 void WaterfallItem::paint(QPainter* painter)
@@ -188,6 +289,12 @@ void WaterfallItem::paint(QPainter* painter)
             QRectF(0.0, split, width(), height() - split), history_,
             QRectF(0.0, 0.0, static_cast<qreal>(wide), static_cast<qreal>(write_row_)));
     }
+
+    // Edges rather than a filled band: this item is tall, and a fill down
+    // the whole of it would cover the history the box is pointing at, which
+    // is the thing being checked when somebody looks here.
+    paint_detections(*painter, boxes_, width(), height(), selected_detection_,
+                     hovered_detection_, DetectionStyle::Edges);
 }
 
 }  // namespace revenant::ui

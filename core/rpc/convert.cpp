@@ -28,15 +28,15 @@ schema::Demod to_schema(engine::Demod mode) {
     // reader has a name for, and the operator finds out by listening to an
     // unintelligible recording.
     //
-    // Written exhaustively with no default label, which is a build error only
-    // because core/rpc/CMakeLists.txt turns on /w14062 for this target.
-    //
+    // Written exhaustively with no default label, which is a build error
+    // because cmake/CompilerFlags.cmake puts /w14062 in the house warning set.
     // That option is load-bearing and this comment used to claim the guard
-    // came free with /W4 and /WX. It does not. Measured on 2026-09-19 with
-    // MSVC 19.44.35228 and this project's exact flags, an unhandled
-    // enumerator with no default compiled clean and silent; C4062 is off by
-    // default at /W4. The cited precedent, core/engine/vrx.h's demod_name,
-    // has the same shape and therefore the same absence of protection.
+    // came free with /W4 and /WX. It does not. Measured 2026-09-19 with MSVC
+    // 19.44.35228 and this project's exact flags, an unhandled enumerator with
+    // no default compiled clean and silent, and only /w14062 produced the
+    // diagnostic; C4062 is off by default at /W4. It was on for this target
+    // alone until the same measurement turned it on tree-wide, which is what
+    // now covers core/engine/vrx.h's demod_name and the rest of the family.
     //
     // The trailing return below is not the fallback that claim was wrong
     // about. It is there because MSVC cannot prove a switch over a scoped
@@ -60,8 +60,8 @@ schema::Demod to_schema(engine::Demod mode) {
 schema::TrackState to_schema(detect::TrackState state) {
     // Exhaustive with no default, for the reason the switch above gives: the
     // asserts in convert.h catch a renumbering and cannot catch a state added
-    // to detect::TrackState alone, and /w14062 on this target is what turns
-    // that into a build error.
+    // to detect::TrackState alone, and /w14062 in the house warning set is
+    // what turns that into a build error.
     //
     // Pending is mapped rather than rejected even though Detector::tracks()
     // never publishes one. A function that refused it would need an error

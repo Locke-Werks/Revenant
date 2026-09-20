@@ -14,6 +14,10 @@
 // mixing, filtering and resampling from there. Adding one must not disturb the
 // grid: no field here appears in GridParams, and that is deliberate rather
 // than incidental.
+//
+// Every frequency in this header is in the source's baseband frame, hertz
+// from wherever the source is tuned. See VrxParams::center, which is the one
+// field a caller is likely to get wrong.
 
 #pragma once
 
@@ -61,11 +65,40 @@ struct VrxId {
 
 // What a receiver is tuned to and how it is configured.
 //
-// Frequency is absolute and in integer hertz, not an offset from the grid
-// channel. A receiver that stored an offset would silently retune itself when
-// the source's centre moved, which is exactly the class of bug integer hertz
-// exists to make impossible.
+// Integer hertz throughout, which is why nothing here is a double: a
+// frequency that has been through a float is a frequency nobody can source.
 struct VrxParams {
+    // Hertz from the SOURCE'S BASEBAND DC. Not an absolute radio frequency,
+    // and bounded by plus and minus half the source rate. The field is called
+    // "center" and that name says nothing about which frame the centre is in,
+    // so it is said here: a caller holding an absolute frequency converts
+    // with `center = absolute - EngineInfo::source_center`, and place()
+    // rejects anything outside the span rather than wrapping it.
+    //
+    // THIS HEADER IS THE DOCUMENT THAT WAS WRONG. Until 2026-09-19 it called
+    // the field an absolute radio frequency while place() read an offset,
+    // and core/rpc/revenant.capnp, core/rpc/types.h and docs/detection.md
+    // each cited that disagreement as a live one. Correcting it changed no
+    // code, because there was never any rebasing to remove: a caller who
+    // believed this header before today was tuning by the whole local
+    // oscillator and the engine was doing exactly what it does now.
+    //
+    // Baseband is the API because it is the only frame the grid has. place()
+    // is handed the grid, the rate and this struct, and is never told where
+    // the source is tuned, so resolving an absolute frequency would mean
+    // passing it the tuned centre, which is the one thing that stops it being
+    // a pure function of the grid and the request. Rebasing a layer up inside
+    // Engine::add_vrx is worse rather than better: VrxStatus carries this
+    // same struct back out, so a subtraction on the way in with none on the
+    // way out moves a receiver by the whole local oscillator every time
+    // vrx_status() is fed back to set_vrx_params().
+    //
+    // What that costs is a receiver that does not follow a retuned source on
+    // its own. No choice of frame for this field closes that: source_center
+    // is read once when the source is opened, Engine exposes no tune at all,
+    // and the day one arrives every receiver has to be re-placed and the ones
+    // that fall outside the new span parked and said to be parked.
+    // docs/ui-spectrum.md has the argument.
     dsp::Hertz center = 0;
 
     // Passband width. The fine stage resamples to whatever this needs, so it
@@ -124,7 +157,12 @@ struct VrxPlacement {
 // What a receiver reports about itself while running.
 struct VrxStatus {
     VrxId id;
+
+    // Exactly what was handed to add_vrx or set_vrx_params, in the same
+    // frame: params.center is still baseband here. A display naming an
+    // absolute frequency adds EngineInfo::source_center back.
     VrxParams params;
+
     VrxPlacement placement;
 
     // Signal level in the passband, dBFS, updated per block. This is what

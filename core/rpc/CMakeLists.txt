@@ -63,24 +63,6 @@ target_link_libraries(revenant_rpc_server
 
 revenant_apply_warnings(revenant_rpc_server)
 
-# C4062, an unhandled enumerator in a switch with no default label.
-#
-# Off by default at /W4, which is not obvious and was got wrong here: a
-# comment in convert.cpp claimed an exhaustive switch made a new
-# demodulator a build error, and it did not. Measured on 2026-09-19 with
-# MSVC 19.44.35228 and this project's exact flags: the unhandled enumerator
-# compiled clean, and only adding this option produced the diagnostic.
-#
-# It is on for this target because convert.cpp's enum mapping is the one
-# place where a mode added to the engine alone becomes an ordinal the wire
-# has no name for, and the receiver decodes it as something else. The same
-# hole exists tree-wide, core/engine/vrx.h's demod_name among others, and
-# turning it on for everything is a separate change that should be made when
-# nothing else is mid-build against this file.
-if(MSVC)
-    target_compile_options(revenant_rpc_server PRIVATE /w14062)
-endif()
-
 # The same reasoning as revenant_core's: an SDR has no business being built
 # with fast math, and a conversion layer that reassociated a rational would
 # be the worst place to find that out.

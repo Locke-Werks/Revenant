@@ -1,6 +1,8 @@
 #include "models/engine_link.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <utility>
 
@@ -16,6 +18,30 @@ namespace {
 // the connection, and because an operator restarting an engine should see
 // the window come back inside a breath rather than wonder whether it will.
 constexpr std::chrono::milliseconds kSuperviseInterval{1000};
+
+// The supervisor loop actually wakes on this, and does the liveness and
+// reconnect work on every fourth pass so that side keeps its one second.
+//
+// Detections are polled on every pass, at 4 Hz. One second is visibly
+// sluggish for an overlay an operator is clicking on, and anything near the
+// frame rate is wasted: the detector decides far less often than the engine
+// produces frames, and DetectionList::last_decision is what says whether it
+// has. A poll that finds the same decision emits nothing.
+constexpr std::chrono::milliseconds kDetectionPollInterval{250};
+
+// Derived rather than written as 4, so that changing either interval cannot
+// silently leave the liveness probe running at some other rate than the one
+// its own comment claims.
+constexpr int kSupervisePassesPerProbe =
+    static_cast<int>(kSuperviseInterval / kDetectionPollInterval);
+
+// The rate window, and how often it is checked when no frame is checking it.
+// Half a second is long enough that the number is steady to read and short
+// enough that a display which stops says so before an operator has finished
+// noticing. The tick is half the window, so a window that no frame closes is
+// closed within one and a half of them.
+constexpr qint64 kRateWindowMs = 500;
+constexpr int kRateTickMs = 250;
 
 // A Rational times a plain multiplier, in hertz, with the multiply done
 // before the divide. See EngineLink::frequencyAtFraction for why that order
@@ -66,6 +92,16 @@ void EngineLink::start(const QString& address, std::uint16_t port, std::uint32_t
     requested_every_nth_ = every_nth == 0 ? 1 : every_nth;
     endpoint_ = QStringLiteral("%1:%2").arg(address).arg(port);
 
+    // Started before the supervisor, so there is no window in which a frame
+    // can arrive with no clock behind it. It runs for the life of the
+    // object rather than only while connected: report_rate costs two loads
+    // and a compare when there is no open window, and a timer started and
+    // stopped from the connection state is a second piece of state that can
+    // disagree with the first.
+    rate_tick_.setInterval(kRateTickMs);
+    connect(&rate_tick_, &QTimer::timeout, this, &EngineLink::report_rate);
+    rate_tick_.start();
+
     // Written before the thread exists, so the thread's construction is the
     // synchronisation and none of the three needs a lock.
     supervisor_ = std::thread([this] { supervise(); });
@@ -73,7 +109,25 @@ void EngineLink::start(const QString& address, std::uint16_t port, std::uint32_t
 
 void EngineLink::supervise()
 {
+    int pass = 0;
     for (;;) {
+        const bool probe = (pass % kSupervisePassesPerProbe) == 0;
+        ++pass;
+
+        if (!probe && client_ != nullptr) {
+            // A detection-only pass. The connection was good a quarter of a
+            // second ago and a failed detections call will find out for us
+            // anyway, so this does not need its own liveness question.
+            poll_detections();
+            std::unique_lock<std::mutex> lock(supervisor_mutex_);
+            supervisor_wake_.wait_for(lock, kDetectionPollInterval,
+                                      [this] { return stopping_; });
+            if (stopping_) {
+                break;
+            }
+            continue;
+        }
+
         if (client_ == nullptr) {
             static_cast<void>(attempt_connect());
         } else if (auto alive = client_->running(); !alive) {
@@ -84,11 +138,28 @@ void EngineLink::supervise()
             // joined by that destructor and nothing else.
             client_->unsubscribe_spectrum();
             client_.reset();
+
+            // Cleared before the connection state is published, so a
+            // refusal the operator has not fixed does not sit on screen
+            // beside "disconnected" claiming the engine said something.
+            // detectionFault is only ever about an engine that is there.
+            note_detection_fault(QString());
             publish(false, QString::fromStdString(alive.error().message));
+        } else {
+            // The call came back, so the connection is good, and the bool it
+            // came back with is the other half of the answer. An engine
+            // binds its port before it runs its graph and goes on answering
+            // after the source ends, so false here is an engine that is
+            // there and producing nothing. This branch used to be absent and
+            // the bool discarded, which made those two engines identical to
+            // the window: connected, geometry on screen, and a frame rate
+            // frozen at whatever it last was.
+            note_running(*alive);
+            poll_detections();
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);
-        supervisor_wake_.wait_for(lock, kSuperviseInterval, [this] { return stopping_; });
+        supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] { return stopping_; });
         if (stopping_) {
             break;
         }
@@ -112,6 +183,19 @@ bool EngineLink::attempt_connect()
     auto info = client_->info();
     if (!info) {
         const QString message = QString::fromStdString(info.error().message);
+        client_.reset();
+        publish(false, message);
+        return false;
+    }
+
+    // Asked here and not left to the supervisor's next pass, so the first
+    // thing the window is told about this engine is the truth rather than an
+    // assumption held for up to a second. Connecting to an engine that is up
+    // and not running is the ordinary case at both ends of its life, so the
+    // assumption would be wrong exactly when someone was watching for it.
+    auto alive = client_->running();
+    if (!alive) {
+        const QString message = QString::fromStdString(alive.error().message);
         client_.reset();
         publish(false, message);
         return false;
@@ -144,6 +228,7 @@ bool EngineLink::attempt_connect()
     {
         const std::lock_guard<std::mutex> lock(state_mutex_);
         handover_connected_ = true;
+        handover_running_ = *alive;
         handover_info_ = *info;
         handover_error_.clear();
     }
@@ -170,27 +255,57 @@ bool EngineLink::attempt_connect()
 }
 
 // Only ever called with connected false today: the successful path in
-// attempt_connect has an EngineInfo to hand over as well, so it writes the
-// handover itself. handover_info_ is deliberately left alone here, because a
-// link that has just gone away has no geometry and QML gates every getter on
-// connected; clearing it would buy nothing and would flicker the status line
-// through zeroes when the same engine comes back.
+// attempt_connect has an EngineInfo and a running flag to hand over as well,
+// so it writes the handover itself. handover_info_ is deliberately left alone
+// here, because a link that has just gone away has no geometry and QML gates
+// every getter on connected; clearing it would buy nothing and would flicker
+// the status line through zeroes when the same engine comes back.
+//
+// handover_running_ is cleared rather than left, because it is not gated the
+// same way: engineRunning is a claim about an engine this link can reach, and
+// there is no engine to reach. The clear is unconditional on the strength of
+// the sentence above, which the one caller shape keeps true.
 void EngineLink::publish(bool connected, QString error)
 {
     {
         const std::lock_guard<std::mutex> lock(state_mutex_);
         handover_connected_ = connected;
+        handover_running_ = false;
         handover_error_ = std::move(error);
     }
     QMetaObject::invokeMethod(this, [this] { adopt(); }, Qt::QueuedConnection);
 }
 
+void EngineLink::note_running(bool running)
+{
+    {
+        const std::lock_guard<std::mutex> lock(state_mutex_);
+        if (handover_running_ == running) {
+            // The answer to a question asked once a second for the life of
+            // the window, and almost always the same answer. Posting a
+            // metacall for each would wake the GUI thread every second to
+            // tell it nothing.
+            return;
+        }
+        handover_running_ = running;
+    }
+
+    // adopt_running and not adopt. adopt emits connectionChanged, which
+    // render/waterfall_item.cpp and render/spectrum_item.cpp read as a new
+    // engine: the waterfall fills its ring with background and the trace
+    // forgets its bin count. An engine pausing is not a new engine, and the
+    // history drawn from it is still what that engine said.
+    QMetaObject::invokeMethod(this, [this] { adopt_running(); }, Qt::QueuedConnection);
+}
+
 void EngineLink::adopt()
 {
     const bool was_connected = connected_;
+    const bool was_running = engine_running_;
     {
         const std::lock_guard<std::mutex> lock(state_mutex_);
         connected_ = handover_connected_;
+        engine_running_ = handover_running_;
         error_text_ = handover_error_;
         if (connected_) {
             info_ = handover_info_;
@@ -207,14 +322,234 @@ void EngineLink::adopt()
         frames_skipped_ = 0;
         frames_drawn_ = 0;
     }
-    if (!connected_) {
-        frame_rate_ = 0.0;
-    }
+
+    // Zeroed on both edges rather than only on the way down. A rate is a
+    // statement about one connection, and the connection that just ended and
+    // the one that just began have each drawn nothing under it. Leaving it
+    // on the way up worked only because the disconnect before it had zeroed
+    // it, which is a fact about the other branch and not about this one.
+    frame_rate_ = 0.0;
     rate_timer_.invalidate();
     rate_mark_ = frames_drawn_;
 
+    // Detections go with the connection, on both edges and for the same
+    // reason the counters do. They are absolute radio frequencies measured
+    // by one engine's detector, and the next engine may be tuned somewhere
+    // else entirely, so a box left on screen across a reconnect would sit
+    // over a frequency that was never scanned. Ids restart at zero as well,
+    // so a held selection would silently become a different signal.
+    {
+        const std::lock_guard<std::mutex> lock(detection_mutex_);
+        pending_detections_ = {};
+        has_pending_detections_ = false;
+    }
+    shown_ = {};
+    emit detectionsChanged();
+
     emit connectionChanged();
+    if (engine_running_ != was_running) {
+        emit runningChanged();
+    }
     emit frameChanged();
+    emit rateChanged();
+}
+
+void EngineLink::poll_detections()
+{
+    // Supervisor thread. Client::detections blocks for a round trip, and
+    // core/rpc/client.h forbids re-entering the Client from the frame
+    // callback, so neither the Qt thread nor the Cap'n Proto loop thread
+    // can do this.
+
+    // One pass, one fault. Both calls below can be refused and the poll runs
+    // second, so the reason is accumulated here and published once at the
+    // end: publishing per call would let a successful poll clear a refused
+    // threshold in the same pass, before the operator ever saw it.
+    QString fault;
+
+    // The engine-side write first, so a threshold the operator moved is in
+    // force before the list that reports it back is fetched. The other
+    // order would show the old threshold for one poll and read as the
+    // control having been ignored.
+    if (threshold_pending_.exchange(false, std::memory_order_acq_rel)) {
+        const double wanted = requested_threshold_db_.load(std::memory_order_acquire);
+
+        // A refusal is deliberately not routed into errorText, because that
+        // field is the connection's and setting it would make a rejected
+        // slider value read as a lost engine. It used to be discarded
+        // entirely, on the reasoning that detectionThresholdDb reads back
+        // the value in force so the control snaps to what the engine has.
+        // That is true and it is not the whole answer: snapping back says
+        // the write was refused and never says which bound was missed, and
+        // the engine's own message does. So it goes to detectionFault,
+        // which exists for exactly this, rather than nowhere.
+        if (auto applied = client_->set_detection_threshold(wanted); !applied) {
+            fault = QString::fromStdString(applied.error().message);
+        }
+    }
+
+    auto listed = client_->detections(confidence_bar_.load(std::memory_order_acquire));
+    if (!listed) {
+        // Two unrelated failures arrive here as the same Expected, and only
+        // one of them is anything an operator can act on. Ask which.
+        //
+        // running() answering at all means the connection is up, so the
+        // refusal was about the request: a bar or a threshold outside what
+        // the engine accepts, or an engine with no spectrum stage, which
+        // cannot build a detector and refuses every poll for as long as it
+        // runs. That is reported, in the engine's own words, because the
+        // message names the bound that was missed.
+        //
+        // running() failing too means the engine went away. That belongs to
+        // the liveness probe, which is where the client is torn down, and
+        // is how a dead engine is normally found here, since this runs four
+        // times for every probe. Nothing is torn down from this branch and
+        // the fault is cleared, because connected and errorText are about
+        // to say the same thing better.
+        //
+        // One extra round trip, on the failure path only. The ordinary pass
+        // costs what it always did.
+        const bool answering = client_->running().has_value();
+        note_detection_fault(answering ? QString::fromStdString(listed.error().message)
+                                       : QString());
+        return;
+    }
+
+    note_detection_fault(fault);
+
+    {
+        const std::lock_guard<std::mutex> lock(detection_mutex_);
+        pending_detections_ = std::move(*listed);
+        has_pending_detections_ = true;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_detections(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_detections()
+{
+    rpc::DetectionList taken;
+    {
+        const std::lock_guard<std::mutex> lock(detection_mutex_);
+        if (!has_pending_detections_) {
+            return;
+        }
+        taken = std::move(pending_detections_);
+        has_pending_detections_ = false;
+    }
+
+    // Emit only on a real change. An overlay repainting four times a second
+    // over a band where nothing is happening is the cost this avoids, and
+    // last_decision is the engine's own statement that it has decided
+    // again. The threshold and the row count are compared as well because
+    // the operator can move the bar without the engine deciding anything.
+    const bool decided = taken.last_decision != shown_.last_decision;
+    const bool resized = taken.detections.size() != shown_.detections.size() ||
+                         taken.total != shown_.total;
+    const bool retuned = taken.detection_threshold_db != shown_.detection_threshold_db;
+
+    shown_ = std::move(taken);
+    if (decided || resized || retuned) {
+        emit detectionsChanged();
+    }
+}
+
+void EngineLink::note_detection_fault(QString fault)
+{
+    // Supervisor thread, four times a second for the life of the window.
+    // posted_fault_ belongs to this thread alone, which is why the ordinary
+    // pass, where the fault is empty and was empty last time, takes no lock
+    // and queues nothing.
+    if (fault == posted_fault_) {
+        return;
+    }
+    posted_fault_ = fault;
+
+    {
+        const std::lock_guard<std::mutex> lock(detection_mutex_);
+        pending_fault_ = std::move(fault);
+        has_pending_fault_ = true;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_detection_fault(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_detection_fault()
+{
+    QString taken;
+    {
+        const std::lock_guard<std::mutex> lock(detection_mutex_);
+        if (!has_pending_fault_) {
+            return;
+        }
+        taken = std::move(pending_fault_);
+        has_pending_fault_ = false;
+    }
+
+    // Compared again on this side. The supervisor suppresses a repeat of
+    // what it last posted, and two posts can still collapse onto one value
+    // here if the fault changed and changed back between them.
+    if (taken == detection_fault_) {
+        return;
+    }
+    detection_fault_ = std::move(taken);
+    emit detectionFaultChanged();
+}
+
+void EngineLink::setConfidenceBar(double bar)
+{
+    // Clamped rather than refused. This is a slider, and a value the engine
+    // will not take would otherwise be refused on every later poll with
+    // nothing on screen to say why.
+    //
+    // The top of the range is kMaxConfidenceBar and NOT one. This clamp was
+    // [0, 1] inclusive until 2026-09-19 while core/rpc/server.cpp refused a
+    // bar of exactly one, so writing 1.0 to this property made every
+    // subsequent detections call fail. poll_detections swallows a failed
+    // poll on purpose, because that is how a dead engine is normally found,
+    // so the overlay silently stopped updating. See kMaxConfidenceBar for
+    // the engine's reasoning about one.
+    //
+    // NaN is dealt with before the clamp because it compares false against
+    // both bounds and would pass straight through, which is the same defect
+    // one step further out: the engine refuses a non-finite bar too. It
+    // goes to the floor, which is this property's own default and passes
+    // everything, because there is no slider position it could have meant.
+    const double wanted = std::isnan(bar) ? 0.0 : bar;
+    const double clamped = std::clamp(wanted, 0.0, kMaxConfidenceBar);
+    if (clamped == confidence_bar_.load(std::memory_order_acquire)) {
+        return;
+    }
+    confidence_bar_.store(clamped, std::memory_order_release);
+
+    // No signal here. The bar changes what the next poll asks for, and the
+    // poll emits detectionsChanged when the answer differs. Emitting now
+    // would tell the overlay to redraw a list fetched at the old bar.
+}
+
+void EngineLink::setDetectionThresholdDb(double threshold_db)
+{
+    requested_threshold_db_.store(threshold_db, std::memory_order_release);
+    threshold_pending_.store(true, std::memory_order_release);
+
+    // Also no signal. detectionThresholdDb reads the value in force, which
+    // is not this one until the supervisor has sent it and the engine has
+    // answered, and reporting it early is the lie this property exists to
+    // avoid.
+}
+
+void EngineLink::adopt_running()
+{
+    const bool was_running = engine_running_;
+    {
+        const std::lock_guard<std::mutex> lock(state_mutex_);
+        engine_running_ = handover_running_;
+    }
+
+    // note_running only posts on a change, but two of them can coalesce
+    // behind an adopt() that already took the newer value, so the compare is
+    // here as well and not only there.
+    if (engine_running_ != was_running) {
+        emit runningChanged();
+    }
 }
 
 QString EngineLink::deviceName() const
@@ -346,22 +681,66 @@ void EngineLink::drain()
     // display's.
     ++frames_drawn_;
 
-    // A rate over a window, restarted each time it is reported. Half a
-    // second is long enough that the number is steady to read and short
-    // enough that a display which stops says so before an operator has
-    // finished noticing.
-    constexpr qint64 kRateWindowMs = 500;
     if (!rate_timer_.isValid()) {
+        // The first frame of a connection opens the window. Until one
+        // arrives there is nothing to measure and report_rate leaves the
+        // rate at the zero adopt() set.
         rate_timer_.start();
         rate_mark_ = frames_drawn_;
-    } else if (const qint64 elapsed = rate_timer_.elapsed(); elapsed >= kRateWindowMs) {
-        frame_rate_ = static_cast<double>(frames_drawn_ - rate_mark_) * 1000.0 /
-                      static_cast<double>(elapsed);
-        rate_timer_.restart();
-        rate_mark_ = frames_drawn_;
+    } else {
+        report_rate();
     }
 
     emit frameChanged();
+}
+
+void EngineLink::report_rate()
+{
+    if (!rate_timer_.isValid()) {
+        return;
+    }
+    const qint64 elapsed = rate_timer_.elapsed();
+    if (elapsed < kRateWindowMs) {
+        return;
+    }
+    const qulonglong drawn = frames_drawn_ - rate_mark_;
+
+    // A window with no frames in it is a stopped display only if a frame was
+    // due in it. The test is against the rate already measured rather than
+    // against a fixed interval, because every_nth sets the cadence and a
+    // caller may ask for one frame in hundreds: at a rate low enough that a
+    // window holds less than one frame, an empty window is what healthy
+    // looks like, and reporting zero for it would flicker the status line
+    // between zero and the real rate. Holding the window open instead makes
+    // the test self-tuning, since a stopped slow feed still crosses the bar
+    // once the window has run one expected interval.
+    //
+    // A rate of zero takes the other branch on purpose. It is both the state
+    // before the first frame of a connection and the state after a stall,
+    // and in each the window has to keep closing: a window left open across
+    // a minute of silence would measure the first frame after it at one
+    // frame per minute and report the resumed display as stopped.
+    const bool frame_was_due =
+        frame_rate_ <= 0.0 ||
+        frame_rate_ * static_cast<double>(elapsed) / 1000.0 >= 1.0;
+    if (drawn == 0 && !frame_was_due) {
+        return;
+    }
+
+    const double rate =
+        static_cast<double>(drawn) * 1000.0 / static_cast<double>(elapsed);
+    rate_timer_.restart();
+    rate_mark_ = frames_drawn_;
+
+    // Only on a change, because the tick reaches here every window for as
+    // long as the window is open and a signal per tick would have every
+    // binding on the rate re-evaluate four times a second while the number
+    // sat still.
+    if (rate == frame_rate_) {
+        return;
+    }
+    frame_rate_ = rate;
+    emit rateChanged();
 }
 
 }  // namespace revenant::ui

@@ -108,6 +108,32 @@
 // and a headless engine feeding a recorder should not pay either of them for
 // a track list nobody has asked to see.
 //
+// WHAT THE LAZY BUILD DOES NOT DO IS GIVE THE COST BACK
+//
+// That saving lasts until the first client asks and no longer. detecting_ is
+// set once in ensure_detector, and short of stop() the only thing that clears
+// it is a consume() that refuses a frame, so from that first call the
+// completion thread runs accumulation on every frame and a decision ten times
+// a second for the life of the Server, whether or not anyone is still reading
+// the list. The saving is for a server nobody has ever asked, not for one that
+// is idle now. Measured on 2026-09-19 with revenant-cli over this project's
+// 8192-bin test geometry, the pair cost 0.201 ms per frame, which the same run
+// put at 0.7% of one core at that frame rate; detector.h has the figures at
+// the shipped 65536.
+//
+// Deliberate, because the alternative resets state that is not the
+// disconnecting client's to reset. detections is a poll rather than a
+// subscription, so there is nothing to count: a client that asked once is
+// indistinguishable from one polling ten times a second, and a dropped
+// connection says nothing about whether detection is still wanted. Tearing
+// the detector down at the last of them would throw away two things nobody
+// asked to lose. Track ids are issued from one and never reused, which is what
+// lets an id in a log name one signal for the life of the process, and a
+// rebuilt detector numbers the same signals from one again. The detection
+// threshold is engine-wide and the operator's, per docs/detection.md, and a
+// rebuild silently puts it back to the default. A display that reconnects,
+// which is the ordinary case rather than the exception, would do both.
+//
 // ONE LOCK AROUND THE WHOLE DETECTOR, AND WHY THAT IS THE CHEAP ANSWER
 //
 // The detector is written on the engine's completion thread, inside
@@ -303,6 +329,11 @@ struct DetectionSnapshot {
     std::uint64_t last_decision = 0;
     std::uint32_t total = 0;
     double threshold_db = 0.0;
+
+    // Seconds of source time a track survives with no evidence, which a
+    // display has to have and cannot derive: it is the detector's
+    // configuration and the wire is the only place a client can read it.
+    double hold_seconds = 0.0;
 };
 
 // One subscriber. Touched only on the event loop thread, so none of it is
@@ -453,9 +484,13 @@ private:
     //
     // detecting_ is the completion thread's cheap way to skip the lock
     // entirely on a server nobody has asked for detections. It is set once,
-    // after the detector exists, and cleared once if the detector ever
-    // refuses a frame, so a relaxed load is ordering enough: the worst a
-    // stale read does is feed or skip one frame at the edge.
+    // after the detector exists, and cleared once: by a consume() that
+    // refuses a frame, or by stop() with both threads that could be inside
+    // the detector already gone. So a relaxed load is ordering enough, and
+    // the worst a stale read does is feed or skip one frame at the edge.
+    //
+    // Nothing else clears it. A client disconnecting does not, which is the
+    // decision the note at the top of this file argues.
     std::mutex detect_lock_;
     std::atomic<bool> detecting_{false};
     std::optional<detect::Detector> detector_;
@@ -681,6 +716,7 @@ public:
         out.setLastDecision(taken->last_decision);
         out.setTotal(taken->total);
         out.setDetectionThresholdDb(taken->threshold_db);
+        out.setDetectorHoldSeconds(taken->hold_seconds);
         return kj::READY_NOW;
     }
 
@@ -888,6 +924,13 @@ Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence) {
     out.last_decision = detector_->last_decision();
     out.total = static_cast<std::uint32_t>(tracks.size());
     out.threshold_db = detector_->config().detection_threshold_db;
+
+    // Read off the live config beside the threshold rather than off
+    // DetectorConfig{}, so a detector built with a hold other than the
+    // default reports the one it is running. ensure_detector above builds it
+    // from defaults today, and a client that assumed that would be wrong the
+    // first time it stops being true.
+    out.hold_seconds = detector_->config().bootstrap_hold_seconds;
 
     // Filtered here rather than on the client so that a busy band does not
     // put five hundred rows on the wire for a display that asked for the

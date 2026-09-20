@@ -4,10 +4,19 @@
 // synthetic frames, with no engine and no wire. Nothing here re-tests
 // detection: every case below is about the seam, which is a different set of
 // failures. A centre that arrives as a baseband offset rather than an
-// absolute frequency. A state that renumbers so a held track draws as live.
-// A confidence bar that is read from the wrong end of the comparison. A
-// detector that never gets built, or one that gets built and never fed
-// because the frames it needs were dropped by the subscription filter.
+// absolute frequency. A state that renumbers so a held track draws as live,
+// or a merged one that arrives pointing at no parent. A confidence bar that
+// is read from the wrong end of the comparison. A detector that never gets
+// built, or one that gets built and never fed because the frames it needs
+// were dropped by the subscription filter.
+//
+// ONE CASE BRINGS ITS OWN SCENE
+//
+// Everything here runs on tests/rpc/rpc_fixture.h except the merge case,
+// which stands up its own engine, server and client on a scene of its own.
+// The fixture builds one scene shape and offers only its length and its
+// centre, and that shape cannot merge: see the note on merging_scene_uri
+// below for what a merge needs and why a static scene never supplies it.
 //
 // WHY THE ENGINE IS STOPPED BEFORE THE LISTS ARE COMPARED
 //
@@ -43,12 +52,15 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "core/detect/detector.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
 #include "core/rpc/client.h"
+#include "core/rpc/server.h"
 #include "core/rpc/types.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
@@ -89,6 +101,17 @@ constexpr std::uint32_t kBlockSamples = 16'384;
 // wider emitter reads higher still, so the margin is larger than it looks.
 // Inside the -60 to 120 dB the server accepts.
 constexpr double kSilencingThresholdDb = 90.0;
+
+// Between the two groups of SNR this scene produces, with more than fifteen
+// decibels of clearance either way.
+//
+// The nine tracks born at the default threshold measured 14.5, 15.6, 17.6,
+// 17.7, 19.0, 36.5, 38.8, 39.1 and 44.7 dB in the 2500 Hz reference
+// bandwidth, read off the wire on 2026-09-19. A threshold here keeps the four
+// strong ones detected and stops every candidate the other five are built
+// from, which is what the confidence case needs: one list holding tracks that
+// are still rising and tracks that have started to decay.
+constexpr double kPartitioningThresholdDb = 25.0;
 
 [[nodiscard]] HarnessOptions detecting_options() {
     HarnessOptions options;
@@ -163,6 +186,109 @@ void bring_up(Harness& harness, const HarnessOptions& options) {
     }
 }
 
+// The last list that still held tracks, and the empty one that followed it.
+//
+// wait_for_quiet answers with the empty list alone, which is the wrong end
+// for a case about the hold. How far a track's silence got before the
+// detector dropped it is only visible in the last list that still carried
+// the track, and that list is gone by the time an empty one arrives.
+//
+// Both members default to an empty list, so a wait that gave up hands back
+// something a case can assert is missing rather than a plausible pair.
+struct FadeOut {
+    rpc::DetectionList last_populated;
+    rpc::DetectionList quiet;
+};
+
+[[nodiscard]] FadeOut wait_for_fade_out(rpc::Client& client, int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    FadeOut out;
+    for (;;) {
+        auto answered = client.detections(0.0);
+        if (answered) {
+            if (!answered->detections.empty()) {
+                out.last_populated = std::move(*answered);
+            } else if (answered->decisions > 0) {
+                out.quiet = std::move(*answered);
+                return out;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return out;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+// The two ends of a list's confidence column, which is where a bar worth
+// testing comes from. Defaults are the empty list's, so a range taken from
+// nothing is empty rather than a pair of plausible numbers.
+struct ConfidenceRange {
+    double lowest = 1.0;
+    double highest = 0.0;
+};
+
+[[nodiscard]] ConfidenceRange confidence_range(const rpc::DetectionList& list) {
+    ConfidenceRange out;
+    for (const rpc::Detection& detection : list.detections) {
+        out.lowest = std::min(out.lowest, detection.confidence);
+        out.highest = std::max(out.highest, detection.confidence);
+    }
+    return out;
+}
+
+// Polls until two detections in one list disagree about confidence, or the
+// deadline passes. Returns the last answer either way.
+//
+// A list where every confidence is identical cannot be partitioned by a bar,
+// and a case that tried would be asserting about an empty result. See the
+// note in the confidence case for what produces the disagreement.
+[[nodiscard]] rpc::DetectionList wait_for_confidence_spread(rpc::Client& client,
+                                                            int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    rpc::DetectionList last;
+    for (;;) {
+        auto answered = client.detections(0.0);
+        if (answered) {
+            last = std::move(*answered);
+            const ConfidenceRange range = confidence_range(last);
+            if (last.detections.size() > 1 && range.lowest < range.highest) {
+                return last;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return last;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
+// Polls until some track in the list has been swallowed by another, or the
+// deadline passes. Returns the last answer either way.
+[[nodiscard]] rpc::DetectionList wait_for_merge(rpc::Client& client, int timeout_ms) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    rpc::DetectionList last;
+    for (;;) {
+        auto answered = client.detections(0.0);
+        if (answered) {
+            last = std::move(*answered);
+            const bool merged = std::ranges::any_of(last.detections, [](const rpc::Detection& d) {
+                return d.state == rpc::TrackState::Merged;
+            });
+            if (merged) {
+                return last;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return last;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
 // The band the engine says its spectrum covers, in absolute hertz. Read off
 // the wire rather than recomputed from kSourceRate, so a detection is checked
 // against the same geometry the engine reports and not against this file's
@@ -182,6 +308,136 @@ struct AbsoluteSpan {
     out.high = base + zero + (static_cast<double>(info.spectrum.bins) - 0.5) * width;
     return out;
 }
+
+// A scene that merges, which the fixture's cannot.
+//
+// Five emitters inside sixty kilohertz, each transmitting in six bursts
+// rather than continuously. Crowding them puts several tracks inside the
+// reach of one candidate, and making them intermittent is what lets a wide
+// one appear on top of two that are already tracked. Neither alone does it.
+//
+// A static scene cannot merge however it is arranged, which is why the
+// fixture's never does. The detector takes the strongest deflection first and
+// grows it onto its own shoulders, so a window covering two signals always
+// clashes with the narrower windows that already took those bins and is
+// skipped. It takes the scene changing under a tracker that is already
+// holding ids. Measured on 2026-09-19 over the fixture's scene, 220 decisions
+// at each of 6, 8, 12, 16 and 20 dB gave 0 merges and 0 splits; this scene
+// gave a merged track in 75 of 84 status samples across one 18 second run.
+//
+// Seed 5 was chosen by running six of them and keeping the one that merged
+// most. There is nothing else special about it, and a change to the scene
+// generator or to the detector can take the merge away, which is why the case
+// below says what it was waiting for when it gives up.
+[[nodiscard]] std::string merging_scene_uri(dsp::SampleIndex samples) {
+    return std::format(
+        "synthetic:wideband?rate={}&emitters=5&seed=5&noise_dbfs=-100&snr_min=25&snr_max=40"
+        "&span_low=-30000&span_high=30000&bursts=6&min_burst=0.15&max_burst=0.6"
+        "&samples={}&center={}",
+        test::kSourceRate, samples, kSceneCenter);
+}
+
+// Engine, server and client over a socket, on a scene this file names.
+//
+// test::Harness would be the place for this and cannot be: it builds its URI
+// from one fixed scene shape and exposes only the sample count and the
+// centre. Everything below is that fixture's sequence, with two differences.
+// The URI is the caller's, and open() also starts the engine, because the one
+// case using this has nothing to do before the frames arrive.
+//
+// The teardown order is the fixture's header's and is copied rather than
+// re-derived: the engine outlives the server because the server holds a sink
+// on it, and the client goes first because it holds a connection to the
+// server.
+class SceneRig {
+public:
+    SceneRig() = default;
+    ~SceneRig() { shutdown(); }
+
+    SceneRig(const SceneRig&) = delete;
+    SceneRig& operator=(const SceneRig&) = delete;
+    SceneRig(SceneRig&&) = delete;
+    SceneRig& operator=(SceneRig&&) = delete;
+
+    // Opens everything and starts the engine on its own thread, because a
+    // case that polls the wire has to be driven while the engine runs.
+    [[nodiscard]] Status open(const std::string& uri) {
+        engine::EngineConfig config;
+        config.gpu_index = -1;  // honours REVENANT_GPU_INDEX, like every other binary here
+        config.channels = kChannels;
+        config.taps_per_branch = 17;
+        config.ring_seconds = 0.5;
+        config.block_samples = kBlockSamples;
+        config.pace = 1.0;
+        config.spectrum_transform = kSpectrumTransform;
+
+        auto created = engine::Engine::create(config);
+        if (!created) {
+            return std::unexpected(with_context(created.error(), "building the engine"));
+        }
+        engine_ = std::move(*created);
+
+        if (auto opened = engine_->open_source(uri); !opened) {
+            return std::unexpected(with_context(opened.error(), "opening the scene"));
+        }
+
+        rpc::ServerOptions server_options;
+        auto served = rpc::Server::create(*engine_, server_options);
+        if (!served) {
+            return std::unexpected(with_context(served.error(), "starting the server"));
+        }
+        server_ = std::move(*served);
+
+        auto connected = rpc::Client::connect("127.0.0.1", server_->port());
+        if (!connected) {
+            return std::unexpected(with_context(connected.error(), "connecting the client"));
+        }
+        client_ = std::move(*connected);
+
+        running_ = true;
+        runner_ = std::thread([this] { run_outcome_ = engine_->run(); });
+        return {};
+    }
+
+    [[nodiscard]] rpc::Client& client() { return *client_; }
+
+    // Stops the engine, joins its thread and hands back what run() returned,
+    // with the cancellation this asked for treated as the clean finish it is.
+    // The same distinction test::Harness draws, and for the same reason: a
+    // device lost mid-run must not hide behind "we asked it to stop".
+    [[nodiscard]] Status stop() {
+        if (!running_) {
+            return run_outcome_;
+        }
+        static_cast<void>(engine_->stop());
+        if (runner_.joinable()) {
+            runner_.join();
+        }
+        running_ = false;
+
+        if (!run_outcome_ &&
+            run_outcome_.error().message.find("the engine was stopped") != std::string::npos) {
+            run_outcome_ = Status{};
+        }
+        return run_outcome_;
+    }
+
+private:
+    void shutdown() {
+        static_cast<void>(stop());
+        client_.reset();
+        server_.reset();
+        engine_.reset();
+    }
+
+    std::unique_ptr<engine::Engine> engine_;
+    std::unique_ptr<rpc::Server> server_;
+    std::unique_ptr<rpc::Client> client_;
+
+    std::thread runner_;
+    Status run_outcome_;
+    bool running_ = false;
+};
 
 }  // namespace
 
@@ -354,8 +610,45 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
 
     const rpc::DetectionList found = wait_for_detections(harness.client(), 8, 20000);
     INFO(std::format("{} decisions, {} detections", found.decisions, found.detections.size()));
-    REQUIRE(!found.detections.empty());
+    REQUIRE(found.detections.size() > 1);
 
+    // WHY THE THRESHOLD IS MOVED BEFORE THE BAR IS EXERCISED
+    //
+    // Every emitter in this scene is continuous, so every track is born at
+    // the decision the detector's warm-up gate releases and detected at every
+    // decision after it. Confidence rises by a fixed fraction of its
+    // remaining distance to one, so tracks with the same history arrive at
+    // the same number to the last bit: measured on 2026-09-19 this list read
+    // 0.968136 to 0.968136 across nine detections.
+    //
+    // A bar picked out of a column like that can only be all or nothing, and
+    // the version of this case that picked one was asserting nothing. At
+    // nextafter(lowest, 1.0) every detection was excluded, the filtered list
+    // came back empty, and both of the per-row loops below ran zero times, so
+    // the exclusive side had no rows to be wrong about.
+    //
+    // kPartitioningThresholdDb is what puts two ends on the column. The four
+    // strong tracks keep being detected and keep rising; the five weak ones
+    // stop being detected, hold, and decay. The detector's bootstrap hold is
+    // three seconds, so both groups are in one list for that long, which is
+    // all this case wants from the detector. Measured on 2026-09-19 the frozen
+    // list read 0.901802 across the five held tracks and 0.979288 across the
+    // four live ones, and the bar below kept four and dropped five.
+    const auto raised = harness.client().set_detection_threshold(kPartitioningThresholdDb);
+    INFO(test::message_of(raised));
+    REQUIRE(raised.has_value());
+
+    const rpc::DetectionList spreading = wait_for_confidence_spread(harness.client(), 20000);
+    {
+        const ConfidenceRange range = confidence_range(spreading);
+        INFO(std::format("confidence runs {:.6f} to {:.6f} across {} detections at decision {}",
+                         range.lowest, range.highest, spreading.detections.size(),
+                         spreading.last_decision));
+        REQUIRE(spreading.detections.size() > 1);
+        REQUIRE(range.lowest < range.highest);
+    }
+
+    // Frozen from here, so every list below belongs to one decision.
     const auto stopped = harness.stop_engine();
     INFO(test::message_of(stopped));
     REQUIRE(stopped.has_value());
@@ -363,40 +656,39 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
     auto unfiltered = harness.client().detections(0.0);
     INFO(test::message_of(unfiltered));
     REQUIRE(unfiltered.has_value());
-    REQUIRE(!unfiltered->detections.empty());
+    REQUIRE(unfiltered->detections.size() > 1);
 
     // A bar of zero excludes nothing, so the list and the count the detector
     // holds are the same number. A filter reading the comparison the wrong
     // way round fails here before any of the arithmetic below.
     CHECK(unfiltered->detections.size() == unfiltered->total);
 
-    double lowest = 1.0;
-    double highest = 0.0;
-    for (const rpc::Detection& detection : unfiltered->detections) {
-        lowest = std::min(lowest, detection.confidence);
-        highest = std::max(highest, detection.confidence);
-    }
-    INFO(std::format("confidence runs {:.6f} to {:.6f} across {} detections", lowest, highest,
-                     unfiltered->detections.size()));
+    const ConfidenceRange range = confidence_range(*unfiltered);
+    INFO(std::format("confidence runs {:.6f} to {:.6f} across {} detections", range.lowest,
+                     range.highest, unfiltered->detections.size()));
+
+    // The decisions taken between the poll above and the stop did not undo
+    // the spread. Without this the list could be uniform again and every row
+    // assertion below would pass by having no rows, which is exactly how this
+    // case used to pass.
+    REQUIRE(range.lowest < range.highest);
 
     // The comparison is inclusive, so a bar exactly at the least confident
-    // track keeps that track.
+    // track keeps that track and everything above it.
     //
     // This pair, with the one below it, is what pins the filter to the exact
-    // boundary rather than to "somewhere around here", and the pinning is
-    // what makes the case worth running: every track in this scene is born at
-    // the same decision and they all carry an identical confidence for as
-    // long as they are all detected, so a bar picked anywhere else would only
-    // ever be testing all-or-nothing.
-    auto at_bar = harness.client().detections(lowest);
+    // boundary rather than to "somewhere around here".
+    auto at_bar = harness.client().detections(range.lowest);
     INFO(test::message_of(at_bar));
     REQUIRE(at_bar.has_value());
     REQUIRE(at_bar->last_decision == unfiltered->last_decision);
     CHECK(at_bar->detections.size() == unfiltered->detections.size());
 
-    // One representable step above it, so that same track is excluded.
-    const double bar = std::nextafter(lowest, 1.0);
+    // One representable step above it, so that same track is excluded and the
+    // rising ones at the other end of the spread are not.
+    const double bar = std::nextafter(range.lowest, 1.0);
     REQUIRE(bar < 1.0);
+    REQUIRE(bar <= range.highest);
 
     auto filtered = harness.client().detections(bar);
     INFO(test::message_of(filtered));
@@ -406,30 +698,151 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
     // comparison is exact.
     REQUIRE(filtered->last_decision == unfiltered->last_decision);
 
-    CHECK(filtered->detections.size() < unfiltered->detections.size());
+    // Both sides of the bar have rows in them, which is what the two loops
+    // below need before they can say anything.
+    REQUIRE(!filtered->detections.empty());
+    REQUIRE(filtered->detections.size() < unfiltered->detections.size());
 
     // The bar is the caller's and is not stored: the detector still holds
     // everything it held.
     CHECK(filtered->total == unfiltered->total);
 
+    // Kept: at or above the bar, and known to the unfiltered list by id.
     for (const rpc::Detection& detection : filtered->detections) {
+        INFO(std::format("detection {} was kept at confidence {:.17g} against a bar of {:.17g}",
+                         detection.id, detection.confidence, bar));
         CHECK(detection.confidence >= bar);
-    }
 
-    // Everything in the filtered list was in the unfiltered one, by id.
-    for (const rpc::Detection& detection : filtered->detections) {
         const bool present = std::ranges::any_of(
             unfiltered->detections,
             [&](const rpc::Detection& other) { return other.id == detection.id; });
-        INFO(std::format("detection {} is not in the unfiltered list", detection.id));
         CHECK(present);
     }
+
+    // Excluded: below the bar, every one of them. A filter that dropped a row
+    // for any other reason, or that kept the wrong end of the comparison and
+    // happened to return the right count, fails here.
+    std::size_t excluded = 0;
+    for (const rpc::Detection& detection : unfiltered->detections) {
+        const bool kept = std::ranges::any_of(
+            filtered->detections,
+            [&](const rpc::Detection& other) { return other.id == detection.id; });
+        if (kept) {
+            continue;
+        }
+        ++excluded;
+        INFO(std::format("detection {} was excluded at confidence {:.17g} against a bar of {:.17g}",
+                         detection.id, detection.confidence, bar));
+        CHECK(detection.confidence < bar);
+    }
+    CHECK(excluded > 0);
+    CHECK(excluded == unfiltered->detections.size() - filtered->detections.size());
 
     // And the bar did not leak into the server: a second caller asking for
     // everything still gets everything.
     auto after = harness.client().detections(0.0);
     REQUIRE(after.has_value());
     CHECK(after->detections.size() == unfiltered->detections.size());
+}
+
+TEST_CASE("a merged track crosses the wire carrying the id it was merged into",
+          "[gpu][rpc][detect][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The one state and the one field nothing else on this wire exercises.
+    //
+    // detect::TrackState::Merged and Track::merged_into are covered in
+    // tests/detect/test_detector.cpp, which never touches this layer. Three
+    // pieces of conversion sit between that coverage and a display:
+    // write_detection's setMergedInto, to_schema(Merged) and the client's
+    // read_track_state. Every other case in this file passes with all three
+    // wrong. The fixture's scene never merges, and the one other place any of
+    // them names Merged is a check that skips a row when it sees one.
+    //
+    // What a merge means, since the numbers below depend on it: a track that
+    // is not detected at this decision because another track's candidate
+    // swallowed its band. It is not the same thing as a held track. A held
+    // one has no evidence and is decaying; a merged one has evidence that is
+    // being counted against a different id, so it stops decaying and points
+    // at the id that took it.
+    SceneRig rig;
+    const auto ready = rig.open(merging_scene_uri(kRunSamples));
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    const rpc::DetectionList list = wait_for_merge(rig.client(), 25000);
+
+    // Worded for the failure this case has to be able to report, which is a
+    // wait that gave up: the list it hands back is then whatever the last
+    // poll saw, and its size is the difference between a scene that stopped
+    // merging and a detector that found nothing at all.
+    INFO(std::format("the merge wait came back at decision {} with {} detections",
+                     list.last_decision, list.detections.size()));
+
+    std::size_t merged_rows = 0;
+    std::size_t resolved_parents = 0;
+    for (const rpc::Detection& detection : list.detections) {
+        if (detection.state != rpc::TrackState::Merged) {
+            continue;
+        }
+        ++merged_rows;
+
+        INFO(std::format("detection {} at {} Hz, {} Hz wide, merged into {}", detection.id,
+                         detection.center_hz, detection.bandwidth_hz, detection.merged_into));
+
+        // The ordinal survived both conversions. A to_schema that mapped
+        // Merged to some other state, or a read_track_state that rejected
+        // ordinal three, never reaches this line.
+        CHECK(rpc::track_state_name(detection.state) == std::string("merged"));
+
+        // The field the state exists to carry. Zero here is what a dropped
+        // setMergedInto looks like, and it is also what every non-merged row
+        // in this file is checked to be, so the two checks are each other's
+        // control.
+        CHECK(detection.merged_into != 0);
+        CHECK(detection.merged_into != detection.id);
+
+        // Not detected at this decision, which is what a merge and a hold
+        // have in common and is what separates both from a live track.
+        CHECK(detection.silent_samples() > 0);
+
+        const auto parent = std::ranges::find_if(list.detections, [&](const rpc::Detection& other) {
+            return other.id == detection.merged_into;
+        });
+
+        // A parent the list no longer names is legal and is not an error to
+        // report. The detector suspends a child's confidence decay while it
+        // is merged and does not suspend the parent's, so a parent that was
+        // young when it took the candidate can be dropped for low confidence
+        // while its child is still inside its own hold. It did not happen in
+        // any run of this scene on 2026-09-19, and the count below is what
+        // keeps a case where it happened to every row from passing empty.
+        if (parent == list.detections.end()) {
+            continue;
+        }
+        ++resolved_parents;
+
+        // Ordering, which is the part of a merge that cannot be got right by
+        // accident. The candidate goes to the elder of the gated tracks, so
+        // the parent is never the younger of the pair, and the child's
+        // evidence is being counted against the parent, so the parent was
+        // detected no earlier than the child was. A merged_into read out of
+        // the wrong field, or truncated on the wire, would have to land on
+        // another track's id and then satisfy both of these.
+        CHECK(parent->first_seen <= detection.first_seen);
+        CHECK(parent->last_detected >= detection.last_detected);
+    }
+
+    // Outside the loop, so a run that never merged fails here with the INFO
+    // above rather than passing on an empty list. That is the whole defect
+    // this case exists to close, so it must not be able to repeat it.
+    CHECK(merged_rows > 0);
+    CHECK(resolved_parents > 0);
+
+    const auto stopped = rig.stop();
+    INFO(test::message_of(stopped));
+    CHECK(stopped.has_value());
 }
 
 TEST_CASE("the detection threshold is the operator's and changes what the detector finds",
@@ -505,6 +918,114 @@ TEST_CASE("the detection threshold is the operator's and changes what the detect
     REQUIRE(stopped.has_value());
 }
 
+TEST_CASE("the detector's hold crosses the wire and bounds what the detector does",
+          "[gpu][rpc][detect][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // DetectionList::detectorHoldSeconds exists because a display cannot
+    // derive it. Before it was on the wire, ui/render/spectrum_item.h
+    // carried a compiled-in copy of DetectorConfig::bootstrap_hold_seconds
+    // and its own comment called that the display's assumption about the
+    // engine's configuration.
+    //
+    // A case that only compared the number against the detector's default
+    // would pass against a server that wrote the literal 3.0 and never read
+    // the detector at all. So this asserts two things that can disagree:
+    // that the number on the wire is the one the engine's own header
+    // declares, and that the detector's observed behaviour is bounded by
+    // the number that arrived.
+    Harness harness;
+    bring_up(harness, detecting_options());
+
+    const double configured = detect::DetectorConfig{}.bootstrap_hold_seconds;
+    REQUIRE(configured > 0.0);
+
+    // Stated on the call that BUILDS the detector, before a frame exists. A
+    // display sizes its drawing from this and the first list it has rows to
+    // draw is later than this, so a field that only appeared once something
+    // was found would be a field arriving after it was needed.
+    auto first = harness.client().detections(0.0);
+    INFO(test::message_of(first));
+    REQUIRE(first.has_value());
+    CHECK(first->decisions == 0);
+    CHECK(first->detector_hold_seconds == configured);
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    const rpc::DetectionList live = wait_for_detections(harness.client(), 8, 20000);
+    INFO(std::format("{} decisions, {} detections, hold {} s", live.decisions,
+                     live.detections.size(), live.detector_hold_seconds));
+    REQUIRE(!live.detections.empty());
+    CHECK(live.detector_hold_seconds == configured);
+
+    auto engine_info = harness.client().info();
+    REQUIRE(engine_info.has_value());
+    const double sample_rate = static_cast<double>(engine_info->source_rate);
+    REQUIRE(sample_rate > 0.0);
+
+    // Silence the scene, which is the only way to make the hold observable:
+    // a track that keeps being detected never spends any of it. Nothing here
+    // clears 90 dB, so every track stops being detected at the next decision
+    // and runs its hold out from there.
+    const auto raised = harness.client().set_detection_threshold(kSilencingThresholdDb);
+    INFO(test::message_of(raised));
+    REQUIRE(raised.has_value());
+
+    const FadeOut faded = wait_for_fade_out(harness.client(), 20000);
+    INFO(std::format("last populated list at decision {} with {} detections, quiet at {}",
+                     faded.last_populated.last_decision, faded.last_populated.detections.size(),
+                     faded.quiet.last_decision));
+    REQUIRE(!faded.last_populated.detections.empty());
+    REQUIRE(faded.quiet.decisions > 0);
+    REQUIRE(faded.quiet.detections.empty());
+
+    // The threshold moved and the hold did not. A server that wrote the
+    // wrong member of DetectorConfig, or aliased the two fields, fails here
+    // as well as against the default above.
+    CHECK(faded.last_populated.detector_hold_seconds == configured);
+    CHECK(faded.quiet.detector_hold_seconds == configured);
+    CHECK(faded.quiet.detection_threshold_db == kSilencingThresholdDb);
+
+    const double hold = faded.last_populated.detector_hold_seconds;
+    double longest_silence = 0.0;
+    for (const rpc::Detection& detection : faded.last_populated.detections) {
+        const double silence = static_cast<double>(detection.silent_samples()) / sample_rate;
+        longest_silence = std::max(longest_silence, silence);
+
+        INFO(std::format("detection {} had been silent {:.3f} s against a hold of {:.3f} s",
+                         detection.id, silence, hold));
+
+        // The detector drops a track at the decision its silence exceeds
+        // the hold, so a track that is still being published has not
+        // exceeded it. The bound is exact rather than approximate, and a
+        // hold reported smaller than the one the detector runs fails it.
+        CHECK(silence <= hold);
+    }
+
+    // The other side of the same claim, which the bound above cannot make:
+    // a hold reported LARGER than the one the detector runs satisfies every
+    // check in the loop and leaves every observed silence far short of it.
+    // Half the hold is a wide margin on purpose. Measured on 2026-09-19 on
+    // GPU 0, the longest silence in the last populated list reached 2.970 s
+    // of the 3.0 s hold, which is one decision short of it at the
+    // detector's default interval. A loaded machine polls less often and
+    // lands further short, and this case must not turn into a timing
+    // measurement, so the bound is set where that cannot matter. Tripling
+    // the reported hold in core/rpc/server.cpp on the same day failed this
+    // line at 2.970 against 4.5 while every other check in the loop still
+    // passed, which is what says the bound has teeth of its own.
+    INFO(std::format("the longest silence reached {:.3f} s of a {:.3f} s hold", longest_silence,
+                     hold));
+    CHECK(longest_silence > 0.5 * hold);
+
+    const auto stopped = harness.stop_engine();
+    INFO(test::message_of(stopped));
+    REQUIRE(stopped.has_value());
+}
+
 TEST_CASE("the detector refuses the arguments that would fail silently",
           "[gpu][rpc][detect][m2]") {
     REVENANT_NEEDS_GPU();
@@ -530,10 +1051,37 @@ TEST_CASE("the detector refuses the arguments that would fail silently",
         harness.client().detections(std::numeric_limits<double>::quiet_NaN());
     CHECK_FALSE(not_a_number.has_value());
 
-    // The open interval's own edge is fine.
-    auto just_under = harness.client().detections(std::nextafter(1.0, 0.0));
+    // The open interval's own edge is fine, and it is the value a clamped
+    // control has to be able to send.
+    //
+    // ui/models/engine_link.h clamps its writable confidenceBar property to
+    // kMaxConfidenceBar, which is this number written as a constexpr
+    // expression because the property needs one. That clamp was [0, 1]
+    // INCLUSIVE until 2026-09-19, which put the one value rejected above
+    // inside the range the property accepted: writing 1.0 made every later
+    // poll fail, and poll_detections discards a failed poll by design,
+    // because that is how a dead engine is normally found, so the overlay
+    // stopped updating with nothing on screen saying why.
+    //
+    // Both forms are asserted equal rather than one of them being trusted.
+    // epsilon is 2^-52 and the spacing of doubles just below one is 2^-53,
+    // so the subtraction is exact and the two are the same double.
+    constexpr double kTopOfRange = 1.0 - std::numeric_limits<double>::epsilon() / 2.0;
+    CHECK(kTopOfRange == std::nextafter(1.0, 0.0));
+
+    auto just_under = harness.client().detections(kTopOfRange);
     INFO(test::message_of(just_under));
     CHECK(just_under.has_value());
+
+    // And nothing sits between the top of the accepted range and the value
+    // that is refused, which is what makes clamping to kTopOfRange the
+    // right fix rather than a guess at a safe margin below one. A server
+    // that moved its guard to reject anything above one, or to reject a
+    // little below it, fails one of this pair.
+    const double one_step_higher = std::nextafter(kTopOfRange, 2.0);
+    CHECK(one_step_higher == 1.0);
+    auto refused_at_one = harness.client().detections(one_step_higher);
+    CHECK_FALSE(refused_at_one.has_value());
 
     // And the threshold's bounds, which are the command line's rather than
     // the arithmetic's.

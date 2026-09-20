@@ -108,7 +108,20 @@ struct SourceStats {
 };
 
 struct VrxParams {
+    // Hertz from the SOURCE'S BASEBAND DC, bounded by plus and minus half
+    // the source rate. Not an absolute radio frequency: the engine's grid
+    // has no other frame, engine::place reads this as an offset, and nothing
+    // between here and there rebases it. A caller holding an absolute
+    // frequency writes `center = absolute - EngineInfo::source_center`.
+    //
+    // Spelled out on a mirror struct that otherwise carries no comments
+    // because this is the field the schema found people getting wrong, and
+    // because the schema's own note on it is a retraction: it used to say
+    // the offset reading had to be stated "because the engine's own header
+    // says the opposite", and core/engine/vrx.h was the document that was
+    // wrong. See core/rpc/revenant.capnp, which carries the full record.
     std::int64_t center = 0;
+
     std::int64_t bandwidth = 12'000;
     Demod demod = Demod::Nfm;
     std::uint32_t audio_rate = 0;
@@ -167,11 +180,17 @@ struct Detection {
     // at measurement out of the frame's exact rational axis, so a ratio here
     // would dress an estimate up as a grid frequency.
     //
-    // VrxParams::center is a BASEBAND offset despite what the engine header
-    // calls it, so tuning to this detection is
+    // VrxParams::center is a BASEBAND offset, so tuning to this detection is
     // `params.center = center_hz - info.source_center`. On a source with no
     // declared centre the two are equal and getting it wrong costs nothing,
     // which is exactly why it has to be written down.
+    //
+    // This sentence used to end "despite what the engine header calls it",
+    // which was true of core/engine/vrx.h until 2026-09-19 and is not now.
+    // The header called the field absolute, the code never treated it that
+    // way, and the header was corrected rather than the code. Retracted here
+    // rather than edited out, because the same claim stood in the schema and
+    // in docs/detection.md and a reader may have taken it from any of them.
     std::int64_t center_hz = 0;
     std::int64_t bandwidth_hz = 0;
 
@@ -217,6 +236,18 @@ struct DetectionList {
     std::uint32_t total = 0;
 
     double detection_threshold_db = 0.0;
+
+    // Seconds of SOURCE time the detector keeps a track it is no longer
+    // detecting. DetectorConfig::bootstrap_hold_seconds, read back rather
+    // than assumed, and the engine's statement about when it will stop
+    // publishing a track rather than anything about how one is drawn. The
+    // schema's note on detectorHoldSeconds has the distinction.
+    //
+    // Zero means the engine did not state it, which is either an engine
+    // older than the field or a list nobody has fetched yet, since a
+    // default-constructed one starts here. Not a track dropped the instant
+    // it goes quiet.
+    double detector_hold_seconds = 0.0;
 };
 
 // Unlike engine::SpectrumFrame, this one owns its bins.

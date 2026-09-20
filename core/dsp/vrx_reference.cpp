@@ -766,14 +766,31 @@ Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
     if (bandwidth <= 0) {
         return 0;
     }
-    if (mode == kDemodNfm) {
-        // Land mobile: 5 kHz peak deviation in a 25 kHz channel.
-        return std::max<Hertz>(1, bandwidth / 5);
+
+    // Over engine::Demod and with no default, for the reason spelled out on
+    // minimum_demod_rate below: that is the shape /w14062 can see, so a ninth
+    // demodulator stops here rather than being handed a deviation of zero.
+    // Zero is right for six of the eight, which is what makes it dangerous to
+    // give by omission. It does not stop at this function either:
+    // vrx_demod_gain reads a zero deviation as "no discriminator" and returns
+    // unity, so a ninth FM-family mode would emit phase advance in radians per
+    // sample instead of the project's +/-1 convention.
+    switch (static_cast<engine::Demod>(mode)) {
+        case engine::Demod::Nfm:
+            // Land mobile: 5 kHz peak deviation in a 25 kHz channel.
+            return std::max<Hertz>(1, bandwidth / 5);
+        case engine::Demod::Wfm:
+            // FM broadcast: 75 kHz peak deviation in a 200 kHz channel.
+            return std::max<Hertz>(1, (3 * bandwidth) / 8);
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw: return 0;
     }
-    if (mode == kDemodWfm) {
-        // FM broadcast: 75 kHz peak deviation in a 200 kHz channel.
-        return std::max<Hertz>(1, (3 * bandwidth) / 8);
-    }
+
+    // Not an enumerator at all. No mode, so no channel plan, so no deviation.
     return 0;
 }
 
@@ -787,46 +804,98 @@ Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
     // therefore no filter. 1.5B leaves a transition of B/4.
     const Hertz floor_rate = (3 * bandwidth + 1) / 2;
 
-    switch (mode) {
-        case kDemodAm:
+    // THE PARAMETER IS THE 32-BIT WORD, THE SWITCH IS OVER THE ENUM.
+    //
+    // The uint32 is deliberate and stays. The mode reaches the device as a
+    // specialization constant: VrxDemodConfig::mode mirrors
+    // core/shaders/vrx_demod.comp's `layout(constant_id = 1) const uint
+    // kMode`, core/engine/vrx_stage.cpp packs it into a std::uint32_t array
+    // with the other three, and VrxPlan::mode is the copy it is packed from.
+    // engine::Demod has an 8-bit underlying type, so the widened word is what
+    // the planner and the stage are actually holding, and it is what this
+    // function, fm_deviation, vrx_demod_gain and the stage's
+    // detector_history() are all handed.
+    //
+    // Switching over the enum instead costs one cast and buys the diagnostic.
+    // C4062 fires only on an enum switch with no default label, so over a
+    // uint32 with a default there was nothing for it to see. The
+    // static_asserts beside the kDemod constants pin each enumerator to its
+    // value, which catches a REORDER; this catches an ADDITION, which is the
+    // case they are blind to. Getting a build error here is the point: a new
+    // demodulator cannot be given a rate by omission.
+    switch (static_cast<engine::Demod>(mode)) {
+        case engine::Demod::Am:
             // The envelope of a band of width B carries content out to B.
             return std::max(floor_rate, 2 * bandwidth);
-        case kDemodUsb:
-        case kDemodLsb:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
             // A product detector on a one-sided passband of width B produces
             // audio out to B.
             return std::max(floor_rate, 2 * bandwidth);
-        case kDemodCw:
+        case engine::Demod::Cw:
             // The passband sits at the pitch, so its upper edge is
             // pitch + B/2 and that has to fit below Fd/2.
             return std::max(floor_rate, 2 * cw_pitch + bandwidth);
-        default:
-            // Raw, DSB and both FM modes. A discriminator produces the
-            // modulating audio, which is narrower than the channel, and DSB's
-            // real part folds a symmetric band onto half its width.
+        case engine::Demod::Raw:
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm:
+        case engine::Demod::Dsb:
+            // A discriminator produces the modulating audio, which is
+            // narrower than the channel, and DSB's real part folds a
+            // symmetric band onto half its width. Raw is not detected at all.
+            // Spelled out rather than left to a default, because sitting at
+            // the shared floor is a claim about these four detectors and not
+            // a fallback.
             return floor_rate;
     }
+
+    // Not an enumerator. Unreachable from plan_vrx, which range-checks the
+    // mode before it gets here, so this is a direct caller with a bad value.
+    //
+    // The floor is the wrong thing to hand it. 1.5B is the rate below which
+    // no mode can be filtered at all, not a rate at which any given mode
+    // works: four of the eight can need more than it, and a detector that
+    // folds the spectrum given 1.5B produces audio out past Fd/2 that comes
+    // back inside the band, quietly, with nothing downstream measuring it.
+    // The widest requirement any mode makes costs a bigger filter and a
+    // faster resampler, which is visible and recoverable.
+    return std::max({floor_rate, 2 * bandwidth, 2 * cw_pitch + bandwidth});
 }
 
 float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation) {
-    if (mode != kDemodNfm && mode != kDemodWfm) {
-        // Raw is a passthrough, AM's envelope is already in the same units as
-        // the input, and a product detector's real part is too. Unity keeps
-        // every mode on the one convention: a unit-amplitude signal fully
-        // modulating its own mode swings the audio to +/-1.
-        //
-        // DSB is the one mode where that is not the whole story, and the
-        // reason is physics rather than a missing constant. Its complex
-        // envelope is real and in phase with a carrier that is not being
-        // transmitted, so a product detector with no carrier recovery scales
-        // the audio by the cosine of the residual phase between the
-        // receiver's oscillator and that suppressed carrier. The measured
-        // figure at one tuning is 0.743 against a residual phase of -0.733
-        // radian, which is exactly its cosine. USB, LSB and CW are not
-        // affected: their audio is a rotating phasor, so a constant phase
-        // offset moves its phase and not its amplitude. Closing it needs a
-        // loop with carried state, which belongs above a kernel.
-        return 1.0F;
+    // The same exhaustive-switch guard as its two neighbours above, for the
+    // same reason: unity is correct for six of the eight modes and is
+    // therefore what a ninth would silently inherit. The two discriminator
+    // cases break out to the scaling below; a value that is no enumerator at
+    // all falls through with them and is caught by the deviation test, since
+    // fm_deviation returns zero for it.
+    switch (static_cast<engine::Demod>(mode)) {
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm: break;
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw:
+            // Raw is a passthrough, AM's envelope is already in the same
+            // units as the input, and a product detector's real part is too.
+            // Unity keeps every mode on the one convention: a unit-amplitude
+            // signal fully modulating its own mode swings the audio to +/-1.
+            //
+            // DSB is the one mode where that is not the whole story, and the
+            // reason is physics rather than a missing constant. Its complex
+            // envelope is real and in phase with a carrier that is not being
+            // transmitted, so a product detector with no carrier recovery
+            // scales the audio by the cosine of the residual phase between
+            // the receiver's oscillator and that suppressed carrier. The
+            // measured figure at one tuning is 0.743 against a residual phase
+            // of -0.733 radian, which is exactly its cosine. USB, LSB and CW
+            // are not affected: their audio is a rotating phasor, so a
+            // constant phase offset moves its phase and not its amplitude.
+            // Closing it needs a loop with carried state, which belongs above
+            // a kernel.
+            return 1.0F;
     }
     if (deviation <= 0 || demod_rate <= 0) {
         return 1.0F;

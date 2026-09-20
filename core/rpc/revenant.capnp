@@ -158,11 +158,27 @@ struct VrxParams {
     # An offset from the source's baseband DC, NOT an absolute radio
     # frequency, and it is bounded by plus and minus half the source rate.
     #
-    # Said here because the engine's own header says the opposite and the code
-    # does this: engine::place reads it as an offset, nothing rebases it, and
-    # tools/cli/main.cpp converts on the way in with
-    # `baseband = absolute - source_center`. Baseband is the only frame the
-    # grid has, which is why it wins.
+    # engine::place reads it as an offset, nothing rebases it, VrxStatus reads
+    # it back in the same frame, and tools/cli/main.cpp converts on the way in
+    # with `baseband = absolute - source_center`. Baseband is the only frame
+    # the grid has, which is why it wins: place() is handed the grid, the rate
+    # and the request, and is never told where the source is tuned.
+    #
+    # WHAT THIS PARAGRAPH USED TO SAY
+    #
+    # Until 2026-09-19 it gave the offset reading as something "said here
+    # because the engine's own header says the opposite". core/engine/vrx.h
+    # did document the field as an absolute radio frequency, and the header
+    # was the half that was wrong: no build of this engine has ever rebased,
+    # and place() has read an offset since it was written. The header has been
+    # corrected and now agrees, which is why the old sentence had to go: a
+    # reader following it to vrx.h found agreement and could not tell which of
+    # the two documents had moved.
+    #
+    # Recorded rather than quietly swapped because the retracted claim was
+    # repeated in core/rpc/types.h and docs/detection.md as well, so anyone
+    # who took it from one of those three before today is owed the retraction
+    # rather than a schema that reads as though it never said it.
     #
     # The consequence that matters for click-to-tune: a Detection's centerHz
     # is ABSOLUTE and cannot be assigned to this field. Subtract
@@ -415,6 +431,29 @@ struct DetectionList {
     # showed its own last request would be showing a number the detector is
     # not using.
     detectionThresholdDb @4 :Float64;
+
+    # How long the detector keeps a track it is no longer detecting before it
+    # drops the track, in seconds of SOURCE time.
+    #
+    # DetectorConfig::bootstrap_hold_seconds, read back off the running
+    # detector for the same reason the threshold above it is: it is
+    # engine-side configuration and a client has no other way to see it. A
+    # track whose state is held has stopped being detected and is somewhere
+    # inside this window, and lastSeen minus lastDetected over
+    # EngineInfo::sourceRate is how far through it that track has got.
+    #
+    # NOT A DISPLAY SETTING. It says when the ENGINE stops publishing a
+    # track, and that is the whole of what it says: whether a display fades a
+    # box over the interval, dims it in one step, or draws it unchanged until
+    # it vanishes is the display's own decision. The two got confused because
+    # ui/render/spectrum_item.h carried its own copy of the number, compiled
+    # in and labelled as the display's assumption about the engine's
+    # configuration, which is exactly the assumption this field removes.
+    #
+    # Zero means the engine did not state it, which is an engine built before
+    # this field existed. A reader must not take zero as a track that is
+    # dropped the instant it goes quiet.
+    detectorHoldSeconds @5 :Float64;
 }
 
 # What a subscriber implements. The engine calls this; the client does not

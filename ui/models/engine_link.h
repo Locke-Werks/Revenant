@@ -33,7 +33,13 @@
 // item draws. The Cap'n Proto event loop thread, inside the Client, runs
 // on_frame. A third thread, the supervisor started by start(), owns the
 // Client itself: it connects, subscribes, and from then on asks the engine
-// once a second whether it is still there.
+// once a second whether it is still there and whether it is running.
+//
+// Those are two questions and Client::running answers both in one call. An
+// Expected that failed is a connection that has gone; an Expected holding
+// false is an engine that is there, answering, and not driving its graph.
+// Reading only the first, which this file did, made a stopped engine
+// indistinguishable from a running one for as long as the process stayed up.
 //
 // The supervisor exists because both halves of that job can block for as
 // long as the far end takes. Client::connect does a TCP connect, and
@@ -43,6 +49,26 @@
 // this side has to go and ask for. Asking on a timer on the GUI thread
 // would put both of those stalls in front of the window. Here a slow engine
 // delays the next reconnection attempt and nothing else.
+//
+// WHY THERE IS A CLOCK AS WELL
+//
+// Every number this object publishes is written when a frame arrives. That
+// works for all of them but one. frameRate is a statement about frames
+// arriving, so the situation that makes it wrong is exactly the situation
+// that stops it being written: the engine stops producing and holds the RPC
+// connection up, drain() never runs, and a rate computed only in drain()
+// keeps reporting the last one it measured. A status line naming a rate over
+// a picture that has not moved in a minute is worse than no rate at all,
+// because it is believable.
+//
+// So a QTimer on the Qt thread closes the measurement window when no frame
+// does, and report_rate is the one place the window is closed from either
+// way. It is not a repaint tick and must never become one: it emits
+// rateChanged alone. frameChanged means a new frame is in frame(), and
+// render/waterfall_item.cpp advances its ring by one row on every one it
+// receives, so a tick that emitted frameChanged would scroll the waterfall
+// with copies of the last row while the engine was stopped, which is the
+// frozen rate's same lie told in pixels.
 //
 // THE THREE PLACES A FRAME GOES MISSING, AND WHICH COUNTER HOLDS EACH
 //
@@ -96,6 +122,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -103,12 +130,36 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 #include <QtQmlIntegration>
 
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
 
 namespace revenant::ui {
+
+// The top of confidenceBar's range, which is the largest double below one
+// and deliberately not one.
+//
+// core/rpc/server.cpp refuses a bar of exactly one and says why: a track's
+// confidence rises by a fraction of its remaining distance to one, so it
+// approaches one and never arrives, and a bar of one lists nothing however
+// strong the signal is. An empty list is also what a dead band looks like,
+// so the engine refuses rather than answering emptily.
+//
+// setConfidenceBar clamped to [0, 1] INCLUSIVE until 2026-09-19, which put
+// the one value the engine refuses inside the range a writable property
+// accepts. Writing 1.0 made every later detections call fail; poll_detections
+// swallows a failed poll by design, because that is how a dead engine is
+// normally found, so the overlay stopped updating and nothing said why. A
+// control binding to this property takes its maximum from here rather than
+// writing 1.0 and finding out.
+//
+// epsilon is 2^-52 and the spacing of doubles just below one is 2^-53, so
+// this is exactly std::nextafter(1.0, 0.0), written in a form that is
+// constexpr rather than depending on constexpr <cmath>.
+inline constexpr double kMaxConfidenceBar =
+    1.0 - std::numeric_limits<double>::epsilon() / 2.0;
 
 class EngineLink : public QObject {
     Q_OBJECT
@@ -118,6 +169,22 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool connected READ connected NOTIFY connectionChanged)
     Q_PROPERTY(QString endpoint READ endpoint CONSTANT)
     Q_PROPERTY(QString errorText READ errorText NOTIFY connectionChanged)
+
+    // Whether the engine is driving its graph, which is a different question
+    // from whether this link can reach it, and the only one of the two that
+    // says whether frames are coming. An engine answers RPC calls from the
+    // moment it binds its port, which core/engine/engine.cpp puts before
+    // run() and leaves true after the source ends, so connected and
+    // engineRunning disagree at both ends of a session and for as long as a
+    // stopped engine is left up.
+    //
+    // It has its own signal and not connectionChanged, because the render
+    // items treat connectionChanged as a new engine and clear their history
+    // on it. A status line pairs this with frameRate: connected with
+    // engineRunning false and 0.0 rows/s is an engine that is there and
+    // stopped, which is a state an operator can act on, and it used to read
+    // exactly like a healthy one.
+    Q_PROPERTY(bool engineRunning READ engineRunning NOTIFY runningChanged)
 
     // EngineInfo, flattened to what a status line shows. Constant for the
     // length of one connection: the engine's geometry is fixed at
@@ -168,7 +235,93 @@ class EngineLink : public QObject {
     // looking at the display to judge: it is how fast the picture moves.
     // framesReceived minus framesDroppedByUi is the same quantity totalled
     // rather than per second.
-    Q_PROPERTY(double frameRate READ frameRate NOTIFY frameChanged)
+    //
+    // rateChanged and not frameChanged, because this is the one property
+    // that has to be able to change when no frame arrives. See WHY THERE IS
+    // A CLOCK AS WELL at the top of this file.
+    Q_PROPERTY(double frameRate READ frameRate NOTIFY rateChanged)
+
+    // The two detection knobs, which are different things and must not read
+    // as one control.
+    //
+    // confidenceBar is client side. It is the min_confidence argument to
+    // Client::detections and it filters what comes back over the wire;
+    // moving it changes nothing about the engine. Writes are clamped into
+    // [0, kMaxConfidenceBar], which is the half-open range the engine
+    // accepts rather than the closed one this used to allow.
+    //
+    // detectionThresholdDb is engine side. Writing it calls
+    // Client::set_detection_threshold and changes what the detector decides
+    // at all. Reading it returns DetectionList::detection_threshold_db,
+    // which is the value IN FORCE rather than the one last asked for,
+    // because several clients can set it and the last writer wins. A
+    // control that echoed back its own request would lie the moment a
+    // second client existed.
+    Q_PROPERTY(double confidenceBar READ confidenceBar WRITE setConfidenceBar
+                   NOTIFY detectionsChanged)
+    Q_PROPERTY(double detectionThresholdDb READ detectionThresholdDb
+                   WRITE setDetectionThresholdDb NOTIFY detectionsChanged)
+
+    // Rows after the confidence bar, and rows the detector holds before it,
+    // so a short list and a filtered one are distinguishable on screen.
+    Q_PROPERTY(uint detectionCount READ detectionCount NOTIFY detectionsChanged)
+    Q_PROPERTY(uint detectionTotal READ detectionTotal NOTIFY detectionsChanged)
+
+    // Zero decisions is the detector having been built and not having
+    // decided yet, which is a different thing from an empty band and reads
+    // identically without this.
+    Q_PROPERTY(qulonglong detectionDecisions READ detectionDecisions
+                   NOTIFY detectionsChanged)
+
+    // The engine sample index of the last decision. Decay is measured from
+    // this against sourceRate, never against a wall clock: a capture
+    // replayed at forty times realtime has to decay at the rate it was
+    // recorded, not the rate it is drawn.
+    Q_PROPERTY(qulonglong lastDecisionSample READ lastDecisionSample
+                   NOTIFY detectionsChanged)
+
+    // Seconds of SOURCE time the detector keeps a track it has stopped
+    // detecting, before it drops the track. DetectorConfig::
+    // bootstrap_hold_seconds, read back off DetectionList.
+    //
+    // Named for the detector because it is the engine's number and not a
+    // display setting. It says when a box will DISAPPEAR, which is the whole
+    // of what it says; whether the interval before that is drawn as a fade,
+    // a single dim step or no change at all is the display's own decision.
+    // ui/render/spectrum_item.h carried a compiled-in copy of the value and
+    // labelled it an assumption about the engine's configuration, which is
+    // the assumption this property removes.
+    //
+    // Zero until the engine has answered a detections call once, and zero
+    // from an engine built before the field existed. There are no rows to
+    // draw at either of those moments, but a display dividing by this has to
+    // check rather than assume.
+    Q_PROPERTY(double detectorHoldSeconds READ detectorHoldSeconds
+                   NOTIFY detectionsChanged)
+
+    // Why the detector's answer has stopped changing, when the engine is
+    // there and refusing rather than gone. Empty when the last pass was
+    // accepted, and empty while the connection is down.
+    //
+    // A detection call fails for two unrelated reasons and this link used to
+    // treat them as one. Either the engine went away, which is connected and
+    // errorText's business and is how a dead engine is normally found here,
+    // since detections are polled four times for every liveness probe. Or
+    // the engine answered and said no: a bar or a threshold outside the
+    // range it accepts, or an engine with no spectrum stage, which cannot
+    // build a detector at all and refuses every poll for as long as it runs.
+    // Only the second is something an operator can act on, and it used to be
+    // invisible, because poll_detections discards a failure by design.
+    //
+    // Told apart by asking rather than by parsing the message. On a failed
+    // poll the link asks the engine whether it is still running, which costs
+    // one extra round trip on the failure path and none on the ordinary one.
+    // An answer means the connection is up and the refusal was about the
+    // request, and this carries the engine's own sentence, which names the
+    // bound that was missed. No answer means the engine went away, and this
+    // is emptied: two error strings on screen for one event is worse than
+    // one, and errorText is the one that belongs to a lost connection.
+    Q_PROPERTY(QString detectionFault READ detectionFault NOTIFY detectionFaultChanged)
 
 public:
     explicit EngineLink(QObject* parent = nullptr);
@@ -187,9 +340,13 @@ public:
     //
     // every_nth is passed straight to Client::subscribe_spectrum. The engine
     // drops the rest before copying them, so asking for fewer costs it less.
+    //
+    // Call it on the Qt thread. It starts the rate clock as well as the
+    // supervisor, and a QTimer started on any other thread never fires.
     void start(const QString& address, std::uint16_t port, std::uint32_t every_nth);
 
     [[nodiscard]] bool connected() const { return connected_; }
+    [[nodiscard]] bool engineRunning() const { return engine_running_; }
     [[nodiscard]] QString endpoint() const { return endpoint_; }
     [[nodiscard]] QString errorText() const { return error_text_; }
 
@@ -247,6 +404,34 @@ public:
     // the row, not this.
     [[nodiscard]] const rpc::SpectrumFrame& frame() const { return display_; }
 
+    [[nodiscard]] double confidenceBar() const { return confidence_bar_; }
+    void setConfidenceBar(double bar);
+    [[nodiscard]] double detectionThresholdDb() const { return shown_.detection_threshold_db; }
+    void setDetectionThresholdDb(double threshold_db);
+
+    [[nodiscard]] uint detectionCount() const {
+        return static_cast<uint>(shown_.detections.size());
+    }
+    [[nodiscard]] uint detectionTotal() const { return shown_.total; }
+    [[nodiscard]] qulonglong detectionDecisions() const {
+        return static_cast<qulonglong>(shown_.decisions);
+    }
+    [[nodiscard]] qulonglong lastDecisionSample() const {
+        return static_cast<qulonglong>(shown_.last_decision);
+    }
+    [[nodiscard]] double detectorHoldSeconds() const {
+        return shown_.detector_hold_seconds;
+    }
+    [[nodiscard]] QString detectionFault() const { return detection_fault_; }
+
+    // What the items draw. Qt thread only, and valid until the next
+    // detectionsChanged, on the same terms frame() is: the supervisor swaps
+    // a new list in and this reference then names the old one. An item
+    // keeping a selection keeps the id, not a pointer into here.
+    [[nodiscard]] const std::vector<rpc::Detection>& detections() const {
+        return shown_.detections;
+    }
+
 signals:
     // The link came up or went away. An item holding history keyed to one
     // engine's geometry clears it here, on the edge into connected: the next
@@ -258,15 +443,60 @@ signals:
     // connect to it directly and repaint from the slot.
     void frameChanged();
 
+    // The engine started or stopped driving its graph, with the connection
+    // up across the change. Separate from connectionChanged so that an item
+    // clearing history on a new engine does not clear it on an engine that
+    // paused, and separate from frameChanged so that nothing repaints.
+    void runningChanged();
+
+    // frameRate changed. The only signal here that fires with no frame
+    // behind it, which is the whole reason it exists: see WHY THERE IS A
+    // CLOCK AS WELL at the top of this file. An item must not treat it as a
+    // frame, and a status line reading the rate binds to this.
+    void rateChanged();
+
+    // The detector's answer changed and detections() holds the new one.
+    //
+    // Emitted only when the engine has actually decided again, or when the
+    // rows differ, and not on every poll. A band with nothing moving in it
+    // should not repaint an overlay four times a second, and
+    // DetectionList::last_decision is what makes that distinguishable
+    // without comparing the rows every time.
+    void detectionsChanged();
+
+    // The engine started refusing a detection call, or stopped refusing.
+    //
+    // Separate from detectionsChanged, which means there are new rows in
+    // detections(). A refusal means the opposite: the rows are not going to
+    // change until something is fixed, and an overlay that repainted on it
+    // would redraw the same stale list. A status line binds here; nothing
+    // that draws boxes should.
+    void detectionFaultChanged();
+
 private:
     // The supervisor thread, and the two halves of what it does.
     void supervise();
     [[nodiscard]] bool attempt_connect();
     void publish(bool connected, QString error);
 
+    // Supervisor thread. The engine answered the probe, so the connection is
+    // good and this is what it said. Posts nothing when the answer has not
+    // changed, because it is asked once a second for the life of the window
+    // and the answer is the same almost every time.
+    void note_running(bool running);
+
     // Qt thread, queued from publish(). Takes the connection state the
     // supervisor left and tells QML.
     void adopt();
+
+    // Qt thread, queued from note_running(). The running flag alone, and no
+    // connectionChanged: the render items read that signal as a new engine
+    // and throw away everything they have drawn.
+    void adopt_running();
+
+    // Qt thread. Closes the rate window if it is due, from drain() when a
+    // frame closed it and from the tick when nothing did.
+    void report_rate();
 
     // Invoked on the Cap'n Proto event loop thread. Touches nothing but its
     // own buffers, the swap mutex and one atomic.
@@ -319,6 +549,7 @@ private:
     // supervisor's copy directly.
     std::mutex state_mutex_;
     bool handover_connected_ = false;  // guarded by state_mutex_
+    bool handover_running_ = false;    // guarded by state_mutex_
     rpc::EngineInfo handover_info_;    // guarded by state_mutex_
     QString handover_error_;           // guarded by state_mutex_
 
@@ -331,6 +562,7 @@ private:
     rpc::SpectrumFrame display_;
     rpc::EngineInfo info_;
     bool connected_ = false;
+    bool engine_running_ = false;
     QString error_text_;
     qulonglong frames_received_ = 0;
     qulonglong frames_dropped_engine_ = 0;
@@ -342,10 +574,71 @@ private:
     // counts drains, which is one repaint each, and is what the rate is
     // taken from; frames_received_ would answer a different question and
     // reads high by exactly the frames this link threw away.
+    //
+    // rate_timer_ times the open window and rate_mark_ is frames_drawn_ when
+    // it opened, so the two of them plus frames_drawn_ are the whole state
+    // report_rate works from and nothing has to be recorded per frame.
     qulonglong frames_drawn_ = 0;
     QElapsedTimer rate_timer_;
     qulonglong rate_mark_ = 0;
     double frame_rate_ = 0.0;
+
+    // The detection poll. Runs on the supervisor thread because
+    // Client::detections blocks for a round trip, and core/rpc/client.h
+    // forbids re-entering the Client from the frame callback, so the Qt
+    // thread and the Cap'n Proto loop thread are both ruled out.
+    //
+    // Polled faster than the supervisor's own liveness probe, because one
+    // second is visibly sluggish for an overlay an operator is clicking,
+    // and slower than the frame rate, because the detector decides far less
+    // often than the engine produces frames and polling past that buys
+    // round trips and nothing else.
+    void poll_detections();
+    void adopt_detections();
+
+    // Supervisor thread. Hands the Qt thread the reason the engine refused
+    // a detection call this pass, or an empty string when it refused
+    // nothing. Posts only on a change, which is what keeps an engine that
+    // refuses every poll from queueing a metacall four times a second for
+    // the life of the window.
+    void note_detection_fault(QString fault);
+
+    // Qt thread, queued from note_detection_fault.
+    void adopt_detection_fault();
+
+    std::mutex detection_mutex_;
+    rpc::DetectionList pending_detections_;   // guarded by detection_mutex_
+    bool has_pending_detections_ = false;     // guarded by detection_mutex_
+    QString pending_fault_;                   // guarded by detection_mutex_
+    bool has_pending_fault_ = false;          // guarded by detection_mutex_
+
+    // Supervisor thread only: the fault last handed over, so the comparison
+    // that suppresses a repeat needs no lock and reads nothing the Qt
+    // thread owns.
+    QString posted_fault_;
+
+    // The Qt thread's copy, which is what detections() hands out.
+    rpc::DetectionList shown_;
+
+    // The Qt thread's copy of the fault, which is what detectionFault()
+    // hands out.
+    QString detection_fault_;
+
+    // Read by the supervisor, written by the Qt thread. A double is not
+    // torn on any platform this builds for and a stale value costs one poll
+    // at the old bar, so it is atomic rather than locked.
+    std::atomic<double> confidence_bar_{0.0};
+
+    // Set by the Qt thread when the operator moves the engine-side control,
+    // consumed and cleared by the supervisor on its next pass. The write
+    // itself is an RPC call and cannot happen on the Qt thread.
+    std::atomic<bool> threshold_pending_{false};
+    std::atomic<double> requested_threshold_db_{0.0};
+
+    // The clock behind report_rate. Lives on the Qt thread and is started by
+    // start(), which main() calls from that thread before the event loop
+    // begins; a QTimer started anywhere else would never fire.
+    QTimer rate_tick_;
 
     // One wake outstanding at a time. Without it a burst of frames posts a
     // metacall each, and the GUI thread then runs a queue of calls that all

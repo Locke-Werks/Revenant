@@ -316,8 +316,19 @@ public:
 
     // Adding a receiver must not rebuild the coarse stage, and nothing in
     // VrxParams appears in GridParams, so it cannot.
+    //
+    // params.center is a baseband offset and nothing in here rebases it: it
+    // reaches engine::place as given and is stored as given. A caller that
+    // knows a frequency in absolute hertz, which is every caller with an
+    // operator or a detection behind it, subtracts info().source_center
+    // first. The note on VrxParams::center has the argument for that being
+    // the caller's job.
     [[nodiscard]] virtual Expected<VrxId> add_vrx(const VrxParams& params) = 0;
     [[nodiscard]] virtual Status remove_vrx(VrxId id) = 0;
+
+    // The same frame in both directions: vrx_status hands back the params it
+    // was given, so reading one out and passing it straight back in leaves
+    // the receiver where it was.
     [[nodiscard]] virtual Status set_vrx_params(VrxId id, const VrxParams& params) = 0;
     [[nodiscard]] virtual Expected<VrxStatus> vrx_status(VrxId id) const = 0;
     [[nodiscard]] virtual std::vector<VrxId> vrx_ids() const = 0;

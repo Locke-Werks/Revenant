@@ -19,6 +19,15 @@
 // frequency per pixel at a different width. Rescaling the history would
 // draw a signal at a frequency it was never at. Losing the picture on a
 // resize is visible and honest; moving a carrier is neither.
+//
+// WHAT THE DETECTION OVERLAY IS DOING IN HERE
+//
+// render/spectrum_item.h owns it, and this file includes that header for it
+// rather than growing a copy. The reasoning is in the block at the top of
+// that file: there is one mapping from hertz to pixels, an overlay with a
+// second one agrees at the centre of the span and is offset at the edges,
+// and the waterfall is precisely where an operator checks whether a box sits
+// on the carrier it names.
 
 #pragma once
 
@@ -27,11 +36,15 @@
 #include <QSize>
 #include <QtQmlIntegration>
 
+#include <cstdint>
 #include <vector>
 
 #include "models/engine_link.h"
+#include "render/spectrum_item.h"
 #include "render/spectrum_scale.h"
 
+class QMouseEvent;
+class QHoverEvent;
 class QPainter;
 
 namespace revenant::ui {
@@ -46,6 +59,11 @@ class WaterfallItem : public QQuickPaintedItem {
     Q_PROPERTY(double drawCeilingDb READ drawCeilingDb NOTIFY endsChanged)
     Q_PROPERTY(double headroomDb READ headroomDb NOTIFY endsChanged)
 
+    // Written by QML and never by this item, so the two displays share one
+    // selection. See the same property on SpectrumItem.
+    Q_PROPERTY(qulonglong selectedDetection READ selectedDetection WRITE setSelectedDetection
+                   NOTIFY selectedDetectionChanged)
+
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
 
@@ -56,19 +74,35 @@ public:
     [[nodiscard]] double drawCeilingDb() const { return ends_.ceiling_db; }
     [[nodiscard]] double headroomDb() const { return headroom_db_; }
 
+    [[nodiscard]] qulonglong selectedDetection() const { return selected_detection_; }
+    void setSelectedDetection(qulonglong id);
+
     void paint(QPainter* painter) override;
 
 signals:
     void linkChanged();
     void endsChanged();
+    void selectedDetectionChanged();
+
+    // Same signal and the same caveats as SpectrumItem::tuneRequested, which
+    // carries the note about the measured centre not being the logical one
+    // and what the two counts are.
+    void tuneRequested(qulonglong id, double center_hz, double bandwidth_hz, int candidates,
+                       int rank);
 
 protected:
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void hoverMoveEvent(QHoverEvent* event) override;
+    void hoverLeaveEvent(QHoverEvent* event) override;
 
 private:
     void takeFrame();
+    void takeDetections();
     void onConnectionChanged();
     void rebuild(int columns, int rows, std::size_t bins);
+    void rebuildDetections();
+    void setHovered(std::uint64_t id);
 
     // The ring is sized in physical pixels, not logical ones, so one stored
     // pixel is one screen pixel. QQuickPaintedItem paints into a texture the
@@ -92,6 +126,11 @@ private:
     MapEnds ends_;
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
+
+    std::vector<DetectionBox> boxes_;
+    std::uint64_t selected_detection_ = 0;
+    std::uint64_t hovered_detection_ = 0;
+    ClickCycle click_cycle_;
 };
 
 }  // namespace revenant::ui
