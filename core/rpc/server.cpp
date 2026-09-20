@@ -163,6 +163,93 @@
 // only way consume() can refuse is a geometry that is not the one the
 // detector was built against, which would mean two engines rather than one,
 // and losing the track list is the right price for not losing the radio.
+//
+// THE RDS DECODERS LIVE HERE TOO, AND THE DETECTOR'S PRECEDENT IS ONLY HALF
+// AN ARGUMENT FOR IT
+//
+// The half that carries: a decoder is host-side work on host-side PCM.
+// core/decode/rds_bits.h takes a span of real samples and core/decode/
+// rds_groups.h takes bits, neither has a shader behind it, and this server
+// is already the thing a client asks. So the shape is the detector's: built
+// on the first call rather than at startup, run on the engine's completion
+// thread inside a sink, one lock around the whole object because its own
+// header says one thread owns it and there is no lock inside it.
+//
+// The half that does not, and which had to be decided rather than
+// inherited: the detector had nowhere else it could go. engine::Engine has
+// no detector and no method returning tracks, and the spectrum sink it
+// needs is the one this server already owns. RDS had somewhere else.
+// core/engine could have grown a per-receiver decode stage, and
+// core/engine/vrx.h says in as many words that it deliberately did not.
+// Three reasons it stays out here:
+//
+//   1. Engine::attach_audio_sink is the composition point and it exists.
+//      core/engine/vrx.h retracted its "optional decoder chain" sentence on
+//      exactly these terms: a second decoder seam invented inside the
+//      engine would mean the one written first gets deleted.
+//   2. A decoder in the engine would have to hand its state back through an
+//      Engine method, which means core/engine depending on core/decode and
+//      an engine-level mirror of decode::StationState. The schema is
+//      already that mirror and two of them would drift.
+//   3. Nothing in the engine knows that a client asked. The whole saving
+//      here is that a receiver nobody has asked about runs no decoder, and
+//      "somebody asked" is a fact about a session.
+//
+// FIVE DIFFERENCES FROM THE DETECTOR THAT CHANGE THE CODE
+//
+// It is PER RECEIVER, so there is a map of these rather than one optional,
+// and each one dies with the receiver it was built on rather than living as
+// long as the Server.
+//
+// It ATTACHES rather than sets. The sink goes on through
+// Engine::attach_audio_sink, so a recording, a loudspeaker or a
+// subscribeAudio already on that receiver keeps its audio. The schema's own
+// note on rdsStation said this call would have to be refused on a receiver
+// that already had a sink, which was true when it was written and is not
+// true now; the retraction is in core/rpc/revenant.capnp.
+//
+// It TOUCHES NOTHING BUT ITS OWN ROUTE on the sample path. AudioRoute needs
+// an owner pointer because on_audio_chunk has to reach the server's node
+// list and its fulfiller; an RdsRoute's sink call reads and writes that one
+// route and nothing else, so a late call arriving after the Server is gone
+// is safe as long as the route is, and the callable co-owns it. There is no
+// gate on this one and that is why.
+//
+// It CANNOT FAIL THE DISPATCH either, and for a narrower reason than the
+// detector's. The decoder has no refusal at all: RdsBitSync::process and
+// RdsDecoder::feed both return void. What can go wrong is the chunk not
+// being what the receiver promised, a rate or a channel count that is not
+// what the decoder was built for, and that is recorded in the route and
+// reported to the next poll rather than returned to the graph.
+//
+// And a client CAN tear this one down early, by removing the receiver,
+// which the detector has no equivalent of. Every poll asks vrx_status
+// first, so a receiver removed by any path, including one this session
+// never saw, is answered in the engine's own words and its decoder is
+// dropped there.
+//
+// WHAT IT COSTS, MEASURED RATHER THAN ASSERTED
+//
+// 12.07 ms of one core per second of composite at 171000 S/s, measured on
+// 2026-09-20 by tests/rpc/test_rpc_rds.cpp's own timing case: a locked
+// station through RdsBitSync::process with RdsDecoder::feed on its bit
+// sink, one second timed out of the middle of the recording, best of three.
+// That is 1.2 percent of one core, PER DECODING RECEIVER rather than per
+// engine, so eight of them cost eight times it.
+//
+// The figure to compare against is the detector's 0.201 ms per frame above,
+// which the same kind of run put at 0.7 percent of one core. Per chunk they
+// land in the same place. A chunk at this project's 16384-sample blocks and
+// a 1368000 S/s source is 2048 composite samples, so the decoder spends
+// 0.145 ms on it against the detector's 0.201 ms on a frame.
+//
+// THE CPU SHARE IS NOT THE NUMBER THAT MATTERS. This runs on the thread
+// retiring GPU readbacks, so what it really costs is LATENCY added to every
+// other sink behind it: 0.145 ms of work inside a 12 ms chunk interval,
+// which is 1.2 percent of the budget before anything else on that thread
+// has run. Eight decoders would be 1.2 ms of a 12 ms interval, still inside
+// it and no longer negligible, and that is the point at which a decoder
+// wants its own thread rather than the sink.
 
 #include "core/rpc/server.h"
 
@@ -493,6 +580,115 @@ struct AudioRoute {
     engine::AudioSinkId sink = 0;
 };
 
+// ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+// The top of the FM composite: the 57 kHz subcarrier plus the 2375 Hz of
+// clause 1.7 shaping. Both the passband condition and the audio rate
+// condition below are this number in different units.
+constexpr dsp::Hertz kCompositeTopHz = 59'375;
+
+// The audio rate a composite from a RECEIVER has to clear, as opposed to one
+// from a file or a modulator.
+//
+// core/decode/rds_bits.h enforces decode::kMinimumRateHz, which is 125000,
+// and says at length why it is not this number: a composite that went
+// through no audio filter is intact at 125000 and refusing it would be the
+// decoder declining a signal because of a stage that was not in the path. A
+// composite from a receiver did go through one. dsp::design_audio_taps puts
+// the decimation filter's passband edge at 0.4 of the audio rate, so 59375
+// is inside the passband only from 59375/0.4 up, and this is that quotient
+// rounded up to the hertz.
+//
+// It applies only when the decimation resolved above one. At a decimation of
+// one the planner designs no audio filter at all and the decoder's own 125000
+// is the true bound, which is why the refusal below distinguishes the two
+// rather than quoting one number.
+constexpr dsp::SampleRate kFilteredCompositeRateHz = 148'438;
+
+// What one rdsStation call takes off a decoder, on the loop thread, under
+// that route's lock.
+//
+// The station state is COPIED rather than referenced, for the reason
+// DetectionSnapshot copies tracks: the completion thread may be inside the
+// decoder the instant the lock is released, and the capnp message is written
+// after that. The copy allocates, on the AF, ODA and EON vectors, and the
+// completion thread waits for it. That is the same bargain the detector
+// struck and it is a better one here, because the vectors are bounded at 16
+// EON entries and a handful of frequencies where the detector's is bounded
+// only by how busy the band is.
+struct RdsSnapshot {
+    decode::StationState state;
+    decode::RdsBitsStatus bits;
+    decode::Region region = decode::Region::kRds;
+
+    // The block layer's counters, which are nine accessors on RdsDecoder
+    // rather than a struct it hands out.
+    decode::SyncState sync = decode::SyncState::kHunting;
+    std::uint64_t bits_fed = 0;
+    std::uint64_t groups_decoded = 0;
+    std::uint64_t blocks_good = 0;
+    std::uint64_t blocks_corrected = 0;
+    std::uint64_t blocks_dropped = 0;
+    std::uint64_t sync_acquisitions = 0;
+    std::uint64_t sync_losses = 0;
+
+    // The server's own three.
+    std::uint32_t composite_rate = 0;
+    std::uint64_t last_group_sample = 0;
+    std::uint64_t ta_changed_at = 0;
+};
+
+// One receiver's RDS decode.
+//
+// THE SINK CALLABLE CO-OWNS THIS AND REACHES NOTHING ELSE. See the note at
+// the top of the file: unlike AudioRoute there is no owner pointer and no
+// gate, because the completion thread's whole job here is to push samples
+// into the two objects below and update three indices beside them.
+struct RdsRoute {
+    RdsRoute(engine::VrxId which, std::uint32_t rate, decode::Region what,
+             decode::RdsBitSync sync)
+        : vrx(which), composite_rate(rate), region(what), bits(std::move(sync)),
+          groups(what) {}
+
+    // Set before the route is handed to the completion thread and never
+    // written again, so reading them there needs no lock.
+    const engine::VrxId vrx;
+    const std::uint32_t composite_rate;
+
+    // Loop thread only: the token that detaches the sink again.
+    engine::AudioSinkId sink = 0;
+
+    // Everything below is written by the completion thread and read by the
+    // loop thread, under this lock. setRdsRegion writes all of it from the
+    // loop thread instead, which is the one place the ownership reverses and
+    // is why the region is in here rather than beside composite_rate.
+    std::mutex lock;
+
+    decode::Region region;
+    decode::RdsBitSync bits;
+    decode::RdsDecoder groups;
+
+    std::uint64_t last_group_sample = 0;
+
+    // The index at which ta last CHANGED, which is not the index at which it
+    // was first received. The first valid value is the state the station was
+    // already in when this decoder started, and recording it here would tell
+    // a client an announcement boundary happened where none did. So a
+    // station tuned mid-announcement reads ta true with this at zero, which
+    // is the honest answer.
+    std::uint64_t ta_changed_at = 0;
+    bool ta_seen = false;
+    bool last_ta = false;
+
+    // Why this decoder stopped, empty while it has not. The sink must not
+    // fail the dispatch, so a chunk that is not what the receiver promised
+    // is recorded here and reported to the next caller. Same arrangement as
+    // detector_fault_ and for the same reason.
+    std::string fault;
+};
+
 // One subscriber to one receiver's passband. Loop thread only, same as
 // Subscription above and for the same reasons.
 struct PassbandNode : std::enable_shared_from_this<PassbandNode> {
@@ -619,6 +815,34 @@ public:
     [[nodiscard]] Status ensure_detector();
     [[nodiscard]] Expected<DetectionSnapshot> detections(double min_confidence);
     [[nodiscard]] Status set_detection_threshold(double threshold_db);
+
+    // Event loop thread, all five.
+    //
+    // rds_station and set_rds_region both build the decoder if there is not
+    // one, so the four conditions are checked on whichever call comes first
+    // and a client presetting a region is told about an unsuitable receiver
+    // then rather than at its first poll.
+    [[nodiscard]] Expected<RdsSnapshot> rds_station(engine::VrxId vrx);
+    [[nodiscard]] Status set_rds_region(engine::VrxId vrx, decode::Region region);
+
+    // Detaches the sink and drops the decoder. Called when a receiver is
+    // removed through this session, and again by any poll that finds the
+    // receiver gone, so a removal this session never saw is still cleaned up
+    // the first time anybody asks.
+    void end_rds_for_vrx(engine::VrxId vrx);
+
+    // Clears one decoder's accumulated state, keeping its region and its
+    // sink. Called after a retune: PS, RadioText and the AF list belong to
+    // the station that was tuned, and a receiver moved to another frequency
+    // would otherwise assemble one station's text over another's.
+    void reset_rds_for_vrx(engine::VrxId vrx);
+
+    // Builds one, attaches its sink and records it. Split out because both
+    // entry points above reach it and both have already asked the engine
+    // for the receiver's status, which this needs and must not ask twice:
+    // the receiver could be removed between the two calls.
+    [[nodiscard]] Expected<std::shared_ptr<RdsRoute>> start_rds(
+        const engine::VrxStatus& status, decode::Region region);
 
 private:
     void serve(ServerOptions options);
@@ -752,6 +976,19 @@ private:
     // different lengths of time and a shared pool would be a queue with the
     // accounting hidden in it.
     std::map<std::uint32_t, std::shared_ptr<AudioRoute>> audio_routes_;
+
+    // One decoder per receiver a client has asked about, keyed the same way
+    // and owned the same way: the map is the loop thread's and each route's
+    // contents are shared with the completion thread under that route's own
+    // lock.
+    //
+    // Not pruned on its own. A receiver removed while a decoder was running
+    // leaves its entry here until somebody polls it or removes it through
+    // this session, which is the same residual Engine::attach_audio_sink
+    // documents for its fan-out map and is bounded by the same thing: ids
+    // are monotonic and never reused, so a stale entry can only be reached
+    // by a caller naming an id it removed itself.
+    std::map<std::uint32_t, std::shared_ptr<RdsRoute>> rds_routes_;
 
     kj::TaskSet* sends_ = nullptr;
 };
@@ -954,6 +1191,13 @@ public:
         // quiet channel with the squelch shut sounds identical, so the
         // subscriber is told in words.
         owner_.end_audio_for_vrx(*id, "the receiver was removed");
+
+        // And the decoder, which needs no message: rdsStation is a poll, so
+        // the next one answers with the engine's own "no receiver N is
+        // registered" rather than with a station that stopped moving. This
+        // call is what takes the sink off promptly; a removal that did not
+        // go through this session is cleaned up by that next poll instead.
+        owner_.end_rds_for_vrx(*id);
         return kj::READY_NOW;
     }
 
@@ -970,6 +1214,20 @@ public:
         if (auto applied = owner_.engine().set_vrx_params(*id, *params); !applied) {
             return to_exception(applied.error());
         }
+
+        // After the retune and only if it took. A receiver that moved is
+        // pointed at a different transmitter, and PS, RadioText, the AF list
+        // and the PI are that station's rather than this one's: keeping them
+        // would assemble one station's text over another's, character by
+        // character, with the A/B flag saying nothing changed.
+        //
+        // Every retune and not only one that moved the centre. The engine
+        // takes a whole VrxParams and this server cannot tell "the same
+        // frequency, a wider filter" from "a hundred kilohertz away" without
+        // keeping its own copy of what was there, and a copy that went stale
+        // would keep the wrong station's text at the one moment it matters.
+        // A client that retunes without meaning to pays a reacquisition.
+        owner_.reset_rds_for_vrx(*id);
         return kj::READY_NOW;
     }
 
@@ -1145,42 +1403,75 @@ public:
         return kj::READY_NOW;
     }
 
-    // The two surfaces the schema carries and the engine does not serve.
+    // The two RDS surfaces.
     //
-    // Refused rather than answered, and refused BEFORE the arguments are
-    // looked at. Checking the receiver id first would produce "no receiver 9
-    // is registered" for a bad id, which reads as though a good id would have
-    // worked, and the shape of a refusal is the only thing a caller can learn
-    // from a surface that does nothing.
-    //
-    // A station struct of zeros would look like a broken engine instead of
-    // unfinished work, and the person seeing it would go looking at the
-    // radio.
-    //
-    // The sentence is the same in both so that a client can match one phrase
-    // rather than two, and so that the branch turning these green has one
-    // string to delete. core/rpc/revenant.capnp says what each of them will
-    // do.
-    //
-    // subscribeAudio above was the third of them and is served now. Its
-    // refusal is gone rather than softened, which is why the one above reads
-    // the receiver id first and answers about the receiver: on a surface that
-    // works, "no receiver 9 is registered" is the true answer rather than the
-    // misleading one.
+    // BOTH READ THEIR ARGUMENTS AND ANSWER ABOUT THEM, which is the
+    // inversion this file used to describe in the other direction. Until
+    // 2026-09-20 these were refused before the arguments were looked at, so
+    // that a bad receiver id got "the surface is not wired" rather than "no
+    // receiver 9 is registered": on a surface that does nothing, the second
+    // reads as though a good id would have worked. On a surface that works
+    // it is the true answer, and the same sentence that was misleading then
+    // is the right one now. subscribeAudio made the same move for the same
+    // reason.
+    kj::Promise<void> rdsStation(RdsStationContext context) override {
+        auto id = to_vrx_id(context.getParams().getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
 
-    kj::Promise<void> rdsStation(RdsStationContext) override {
-        return to_exception(Error{
-            "rdsStation exists on the wire and is not wired to the engine yet. The decoder is "
-            "in core/decode and nothing in core/engine feeds it a composite, so serving this "
-            "means changing core/engine, which is its own branch. See "
-            "core/rpc/revenant.capnp for the four conditions the receiver will have to meet"});
+        auto taken = owner_.rds_station(*id);
+        if (!taken) {
+            return to_exception(taken.error());
+        }
+
+        auto out = context.getResults().initStation();
+
+        // The decode struct's own fields first, then the six that are not
+        // its own. core/rpc/convert.h has the split and why it is there.
+        write_rds_station(out, taken->state, taken->region);
+
+        out.setVrx(id->value);
+        out.setRegion(to_schema(taken->region));
+        out.setCompositeRate(taken->composite_rate);
+        out.setLastGroupSample(taken->last_group_sample);
+        out.setTaChangedAt(taken->ta_changed_at);
+
+        auto health = out.initHealth();
+        write_rds_bits_status(health, taken->bits);
+        health.setSync(to_schema(taken->sync));
+        health.setBitsFed(taken->bits_fed);
+        health.setGroupsDecoded(taken->groups_decoded);
+        health.setBlocksGood(taken->blocks_good);
+        health.setBlocksCorrected(taken->blocks_corrected);
+        health.setBlocksDropped(taken->blocks_dropped);
+        health.setSyncAcquisitions(taken->sync_acquisitions);
+        health.setSyncLosses(taken->sync_losses);
+        return kj::READY_NOW;
     }
 
-    kj::Promise<void> setRdsRegion(SetRdsRegionContext) override {
-        return to_exception(Error{
-            "setRdsRegion exists on the wire and is not wired to the engine yet. There is no "
-            "per-receiver RDS decoder to set a region on until rdsStation is served, and that "
-            "is its own branch. See core/rpc/revenant.capnp"});
+    kj::Promise<void> setRdsRegion(SetRdsRegionContext context) override {
+        auto request = context.getParams();
+
+        auto id = to_vrx_id(request.getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
+
+        // The region before the receiver, which is the one place in this
+        // pair the argument order matters. An ordinal this build cannot name
+        // means the caller was built against a newer schema, and answering
+        // that with a receiver's problem would send whoever read it to the
+        // radio.
+        auto region = from_schema(request.getRegion());
+        if (!region) {
+            return to_exception(region.error());
+        }
+
+        if (auto applied = owner_.set_rds_region(*id, *region); !applied) {
+            return to_exception(applied.error());
+        }
+        return kj::READY_NOW;
     }
 
 private:
@@ -1494,6 +1785,402 @@ Status ServerImpl::set_detection_threshold(double threshold_db) {
     // both because the detector validates them as a pair, and this call is
     // about the other one.
     return detector_->set_thresholds(threshold_db, detector_->config().confidence_threshold);
+}
+
+// ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The four conditions core/rpc/revenant.capnp states, asked in order and
+// answered one at a time.
+//
+// THE NATURAL BAR IS THE RATE ALONE AND THE RATE ALONE CERTIFIES ONE SHAPE
+// OUT OF FOUR. A receiver on the right rate with an AM detector in front of
+// it produces audio with no subcarrier anywhere; a WFM receiver at 171000
+// whose passband was clamped to a channel too narrow to hold 59375 Hz
+// produces a composite with the data band cut off. Neither decodes, neither
+// faults, and both look exactly like a station that has no RDS.
+[[nodiscard]] Status rds_receiver_is_suitable(const engine::VrxStatus& status) {
+    const std::uint32_t id = status.id.value;
+    const engine::Demod mode = status.params.demod;
+
+    // 1. Only a discriminator produces a composite. NFM is admitted beside
+    //    WFM: core/shaders/vrx_demod.comp reaches the same atan2 branch for
+    //    both, only the gain differs, and the decoder is scale invariant.
+    if (mode != engine::Demod::Nfm && mode != engine::Demod::Wfm) {
+        return fail(std::format(
+            "receiver {} is {} and RDS is decoded from an FM composite, which only a "
+            "discriminator produces. An envelope detector and the four product detectors "
+            "give audio with no 57 kHz subcarrier in it at any rate. Point a receiver with "
+            "demod wfm at the station",
+            id, engine::demod_name(mode)));
+    }
+
+    // 2. Real and mono. Today this is exactly what condition 1 already
+    //    excluded, because the raw tap is the only thing in the tree that
+    //    writes an interleaved complex pair and it is not a discriminator.
+    //    There is nothing left to ask here, so nothing is asked; the guard
+    //    that survives is in on_rds_chunk, which refuses a chunk whose
+    //    channel count is not one rather than reading I and Q as
+    //    consecutive samples of a signal that does not exist. Stated so
+    //    that a reader counting four conditions against three checks knows
+    //    which one moved and where it went.
+
+    // 3. The audio rate, against the RECEIVER's bound rather than the
+    //    decoder's.
+    const dsp::SampleRate audio_rate = status.params.audio_rate;
+    if (audio_rate <= 0) {
+        // Not a rate this server can name, rather than a rate it can
+        // refuse. VrxParams::audio_rate is a verbatim echo and zero means
+        // the receiver took EngineConfig::audio_rate, which is not on
+        // EngineInfo and so is not visible from here or from a client.
+        // Guessing it would mean admitting a receiver at whatever the
+        // engine's default happens to be, and the default is 48000, where
+        // the composite is already destroyed.
+        return fail(std::format(
+            "receiver {} took the engine's default audio rate, which is not a number this "
+            "server can read: VrxParams::audioRate comes back as the verbatim zero that was "
+            "sent and EngineInfo does not carry the default. State the rate on the receiver. "
+            "171000 is the one to state: it is three times the 57 kHz subcarrier and 144 "
+            "times the 1187.5 bit/s bit rate, both exact",
+            id));
+    }
+
+    const dsp::SampleRate demod_rate = status.demod_rate;
+    const bool decimated = demod_rate > audio_rate;
+    const dsp::SampleRate bound =
+        decimated ? kFilteredCompositeRateHz : decode::kMinimumRateHz;
+    if (audio_rate < bound) {
+        if (decimated) {
+            return fail(std::format(
+                "receiver {} runs at {} S/s of audio and a composite from a receiver needs "
+                "at least {}. It demodulates at {} and decimates by {}, so it has an audio "
+                "filter whose passband edge is 0.4 of the audio rate, which is {} Hz: the "
+                "composite reaches {} Hz and the top of the data band is already in the "
+                "stopband. The decoder's own bound is {}, and it is lower because a "
+                "composite from a file or a modulator went through no such filter",
+                id, audio_rate, kFilteredCompositeRateHz, demod_rate,
+                demod_rate / std::max<dsp::SampleRate>(audio_rate, 1),
+                (audio_rate * 2) / 5, kCompositeTopHz, decode::kMinimumRateHz));
+        }
+        return fail(std::format(
+            "receiver {} runs at {} S/s of audio and the composite reaches {} Hz, so the "
+            "decoder needs at least {}. Its decimation resolved to one, so the planner "
+            "designed no audio filter and this is the decoder's own bound rather than the "
+            "receiver's higher one",
+            id, audio_rate, kCompositeTopHz, decode::kMinimumRateHz));
+    }
+
+    // 4. The granted passband, read off the placement rather than the
+    //    request, because each edge is fitted on its own and a request too
+    //    wide on one side keeps the other edge where it was.
+    //
+    //    NECESSARY AND NOT SUFFICIENT, which is why this is a bar and not a
+    //    prediction. Carson for a multiplex deviating 75 kHz and reaching
+    //    59375 Hz is about 268750 Hz, so the ordinary 200 kHz broadcast
+    //    passband already truncates the sidebands and a receiver at the
+    //    bare minimum here will decode worse than one at 200000. The health
+    //    counters are how a client finds that out.
+    const engine::VrxPlacement& placement = status.placement;
+    if (placement.granted_low > -kCompositeTopHz ||
+        placement.granted_high < kCompositeTopHz) {
+        return fail(std::format(
+            "receiver {} was granted the passband {} to {} Hz about its centre and the FM "
+            "composite reaches {} Hz either side, so the data band is outside the filter. "
+            "{}Widen the receiver, or place it on a grid with wider channels: one channel is "
+            "{} S/s here and a receiver cannot be given more than half of that either side "
+            "of where it sits",
+            id, placement.granted_low, placement.granted_high, kCompositeTopHz,
+            placement.bandwidth_clamped
+                ? "The request was clamped to what one grid channel can carry. "
+                : "",
+            placement.channel_rate));
+    }
+
+    return {};
+}
+
+// The engine's completion thread, with route.lock held by the callable that
+// got here.
+//
+// A free function and not a ServerImpl member, which is the whole of the
+// difference from on_audio_chunk and is worth the line it costs to say: it
+// reaches nothing but the route it is handed, so there is no owner pointer
+// to check and no gate to close. A sink call still running when the Server
+// is destroyed writes into a route the callable itself keeps alive.
+//
+// Returns void because there is nothing it could usefully refuse. The
+// decoder has no error channel of its own, and the graph turns a refusing
+// sink into a failing dispatch, so the two things that can go wrong are
+// recorded in the route and reported to the next poll instead.
+void decode_rds_chunk(RdsRoute& route, const engine::AudioChunk& chunk) {
+    if (!route.fault.empty()) {
+        return;
+    }
+
+    // The two things a chunk can be that the decoder was not built for. Both
+    // are recorded rather than returned: a sink that refuses fails the
+    // dispatch and ends the run, and losing the radio over a decoder is the
+    // wrong trade for the same reason it is wrong for the detector.
+    if (chunk.channels != 1) {
+        route.fault = std::format(
+            "receiver {} delivered {} interleaved channels and the decoder was built for a "
+            "real mono composite. Reading an interleaved pair as consecutive samples "
+            "decodes a signal that does not exist, so this decoder stopped",
+            route.vrx.value, chunk.channels);
+        return;
+    }
+    if (chunk.rate != route.composite_rate) {
+        route.fault = std::format(
+            "receiver {} delivered audio at {} S/s and the decoder was built for {}. Its "
+            "loops are sized by the rate, so the ones running now are for a rate the "
+            "receiver is not producing, and this decoder stopped rather than reporting a "
+            "subcarrier offset that is an artefact of the mismatch",
+            route.vrx.value, chunk.rate, route.composite_rate);
+        return;
+    }
+
+    // A muted chunk is fed like any other. core/engine/graph.cpp writes
+    // zeros into the readback buffer when the gate is shut, and those zeros
+    // are what the receiver produced: skipping them would take the
+    // composite timeline out of step with samplesConsumed, which is the unit
+    // both sample indices on the wire are stated in. A gated receiver simply
+    // loses lock, which is the truth about what reached it.
+
+    // One std::function built per chunk and not per sample. It captures one
+    // pointer, which MSVC's small-object buffer holds inline, so the
+    // per-chunk cost is a construction and no allocation.
+    route.bits.process(chunk.samples, [&route](bool bit) {
+        const std::uint64_t before = route.groups.groups_decoded();
+        route.groups.feed(bit);
+        if (route.groups.groups_decoded() == before) {
+            return;
+        }
+
+        // Read inside the sink rather than after the chunk, so the index is
+        // the sample the group's last bit came out of rather than the end of
+        // whatever buffer happened to carry it. A chunk is about 12 ms of
+        // composite at the block sizes this tree runs and a group is 87.6
+        // ms, so chunk resolution would have been visible.
+        const std::uint64_t at = route.bits.status().samples_consumed;
+        route.last_group_sample = at;
+
+        // TA can only move when a group completes, so it is asked here
+        // rather than per bit.
+        const decode::StationState& state = route.groups.state();
+        if (!state.ta_valid) {
+            return;
+        }
+        if (!route.ta_seen) {
+            route.ta_seen = true;
+            route.last_ta = state.ta;
+            return;
+        }
+        if (state.ta != route.last_ta) {
+            route.last_ta = state.ta;
+            route.ta_changed_at = at;
+        }
+    });
+}
+
+}  // namespace
+
+Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
+    // The receiver first, on every poll and not only on the first. It is one
+    // map lookup in the graph and it is what makes a decoder outliving its
+    // receiver impossible to read: a removal by any path, including one this
+    // session never saw, is answered in the engine's own words here and the
+    // decoder is dropped on the way out.
+    auto status = engine_.vrx_status(vrx);
+    if (!status) {
+        end_rds_for_vrx(vrx);
+        return std::unexpected(status.error());
+    }
+
+    std::shared_ptr<RdsRoute> route;
+    if (auto found = rds_routes_.find(vrx.value); found != rds_routes_.end()) {
+        route = found->second;
+    } else {
+        // THE DEFAULT REGION IS STATED HERE AND NOWHERE ELSE, and it is RDS.
+        // A client that has not called setRdsRegion gets EN 50067's reading
+        // of the bitstream, reads it back off RdsStation::region, and can
+        // change it. There is no inference from the tuned frequency and
+        // there is deliberately none: core/decode/rds_groups.h has the
+        // argument, and a server that guessed would be making a setting
+        // look like a measurement.
+        auto built = start_rds(*status, decode::Region::kRds);
+        if (!built) {
+            return std::unexpected(built.error());
+        }
+        route = std::move(*built);
+    }
+
+    const std::scoped_lock held(route->lock);
+    if (!route->fault.empty()) {
+        return fail(route->fault);
+    }
+
+    RdsSnapshot out;
+    out.state = route->groups.state();
+    out.bits = route->bits.status();
+    out.region = route->region;
+    out.sync = route->groups.sync_state();
+    out.bits_fed = route->groups.bits_fed();
+    out.groups_decoded = route->groups.groups_decoded();
+    out.blocks_good = route->groups.blocks_good();
+    out.blocks_corrected = route->groups.blocks_corrected();
+    out.blocks_dropped = route->groups.blocks_dropped();
+    out.sync_acquisitions = route->groups.sync_acquisitions();
+    out.sync_losses = route->groups.sync_losses();
+    out.composite_rate = route->composite_rate;
+    out.last_group_sample = route->last_group_sample;
+    out.ta_changed_at = route->ta_changed_at;
+    return out;
+}
+
+Status ServerImpl::set_rds_region(engine::VrxId vrx, decode::Region region) {
+    auto status = engine_.vrx_status(vrx);
+    if (!status) {
+        end_rds_for_vrx(vrx);
+        return std::unexpected(status.error());
+    }
+
+    auto found = rds_routes_.find(vrx.value);
+    if (found == rds_routes_.end()) {
+        // Built at the region asked for rather than built at the default and
+        // then reset, so the client presetting a region pays nothing and
+        // learns about an unsuitable receiver now.
+        auto built = start_rds(*status, region);
+        if (!built) {
+            return std::unexpected(built.error());
+        }
+        return {};
+    }
+
+    const std::shared_ptr<RdsRoute>& route = found->second;
+    const std::scoped_lock held(route->lock);
+
+    route->region = region;
+
+    // BOTH LAYERS, INCLUDING THE ONE THE REGION DOES NOT REACH.
+    //
+    // The physical layer knows nothing about regions, so resetting it costs
+    // a reacquisition, about half a second, for no decoding benefit. It is
+    // reset anyway because every counter in RdsHealth is documented as
+    // cumulative from the moment the decoder was built, and a client
+    // differences two polls to get a rate. Clearing the block layer's
+    // counters and not the bit layer's would leave one struct with two
+    // epochs in it, and a difference taken across the change would divide
+    // one layer's delta by the other's elapsed samples.
+    //
+    // The same reset also puts samplesConsumed back to zero, which is the
+    // unit lastGroupSample and taChangedAt are stated in, so those two go
+    // with it.
+    route->bits.reset();
+    route->groups = decode::RdsDecoder(region);
+    route->last_group_sample = 0;
+    route->ta_changed_at = 0;
+    route->ta_seen = false;
+    route->last_ta = false;
+    route->fault.clear();
+    return {};
+}
+
+Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatus& status,
+                                                          decode::Region region) {
+    if (auto suitable = rds_receiver_is_suitable(status); !suitable) {
+        return std::unexpected(suitable.error());
+    }
+
+    {
+        const std::scoped_lock held(sink_lock_);
+        if (sink_closed_) {
+            return fail("this server is stopping and will install no further sinks");
+        }
+    }
+
+    decode::RdsBitsConfig config;
+    config.rate = status.params.audio_rate;
+
+    auto sync = decode::RdsBitSync::create(config);
+    if (!sync) {
+        return std::unexpected(with_context(
+            sync.error(),
+            std::format("building the RDS decoder for receiver {}", status.id.value)));
+    }
+
+    auto route = std::make_shared<RdsRoute>(
+        status.id, static_cast<std::uint32_t>(status.params.audio_rate), region,
+        std::move(*sync));
+
+    // attach rather than set, which is the seam core/engine/engine.h exists
+    // for: a recording, a loudspeaker or an audio subscription already on
+    // this receiver keeps its audio and this decoder joins beside it.
+    auto attached = engine_.attach_audio_sink(
+        status.id, [route](const engine::AudioChunk& chunk) -> Status {
+            const std::scoped_lock owned(route->lock);
+            decode_rds_chunk(*route, chunk);
+            return {};
+        });
+    if (!attached) {
+        return std::unexpected(attached.error());
+    }
+    route->sink = *attached;
+
+    rds_routes_.emplace(status.id.value, route);
+    return route;
+}
+
+void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
+    auto found = rds_routes_.find(vrx.value);
+    if (found == rds_routes_.end()) {
+        return;
+    }
+
+    auto route = found->second;
+    rds_routes_.erase(found);
+
+    {
+        const std::scoped_lock held(sink_lock_);
+        if (!sink_closed_) {
+            // Discarded: the only failures are a receiver the graph no
+            // longer knows, which is the ordinary teardown order and the
+            // usual way this function is reached, and a token already
+            // detached, which stop() would have done.
+            static_cast<void>(engine_.detach_audio_sink(vrx, route->sink));
+        }
+    }
+
+    // Taken and released, which is what waits for a sink call that was
+    // already inside the decoder when the detach was queued. The detach is
+    // asynchronous, so a dispatch recorded before it can still arrive; the
+    // route outlives this scope in the callable's own shared_ptr and its
+    // decode reaches nothing but itself, so a late call is harmless once
+    // this has returned.
+    const std::scoped_lock owned(route->lock);
+}
+
+void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx) {
+    auto found = rds_routes_.find(vrx.value);
+    if (found == rds_routes_.end()) {
+        return;
+    }
+
+    const std::shared_ptr<RdsRoute>& route = found->second;
+    const std::scoped_lock held(route->lock);
+    route->bits.reset();
+    route->groups.reset();
+    route->last_group_sample = 0;
+    route->ta_changed_at = 0;
+    route->ta_seen = false;
+    route->last_ta = false;
+
+    // The fault is NOT cleared. A retune cannot change the audio rate or the
+    // channel count: both are shape, and Graph::set_vrx_params refuses a
+    // retune that changes the shape rather than applying it, so a receiver
+    // that delivered the wrong thing once will deliver it again.
 }
 
 Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
@@ -2394,6 +3081,17 @@ void ServerImpl::stop() {
         entry.second->nodes.clear();
     }
     audio_routes_.clear();
+
+    // And every RDS decoder, on the same terms. Taking each route's lock is
+    // what makes a sink call already inside the decoder finish before this
+    // returns; there is no owner to clear, because the decode reaches
+    // nothing outside its own route.
+    for (const auto& entry : rds_routes_) {
+        static_cast<void>(
+            engine_.detach_audio_sink(engine::VrxId{entry.first}, entry.second->sink));
+        const std::scoped_lock owned(entry.second->lock);
+    }
+    rds_routes_.clear();
 
     {
         std::scoped_lock held(frame_lock_);

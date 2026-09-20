@@ -35,7 +35,6 @@ if(TARGET revenant_rpc_server)
         test_rpc_session.cpp
         test_rpc_spectrum.cpp
         test_rpc_token.cpp
-        test_rpc_unwired.cpp
     )
 
     target_link_libraries(revenant_rpc_tests PRIVATE

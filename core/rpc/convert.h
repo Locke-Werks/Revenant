@@ -23,6 +23,8 @@
 
 #pragma once
 
+#include "core/decode/rds_bits.h"
+#include "core/decode/rds_groups.h"
 #include "core/detect/detector.h"
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
@@ -64,8 +66,40 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
 static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
               static_cast<std::uint16_t>(detect::TrackState::Merged));
 
+// And the three RDS enums, which is the assert core/rpc/types.h and
+// core/rpc/client.cpp both said would land here: they hold the schema
+// against the client's mirror, this file holds it against the decoder, and
+// nothing else in the tree sees both ends of the second pair.
+//
+// The region is the one that matters, because it is the only one written IN
+// rather than read out. Renumber decode::Region without renumbering the
+// schema and every station on one continent is decoded with the other's PTY
+// table and call sign rules, which draws and is wrong, and nothing
+// downstream can tell.
+static_assert(static_cast<std::uint16_t>(schema::RdsRegion::RDS) ==
+              static_cast<std::uint16_t>(decode::Region::kRds));
+static_assert(static_cast<std::uint16_t>(schema::RdsRegion::RBDS) ==
+              static_cast<std::uint16_t>(decode::Region::kRbds));
+
+static_assert(static_cast<std::uint16_t>(schema::RdsLock::UNLOCKED) ==
+              static_cast<std::uint16_t>(decode::RdsLock::Unlocked));
+static_assert(static_cast<std::uint16_t>(schema::RdsLock::ACQUIRING) ==
+              static_cast<std::uint16_t>(decode::RdsLock::Acquiring));
+static_assert(static_cast<std::uint16_t>(schema::RdsLock::LOCKED) ==
+              static_cast<std::uint16_t>(decode::RdsLock::Locked));
+
+static_assert(static_cast<std::uint16_t>(schema::RdsSync::HUNTING) ==
+              static_cast<std::uint16_t>(decode::SyncState::kHunting));
+static_assert(static_cast<std::uint16_t>(schema::RdsSync::PRE_SYNC) ==
+              static_cast<std::uint16_t>(decode::SyncState::kPreSync));
+static_assert(static_cast<std::uint16_t>(schema::RdsSync::SYNCED) ==
+              static_cast<std::uint16_t>(decode::SyncState::kSynced));
+
 [[nodiscard]] schema::Demod to_schema(engine::Demod mode);
 [[nodiscard]] schema::TrackState to_schema(detect::TrackState state);
+[[nodiscard]] schema::RdsRegion to_schema(decode::Region region);
+[[nodiscard]] schema::RdsLock to_schema(decode::RdsLock lock);
+[[nodiscard]] schema::RdsSync to_schema(decode::SyncState sync);
 
 // Rejects an out-of-range ordinal rather than casting it.
 //
@@ -76,6 +110,13 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
 // Mode is the one receiver parameter where being wrong is inaudible until
 // somebody notices the recording is unintelligible.
 [[nodiscard]] Expected<engine::Demod> from_schema(schema::Demod mode);
+
+// The same, for the one RDS enum a client sends rather than reads. An
+// ordinal nobody here knows is refused rather than cast, because the two
+// readings of the bitstream are mutually incompatible and picking the wrong
+// one is silent: PTY 26 renders as National Music in one and Hip-Hop in the
+// other, both draw, and nothing downstream can tell.
+[[nodiscard]] Expected<decode::Region> from_schema(schema::RdsRegion region);
 
 void write_rational(schema::Rational::Builder out, std::int64_t numerator,
                     std::int64_t denominator);
@@ -120,6 +161,39 @@ void write_passband_frame(schema::PassbandFrame::Builder out,
 // make reviewable, not an instance of it. The one place they are written is
 // ServerImpl::detections, next to the code that reads them.
 void write_detection(schema::Detection::Builder out, const detect::Track& in);
+
+// One station's accumulated group-layer state.
+//
+// LOSSY IN ONE DIRECTION AND INCOMPLETE IN THE OTHER, and both halves of
+// that have to be said or the rule at the top of this file is broken twice.
+//
+// Lossy: it leaves behind the decoder's own assembly state, the partially
+// built AF pair, the pending LF/MF flag and the leaky-bucket error credit,
+// for the reason schema::RdsStation gives. A schema is a contract rather
+// than a mirror.
+//
+// Incomplete: six fields of schema::RdsStation are NOT written here, because
+// they are not fields of decode::StationState and never will be. vrx,
+// region, compositeRate, taChangedAt and lastGroupSample belong to the
+// server's own bookkeeping, and health draws on two objects rather than one
+// (RdsBitsStatus for the physical half and RdsDecoder's counters for the
+// block half). They are written in core/rpc/server.cpp beside the code that
+// keeps them, which is the same split ServerImpl::detections makes for
+// DetectionList's five non-track fields and for the same reason: taking
+// them here as loose scalars would be the mechanical-copy mistake this file
+// exists to make reviewable rather than an instance of it.
+//
+// region is a parameter and not a field of the state because the PTY names
+// and the call sign derivation are region dependent and StationState carries
+// neither of them. Passing the decoder's own region is the caller's job, and
+// passing a different one produces a struct whose names disagree with the
+// bytes they came from.
+void write_rds_station(schema::RdsStation::Builder out, const decode::StationState& in,
+                       decode::Region region);
+
+// The physical half of RdsHealth. The block half is nine counters off
+// RdsDecoder and is written by the caller: see the note above.
+void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBitsStatus& in);
 
 [[nodiscard]] Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in);
 

@@ -56,24 +56,27 @@
 # not listen is owed the retraction rather than a schema that reads as though
 # it never said it.
 #
-# WHAT IS ON THE WIRE HERE AND NOT YET BEHIND IT
+# WHAT THIS SECTION USED TO SAY, WHICH WAS TRUE FOR ONE DAY
 #
-# rdsStation and setRdsRegion are declared, ordinal-allocated and refused.
+# It was headed "WHAT IS ON THE WIRE HERE AND NOT YET BEHIND IT" and read:
+# "rdsStation and setRdsRegion are declared, ordinal-allocated and refused.
 # No RDS decoder is wired into the engine; that is its own lane. The refusal
 # names the surface and says it is not wired, because a method that answered
 # with a zeroed struct would read as a broken engine rather than as
-# unfinished work.
+# unfinished work." It then recorded that subscribeAudio had been the third
+# of the three and was served.
 #
-# subscribeAudio was the third of them and is served as of 2026-09-20. This
-# paragraph used to name it alongside the other two and say "the engine has
-# no wire audio fan-out"; core/engine/engine.h has AudioFanout and
-# Engine::attach_audio_sink now, and tests/rpc/test_rpc_audio.cpp drives the
-# whole path over a socket. What the paragraph said about the refusal's shape
-# still holds for the two that remain.
+# All three are served now, as of 2026-09-20. The decoder is not in the
+# engine and was never going to be: core/rpc/server.cpp builds one per
+# receiver on the first call and joins it to that receiver's audio fan-out,
+# and the long note at the top of that file has the argument against putting
+# it in core/engine, which core/engine/vrx.h had already made from the other
+# side. tests/rpc/test_rpc_rds.cpp runs a synthetic station through the GPU
+# chain and reads its PI, PS and RadioText back over a socket.
 #
 # The reason all three ordinals were allocated in one pass is that a Cap'n
 # Proto field number is permanent and three lanes racing to append would
-# collide.
+# collide. That worked: nothing here moved when each lane landed.
 
 using Cxx = import "/capnp/c++.capnp";
 $Cxx.namespace("revenant::rpc::schema");
@@ -949,9 +952,24 @@ interface AudioSubscription {
 # audio path with no resampling anywhere: 171000 is what
 # decode::RdsBitsConfig::rate defaults to, it is three times the 57 kHz
 # subcarrier and 144 times the 1187.5 bit/s bit rate. Point a DEDICATED
-# receiver at the station rather than reusing the one being listened to: the
+# receiver at the station rather than reusing the one being listened to, and
+# the reason is now the signal rather than the plumbing: a 171 kHz composite
+# is not audio anybody wants to hear, and a receiver at a rate somebody does
+# want to hear it at has already lost the subcarrier.
+#
+# THAT SENTENCE USED TO CARRY A SECOND REASON AND IT IS GONE. It read "the
 # engine allows one audio sink per receiver and setting a second replaces the
-# first, and a 171 kHz composite is not audio anybody wants to hear.
+# first". core/engine/engine.h has AudioFanout and Engine::attach_audio_sink
+# as of 2026-09-20, so a decoder joins whatever is already listening instead
+# of displacing it. It costs a receiver rather than a listener now.
+#
+# AND audioRate HAS TO BE STATED, not left at zero. VrxParams::audioRate is a
+# verbatim echo on the way out, so a receiver that took the engine's default
+# reads back as zero, and EngineInfo does not carry that default. The server
+# refuses such a receiver naming this, rather than admitting one at whatever
+# the default happens to be: it is 48000, where the composite is already
+# destroyed. Putting the resolved rate on VrxStatus or EngineInfo would close
+# it and is a schema change nobody has needed for anything else yet.
 #
 # ONE CANDIDATE THAT LOOKS OBVIOUS AND IS PHYSICALLY IMPOSSIBLE
 #
@@ -963,12 +981,15 @@ interface AudioSubscription {
 # first thing anybody proposes.
 
 enum RdsRegion {
-    # The ordinals are chosen to match revenant::decode::Region, which is
-    # kRds then kRbds, so the conversion the decode lane writes can be a cast
-    # with a static_assert over it rather than a table that can drift. It is
-    # only a cast once that lane writes it: convert.h asserts every pair it
-    # converts and this pair is not converted yet, so what is here today is a
-    # matched ordering and not an enforced one.
+    # The ordinals match revenant::decode::Region, which is kRds then kRbds.
+    # core/rpc/convert.h asserts the pair and core/rpc/convert.cpp converts
+    # it through an exhaustive switch rather than the cast the assert would
+    # allow, because an assert catches a REORDER and cannot catch a third
+    # region added to the decoder alone.
+    #
+    # This note used to end "what is here today is a matched ordering and not
+    # an enforced one", which was true while nothing converted it. It is
+    # enforced now.
     #
     # A SETTING AND NEVER AN INFERENCE, and core/decode/rds_groups.h has the
     # argument at length. No field names the region; the nearest thing is an
@@ -1649,9 +1670,13 @@ interface Session {
 
     # What the RDS decoder on one receiver has accumulated.
     #
-    # NOT SERVED YET, on the same terms subscribeAudio states. The decoder
-    # exists in core/decode and nothing in core/engine feeds it; wiring it in
-    # is its own lane. Refused, naming the surface.
+    # THIS USED TO SAY "NOT SERVED YET, on the same terms subscribeAudio
+    # states. The decoder exists in core/decode and nothing in core/engine
+    # feeds it; wiring it in is its own lane. Refused, naming the surface."
+    # It is served as of 2026-09-20, and nothing in core/engine feeds it
+    # still: core/rpc/server.cpp holds the decoder and joins it to the
+    # receiver's audio fan-out, which is not the lane that paragraph
+    # expected and is the one core/engine/vrx.h argued for.
     #
     # A poll rather than a subscription, on exactly the argument
     # Session::detections makes above and for the same reason a track list is
@@ -1669,7 +1694,7 @@ interface Session {
     #
     # THE FIRST CALL IS WHAT STARTS THE DECODER, the same way the first
     # detections call builds the detector and the first listSources starts the
-    # enumeration thread. It installs an audio sink on that receiver, builds
+    # enumeration thread. It joins that receiver's audio fan-out, builds
     # the physical and group layers, and answers with an unlocked decoder and
     # zero groups, because it cannot answer otherwise. A client polls again.
     # From then on the decoder runs on the engine's completion thread for the
@@ -1678,24 +1703,65 @@ interface Session {
     # away accumulated station state that the disconnecting client does not
     # own.
     #
-    # IT TAKES THE RECEIVER'S AUDIO SINK. There is one sink per receiver and
-    # setting a second replaces the first, so this call is refused on a
-    # receiver that already has one rather than displacing it. Point it at a
-    # receiver created for the purpose: demod = wfm, audioRate = 171000, on
-    # the station's frequency. The four conditions in the RDS section above
-    # are what the refusal checks, and the refusal names which one failed.
+    # WHAT THIS PARAGRAPH USED TO SAY, AND IT WAS TRUE WHEN IT WAS WRITTEN
+    #
+    # It was headed "IT TAKES THE RECEIVER'S AUDIO SINK" and read: "There is
+    # one sink per receiver and setting a second replaces the first, so this
+    # call is refused on a receiver that already has one rather than
+    # displacing it."
+    #
+    # It does not take the sink. Engine::attach_audio_sink landed on
+    # 2026-09-20 with AudioFanout behind it, so this call JOINS whatever is
+    # already listening: a recording, a loudspeaker, another client's
+    # subscribeAudio. Nothing is displaced and nothing is refused on that
+    # ground. The retraction matters because that sentence was an
+    # instruction to a client as much as a description, and a client that
+    # believed it would have torn its own audio subscription down first.
+    #
+    # Still point it at a receiver created for the purpose: demod = wfm,
+    # audioRate = 171000, on the station's frequency. The four conditions in
+    # the RDS section above are what the refusal checks and it names which
+    # one failed. A listening receiver fails the third of them, so the
+    # dedicated receiver is a consequence of the RATE rather than of the
+    # sink.
+    #
+    # A REMOVED RECEIVER TAKES ITS DECODER WITH IT. This is a poll, so there
+    # is nothing to notify: the next call answers with the engine's own "no
+    # receiver N is registered" and the decoder is dropped there, whether the
+    # removal went through removeVrx or happened some other way. What is not
+    # kept is the accumulated state, so a client that wants the last reading
+    # of a station it removed has to have kept it.
+    #
+    # A RETUNE CLEARS IT. setVrxParams on a receiver with a decoder resets
+    # that decoder, because a receiver that moved is pointed at a different
+    # transmitter and PS, RadioText, the AF list and the PI belong to the one
+    # it left. Every retune and not only one that moved the centre: the
+    # server is handed a whole VrxParams and cannot tell a wider filter from
+    # a hundred kilohertz away without keeping a copy that could go stale.
     rdsStation @14 (vrx :UInt64) -> (station :RdsStation);
 
-    # The region the decoder for this receiver uses. NOT SERVED YET, on the
-    # same terms as rdsStation.
+    # The region the decoder for this receiver uses, and it defaults to rds.
     #
     # Settable before the first rdsStation call, so a client does not have to
     # poll once at the wrong region and then correct it, which is the same
-    # arrangement setDetectionThreshold has with detections. Called on a
-    # receiver whose decoder already exists, it rebuilds it and clears the
-    # accumulated state: the PTY table and the call sign derivation are both
-    # region dependent, so keeping the old state would mix two readings of the
-    # same bytes in one struct.
+    # arrangement setDetectionThreshold has with detections. It BUILDS the
+    # decoder when there is not one rather than recording a preference for
+    # later, so the four conditions are checked on whichever of these two
+    # methods a client calls first.
+    #
+    # Called on a receiver whose decoder already exists, it rebuilds it and
+    # clears the accumulated state: the PTY table and the call sign
+    # derivation are both region dependent, so keeping the old state would
+    # mix two readings of the same bytes in one struct. That reset reaches
+    # the PHYSICAL layer as well, which the region does not touch, and costs
+    # about half a second of reacquisition. It is done anyway because every
+    # counter in RdsHealth is cumulative from the moment the decoder was
+    # built: clearing one layer and not the other would leave one struct
+    # holding two epochs, and a client differencing two polls across the
+    # change would divide one layer's delta by the other's elapsed samples.
+    #
+    # This paragraph used to end at "in one struct", which said what was
+    # cleared and not how far the clearing reached.
     #
     # Per receiver and not engine-wide, unlike setDetectionThreshold. Two
     # receivers can sit on two stations and there is no reason in the standard
