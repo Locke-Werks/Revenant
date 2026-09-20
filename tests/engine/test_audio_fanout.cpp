@@ -3,9 +3,14 @@
 // AudioFanout is the only part of core/engine/engine.h that is pure host
 // code: it holds a list of callables and calls them. Everything the wire
 // cases in tests/rpc assert about two consumers on one receiver rests on the
-// four properties below, and none of them needs a device to check, so they
-// are checked here where a failure names the property rather than a
-// subscription that went quiet.
+// properties below, and none of them needs a device to check, so they are
+// checked here where a failure names the property rather than a subscription
+// that went quiet.
+//
+// This sentence used to say "the four properties below" and there are five.
+// The count was right once. Counting is the wrong shape for it, the same
+// mistake engine.h's own AudioChunk comment records, so the number is gone
+// rather than corrected.
 //
 // Engine::attach_audio_sink is NOT exercised here and cannot be. It calls
 // set_audio_sink, which is pure virtual, so reaching it means a real Engine
@@ -130,6 +135,53 @@ TEST_CASE("detaching one consumer leaves the others attached",
     CHECK(fanout.empty());
     REQUIRE(fanout.deliver(empty_chunk()).has_value());
     CHECK(kept == 2);
+}
+
+TEST_CASE("an empty sink is skipped rather than called", "[engine][audio][fanout]") {
+    engine::AudioFanout fanout;
+    int before = 0;
+    int after = 0;
+
+    const engine::AudioSinkId first =
+        fanout.attach([&before](const engine::AudioChunk&) -> Status {
+            before += 1;
+            return {};
+        });
+
+    // Engine::attach_audio_sink refuses this and says why, so the guard in
+    // deliver is unreachable through the seam and reachable through the
+    // class: attach returns a token and has no error channel to refuse with.
+    // A caller that lost its callable gets a fan-out that skips it, and the
+    // alternative is calling an empty std::function on the thread retiring
+    // GPU readbacks.
+    const engine::AudioSinkId hollow = fanout.attach(engine::AudioSink{});
+    const engine::AudioSinkId last =
+        fanout.attach([&after](const engine::AudioChunk&) -> Status {
+            after += 1;
+            return {};
+        });
+
+    // It occupies a place and holds a token of its own, so the ones behind
+    // it are not renumbered by its presence.
+    CHECK(fanout.size() == 3);
+    CHECK(hollow != first);
+    CHECK(hollow != last);
+
+    const auto outcome = fanout.deliver(empty_chunk());
+
+    // Skipped, and the sink behind it still ran. A guard that returned
+    // instead of continuing would leave `after` at zero.
+    REQUIRE(outcome.has_value());
+    CHECK(before == 1);
+    CHECK(after == 1);
+
+    // And it is an ordinary member otherwise: its token detaches it and the
+    // fan-out shrinks.
+    CHECK(fanout.detach(hollow));
+    CHECK(fanout.size() == 2);
+    REQUIRE(fanout.deliver(empty_chunk()).has_value());
+    CHECK(before == 2);
+    CHECK(after == 2);
 }
 
 TEST_CASE("a token that is not attached detaches nothing", "[engine][audio][fanout]") {

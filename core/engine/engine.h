@@ -501,6 +501,13 @@ public:
         const std::shared_ptr<const Entries> entries = live_.load();
         Status outcome;
         for (const Entry& entry : *entries) {
+            // Unreachable through Engine::attach_audio_sink, which refuses an
+            // empty sink before it gets here, and reachable through this
+            // class, which has no error channel on attach and so takes what
+            // it is given. A caller that lost its callable gets a token that
+            // detaches and a fan-out that skips it, rather than a crash on
+            // the thread retiring GPU readbacks.
+            // tests/engine/test_audio_fanout.cpp drives it through the class.
             if (!entry.sink) {
                 continue;
             }
