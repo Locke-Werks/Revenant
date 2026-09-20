@@ -678,6 +678,58 @@ TEST_CASE("sync holds through a short fade and is dropped by a long one", "[rds]
     }
 }
 
+TEST_CASE("no correction runs while acquiring sync", "[rds]") {
+    // Kopitz and Marks section 12.2.3, and the arithmetic in rds_groups.cpp's
+    // acquisition comment: a corrector applied to a window that is not a block
+    // at all lets 367 more syndromes count as a match, which is what turns the
+    // 5/1024 false-anchor rate into something that matters. A single bit is
+    // the cheapest thing the corrector can repair, so a decoder that corrected
+    // during acquisition would anchor on it and be synced a block sooner.
+    const GroupWords words{0xC0FF, 0x0000, 0x0000, 0x0000, false};
+
+    SECTION("a clean group is enough") {
+        RdsDecoder decoder;
+        feed_group(decoder, words);
+        CHECK(decoder.synced());
+        CHECK(decoder.sync_acquisitions() == 1);
+    }
+
+    SECTION("one wrong bit in block 1 is not, even though the corrector fixes it") {
+        RdsDecoder decoder;
+        auto blocks = encode_group(words);
+        blocks[0] ^= 1u << 17;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+        CHECK_FALSE(decoder.synced());
+        CHECK(decoder.sync_acquisitions() == 0);
+
+        // Block 2 anchored it instead, so the next group's block 1 is the
+        // fourth in sequence and acquisition completes one block into it.
+        feed_group(decoder, words);
+        CHECK(decoder.synced());
+        CHECK(decoder.sync_acquisitions() == 1);
+    }
+}
+
+TEST_CASE("offset word E never anchors sync", "[rds]") {
+    // E is zero, so every window that happens to be a codeword of the bare
+    // cyclic code matches it, and it names no block position to sequence
+    // from. MMBS blocks are recognised once framing exists and are never used
+    // to establish it, which is the difference between a decoder that rides
+    // through an MMBS burst and one that tries to frame on it.
+    for (const Region region : {Region::kRds, Region::kRbds}) {
+        INFO("region " << revenant::decode::region_name(region));
+        RdsDecoder decoder(region);
+        for (std::uint16_t info = 0; info < 200; ++info) {
+            feed_word(decoder, revenant::decode::make_block(info, BlockOffset::kE));
+        }
+        CHECK_FALSE(decoder.synced());
+        CHECK(decoder.sync_acquisitions() == 0);
+        CHECK(decoder.mmbs_blocks() == 0);  // counted only once framed
+    }
+}
+
 TEST_CASE("noise alone does not produce decoded groups for long", "[rds]") {
     // Seeded and printed, per docs/conventions.md. The claim under test is not
     // "noise never syncs": EN 50067 Annex C clause C.2 says a false anchor
@@ -1615,6 +1667,100 @@ TEST_CASE("a lost block 2 leaves the group type unknown and only PI recoverable"
     CHECK(decoder.state().pi == 0x2345);
     CHECK_FALSE(decoder.state().pty_valid);
     CHECK(decoder.state().ps_received == 0);
+}
+
+TEST_CASE("an unparsed group type still yields its block 2 fields", "[rds]") {
+    // Types 5 through 9, 11, 12, 13, the B versions of 1, 3, 4 and 10, and
+    // 15A are real group types this decoder does not parse. The default label
+    // in apply_group is deliberate and the thing it must not do is discard the
+    // TP and PTY that every group's block 2 carries.
+    RdsDecoder decoder;
+    prime(decoder);
+
+    // Type 8A, which is TMC and is specified in CEN ENV 12313-1 rather than in
+    // the RDS standard at all.
+    const std::uint16_t b2 = static_cast<std::uint16_t>((8u << 12) | 0x0400u | (17u << 5));
+    feed_group(decoder, GroupWords{0x2345, b2, 0xABCD, 0xEF01, false});
+
+    CHECK(decoder.state().pi == 0x2345);
+    CHECK(decoder.state().tp);
+    CHECK(decoder.state().pty == 17);
+    // And nothing addressed by a group type it does not know.
+    CHECK(decoder.state().ps_received == 0);
+    CHECK(decoder.state().rt_length == 0);
+    CHECK(decoder.state().af.empty());
+    CHECK(decoder.state().oda.empty());
+    CHECK(decoder.state().eon.empty());
+    CHECK_FALSE(decoder.state().ta_valid);
+}
+
+TEST_CASE("only 0x0D ends a RadioText message", "[rds]") {
+    // NRSC-4-B section 6.1.5.3 adds 0x0B as an end-of-headline and 0x1F as a
+    // soft hyphen, with a note that at least one RDS IC vendor does not
+    // support them, and 0x0A is a preferred line break. None of the three
+    // ends the message. Treating one as a terminator truncates a message at a
+    // line break and the result reads as a complete short message.
+    RdsDecoder decoder;
+    prime(decoder);
+
+    auto send_2a = [&](std::uint8_t address, const char* four) {
+        const std::uint16_t b2 = static_cast<std::uint16_t>((2u << 12) | (address & 0x0Fu));
+        feed_group(decoder, GroupWords{0x2345, b2, chars_to_word(four[0], four[1]),
+                                       chars_to_word(four[2], four[3]), false});
+    };
+
+    send_2a(0, "AB\x0A" "C");
+    send_2a(1, "D\x0B" "E\x1F");
+    CHECK(decoder.state().rt_text().size() == 8);
+    CHECK(decoder.state().rt_text() == std::string_view("AB\x0A" "CD\x0B" "E\x1F", 8));
+
+    // 0x0D does, and it ends the message before itself.
+    send_2a(2, "FG\rH");
+    CHECK(decoder.state().rt_text() == std::string_view("AB\x0A" "CD\x0B" "E\x1F" "FG", 10));
+}
+
+TEST_CASE("the AF and EON tables are bounded against a stuck transmitter", "[rds]") {
+    SECTION("the alternative frequency list stops at 128") {
+        RdsDecoder decoder;
+        prime(decoder);
+
+        // Every VHF code the table defines, 204 distinct frequencies, in 102
+        // pairs. The bound exists so a stuck or hostile transmitter cannot
+        // make the decoder allocate without limit.
+        for (int code = 1; code <= 204; code += 2) {
+            feed_group(decoder,
+                       GroupWords{0x2345, type0_block2(0, false, false, true, false, 0),
+                                  static_cast<std::uint16_t>((code << 8) | (code + 1)),
+                                  0x2020, false});
+        }
+        CHECK(decoder.state().af.size() == 128);
+        // The first 128 are kept and the rest refused, rather than the list
+        // rolling over and showing the last ones seen.
+        CHECK(decoder.state().af.front() == revenant::decode::af_vhf_frequency(1));
+        CHECK(decoder.state().af.back() == revenant::decode::af_vhf_frequency(128));
+    }
+
+    SECTION("the EON table stops at max_eon_entries") {
+        RdsDecoder::Options options;
+        options.max_eon_entries = 2;
+        RdsDecoder decoder(options);
+        prime(decoder);
+
+        for (const std::uint16_t other : {std::uint16_t{0xD3F1}, std::uint16_t{0xD3F2},
+                                          std::uint16_t{0xD3F3}}) {
+            const std::uint16_t b2 = static_cast<std::uint16_t>((14u << 12) | 0x0010u);
+            feed_group(decoder, GroupWords{0x2345, b2, chars_to_word('B', 'B'), other, false});
+        }
+
+        REQUIRE(decoder.state().eon.size() == 2);
+        CHECK(decoder.state().eon[0].pi == 0xD3F1);
+        CHECK(decoder.state().eon[1].pi == 0xD3F2);
+        // The ones already in the table keep being updated, so a full table
+        // does not stop the networks it holds from filling in.
+        const std::uint16_t b2 = static_cast<std::uint16_t>((14u << 12) | 0x0010u | 1u);
+        feed_group(decoder, GroupWords{0x2345, b2, chars_to_word('C', ' '), 0xD3F1, false});
+        CHECK(decoder.state().eon[0].ps_received == 0x03);
+    }
 }
 
 TEST_CASE("reset clears the state and keeps the configuration", "[rds]") {
