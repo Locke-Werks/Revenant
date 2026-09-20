@@ -108,8 +108,10 @@ that diffs every GPU kernel against a scalar twin and demands identical bits.
 What does not: every decoder. Audio does not cross the wire, so the client is
 silent and the command line is what listens. The session has no authentication
 of any kind and binds loopback for that reason, it cannot open or stop a
-source, and nothing saves a set of receivers across a restart. `docs/rpc.md`
-carries that list and what each one is waiting on.
+source, and nothing saves a set of receivers across a restart. Those four are
+in `docs/rpc.md` under "Not done yet", each with what it would take and what
+the gap costs meanwhile. The decoders are not in it, because nothing about
+them is a wire question.
 
 ### What has been measured
 
