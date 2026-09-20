@@ -324,6 +324,13 @@ private:
     // this one is a stream that changed rate or channel count under it.
     std::uint64_t open_generation_ = 0;
 
+    // handle_sink_state saw QAudio::StoppedState with an error on it. It
+    // cannot close the sink from inside that sink's own signal, so this
+    // says tick() has to, and it then latches the reopen off: a device
+    // that has just failed fails again, and this branch runs twenty times
+    // a second. Cleared by setDevice and by refresh_devices.
+    bool sink_failed_ = false;
+
     QTimer tick_;
 
     QStringList device_names_;

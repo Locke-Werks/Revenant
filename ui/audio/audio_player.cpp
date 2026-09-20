@@ -154,6 +154,12 @@ void AudioPlayer::refresh_devices()
 {
     const QByteArray was_wanted = wanted_device_id_;
 
+    // The other thing that lets tick() try again after a sink stopped with
+    // an error, and the one the message means by "plug it back in": the
+    // set of outputs has moved, so the previous failure says nothing about
+    // what an attempt would do now.
+    sink_failed_ = false;
+
     device_handles_ = QMediaDevices::audioOutputs();
     device_names_.clear();
     device_names_.append(QStringLiteral("system default"));
@@ -224,6 +230,10 @@ void AudioPlayer::setDevice(int index)
     // sentence about a device they have moved off is holding a stale one.
     device_fault_.clear();
     sink_fault_.clear();
+
+    // One of the two things that lets tick() try again after a sink
+    // stopped with an error. See that branch.
+    sink_failed_ = false;
     close_sink();
     emit deviceChanged();
     emit statusChanged();
@@ -477,6 +487,19 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
                               "the output device stopped (%1). Pick another output, or "
                               "plug it back in and pick it again.")
                               .arg(static_cast<int>(why));
+
+            // NOT close_sink() HERE. This runs from the QAudioSink's own
+            // stateChanged, so the sink whose signal is on the stack would
+            // be destroyed under it. tick() does the close on the next
+            // pass with nothing of the sink's live.
+            //
+            // Recording the fault and leaving the sink in place was the
+            // whole bug: playing() reads sink_ != nullptr, so the window
+            // went on claiming to be playing out of a device that had
+            // stopped, and the reopen branch in tick() only fires when
+            // sink_ is null or the generation moved, so nothing ever
+            // reopened either.
+            sink_failed_ = true;
             emit statusChanged();
             break;
         }
@@ -485,6 +508,14 @@ void AudioPlayer::handle_sink_state(QAudio::State state)
 
 void AudioPlayer::tick()
 {
+    if (sink_failed_ && sink_ != nullptr) {
+        // handle_sink_state saw the sink stop with an error and could not
+        // take it down from inside the sink's own signal. Done here, where
+        // nothing of the sink's is on the stack, so playing() stops
+        // claiming a device that has stopped.
+        close_sink();
+    }
+
     AudioRing& r = ring();
     const RingFormat format = r.format();
     const std::uint64_t generation = r.format_generation();
@@ -495,6 +526,14 @@ void AudioPlayer::tick()
         if (sink_ != nullptr) {
             close_sink();
         }
+    } else if (sink_failed_) {
+        // NOT REOPENED UNTIL SOMETHING CHANGES. A device that has just
+        // failed fails again, and this branch runs twenty times a second,
+        // so an automatic retry is a loop that rewrites the same error
+        // forever and never lets the operator read it. The latch is
+        // cleared by the operator picking a device and by the device list
+        // changing, which are the two things that make another attempt
+        // worth making, and both are what the message asks for.
     } else if (sink_ == nullptr || generation != open_generation_) {
         // A generation past the one the sink was opened for is a stream
         // that changed rate or channel count. Reopened rather than
