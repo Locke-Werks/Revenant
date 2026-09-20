@@ -216,9 +216,13 @@ struct FmProgramme {
     // the curve has to run a quieter programme to stay inside 75 kHz.
     //
     // 52.5 kHz is 70 percent of 75 kHz, which with a 9 percent pilot and a
-    // 2.7 percent RDS injection leaves the composite peak just under full
-    // deviation with no pre-emphasis. It is a default that produces a legal
-    // station, not a figure out of a standard.
+    // 2.7 percent RDS injection bounds the composite peak at 82 percent of
+    // full deviation with no pre-emphasis. The 18 percent left over is what
+    // a curve on a low tone spends: 50 us at 1 kHz is a gain of 1.048, and
+    // above about 2.5 kHz a programme at this level starts asking for more
+    // than 75 kHz. It is a default that produces a legal station at the
+    // bottom of the audio band, not a figure out of a standard and not a
+    // level that is legal at every tone.
     Hertz audio_deviation_hz = 52500;
 
     Preemphasis preemphasis = Preemphasis::Eu50;

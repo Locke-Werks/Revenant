@@ -163,18 +163,20 @@ TEST_CASE("the FM phase is the integral of the composite", "[tools][wfm]")
     // difference channel each integrate analytically, and the RDS term does
     // too, through the running integral RdsModulator tabulates. A
     // slip in any of those produces a station that still looks like a
-    // station and still decodes, because the RDS term contributes about
-    // 0.02 radian of the carrier phase against the audio's several. Nothing
-    // else in the suite would notice.
+    // station and still decodes, because the RDS term contributes an FM
+    // modulation index of 2000/57000, which is 0.035 radian of carrier
+    // phase, against the audio's 27.5 at this spec's 1 kHz tone and half of
+    // its 52.5 kHz of deviation. Nothing else in the suite would notice.
     //
     // So this differentiates the integral back and compares it against the
     // composite the same object renders. Fourth order central difference,
     // whose error is O(h^4) against the fifth derivative, so it has to run
     // at a rate where the 57 kHz subcarrier is oversampled properly. At the
     // station rate there are exactly twelve samples per subcarrier cycle,
-    // which puts the difference's own error term near a quarter of a
-    // percent; sixteen times that is 192 samples a cycle and the same term
-    // is four orders smaller. The figure the run actually reaches is in the
+    // which puts the difference's own error term at (2*pi/12)^4/30, a
+    // quarter of a percent; sixteen times that is 192 samples a cycle and
+    // the same term falls by 16^4, which is 65536, to 3.8e-8. The figure
+    // the run actually reaches is in the
     // INFO line below rather than asserted as a constant here, because it
     // is a property of the difference and not of the code under test.
     constexpr dsp::SampleRate kFineRate = 16 * kStationRate;
@@ -593,8 +595,8 @@ TEST_CASE("over deviation is reported rather than clamped", "[tools][wfm]")
     // Reachable on purpose, for the same reason AmParams::modulation_index
     // above 1.0 is: a receiver that cannot cope with an over-deviating
     // station should fail a test rather than never meet one. 60 kHz of audio
-    // at 10 kHz through the 50 us curve is a gain of 3.28, so the audio
-    // alone asks for 197 kHz.
+    // at 10 kHz through the 50 us curve is a gain of sqrt(1 + pi^2), which
+    // is 3.297, so the audio alone asks for 198 kHz.
     siggen::WfmSpec spec = base_station();
     spec.programme.stereo = false;
     spec.programme.left_tone_hz = 10000;

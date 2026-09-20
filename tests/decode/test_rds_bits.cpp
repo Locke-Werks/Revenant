@@ -1363,10 +1363,13 @@ TEST_CASE("an RDS payload survives an FM link and a WFM receiver's audio path",
     // those reaches the decoder differently and each is below.
     //
     //   Stereo with 50 us, on centre. The ordinary European broadcast.
-    //   Stereo with 75 us, on centre. The same station in North America,
-    //     and the case that would fail if the curve were run over the
-    //     composite instead of over the audio: the subcarrier would arrive
-    //     25 dB hot and the injection ratio would be a lie.
+    //   Stereo with 75 us, on centre. The same station in North America.
+    //     Running the curve over the composite instead of over the audio
+    //     would land the subcarrier 28.6 dB hot here and 25.1 dB hot on the
+    //     50 us row, and the injection ratio would be a lie. That is not
+    //     what this case catches: the decoder normalises what it measures
+    //     and would report a clean lock either way. The bar on it is the
+    //     component-level case in tests/tools/test_wfm_mod.cpp.
     //   Stereo with no pre-emphasis. The reference the other two move away
     //     from, and the only one where the audio deviation is what the spec
     //     says it is.
