@@ -705,34 +705,124 @@ TEST_CASE("the cheap demodulation rate query answers what the planner builds",
     }
 }
 
-TEST_CASE("the generalised minimum rate matches the shorthand it replaced, to within the "
-          "odd hertz",
+namespace {
+
+// The function minimum_demod_rate's shorthand overload replaced: one
+// symmetric bandwidth, a pitch, and four cases. Written out here rather
+// than referred to, because the header's table is a comparison against it
+// and a comparison needs both sides present to mean anything.
+//
+// The switch is over the 32-bit word and therefore carries a default, which
+// is the opposite of the rule the three functions in vrx_reference.cpp
+// follow. They switch over engine::Demod so that /w14062 makes a ninth
+// demodulator a build error. This one is a frozen copy of a function that
+// no longer exists and must not move when a ninth is added, so it takes the
+// word and answers the shared floor for anything it does not know, exactly
+// as the original did.
+[[nodiscard]] dsp::Hertz retired_minimum_demod_rate(std::uint32_t mode, dsp::Hertz bandwidth,
+                                                    dsp::Hertz cw_pitch) {
+    if (bandwidth <= 0) {
+        return 0;
+    }
+    const dsp::Hertz floor_rate = (3 * bandwidth + 1) / 2;
+    switch (mode) {
+        case dsp::kDemodAm:
+        case dsp::kDemodUsb:
+        case dsp::kDemodLsb: return std::max(floor_rate, 2 * bandwidth);
+        case dsp::kDemodCw: return std::max(floor_rate, 2 * cw_pitch + bandwidth);
+        default: return floor_rate;
+    }
+}
+
+}  // namespace
+
+TEST_CASE("the generalised minimum rate against the shorthand it replaced, mode by mode",
           "[vrx][m1]") {
     // The claim first written down was that the generalisation produces the
-    // same hertz as the three cases it replaced. It does for an even
-    // bandwidth and not for an odd one, because the shorthand takes a
-    // half-width twice rather than subtracting one from the other, so an
-    // odd request resolves one hertz narrow. The hertz was never in the
-    // filter: the planner has always passed bandwidth/2 to design_fine_taps
-    // as a half-width. It IS in the rate, so it is pinned here rather than
-    // left as a sentence.
-    constexpr dsp::Hertz kPitch = 700;
+    // same hertz as the cases it replaced. The correction to that was that
+    // it is exact for an even bandwidth and 1 to 2 Hz lower for an odd one
+    // on every mode. Both are wrong, and the second was contradicted by the
+    // USB line of the test that was here.
+    //
+    // The gap follows the shorthand expansion, not the parity. USB and LSB
+    // expand to a one-sided band that states the full width, so they are
+    // exact at every bandwidth. The six symmetric modes take a half-width
+    // twice, so an odd request resolves one hertz narrow, which costs 2 Hz
+    // at the shape floor and 1 Hz at the reach term.
+    //
+    // Every cell of the header's table is asserted below, per mode, so the
+    // table cannot go stale without this failing.
+    for (dsp::Hertz pitch : {0, 1, 250, 700, 5'000}) {
+        for (dsp::Hertz bandwidth : {1, 2, 3, 500, 501, 3'000, 3'001, 12'000, 12'001}) {
+            const dsp::Hertz half = bandwidth / 2;
+            const bool even = bandwidth % 2 == 0;
 
-    for (dsp::Hertz bandwidth : {500, 501, 3'000, 3'001, 12'000, 12'001}) {
-        INFO("bandwidth " << bandwidth);
+            for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodCw; ++mode) {
+                INFO("mode " << engine::demod_name(static_cast<engine::Demod>(mode))
+                             << ", bandwidth " << bandwidth << ", pitch " << pitch);
 
-        const dsp::Hertz cw =
-            dsp::minimum_demod_rate(dsp::kDemodCw, bandwidth, kPitch);
-        const dsp::Hertz cw_was =
-            std::max((3 * bandwidth + 1) / 2, 2 * kPitch + bandwidth);
-        CHECK(cw <= cw_was);
-        CHECK(cw_was - cw <= 2);
-        CHECK((bandwidth % 2 == 0) == (cw == cw_was));
+                const dsp::Hertz now = dsp::minimum_demod_rate(mode, bandwidth, pitch);
+                const dsp::Hertz before = retired_minimum_demod_rate(mode, bandwidth, pitch);
 
-        const dsp::Hertz usb = dsp::minimum_demod_rate(dsp::kDemodUsb, bandwidth, 0);
-        const dsp::Hertz usb_was = std::max((3 * bandwidth + 1) / 2, 2 * bandwidth);
-        CHECK(usb == usb_was);
+                // The closed form the header states, and then the gap. Both,
+                // because a closed form that is merely self-consistent with
+                // the gap would let the pair drift together.
+                dsp::Hertz expect = 0;
+                dsp::Hertz gap_low = 0;
+                dsp::Hertz gap_high = 0;
+                switch (mode) {
+                    case dsp::kDemodUsb:
+                    case dsp::kDemodLsb:
+                        expect = 2 * bandwidth;
+                        break;
+                    case dsp::kDemodAm:
+                        expect = 4 * half;
+                        gap_low = gap_high = even ? 0 : 2;
+                        break;
+                    case dsp::kDemodCw:
+                        // The one row with two answers for an odd width:
+                        // the shape floor loses 2 Hz to the narrower band
+                        // and the reach term loses 1, and which of them
+                        // wins depends on the pitch.
+                        expect = std::max(3 * half, 2 * pitch + 2 * half);
+                        gap_low = even ? 0 : 1;
+                        gap_high = even ? 0 : 2;
+                        break;
+                    default:
+                        expect = 3 * half;
+                        gap_low = gap_high = even ? 0 : 2;
+                        break;
+                }
+
+                if (bandwidth == 1 && mode != dsp::kDemodUsb && mode != dsp::kDemodLsb) {
+                    // The row that is not 1 to 2 Hz off anything. A
+                    // one-hertz symmetric request expands to [0, 0], so the
+                    // empty-band rule answers before any mode's case runs.
+                    // CW's closed form would say 2*pitch here and does not
+                    // get the chance.
+                    expect = 0;
+                    gap_low = gap_high = before;
+                }
+
+                CHECK(now == expect);
+                CHECK(before - now >= gap_low);
+                CHECK(before - now <= gap_high);
+            }
+        }
     }
+
+    // The planner refuses the one-hertz symmetric request the row above
+    // answers zero for, so nothing downstream ever sees that zero. place()
+    // is not the refusal: it grants an empty band and reports it as one.
+    engine::VrxParams narrow;
+    narrow.center = 196'500;
+    narrow.demod = engine::Demod::Nfm;
+    narrow.bandwidth = 1;
+    auto narrow_place = engine::place(kGrid, kSourceRate, narrow);
+    REQUIRE(narrow_place.has_value());
+    CHECK(narrow_place->granted_high == narrow_place->granted_low);
+    CHECK_FALSE(dsp::plan_vrx(kGrid, kSourceRate, narrow, *narrow_place).has_value());
+    CHECK_FALSE(dsp::demod_rate_for(narrow, *narrow_place, 48'000).has_value());
 }
 
 // ---------------------------------------------------------------------------

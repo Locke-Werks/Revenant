@@ -555,19 +555,53 @@ struct Passband {
 // because a reader arriving from core/shaders/vrx_fine.comp's mode table
 // will be looking for them.
 //
-// HOW CLOSE "THE SAME EXPRESSION" ACTUALLY IS, SINCE IT WAS FIRST WRITTEN
-// DOWN AS "UNCHANGED TO THE HERTZ" AND IS NOT. For an even bandwidth it is
-// exact on every mode. For an ODD one it is 1 to 2 Hz lower, because the
-// shorthand expansion takes a half-width twice rather than subtracting one
-// from the other: a CW request of 501 Hz resolves to [-250, +250], so the
-// shared floor is (3*500 + 1)/2 = 750 where the old (3*501 + 1)/2 was 752,
-// and the reach term is 2*pitch + 500 where the old 2*pitch + B was
-// 2*pitch + 501. That hertz was never in the filter. The planner has always
-// passed bandwidth/2 to design_fine_taps as a half-width, so an odd request
-// has always been built one hertz narrow and only the rate it was rounded
-// up to carried the difference. It is recorded because the figure is
-// reachable from a client that sends an odd width and would otherwise look
-// like drift.
+// HOW CLOSE "THE SAME EXPRESSION" ACTUALLY IS. THE FIRST ANSWER WAS
+// "UNCHANGED TO THE HERTZ", WHICH WAS WRONG. THE CORRECTION TO IT WAS
+// "EXACT FOR AN EVEN BANDWIDTH, 1 TO 2 HZ LOWER FOR AN ODD ONE, ON EVERY
+// MODE", AND THAT IS WRONG TOO: USB AND LSB ARE EXACT AT EVERY BANDWIDTH,
+// AND THE LANE'S OWN TEST SAID SO WHILE THIS PARAGRAPH SAID OTHERWISE.
+//
+// The gap is not a property of the parity on its own. It is a property of
+// which shorthand expansion the mode uses, and resolve_passband gives the
+// eight modes two of them. USB and LSB expand to [0, B] and [-B, 0], which
+// state the full width, so the band is B wide whatever B is. The other six
+// expand to [-B/2, +B/2], which takes a half-width twice rather than
+// subtracting one from the other, so an odd B gives a band of B - 1. That
+// missing hertz was never in the filter: the planner has always passed
+// bandwidth/2 to design_fine_taps as a half-width, so an odd request has
+// always been built one hertz narrow and only the rate it was rounded up to
+// carried the difference.
+//
+// Measured mode by mode against the function this replaced. Both columns
+// are the SHORTHAND overload below, which is the signature the old one had.
+// h is B/2 rounded down and the pitch P is zero or more:
+//
+//   B >= 2            now                before                even   odd
+//   ------------------------------------------------------------------------
+//   Raw Nfm Wfm Dsb   3h                 (3B + 1)/2            same   2 Hz low
+//   Am                4h                 2B                    same   2 Hz low
+//   Usb Lsb           2B                 2B                    same   same
+//   Cw                max(3h, 2P + 2h)   max((3B+1)/2, 2P+B)   same   1 or 2 low
+//
+// CW is the one row with two odd-bandwidth answers because it is the one
+// mode where two terms compete for the maximum. The shape floor loses 2 Hz
+// to the narrower band and the reach term loses 1, so an odd request whose
+// floor wins is 2 Hz lower and one whose reach wins is 1 Hz lower. It is
+// never equal.
+//
+// B = 1 is its own row and is not 1 to 2 Hz off anything. The six symmetric
+// modes expand it to [0, 0], an empty band, so the empty-band rule further
+// down answers 0 rather than a rate. Against the old figures that is 2 Hz
+// low for five of them and 2P + 1 Hz low for CW, which at the default
+// 700 Hz pitch is 1401 Hz. Nothing is lost by it: the planner refuses a
+// one-hertz symmetric request as well, because channel_carries is handed a
+// band with no width. USB and LSB expand B = 1 to a real one-hertz band and
+// answer 2, the same as before.
+//
+// tests/reference/test_vrx.cpp asserts the table, every mode against every
+// bandwidth and pitch in it. It is pinned rather than left as arithmetic
+// because the figures are reachable from a client that sends an odd width
+// and would otherwise look like drift.
 //
 // The exhaustive switch over engine::Demod stays, and stays without a
 // default label, even though only AM now differs. It is the guard that makes
