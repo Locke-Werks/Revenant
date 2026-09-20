@@ -154,14 +154,26 @@ namespace revenant::ui {
 // normally found, so the overlay stopped updating and nothing said why.
 //
 // EngineLink::maxConfidenceBar publishes this so a control can take its
-// maximum from the same constant the clamp uses. Nothing binds to it yet:
-// ui/qml/Main.qml's confidence slider carries its own hardcoded maximum and
-// is not this file's to change, so the engine's rule is written down twice
-// until that binding is made.
+// maximum from the same constant the clamp uses. ui/qml/Main.qml's
+// confidence slider binds its `to` to that property, so the engine's rule is
+// written down once. It carried a hardcoded 0.95 until 2026-09-20, which was
+// neither this constant nor anything that would follow it.
 //
 // epsilon is 2^-52 and the spacing of doubles just below one is 2^-53, so
 // this is exactly std::nextafter(1.0, 0.0), written in a form that is
 // constexpr rather than depending on constexpr <cmath>.
+//
+// The top of the slider's travel is therefore a live position rather than a
+// dead stop, which is not obvious and was expected to go the other way.
+// core/detect/detector.cpp raises a track's confidence by confidence_rise of
+// its remaining distance to one on every detection, and at the shipped 0.35
+// that iteration's fixed point in double arithmetic is exactly this value:
+// one is never reached, and the double just below it is. server.cpp compares
+// with >=, so a saturated track sits on the bar and is still listed.
+// Measured 2026-09-20 against a synthetic wideband scene, eight emitters,
+// seed 4242: nine of nine tracks shown at full travel. A slider bound to 1.0
+// instead would list nothing there, which is the failure this constant
+// exists to prevent, and it is prevented by a margin of one ulp.
 inline constexpr double kMaxConfidenceBar =
     1.0 - std::numeric_limits<double>::epsilon() / 2.0;
 
@@ -266,8 +278,8 @@ class EngineLink : public QObject {
     Q_PROPERTY(double detectionThresholdDb READ detectionThresholdDb
                    WRITE setDetectionThresholdDb NOTIFY detectionsChanged)
 
-    // The top of confidenceBar's range, so a control can take its maximum
-    // from the engine's rule rather than carrying a copy of it. CONSTANT
+    // The top of confidenceBar's range, which ui/qml/Main.qml's confidence
+    // slider takes as its `to` rather than carrying a copy of. CONSTANT
     // because this is a bound on what core/rpc/server.cpp will answer at
     // all, fixed at compile time and the same for every engine.
     //

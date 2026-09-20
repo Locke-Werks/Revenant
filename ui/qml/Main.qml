@@ -365,12 +365,17 @@ ApplicationWindow {
 
                 Layout.preferredWidth: 120
                 from: 0.0
-                // Not 1. core/rpc/client.h refuses a bar of exactly 1 rather
-                // than answering emptily, because a track's confidence
-                // approaches 1 without reaching it, so a bar of 1 lists
-                // nothing however strong the signal is and an empty list is
-                // what a dead band looks like too.
-                to: 0.95
+                // The engine's own bound, not a copy of it. core/rpc/client.h
+                // refuses a bar of exactly 1 rather than answering emptily,
+                // because a track's confidence approaches 1 without reaching
+                // it, so a bar of 1 lists nothing however strong the signal
+                // is and an empty list is what a dead band looks like too.
+                // maxConfidenceBar is the largest double below 1, which is
+                // the same constant setConfidenceBar clamps to, so the handle
+                // cannot reach a value the link would quietly pull back.
+                // This read 0.95 until 2026-09-20: a round number that was
+                // not the engine's rule and could only drift from it.
+                to: engineLink.maxConfidenceBar
                 stepSize: 0.01
                 // EngineLink starts the bar at zero, which is everything
                 // the engine will send, and the handle starts there with
