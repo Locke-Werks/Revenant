@@ -2172,16 +2172,32 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
     auto route = found->second;
     rds_routes_.erase(found);
 
-    {
-        const std::scoped_lock held(sink_lock_);
-        if (!sink_closed_) {
-            // Discarded: the only failures are a receiver the graph no
-            // longer knows, which is the ordinary teardown order and the
-            // usual way this function is reached, and a token already
-            // detached, which stop() would have done.
-            static_cast<void>(engine_.detach_audio_sink(vrx, route->sink));
-        }
-    }
+    // UNCONDITIONALLY, AND sink_lock_ IS NOT TAKEN FOR IT.
+    //
+    // This used to run under sink_lock_ and only when sink_closed_ was
+    // clear, with a comment justifying the discarded return value and saying
+    // nothing about the skip. There is no ordering that makes the skip safe,
+    // and the one that looks like it does is the one that breaks it: stop()
+    // sets sink_closed_ under sink_lock_ while the loop thread is STILL
+    // RUNNING, and only walks rds_routes_ after joining it. This function is
+    // loop-thread only and erases the route from that map BEFORE detaching.
+    // So a removeVrx handled in the window between the flag and the join
+    // erased the entry, skipped the detach, and left stop()'s walk nothing
+    // to find: the engine kept the callable, the callable kept the route
+    // alive through its own shared_ptr, and the decoder ran on for the life
+    // of the engine, decoding a receiver nobody could reach.
+    //
+    // sink_closed_ answers a different question. It exists to stop a sink
+    // being INSTALLED after stop() has decided which ones it will take off,
+    // which is why start_rds checks it across the attach. Taking one off is
+    // always allowed and always right: stop() itself detaches after setting
+    // the flag.
+    //
+    // Discarded, though, for the reason it always was: the only failures are
+    // a receiver the graph no longer knows, which is the ordinary teardown
+    // order and the usual way this function is reached, and a token already
+    // detached, which stop() would have done.
+    static_cast<void>(engine_.detach_audio_sink(vrx, route->sink));
 
     // Taken and released, which is what waits for a sink call that was
     // already inside the decoder when the detach was queued. The detach is
