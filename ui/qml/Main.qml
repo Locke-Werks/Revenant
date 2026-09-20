@@ -62,13 +62,15 @@ ApplicationWindow {
     property var tunedId: 0
     property var selectedDetection: 0
 
-    // How many boxes the last click was inside, and which of them it chose.
-    // Carried on the signal rather than read back off a property, because
-    // they belong to that click: a poll a frame later changes the list and
-    // would change these under a reading still on screen. See ClickResult in
-    // render/spectrum_item.h.
+    // How many boxes the last click was inside, how far into the cycle this
+    // answer was, and whether the next click in the same place advances or
+    // starts over. Carried on the signal rather than read back off a
+    // property, because they belong to that click: a poll a frame later
+    // changes the list and would change these under a reading still on
+    // screen. See ClickResult in render/spectrum_item.h.
     property int tunedCandidates: 0
     property int tunedRank: 0
+    property bool tunedExhausted: false
 
     // Absolute megahertz at a fraction of the drawn span, as a tick label.
     //
@@ -93,13 +95,14 @@ ApplicationWindow {
     }
 
     // One click, whichever display it came from.
-    function takeTune(id, centerHz, bandwidthHz, candidates, rank) {
+    function takeTune(id, centerHz, bandwidthHz, candidates, rank, exhausted) {
         window.selectedDetection = id
         window.tunedId = id
         window.tunedHz = centerHz
         window.tunedBandwidthHz = bandwidthHz
         window.tunedCandidates = candidates
         window.tunedRank = rank
+        window.tunedExhausted = exhausted
     }
 
     ColumnLayout {
@@ -494,8 +497,9 @@ ApplicationWindow {
                 anchors.fill: parent
                 link: engineLink
                 selectedDetection: window.selectedDetection
-                onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank) =>
-                                 window.takeTune(id, centerHz, bandwidthHz, candidates, rank)
+                onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted) =>
+                                 window.takeTune(id, centerHz, bandwidthHz, candidates, rank,
+                                                 exhausted)
             }
 
             // The ends the trace was drawn against, which include the
@@ -548,8 +552,9 @@ ApplicationWindow {
             Layout.fillHeight: true
             link: engineLink
             selectedDetection: window.selectedDetection
-            onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank) =>
-                             window.takeTune(id, centerHz, bandwidthHz, candidates, rank)
+            onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted) =>
+                             window.takeTune(id, centerHz, bandwidthHz, candidates, rank,
+                                             exhausted)
         }
 
         // ------------------------------------------------------------------
@@ -692,13 +697,32 @@ ApplicationWindow {
                 // which means the answer is a choice and the row has to say
                 // that a choice was made and how to get the others.
                 //
+                // The second half of the sentence is read off the click
+                // rather than assumed. This promised "click again for the
+                // next" unconditionally, and the next click restarted the
+                // walk whenever the track it was going to advance past had
+                // left the list, which on a live band it usually had. The
+                // cycle now survives that, and exhausted says which of the
+                // two sentences is true for the next click.
+                //
                 // Only when there is more than one. On a lone carrier "1 of
                 // 1" is noise beside a number the operator is reading.
+                //
+                // rank counts the cycle and candidates counts what is under
+                // the pointer now, so on a band where the detector splits and
+                // merges tracks between two clicks the first can pass the
+                // second. That is not an error and it gets its own sentence
+                // rather than being printed as "5 of 4".
                 Label {
                     Layout.minimumWidth: 0
                     visible: window.tunedCandidates > 1
-                    text: "·  " + window.tunedRank + " of " + window.tunedCandidates
-                          + " here, click again for the next"
+                    text: "·  "
+                          + (window.tunedRank > window.tunedCandidates
+                             ? window.tunedRank + " shown, " + window.tunedCandidates
+                               + " here now, "
+                             : window.tunedRank + " of " + window.tunedCandidates + " here, ")
+                          + (window.tunedExhausted ? "click again to start over"
+                                                   : "click again for the next")
                     color: window.inkDim
                     font.pixelSize: 12
                     elide: Text.ElideRight

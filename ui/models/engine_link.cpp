@@ -142,8 +142,10 @@ void EngineLink::supervise()
             // Cleared before the connection state is published, so a
             // refusal the operator has not fixed does not sit on screen
             // beside "disconnected" claiming the engine said something.
-            // detectionFault is only ever about an engine that is there.
-            note_detection_fault(QString());
+            // detectionFault is only ever about an engine that is there,
+            // and clear_ rather than note_ because a held threshold
+            // refusal has to go with it or the next engine inherits it.
+            clear_detection_fault();
             publish(false, QString::fromStdString(alive.error().message));
         } else {
             // The call came back, so the connection is good, and the bool it
@@ -361,18 +363,17 @@ void EngineLink::poll_detections()
     // callback, so neither the Qt thread nor the Cap'n Proto loop thread
     // can do this.
 
-    // One pass, one fault. Both calls below can be refused and the poll runs
-    // second, so the reason is accumulated here and published once at the
-    // end: publishing per call would let a successful poll clear a refused
-    // threshold in the same pass, before the operator ever saw it.
-    QString fault;
-
     // The engine-side write first, so a threshold the operator moved is in
     // force before the list that reports it back is fetched. The other
     // order would show the old threshold for one poll and read as the
     // control having been ignored.
     if (threshold_pending_.exchange(false, std::memory_order_acq_rel)) {
         const double wanted = requested_threshold_db_.load(std::memory_order_acquire);
+
+        // Cleared before the attempt rather than after it, so whichever way
+        // this write goes its own verdict is the only thing left behind. A
+        // write the engine takes is what answers the refusal before it.
+        threshold_fault_.clear();
 
         // A refusal is deliberately not routed into errorText, because that
         // field is the connection's and setting it would make a rejected
@@ -383,8 +384,16 @@ void EngineLink::poll_detections()
         // the write was refused and never says which bound was missed, and
         // the engine's own message does. So it goes to detectionFault,
         // which exists for exactly this, rather than nowhere.
+        //
+        // Held in a member rather than published straight out, because
+        // nothing repeats this call. A refused poll is renewed every pass
+        // and clears itself when the poll works; this happens once, and
+        // published the same way it was overwritten with an empty string by
+        // the very next poll, which succeeds because a rejected write
+        // changed nothing. One poll interval on screen is not a fault an
+        // operator can read. It stands until another write answers it.
         if (auto applied = client_->set_detection_threshold(wanted); !applied) {
-            fault = QString::fromStdString(applied.error().message);
+            threshold_fault_ = QString::fromStdString(applied.error().message);
         }
     }
 
@@ -409,13 +418,21 @@ void EngineLink::poll_detections()
         //
         // One extra round trip, on the failure path only. The ordinary pass
         // costs what it always did.
-        const bool answering = client_->running().has_value();
-        note_detection_fault(answering ? QString::fromStdString(listed.error().message)
-                                       : QString());
+        if (!client_->running().has_value()) {
+            clear_detection_fault();
+            return;
+        }
+
+        // Outranks a threshold write that is still unanswered, which stays
+        // held and comes back when the poll does. A frozen list is the
+        // worse news and the row has one line.
+        note_detection_fault(QString::fromStdString(listed.error().message));
         return;
     }
 
-    note_detection_fault(fault);
+    // The poll was accepted, so the only thing left to report is a
+    // threshold write the engine would not take. Empty when there is none.
+    note_detection_fault(threshold_fault_);
 
     {
         const std::lock_guard<std::mutex> lock(detection_mutex_);
@@ -470,6 +487,12 @@ void EngineLink::note_detection_fault(QString fault)
         has_pending_fault_ = true;
     }
     QMetaObject::invokeMethod(this, [this] { adopt_detection_fault(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::clear_detection_fault()
+{
+    threshold_fault_.clear();
+    note_detection_fault(QString());
 }
 
 void EngineLink::adopt_detection_fault()

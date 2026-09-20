@@ -275,6 +275,99 @@ constexpr double kSilenceFloorDbfs = -200.0;
     return geometry;
 }
 
+// The frequency axis of one receiver's passband frame.
+//
+// Bin zero is half the demodulation rate below whatever the fine stage mixed
+// to DC, and the whole band is kept, so the axis is the plainest one in this
+// file: bin b is at dc + (b - N/2) * Fd / N hertz. Both ends are exact
+// rationals for the reason dsp::ChannelCentre gives.
+[[nodiscard]] PassbandGeometry passband_geometry_for(dsp::SampleRate rate,
+                                                     std::uint32_t transform,
+                                                     std::int64_t dc_numerator,
+                                                     std::int64_t dc_denominator) {
+    PassbandGeometry geometry;
+    geometry.transform = transform;
+    geometry.bins = transform;
+    geometry.rate = rate;
+    geometry.bin_width_numerator = rate;
+    geometry.bin_width_denominator = static_cast<std::int64_t>(transform);
+
+    // dc - rate/2, over a common denominator so nothing rounds.
+    geometry.bin_zero_numerator = 2 * dc_numerator - rate * dc_denominator;
+    geometry.bin_zero_denominator = 2 * dc_denominator;
+    return geometry;
+}
+
+// Bins one pass of the passband transform writes: the kernel's central half.
+[[nodiscard]] constexpr std::uint32_t passband_pass_bins(std::uint32_t transform) {
+    return transform / 2;
+}
+
+// The passband stage's two analysis windows.
+//
+// WHY THERE ARE TWO, WHICH IS THE WHOLE TRICK
+//
+// core/shaders/spectrum.comp keeps the CENTRAL HALF of each transform,
+// because that is what tiles an oversampled channel bank exactly once. A
+// passband is not a bank and needs every bin: the fine stream's rate is only
+// 1.5 times the receiver's bandwidth at minimum_demod_rate's shared floor, so
+// the central half is 0.75 of the bandwidth and cuts into the signal rather
+// than into the guard. Worked at the canonical audio rate: a 200 kHz WFM
+// receiver lands at Fd = 336 kHz, whose central half is 168 kHz, which is
+// 16 kHz short at each edge of the signal itself.
+//
+// The other half comes out of the same kernel unchanged, by the modulation
+// theorem, which is the same identity core/shaders/vrx_fine.comp uses to fold
+// its mixer into its tap table. Multiplying the window by (-1)^n shifts the
+// transform by exactly N/2 bins:
+//
+//     sum_n w[n] x[n] (-1)^n e^(-j2*pi*k*n/N) = X_w((k + N/2) mod N)
+//
+// so a second pass with the negated-odd window hands back the bins the first
+// pass dropped. (-1)^n is real, which is the reason this fits at all: the
+// window binding is a real array, and negating a float is exact, so the
+// second table is the first one's bits with a sign flipped and the two passes
+// are the same arithmetic on the same data.
+//
+// The reassembly is in the graph's copy regions. Pass A's output is the
+// central half, ascending. Pass B's is the positive outer quarter followed by
+// the negative outer quarter, each ascending, because the kernel's own
+// ordering walks the negative quarter of the transform and then the positive
+// one and the N/2 shift rotates that.
+//
+// THE SECOND HALF OF THE BUFFER IS ONES, AND THAT IS A DECISION
+//
+// dsp::build_spectrum_window returns the window followed by the channelizer
+// prototype's per-bin droop correction. That correction is the wrong filter
+// here and the wrong idea here, and PassbandFrame's comment has the argument:
+// a passband frame has no seam to hide, its edges are not on any cutoff, and
+// the response across it is the receiver's own fine filter, which is exactly
+// what the display exists to show. So the correction half is overwritten with
+// unity, and the design parameters that built it are irrelevant.
+//
+// Built by the shipped builder rather than by arithmetic of its own so that
+// the window taps are bit-identical to the full-span stage's, which is what
+// lets the twin in tests/engine/test_engine_passband.cpp referee this kernel
+// with dsp::reference_spectrum and nothing new.
+[[nodiscard]] Expected<std::vector<float>> passband_window(std::uint32_t transform,
+                                                            bool alternating) {
+    auto built = dsp::build_spectrum_window(transform);
+    if (!built) {
+        return std::unexpected(with_context(built.error(), "the passband window"));
+    }
+    std::vector<float> taps = std::move(*built);
+
+    for (std::uint32_t bin = 0; bin < passband_pass_bins(transform); ++bin) {
+        taps[transform + bin] = 1.0F;
+    }
+    if (alternating) {
+        for (std::uint32_t n = 1; n < transform; n += 2) {
+            taps[n] = -taps[n];
+        }
+    }
+    return taps;
+}
+
 [[nodiscard]] double dbfs_of(double rms) {
     if (!(rms > 0.0)) {
         return kSilenceFloorDbfs;
@@ -405,6 +498,75 @@ VrxStageFactory installed_vrx_stage_factory() {
 // ---------------------------------------------------------------------------
 
 struct Graph::Impl {
+    // One receiver's passband transform: everything that exists only because
+    // somebody is looking closely at that receiver.
+    //
+    // Held behind a shared_ptr and referenced by every frame that recorded
+    // against it, for the same reason VrxSlot is: detaching a sink while a
+    // frame is in flight must not free a buffer the device is still writing.
+    //
+    // ALLOCATED ON ATTACH, NOT ON ADD, WHICH IS THE OPT-IN
+    //
+    // Three device buffers and a readback per frame in flight, plus a
+    // descriptor pool, is not a rounding error at fifty receivers. A receiver
+    // nobody has attached a sink to holds none of it and records no dispatch,
+    // so the rack pays for the receivers under examination and not for the
+    // ones merely running.
+    //
+    // What a receiver DOES pay for unconditionally is room in its fine ring
+    // for a window this long, because a ring cannot be grown while a command
+    // buffer names it. That is memory rather than work, and it is why
+    // GraphConfig::passband_transform is a second switch above this one.
+    struct PassbandView {
+        VkDevice device = VK_NULL_HANDLE;
+        VkDescriptorPool descriptors = VK_NULL_HANDLE;
+
+        std::uint32_t transform = 0;
+
+        // Copied from the stage at attach. Every field is fixed for the life
+        // of the stage, which is what makes reading it from the control
+        // plane safe while a block is being recorded.
+        StageFineOutput fine{};
+
+        // Per frame in flight, because frames overlap on the device.
+        //
+        // pass_a and pass_b are each a whole frame's worth although one pass
+        // writes only the upper half of one: core/shaders/spectrum.comp
+        // places a channel's output at slot (k + M/2) mod M, and the smallest
+        // M its own validate() accepts is two, so channel zero lands at slot
+        // one. The lower half of each pass buffer is never written and never
+        // read. Half a frame of scratch is cheaper than a second kernel.
+        std::vector<gpu::Buffer> pass_a;
+        std::vector<gpu::Buffer> pass_b;
+        std::vector<gpu::Buffer> frame;
+        std::vector<gpu::Buffer> readback;
+        std::vector<gpu::Buffer> levels_output;
+        std::vector<gpu::Buffer> levels_readback;
+
+        std::vector<VkDescriptorSet> pass_a_set;
+        std::vector<VkDescriptorSet> pass_b_set;
+        std::vector<VkDescriptorSet> levels_set;
+
+        // Completion thread only, which is single and in order.
+        //
+        // Buffers and nothing else. What a receiver's passband display is
+        // up to, the row count and the colour map, lives on the slot rather
+        // than here, because it has to outlive a sink being swapped.
+        std::vector<float> scratch;
+
+        ~PassbandView() {
+            if (descriptors != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device, descriptors, nullptr);
+            }
+        }
+
+        PassbandView() = default;
+        PassbandView(const PassbandView&) = delete;
+        PassbandView& operator=(const PassbandView&) = delete;
+        PassbandView(PassbandView&&) = delete;
+        PassbandView& operator=(PassbandView&&) = delete;
+    };
+
     // One receiver. Kept behind a shared_ptr so that removing it while a frame
     // is in flight is safe: the frame's snapshot holds a reference and the
     // slot outlives the dispatch that was reading it.
@@ -435,10 +597,31 @@ struct Graph::Impl {
         std::vector<float> scratch;
         dsp::SampleIndex audio_index = 0;
 
+        // What this receiver's passband display is up to: how many rows it
+        // has drawn, where the last one was, and where its colour map has
+        // got to.
+        //
+        // Here and not on the PassbandView, so that detaching a sink and
+        // attaching another does not restart the row count or reset the
+        // colour map. Frames recorded against the old view can still be in
+        // flight when the new one arrives, and a counter living on the view
+        // would have those frames numbered from a different origin than the
+        // ones behind them. Completion thread only, like the two above.
+        std::optional<SpectrumScale> passband_scale;
+        std::uint64_t passband_sequence = 0;
+        dsp::SampleIndex passband_last_start = 0;
+        bool passband_have_last = false;
+
         // Recording thread only. The completion thread gets its own copy of
         // the pointer in the frame snapshot, so replacing a sink never races
         // a delivery that is already under way.
         std::shared_ptr<AudioSink> sink;
+
+        // Both null until a passband sink is attached, and both dropped
+        // together when it is detached. Recording thread only, like the
+        // audio sink above and for the same reason.
+        std::shared_ptr<PassbandView> passband;
+        std::shared_ptr<PassbandSink> passband_sink;
 
         std::atomic<std::uint64_t> audio_samples{0};
         std::atomic<std::uint64_t> audio_dropped{0};
@@ -464,7 +647,7 @@ struct Graph::Impl {
     // not take one, and a Treiber stack rather than a ring because the control
     // plane is rare and unbounded and the sample path only ever drains.
     struct ControlOp {
-        enum class Kind : std::uint8_t { Add, Remove, Retune, Sink, Spectrum };
+        enum class Kind : std::uint8_t { Add, Remove, Retune, Sink, Spectrum, Passband };
 
         Kind kind = Kind::Add;
         VrxId id;
@@ -473,6 +656,12 @@ struct Graph::Impl {
         std::shared_ptr<VrxSlot> slot;
         std::shared_ptr<AudioSink> sink;
         std::shared_ptr<SpectrumSink> spectrum_sink;
+
+        // Both null on a detach, which is how one operation says either
+        // thing: a view with no sink would record a transform nobody reads
+        // and a sink with no view would have nothing to read.
+        std::shared_ptr<PassbandView> passband;
+        std::shared_ptr<PassbandSink> passband_sink;
         ControlOp* next = nullptr;
     };
 
@@ -487,6 +676,22 @@ struct Graph::Impl {
         std::size_t readback_index = 0;
         StageOutput output{};
         double squelch_dbfs = kSilenceFloorDbfs;
+
+        // The passband this frame recorded for this receiver, if any. The
+        // view is held by value in the snapshot so that a detach landing
+        // while this frame is in flight cannot free the buffers under it.
+        std::shared_ptr<PassbandView> passband;
+        std::shared_ptr<PassbandSink> passband_sink;
+        PassbandGeometry passband_geometry{};
+        dsp::SampleIndex passband_start = 0;
+        dsp::SampleIndex passband_count = 0;
+
+        // Ring slot of the oldest fine sample in this frame's window, which
+        // is what the kernel takes as its in_offset. Worked out in the
+        // planning phase and used one phase later, because the phases are
+        // what keep the barriers off the per-receiver path.
+        std::uint32_t passband_window_offset = 0;
+        bool passband_recorded = false;
     };
 
     struct Frame {
@@ -546,12 +751,29 @@ struct Graph::Impl {
     gpu::Buffer spectrum_twiddles;
     gpu::Buffer spectrum_window;
 
+    // The passband stage's tables, shared by every receiver that attaches a
+    // sink. A third twiddle circle because its transform is its own size, and
+    // two windows because the second pass is the first one's window with the
+    // odd taps negated; passband_window() has the argument.
+    gpu::Buffer passband_twiddles;
+    gpu::Buffer passband_window_a;
+    gpu::Buffer passband_window_b;
+
     bool has_convert = false;
     gpu::ComputePipeline convert_pipeline;
     gpu::ComputePipeline branch_pipeline;
     gpu::ComputePipeline fft_pipeline;
     gpu::ComputePipeline spectrum_pipeline;
     gpu::ComputePipeline spectrum_levels_pipeline;
+
+    // A second specialization of core/shaders/spectrum.comp, at one channel
+    // and the passband's own transform size.
+    //
+    // docs/fft.md records an integrated-device fault that tracks how many
+    // pipelines one module is specialized into, so a second one is worth
+    // naming rather than adding quietly. It buys the whole stage: the same
+    // refereed butterfly graph, no new kernel, no new CPU twin.
+    gpu::ComputePipeline passband_pipeline;
 
     VkDescriptorPool descriptors = VK_NULL_HANDLE;
     VkSemaphore timeline = VK_NULL_HANDLE;
@@ -631,6 +853,8 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> audio_dropped{0};
     std::atomic<std::uint64_t> spectrum_frames{0};
     std::atomic<std::uint64_t> spectrum_skipped{0};
+    std::atomic<std::uint64_t> passband_frames{0};
+    std::atomic<std::uint64_t> passband_skipped{0};
 
     ~Impl() { destroy(); }
 
@@ -752,7 +976,170 @@ struct Graph::Impl {
             case ControlOp::Kind::Spectrum:
                 spectrum_sink = op.spectrum_sink;
                 return;
+            case ControlOp::Kind::Passband:
+                for (auto& slot : active) {
+                    if (slot->id == op.id) {
+                        // Both together. On a detach both are null and the
+                        // old view's last reference here goes away, which
+                        // frees it as soon as the frames holding one retire.
+                        slot->passband = op.passband;
+                        slot->passband_sink = op.passband_sink;
+                    }
+                }
+                return;
         }
+    }
+
+    // Control plane. Everything one receiver needs to have its passband
+    // transformed, allocated in one place so that attaching a sink is the
+    // only moment any of it is created.
+    [[nodiscard]] Expected<std::shared_ptr<PassbandView>> build_passband_view(
+        const StageFineOutput& fine) {
+        const std::uint32_t points = geometry.passband_transform;
+        if (fine.capacity < points) {
+            return fail(std::format(
+                "a {}-point window does not fit a fine ring of {} samples, so the transform "
+                "would read the same samples twice. The ring is sized against "
+                "VrxStageRequest::passband_transform at construction, so this receiver was "
+                "built before the passband stage was",
+                points, fine.capacity));
+        }
+        if (fine.mask != fine.capacity - 1U || !std::has_single_bit(fine.capacity)) {
+            return fail(std::format(
+                "a fine ring of {} samples with mask {} is not a power-of-two ring, and the "
+                "kernel masks its own index",
+                fine.capacity, fine.mask));
+        }
+        if (fine.rate <= 0) {
+            return fail("a fine stream with no rate has no frequency axis");
+        }
+
+        auto view = std::make_shared<PassbandView>();
+        view->device = context->device();
+        view->transform = points;
+        view->fine = fine;
+        view->scratch.assign(points, 0.0F);
+
+        const auto frame_bytes = static_cast<VkDeviceSize>(points) * sizeof(float);
+        constexpr VkDeviceSize kLevelsBytes =
+            static_cast<VkDeviceSize>(dsp::kSpectrumLevelsOutputs) * sizeof(float);
+
+        auto make = [&](std::vector<gpu::Buffer>& into, VkDeviceSize bytes,
+                        gpu::MemoryKind kind, VkBufferUsageFlags usage,
+                        const char* what) -> Status {
+            into.reserve(geometry.frames_in_flight);
+            for (std::uint32_t i = 0; i < geometry.frames_in_flight; ++i) {
+                auto buffer = gpu::Buffer::create(*context, bytes, usage, kind);
+                if (!buffer) {
+                    return std::unexpected(with_context(buffer.error(), what));
+                }
+                into.push_back(std::move(*buffer));
+            }
+            return {};
+        };
+
+        if (auto ok = make(view->pass_a, frame_bytes, gpu::MemoryKind::DeviceLocal,
+                           kDeviceStorage, "passband pass scratch");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = make(view->pass_b, frame_bytes, gpu::MemoryKind::DeviceLocal,
+                           kDeviceStorage, "passband pass scratch");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = make(view->frame, frame_bytes, gpu::MemoryKind::DeviceLocal,
+                           kDeviceStorage, "passband frame");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = make(view->readback, frame_bytes, gpu::MemoryKind::Readback,
+                           kReadbackUsage, "passband readback");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = make(view->levels_output, kLevelsBytes, gpu::MemoryKind::DeviceLocal,
+                           kDeviceStorage, "passband levels scratch");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = make(view->levels_readback, kLevelsBytes, gpu::MemoryKind::Readback,
+                           kReadbackUsage, "passband levels readback");
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+
+        // Three sets per frame in flight: one per pass, which differ only in
+        // which window they bind, and one for the percentile.
+        const std::uint32_t sets = 3U * geometry.frames_in_flight;
+        VkDescriptorPoolSize pool_size{};
+        pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        pool_size.descriptorCount = (4U + 4U + 2U) * geometry.frames_in_flight;
+
+        VkDescriptorPoolCreateInfo pool_info{};
+        pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pool_info.maxSets = sets;
+        pool_info.poolSizeCount = 1;
+        pool_info.pPoolSizes = &pool_size;
+
+        VkResult result =
+            vkCreateDescriptorPool(view->device, &pool_info, nullptr, &view->descriptors);
+        if (result != VK_SUCCESS) {
+            return fail(std::format("vkCreateDescriptorPool failed for a passband ({})",
+                                    gpu::result_name(result)),
+                        result);
+        }
+
+        auto allocate = [&](std::vector<VkDescriptorSet>& into,
+                            VkDescriptorSetLayout layout) -> Status {
+            std::vector<VkDescriptorSetLayout> layouts(geometry.frames_in_flight, layout);
+            into.assign(geometry.frames_in_flight, VK_NULL_HANDLE);
+
+            VkDescriptorSetAllocateInfo alloc{};
+            alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            alloc.descriptorPool = view->descriptors;
+            alloc.descriptorSetCount = geometry.frames_in_flight;
+            alloc.pSetLayouts = layouts.data();
+            const VkResult allocated =
+                vkAllocateDescriptorSets(view->device, &alloc, into.data());
+            if (allocated != VK_SUCCESS) {
+                return fail(std::format("vkAllocateDescriptorSets failed for a passband ({})",
+                                        gpu::result_name(allocated)),
+                            allocated);
+            }
+            return {};
+        };
+
+        if (auto ok = allocate(view->pass_a_set, passband_pipeline.descriptor_layout()); !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = allocate(view->pass_b_set, passband_pipeline.descriptor_layout()); !ok) {
+            return std::unexpected(ok.error());
+        }
+        if (auto ok = allocate(view->levels_set, spectrum_levels_pipeline.descriptor_layout());
+            !ok) {
+            return std::unexpected(ok.error());
+        }
+
+        for (std::uint32_t i = 0; i < geometry.frames_in_flight; ++i) {
+            const VkBuffer a[] = {fine.ring, passband_twiddles.handle(),
+                                  passband_window_a.handle(), view->pass_a[i].handle()};
+            if (auto wrote = write_storage_set(view->device, view->pass_a_set[i], a); !wrote) {
+                return std::unexpected(with_context(wrote.error(), "passband pass set"));
+            }
+            const VkBuffer b[] = {fine.ring, passband_twiddles.handle(),
+                                  passband_window_b.handle(), view->pass_b[i].handle()};
+            if (auto wrote = write_storage_set(view->device, view->pass_b_set[i], b); !wrote) {
+                return std::unexpected(with_context(wrote.error(), "passband pass set"));
+            }
+            const VkBuffer levels[] = {view->frame[i].handle(),
+                                       view->levels_output[i].handle()};
+            if (auto wrote = write_storage_set(view->device, view->levels_set[i], levels);
+                !wrote) {
+                return std::unexpected(with_context(wrote.error(), "passband levels set"));
+            }
+        }
+        return view;
     }
 
     [[nodiscard]] std::shared_ptr<VrxSlot> find_known(VrxId id) const {
@@ -762,6 +1149,265 @@ struct Graph::Impl {
             }
         }
         return nullptr;
+    }
+
+    // Recording thread. Where a fine sample sits in the SOURCE's index,
+    // which is the one index everything downstream shares.
+    //
+    // Fine output j is taken at channel instant j*Fc/Fd, the fine filter
+    // delays it by its own group delay in channel samples, channel sample m
+    // is taken at input m*D, and the channelizer prototype delays that by its
+    // group delay in input samples. Composed and with Fs = Fc*D:
+    //
+    //     source(j) = j*Fs/Fd - (fine_delay*D + prototype_delay)
+    //
+    // Split over Fd before multiplying by Fs so the product cannot leave 64
+    // bits at any index this engine can reach, which is the same split
+    // core/engine/vrx_stage.cpp uses on the same ratio.
+    [[nodiscard]] dsp::SampleIndex source_index_of_fine(const StageFineOutput& fine,
+                                                        dsp::SampleIndex j) const {
+        const auto fd = static_cast<dsp::SampleIndex>(fine.rate);
+        const auto fs = static_cast<dsp::SampleIndex>(config.source_rate);
+        if (fd == 0) {
+            return 0;
+        }
+        const dsp::SampleIndex scaled = (j / fd) * fs + ((j % fd) * fs) / fd;
+
+        const auto delay =
+            static_cast<dsp::SampleIndex>(std::llround(
+                fine.group_delay_channel_samples * static_cast<double>(grid.decimation))) +
+            prototype_group_delay;
+
+        // Clamped rather than wrapped. The first window of a stream sits a
+        // few thousand samples above zero and the delay is a few hundred, so
+        // this does not bite in practice; an unsigned index that wrapped
+        // would put a frame at 1.8e19 on a timeline, which is not a number
+        // anything downstream recovers from.
+        return scaled > delay ? scaled - delay : 0;
+    }
+
+    // Recording thread. Every enabled receiver's passband, recorded once the
+    // fine stages have all run.
+    //
+    // TWO PASSES OF ONE KERNEL, WHICH IS WHAT MAKES THIS NEED NO NEW SHADER
+    //
+    // core/shaders/spectrum.comp keeps the central half of its transform.
+    // passband_window() has the argument for why a passband needs all of it
+    // and how the second window's negated odd taps fetch the other half. What
+    // is left here is the reassembly, which is three copy regions:
+    //
+    //   frame[N/4 .. 3N/4)  is pass A's output, the central half, ascending.
+    //   frame[0 .. N/4)     is the upper half of pass B's, which is the
+    //                       negative outer quarter.
+    //   frame[3N/4 .. N)    is the lower half of pass B's, the positive one.
+    //
+    // Each pass writes at N/2 within its own buffer rather than at zero,
+    // because the kernel is specialized at two channels and places channel
+    // zero at slot one. That is why the source offsets below start there.
+    //
+    // WHY THIS IS FIVE PHASES OVER EVERY RECEIVER RATHER THAN ONE FUNCTION
+    //    PER RECEIVER, MEASURED
+    //
+    // A passband is two dispatches of one workgroup each. On a card with a
+    // hundred and twenty-eight multiprocessors that is almost entirely idle
+    // silicon, so what it costs is not the arithmetic but the serialisation
+    // around it: every vkCmdPipelineBarrier is a full stop, and receivers
+    // fenced off from each other cannot overlap however little work each one
+    // has.
+    //
+    // Recorded per receiver, with its own four barriers, this cost 32.7 us
+    // per receiver per block at eight receivers against 10.8 us at one, and
+    // quartering the transform from 2048 points to 512 changed it by 2.6
+    // percent. Both numbers say the same thing: the transform is free and
+    // the fences are not.
+    //
+    // Phased, the barrier count is four whatever the receiver count is, and
+    // every receiver's two transforms are in the same dependency region as
+    // every other's, so they overlap. The phases are the dependency chain
+    // written out: transform, assemble, measure, carry home. That took the
+    // eight-receiver figure to about 15 us each, against a coarse chain of
+    // about 10 us and a fine stage of about 18.
+    //
+    // WHAT THE MEASUREMENT WILL AND WILL NOT SUPPORT
+    //
+    // Eight receivers is the only point that repeats: 32.7 and 35.4 us each
+    // before the phases, 14.6, 15.1, 16.2 and 16.2 after, over four runs of
+    // each. That comparison is what justifies the shape of this function.
+    //
+    // One receiver and thirty-two do not repeat. Across four runs the same
+    // case gave 1.5 to 13.9 us each at one and 4.7 to 14.7 at thirty-two, so
+    // the honest figure at those counts is "somewhere between five and
+    // fifteen microseconds" and nothing finer. At one receiver the whole
+    // delta is a few milliseconds over a seventy-millisecond run, which is
+    // near the resolution of a wall clock around a whole engine.
+    //
+    // Transform size does not show up at all: 512 points against 2048 at
+    // eight receivers gave 11.3 to 18.9 against 14.6 to 16.2, which is the
+    // same number. Two single-workgroup transforms are idle silicon either
+    // way.
+    //
+    // All of it measured 2026-09-19 on the RTX 4090 at 20 MS/s in
+    // 65536-sample blocks by the hidden cost case in
+    // tests/engine/test_engine_passband.cpp, as a wall-clock delta of two
+    // end-to-end runs, each the minimum of five. That includes the host
+    // side, so it is what a caller opening a second display pays rather than
+    // what the dispatches cost. A per-stage figure would want GPU
+    // timestamps, which is what the rig in tools/bench is for.
+    void record_passbands(Frame& frame) {
+        VkCommandBuffer commands = frame.commands;
+
+        std::size_t planned = 0;
+        for (FrameVrx& entry : frame.vrxs) {
+            if (entry.passband == nullptr) {
+                continue;
+            }
+            PassbandView& view = *entry.passband;
+            const auto points = static_cast<dsp::SampleIndex>(view.transform);
+
+            // The window is the last N fine samples. It has to be entirely
+            // the receiver's own: below fine_from the ring holds what the
+            // stage cleared it to, and a window straddling that transforms a
+            // step that was never on the air. Expected for the first blocks
+            // after a receiver is added, which is why it is counted rather
+            // than logged.
+            if (entry.output.fine_next < points ||
+                entry.output.fine_next - points < entry.output.fine_from) {
+                passband_skipped.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+
+            const dsp::SampleIndex first = entry.output.fine_next - points;
+            entry.passband_window_offset = static_cast<std::uint32_t>(first & view.fine.mask);
+            entry.passband_geometry =
+                passband_geometry_for(view.fine.rate, view.transform,
+                                      entry.output.fine_dc_numerator,
+                                      entry.output.fine_dc_denominator);
+            entry.passband_start = source_index_of_fine(view.fine, first);
+            entry.passband_count =
+                source_index_of_fine(view.fine, entry.output.fine_next) - entry.passband_start;
+            entry.passband_recorded = true;
+            ++planned;
+        }
+
+        if (planned == 0) {
+            return;
+        }
+
+        // The fine dispatches wrote the windows; the transforms read them.
+        // Each stage already barriers between its own two dispatches, so
+        // this is strictly redundant today and is recorded anyway: the
+        // dependency belongs to the reader, and a stage that stopped needing
+        // its own barrier would take this one with it silently.
+        record_barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT);
+
+        for (FrameVrx& entry : frame.vrxs) {
+            if (!entry.passband_recorded) {
+                continue;
+            }
+            PassbandView& view = *entry.passband;
+            const std::size_t slot = entry.readback_index;
+
+            SpectrumPushConstants params;
+            params.chan_blocks = view.fine.capacity;
+            params.chan_mask = view.fine.mask;
+            params.in_offset = entry.passband_window_offset;
+            const auto push = std::as_bytes(std::span<const SpectrumPushConstants>(&params, 1));
+
+            // One workgroup each, and nothing fences them apart: every pass
+            // of every receiver reads its own ring and writes its own
+            // buffer.
+            record_dispatch(commands, passband_pipeline, view.pass_a_set[slot], push, 1);
+            record_dispatch(commands, passband_pipeline, view.pass_b_set[slot], push, 1);
+        }
+
+        record_barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_TRANSFER_READ_BIT);
+
+        constexpr VkDeviceSize kFloat = sizeof(float);
+        for (FrameVrx& entry : frame.vrxs) {
+            if (!entry.passband_recorded) {
+                continue;
+            }
+            PassbandView& view = *entry.passband;
+            const std::size_t slot = entry.readback_index;
+            const auto half = static_cast<VkDeviceSize>(view.transform / 2);
+            const auto quarter = static_cast<VkDeviceSize>(view.transform / 4);
+
+            VkBufferCopy central{};
+            central.srcOffset = half * kFloat;
+            central.dstOffset = quarter * kFloat;
+            central.size = half * kFloat;
+            vkCmdCopyBuffer(commands, view.pass_a[slot].handle(), view.frame[slot].handle(), 1,
+                            &central);
+
+            VkBufferCopy outer[2]{};
+            outer[0].srcOffset = (half + quarter) * kFloat;
+            outer[0].dstOffset = 0;
+            outer[0].size = quarter * kFloat;
+            outer[1].srcOffset = half * kFloat;
+            outer[1].dstOffset = (half + quarter) * kFloat;
+            outer[1].size = quarter * kFloat;
+            vkCmdCopyBuffer(commands, view.pass_b[slot].handle(), view.frame[slot].handle(), 2,
+                            outer);
+        }
+
+        // Two readers of each assembled frame: the percentile that measures
+        // it and the copy that carries it home. The measurement runs on the
+        // device for the reason docs/ui-spectrum.md gives about the span, and
+        // it runs on the assembled frame rather than on either pass because a
+        // percentile of half a band is a percentile of half a band.
+        record_barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT);
+
+        for (FrameVrx& entry : frame.vrxs) {
+            if (!entry.passband_recorded) {
+                continue;
+            }
+            PassbandView& view = *entry.passband;
+            const std::size_t slot = entry.readback_index;
+
+            SpectrumLevelsPushConstants levels_params;
+            levels_params.bins = view.transform;
+            levels_params.low_permille = dsp::kSpectrumLowPermille;
+            levels_params.high_permille = dsp::kSpectrumHighPermille;
+
+            record_dispatch(
+                commands, spectrum_levels_pipeline, view.levels_set[slot],
+                std::as_bytes(std::span<const SpectrumLevelsPushConstants>(&levels_params, 1)),
+                1);
+
+            VkBufferCopy home{};
+            home.srcOffset = 0;
+            home.dstOffset = 0;
+            home.size = static_cast<VkDeviceSize>(view.transform) * kFloat;
+            vkCmdCopyBuffer(commands, view.frame[slot].handle(), view.readback[slot].handle(),
+                            1, &home);
+        }
+
+        record_barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_ACCESS_TRANSFER_READ_BIT);
+
+        for (FrameVrx& entry : frame.vrxs) {
+            if (!entry.passband_recorded) {
+                continue;
+            }
+            PassbandView& view = *entry.passband;
+            const std::size_t slot = entry.readback_index;
+
+            VkBufferCopy levels_home{};
+            levels_home.srcOffset = 0;
+            levels_home.dstOffset = 0;
+            levels_home.size = static_cast<VkDeviceSize>(dsp::kSpectrumLevelsOutputs) * kFloat;
+            vkCmdCopyBuffer(commands, view.levels_output[slot].handle(),
+                            view.levels_readback[slot].handle(), 1, &levels_home);
+        }
+
+        dispatches.fetch_add(3 * planned, std::memory_order_relaxed);
     }
 
     // The completion thread, once per submitted frame, in submission order.
@@ -850,6 +1496,21 @@ struct Graph::Impl {
             slot.audio_index += entry.output.frames;
             slot.audio_samples.fetch_add(entry.output.frames, std::memory_order_relaxed);
             audio_frames.fetch_add(entry.output.frames, std::memory_order_relaxed);
+        }
+
+        // Separate from the audio loop above, and after it, because a
+        // squelched receiver still has a passband: the audio is muted and
+        // the display is not, for the same reason the level meter keeps
+        // reading. `continue` in that loop skips a receiver that produced no
+        // audio this dispatch, and one of those can still have produced a
+        // frame.
+        for (auto& entry : frame.vrxs) {
+            if (!entry.passband_recorded) {
+                continue;
+            }
+            if (auto delivered = deliver_passband(entry); !delivered) {
+                outcome = std::unexpected(delivered.error());
+            }
         }
 
         if (frame.spectrum_recorded) {
@@ -964,6 +1625,94 @@ struct Graph::Impl {
         }
         return {};
     }
+
+    // The completion thread, for one receiver that recorded a passband.
+    //
+    // Shaped exactly like deliver_spectrum above, against per-receiver state
+    // instead of the graph's: the frame, the two percentiles measured from it
+    // on the device, and a scale of this receiver's own. The one difference
+    // is that the sequence counts frames for this receiver rather than for
+    // the engine, because a receiver attached an hour into a run has not
+    // missed anything.
+    Status deliver_passband(FrameVrx& entry) {
+        entry.passband_recorded = false;
+
+        PassbandView& view = *entry.passband;
+        VrxSlot& slot = *entry.slot;
+        const auto bins = static_cast<std::size_t>(entry.passband_geometry.bins);
+        if (bins == 0 || bins > view.scratch.size()) {
+            return fail(std::format(
+                "a frame recorded a passband of {} bins for receiver {} and its host scratch "
+                "holds {}",
+                bins, slot.id.value, view.scratch.size()));
+        }
+        if (!slot.passband_scale.has_value()) {
+            return fail(std::format(
+                "receiver {} recorded a passband and has no colour-map scale, which "
+                "Graph::add_vrx builds with the receiver",
+                slot.id.value));
+        }
+
+        const std::span<float> values(view.scratch.data(), bins);
+        if (auto read = view.readback[entry.readback_index].read(std::as_writable_bytes(values));
+            !read) {
+            return std::unexpected(with_context(
+                read.error(), std::format("receiver {} passband readback", slot.id.value)));
+        }
+
+        std::array<float, dsp::kSpectrumLevelsOutputs> measured{};
+        if (auto read = view.levels_readback[entry.readback_index].read(
+                std::as_writable_bytes(std::span(measured)));
+            !read) {
+            return std::unexpected(with_context(
+                read.error(),
+                std::format("receiver {} passband levels readback", slot.id.value)));
+        }
+
+        // Source time since this receiver's last frame, from the sample
+        // indices rather than from a clock, so a capture replayed at forty
+        // times realtime scales the way it did live.
+        double elapsed_seconds = 0.0;
+        if (slot.passband_have_last && entry.passband_start > slot.passband_last_start &&
+            config.source_rate > 0) {
+            elapsed_seconds =
+                static_cast<double>(entry.passband_start - slot.passband_last_start) /
+                static_cast<double>(config.source_rate);
+        }
+        slot.passband_last_start = entry.passband_start;
+        slot.passband_have_last = true;
+
+        const SpectrumScaleLevels ends =
+            slot.passband_scale->update(measured[0], measured[1], elapsed_seconds);
+
+        // Counted before the null check and after the measurement, for the
+        // reason deliver_spectrum gives at length: this counts what the
+        // device produced, and the sequence below counts what was delivered.
+        passband_frames.fetch_add(1, std::memory_order_relaxed);
+
+        if (entry.passband_sink == nullptr || !*entry.passband_sink) {
+            return {};
+        }
+
+        PassbandFrame out;
+        out.vrx = slot.id;
+        out.power_db = std::span<const float>(values.data(), values.size());
+        out.geometry = entry.passband_geometry;
+        out.start = entry.passband_start;
+        out.count = entry.passband_count;
+        out.sequence = slot.passband_sequence;
+        ++slot.passband_sequence;
+        out.floor_db = ends.floor_db;
+        out.ceiling_db = ends.ceiling_db;
+        out.percentile_low_db = measured[0];
+        out.percentile_high_db = measured[1];
+
+        if (auto delivered = (*entry.passband_sink)(out); !delivered) {
+            return std::unexpected(with_context(
+                delivered.error(), std::format("receiver {} passband sink", slot.id.value)));
+        }
+        return {};
+    }
 };
 
 Graph::Graph() : impl_(std::make_unique<Impl>()) {}
@@ -1064,7 +1813,7 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     // --- the spectrum stage, sized before the ring is sized around it -------
 
     SpectrumGeometry spectrum;
-    std::string spectrum_note;
+    std::string stage_note;
     if (config.spectrum_transform != 0) {
         const std::uint32_t transform_ceiling =
             dsp::max_spectrum_transform_size(device.max_workgroup_shared_memory);
@@ -1089,7 +1838,7 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
             // cap the GPU did not set.
             const std::uint32_t device_ceiling =
                 dsp::max_fft_transform_size(device.max_workgroup_shared_memory);
-            spectrum_note =
+            stage_note =
                 device_ceiling < dsp::kMaxSpectrumTransform
                     ? std::format("a {}-point spectrum transform needs {} bytes of shared memory "
                                   "and '{}' offers {}, so it was reduced to {} points",
@@ -1138,7 +1887,63 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
         spectrum_local = std::max(1U, spectrum.transform / 2);
         spectrum_local = std::min(spectrum_local, ceiling);
         spectrum_local = std::min(spectrum_local, 256U);
+    }
 
+    // --- the passband stage, which shares the spectrum kernel ---------------
+
+    std::uint32_t passband_transform = 0;
+    std::uint32_t passband_local = 0;
+    if (config.passband_transform != 0) {
+        const std::uint32_t transform_ceiling =
+            dsp::max_spectrum_transform_size(device.max_workgroup_shared_memory);
+        if (transform_ceiling == 0) {
+            return fail(std::format(
+                "'{}' reports {} bytes of workgroup shared memory, which holds no passband "
+                "transform at all",
+                device.name, device.max_workgroup_shared_memory));
+        }
+
+        // Four points is the smallest core/shaders/spectrum.comp's own
+        // validate() accepts, and below it there is no central half to place.
+        if (config.passband_transform < 4 || !std::has_single_bit(config.passband_transform)) {
+            return fail(std::format(
+                "passband_transform is {}; it is a transform size, so a power of two of at "
+                "least four",
+                config.passband_transform));
+        }
+
+        passband_transform = std::min(config.passband_transform, transform_ceiling);
+        if (passband_transform < config.passband_transform) {
+            const std::uint32_t device_ceiling =
+                dsp::max_fft_transform_size(device.max_workgroup_shared_memory);
+            const std::string note =
+                device_ceiling < dsp::kMaxSpectrumTransform
+                    ? std::format("a {}-point passband transform needs {} bytes of shared "
+                                  "memory and '{}' offers {}, so it was reduced to {} points",
+                                  config.passband_transform,
+                                  dsp::fft_shared_bytes(config.passband_transform), device.name,
+                                  device.max_workgroup_shared_memory, passband_transform)
+                    : std::format("a {}-point passband transform is above the {}-point ceiling "
+                                  "core/dsp/pfb_design.cpp's twiddle table sets, so it was "
+                                  "reduced to {} points. That ceiling is not this device's: "
+                                  "'{}' has shared memory for {} points",
+                                  config.passband_transform, dsp::kMaxSpectrumTransform,
+                                  passband_transform, device.name, device_ceiling);
+            if (!stage_note.empty()) {
+                stage_note.append("; also ");
+            }
+            stage_note.append(note);
+        }
+
+        passband_local = std::max(1U, passband_transform / 2);
+        passband_local = std::min(passband_local, ceiling);
+        passband_local = std::min(passband_local, 256U);
+    }
+
+    // One width serves both, because one kernel does. Built whenever either
+    // stage is, since the passband measures its own two percentiles with the
+    // same module the span does.
+    if (spectrum.enabled() || passband_transform != 0) {
         spectrum_levels_local = std::min(ceiling, 256U);
     }
 
@@ -1188,6 +1993,8 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     impl.geometry.spectrum_local_size_x = spectrum_local;
     impl.geometry.spectrum_levels_local_size_x = spectrum_levels_local;
     impl.geometry.spectrum = spectrum;
+    impl.geometry.passband_transform = passband_transform;
+    impl.geometry.passband_local_size_x = passband_local;
     impl.geometry.block_samples = config.block_samples;
     impl.geometry.channel_ring_bytes = channel_ring_bytes;
     impl.geometry.staging_bytes = staging_bytes_for(config.format, config.block_samples);
@@ -1200,12 +2007,12 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
                         config.block_samples, max_blocks, ring_blocks,
                         impl.geometry.max_blocks_per_dispatch);
     }
-    if (!spectrum_note.empty()) {
+    if (!stage_note.empty()) {
         impl.geometry.clamped = true;
         if (!impl.geometry.clamp_reason.empty()) {
             impl.geometry.clamp_reason.append("; also ");
         }
-        impl.geometry.clamp_reason.append(spectrum_note);
+        impl.geometry.clamp_reason.append(stage_note);
     }
 
     // A caller who pinned channel_ring_blocks can pin one too small for the
@@ -1395,6 +2202,60 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         impl.spectrum_window = std::move(*device_window);
     }
 
+    // The passband stage's three tables. Shared by every receiver, because
+    // none of them depends on the receiver: the twiddle circle and both
+    // windows are functions of the transform size alone.
+    std::vector<dsp::Complex32> passband_twiddle_table;
+    std::vector<float> passband_window_a_taps;
+    std::vector<float> passband_window_b_taps;
+    VkDeviceSize passband_twiddle_bytes = 0;
+    VkDeviceSize passband_window_bytes = 0;
+    if (impl.geometry.passband_transform != 0) {
+        const std::uint32_t points = impl.geometry.passband_transform;
+
+        auto circle = dsp::build_twiddles(points);
+        if (!circle) {
+            return std::unexpected(with_context(circle.error(), "Graph::prepare passband"));
+        }
+        passband_twiddle_table = std::move(*circle);
+
+        auto plain = passband_window(points, false);
+        if (!plain) {
+            return std::unexpected(with_context(plain.error(), "Graph::prepare passband"));
+        }
+        passband_window_a_taps = std::move(*plain);
+
+        auto shifted = passband_window(points, true);
+        if (!shifted) {
+            return std::unexpected(with_context(shifted.error(), "Graph::prepare passband"));
+        }
+        passband_window_b_taps = std::move(*shifted);
+
+        passband_twiddle_bytes = passband_twiddle_table.size() * sizeof(dsp::Complex32);
+        passband_window_bytes = passband_window_a_taps.size() * sizeof(float);
+
+        auto device_twiddles = make_device_buffer(passband_twiddle_bytes);
+        if (!device_twiddles) {
+            return std::unexpected(
+                with_context(device_twiddles.error(), "Graph::prepare passband twiddles"));
+        }
+        impl.passband_twiddles = std::move(*device_twiddles);
+
+        auto window_a = make_device_buffer(passband_window_bytes);
+        if (!window_a) {
+            return std::unexpected(
+                with_context(window_a.error(), "Graph::prepare passband window"));
+        }
+        impl.passband_window_a = std::move(*window_a);
+
+        auto window_b = make_device_buffer(passband_window_bytes);
+        if (!window_b) {
+            return std::unexpected(
+                with_context(window_b.error(), "Graph::prepare passband window"));
+        }
+        impl.passband_window_b = std::move(*window_b);
+    }
+
     {
         // A CommandRunner here and nowhere else in this file. Uploading the
         // filter tables is not the sample path, it happens once, and it wants
@@ -1485,6 +2346,56 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
                               spectrum_window_bytes});
         }
 
+        gpu::Buffer passband_twiddle_staging;
+        gpu::Buffer passband_window_a_staging;
+        gpu::Buffer passband_window_b_staging;
+        if (impl.geometry.passband_transform != 0) {
+            auto stage_upload = [&](VkDeviceSize bytes, std::span<const std::byte> source,
+                                    const char* what) -> Expected<gpu::Buffer> {
+                auto staged = gpu::Buffer::create(context, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                                  gpu::MemoryKind::Upload);
+                if (!staged) {
+                    return std::unexpected(with_context(staged.error(), what));
+                }
+                if (auto wrote = staged->write(source); !wrote) {
+                    return std::unexpected(with_context(wrote.error(), what));
+                }
+                return staged;
+            };
+
+            auto twiddles_staged =
+                stage_upload(passband_twiddle_bytes,
+                             std::as_bytes(std::span(passband_twiddle_table)),
+                             "Graph::prepare passband twiddle staging");
+            if (!twiddles_staged) {
+                return std::unexpected(twiddles_staged.error());
+            }
+            passband_twiddle_staging = std::move(*twiddles_staged);
+
+            auto a_staged = stage_upload(passband_window_bytes,
+                                         std::as_bytes(std::span(passband_window_a_taps)),
+                                         "Graph::prepare passband window staging");
+            if (!a_staged) {
+                return std::unexpected(a_staged.error());
+            }
+            passband_window_a_staging = std::move(*a_staged);
+
+            auto b_staged = stage_upload(passband_window_bytes,
+                                         std::as_bytes(std::span(passband_window_b_taps)),
+                                         "Graph::prepare passband window staging");
+            if (!b_staged) {
+                return std::unexpected(b_staged.error());
+            }
+            passband_window_b_staging = std::move(*b_staged);
+
+            copies.push_back({passband_twiddle_staging.handle(), impl.passband_twiddles.handle(),
+                              passband_twiddle_bytes});
+            copies.push_back({passband_window_a_staging.handle(),
+                              impl.passband_window_a.handle(), passband_window_bytes});
+            copies.push_back({passband_window_b_staging.handle(),
+                              impl.passband_window_b.handle(), passband_window_bytes});
+        }
+
         if (auto copied = runner->copy(copies); !copied) {
             return std::unexpected(with_context(copied.error(), "Graph::prepare"));
         }
@@ -1555,13 +2466,43 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             return std::unexpected(with_context(pipeline.error(), "Graph::prepare spectrum"));
         }
         impl.spectrum_pipeline = std::move(*pipeline);
+    }
 
-        // The percentile, measured on the device from the frame above. No
-        // grid constants: this kernel's shape is entirely in its push
-        // constants, so one pipeline serves every geometry. The kernel beside
-        // it does the opposite, and docs/fft.md records an integrated-device
-        // fault that tracks exactly how many pipelines one module is
-        // specialized into, so this one adds none.
+    if (impl.geometry.passband_transform != 0) {
+        // One channel, because a fine stream is one stream. Two is what
+        // core/shaders/spectrum.comp's slot arithmetic and
+        // dsp::validate(SpectrumParams) both take as the floor, and the
+        // graph dispatches exactly one workgroup against it, so the second
+        // channel is never entered and its origin is never computed. The
+        // cost of saying two is that channel zero writes at slot one, which
+        // is why a pass buffer is a whole frame wide and only its upper half
+        // is used.
+        const std::uint32_t passband_constants[] = {
+            2U, impl.geometry.passband_transform,
+            dsp::fft_stages(impl.geometry.passband_transform)};
+
+        gpu::ComputePipeline::Options options;
+        options.spirv = gpu::shaders::spectrum();
+        options.storage_buffer_count = 4;
+        options.local_size_x = impl.geometry.passband_local_size_x;
+        options.push_constant_bytes = sizeof(SpectrumPushConstants);
+        options.grid_constants = passband_constants;
+        auto pipeline = gpu::ComputePipeline::create(context, options);
+        if (!pipeline) {
+            return std::unexpected(with_context(pipeline.error(), "Graph::prepare passband"));
+        }
+        impl.passband_pipeline = std::move(*pipeline);
+    }
+
+    // The percentile, measured on the device from a frame before it moves.
+    //
+    // No grid constants: this kernel's shape is entirely in its push
+    // constants, so one pipeline serves every geometry, and that is what lets
+    // one of them serve both the span and every receiver's passband. The
+    // kernel beside it does the opposite, and docs/fft.md records an
+    // integrated-device fault that tracks exactly how many pipelines one
+    // module is specialized into, so this one adds none.
+    if (impl.geometry.spectrum.enabled() || impl.geometry.passband_transform != 0) {
         gpu::ComputePipeline::Options levels;
         levels.spirv = gpu::shaders::spectrum_levels();
         levels.storage_buffer_count = 2;
@@ -1806,6 +2747,7 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     request.frames_in_flight = impl.geometry.frames_in_flight;
     request.local_size_x = impl.geometry.local_size_x;
     request.audio_rate = params.audio_rate != 0 ? params.audio_rate : impl.config.audio_rate;
+    request.passband_transform = impl.geometry.passband_transform;
 
     std::unique_ptr<VrxStage> stage;
     if (impl.factory) {
@@ -1852,6 +2794,20 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
         slot->readback.push_back(std::move(*buffer));
     }
     slot->scratch.assign(slot->audio_bytes / sizeof(float), 0.0F);
+
+    // The receiver's passband colour map, built here rather than when a sink
+    // is attached, so that it survives one being swapped for another. No
+    // pins: nothing in VrxParams sets them, and PassbandFrame carries the
+    // raw percentiles for a consumer that wants its own.
+    //
+    // Built even when the graph has no passband stage. It is two floats and
+    // a little history, against the alternative of a second place where the
+    // stage's absence has to be remembered.
+    if (auto made = SpectrumScale::create(SpectrumScaleConfig{})) {
+        slot->passband_scale = std::move(*made);
+    } else {
+        return std::unexpected(with_context(made.error(), "Graph::add_vrx passband scale"));
+    }
 
     {
         std::scoped_lock lock(impl.control_lock);
@@ -1958,6 +2914,70 @@ Status Graph::set_spectrum_sink(SpectrumSink sink) {
     }
     op->kind = Impl::ControlOp::Kind::Spectrum;
     op->spectrum_sink = std::make_shared<SpectrumSink>(std::move(sink));
+    impl.push_control(op);
+    return {};
+}
+
+Status Graph::set_passband_sink(VrxId id, PassbandSink sink) {
+    auto& impl = *impl_;
+    if (impl.geometry.passband_transform == 0) {
+        return fail("this graph was built with no passband stage. It costs a pipeline, two "
+                    "window tables and a window's worth of room in every receiver's fine ring, "
+                    "and a ring cannot be grown while a command buffer names it, so it is "
+                    "chosen through GraphConfig::passband_transform before the source is "
+                    "opened rather than by attaching a sink");
+    }
+
+    std::shared_ptr<Impl::VrxSlot> slot;
+    {
+        std::scoped_lock lock(impl.control_lock);
+        slot = impl.find_known(id);
+        if (slot == nullptr) {
+            return fail(std::format("no receiver {} is registered", id.value));
+        }
+    }
+
+    auto* op = new (std::nothrow) Impl::ControlOp();
+    if (op == nullptr) {
+        return fail("Graph::set_passband_sink could not allocate the control operation");
+    }
+    op->kind = Impl::ControlOp::Kind::Passband;
+    op->id = id;
+
+    // An empty sink is a detach, and a detach allocates nothing. The
+    // recording thread drops both the view and the sink together, and the
+    // frames still in flight keep the buffers alive through their own
+    // references until they retire.
+    if (!sink) {
+        impl.push_control(op);
+        return {};
+    }
+
+    // Read once, here, on the control plane. Every field of StageFineOutput
+    // is written at construction and never again, which is the reason this
+    // is safe while the recording thread is inside record() on the same
+    // stage. The one thing about a fine stream that a retune does move, the
+    // frequency its DC sits at, comes back on StageOutput instead and is
+    // read on the recording thread.
+    const StageFineOutput fine = slot->stage->fine_output();
+    if (fine.ring == VK_NULL_HANDLE) {
+        delete op;
+        return fail(std::format(
+            "receiver {} keeps no fine stream, so there is nothing to transform. The graph's "
+            "raw tap is a copy out of the coarse channel ring with no mixing and no filtering, "
+            "and the full-span spectrum already covers that channel",
+            id.value));
+    }
+
+    auto built = impl.build_passband_view(fine);
+    if (!built) {
+        delete op;
+        return std::unexpected(with_context(
+            built.error(), std::format("receiver {} passband", id.value)));
+    }
+
+    op->passband = std::move(*built);
+    op->passband_sink = std::make_shared<PassbandSink>(std::move(sink));
     impl.push_control(op);
     return {};
 }
@@ -2467,9 +3487,19 @@ Status Graph::on_block(const source::SourceBlock& block) {
             entry.readback_index = frame_index;
             entry.output = *recorded;
             entry.squelch_dbfs = slot->recording_params.squelch_dbfs;
+
+            // Snapshotted the same way the audio sink is, so detaching never
+            // races a delivery already under way. The transform itself is
+            // recorded after this loop, not inside it: see record_passbands.
+            entry.passband = slot->passband;
+            entry.passband_sink = slot->passband_sink;
             frame.vrxs.push_back(std::move(entry));
         }
         impl.readbacks.fetch_add(frame.vrxs.size(), std::memory_order_relaxed);
+
+        // After every fine stage, so that all of them sit in one dependency
+        // region and their transforms can overlap.
+        impl.record_passbands(frame);
     }
 
     // Everything above this line stayed on the device. What crosses back is
@@ -2589,6 +3619,8 @@ GraphStats Graph::stats() const {
     out.audio_dropped = impl.audio_dropped.load(std::memory_order_relaxed);
     out.spectrum_frames = impl.spectrum_frames.load(std::memory_order_relaxed);
     out.spectrum_skipped = impl.spectrum_skipped.load(std::memory_order_relaxed);
+    out.passband_frames = impl.passband_frames.load(std::memory_order_relaxed);
+    out.passband_skipped = impl.passband_skipped.load(std::memory_order_relaxed);
     if (impl.ring != nullptr) {
         out.write_index = impl.ring->write_index();
         const auto cursor = impl.ring->cursor(impl.consumer);

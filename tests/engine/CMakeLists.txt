@@ -20,6 +20,13 @@
 # stays green on a build machine with nothing plugged in without pretending it
 # covered the radio.
 #
+# test_engine_passband.cpp is the per-receiver transform, which needs a GPU
+# for the same reasons and one more: the passband runs two passes of the
+# spectrum kernel and reassembles them, so its correctness is in a copy
+# region as much as in any arithmetic. Its last case needs no device and is
+# in this file rather than in tests/reference because it is refereeing the
+# graph's reassembly rule rather than a kernel.
+#
 # test_engine_spectrum.cpp is the spectrum path's half of test_engine.cpp and
 # needs a GPU for the same reason: the transform is on the device and the
 # frame comes back through a readback buffer, so nothing about the axis, the
@@ -33,6 +40,7 @@ add_executable(revenant_engine_tests
     ../reference/gpu_fixture.cpp
     test_audio_wasapi.cpp
     test_engine.cpp
+    test_engine_passband.cpp
     test_engine_spectrum.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp

@@ -341,9 +341,42 @@ struct DetectorConfig {
     std::uint32_t max_sum_bins = 0;
 
     // Ceiling on how many scale-space peaks one decision considers, so a
-    // pathological frame cannot make this allocate without bound. Overflow is
-    // counted rather than silently dropped.
-    std::uint32_t max_peaks = 4096;
+    // pathological frame cannot make this allocate without bound. Zero
+    // derives one per fine bin, which is what the shipped configuration uses.
+    //
+    // The peaks kept are the STRONGEST this many, not the first this many.
+    // That distinction is the whole of it, and getting it wrong cost a
+    // broadcast station: the ladder is walked narrowest rung first, so a
+    // budget spent in arrival order is spent entirely on the narrowest rungs
+    // and the widest ones are never searched. See the note in
+    // find_candidates() for what that measured like on the radio.
+    //
+    // With that fixed this is a sensitivity knob rather than a correctness
+    // one: no setting can lose a wide signal to a narrow one, and a small one
+    // can still lose a WEAK signal to a loud one, because a very peaky
+    // emitter spends the budget on its own windows.
+    //
+    // One per bin rather than a round number. The ladder's rungs are powers
+    // of two, so the positions it can report sum to under twice the bin
+    // count whatever the frame holds; a budget of one per bin is therefore
+    // over half of everything that could ever be produced, and it scales with
+    // the frame instead of being right at one transform size.
+    //
+    // Measured this session, 65536 bins, a scene holding eight emitters from
+    // 50 Hz to 150 kHz including two with resolvable interior lines:
+    //
+    //   budget 4096   19.7 candidates per decision, 11.1 ms, the 6.5 kHz
+    //                 emitter evicted entirely and the 27 kHz one seen at
+    //                 70 percent of the decisions it was transmitting at
+    //   budget 16384  28.9 candidates, 11.8 ms, both found, both at 95
+    //                 percent
+    //   budget 65536  31.0 candidates, 11.5 ms, and the budget stops binding
+    //   budget 262144 no change from 65536 on any figure
+    //
+    // So the cost of the whole range is under half a millisecond a decision
+    // against a decision that costs eleven, and the sensitivity it buys is
+    // a whole emitter. The frame, not the budget, is what this stage costs.
+    std::uint32_t max_peaks = 0;
 
     // How far below a detection's own mean per-bin excess a neighbouring bin
     // may sit and still be grown into it.
@@ -436,6 +469,12 @@ struct DetectorStats {
     std::uint64_t births_refused = 0;
     std::uint64_t merges = 0;
     std::uint64_t splits = 0;
+
+    // Decisions where the scale-space search produced more peaks than
+    // max_peaks, so the weakest were evicted. Not a fault: the set kept is
+    // the strongest that many and a wide signal cannot be squeezed out by
+    // narrow ones. It says the frame is busy enough that raising max_peaks
+    // would change what is reported.
     std::uint64_t peaks_overflowed = 0;
 };
 
@@ -527,6 +566,12 @@ private:
     std::uint64_t decision_interval_samples_ = 1;
     std::uint64_t warmup_samples_ = 1;
     std::size_t noise_window_bins_ = 0;
+
+    // config_.max_peaks with the zero-derives-from-the-frame rule applied,
+    // the same way widths_ carries the derived form of max_sum_bins. The
+    // configuration keeps what the caller asked for so that config() does
+    // not report a number nobody set.
+    std::uint32_t peak_budget_ = 1;
     std::vector<std::uint32_t> widths_;
 
     // Integrated linear power per bin, and the floor under it.

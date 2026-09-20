@@ -121,6 +121,17 @@ struct VrxStageRequest {
     // The engine's audio rate, already resolved from VrxParams::audio_rate or
     // the engine default.
     dsp::SampleRate audio_rate = 0;
+
+    // Points in a passband transform, or 0 when the graph has no passband
+    // stage. See GraphConfig::passband_transform.
+    //
+    // A stage that keeps a fine ring has to hold a whole window of this
+    // length below everything the frames in flight are writing, or the
+    // transform reads slots a later dispatch has already overwritten. That
+    // is a sizing decision made once at construction, which is why it is
+    // here rather than on StageRecord: growing a ring mid-stream would mean
+    // freeing a buffer an in-flight command buffer still names.
+    std::uint32_t passband_transform = 0;
 };
 
 // What one recorded dispatch will produce on the host side.
@@ -132,6 +143,74 @@ struct StageOutput {
     std::uint32_t channels = 1;
 
     dsp::SampleRate rate = 0;
+
+    // How far the stage's own complex baseband has got after this dispatch,
+    // as a half-open range of absolute fine-stream indices: [fine_from,
+    // fine_next) are the receiver's samples and are live in the ring
+    // fine_output() names.
+    //
+    // Both, and not just the end, because the passband transform's window
+    // reaches back over several dispatches and the bottom of the ring is not
+    // the stream. Below fine_from is whatever the stage cleared the ring to,
+    // and a window straddling that boundary transforms a step that was never
+    // on the air. It is the same gate the full-span spectrum applies against
+    // blocks_contiguous_from, one stream down.
+    //
+    // Left zero by a stage with no fine ring, which is what an empty
+    // fine_output() already says.
+    dsp::SampleIndex fine_from = 0;
+    dsp::SampleIndex fine_next = 0;
+
+    // Where the fine stream's DC sits in the SOURCE's baseband frame, as an
+    // exact rational in hertz: the coarse channel's centre plus the residual
+    // the stage mixes out.
+    //
+    // Not the receiver's centre. CW translates the carrier to the operator's
+    // pitch instead of to DC, so the two differ by the pitch there and agree
+    // on the other seven modes. The stage is the only thing that knows which,
+    // so the stage is what reports it.
+    //
+    // Here rather than on StageFineOutput because a retune moves it, and
+    // this is the one surface the graph reads on the recording thread only.
+    // Everything on StageFineOutput is fixed at construction, which is what
+    // lets the control plane read that struct while a block is being
+    // recorded.
+    std::int64_t fine_dc_numerator = 0;
+    std::int64_t fine_dc_denominator = 1;
+};
+
+// A stage's own complex baseband on the device, for a second transform over
+// the receiver's passband.
+//
+// The fine stage already writes exactly this: mixed to DC, limited to the
+// requested bandwidth, at the demodulation rate. docs/ui-spectrum.md calls
+// that the reason the fine-tuning display is cheap, since the expensive part
+// is already paid for by the demodulator. This is the seam that lets the
+// graph reach it without owning the demodulator's arithmetic.
+//
+// Everything here is fixed for the life of the stage. A retune moves where
+// the receiver points and changes no field below, which is what lets the
+// graph write a descriptor set once.
+struct StageFineOutput {
+    // VK_NULL_HANDLE when the stage keeps no such ring, which is how a stage
+    // declines a passband rather than by failing one.
+    VkBuffer ring = VK_NULL_HANDLE;
+
+    // Complex samples, a power of two, and its mask.
+    std::uint32_t capacity = 0;
+    std::uint32_t mask = 0;
+
+    // The fine stream's rate, which is the width of a passband frame.
+    dsp::SampleRate rate = 0;
+
+    // Delay from the channel stream to the fine stream, in channel samples,
+    // so the graph can say when a window's energy was on the air rather than
+    // when its samples reached this stage. Fractional because an
+    // interpolating prototype's centre is.
+    //
+    // Fixed like the rest: a retune that would change the filter's shape is
+    // refused outright, so the delay a shape implies cannot move either.
+    double group_delay_channel_samples = 0.0;
 };
 
 // What a stage is handed at record time, once per block per receiver.
@@ -198,6 +277,17 @@ public:
     [[nodiscard]] virtual Status retune(const VrxParams& params,
                                         const VrxPlacement& placement) = 0;
 
+    // The stage's own complex baseband, or an empty record when it keeps
+    // none. Called on the control plane, once, when a passband sink is
+    // attached, and never on the sample path.
+    //
+    // Defaulted rather than pure so that a stage written before the passband
+    // existed still compiles and simply declines one. The graph's raw tap is
+    // that case and stays that case: it copies a coarse channel out of the
+    // channel ring without mixing or filtering, so it has no per-receiver
+    // baseband of its own to transform.
+    [[nodiscard]] virtual StageFineOutput fine_output() const { return {}; }
+
 protected:
     VrxStage() = default;
 };
@@ -263,6 +353,15 @@ struct GraphConfig {
     // where the reasoning is.
     std::optional<float> spectrum_floor_db;
     std::optional<float> spectrum_ceiling_db;
+
+    // Points in a receiver's passband transform, or 0 to build no passband
+    // stage. See EngineConfig::passband_transform, which is where this comes
+    // from and where the reasoning is.
+    //
+    // A non-zero value enlarges every receiver's fine ring by a window's
+    // worth, whether or not that receiver ever attaches a sink, because the
+    // ring is sized once when the stage is built.
+    std::uint32_t passband_transform = 0;
 };
 
 // What the graph settled on, which the caller needs to see rather than infer.
@@ -279,6 +378,11 @@ struct GraphGeometry {
 
     // Empty when GraphConfig::spectrum_transform was zero.
     SpectrumGeometry spectrum{};
+
+    // Zero when GraphConfig::passband_transform was, and otherwise what it
+    // was clamped to against this device's shared memory.
+    std::uint32_t passband_transform = 0;
+    std::uint32_t passband_local_size_x = 0;
 
     std::size_t block_samples = 0;
     std::uint64_t channel_ring_bytes = 0;
@@ -331,6 +435,14 @@ struct GraphStats {
     std::uint64_t spectrum_frames = 0;
     std::uint64_t spectrum_skipped = 0;
 
+    // Passband frames produced across every receiver that has a sink, and
+    // dispatches that produced none because the fine stream did not yet hold
+    // a whole contiguous window. The second is expected for the first few
+    // blocks after a receiver is added and after any skip, for the same
+    // reason spectrum_skipped is.
+    std::uint64_t passband_frames = 0;
+    std::uint64_t passband_skipped = 0;
+
     dsp::SampleIndex write_index = 0;
     dsp::SampleIndex retired_index = 0;
     dsp::SampleIndex next_output_block = 0;
@@ -367,6 +479,17 @@ public:
                                         const VrxPlacement& placement);
     [[nodiscard]] Status set_audio_sink(VrxId id, AudioSink sink);
     [[nodiscard]] Status set_spectrum_sink(SpectrumSink sink);
+
+    // Attaches or detaches one receiver's passband. Allocating here rather
+    // than in add_vrx is the per-receiver opt-in: a receiver nobody is
+    // examining holds no transform buffers and records no dispatch.
+    //
+    // The allocation happens on this thread, before the control operation is
+    // queued, so the recording thread never allocates. Detaching hands the
+    // buffers to the recording thread to drop, and a frame already in flight
+    // holds its own reference, so the memory outlives the dispatch reading
+    // it.
+    [[nodiscard]] Status set_passband_sink(VrxId id, PassbandSink sink);
     [[nodiscard]] Expected<VrxStatus> vrx_status(VrxId id) const;
     [[nodiscard]] std::vector<VrxId> vrx_ids() const;
 

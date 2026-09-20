@@ -85,6 +85,52 @@ The context is the point: one wheel does two different jobs and never has to
 be told which, because the operator is already looking at the thing they mean
 to change.
 
+### Time runs down: newest at the top
+
+The newest row of the waterfall is at the top edge and the history scrolls
+down away from it. SDR#, SDRuno, GQRX, CubicSDR and HDSDR all default to
+that, so an operator's eye goes to the top of a waterfall for "now" before
+they have read a label, and a display that runs the other way is read
+backwards for as long as it takes them to notice.
+
+Written down because this section specified both gestures in detail without
+ever saying which way the axis they act on runs, and the first implementation
+ran it the other way. `ui/render/waterfall_item.cpp` holds the convention now:
+the ring's write cursor decrements, so reading the ring forwards from just
+past the cursor is newest to oldest, top to bottom, with no mirror anywhere.
+
+The scrub gesture below inherits this axis. Older rows are the ones below the
+bottom edge, so a scrub into the past moves the picture the way scrolling
+down a document does, and a scrub back toward now moves it the other way.
+Reversing one of the two without the other gives a display that scrolls one
+way and scrubs the other, which is the failure this paragraph exists to
+prevent.
+
+### A detection means a different thing on each display
+
+The spectrum has no time axis. A detection drawn over it is a frequency
+marker and nothing more: this signal, this wide, live or held, with the fade
+saying how much evidence the tracker still has for it.
+
+The waterfall has a time axis, so a detection drawn over it is bounded in
+both: frequency across, and down, the rows the signal was actually present
+in. It scrolls with the history it annotates, so a burst that ended ten
+seconds ago keeps its place as it ages and an operator can read off that it
+lasted two seconds and started eight seconds ago. A band down the full height
+says none of that and hides the history it is pointing at.
+
+Two consequences. The waterfall has to remember which samples each stored row
+covers, which is a ring of sample ranges beside the ring of pixels. And the
+rectangle's closing edge is the last frame the signal was DETECTED in, never
+the last frame the tracker considered: those differ by exactly the hold for a
+held track, so closing on the second one would draw every held track as
+lasting the length of its own hold.
+
+The fade follows the same split. A held track's rectangle already ends where
+the signal stopped, so down there it is drawn solid; fading belongs to the
+spectrum marker alone, where it means the tracker has not dropped this track
+yet and the signal has stopped.
+
 ### Horizontal scroll tunes
 
 Over the fine-tuning display, it moves the receiver. That is

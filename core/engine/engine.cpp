@@ -254,6 +254,7 @@ public:
         graph_config.spectrum_transform = config_.spectrum_transform;
         graph_config.spectrum_floor_db = config_.spectrum_floor_db;
         graph_config.spectrum_ceiling_db = config_.spectrum_ceiling_db;
+        graph_config.passband_transform = config_.passband_transform;
 
         auto graph = Graph::create(context_, *ring_, *scheduler_, graph_config);
         if (!graph) {
@@ -275,6 +276,7 @@ public:
         info_.grid = grid;
         info_.source_rate = rate;
         info_.spectrum = graph_->geometry().spectrum;
+        info_.passband_transform = graph_->geometry().passband_transform;
 
         // Read once here rather than forwarded live, because this engine has
         // no tune call: the centre is fixed by the URI the source was opened
@@ -388,6 +390,21 @@ public:
                         "graph would mean rebuilding that");
         }
         return graph_->set_spectrum_sink(std::move(sink));
+    }
+
+    [[nodiscard]] Status set_passband_sink(VrxId id, PassbandSink sink) override {
+        if (graph_ == nullptr) {
+            return fail("Engine::set_passband_sink before a source is open: a passband's width "
+                        "is the receiver's demodulation rate, and there is no receiver until "
+                        "the source's rate is known");
+        }
+        if (config_.passband_transform == 0) {
+            return fail("this engine was created with EngineConfig::passband_transform at "
+                        "zero, so no passband stage was built. Set it before Engine::create: "
+                        "it sizes every receiver's fine ring, and a ring cannot be grown while "
+                        "a command buffer names it");
+        }
+        return graph_->set_passband_sink(id, std::move(sink));
     }
 
     [[nodiscard]] Status run() override {

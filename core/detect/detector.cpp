@@ -231,8 +231,8 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
         return fail("Detector::create: birth_hits of zero would make every noise excursion a "
                     "track, which is the one thing that knob exists to prevent");
     }
-    if (config.max_peaks == 0 || config.max_tracks == 0) {
-        return fail("Detector::create: max_peaks and max_tracks must both be at least one");
+    if (config.max_tracks == 0) {
+        return fail("Detector::create: max_tracks must be at least one");
     }
 
     Detector detector;
@@ -283,6 +283,14 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
         detector.widths_.push_back(width);
     }
 
+    // Zero derives one peak per fine bin. See the note on max_peaks: the
+    // ladder cannot report more than about twice the bin count of distinct
+    // positions, so this keeps over half of everything it could produce and
+    // it tracks the transform size rather than being right at one of them.
+    detector.peak_budget_ = config.max_peaks != 0
+                                ? config.max_peaks
+                                : static_cast<std::uint32_t>(detector.bins_);
+
     detector.average_.assign(detector.bins_, 0.0);
     detector.floor_.assign(detector.bins_, static_cast<double>(dsp::kSpectrumPowerFloor));
     detector.excess_cumulative_.assign(detector.bins_ + 1, 0.0);
@@ -292,7 +300,7 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
     detector.knot_floor_.assign(knots, static_cast<double>(dsp::kSpectrumPowerFloor));
     detector.knot_position_.assign(knots, 0.0);
     detector.separator_.reserve(detector.bins_);
-    detector.peaks_.reserve(config.max_peaks);
+    detector.peaks_.reserve(detector.peak_budget_);
 
     for (std::size_t k = 0; k < knots; ++k) {
         detector.knot_position_[k] = (static_cast<double>(2 * k + 1) *
@@ -519,8 +527,56 @@ void Detector::find_candidates() {
     // statement docs/detection.md makes about matching the bin width to the
     // signal bandwidth. It selects the scale and it is never the threshold,
     // because a deflection is not comparable across bandwidths.
+    //
+    // THE PEAK BUDGET IS A BEST-N SET, NOT A CUTOFF, AND THAT IS THE WHOLE
+    // DIFFERENCE BETWEEN FINDING A BROADCAST STATION AND FINDING THIRTY
+    // PIECES OF ONE
+    //
+    // max_peaks bounds the allocation. It used to do that by stopping the
+    // search at the first peak past the bound, and the ladder is walked
+    // narrowest rung first, so the bound was always spent on the rungs that
+    // matter least and the widest rungs were never searched at all. The
+    // failure is silent, it only appears once the frame is mostly signal, and
+    // it gets worse as the threshold is lowered.
+    //
+    // Measured against an RTL-SDR at 98.1 MHz, 2.4 MS/s, 65536 bins, this
+    // session. At the 6 dB default the four FM stations on that span produced
+    // 103 tracks in eight seconds and ids past 200: the 98.1 MHz station came
+    // back as about thirty tracks of 5 kHz each, evenly spaced, which is a
+    // 128-bin rung tiling a 3000-bin signal because nothing wider was ever
+    // reached. At 12 dB, where far fewer narrow windows clear their own
+    // threshold and the bound is never reached, the same station came back as
+    // ONE track of 106 to 116 kHz with a stable id. The signal did not change.
+    //
+    // So the bound keeps the strongest max_peaks windows instead of the first
+    // max_peaks found. That costs a bounded heap past the bound and nothing
+    // before it, it is the same set the greedy pass below was going to work
+    // from anyway, and it removes the dependence on which order the rungs
+    // happen to be walked in.
+    //
+    // It costs time, and the cost reads as a regression until you see where
+    // it came from: stopping early was a speedup that arrived exactly when
+    // the band got busy. The whole ladder is walked now whatever the frame
+    // holds. Measured on the same eight seconds of 98.1 MHz, 1.56 ms per
+    // frame before and 2.00 ms after, 5.7 percent of one core against 7.3.
+    // Four tenths of a millisecond a frame buys the wide rungs, which are
+    // the rungs that find a broadcast station.
     peaks_.clear();
-    bool overflowed = false;
+    bool bounded = false;
+
+    // Strongest first, with position and width breaking ties, so two equal
+    // deflections cannot swap between runs. Shared by the heap and the sort
+    // below because an eviction rule that disagreed with the sort order would
+    // drop a peak the sort was about to rank first.
+    const auto stronger = [](const Peak& a, const Peak& b) {
+        if (a.deflection != b.deflection) {
+            return a.deflection > b.deflection;
+        }
+        if (a.start != b.start) {
+            return a.start < b.start;
+        }
+        return a.width < b.width;
+    };
 
     for (const std::uint32_t width : widths_) {
         if (static_cast<std::size_t>(width) > bins_) {
@@ -549,7 +605,7 @@ void Detector::find_candidates() {
                                  : 0.0F;
         }
 
-        for (std::size_t s = 0; s <= last && !overflowed; ++s) {
+        for (std::size_t s = 0; s <= last; ++s) {
             if (!(static_cast<double>(deflection_[s]) > deflection_threshold)) {
                 continue;
             }
@@ -574,33 +630,36 @@ void Detector::find_candidates() {
             }
             const std::size_t middle = s + (end - s) / 2;
 
-            if (peaks_.size() >= config_.max_peaks) {
-                overflowed = true;
-                break;
+            const Peak found{.start = static_cast<std::uint32_t>(middle),
+                             .width = width,
+                             .deflection = static_cast<double>(here)};
+
+            if (peaks_.size() < peak_budget_) {
+                peaks_.push_back(found);
+                if (peaks_.size() == peak_budget_) {
+                    // Ordered by `stronger`, so the heap's root is the peak
+                    // that sorts LAST: the weakest, which is the one an
+                    // eviction has to reach.
+                    std::make_heap(peaks_.begin(), peaks_.end(), stronger);
+                }
+                continue;
             }
-            peaks_.push_back(Peak{.start = static_cast<std::uint32_t>(middle),
-                                  .width = width,
-                                  .deflection = static_cast<double>(here)});
-        }
-        if (overflowed) {
-            break;
+
+            bounded = true;
+            if (stronger(found, peaks_.front())) {
+                std::pop_heap(peaks_.begin(), peaks_.end(), stronger);
+                peaks_.back() = found;
+                std::push_heap(peaks_.begin(), peaks_.end(), stronger);
+            }
         }
     }
-    if (overflowed) {
+    if (bounded) {
         ++stats_.peaks_overflowed;
     }
 
     // Strongest deflection first, so the width that fits a signal takes its
     // bins before a wider window that merely contains it can.
-    std::sort(peaks_.begin(), peaks_.end(), [](const Peak& a, const Peak& b) {
-        if (a.deflection != b.deflection) {
-            return a.deflection > b.deflection;
-        }
-        if (a.start != b.start) {
-            return a.start < b.start;
-        }
-        return a.width < b.width;
-    });
+    std::sort(peaks_.begin(), peaks_.end(), stronger);
 
     // Strongest first, and each winner grows onto its own shoulders before
     // the next one is considered.

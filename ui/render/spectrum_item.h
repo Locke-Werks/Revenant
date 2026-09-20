@@ -1,17 +1,35 @@
 // The instantaneous spectrum, drawn as one column of pixels per bin run, and
 // the detection overlay both displays share.
 //
-// WHY A PAINTED ITEM AND NOT A QSGRenderNode
+// WHY THIS IS A QQuickItem AND NOT A QQuickPaintedItem, WHICH IS A REVERSAL
 //
-// ui/render/.gitkeep planned a custom render node sharing the Vulkan device
-// and command buffers with the DSP, so raster data never touched host
-// memory. That is still the right destination and it is not reachable from
-// here: the UI is a separate process for the runtime reason
-// core/rpc/types.h sets out, and a frame reaches it as a copied vector of
-// floats over a socket. The raster data is already in host memory by the
-// time this item sees it, so a painted item is what the data actually is.
-// The shared-handle path arrives with a local-client fast path in the
-// schema, not before.
+// It was a painted item, on the reasoning that a frame reaches this process
+// as a copied vector of floats over a socket, so the raster data is already
+// in host memory and a painted item is what the data actually is. That is
+// still true of where the data comes from and it was the wrong conclusion
+// about how to draw it.
+//
+// QQuickPaintedItem has one path in Qt 6: rasterise through QPainter into an
+// indirect image the size of the item in device pixels, then upload that
+// whole image, and update() marks the whole item dirty. Three O(W*H) terms
+// per frame, the blit, the rasterise and the upload, to deliver one new row
+// of W pixels. A waterfall 1578 by 1123 device pixels is 6.8 MB of RGBA by
+// arithmetic, and that is what was re-uploaded per frame.
+//
+// The measured consequence was that the frame rate fell as the window grew:
+// 41.6, 22.5 and 18.3 rows a second at waterfall sizes of 1578x363,
+// 1578x743 and 1578x1123 device pixels, against one synthetic scene at a
+// fixed nine tracks with the engine offering more frames than the window
+// drew at any of the three.
+//
+// So both displays build scene graph nodes instead. The trace is a line strip
+// and a textured triangle strip, the waterfall's history is a texture the GPU
+// scrolls by moving source rectangles, and the overlay is one batch of
+// triangles. Every per-frame term is then O(W), and the same three sizes
+// against the same engine settings measured 96.5, 97.3 and 97.6 rows a
+// second, which is everything that engine offered. Raising the supply until
+// the window was the limit again gave 201.7, 199.1 and 192.9. Flat against
+// height either way. All of these were measured this session on GPU 0.
 //
 // WHY THE DETECTION OVERLAY IS IN THIS HEADER AND NOT IN EACH ITEM
 //
@@ -24,17 +42,33 @@
 // is built once, here, from the two numbers the axis itself is drawn from,
 // and both items call it.
 //
-// It is a plain struct and three free functions rather than a QObject
-// because it holds no state between calls and belongs to neither item.
-// render/spectrum_scale.h would be the natural home and is another agent's
-// file this session.
+// WHAT THE TWO DISPLAYS DO WITH IT IS NOT THE SAME THING
+//
+// The spectrum has no time axis, so a detection there is a frequency marker
+// and nothing else: this signal, this wide, live or held. The waterfall has
+// one, so a detection there is bounded in both axes, frequency across and the
+// rows the signal was present in down, and it scrolls with the history it
+// annotates. A full-height band on the waterfall says nothing about when the
+// signal was there and covers the history that would have said it.
+//
+// The fade follows that split. A held track on the waterfall has a definite
+// end, drawn as the bottom edge of its rectangle, so it is drawn solid;
+// fading belongs to the spectrum marker alone, where it means the tracker has
+// not dropped this track yet and the signal has stopped.
 
 #pragma once
 
 #include <cstdint>
 #include <vector>
 
+#include <QColor>
+#include <QQuickItem>
 #include <QQuickPaintedItem>
+#include <QRectF>
+#include <QSGGeometry>
+#include <QSGGeometryNode>
+#include <QSGVertexColorMaterial>
+#include <QString>
 #include <QtQmlIntegration>
 
 #include "core/rpc/types.h"
@@ -106,6 +140,27 @@ struct DetectionBox {
     double right_px = 0.0;
     double center_px = 0.0;
 
+    // The rows this track was present in, as logical y in the display that
+    // resolved them, and whether they were resolved at all. Only a display
+    // with a time axis can answer this, so only the waterfall fills these in;
+    // see WaterfallItem::resolveRows. On the spectrum they stay unset and the
+    // marker spans the item.
+    double top_px = 0.0;
+    double bottom_px = 0.0;
+    bool time_bounded = false;
+
+    // The detector's own sample clock, which is what a display with a time
+    // axis draws the rows from.
+    //
+    // last_seen is deliberately not here. It is the last frame the tracker
+    // CONSIDERED this track in and last_detected is the last one the signal
+    // was actually in, so for a held track they differ by exactly the hold:
+    // closing a rectangle on last_seen would stretch every held track across
+    // the seconds it spent being held, which is the opposite of what the
+    // rectangle is for.
+    std::uint64_t first_seen = 0;
+    std::uint64_t last_detected = 0;
+
     // Seconds since the detector last had evidence for this track, from the
     // engine's sample clock and never from a wall clock. Zero unless held.
     double silent_seconds = 0.0;
@@ -115,30 +170,112 @@ struct DetectionBox {
 };
 
 enum class DetectionStyle : std::uint8_t {
-    // Over the trace: a filled band, both edges, and a label on every box
-    // with room for one.
+    // Over the trace, where there is no time axis: a bracket, both edges and
+    // the centre down the full height, faded by how much evidence the
+    // detector still has, and a label on every box with room for one.
     Band,
 
-    // Over the waterfall: the edges and the centre, no fill, and a label
-    // only on the selected box. A filled band the height of a waterfall
-    // covers the history it is pointing at, and the waterfall is where the
-    // operator is checking whether the box is on the right carrier.
-    Edges,
+    // Over the waterfall, where there is one: a rectangle closed on all four
+    // sides, spanning the rows the signal was actually present in, drawn
+    // solid because those rows already say when it stopped. A label only on
+    // the box under the pointer and on the chosen one.
+    Rows,
+};
+
+// One rectangle of the overlay, in logical item coordinates. Both displays
+// draw their overlay as a single batch of these, so the cost of the overlay
+// is one draw call whether there are two tracks or five hundred.
+struct OverlayQuad {
+    QRectF rect;
+    QColor colour;
+};
+
+// One label of the overlay. The plate is centred on center_px and pulled back
+// inside the item by whoever paints it; the y is the strip's, not the label's,
+// because every label in one strip shares it.
+struct OverlayLabel {
+    QString text;
+    double center_px = 0.0;
+    QColor ink;
 };
 
 // Resolves every detection the link is holding into this display's
 // coordinates, and works out the fade from the engine's sample indices.
 //
-// width_px is logical, because that is what QQuickPaintedItem::paint draws
-// in. The frame reduction elsewhere in this file works in device pixels; the
-// two are different jobs and mixing them puts the boxes a scale factor away
-// from the trace.
+// width_px is logical, because that is what a scene graph node is positioned
+// in. The frame reduction elsewhere works in device pixels; the two are
+// different jobs and mixing them puts the boxes a scale factor away from the
+// trace.
 void build_detection_boxes(const EngineLink& link, double width_px,
                            std::vector<DetectionBox>& out);
 
-void paint_detections(QPainter& painter, const std::vector<DetectionBox>& boxes,
-                      double width_px, double height_px, std::uint64_t selected_id,
-                      std::uint64_t hovered_id, DetectionStyle style);
+// The overlay's rectangles for one display. Everything about the difference
+// between a frequency marker and a bounded rectangle is in here rather than
+// in the two items.
+void build_detection_quads(const std::vector<DetectionBox>& boxes, double width_px,
+                           double height_px, std::uint64_t selected_id,
+                           std::uint64_t hovered_id, DetectionStyle style,
+                           std::vector<OverlayQuad>& out);
+
+// What one box is called, and in the colour its state is drawn in.
+[[nodiscard]] OverlayLabel detection_label(const DetectionBox& box);
+
+// The labels for the Band style, left to right, skipping any that would
+// collide with the one before it. The chosen box is always in the list and is
+// always last, so it is drawn over whatever it collides with.
+void build_detection_labels(const std::vector<DetectionBox>& boxes,
+                            std::uint64_t selected_id, std::vector<OverlayLabel>& out);
+
+// How tall a label strip has to be for the application font.
+[[nodiscard]] double overlay_label_height();
+
+// Clear of the bracket and the centre notch, which are drawn from the top
+// edge down. A label overlapping its own mark reads as a rendering fault.
+inline constexpr double kLabelTopPx = 9.0;
+
+// The overlay's text, and the one thing in either display still rasterised by
+// QPainter.
+//
+// Text is the case the scene graph does not make cheaper without a glyph
+// cache of its own, and a QQuickPaintedItem the height of one label is
+// already O(W) and constant in the height of the display it sits on: at 1580
+// device pixels wide that is about 150 KB a frame against the 6.7 MB the
+// whole display used to cost. So the labels keep QPainter and the pictures
+// stop using it.
+//
+// One of these is one strip of labels that all share a y. The spectrum has a
+// single strip at the top; the waterfall's labels follow the top edge of the
+// rectangle they name, so it has one per labelled box.
+class OverlayLabelItem : public QQuickPaintedItem {
+    Q_OBJECT
+
+public:
+    explicit OverlayLabelItem(QQuickItem* parent = nullptr);
+
+    // Repaints only when the text or the placement actually changed, because
+    // this is called once per frame per display and most frames do not move
+    // a label.
+    void setLabels(std::vector<OverlayLabel> labels);
+
+    void paint(QPainter* painter) override;
+
+private:
+    std::vector<OverlayLabel> labels_;
+};
+
+// The overlay's rectangles as one geometry node. Shared by both displays,
+// because the only thing that differs between them is which rectangles they
+// ask for.
+class OverlayNode : public QSGGeometryNode {
+public:
+    OverlayNode();
+
+    void setQuads(const std::vector<OverlayQuad>& quads);
+
+private:
+    QSGGeometry geometry_;
+    QSGVertexColorMaterial material_;
+};
 
 // WHICH BOX A CLICK MEANS, WHEN SEVERAL OF THEM CONTAIN IT
 //
@@ -151,10 +288,10 @@ void paint_detections(QPainter& painter, const std::vector<DetectionBox>& boxes,
 //
 // WHAT THE DETECTOR ACTUALLY PRODUCES HERE, BECAUSE IT CHANGES THE PROBLEM
 //
-// Measured this session against the RTL-SDR at 98.1 MHz on GPU 0, at the
-// shipped 6 dB threshold, from revenant-cli --detect with the confidence bar
-// at zero: 105 tracks across the span, and the broadcast station is not one
-// of them. It arrives as a ladder of about thirty tracks between 2.4 and
+// Measured in an earlier session against the RTL-SDR at 98.1 MHz on GPU 0, at
+// the shipped 6 dB threshold, from revenant-cli --detect with the confidence
+// bar at zero: 105 tracks across the span, and the broadcast station is not
+// one of them. It arrives as a ladder of about thirty tracks between 2.4 and
 // 7.0 kHz wide, shoulder to shoulder from 98.035 to 98.175 MHz, the widest
 // anywhere in the block 6.98 kHz and the strongest 6.979 kHz at
 // 98.1022 MHz, 29.1 dB. Their brackets abut, which is why the block reads on
@@ -184,13 +321,13 @@ void paint_detections(QPainter& painter, const std::vector<DetectionBox>& boxes,
 // nothing is hidden: every box containing the click is still a candidate,
 // and detection_clicked walks the rest of them.
 //
-// The change is visible on the radio at one pointer width. Measured this
-// session: a click on the block's centre returned a 705 Hz track whose
-// centre was a quarter of a pixel away, and moving the pointer four logical
-// pixels right returned a 3.05 kHz track 1.4 pixels away, while the 705 Hz
-// track was 3.2 pixels off and so still inside the six-pixel slack that used
-// to be all it needed to win. Narrowest-wins would have answered the 705 Hz
-// track both times.
+// The change is visible on the radio at one pointer width. Measured in an
+// earlier session: a click on the block's centre returned a 705 Hz track
+// whose centre was a quarter of a pixel away, and moving the pointer four
+// logical pixels right returned a 3.05 kHz track 1.4 pixels away, while the
+// 705 Hz track was 3.2 pixels off and so still inside the six-pixel slack
+// that used to be all it needed to win. Narrowest-wins would have answered
+// the 705 Hz track both times.
 [[nodiscard]] double detection_depth(const DetectionBox& box, double x_px);
 
 // Every box containing x, best first. Ties are broken by SNR and then by id:
@@ -210,46 +347,69 @@ void detections_at(const std::vector<DetectionBox>& boxes, double x_px,
 [[nodiscard]] std::uint64_t detection_at(const std::vector<DetectionBox>& boxes,
                                          double x_px);
 
-// Where a run of clicks is anchored and what the last of them chose. One per
-// item, because each display has its own pointer; the selection the two
-// share is the window's and is written back to both.
+// Where a run of clicks is anchored and which tracks it has already answered.
+// One per item, because each display has its own pointer; the selection the
+// two share is the window's and is written back to both.
 struct ClickCycle {
     double anchor_px = 0.0;
-    std::uint64_t id = 0;
+    bool anchored = false;
+
+    // In the order they were answered. This is the whole of what makes the
+    // cycle survive the list changing under it: see detection_clicked.
+    std::vector<std::uint64_t> shown;
 };
 
 struct ClickResult {
     // Zero for a click that landed on no detection.
     std::uint64_t id = 0;
 
-    // How many boxes contained the click, and where the chosen one sits in
-    // that order, counting from one. The window shows both, because a rule
+    // How many boxes contain the click now, and how far into the cycle this
+    // answer is, counting from one. The window shows both, because a rule
     // that picks one of seven overlapping tracks has to say that it did.
+    //
+    // rank counts the cycle and not the depth order. Those were the same
+    // number while the cycle walked a fixed list, and they are not once the
+    // list can change between two clicks in one place, which on a live band
+    // it does constantly.
     int candidates = 0;
     int rank = 0;
+
+    // The cycle has now answered every box containing the click, so the next
+    // click in the same place starts again at the nearest. The window says
+    // which of the two is about to happen rather than promising a next one
+    // unconditionally.
+    bool exhausted = false;
 };
 
 // What a click at x chooses, advancing the cycle.
 //
-// The depth rule answers the first click. A second click in the same place
-// takes the next candidate and the last wraps to the first, which is what
-// keeps a sub-track reachable in the middle of a wide box, where depth
-// deliberately prefers the wide one. The cycle restarts whenever the pointer
-// moves off the anchor or the track it last chose leaves the list, so it
-// never walks somewhere the operator did not point.
+// The depth rule answers the first click at a place. Each later click in the
+// same place answers the best candidate the cycle has not answered yet, which
+// is what keeps a sub-track reachable in the middle of a wide box, where
+// depth deliberately prefers the wide one. When every candidate has been
+// answered the cycle clears and the next click starts at the nearest again.
 //
-// That second restart is common and not a fault. Against the RTL-SDR at
-// 98.1 MHz this session the detector split and merged tracks inside the
-// broadcast block fast enough that a second click a few seconds later found
-// the first pick gone and answered rank 1 of a list that had changed size,
-// alongside clicks that did advance to rank 2. A cycle is therefore worth
-// offering and not worth promising: the window says how many candidates
-// there were, and restarting on a vanished track is better than advancing
-// past it into whatever now occupies that position.
+// THE CYCLE REMEMBERS WHAT IT SHOWED, NOT WHERE IT WAS IN THE LIST, AND THAT
+// IS THE FIX
+//
+// It used to remember the last id and advance one position past it. When the
+// track it remembered was gone from the freshly ranked list, which on a live
+// band is the ordinary case rather than the exception, it silently restarted
+// at rank 1, so the window promised "click again for the next" and the next
+// click answered the first again. Observed against the RTL-SDR at 98.1 MHz:
+// a click reported "1 of 6 here", and the next click at the same pixel
+// reported "1 of 5" on a different track.
+//
+// A set of what has been shown survives exactly that. A track that vanishes
+// is skipped rather than restarting the walk, a track that appears mid-cycle
+// is reachable, and every click at one place answers something the operator
+// has not already been shown until there is nothing left to show. The window
+// then says "click again for the next" while that is true and "click again to
+// start over" when it is not.
 [[nodiscard]] ClickResult detection_clicked(const std::vector<DetectionBox>& boxes,
                                             double x_px, ClickCycle& cycle);
 
-class SpectrumItem : public QQuickPaintedItem {
+class SpectrumItem : public QQuickItem {
     Q_OBJECT
     QML_ELEMENT
 
@@ -284,8 +444,6 @@ public:
     [[nodiscard]] qulonglong selectedDetection() const { return selected_detection_; }
     void setSelectedDetection(qulonglong id);
 
-    void paint(QPainter* painter) override;
-
 signals:
     void linkChanged();
     void endsChanged();
@@ -314,15 +472,16 @@ signals:
     // their logical centre, and the window says so next to the number rather
     // than presenting it as a tuning solution.
     //
-    // candidates and rank are ClickResult's two counts. They go out with the
-    // click rather than being read back off a property, because they belong
-    // to that one click: a poll arriving a frame later changes the boxes and
-    // would change the counts under a reading the operator is still looking
-    // at. Both are zero for a click on bare spectrum.
+    // candidates, rank and exhausted are ClickResult's three. They go out
+    // with the click rather than being read back off a property, because they
+    // belong to that one click: a poll arriving a frame later changes the
+    // boxes and would change the counts under a reading the operator is still
+    // looking at. All three are empty for a click on bare spectrum.
     void tuneRequested(qulonglong id, double center_hz, double bandwidth_hz, int candidates,
-                       int rank);
+                       int rank, bool exhausted);
 
 protected:
+    QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
     void mousePressEvent(QMouseEvent* event) override;
     void hoverMoveEvent(QHoverEvent* event) override;
@@ -335,12 +494,12 @@ private:
     void rebuildDetections();
     void setHovered(std::uint64_t id);
 
-    // One column per physical pixel, not per logical one. QQuickPaintedItem
-    // paints into a texture the size of the item times the window's device
-    // pixel ratio, so a trace built at logical width throws away a fifth of
-    // the columns on the 1.25 scaling this was checked on, and does it by
-    // widening each column's bin run rather than by blurring, which is a
-    // real loss of resolution rather than a soft picture.
+    // One column per physical pixel, not per logical one. The trace is drawn
+    // in the item's own logical coordinates, so a trace built at logical
+    // width throws away a fifth of the columns on the 1.25 scaling this was
+    // checked on, and does it by widening each column's bin run rather than
+    // by blurring, which is a real loss of resolution rather than a soft
+    // picture.
     [[nodiscard]] int deviceColumns() const;
 
     // Recomputes the reduction headroom for the current column count. The
@@ -350,15 +509,25 @@ private:
 
     EngineLink* link_ = nullptr;
     std::vector<float> columns_;
+
+    // The same columns normalised to [0, 1], because the fill and the trace
+    // are two nodes drawing one set of y values and the map from decibels is
+    // worth doing once.
+    std::vector<float> levels_;
     MapEnds ends_;
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
     bool have_frame_ = false;
 
     std::vector<DetectionBox> boxes_;
+    std::vector<OverlayQuad> quads_;
     std::uint64_t selected_detection_ = 0;
     std::uint64_t hovered_detection_ = 0;
     ClickCycle click_cycle_;
+
+    // Created in the constructor and positioned in updatePaintNode, so the
+    // labels are a child item and not part of this item's own node.
+    OverlayLabelItem* labels_ = nullptr;
 };
 
 }  // namespace revenant::ui

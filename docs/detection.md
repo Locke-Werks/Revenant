@@ -209,6 +209,129 @@ Averaging is what makes a low threshold usable. One frame's noise varies
 enough that a threshold near the floor produces constant false detections;
 integrating about a second settles it.
 
+### The scale-space search, and the budget that decides what it finds
+
+The summed-bin search runs a ladder of widths, powers of two from one bin up
+to an eighth of the frame, and scores every position at every width by its
+deflection. `max_peaks` bounds how many of those scored positions one decision
+keeps, so that a pathological frame cannot allocate without bound.
+
+**Which ones it keeps is the whole question, and the obvious answer is wrong.**
+Keeping the first `max_peaks` found spends the budget in ladder order, the
+ladder is walked narrowest rung first, and a frame that is mostly signal
+produces more peaks at the narrow rungs alone than the budget holds. The wide
+rungs are then never searched at all. Nothing reports this: the track list is
+full, every track is confident, and each one is about as wide as whatever rung
+the budget happened to run out on.
+
+Measured, 2026-09-19, RTL-SDR at 98.1 MHz, 2.4 MS/s, 64 channels, a 2048-point
+second-stage transform, 65536 bins at 36.6 Hz, eight seconds, GPU 0, the
+default 6 dB threshold:
+
+| | keeping the first 4096 | keeping the strongest |
+| --- | --- | --- |
+| Tracks born | 103 | 26 |
+| Highest id issued | 204 | 45 |
+| The 98.1 MHz station | about thirty tracks, 5 kHz each, evenly spaced | one track, 140.4 kHz, alive the whole run |
+| Detector cost | 1.56 ms per frame, 5.7 percent of one core | 2.00 ms, 7.3 percent |
+
+The evenly spaced 5 kHz fragments are the signature. 5 kHz is 137 bins at that
+resolution, which is the 128-bin rung grown until it met its neighbours: the
+widest rung the budget reached, tiling a signal about 4000 bins wide.
+
+Raising the threshold cures it and is not the fix. At 12 dB far fewer narrow
+windows clear their own threshold, the budget is never reached, and the same
+station comes back as one track of 106 to 116 kHz. That is the same detector
+reading the same signal and giving two different answers depending on a
+number that is supposed to control sensitivity, which is how the fault was
+found rather than what to do about it.
+
+So the budget keeps the strongest `max_peaks` peaks. The greedy pass takes
+peaks strongest first anyway, so this is the set it was going to work from;
+the change is that the set no longer depends on which order the rungs were
+walked in. A wide signal cannot be crowded out by narrow ones at any budget,
+because the deflection of a signal of bandwidth B peaks at the rung that fits
+it.
+
+What a small budget can still do is lose a WEAK signal to a loud one, because
+a peaky emitter spends the budget on its own windows. `max_peaks` of zero
+therefore derives one per fine bin: the ladder's rungs are powers of two, so
+the positions it can report sum to under twice the bin count whatever the
+frame holds, and one per bin keeps over half of everything that could exist.
+Measured over a seeded eight-emitter scene from 50 Hz to 150 kHz, at 65536
+bins, a 6.5 kHz emitter is lost entirely at a budget of 4096, found at 16384,
+and the budget stops binding at 65536; the whole range costs under half a
+millisecond against a decision that costs eleven.
+
+### What the wide end costs, and where it stops
+
+Two limits sit above a broadcast station, and neither is the budget. The
+ladder's widest rung is an eighth of the frame. The noise floor's window is
+`noise_knots` by `noise_window_knots` bins, and a signal filling much over
+half of one hides its own floor, which `core/detect/detector.h` states at
+length. At 2.4 MS/s across 65536 bins those are 300 kHz and about 360 kHz.
+
+Measured against single QPSK emitters of known occupied bandwidth on that
+geometry, one per scene, 30 dB in their own bandwidth:
+
+| Occupied bandwidth | Bins | Tracks | Best track covers |
+| --- | --- | --- | --- |
+| 135 kHz | 3686 | 5 | 79 percent |
+| 270 kHz | 7373 | 8 | 78 percent |
+| 338 kHz | 9216 | 5 | 84 percent |
+| 405 kHz | 11059 | 2 | 54 percent |
+
+The counts read worse than they are, and the candidate edges say why: below
+the widest rung the body is one candidate and the extra tracks are the
+root-raised-cosine skirts, which fall away smoothly and register separately
+once they drop under the growth rule's level. At 405 kHz, past the widest
+rung, it is the body itself that comes in two. Above about 300 kHz on this
+grid there is no rung that fits a signal, and the answer degrades from "one
+track plus skirt clutter" to "pieces about a rung wide".
+
+The reported bandwidth of a signal that IS found sits at 78 to 87 percent of
+the nominal occupied bandwidth throughout. That is the 99 percent
+occupied-power trim meeting a shaped signal, not an error.
+
+### Re-running any of this
+
+Every figure in the two sections above came from `tests/detect/`, and the
+harness is the point rather than the numbers: an emitter with a known
+occupied band, a known start sample and a known stop sample is something to
+generate on demand and score against, and it does not need a radio or a
+device.
+
+`tests/detect/scene_frames.h` renders a `siggen` scene and pushes it through
+the channelizer and spectrum TWINS, which `tests/reference` proves bit-exact
+against the kernels, so the frames are the ones the device would produce.
+`SceneScorer` then scores the track list against `EmitterTruth` per emitter:
+distinct ids, most tracks at once, how much of the truth extent the best
+track covers, how far outside it spills, how far the centre is out, what
+fraction of the transmission it was detected at, how long one id survived,
+and how far the measurement moves between decisions.
+
+The measurement cases are hidden behind the `[.scene]` tag because the twins
+cost about a second and a half of wall time per second of scene:
+
+    revenant_detect_tests.exe "[scene]"
+
+The bar itself is not hidden and runs with the suite: over a seeded keyed
+scene, every filled emitter must read as exactly one track, present at one
+decision in one, covering at least 70 percent of its extent with at most 25
+percent spill, detected at 85 percent of the decisions it transmits at, one
+id lasting 85 percent of the transmission, and centred within a tenth of its
+own bandwidth. Four of four pass as this is written, at coverage 0.82 to 0.86
+and spill zero.
+
+Tone-driven emitters are measured and deliberately not scored against that
+bar. A truth extent is the channel a mode occupies, which for QPSK is where
+the energy is and for a tone-modulated AM, SSB or FM emitter is not: those
+put their power in a few discrete lines, a detector correctly reports a few
+discrete lines, and scoring that against a Carson-rule bandwidth marks the
+detector down for being right. A real broadcast station is not that shape,
+which is itself a measurement: at 12 dB on the radio the 98.1 MHz station
+reads as one track, so its interior never reaches the floor.
+
 ### What the threshold is measured in
 
 `docs/snr-convention.md` exists because three different numbers get called
@@ -281,6 +404,36 @@ is known.
 rounding, so a track near a boundary flips channel on measurement noise, and
 each flip is a channel-sized change in the residual, a completely different
 tap table and a half-megabyte upload.
+
+### The association window was never the problem
+
+When one wide signal reads as many narrow tracks, the association rule is the
+first suspect: if a candidate moves further between decisions than
+`association_overlap` tolerates, every decision starts new tracks and the ids
+churn. It is not what happens, and the measurement is cheap to re-run.
+
+Scored against `siggen` ground truth on the shipped geometry, over the filled
+emitters of a seeded bandwidth ladder from 6.5 kHz to 150 kHz, keyed on and
+off inside the scene:
+
+| Occupied bandwidth | Centre movement per decision, mean | Worst | Worst overlap with itself |
+| --- | --- | --- | --- |
+| 6.5 kHz | 5 Hz | 15 Hz | 1.00 |
+| 27 kHz | 9 Hz | 38 Hz | 1.00 |
+| 75.6 kHz | 5 Hz | 26 Hz | 1.00 |
+| 149.85 kHz | 6 Hz | 12 Hz | 1.00 |
+
+The last column is the quantity `association_overlap` is compared against:
+overlap between one decision's measurement and the next, over the narrower of
+the two. The bar is 0.3 and the measured worst case is 1.00, three orders of
+magnitude of margin in the sense that matters. A wide signal's measured centre
+moves tens of hertz on a band a hundred and fifty kilohertz across, because
+the centre is a power-weighted average over thousands of bins and averaging is
+what makes it steady.
+
+So an id that churns on a wide signal is the search handing the tracker a
+different set of candidates each decision, not the tracker failing to match
+the same one. Look at `candidates()` before `tracks()`.
 
 ## Identification
 

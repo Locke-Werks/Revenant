@@ -386,6 +386,100 @@ TEST_CASE("three signals at once come back as three", "[detect]") {
     }
 }
 
+TEST_CASE("a wide signal survives a peak budget too small to hold the narrow ones",
+          "[detect]") {
+    constexpr std::uint64_t kSeed = 20260919;
+    INFO("seed " << kSeed);
+
+    // One wide signal and four strong narrow ones. The narrow ones are what
+    // floods the scale-space search: every bin of every signal that clears
+    // the width-one threshold is a local maximum somewhere, and the ladder is
+    // walked narrowest rung first, so the narrow rungs produce their peaks
+    // before the wide rungs are ever reached.
+    //
+    // This is the case the budget used to lose. It kept the first max_peaks
+    // peaks, which on a busy frame means only the narrowest rungs, and the
+    // wide signal came back as a row of fragments a rung wide each. Measured
+    // against an RTL-SDR at 98.1 MHz the same week: 103 tracks born in eight
+    // seconds, a 164 kHz broadcast station read as about thirty tracks of
+    // 5 kHz, and ids past two hundred. It keeps the STRONGEST max_peaks now,
+    // and the widest rung that fits a signal is where its deflection peaks,
+    // so the wide one can no longer be crowded out by narrow ones.
+    // Wide for this frame, and no wider, for two reasons that both belong to
+    // the 1024-bin test geometry rather than to the detector.
+    //
+    // The summing ladder's widest rung is an eighth of the frame, 128 bins
+    // here, so a signal past that has no rung that fits it. And the noise
+    // floor's window is noise_knots by noise_window_knots, 256 bins here, so
+    // a signal filling much over half of one hides its own floor: at 201 bins
+    // this reported 13.8 dB for a 40 dB signal and came back in three pieces,
+    // which is the estimator behaving exactly as detector.h says it will.
+    // Both limits scale with the frame, and on the shipped 65536-bin one they
+    // land at 300 kHz and about 360 kHz, well past a broadcast station.
+    constexpr std::size_t kWideCentre = 512;
+    constexpr std::size_t kWideWidth = 97;
+
+    Scene scene(-90.0, kSeed);
+    scene.set({
+        Emitter{.centre_bin = kWideCentre, .width_bins = kWideWidth, .snr_2500_db = 40.0},
+        Emitter{.centre_bin = 80, .width_bins = 1, .snr_2500_db = 20.0},
+        Emitter{.centre_bin = 200, .width_bins = 1, .snr_2500_db = 20.0},
+        Emitter{.centre_bin = 850, .width_bins = 1, .snr_2500_db = 20.0},
+        Emitter{.centre_bin = 950, .width_bins = 1, .snr_2500_db = 20.0},
+    });
+
+    const dsp::Hertz wide_centre = scene.frequency_of(kWideCentre);
+    const auto wide_width =
+        static_cast<dsp::Hertz>(std::llround(static_cast<double>(kWideWidth) * scene.bin_width()));
+
+    SECTION("with a budget that cannot hold the frame") {
+        detect::DetectorConfig config = base_config();
+        config.max_peaks = 8;
+
+        auto made = detect::Detector::create(config, scene.geometry());
+        REQUIRE(made);
+        detect::Detector& detector = *made;
+        run_for(detector, scene, 4.0);
+
+        INFO(describe(detector));
+
+        // The budget binds, which is what makes this case mean anything: a
+        // frame that never reached the bound would pass under either rule.
+        CHECK(detector.stats().peaks_overflowed > 0);
+
+        const detect::Track* wide = find_near(detector, wide_centre, wide_width);
+        REQUIRE(wide != nullptr);
+
+        // Most of its real width, rather than a fragment of it. Under the old
+        // rule this came back at a rung's width or less.
+        CHECK(wide->bandwidth > wide_width / 2);
+    }
+
+    SECTION("with the budget the frame size derives") {
+        auto made = detect::Detector::create(base_config(), scene.geometry());
+        REQUIRE(made);
+        detect::Detector& detector = *made;
+        run_for(detector, scene, 4.0);
+
+        INFO(describe(detector));
+
+        // A budget of one per bin does not bind on a frame with five signals
+        // on it, so everything is found and the wide one is one track.
+        CHECK(detector.stats().peaks_overflowed == 0);
+        CHECK(detector.tracks().size() == 5);
+
+        const detect::Track* wide = find_near(detector, wide_centre, wide_width);
+        REQUIRE(wide != nullptr);
+        CHECK(std::abs(wide->bandwidth - wide_width) <= 4000);
+
+        for (const std::size_t bin : {std::size_t{80}, std::size_t{200}, std::size_t{850},
+                                      std::size_t{950}}) {
+            INFO("looking for the narrow emitter at bin " << bin);
+            CHECK(find_near(detector, scene.frequency_of(bin), 2000) != nullptr);
+        }
+    }
+}
+
 TEST_CASE("SNR is reported in the reference bandwidth and compares across widths", "[detect]") {
     constexpr std::uint64_t kSeed = 24680;
     INFO("seed " << kSeed);

@@ -268,6 +268,17 @@ public:
     [[nodiscard]] Status retune(const VrxParams& params,
                                 const VrxPlacement& placement) override;
 
+    // Every field of this is written in build() and never again, which is
+    // what lets the graph read it from the control plane while the recording
+    // thread is inside record(). A retune cannot change any of them: it is
+    // refused outright unless the filter's shape, the tap count and both
+    // rates are identical, and the ring was sized against those.
+    //
+    // Where the fine stream's DC sits DOES move on a retune, so it is not
+    // here. It rides back on StageOutput, which only the recording thread
+    // reads.
+    [[nodiscard]] StageFineOutput fine_output() const override { return fine_output_; }
+
 private:
     DemodStage() = default;
 
@@ -300,6 +311,8 @@ private:
     std::uint32_t channel_ring_mask_ = 0;
     std::uint32_t frames_in_flight_ = 1;
     std::uint32_t local_size_x_ = gpu::kDefaultLocalSizeX;
+
+    StageFineOutput fine_output_{};
 
     std::uint32_t fine_capacity_ = 0;
     std::uint32_t fine_mask_ = 0;
@@ -400,8 +413,29 @@ Status DemodStage::build(const VrxStageRequest& request) {
     // detector's history, plus the one the recording thread is filling. A
     // ring exactly one dispatch long would have the detector reading samples
     // the next fine dispatch had already overwritten, which is silent.
-    const std::uint64_t wanted =
+    std::uint64_t wanted =
         static_cast<std::uint64_t>(max_outputs_) * (frames_in_flight_ + 1U) + fine_history_ + 2U;
+
+    // A passband transform reaches further back than the detector does: its
+    // window is the last N fine samples of the dispatch that recorded it,
+    // and every frame submitted behind that one writes above it. So the ring
+    // has to hold the window plus a frame's worth for each of them, or the
+    // transform reads slots a later dispatch has already overwritten and the
+    // display shows a splice of two eras.
+    //
+    // Paid by every receiver, not only by the ones somebody is examining,
+    // because a ring cannot be resized while a command buffer names it. That
+    // is memory and not work: the transform itself is still allocated and
+    // dispatched only when a sink is attached. A 2048-point window is 16 KiB
+    // of complex samples, and the ring is rounded up to a power of two
+    // around whichever of the two bounds is larger, so what a receiver
+    // actually pays is a doubling or nothing.
+    if (request.passband_transform != 0) {
+        wanted = std::max(wanted, static_cast<std::uint64_t>(request.passband_transform) +
+                                      static_cast<std::uint64_t>(max_outputs_) *
+                                          frames_in_flight_ +
+                                      2U);
+    }
     if (wanted > kMaxFineCapacity) {
         return fail(std::format(
             "this receiver would need a fine ring of {} samples and the limit is {}",
@@ -447,7 +481,33 @@ Status DemodStage::build(const VrxStageRequest& request) {
     if (auto built = build_buffers(request.channel_ring); !built) {
         return built;
     }
+
+    fine_output_.ring = fine_ring_.handle();
+    fine_output_.capacity = fine_capacity_;
+    fine_output_.mask = fine_mask_;
+    fine_output_.rate = plan_.demod_rate;
+    fine_output_.group_delay_channel_samples = plan_.fine_group_delay_channel_samples;
+
     return build_descriptors(request.channel_ring);
+}
+
+// Where the fine stream's DC sits in the source's baseband frame: the coarse
+// channel's centre plus what the mixer translates to DC, both exact
+// rationals and both already reduced by their own producers.
+//
+// mix is the residual for five of the modes, the residual for USB and LSB
+// too (their asymmetry is in the FILTER centre, not the mixer's), and the
+// residual less the operator's pitch for CW. Taking it from the plan rather
+// than re-deriving it from the mode is the point: one table of that, in
+// plan_vrx, and nothing here to fall out of step with it.
+[[nodiscard]] std::pair<std::int64_t, std::int64_t> fine_dc_of(const dsp::VrxPlan& plan) {
+    const std::int64_t centre_num = plan.placement.channel_centre.numerator;
+    const std::int64_t centre_den = plan.placement.channel_centre.denominator;
+    if (centre_den == 0 || plan.mix_denominator == 0) {
+        return {0, 1};
+    }
+    return {centre_num * plan.mix_denominator + plan.mix_numerator * centre_den,
+            centre_den * plan.mix_denominator};
 }
 
 Status DemodStage::build_pipelines() {
@@ -759,6 +819,18 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
                        VK_ACCESS_SHADER_READ_BIT);
         next_output_ += count;
     }
+
+    // What a passband transform may look at. first_output_ and not a live
+    // floor: the ring is sized in build() to hold a whole window below
+    // everything the frames in flight are writing, so liveness is a sizing
+    // guarantee rather than something to re-check per block. What this bound
+    // is actually for is the other end of the ring, the cleared samples
+    // below the first output this receiver ever produced.
+    out.fine_from = first_output_;
+    out.fine_next = next_output_;
+    const auto dc = fine_dc_of(plan_);
+    out.fine_dc_numerator = dc.first;
+    out.fine_dc_denominator = dc.second;
 
     // --- the detector -------------------------------------------------------
 

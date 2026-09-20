@@ -151,9 +151,13 @@ namespace revenant::ui {
 // the one value the engine refuses inside the range a writable property
 // accepts. Writing 1.0 made every later detections call fail; poll_detections
 // swallows a failed poll by design, because that is how a dead engine is
-// normally found, so the overlay stopped updating and nothing said why. A
-// control binding to this property takes its maximum from here rather than
-// writing 1.0 and finding out.
+// normally found, so the overlay stopped updating and nothing said why.
+//
+// EngineLink::maxConfidenceBar publishes this so a control can take its
+// maximum from the same constant the clamp uses. Nothing binds to it yet:
+// ui/qml/Main.qml's confidence slider carries its own hardcoded maximum and
+// is not this file's to change, so the engine's rule is written down twice
+// until that binding is made.
 //
 // epsilon is 2^-52 and the spacing of doubles just below one is 2^-53, so
 // this is exactly std::nextafter(1.0, 0.0), written in a form that is
@@ -262,6 +266,17 @@ class EngineLink : public QObject {
     Q_PROPERTY(double detectionThresholdDb READ detectionThresholdDb
                    WRITE setDetectionThresholdDb NOTIFY detectionsChanged)
 
+    // The top of confidenceBar's range, so a control can take its maximum
+    // from the engine's rule rather than carrying a copy of it. CONSTANT
+    // because this is a bound on what core/rpc/server.cpp will answer at
+    // all, fixed at compile time and the same for every engine.
+    //
+    // There is no matching property for detectionThresholdDb's bounds. That
+    // one is engine side and the engine does not publish its limits, so a
+    // control there is guessing either way and a property here would only
+    // move the guess.
+    Q_PROPERTY(double maxConfidenceBar READ maxConfidenceBar CONSTANT)
+
     // Rows after the confidence bar, and rows the detector holds before it,
     // so a short list and a filtered one are distinguishable on screen.
     Q_PROPERTY(uint detectionCount READ detectionCount NOTIFY detectionsChanged)
@@ -299,9 +314,10 @@ class EngineLink : public QObject {
     Q_PROPERTY(double detectorHoldSeconds READ detectorHoldSeconds
                    NOTIFY detectionsChanged)
 
-    // Why the detector's answer has stopped changing, when the engine is
-    // there and refusing rather than gone. Empty when the last pass was
-    // accepted, and empty while the connection is down.
+    // Why the engine refused something this link asked of the detector,
+    // when the engine is there and refusing rather than gone. Empty when
+    // nothing it has been asked for is outstanding, and empty while the
+    // connection is down.
     //
     // A detection call fails for two unrelated reasons and this link used to
     // treat them as one. Either the engine went away, which is connected and
@@ -321,6 +337,23 @@ class EngineLink : public QObject {
     // bound that was missed. No answer means the engine went away, and this
     // is emptied: two error strings on screen for one event is worse than
     // one, and errorText is the one that belongs to a lost connection.
+    //
+    // TWO KINDS OF REFUSAL, WHICH DO NOT LAST THE SAME LENGTH OF TIME
+    //
+    // A refused POLL is a condition. The bar, the threshold in force or an
+    // engine with no spectrum stage makes every pass fail, so the string is
+    // rewritten as often as the link polls and goes away by itself the pass
+    // the poll succeeds. That is the case the paragraphs above describe.
+    //
+    // A refused THRESHOLD WRITE is one event. The write is attempted once
+    // and nothing repeats it, so published on the same terms it was cleared
+    // by the next successful poll before an operator could read it, which
+    // is the same as never publishing it. It is held instead, until the
+    // operator writes another threshold and that write's own verdict
+    // replaces it, or until the connection goes. A refused poll outranks it
+    // while one is happening, because a frozen list is the worse news, and
+    // the held write reappears if the poll starts working again with the
+    // write still unanswered.
     Q_PROPERTY(QString detectionFault READ detectionFault NOTIFY detectionFaultChanged)
 
 public:
@@ -405,6 +438,7 @@ public:
     [[nodiscard]] const rpc::SpectrumFrame& frame() const { return display_; }
 
     [[nodiscard]] double confidenceBar() const { return confidence_bar_; }
+    [[nodiscard]] double maxConfidenceBar() const { return kMaxConfidenceBar; }
     void setConfidenceBar(double bar);
     [[nodiscard]] double detectionThresholdDb() const { return shown_.detection_threshold_db; }
     void setDetectionThresholdDb(double threshold_db);
@@ -603,6 +637,14 @@ private:
     // the life of the window.
     void note_detection_fault(QString fault);
 
+    // Supervisor thread. Empties the property and drops the held threshold
+    // refusal with it. The two go together at exactly the moments there is
+    // no engine to have refused anything: a connection torn down, and a
+    // poll whose failure turned out to be the engine leaving. Clearing one
+    // and not the other would put a refusal from the previous engine back
+    // on screen on the next pass that polled successfully.
+    void clear_detection_fault();
+
     // Qt thread, queued from note_detection_fault.
     void adopt_detection_fault();
 
@@ -616,6 +658,13 @@ private:
     // that suppresses a repeat needs no lock and reads nothing the Qt
     // thread owns.
     QString posted_fault_;
+
+    // Supervisor thread only: the engine's refusal of the last threshold
+    // write, kept across passes because nothing repeats that call. Empty
+    // when the last write was taken, when there has been no write, and
+    // whenever the connection is not up. See the second half of
+    // detectionFault's comment for why this one outlives its pass.
+    QString threshold_fault_;
 
     // The Qt thread's copy, which is what detections() hands out.
     rpc::DetectionList shown_;

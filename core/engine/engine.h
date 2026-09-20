@@ -135,6 +135,23 @@ struct EngineConfig {
     // smoothed ends.
     std::optional<float> spectrum_floor_db;
     std::optional<float> spectrum_ceiling_db;
+
+    // Points in a receiver's passband transform. Zero, the default, builds no
+    // passband stage at all, and then set_passband_sink is refused the same
+    // way set_spectrum_sink is at spectrum_transform zero.
+    //
+    // Two levels of opt-in, and they are answering different costs. This one
+    // decides whether the machinery exists: a pipeline, two window tables, and
+    // room in every receiver's fine ring for a window this long. A headless
+    // recording leaves it zero and pays none of that. Attaching a sink to one
+    // receiver is the second: until a receiver has one, it allocates no
+    // buffers and dispatches nothing, so a rack of fifty receivers with one
+    // under examination pays for one transform.
+    //
+    // Unlike spectrum_transform this is not per channel. A passband frame is
+    // this many bins wide and covers one receiver's whole demodulation rate,
+    // because the fine stream is one stream rather than a bank.
+    std::uint32_t passband_transform = 0;
 };
 
 // The frequency axis of a spectrum frame, and how wide one is.
@@ -187,6 +204,66 @@ struct SpectrumGeometry {
     }
 };
 
+// The frequency axis of one receiver's passband frame.
+//
+// A separate type from SpectrumGeometry rather than a reuse of it, because
+// two of that struct's fields would have to mean something else here:
+// `channels` is a coarse channel count and a passband has no bank behind it,
+// and `bins_per_channel` is the central half of a transform where a passband
+// keeps every bin. Both are load-bearing in the full-span frame's layout, so
+// a passband borrowing the struct would be a frame whose fields a consumer
+// has to know not to believe.
+//
+// Rationals for the same reason SpectrumGeometry carries them: Fd / N is
+// rarely a whole hertz, and neither is the fine stream's DC, which is a
+// coarse channel centre plus the residual the fine stage mixed out. Rounding
+// either here puts an unsourceable offset into every frequency a person
+// clicks on.
+//
+// Both frequencies are relative to the source's baseband DC, the same frame
+// VrxParams::center is in. Add EngineInfo::source_center for absolute radio
+// frequency.
+struct PassbandGeometry {
+    // Points in the transform, which is also the bin count: the whole band is
+    // kept, edge to edge.
+    std::uint32_t transform = 0;
+    std::uint32_t bins = 0;
+
+    // The fine stream's rate, which is the width of the frame. plan_vrx
+    // rounds it up to a whole multiple of the audio rate, so it is somewhat
+    // wider than the receiver's bandwidth rather than equal to it, and the
+    // margin is where the filter's skirts are drawn.
+    dsp::SampleRate rate = 0;
+
+    std::int64_t bin_width_numerator = 0;
+    std::int64_t bin_width_denominator = 1;
+    std::int64_t bin_zero_numerator = 0;
+    std::int64_t bin_zero_denominator = 1;
+
+    [[nodiscard]] constexpr bool enabled() const { return bins != 0; }
+
+    [[nodiscard]] constexpr double bin_width_hz() const {
+        return bin_width_denominator == 0 ? 0.0
+                                          : static_cast<double>(bin_width_numerator) /
+                                                static_cast<double>(bin_width_denominator);
+    }
+
+    // Centre frequency of bin zero, which is half the demodulation rate below
+    // whatever the fine stage mixed to DC.
+    //
+    // That is NOT always the receiver's centre. For CW the fine stage
+    // translates the carrier to the operator's pitch rather than to DC, so
+    // this sits a pitch below VrxParams::center. Carried rather than derived
+    // for exactly that reason: a display that computed the axis from
+    // params.center would be one pitch out on one mode and right on the other
+    // seven, which is the shape of a bug nobody finds.
+    [[nodiscard]] constexpr double bin_zero_hz() const {
+        return bin_zero_denominator == 0 ? 0.0
+                                         : static_cast<double>(bin_zero_numerator) /
+                                               static_cast<double>(bin_zero_denominator);
+    }
+};
+
 // What the engine settled on, which is frequently not what was asked for.
 struct EngineInfo {
     gpu::DeviceInfo device;
@@ -198,6 +275,15 @@ struct EngineInfo {
 
     // Left empty when EngineConfig::spectrum_transform was zero.
     SpectrumGeometry spectrum{};
+
+    // Points in a passband transform, after the same clamp against this
+    // device's shared memory the full-span transform takes. Zero when
+    // EngineConfig::passband_transform was zero.
+    //
+    // The transform size is all that is engine-wide. The rest of a passband's
+    // axis is the receiver's, because the rate is the receiver's, so the
+    // geometry arrives on each frame rather than here.
+    std::uint32_t passband_transform = 0;
 
     // What the source's baseband DC corresponds to in real radio frequency,
     // read once when the source was opened.
@@ -297,6 +383,95 @@ struct SpectrumFrame {
 
 using SpectrumSink = std::function<Status(const SpectrumFrame&)>;
 
+// One receiver's passband, handed to the caller on the host.
+//
+// docs/ui-spectrum.md, "The fine-tuning display": a second spectrum over the
+// receiver's own passband rather than the wide span, which is what makes
+// parking a filter on a signal precise rather than approximate. It is a
+// transform of the fine stream and not a zoom of the wide one, and the
+// difference is resolution: at the shipped geometry a 4096-point transform of
+// a 48 kS/s fine ring resolves 11.7 Hz where a 2^18-point transform of a
+// 20 MHz span resolves 76 Hz.
+//
+// NO CHANNEL-SHAPE CORRECTION IS APPLIED, AND THAT IS THE OPPOSITE OF THE
+// FULL-SPAN FRAME
+//
+// SpectrumFrame's bins are divided by the channelizer prototype's droop
+// across each channel's kept band, because that band's edges sit exactly on
+// the prototype's cutoff and the span tiles the droop once per channel. None
+// of that reasoning reaches here. A passband frame is one piece with no seam
+// to hide, its edges are at plus and minus half the demodulation rate rather
+// than on any filter's cutoff, and the response shaping it is the receiver's
+// own fine filter.
+//
+// Dividing that out would erase the thing the display exists to show. The
+// skirts ARE the feature: a filter parked on a signal is judged by where its
+// edges fall against the signal's. And the stopband is 60 to 120 dB down, so
+// inverting the filter would multiply the noise out there by up to 1e12 and
+// replace a clean floor with a wall.
+//
+// The deeper reason is that a passband frame is a view of a stream something
+// downstream consumes. Whatever the fine stage's filter did to these samples,
+// the demodulator is demodulating it, so a corrected picture would disagree
+// with the audio. The full-span frame has no such consumer: it is a
+// measurement of the band, the seams are in the measurement, and correcting
+// them makes it more true rather than less.
+//
+// What that leaves in is the coarse prototype's own tilt across the
+// receiver's slice of its channel, which IS a measurement artefact of the
+// same class. It is left in for the same reason: the fine stage filtered a
+// channel that already had that tilt, so it is in the audio too.
+struct PassbandFrame {
+    VrxId vrx;
+
+    // Power per bin in decibels relative to full scale, ascending in
+    // frequency across the whole demodulation rate with no gaps.
+    //
+    // Valid for the duration of the call and not after, the same as
+    // AudioChunk::samples and SpectrumFrame::power_db.
+    std::span<const float> power_db;
+
+    PassbandGeometry geometry;
+
+    // The source samples this frame's window covers, as a half-open range
+    // [start, start + count). Absolute from the start of the stream, so it
+    // lines up with an AudioChunk's start and with a SpectrumFrame's. Both
+    // the channelizer prototype's group delay and the fine filter's have
+    // already been taken off, so this is when the energy was on the air and
+    // not when the samples reached this stage.
+    dsp::SampleIndex start = 0;
+    dsp::SampleIndex count = 0;
+
+    // Frames delivered to this receiver before this one, so a waterfall that
+    // skipped a row knows it skipped a row.
+    //
+    // The receiver's count and not the engine's, and it survives a sink
+    // being replaced: the buffers behind a passband are rebuilt on every
+    // attach, but frames recorded against the old set can still be in flight
+    // when the new one arrives, and a count that restarted with the buffers
+    // would run backwards across that handover.
+    std::uint64_t sequence = 0;
+
+    // This receiver's own colour map, smoothed by its own SpectrumScale with
+    // the same time constants the full-span one uses.
+    //
+    // Its own and not the span's, because docs/ui-spectrum.md is explicit
+    // that the fine display scales on the receiver's passband: a display
+    // scaled by something it is not showing is a display that lies, and a
+    // passband holding one 30 dB signal has nothing in common with a 20 MHz
+    // span whose percentiles are mostly noise.
+    float floor_db = 0.0F;
+    float ceiling_db = 0.0F;
+
+    // What the device measured of THIS frame, before any smoothing. A
+    // consumer with its own time constant wants these rather than the two
+    // above; there are no pins on the passband scale for that reason.
+    float percentile_low_db = 0.0F;
+    float percentile_high_db = 0.0F;
+};
+
+using PassbandSink = std::function<Status(const PassbandFrame&)>;
+
 class Engine {
 public:
     [[nodiscard]] static Expected<std::unique_ptr<Engine>> create(const EngineConfig& config);
@@ -346,6 +521,18 @@ public:
     // opened and adding one later would mean rebuilding it, which is the one
     // thing the graph promises never to do while a stream is running.
     [[nodiscard]] virtual Status set_spectrum_sink(SpectrumSink sink) = 0;
+
+    // Routes one receiver's passband to a callback, and is the per-receiver
+    // opt-in: until a sink is attached that receiver records no transform and
+    // holds no buffers for one. An empty sink detaches and frees them again.
+    //
+    // One sink per receiver; setting a second replaces the first. Refused
+    // when EngineConfig::passband_transform was zero, and refused for a raw
+    // tap, which has no fine stage to transform: the graph's raw tap is a
+    // copy out of the coarse channel ring and never mixes or filters, so
+    // there is no per-receiver baseband on the device to look at. The
+    // full-span spectrum already covers that channel.
+    [[nodiscard]] virtual Status set_passband_sink(VrxId id, PassbandSink sink) = 0;
 
     // Runs the graph until the source ends or stop() is called. The source's
     // own thread drives it; this returns once the stream is finished and

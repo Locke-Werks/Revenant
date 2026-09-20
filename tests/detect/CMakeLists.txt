@@ -2,19 +2,31 @@
 #
 # No GPU, and not because a GPU would be inconvenient here. The detector is
 # host code by design, for the reason core/detect/detector.h states: the
-# spectrum frame has already crossed the bus before it sees one. A case that
-# ran the engine to produce its frames would be testing the channelizer, the
-# FFT kernel and the readback path as well, and would then have to assert
-# against a measurement rather than against a number somebody chose. These
-# frames are built with a known centre, a known bandwidth and a known SNR in
-# the reference bandwidth, so the assertions are arithmetic.
+# spectrum frame has already crossed the bus before it sees one. Running the
+# device to produce these frames would test the channelizer, the FFT kernel
+# and the readback path as well, and a failure would then have three possible
+# causes.
+#
+# Two ways of producing a frame, for two different questions.
+#
+# test_detector.cpp builds each frame bin by bin from a chosen mean, so a case
+# asserts against arithmetic: a known centre, a known bandwidth and a known
+# SNR in the reference bandwidth, none of them measured.
+#
+# test_detector_scene.cpp runs a real modulated scene through the channelizer
+# and spectrum TWINS, which tests/reference proves bit-exact against the
+# kernels. The frames are the ones the device would produce and no device is
+# involved. That is the only way to ask what the detector does with interior
+# structure, because a rectangle has none.
 #
 # The end-to-end path, engine to radio to track list, is covered by
 # revenant-cli --detect rather than here.
 
 add_executable(revenant_detect_tests
     ../support/no_modal_dialogs.cpp
+    scene_frames.cpp
     test_detector.cpp
+    test_detector_scene.cpp
 )
 
 target_link_libraries(revenant_detect_tests PRIVATE
