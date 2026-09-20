@@ -791,7 +791,6 @@ RdsDecoder::RdsDecoder(const Options& options) : options_(options) {
 
 void RdsDecoder::reset() {
     window_ = 0;
-    bits_fed_ = 0;
     sync_ = SyncState::kHunting;
     bits_to_boundary_ = 0;
     expected_block_ = 0;
@@ -803,6 +802,20 @@ void RdsDecoder::reset() {
     state_ = StationState{};
     af_pending_lf_mf_ = false;
     af_first_of_pair_ = 0;
+
+    // All eight counters, not just bits_fed_. They are the numerator and
+    // denominator of every rate a caller derives from this decoder, and
+    // clearing one of the eight makes those rates wrong rather than stale: a
+    // block error rate computed after a retune divided the previous station's
+    // dropped blocks by the new station's bits.
+    bits_fed_ = 0;
+    groups_decoded_ = 0;
+    blocks_good_ = 0;
+    blocks_corrected_ = 0;
+    blocks_dropped_ = 0;
+    mmbs_blocks_ = 0;
+    acquisitions_ = 0;
+    losses_ = 0;
 }
 
 void RdsDecoder::feed(bool bit) {

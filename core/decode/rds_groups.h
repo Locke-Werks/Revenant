@@ -628,8 +628,14 @@ public:
     // terminate inside the sample path.
     void feed(bool bit);
 
-    // Drops framing and every partially assembled field, keeping the
-    // configuration. For a retune, not for a fade.
+    // Drops framing, every partially assembled field and all eight counters,
+    // keeping the configuration. For a retune, not for a fade.
+    //
+    // The counters go because a caller derives rates from them and a rate
+    // spanning a retune is wrong rather than stale: dropped blocks from the
+    // old station over bits from the new one. Until 2026-09-20 this cleared
+    // bits_fed_ alone, which left exactly that division set up and looking
+    // right.
     void reset();
 
     [[nodiscard]] Region region() const noexcept { return options_.region; }

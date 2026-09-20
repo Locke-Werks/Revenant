@@ -1812,10 +1812,36 @@ TEST_CASE("reset clears the state and keeps the configuration", "[rds]") {
                                    0xE0E0, chars_to_word('K', 'X'), false});
     REQUIRE(decoder.state().pi_valid);
 
+    REQUIRE(decoder.bits_fed() > 0);
+    REQUIRE(decoder.groups_decoded() > 0);
+    REQUIRE(decoder.blocks_good() > 0);
+    REQUIRE(decoder.sync_acquisitions() > 0);
+
     decoder.reset();
     CHECK(decoder.region() == Region::kRbds);
     CHECK_FALSE(decoder.synced());
     CHECK_FALSE(decoder.state().pi_valid);
     CHECK(decoder.state().ps_text() == "        ");
+
+    // All eight counters, not just bits_fed_. A caller divides one by another
+    // to get a block error rate or a group rate, and a reset that clears the
+    // denominator alone makes those rates wrong rather than stale.
     CHECK(decoder.bits_fed() == 0);
+    CHECK(decoder.groups_decoded() == 0);
+    CHECK(decoder.blocks_good() == 0);
+    CHECK(decoder.blocks_corrected() == 0);
+    CHECK(decoder.blocks_dropped() == 0);
+    CHECK(decoder.mmbs_blocks() == 0);
+    CHECK(decoder.sync_acquisitions() == 0);
+    CHECK(decoder.sync_losses() == 0);
+
+    // And the decoder still works from scratch afterwards, with the counters
+    // now describing the new station alone.
+    prime(decoder);
+    feed_group(decoder, GroupWords{0x7788, type0_block2(3, true, false, true, false, 0),
+                                   0xE0E0, chars_to_word('O', 'K'), false});
+    CHECK(decoder.state().pi == 0x7788);
+    CHECK(decoder.groups_decoded() == 1);
+    CHECK(decoder.sync_acquisitions() == 1);
+    CHECK(decoder.bits_fed() == 2 * revenant::decode::kBitsPerGroup);
 }
