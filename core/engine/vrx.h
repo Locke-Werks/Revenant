@@ -1,8 +1,24 @@
 // A virtual receiver.
 //
 // A VRX owns a centre frequency, a bandwidth, a filter shape, a demodulator,
-// AGC and squelch settings, an audio sink and an optional decoder chain. It
-// has an identity, a colour and a label, and it survives a session.
+// AGC and squelch settings, and an audio sink. It has an identity, a colour
+// and a label, and it survives a session.
+//
+// WHAT THIS SENTENCE USED TO SAY. Until 2026-09-20 it ended "an audio sink
+// and an optional decoder chain". There is no decoder chain. Nothing in
+// core/engine builds, holds or feeds a decoder: no field on this struct, no
+// stage in core/engine/vrx_stage.cpp, no hook in core/engine/graph.cpp. The
+// decoders live in core/decode and are driven by whatever has PCM, which
+// today is a caller holding an AudioSink.
+//
+// Retracted rather than built, which is a decision and not a shrug. A seam
+// invented here would be a second one: core/rpc/revenant.capnp already
+// states that the RDS surface installs a decoder on a receiver's audio when
+// that branch lands, and two decoder seams in core/engine means the one
+// written first gets deleted. Engine::attach_audio_sink is the composition
+// point a decoder will attach through, and it exists now, so the sentence
+// this replaces was describing something the tree can do rather than
+// something it has.
 //
 // There is no "main" receiver and the first VRX is not privileged. Every other
 // SDR application treats multi-VFO as an accessory to a primary tuner and the
@@ -174,8 +190,23 @@ struct VrxParams {
     dsp::SampleRate audio_rate = 0;
 
     // Squelch threshold in dB relative to full scale. Below this the audio
-    // output is muted rather than the receiver being stopped, because a
-    // squelched receiver still feeds its decoder chain and its signal meter.
+    // output is muted rather than the receiver being stopped, so the meter,
+    // the passband display and the sample index all keep running: a gate is a
+    // thing the operator hears and not a thing that stops a receiver.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "because a squelched receiver still
+    // feeds its decoder chain and its signal meter". The meter half is true
+    // and core/engine/graph.cpp stores the level before it mutes. The decoder
+    // half was never true twice over: there is no decoder chain, per the
+    // retraction at the top of this file, and the mute is written into the
+    // shared readback buffer before any sink is called, so a consumer wanting
+    // ungated audio could not have one. It went unnoticed because the default
+    // below never opens the gate's other side: -200 dBFS is under the
+    // arithmetic's own floor, so every receiver built from the defaults is
+    // permanently open and nothing is ever muted.
+    //
+    // A consumer that needs to tell the gate from a dead band reads
+    // AudioChunk::squelch_open, which is on every chunk for that reason.
     double squelch_dbfs = -200.0;
 
     double agc_attack_ms = 10.0;
@@ -270,8 +301,35 @@ struct VrxStatus {
 
     bool squelch_open = false;
 
-    // Audio samples produced and dropped. A drop is a dropout the operator
-    // hears, so it is counted and never merely logged.
+    // Audio FRAMES this receiver produced, and frames it produced that
+    // reached nothing.
+    //
+    // audio_dropped is the engine's own loss and only the engine's: frames
+    // handed to this receiver's sink and refused by it. That is the whole of
+    // it, and it is normally zero, because core/engine/graph.cpp turns a
+    // refusing sink into a failing dispatch and ends the run. A non-zero
+    // value here means the run is on its way out, not that a listener missed
+    // a syllable.
+    //
+    // WHAT THIS PAIR USED TO SAY, AND WHY THE NARROWER READING IS THE HONEST
+    // ONE. Until 2026-09-20 the comment read "audio samples produced and
+    // dropped. A drop is a dropout the operator hears", and the only site
+    // that incremented it was the squelch mute, which is not a dropout at
+    // all: the chunk is delivered at the full rate with the index unbroken
+    // and AudioChunk::squelch_open saying why it is silent. So the field
+    // named one thing and counted another.
+    //
+    // It is also not the number a listener wants, and no field on this struct
+    // can be. A drop belongs to a CONSUMER: a recording's disk stalling and a
+    // remote subscriber's socket stalling are two different losses on one
+    // receiver, and there is one field here to put them in. They are counted
+    // where they happen, in AudioEgressStats::frames_dropped and in the
+    // AudioStats a subscription answers with.
+    //
+    // They are frames rather than interleaved samples, which the old name
+    // "audio_samples" also got wrong: a stereo stream counted in samples
+    // reports every instant twice. core/engine/graph.cpp has always added
+    // StageOutput::frames here.
     std::uint64_t audio_samples = 0;
     std::uint64_t audio_dropped = 0;
 };

@@ -402,9 +402,28 @@ struct VrxStatus {
     levelDbfs @3 :Float64;
     squelchOpen @4 :Bool;
 
-    # A dropped audio sample is a dropout the operator hears, so it is
-    # counted and carried rather than logged where a remote client cannot
-    # read it.
+    # FRAMES this receiver produced, and frames it produced that reached
+    # nothing. Carried rather than logged because a remote client cannot read
+    # a log.
+    #
+    # audioDropped IS THE ENGINE'S OWN LOSS AND IS NORMALLY ZERO. A frame
+    # counted here was handed to the receiver's sink and refused, which
+    # core/engine/graph.cpp also turns into a failing dispatch, so a non-zero
+    # value means the run is ending rather than that a listener missed a
+    # syllable.
+    #
+    # WHAT THESE TWO USED TO SAY: "a dropped audio sample is a dropout the
+    # operator hears". They are frames rather than samples, and until
+    # 2026-09-20 the only site that incremented audioDropped was the squelch
+    # mute, which is the opposite of a dropout: the chunk crosses at the full
+    # rate with the sample index unbroken and AudioChunk::squelchOpen saying
+    # why it is silent. A client drawing a dropout indicator from this field
+    # lit it for the whole of every quiet channel.
+    #
+    # The number a listener wants is per CONSUMER and cannot live here. One
+    # receiver can feed a recording and two subscriptions at once, and their
+    # losses are three different numbers with one field to hold them.
+    # AudioStats::framesDropped is this subscription's, and it moves.
     audioSamples @5 :UInt64;
     audioDropped @6 :UInt64;
 

@@ -355,6 +355,19 @@ struct AudioChunk {
     // decoder rather than here.
     std::span<const float> samples;
     std::uint32_t channels = 1;
+
+    // The squelch gate at the moment these frames were produced.
+    //
+    // False means the samples above are ZEROS THE GRAPH WROTE, not a quiet
+    // band. core/engine/graph.cpp mutes a closed receiver in the readback
+    // buffer before any sink is called, so every consumer of this chunk sees
+    // the same silence, and without this flag none of them can tell the gate
+    // shutting from the transmitter stopping. A recording is identical either
+    // way; a subscriber's indicator is not.
+    //
+    // Defaulted true so a producer that does not gate says nothing about a
+    // gate. It is not a claim that the signal was strong.
+    bool squelch_open = true;
 };
 
 using AudioSink = std::function<Status(const AudioChunk&)>;

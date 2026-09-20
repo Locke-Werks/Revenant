@@ -1552,15 +1552,35 @@ struct Graph::Impl {
             const double level = dbfs_of(std::sqrt(sum));
             slot.store_level(level);
 
-            // Squelched means muted, not stopped. A squelched receiver still
-            // feeds its decoder chain and its meter, which is why the level is
-            // stored above this and not below it.
+            // Squelched means muted, not stopped. The level is stored above
+            // this and the passband loop below runs whatever the gate did, so
+            // a squelched receiver keeps feeding its meter and its display.
+            //
+            // THE MUTE IS WRITTEN INTO THE SHARED READBACK BUFFER, so every
+            // consumer of this chunk sees the same silence and none of them
+            // can opt out. core/engine/vrx.h said a squelched receiver still
+            // feeds its decoder chain, and this line has always contradicted
+            // it. The header was corrected rather than this line: every sink
+            // reachable from here is an audio output, muting an output is what
+            // the gate is for, and there is no decoder framework in
+            // core/engine for the exemption to have been written for.
+            // AudioChunk::squelch_open is what tells a consumer these zeros
+            // are the gate rather than the band.
+            //
+            // WHAT THIS BLOCK USED TO DO. Until 2026-09-20 it also added every
+            // muted frame to slot.audio_dropped and to the graph-wide
+            // audio_dropped, which core/engine/vrx.h and
+            // core/rpc/revenant.capnp both describe as a dropout the operator
+            // heard. A closed squelch is not one. The chunk is delivered at
+            // the full rate with the sample index unbroken, so nothing is
+            // lost and nothing has to be filled; what the listener hears is
+            // the threshold they set. Counting it as loss made the field climb
+            // for the whole of every quiet channel, which is the one reading
+            // that makes it useless for what it is for.
             const bool open = level >= entry.squelch_dbfs;
             slot.squelch_open.store(open, std::memory_order_relaxed);
             if (!open) {
                 std::fill(audio.begin(), audio.end(), 0.0F);
-                slot.audio_dropped.fetch_add(entry.output.frames, std::memory_order_relaxed);
-                audio_dropped.fetch_add(entry.output.frames, std::memory_order_relaxed);
             }
 
             AudioChunk chunk;
@@ -1569,9 +1589,19 @@ struct Graph::Impl {
             chunk.rate = entry.output.rate;
             chunk.samples = std::span<const float>(audio.data(), audio.size());
             chunk.channels = entry.output.channels;
+            chunk.squelch_open = open;
 
             if (entry.sink != nullptr && *entry.sink) {
                 if (auto delivered = (*entry.sink)(chunk); !delivered) {
+                    // Frames this receiver produced that reached nothing,
+                    // which is what audio_dropped counts now that a squelch
+                    // mute does not. See the note on VrxStatus::audio_dropped:
+                    // a sink refusing a chunk also fails this dispatch and
+                    // ends the run, so the counter moves once on the way out
+                    // rather than accumulating.
+                    slot.audio_dropped.fetch_add(entry.output.frames,
+                                                 std::memory_order_relaxed);
+                    audio_dropped.fetch_add(entry.output.frames, std::memory_order_relaxed);
                     outcome = std::unexpected(with_context(
                         delivered.error(), std::format("receiver {} sink", slot.id.value)));
                 }

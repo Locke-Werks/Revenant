@@ -306,8 +306,19 @@ struct AudioEgressStats {
     // Accepted into the ring by publish().
     std::uint64_t frames_published = 0;
 
-    // Offered to publish() and refused because the ring was full. This is the
-    // number that belongs in VrxStatus::audio_dropped.
+    // Offered to publish() and refused because the ring was full. This
+    // receiver's loss, on this egress, and nowhere else.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "this is the number that belongs in
+    // VrxStatus::audio_dropped". It does not, on two counts. Nothing carries
+    // it there and nothing can: AudioEgress is built above Engine and has no
+    // route back into a receiver's slot, and adding one would mean the graph
+    // taking a number from a layer it does not know about. And it would not
+    // fit if it did. A receiver can have more than one consumer now, per the
+    // composition seam in core/engine/engine.h, so one receiver produces one
+    // of these per egress plus one per wire subscription, and there is a
+    // single field over there to hold them. VrxStatus::audio_dropped has been
+    // narrowed to the engine's own loss for that reason and says so.
     std::uint64_t frames_dropped = 0;
     std::uint64_t drop_events = 0;
 
