@@ -1405,6 +1405,35 @@ struct RdsStation {
     # timeline, and converting here would mean the engine asserting a ratio
     # the decoder never saw. Divide by compositeRate for seconds.
     lastGroupSample @52 :UInt64;
+
+    # Empty while the decoder is running. Non-empty is the sentence saying
+    # why it stopped, and everything above it is frozen at the last chunk it
+    # accepted.
+    #
+    # A DECODER CAN STOP WITHOUT THE RECEIVER GOING, which is the state this
+    # field exists to name. The sink must not fail the graph's dispatch, so a
+    # chunk that is not what the decoder was built for, an interleaved pair
+    # or a rate the loops are not sized for, is recorded here instead of
+    # returned. Both are shape, and setVrxParams refuses a change of shape
+    # rather than applying it, so a receiver that delivered the wrong thing
+    # once will deliver it again: this is TERMINAL for the life of the
+    # receiver. Removing it and adding another is the only recovery, and
+    # nothing here pretends otherwise.
+    #
+    # WHAT THIS CALL USED TO DO INSTEAD, because a client written against the
+    # old behaviour has a branch it can now delete. A faulted decoder made
+    # rdsStation THROW, with this sentence as the exception's message. That
+    # told a client why, and it threw away everything the decoder had
+    # accumulated before the bad chunk, which is still true about the
+    # station; it also made "the decoder stopped" and "no such receiver"
+    # arrive on the same channel, so telling them apart meant matching prose.
+    # The call answers now and this field is the branch.
+    #
+    # It is the one place RDS departs from the detector's precedent, which
+    # refuses on detectorFault and always will: a detector fault means the
+    # track list no longer describes anything, where an RDS fault leaves a
+    # station struct that was true when it was last written.
+    fault @53 :Text;
 }
 
 # ---------------------------------------------------------------------------

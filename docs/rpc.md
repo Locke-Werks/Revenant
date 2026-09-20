@@ -534,6 +534,20 @@ region does not reach: every counter in `RdsHealth` is cumulative from the
 moment the decoder was built, and clearing one layer would leave one struct
 holding two epochs.
 
+**`RdsStation::fault` is how a decoder says it stopped.** Empty while it runs.
+Non-empty means the receiver delivered a chunk the decoder was not built for,
+an interleaved pair or a rate its loops are not sized for, and every other
+field is frozen at the last chunk it accepted. Terminal for the life of the
+receiver: both faults are shape, and a retune that changes the shape is
+refused rather than applied, so there is nothing a client can do to that
+receiver that would make it deliver a composite again. Remove it and add
+another. Until 2026-09-20 a faulted decoder made `rdsStation` throw with this
+sentence as the message, which threw away the state the decoder had built
+before the bad chunk and put "the decoder stopped" on the same channel as "no
+such receiver". The detector still refuses on its own fault and should: a
+detector fault means the track list no longer describes anything, where this
+one leaves a struct that was true when it was written.
+
 **What it costs**, measured rather than asserted: 12.07 ms of one core per
 second of composite at 171000 S/s, which is 0.145 ms per chunk against the
 detector's 0.201 ms per frame, per decoding receiver rather than per engine.

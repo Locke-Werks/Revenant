@@ -652,10 +652,14 @@ struct RdsSnapshot {
     std::uint64_t sync_acquisitions = 0;
     std::uint64_t sync_losses = 0;
 
-    // The server's own three.
+    // The server's own four.
     std::uint32_t composite_rate = 0;
     std::uint64_t last_group_sample = 0;
     std::uint64_t ta_changed_at = 0;
+
+    // Empty while the decoder is running. See RdsRoute::fault, and
+    // rds_station for why a faulted decoder answers rather than refusing.
+    std::string fault;
 };
 
 // One receiver's RDS decode.
@@ -739,6 +743,24 @@ struct RdsRoute {
     // fail the dispatch, so a chunk that is not what the receiver promised
     // is recorded here and reported to the next caller. Same arrangement as
     // detector_fault_ and for the same reason.
+    //
+    // TERMINAL, AND THAT IS CORRECT RATHER THAN UNFINISHED. The only two
+    // ways to set it are a channel count and a rate that are not what the
+    // decoder was built for, both of which are SHAPE, and
+    // Graph::set_vrx_params refuses a retune that changes the shape rather
+    // than applying it. So a receiver that delivered the wrong thing once
+    // has no way to start delivering the right one, and a recovery path
+    // would be a way to ask the same broken receiver again. Removing the
+    // receiver and adding another is the recovery, and it is the only one
+    // that changes anything.
+    //
+    // Neither reset clears it. set_rds_region does not, because a region is
+    // not a shape; reset_rds_for_vrx does not, for the same reason. Both say
+    // so where they do it.
+    //
+    // ON THE WIRE as RdsStation::fault since 2026-09-20, so a client can
+    // tell a decoder that stopped from a receiver that went without matching
+    // prose. rds_station has why that is a field rather than a refusal.
     std::string fault;
 };
 
@@ -1494,6 +1516,7 @@ public:
         out.setCompositeRate(taken->composite_rate);
         out.setLastGroupSample(taken->last_group_sample);
         out.setTaChangedAt(taken->ta_changed_at);
+        out.setFault(taken->fault);
 
         auto health = out.initHealth();
         write_rds_bits_status(health, taken->bits);
@@ -2098,11 +2121,25 @@ Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
     }
 
     const std::scoped_lock held(route->lock);
-    if (!route->fault.empty()) {
-        return fail(route->fault);
-    }
 
+    // A FAULTED DECODER ANSWERS RATHER THAN REFUSING, and it is the one
+    // place this departs from the detector's precedent.
+    //
+    // Until 2026-09-20 this returned fail(route->fault), which put the
+    // sentence on the wire as an exception. Two things were wrong with that.
+    // It threw away everything the decoder had accumulated before the bad
+    // chunk, which is still true about the station and is the only record of
+    // it there will ever be, since the fault is terminal. And it put "this
+    // decoder stopped" on the same channel as "no receiver 9 is registered",
+    // so a client telling them apart had to match prose.
+    //
+    // The detector keeps refusing and should: its fault means consume()
+    // rejected a geometry, so the track list no longer describes anything.
+    // An RDS fault leaves a station struct that was true when it was last
+    // written, and freezing a true thing is not the same as holding a false
+    // one. RdsStation::fault on the wire is what says which it is.
     RdsSnapshot out;
+    out.fault = route->fault;
     out.state = route->groups.state();
     out.bits = route->bits.status();
     out.region = route->region;

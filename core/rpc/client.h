@@ -248,6 +248,18 @@ public:
     // three are served now, and this paragraph used to say that the branch
     // serving RDS would change the return type and break every caller. It
     // did.
+    //
+    // A DECODER THAT STOPPED ANSWERS RATHER THAN REFUSING, so check
+    // RdsStation::fault before drawing anything else. It is non-empty only
+    // when the receiver delivered a chunk the decoder was not built for, an
+    // interleaved pair or a rate its loops are not sized for, and it is
+    // terminal for the life of that receiver: both faults are shape, and a
+    // retune that changes the shape is refused rather than applied. The
+    // fields beside it are frozen at the last chunk the decoder accepted and
+    // are still true about the station, which is why they are served instead
+    // of thrown away. What this refuses is a receiver that does not exist,
+    // in the engine's words, and a receiver that cannot carry a composite,
+    // in the server's.
     [[nodiscard]] virtual Expected<RdsStation> rds_station(std::uint64_t vrx) = 0;
 
     // The region the decoder for this receiver uses, which defaults to

@@ -743,6 +743,20 @@ struct RdsStation {
     // and has no access to the source timeline. Divide by composite_rate for
     // seconds.
     std::uint64_t last_group_sample = 0;
+
+    // Empty while the decoder is running. Non-empty is why it stopped, and
+    // every field above is frozen at the last chunk it accepted.
+    //
+    // CHECK IT BEFORE DRAWING ANYTHING ELSE. A decoder can stop without its
+    // receiver going, and the two states are not otherwise distinguishable:
+    // a station that stopped transmitting and a decoder that stopped reading
+    // both look like a struct whose counters no longer move. TERMINAL for
+    // the life of the receiver, because the only two faults are shape and
+    // set_vrx_params refuses a change of shape. See the schema for what this
+    // call did before the field existed.
+    std::string fault;
+
+    [[nodiscard]] bool decoding() const { return fault.empty(); }
 };
 
 }  // namespace revenant::rpc
