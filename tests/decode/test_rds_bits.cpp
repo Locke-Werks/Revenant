@@ -517,6 +517,92 @@ TEST_CASE("a fractional sample offset and a clock error are both recovered", "[d
     }
 }
 
+TEST_CASE("the modulator renders the same samples from any start index", "[decode][rds]")
+{
+    INFO(std::format("seed {}", kSeed));
+
+    // rds_mod.h states that render(start, out) writes absolute samples
+    // [start, start + out.size()) and that the same absolute range always
+    // produces the same samples whatever partition the caller used. Nothing
+    // called render with a start other than zero, so the absolute-index half
+    // of that was never exercised at all: generate_rds renders from zero, and
+    // so did every case in this file. A modulator that quietly treated start
+    // as a phase reset, or cached anything between calls, passed.
+    //
+    // The spec is picked so the property is not trivially true. A clock error
+    // makes the pilot, the subcarrier and the bit clock all non-integer in
+    // samples; a fractional start offset puts the bit grid off the sample
+    // grid; an incoherent subcarrier offset moves one of the three and not
+    // the others.
+    siggen::RdsModSpec spec = base_spec(kAwkwardRate, 700);
+    spec.start_offset_samples = 0.41;
+    spec.clock_error_ppm = 40.0;
+    spec.subcarrier_offset_hz = -25;
+    spec.subcarrier_phase_radians = std::numbers::pi / 3.0;
+
+    auto mod = siggen::RdsModulator::create(spec);
+    REQUIRE(mod.has_value());
+
+    const std::size_t count = mod->nominal_sample_count();
+    std::vector<float> whole(count, 0.0F);
+    std::vector<float> whole_rds(count, 0.0F);
+    mod->render(0, dsp::RealSpan(whole));
+    mod->render_rds_only(0, dsp::RealSpan(whole_rds));
+
+    // Windows at starts that share no factor with the samples per bit, the
+    // subcarrier period or each other, so no window boundary lands on the
+    // same phase twice.
+    for (const std::size_t start : {1U, 13U, 1021U, 30011U, 65537U}) {
+        REQUIRE(start < count);
+        const std::size_t length = std::min<std::size_t>(4099, count - start);
+
+        std::vector<float> window(length, 0.0F);
+        mod->render(static_cast<dsp::SampleIndex>(start), dsp::RealSpan(window));
+
+        std::vector<float> window_rds(length, 0.0F);
+        mod->render_rds_only(static_cast<dsp::SampleIndex>(start), dsp::RealSpan(window_rds));
+
+        INFO(std::format("window of {} at absolute {}", length, start));
+
+        // Bit for bit, not to a tolerance. Both renders are pure functions of
+        // the absolute index, so anything short of equality is state leaking
+        // between calls.
+        const std::vector<float> expected(whole.begin() + static_cast<std::ptrdiff_t>(start),
+                                          whole.begin() +
+                                              static_cast<std::ptrdiff_t>(start + length));
+        CHECK(window == expected);
+
+        const std::vector<float> expected_rds(
+            whole_rds.begin() + static_cast<std::ptrdiff_t>(start),
+            whole_rds.begin() + static_cast<std::ptrdiff_t>(start + length));
+        CHECK(window_rds == expected_rds);
+    }
+
+    // And the partition-independence half: chunk the whole buffer at sizes
+    // that do not divide it and reassemble.
+    for (const std::size_t chunk : {1U, 3U, 997U, 8191U}) {
+        std::vector<float> assembled(count, 0.0F);
+        for (std::size_t offset = 0; offset < count; offset += chunk) {
+            const std::size_t length = std::min(chunk, count - offset);
+            mod->render(static_cast<dsp::SampleIndex>(offset),
+                        dsp::RealSpan(assembled.data() + offset, length));
+        }
+        INFO(std::format("chunk {}", chunk));
+        CHECK(assembled == whole);
+    }
+
+    // The bit instants are absolute too, so a caller slicing the output has
+    // to be able to work out which bits are in its slice. bit_instant_samples
+    // is what it asks, and it has to stay linear in the bit index at the
+    // realised clock rather than the nominal one.
+    const double spacing = mod->bit_instant_samples(1) - mod->bit_instant_samples(0);
+    CHECK(spacing == Approx(mod->samples_per_bit()).epsilon(1e-12));
+    CHECK(mod->bit_instant_samples(600) ==
+          Approx(mod->bit_instant_samples(0) + 600.0 * spacing).epsilon(1e-9));
+    CHECK(mod->samples_per_bit() ==
+          Approx(static_cast<double>(kAwkwardRate) / mod->bit_rate_hz()).epsilon(1e-12));
+}
+
 TEST_CASE("blocking the input does not change the bits", "[decode][rds]")
 {
     INFO(std::format("seed {}", kSeed));
