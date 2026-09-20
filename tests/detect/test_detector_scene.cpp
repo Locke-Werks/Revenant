@@ -997,6 +997,20 @@ TEST_CASE("a station that fades keeps its track", "[detect][scene-bar]") {
     CHECK(result.stats.tracks_born == 1);
     CHECK(result.stats.tracks_dropped == 0);
 
+    // The mechanism, and not the outcome. One birth and no drops says only
+    // that the hold had not expired when the scene ended, which is what a
+    // suppressed fade also looks like from far enough away: suppression
+    // outlives the fade that started it, so a case whose frames run out
+    // mid-suppression records a track that has not been dropped YET. Zero
+    // withheld candidates says the rule never fired at all, so there is no
+    // hold being spent and no length of scene that could change the answer.
+    //
+    // 2.67 dB/s is below the window's lower edge, 0.75 * 4.343 = 3.26 dB/s,
+    // and the sweep in tests/detect/test_detector.cpp shows nothing is
+    // suppressed below that edge at any depth. This is that region's one
+    // point on real frames.
+    CHECK(result.stats.candidates_residual == 0);
+
     // And the case has teeth, over the same frames. A tolerance of one puts
     // the window's lower edge at zero, so any fall inside a run qualifies and
     // the rule fires on direction alone, which is the shape it had. The track

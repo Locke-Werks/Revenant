@@ -368,6 +368,27 @@ The third is the opposite question, and it is the one the residual rule can
 fail: a station that fades 8 dB over three seconds and keeps transmitting must
 keep its track. One birth, no drops.
 
+That third bar is one point on a surface, and how much of the surface is safe
+has now been got wrong twice, both times by stating the answer as a fade RATE.
+It is not a rate. The rule withholds candidates, a withheld candidate is a
+track that is not fed, and a track is dropped once it has gone
+`bootstrap_hold_seconds` without a detection, so the quantity that decides is
+how many seconds of continuous suppression a fade produces. Rate decides
+whether the rule fires at all: an exponential average of time constant tau
+lags a falling input, and the measured rate converges to the input rate below
+`1/tau` and to `1/tau` above it, so a fade slower than the window's lower edge
+(0.75 / tau, which is 3.26 dB/s at the shipped second) never reaches the
+window at any depth. Depth decides how long it stays fired, because
+suppression continues past the end of the fade until the average has emptied
+back down to the input.
+
+Measured over both axes in `how long the residual rule starves a fade`, in
+`tests/detect/test_detector.cpp`: below 3.26 dB/s nothing is suppressed at any
+depth up to 40 dB, and above it the budget is a depth between 13 and 25 dB,
+narrowing as the rate rises. A 30 dB fade loses its track at every rate above
+3.6 dB/s. The header at `DetectorConfig::residual_rate_tolerance` carries the
+table and the history of the two wrong claims.
+
 Tone-driven emitters are measured and deliberately not scored against that
 bar. A truth extent is the channel a mode occupies, which for QPSK is where
 the energy is and for a tone-modulated AM, SSB or FM emitter is not: those

@@ -914,22 +914,27 @@ TEST_CASE("a track stops being published soon after its signal stops", "[detect]
     CHECK(new_ids == 0);
 }
 
-// A signal that fades keeps its track, and the rate is what decides.
+// A signal that fades keeps its track, and what actually decides is how long
+// the rule starves it for.
 //
-// The residual rule withholds a candidate whose band is falling at the
-// exponential average's own decay rate, because that is what a stopped
-// transmission looks like on the way out. It used to withhold anything
-// falling at 0.6 of that rate or faster, on the argument that the cost of a
-// false positive was a momentary Held state. It is not: the suppression sits
-// on the candidate, so the track stops being fed, reaches its hold three
-// seconds later and is DROPPED, and no replacement is born either because
-// there is no candidate to born one from. A transmitter still tens of
-// decibels over the noise leaves the list entirely.
+// The residual rule withholds a candidate whose band is falling at the rate
+// an emptying exponential average falls at, because that is what a stopped
+// transmission looks like on the way out. A withheld candidate is a track
+// that is not fed, so the cost of a false positive is paid in the one
+// currency update_tracks spends: seconds without a detection, against
+// bootstrap_hold_seconds. Reach the hold and the track is DROPPED, and
+// because the suppression sits on the candidate nothing is reborn from it
+// either, so a transmitter still tens of decibels over the noise leaves the
+// list entirely.
 //
-// 8 dB over 3 s is the case, and it is ordinary: mobile VHF driving behind a
-// building, an aeronautical signal at low elevation, an HF path at dusk. At
-// the shipped second of averaging that is 2.67 dB/s against a predicted 4.343,
-// so it cleared the old 2.606 bar with room to spare.
+// 8 dB over 3 s is the case the rule used to lose, and it is ordinary: mobile
+// VHF driving behind a building, an aeronautical signal at low elevation, an
+// HF path at dusk. At the shipped second of averaging that is 2.67 dB/s
+// against the 4.343 the average falls at with no input, so it cleared the old
+// one-sided 2.606 bar with room to spare.
+//
+// This case is the one point, asserted at the mechanism. The surface it sits
+// on is the sweep below, which is where a fade budget comes from.
 //
 // Nothing here reads a clock. The fade is a function of the sample index the
 // scene has reached, exactly like everything else in this file.
@@ -942,13 +947,24 @@ TEST_CASE("a fading signal keeps its track", "[detect]") {
     constexpr double kStartDb = 60.0;
     constexpr double kFadeSeconds = 3.0;
 
+    // Eight seconds and not one. Suppression that begins during a fade
+    // outlasts the fade, because the average is left sitting far above the
+    // input and goes on emptying at its own rate afterwards, so a run that
+    // stops while the candidate is still withheld has measured nothing: the
+    // track it still holds is a track whose hold has not expired YET. The
+    // scene bar gave itself two seconds for exactly this reason and the unit
+    // case gave itself one, which is how a 30 dB section that was 0.2 s from
+    // flipping read as a comfortable pass.
+    constexpr double kTailSeconds = 8.0;
+
     // Feeds one frame at a time with the emitter at whatever level the ramp
-    // has reached. Returns the id it saw, or zero.
+    // has reached.
     const auto fade = [](detect::Detector& detector, Scene& scene, double from_db, double to_db,
                          double seconds) {
         const auto frames = static_cast<std::size_t>(std::llround(seconds / kFrameSeconds));
         for (std::size_t i = 0; i < frames; ++i) {
-            const double t = static_cast<double>(i) / static_cast<double>(std::max<std::size_t>(1, frames));
+            const double t =
+                static_cast<double>(i) / static_cast<double>(std::max<std::size_t>(1, frames));
             scene.set({Emitter{.centre_bin = kCentreBin,
                                .width_bins = kWidthBins,
                                .snr_2500_db = from_db + t * (to_db - from_db)}});
@@ -978,25 +994,30 @@ TEST_CASE("a fading signal keeps its track", "[detect]") {
         run_for(detector, scene, 3.0);
         REQUIRE(detector.tracks().size() == 1);
         const std::uint64_t id = detector.tracks()[0].id;
+        const std::uint64_t residual_before = detector.stats().candidates_residual;
 
         fade(detector, scene, start_db, start_db - fall_db, kFadeSeconds);
-        run_for(detector, scene, 1.0);
+        run_for(detector, scene, kTailSeconds);
 
         struct Outcome {
             std::uint64_t id = 0;
             std::size_t tracks = 0;
             std::uint64_t dropped = 0;
             std::uint64_t born = 0;
+            std::uint64_t residual = 0;
+            detect::TrackState state = detect::TrackState::Pending;
             std::string text;
         };
         Outcome outcome;
         outcome.tracks = detector.tracks().size();
         outcome.dropped = detector.stats().tracks_dropped;
         outcome.born = detector.stats().tracks_born;
+        outcome.residual = detector.stats().candidates_residual - residual_before;
         outcome.text = describe(detector);
         for (const detect::Track& track : detector.tracks()) {
             if (track.id == id) {
                 outcome.id = id;
+                outcome.state = track.state;
             }
         }
         return outcome;
@@ -1011,6 +1032,13 @@ TEST_CASE("a fading signal keeps its track", "[detect]") {
         CHECK(outcome.id != 0);
         CHECK(outcome.dropped == 0);
         CHECK(outcome.born == 1);
+
+        // The mechanism and not the outcome. Surviving says only that the
+        // hold had not expired when the frames ran out; these two say the
+        // rule never fired, so there was no hold being spent and no margin
+        // to run out of.
+        CHECK(outcome.residual == 0);
+        CHECK(outcome.state == detect::TrackState::Live);
     }
 
     SECTION("the same fade, with the window opened to its far end") {
@@ -1023,32 +1051,257 @@ TEST_CASE("a fading signal keeps its track", "[detect]") {
         INFO(outcome.text);
         CHECK(outcome.dropped >= 1);
         CHECK(outcome.id == 0);
+        CHECK(outcome.residual > 0);
+    }
+}
+
+// THE SURFACE: how long the residual rule starves a fade, swept over depth
+// and rate, against the hold that the starvation is spent against.
+//
+// This case exists because two attempts to state the rule's cost as ONE
+// number were both wrong, in the same way, and the bar in front of each of
+// them could not see it.
+//
+// The first said the cost was bounded: a false positive puts the track in
+// Held for a moment and the next non-falling decision publishes it again. The
+// second said the bar was 13.3 dB/s, read off a ladder of fades that all ran
+// for three seconds. Both are single points read as a rule, and the second
+// was worse than the first because it looked measured.
+//
+// Rate alone cannot answer it, because rate alone does not say when the
+// starvation ENDS. Feed an exponential average of time constant tau an input
+// falling at b nepers per second and it solves to
+//
+//     A(t) = k P0 exp(-b t) - (k - 1) P0 exp(-t / tau),   k = 1 / (1 - b tau)
+//
+// so A sits above P throughout and the measured fall TRAILS the input's,
+// rising towards it rather than starting there. Two things follow, and they
+// are the two axes:
+//
+//   RATE decides whether the rule ever fires. The measured rate converges to
+//   the input rate when b tau < 1 and to 1/tau when b tau >= 1, so a fade
+//   slower than the window's lower edge never reaches the window at any
+//   depth, and a fade faster than it always does eventually.
+//
+//   DEPTH decides how long it stays fired. When the fade stops, the average
+//   is left above the input by however far it lagged, which grows with the
+//   depth, and it goes on emptying at its own rate: dead centre of the
+//   window. So suppression continues past the end of the fade until the
+//   average has come back down to the input, and THAT is what is measured
+//   against the three second hold.
+//
+// What the sweep prints is the starved stretch in seconds, which is the
+// quantity a fade budget is sized in. The single assertion per cell is that
+// the track is lost exactly when that stretch exceeds the hold, which is the
+// mechanism rather than an outcome: it holds at every cell rather than
+// certifying the handful somebody thought to write down.
+//
+// Every cell ends at least 20 dB over the detection threshold, so a decision
+// that published nothing published nothing because of the residual rule and
+// not because the signal went under the bar. starvation_was_residual checks
+// that rather than assuming it.
+TEST_CASE("how long the residual rule starves a fade", "[detect]") {
+    constexpr std::uint64_t kSeed = 19283;
+    INFO("seed " << kSeed);
+
+    constexpr std::size_t kCentreBin = 480;
+    constexpr std::size_t kWidthBins = 33;
+    constexpr double kStartDb = 60.0;
+    constexpr double kSteadySeconds = 3.0;
+
+    // Past the hold with room, so a stretch that is going to close, closes
+    // inside the run. A stretch still open at the last frame is a lower
+    // bound on itself and is rejected below rather than counted as survival.
+    constexpr double kTailSeconds = 8.0;
+
+    const double hold_seconds = detect::DetectorConfig{}.bootstrap_hold_seconds;
+
+    struct Cell {
+        double depth_db = 0.0;
+        double rate_db_per_s = 0.0;
+        double fade_seconds = 0.0;
+        double longest_starved_seconds = 0.0;
+        bool starved_at_end = false;
+        bool starvation_was_residual = true;
+        std::uint64_t born = 0;
+        std::uint64_t dropped = 0;
+        bool kept = false;
+    };
+
+    const auto measure = [&](double depth_db, double rate_db_per_s, double tail_seconds) {
+        Cell cell;
+        cell.depth_db = depth_db;
+        cell.rate_db_per_s = rate_db_per_s;
+        cell.fade_seconds = depth_db / rate_db_per_s;
+
+        Scene scene(-90.0, kSeed);
+        scene.set({Emitter{.centre_bin = kCentreBin,
+                           .width_bins = kWidthBins,
+                           .snr_2500_db = kStartDb}});
+
+        detect::DetectorConfig config = base_config();
+        config.average_seconds = 1.0;
+        config.decision_interval_seconds = 0.1;
+
+        auto made = detect::Detector::create(config, scene.geometry());
+        REQUIRE(made);
+        detect::Detector detector = std::move(*made);
+
+        std::uint64_t id = 0;
+        std::uint64_t seen_decisions = 0;
+        std::uint64_t seen_candidates = 0;
+        std::uint64_t seen_residual = 0;
+
+        // Source seconds at the last decision that published a candidate,
+        // which is what Track::last_detected holds and what the hold is
+        // measured from. Starvation is now minus this, exactly as
+        // update_tracks computes it.
+        double last_fed_seconds = 0.0;
+        bool starving = false;
+
+        const double total = kSteadySeconds + cell.fade_seconds + tail_seconds;
+        const auto frames = static_cast<std::size_t>(std::llround(total / kFrameSeconds));
+        for (std::size_t i = 0; i < frames; ++i) {
+            const double start = static_cast<double>(i) * kFrameSeconds;
+            const double through =
+                std::clamp((start - kSteadySeconds) / cell.fade_seconds, 0.0, 1.0);
+            scene.set({Emitter{.centre_bin = kCentreBin,
+                               .width_bins = kWidthBins,
+                               .snr_2500_db = kStartDb - through * depth_db}});
+            auto fed = detector.consume(scene.next());
+            if (!fed) {
+                FAIL("consume refused a frame: " << fed.error().message);
+            }
+            if (detector.stats().decisions == seen_decisions) {
+                continue;
+            }
+            seen_decisions = detector.stats().decisions;
+
+            const std::uint64_t published = detector.stats().candidates - seen_candidates;
+            const std::uint64_t withheld = detector.stats().candidates_residual - seen_residual;
+            seen_candidates = detector.stats().candidates;
+            seen_residual = detector.stats().candidates_residual;
+
+            // The frame's end in source seconds, which is the instant the
+            // decision is stamped with.
+            const double now = static_cast<double>(i + 1) * kFrameSeconds;
+            if (published > 0) {
+                last_fed_seconds = now;
+                starving = false;
+            } else {
+                if (withheld == 0) {
+                    cell.starvation_was_residual = false;
+                }
+                cell.longest_starved_seconds =
+                    std::max(cell.longest_starved_seconds, now - last_fed_seconds);
+                starving = true;
+            }
+
+            if (id == 0) {
+                for (const detect::Track& track : detector.tracks()) {
+                    if (track.state == detect::TrackState::Live) {
+                        id = track.id;
+                        break;
+                    }
+                }
+            }
+        }
+
+        cell.starved_at_end = starving;
+        cell.born = detector.stats().tracks_born;
+        cell.dropped = detector.stats().tracks_dropped;
+        for (const detect::Track& track : detector.tracks()) {
+            if (id != 0 && track.id == id) {
+                cell.kept = true;
+            }
+        }
+        return cell;
+    };
+
+    // Two rates under the window's lower edge, two straddling it, and three
+    // above. The depths reach 40 dB, which leaves the emitter 20 dB over the
+    // detection threshold at the bottom of the deepest fade.
+    // 13.3 dB/s is in the list because it is the number the header used to
+    // carry as the bar, so the row for 30 dB at 10 dB/s and the column for
+    // 13.3 both sit where a reader can check the retraction against the
+    // measurement instead of taking it on trust.
+    constexpr double kRates[] = {2.0, 3.0, 3.2, 3.3, 3.6, 4.343, 6.0, 10.0, 13.3};
+    constexpr double kDepths[] = {8.0, 13.0, 16.0, 20.0, 25.0, 30.0, 40.0};
+
+    std::println("");
+    std::println("residual suppression against the {:.1f} s hold, at the shipped second of "
+                 "averaging",
+                 hold_seconds);
+    std::println("  columns are fade rate in dB/s, rows are fade depth in dB, cells are the "
+                 "longest");
+    std::println("  stretch in seconds with no candidate published; * marks a lost track");
+    std::string header = std::format("{:>7}", "depth");
+    for (const double rate : kRates) {
+        header += std::format("{:>9.2f}", rate);
+    }
+    std::println("{}", header);
+
+    for (const double depth : kDepths) {
+        std::string row = std::format("{:>7.0f}", depth);
+        for (const double rate : kRates) {
+            const Cell cell = measure(depth, rate, kTailSeconds);
+            row += std::format("{:>8.2f}{}", cell.longest_starved_seconds,
+                               cell.kept ? ' ' : '*');
+
+            INFO("depth " << depth << " dB at " << rate << " dB/s, fade " << cell.fade_seconds
+                          << " s, starved " << cell.longest_starved_seconds << " s, born "
+                          << cell.born << ", dropped " << cell.dropped);
+
+            // Starvation is the residual rule's doing and not the signal
+            // sinking under the detection threshold, which would make the
+            // whole measurement about something else.
+            CHECK(cell.starvation_was_residual);
+
+            // The mechanism. A track is dropped at the first decision where
+            // it has gone longer than the hold without a detection, so the
+            // starved stretch and the hold decide it between them and
+            // nothing else does. Confidence cannot reach drop_confidence
+            // first: at the shipped half life a saturated track needs 4.3 s
+            // of silence to fall to 0.05 and the hold is 3.0.
+            const bool over_hold = cell.longest_starved_seconds > hold_seconds;
+            CHECK(cell.kept == !over_hold);
+            CHECK((cell.dropped > 0) == over_hold);
+
+            if (cell.kept) {
+                // Survival only means something if the stretch CLOSED. Still
+                // starving at the last frame means the hold had not expired
+                // yet, which is a shorter run rather than a surviving track.
+                CHECK_FALSE(cell.starved_at_end);
+                CHECK(cell.born == 1);
+            }
+        }
+        std::println("{}", row);
     }
 
-    SECTION("30 dB over 3 s, more than twice the rate, and it still keeps its track") {
-        // The margin is not one decibel wide. An exponential average fed a
-        // ramp lags it: the average's own fall only reaches the input's once
-        // the ramp has run for several time constants, and at 10 dB/s over
-        // three seconds it never lands inside the window for the four
-        // consecutive decisions the rule needs.
-        const auto outcome = run(kStartDb, 30.0, shipped);
-        INFO(outcome.text);
-        CHECK(outcome.tracks == 1);
-        CHECK(outcome.id != 0);
-        CHECK(outcome.dropped == 0);
-    }
+    // AND THE TAIL IS PART OF THE MEASUREMENT, not a detail of how long the
+    // case happens to run for.
+    //
+    // 30 dB over three seconds is 10 dB/s, and it is the cell the header
+    // called a survivor. The ladder that certified it gave itself one second
+    // after the fade, which stops the frames 0.2 s before the hold expires,
+    // so it recorded a track that had not been dropped YET and read that as a
+    // track that was kept. The same cell with a tail long enough to let the
+    // hold run loses it.
+    //
+    // This pair stays here so that shortening the tail fails a case instead
+    // of quietly making the rest of this file agree with itself again.
+    const Cell truncated = measure(30.0, 10.0, 1.0);
+    const Cell honest = measure(30.0, 10.0, kTailSeconds);
+    std::println("  30 dB at 10 dB/s: starved {:.2f} s with a 1 s tail ({}), {:.2f} s with a "
+                 "{:.0f} s tail ({})",
+                 truncated.longest_starved_seconds, truncated.kept ? "kept" : "lost",
+                 honest.longest_starved_seconds, kTailSeconds, honest.kept ? "kept" : "lost");
 
-    SECTION("40 dB over 3 s is where it does cost a track, and the header says so") {
-        // 13.3 dB/s, three times the rate an emptying average falls at.
-        // Sustained that long the average cannot tell the ramp from an
-        // input that went to zero, and the track is dropped even though the
-        // signal ends 14 dB over the threshold. Measured rather than
-        // reasoned: the sweep behind this section kept the track at 4, 8,
-        // 13, 20 and 30 dB of fall and lost it at 40.
-        const auto outcome = run(kStartDb, 40.0, shipped);
-        INFO(outcome.text);
-        CHECK(outcome.dropped >= 1);
-    }
+    CHECK(truncated.kept);
+    CHECK(truncated.starved_at_end);
+    CHECK(truncated.longest_starved_seconds < hold_seconds);
+    CHECK_FALSE(honest.kept);
+    CHECK(honest.longest_starved_seconds > hold_seconds);
 }
 
 TEST_CASE("two signals merge into one track and split back into two", "[detect]") {

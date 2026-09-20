@@ -596,35 +596,98 @@ struct DetectorConfig {
     // ends of the range are not symmetric and the upper one is the dangerous
     // one.
     //
-    // WHAT THIS PARAGRAPH USED TO SAY. The knob was residual_decay_fraction,
-    // default 0.6, the test was one-sided, and this block said: "The cost of
-    // a false positive is bounded and small. A genuine signal fading at that
-    // rate is suppressed, its track goes Held rather than being dropped, and
-    // the first decision at which the SNR stops falling publishes the
-    // candidate again and the track keeps its id. So the failure mode is a
-    // momentary Held state, not a lost track."
+    // WHAT THIS PARAGRAPH USED TO SAY, TWICE. Two statements of this rule's
+    // cost have now been wrong, and the second was wrong in the same way as
+    // the first: one reachable shape measured, and the result written down as
+    // though it governed all of them.
     //
-    // That held only while the fade was shorter than the hold. At the shipped
-    // average_seconds the old bar was 0.6 * 4.343 = 2.606 dB/s sustained, so
-    // a signal fading 8 dB over 3 s, which is ordinary mobile VHF or an HF
-    // evening, was withheld from the fourth consecutive falling decision
-    // onward. update_tracks then reached silent > hold_samples three seconds
-    // later and DROPPED the track, and because the suppression sits on the
-    // candidate no replacement was born either, so a transmitter still 20 dB
-    // over the noise floor left the list entirely. Both bars asserted that
-    // outcome as a pass, because both only counted ids appearing.
+    // FIRST CLAIM. The knob was residual_decay_fraction, default 0.6, the
+    // test was one-sided, and this block said: "The cost of a false positive
+    // is bounded and small. A genuine signal fading at that rate is
+    // suppressed, its track goes Held rather than being dropped, and the
+    // first decision at which the SNR stops falling publishes the candidate
+    // again and the track keeps its id. So the failure mode is a momentary
+    // Held state, not a lost track."
     //
-    // The cost is now measured rather than claimed away, and it is at the
-    // FAST end rather than the slow one. An exponential average fed a ramp
-    // lags it, so the average's own fall only reaches the input's after the
-    // ramp has run for several time constants; below that the measured rate
-    // never settles inside the window for four consecutive decisions. On the
-    // unit grid at the shipped second of averaging, a 33-bin emitter starting
-    // 60 dB over the reference bandwidth keeps its track through a fall of 4,
-    // 8, 13, 20 and 30 dB over three seconds, and loses it at 40 dB over
-    // three seconds: 13.3 dB/s, three times the rate an emptying average
-    // falls at, sustained for three time constants. A signal doing that is
-    // leaving, and it is still a lost track rather than a momentary Held one.
+    // WHY IT WAS WRONG. That held only while the fade was shorter than the
+    // hold. At the shipped average_seconds the old bar was 0.6 * 4.343 =
+    // 2.606 dB/s sustained, so a signal fading 8 dB over 3 s, which is
+    // ordinary mobile VHF or an HF evening, was withheld from the fourth
+    // consecutive falling decision onward. update_tracks then reached
+    // silent > hold_samples three seconds later and DROPPED the track, and
+    // because the suppression sits on the candidate no replacement was born
+    // either, so a transmitter still 20 dB over the noise floor left the list
+    // entirely. Both bars asserted that outcome as a pass, because both only
+    // counted ids appearing.
+    //
+    // SECOND CLAIM, which was the correction to the first. "A 33-bin emitter
+    // starting 60 dB over the reference bandwidth keeps its track through a
+    // fall of 4, 8, 13, 20 and 30 dB over three seconds, and loses it at
+    // 40 dB over three seconds: 13.3 dB/s, three times the rate an emptying
+    // average falls at."
+    //
+    // WHY THAT WAS WRONG TOO. Every rung of that ladder ran for three
+    // seconds, so it moved depth and rate together along one axis and then
+    // reported the answer as a rate. It is not a rate, and 13.3 dB/s is about
+    // four times too generous for anyone sizing a fade budget from it. The
+    // 30 dB rung was not even a survival: it had 1.0 s of scene after the
+    // fade, which stops the frames 0.09 s before the hold expires, so it
+    // recorded a track that had not been dropped YET. Given a tail long
+    // enough for the hold to run, that same fade is starved for 8.22 s and
+    // the track goes.
+    //
+    // WHAT IS ACTUALLY GOING ON. The cost is paid in seconds of starvation
+    // against bootstrap_hold_seconds, and depth and rate set different halves
+    // of it. Feed an exponential average of time constant tau an input
+    // falling at b nepers per second and it solves to
+    //
+    //     A(t) = k P0 exp(-b t) - (k - 1) P0 exp(-t / tau),  k = 1/(1 - b tau)
+    //
+    // so the average sits above the input throughout and the measured fall
+    // TRAILS the input's, rising towards it rather than starting there.
+    //
+    //   RATE decides whether the rule ever fires. The measured rate converges
+    //   to the input rate when b tau < 1 and to 1/tau when b tau >= 1, so a
+    //   fade slower than the window's lower edge, 0.75 * 4.343 = 3.26 dB/s at
+    //   the shipped second, never reaches the window at any depth, and a fade
+    //   faster than it reaches the window eventually whatever its depth.
+    //
+    //   DEPTH decides how long it stays fired. When the fade stops, the
+    //   average is left above the input by however far it lagged, which grows
+    //   with the depth, and it goes on emptying at its own rate: dead centre
+    //   of the window. So suppression outlives the fade, and the total is
+    //   what the three second hold is spent against.
+    //
+    // THE MEASURED ANSWER, swept over both axes. Same 33-bin emitter at 60 dB
+    // on the unit grid; cells are the longest stretch in seconds with no
+    // candidate published, and * marks a lost track. "how long the residual
+    // rule starves a fade" in tests/detect/test_detector.cpp is this table and
+    // re-measures every cell of it on each run.
+    //
+    //   depth  2.00   3.00   3.20   3.30   3.60   4.34   6.00  10.00  13.30 dB/s
+    //       8  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.10   0.42
+    //      13  0.00   0.00   0.00   0.00   0.00   0.00   1.14   2.18   2.50
+    //      16  0.00   0.00   0.00   0.00   0.00   0.62   2.50   3.43*  3.64*
+    //      20  0.00   0.00   0.00   0.00   0.00   2.18   3.95*  4.89*  5.10*
+    //      25  0.00   0.00   0.00   0.00   1.56   4.06*  5.72*  6.55*  6.76*
+    //      30  0.00   0.00   0.00   0.00   3.43*  5.82*  7.38*  8.22*  8.32*
+    //      40  0.00   0.00   0.00   0.52   6.86*  9.15* 10.61* 10.92* 10.19*
+    //
+    // Read it as two statements rather than as one number.
+    //
+    //   Below 3.26 dB/s the rule never fires, at any depth. That is the only
+    //   part of the surface a rate on its own describes, and it is what to
+    //   size against when the depth is not known in advance.
+    //
+    //   Above it the budget is a DEPTH, between 13 and 25 dB, narrowing as
+    //   the rate rises: 25 dB survives at 3.6 dB/s, 20 dB at 4.34, 16 dB at
+    //   6.0 and 13 dB at 10.0 and beyond. A 30 dB fade loses its track at
+    //   every rate above 3.6 dB/s, including the ones the old bar called
+    //   safe.
+    //
+    // A signal fading deeper than that is leaving, and losing it is still a
+    // lost track rather than a momentary Held one. What is no longer claimed
+    // is that anyone can tell which case they are in from the rate.
     double residual_rate_tolerance = 0.25;
     std::uint32_t residual_decisions = 4;
 
