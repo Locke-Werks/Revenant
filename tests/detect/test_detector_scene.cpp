@@ -1043,6 +1043,13 @@ TEST_CASE("a station that fades keeps its track", "[detect][scene-bar]") {
 // published when the four second window closes and nine of the assertions
 // below fail. That is what makes this a bar and not a report.
 //
+// It is a bar in the other direction too, and it was not at first. Every
+// figure this case measures is an upper bound on what a row did AFTER its
+// signal stopped, and every one of them is satisfied by a detector that
+// never published the station at all: nothing outlives nothing. So the
+// assertions open with the lower bounds, and a regression that silenced
+// these three stations before they stopped now fails here rather than
+// passing quietly.
 TEST_CASE("a stopped emitter stops being published", "[detect][scene-bar]") {
     const test::SceneGeometry geometry;
 
@@ -1092,6 +1099,35 @@ TEST_CASE("a stopped emitter stops being published", "[detect][scene-bar]") {
                          detect::track_state_name(score.after_state_at_worst),
                          score.after_worst_bandwidth_ratio, score.after_last_bandwidth_ratio,
                          score.after_new_ids, score.after_published, score.after_decisions));
+
+        // THE LOWER BOUNDS COME FIRST, BECAUSE EVERYTHING BELOW THEM PASSES
+        // VACUOUSLY ON A DETECTOR THAT FOUND NOTHING.
+        //
+        // Every other assertion in this case is an upper bound on what the
+        // row did after the stop, and a detector that never published the
+        // station at all satisfies all of them: residual_seconds stays zero,
+        // the tail is empty, no id is carried and no new one appears. A
+        // regression that silenced the three stations before they stopped
+        // would have read as a pass. So the station has to have been there,
+        // measured while it was transmitting, and the row has to survive its
+        // hold afterward.
+        const double seen =
+            score.decisions_on > 0 ? static_cast<double>(score.decisions_detected) /
+                                         static_cast<double>(score.decisions_on)
+                                   : 0.0;
+        CHECK(score.decisions_on > 0);
+        CHECK(seen >= 0.85);
+        CHECK(score.best_coverage >= 0.70);
+        CHECK(score.track_ids == 1);
+        CHECK(score.after_decisions > 0);
+        CHECK(score.after_published > 0);
+
+        // The hold is the floor and it is deliberate, so a row that vanished
+        // the decision after its signal stopped would be as wrong as one that
+        // never went. Three decisions of slack under the hold for the run the
+        // residual rule needs and for the decision that straddles the stop.
+        CHECK(score.residual_seconds >=
+              config.bootstrap_hold_seconds - 3.0 * config.decision_interval_seconds);
 
         // The window has to be big enough to hold the answer, or every
         // figure below is truncated rather than measured.
