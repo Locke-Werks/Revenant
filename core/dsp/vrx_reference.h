@@ -1164,8 +1164,7 @@ struct VrxShape {
 // half of them.
 [[nodiscard]] std::string describe_shape_change(const VrxShape& from, const VrxShape& to);
 
-// What this receiver is doing to the audio, in one sentence, for a surface
-// to print where the operator is looking.
+// What this receiver is doing to the audio, in one sentence.
 //
 // THE REASON THIS EXISTS. An operator tuned a real broadcast station on
 // 2026-09-20 and heard audio that was harsh at the top of the band, and
@@ -1173,8 +1172,20 @@ struct VrxShape {
 // de-emphasis, no field said so, and 361 passing tests agreed. A curve that
 // is applied silently is only half the fix, because the next time the
 // question is "is it on?" the answer has to be somewhere other than the
-// sound. This is that somewhere. It names the curve, the audio band the
-// filter was built for, and what a clamp took away when one did.
+// sound. It names the curve, the audio band the filter was built for,
+// whether the stereo decoder is running, and what a clamp took away when
+// one did.
+//
+// NOTHING PRINTS IT YET, WHICH IS SAID HERE RATHER THAN LEFT TO BE
+// DISCOVERED. tests/reference/test_vrx.cpp asserts on the words and is the
+// only caller. The three surfaces an operator actually reads are
+// core/rpc/revenant.capnp's VrxStatus, tools/cli's receiver listing and
+// ui/'s receiver rack, and all three belong to other lanes this round, so
+// the sentence exists and is correct and is not yet in front of anybody. A
+// caller holding an engine::VrxStatus can answer the two questions it leads
+// with more cheaply: VrxStatus::applied_deemphasis and
+// VrxStatus::decoding_stereo are pure functions of fields already echoed
+// back, and need no plan.
 [[nodiscard]] std::string describe_audio_chain(const VrxPlan& plan);
 
 // ---------------------------------------------------------------------------

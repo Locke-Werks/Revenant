@@ -1191,13 +1191,31 @@ TEST_CASE("the demodulators are bit-exact at every workgroup size", "[gpu][vrx][
     const auto fine_ring = input.complexes(kFineCapacity);
 
     // AM and NFM between them cover every deterministic transcendental the
-    // file has: AM runs det_sqrt once per DC-window tap, NFM runs det_atan2.
-    for (const auto mode : {engine::Demod::Am, engine::Demod::Nfm}) {
-        const auto plan = make_plan(mode, 196'500, 10'000, kGrid);
+    // file had: AM runs det_sqrt once per DC-window tap, NFM runs det_atan2.
+    // Stereo WFM is here because it added the third, det_recip, and because
+    // it is the only branch with two accumulations running over one loop and
+    // two outputs written per invocation, which is the shape a workgroup
+    // size is most likely to disturb.
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz centre;
+        dsp::Hertz bandwidth;
+        const dsp::GridParams* grid;
+    };
+
+    const Case cases[] = {
+        {engine::Demod::Am, 196'500, 10'000, &kGrid},
+        {engine::Demod::Nfm, 196'500, 10'000, &kGrid},
+        {engine::Demod::Wfm, 160'000, 200'000, &kWideGrid},
+    };
+
+    for (const auto& item : cases) {
+        const auto plan = make_plan(item.mode, item.centre, item.bandwidth, *item.grid);
         const std::uint32_t count = demod_count(plan.demod, kFineCapacity, 1024);
         const auto params = demod_params(plan, 7, count);
 
-        std::vector<float> cpu_result(count, 0.0F);
+        std::vector<float> cpu_result(
+            static_cast<std::size_t>(count) * plan.demod.channels, 0.0F);
         REQUIRE(dsp::reference_vrx_demod(plan.demod, params, fine_ring, plan.demod_weights,
                                          cpu_result)
                     .has_value());
@@ -1209,7 +1227,8 @@ TEST_CASE("the demodulators are bit-exact at every workgroup size", "[gpu][vrx][
             const auto gpu_result =
                 run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, local_size);
             const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
-            INFO("mode " << engine::demod_name(mode) << ", local_size_x = " << local_size);
+            INFO("mode " << engine::demod_name(item.mode) << ", " << plan.demod.channels
+                         << " channels, local_size_x = " << local_size);
             INFO(comparison.report);
             CHECK(comparison.identical);
         }
@@ -2283,6 +2302,25 @@ TEST_CASE("the stereo decoder is off where two channels would destroy the signal
         const std::string words = dsp::describe_audio_chain(plan);
         INFO(words);
         CHECK(words.find("stereo from a") != std::string::npos);
+
+        // The pilot filter reaches below the middle of the audio window and
+        // further down than the window's own edge, and the block the engine
+        // dispatches has to say so: core/engine/vrx_stage.cpp compares
+        // oldest_fine against its ring capacity, and a figure that left the
+        // pilot out would let a dispatch read slots a later fine dispatch
+        // had already written. Silent, and it would sound like a click.
+        constexpr std::uint32_t kFirstAudio = 4096;
+        auto block = dsp::demod_block(plan, kFineMask, kFirstAudio, 64);
+        INFO(test::message_of(block));
+        REQUIRE(block.has_value());
+
+        const auto pilot_reach = static_cast<dsp::SampleIndex>(
+            plan.demod.audio_taps / 2U + plan.demod.pilot_taps - 1U + 1U);
+        const auto audio_reach = static_cast<dsp::SampleIndex>(plan.demod.audio_taps - 1U + 1U);
+        INFO("the pilot reaches " << pilot_reach << " below the first output and the audio "
+                                  << "filter " << audio_reach);
+        REQUIRE(pilot_reach > audio_reach);
+        CHECK(block->first_fine - block->oldest_fine >= pilot_reach);
     }
 
     SECTION("the composite tap stays mono however it is asked") {

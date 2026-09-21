@@ -2334,16 +2334,18 @@ Expected<VrxDemodBlock> demod_block(const VrxPlan& plan, std::uint32_t fine_mask
         return std::unexpected(with_context(valid.error(), "demod_block"));
     }
 
-    // How far back the detector and the decimation filter reach. The AM
-    // envelope's DC-removal window is much the longest of the three, which is
-    // why it is worth naming rather than folding into a single worst case.
-    const SampleIndex detector_history =
-        (plan.demod.mode == kDemodAm)
-            ? static_cast<SampleIndex>(plan.demod.dc_taps - 1U)
-        : (plan.demod.mode == kDemodNfm || plan.demod.mode == kDemodWfm) ? SampleIndex{1}
-                                                                         : SampleIndex{0};
-    block.oldest_fine =
-        first_fine - static_cast<SampleIndex>(plan.demod.audio_taps - 1U) - detector_history;
+    // How far back this dispatch's first output reaches.
+    //
+    // WHAT THIS BLOCK USED TO DO, AND IT WAS A THIRD COPY. It spelled the
+    // detector's history out here, added the audio filter's reach to it, and
+    // arrived at the same number dsp::validate and core/engine/vrx_stage.cpp
+    // each derived separately. FM stereo is what would have separated them:
+    // the pilot bandpass is measured at the middle of the audio window and
+    // reaches further below it than the window's own edge, by 52 samples on
+    // a 48 kHz broadcast receiver, and none of the three expressions knew.
+    // The engine compares this against its ring capacity, so the three
+    // agreeing is the whole point and they now agree by construction.
+    block.oldest_fine = first_fine - static_cast<SampleIndex>(demod_fine_history(plan.demod));
 
     return block;
 }
