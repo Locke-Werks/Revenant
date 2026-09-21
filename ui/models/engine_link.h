@@ -1280,8 +1280,17 @@ public:
     //
     // An index outside the list answers empty rather than throwing, because
     // QML will call this during a rebind when the list has just been replaced.
-    [[nodiscard]] Q_INVOKABLE QString composeSourceUri(int index, double center_hz, double rate,
-                                                       double gain_db, bool gain_auto) const;
+    // TEXT AND NOT NUMBERS, because an empty box has to stay empty all the way
+    // down. Passing doubles meant an untouched box arrived as zero and
+    // compose_source_uri could not tell that from a request for zero: the centre
+    // was clamped into the tune envelope and opened an R820T at its 24 MHz low
+    // edge, and the gain snapped to the lowest step in the tuner's table. The
+    // parse happens here so the emptiness is preserved and so the rate keeps its
+    // own bare-number rule.
+    [[nodiscard]] Q_INVOKABLE QString composeSourceUri(int index, const QString& center,
+                                                       const QString& rate,
+                                                       const QString& gain_db,
+                                                       bool gain_auto) const;
 
     [[nodiscard]] bool clamped() const { return info_.ring_clamped; }
     [[nodiscard]] QString clampReason() const;

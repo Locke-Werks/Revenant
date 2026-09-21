@@ -839,3 +839,62 @@ TEST_CASE("describing every device while one is streaming does not wedge its tun
 
     REQUIRE(radio.stop().has_value());
 }
+
+TEST_CASE("a dongle opened at the bottom of its range can still be tuned away",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE STATE THE PICKER PUT THE RADIO IN, read off the window on 2026-09-21:
+    // the composed URI was "rtlsdr://0?freq=24000000&gain=0" and a tune to
+    // 435 MHz came back "the tuner refused 435000000 Hz: librtlsdr returned -9".
+    //
+    // Neither value was typed. An empty centre box parsed to zero and
+    // compose_source_uri clamped zero into the tune envelope, whose low edge on
+    // an R820T is 24 MHz exactly; an empty gain box parsed to zero and snapped
+    // to the lowest step in the tuner's table. So the radio was opened at the
+    // very bottom edge of its tuning range with no gain, which is not a state
+    // any other case in this file reaches.
+    //
+    // This pins whether that state is what breaks the tune. If it passes, the
+    // empty-box defaults are still wrong and still worth fixing, and the refusal
+    // has another cause.
+    constexpr dsp::Hertz kWanted = 435'000'000;
+
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=24000000&gain=0");
+    if (!opened) {
+        SKIP("the dongle could not be opened at 24 MHz: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+    INFO("opened at " << radio.center() << " Hz");
+
+    Collected collected;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock guard(collected.lock);
+            if (collected.samples >= 300'000) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(radio.running());
+
+    auto landed = radio.tune(kWanted);
+    if (!landed) {
+        INFO("the tuner said: " << landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+
+    const dsp::Hertz offset = *landed - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset);
+    CHECK(std::abs(offset) <= kWanted / 10'000);
+
+    REQUIRE(radio.stop().has_value());
+}

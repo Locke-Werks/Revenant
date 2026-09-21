@@ -24,6 +24,8 @@
 #include "models/engine_link.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -571,8 +573,8 @@ void EngineLink::closeSource()
     emit sourcesChanged();
 }
 
-QString EngineLink::composeSourceUri(int index, double center_hz, double rate, double gain_db,
-                                     bool gain_auto) const
+QString EngineLink::composeSourceUri(int index, const QString& center, const QString& rate,
+                                     const QString& gain_db, bool gain_auto) const
 {
     if (index < 0 || static_cast<std::size_t>(index) >= source_rows_.size()) {
         return {};
@@ -580,12 +582,41 @@ QString EngineLink::composeSourceUri(int index, double center_hz, double rate, d
     const rpc::SourceDescriptor& source = source_rows_[static_cast<std::size_t>(index)];
 
     SourceChoice choice;
-    choice.center_hz = static_cast<std::int64_t>(center_hz);
-    choice.rate = static_cast<std::int64_t>(rate);
+
+    // A BOX THAT PARSES BECOMES A VALUE AND ONE THAT DOES NOT STAYS ABSENT,
+    // which covers empty and covers junk with the same answer: leave the key off
+    // and let the backend decide. See SourceChoice for what emitting zero cost.
+    //
+    // The centre and the rate take DIFFERENT bare-number rules, which is why
+    // they are parsed separately rather than through one helper. See
+    // ui/models/frequency_entry.h's BareNumber.
+    if (const auto parsed = parse_frequency(center.toStdString())) {
+        choice.center_hz = parsed->hertz;
+    }
+    if (const auto parsed = parse_frequency(rate.toStdString(), BareNumber::Hertz)) {
+        choice.rate = parsed->hertz;
+    }
+
     if (!source.gain_stages.empty()) {
-        choice.gains.push_back(GainChoice{.stage = source.gain_stages.front().name,
-                                          .automatic = gain_auto,
-                                          .db = gain_db});
+        GainChoice gain;
+        gain.stage = source.gain_stages.front().name;
+        gain.automatic = gain_auto;
+
+        // Its own parse rather than parse_frequency: a gain is decibels, it can
+        // be negative on some stages, and it is not a frequency. std::from_chars
+        // on the whole string, so trailing junk is a refusal and not a prefix
+        // quietly accepted.
+        const std::string text = gain_db.trimmed().toStdString();
+        if (!text.empty()) {
+            double value = 0.0;
+            const char* first = text.data();
+            const char* last = first + text.size();
+            const auto result = std::from_chars(first, last, value);
+            if (result.ec == std::errc{} && result.ptr == last && std::isfinite(value)) {
+                gain.db = value;
+            }
+        }
+        choice.gains.push_back(std::move(gain));
     }
     return QString::fromStdString(compose_source_uri(source, choice));
 }

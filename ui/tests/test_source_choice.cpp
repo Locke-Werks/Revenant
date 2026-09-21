@@ -124,11 +124,17 @@ TEST_CASE("the descriptor's own URI is appended to and never rewritten", "[ui][s
 
     // A base that already carries a query gets '&' and not a second '?', which
     // would make the whole tail one value.
+    //
+    // THIS ASSERTION USED TO EXPECT "&freq=24000000" and that was the defect
+    // rather than the behaviour: `choice` above names no centre, and the old
+    // code clamped the resulting zero into the tune envelope, whose low edge on
+    // an R820T is 24 MHz. A test that expects the bug is worse than no test,
+    // because it stops anybody changing it.
     SourceDescriptor with_query = dongle();
     with_query.uri = "rtlsdr://0?ppm=12";
     const std::string joined = compose_source_uri(with_query, choice);
     INFO(joined);
-    CHECK(joined == "rtlsdr://0?ppm=12&rate=2400000&freq=24000000");
+    CHECK(joined == "rtlsdr://0?ppm=12&rate=2400000");
     CHECK(joined.find("?ppm=12?") == std::string::npos);
 
     // An empty descriptor composes nothing rather than a string starting with
@@ -345,4 +351,53 @@ TEST_CASE("a live device has no length and a recording's is a duration", "[ui][s
     // count as seconds would be off by whatever the rate turned out to be.
     recording.max_rate = 0;
     CHECK(describe_length(recording).empty());
+}
+
+TEST_CASE("a box the operator left empty leaves its key off", "[ui][source]")
+{
+    // THE DEFECT THIS FILE SHIPPED WITH, and the one the window showed on
+    // 2026-09-21: an operator who filled in nothing and pressed open got
+    // "rtlsdr://0?freq=24000000&gain=0". Zero was clamped into the tune
+    // envelope, whose low edge on an R820T is 24 MHz exactly, and zero snapped
+    // to the lowest step in the tuner's gain table, so the radio opened at the
+    // very bottom of its range with no gain.
+    //
+    // The wrong implementation is a plain number defaulting to zero, which
+    // cannot tell "nothing was typed" from "zero was asked for". Omitting the
+    // key hands the decision to the backend, which has documented defaults and
+    // a measurement behind the gain: 20 dB, chosen over the tuner's own AGC.
+    const SourceDescriptor source = dongle();
+
+    SourceChoice nothing;
+    nothing.gains.push_back(GainChoice{.stage = "tuner"});
+    const std::string bare = compose_source_uri(source, nothing);
+    INFO(bare);
+    CHECK(bare == "rtlsdr://0");
+
+    // One at a time, so a field that started working cannot hide one that did
+    // not.
+    SourceChoice centre_only;
+    centre_only.center_hz = 98'100'000;
+    CHECK(compose_source_uri(source, centre_only) == "rtlsdr://0?freq=98100000");
+
+    SourceChoice rate_only;
+    rate_only.rate = 2'400'000;
+    CHECK(compose_source_uri(source, rate_only) == "rtlsdr://0?rate=2400000");
+
+    SourceChoice gain_only;
+    gain_only.gains.push_back(GainChoice{.stage = "tuner", .db = 20.7});
+    CHECK(compose_source_uri(source, gain_only) == "rtlsdr://0?gain=20.7");
+
+    // AND ZERO IS STILL A REQUEST WHEN IT IS MADE. 0 dB is a real step in the
+    // R820T's table and DC is a real thing to ask a direct-sampling dongle for,
+    // so the fix must not turn "zero" into "nothing": that would be the same
+    // conflation with the sign reversed.
+    SourceChoice explicit_zero;
+    explicit_zero.gains.push_back(GainChoice{.stage = "tuner", .db = 0.0});
+    CHECK(compose_source_uri(source, explicit_zero) == "rtlsdr://0?gain=0");
+
+    // auto with no dB is a request, not an absence.
+    SourceChoice automatic;
+    automatic.gains.push_back(GainChoice{.stage = "tuner", .automatic = true});
+    CHECK(compose_source_uri(source, automatic) == "rtlsdr://0?gain=auto");
 }

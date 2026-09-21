@@ -48,6 +48,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,11 @@ struct GainChoice {
     // The stage's own name, as SourceDescriptor::gain_stages reported it.
     std::string stage;
 
+    // NOTHING IN `db` AND NOT `automatic` MEANS THE OPERATOR SAID NOTHING, and
+    // the key is then left off so the backend's own default applies. See the
+    // note on SourceChoice: a zero here used to reach the device as the lowest
+    // step in its gain table.
+
     // True asks the device to set this stage itself, and `db` is then unused.
     //
     // OFFERED AND NOT DEFAULTED. The RTL-SDR's own AGC maximises the level at
@@ -72,17 +78,42 @@ struct GainChoice {
     // three. README.md carries that measurement.
     bool automatic = false;
 
-    double db = 0.0;
+    std::optional<double> db;
 };
 
 struct SourceChoice {
-    // Absolute hertz for the front end. Ignored for a source with no tune
-    // range, which is every file and every synthetic scene.
-    std::int64_t center_hz = 0;
+    // AN EMPTY BOX IS NOT A VALUE, AND GETTING THAT WRONG IS NOT A COSMETIC
+    // BUG. Every field here is optional, and the reason is what shipped on
+    // 2026-09-21 without it.
+    //
+    // center_hz and the gain were plain numbers defaulting to zero, and
+    // compose_source_uri emitted both whenever the device had the capability.
+    // An operator who filled in nothing and pressed open got
+    // "rtlsdr://0?freq=24000000&gain=0": zero clamped into the tune envelope,
+    // whose low edge on an R820T is 24 MHz exactly, and zero snapped to the
+    // lowest step in the tuner's gain table. So the radio opened at the very
+    // bottom of its range with no gain, and the window said so only if you read
+    // the frequency axis.
+    //
+    // Omitting the key instead hands the decision to the backend, which has
+    // documented defaults and a measurement behind one of them: the RTL-SDR's
+    // is 20 dB, chosen over the tuner's own AGC because auto put three
+    // intermodulation products in the detector's track list at confidence 1.00.
+    // See README.md. Zero was not a worse guess than 20; it was a guess where
+    // there was already an answer.
+    //
+    // `rate` was the one field that got this right from the start, which is what
+    // made the other two easy to miss: a zero rate left the key off and the
+    // backend's 2.4 MS/s applied, so the status row looked correct while the
+    // centre and the gain did not.
 
-    // Samples per second. Zero leaves the key off entirely, which is how an
-    // operator asks for whatever the backend defaults to.
-    std::int64_t rate = 0;
+    // Absolute hertz for the front end. Nothing leaves the key off. Ignored for
+    // a source with no tune range, which is every file and every synthetic
+    // scene.
+    std::optional<std::int64_t> center_hz;
+
+    // Samples per second. Nothing leaves the key off.
+    std::optional<std::int64_t> rate;
 
     std::vector<GainChoice> gains;
 };
@@ -288,20 +319,26 @@ namespace detail {
     };
 
     // Every backend takes this one, which is what makes it the only key here
-    // emitted without asking the descriptor's permission first.
-    const std::int64_t rate = settle_rate(source, choice.rate);
-    if (rate > 0) {
-        append("rate", std::to_string(rate));
+    // emitted without asking the descriptor's permission first. Still only when
+    // the operator named a rate: nothing means the backend's default.
+    if (choice.rate.has_value()) {
+        const std::int64_t rate = settle_rate(source, *choice.rate);
+        if (rate > 0) {
+            append("rate", std::to_string(rate));
+        }
     }
 
     // Only for a device that can be pointed somewhere, so the file and
     // synthetic backends never see this key. See the header note: that gate is
     // half of what makes composing a URI here safe, and Query::reject_unknown
     // is the other half.
+    // AND ONLY WHEN A CENTRE WAS GIVEN. Clamping a centre nobody typed into the
+    // envelope is what opened an R820T at 24 MHz, its low edge, because
+    // std::clamp of zero into [24 MHz, 1766 MHz] is 24 MHz.
     const TuneEnvelope envelope = tune_envelope(source);
-    if (envelope.tunable) {
+    if (envelope.tunable && choice.center_hz.has_value()) {
         const std::int64_t centre =
-            std::clamp(choice.center_hz, envelope.low_hz, envelope.high_hz);
+            std::clamp(*choice.center_hz, envelope.low_hz, envelope.high_hz);
         append("freq", std::to_string(centre));
     }
 
@@ -319,6 +356,10 @@ namespace detail {
         if (chosen == choice.gains.end()) {
             continue;
         }
+        if (!chosen->automatic && !chosen->db.has_value()) {
+            // Said nothing about this stage, so the backend's default stands.
+            break;
+        }
         if (chosen->automatic) {
             // `gain=auto` AND NOT `agc=1`, WHICH ARE TWO DIFFERENT CONTROLS ON
             // THIS DEVICE. gain=auto is the TUNER's own AGC, which is what
@@ -331,7 +372,7 @@ namespace detail {
             // setting.
             append("gain", "auto");
         } else {
-            append("gain", detail::decimal(settle_gain(stage, chosen->db)));
+            append("gain", detail::decimal(settle_gain(stage, *chosen->db)));
         }
         break;
     }

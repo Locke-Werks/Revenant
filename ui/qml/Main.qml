@@ -587,9 +587,9 @@ ApplicationWindow {
                     visible: !!sourceSettings.row
                     text: engineLink.composeSourceUri(
                               sourceRow.chosen,
-                              engineLink.parseHz(sourceFreqField.text),
-                              engineLink.parseRateHz(sourceRateField.text),
-                              parseFloat(sourceGainField.text || "0"),
+                              sourceFreqField.text,
+                              sourceRateField.text,
+                              sourceGainField.text,
                               sourceGainAuto.checked)
                     color: window.inkDim
                     font.pixelSize: 11
@@ -603,9 +603,9 @@ ApplicationWindow {
                     onClicked: engineLink.openSource(
                                    engineLink.composeSourceUri(
                                        sourceRow.chosen,
-                                       engineLink.parseHz(sourceFreqField.text),
-                                       engineLink.parseRateHz(sourceRateField.text),
-                                       parseFloat(sourceGainField.text || "0"),
+                                       sourceFreqField.text,
+                                       sourceRateField.text,
+                                       sourceGainField.text,
                                        sourceGainAuto.checked))
                 }
             }
