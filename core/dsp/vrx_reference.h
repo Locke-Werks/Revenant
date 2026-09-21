@@ -214,11 +214,16 @@ inline constexpr std::uint32_t kMaxFinePhases = 4096;
     return static_cast<std::size_t>(config.phases) * static_cast<std::size_t>(config.taps) + 1U;
 }
 
-// The thirteen values core/shaders/vrx_fine.comp takes as push constants, in
-// the order it declares them. Thirteen tightly packed 32-bit words is the
+// The fifteen values core/shaders/vrx_fine.comp takes as push constants, in
+// the order it declares them. Fifteen tightly packed 32-bit words is the
 // scalar push-constant layout of the shader's Params block, so this struct can
 // be handed to a dispatch as bytes with no repacking. The static assert below
 // is what keeps that true.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: thirteen, twice. The count is what the
+// paragraph is for, and the static_assert below has said fifteen since the
+// members that made it fifteen were added, so the file disagreed with itself
+// with the compiler enforcing the half nobody read.
 struct VrxFineParams {
     // channel_index * out_ring_blocks: where this receiver's channel starts
     // in the channel-major ring core/shaders/pfb_fft.comp writes.
