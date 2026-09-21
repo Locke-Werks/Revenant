@@ -120,6 +120,106 @@ struct ClockQuality {
     std::int64_t residual_ns = 0;
 };
 
+// How fine the spectrum has to be before what it says about a signal is worth
+// more than "something is there".
+//
+// A detector finds a signal that is one bin wide. Placing its centre and
+// measuring its width, which is what naming a mode rests on, takes several
+// bins across it. The shipped geometry is 2.4 MS/s over 64 coarse channels
+// with a 2048-point transform per channel, which is 65536 bins at 36.6 Hz,
+// and it was chosen for an RTL-SDR watching broadcast FM where the narrowest
+// thing on the band is 12.5 kHz. Point the same geometry at HF and FT8 is
+// 1.4 bins wide and PSK31 is under one. The detector still fires. What it
+// publishes is a centre it cannot place inside the signal and a width that is
+// the bin's width rather than the signal's, which is worse than a miss
+// because it reads as a working detector.
+//
+// So a source states the scale of what it carries and something above it
+// chooses a geometry that meets it. This is the stating half.
+struct ResolutionRequest {
+    // The narrowest signal worth telling apart from its neighbours anywhere
+    // in this source's span.
+    //
+    // Zero means the source has not said, which is not a claim that nothing
+    // narrow is here. A caller that knows better overwrites it.
+    dsp::Hertz narrowest_signal_hz = 0;
+
+    // Bins wanted across that signal. Four is what the callers here ask for:
+    // one bin cannot distinguish a centre from an edge, two cannot show a
+    // shape, and four puts the centre within a quarter of the signal's own
+    // width.
+    std::uint32_t bins_across_narrowest = 0;
+
+    // Why, in a phrase, so a caller that cannot meet the request can quote it
+    // back instead of reporting two bare numbers.
+    std::string basis;
+
+    [[nodiscard]] bool stated() const {
+        return narrowest_signal_hz > 0 && bins_across_narrowest > 0;
+    }
+
+    // Whether bins of numerator/denominator hertz are fine enough.
+    //
+    // A rational rather than a rounded integer because the engine's bin width
+    // is 2 * rate / (channels * transform) hertz and is not a whole number of
+    // hertz in general. Rounding it here would put the sizing decision one
+    // bin either side of the truth for no reason, and the integer-hertz
+    // convention exists to stop exactly that kind of quiet rounding.
+    //
+    // An unstated request is met by anything, because a source that said
+    // nothing cannot refuse what a caller picked.
+    [[nodiscard]] bool met_by(std::int64_t bin_width_numerator,
+                              std::int64_t bin_width_denominator) const;
+};
+
+// The narrowest signal an operator is likely to want identified in a span,
+// from where that span sits.
+//
+// THE MODE WIDTHS, AND WHERE EACH NUMBER COMES FROM
+//
+//   FT8     50 Hz   WSJT-X User Guide, protocol specifications table: 8-FSK,
+//                   6.25 Hz tone spacing, 50 Hz occupied bandwidth, 15 s T/R
+//                   period.
+//   PSK31   31 Hz   Peter Martinez G3PLX, "PSK31: A New Radio-Teletype Mode",
+//                   RadCom, December 1998: 31.25 baud BPSK.
+//   CW      50 to   ITU-R SM.1138, necessary bandwidth for class A1A, Bn = BK
+//           150 Hz  with K = 5 on a fading circuit. 10 to 30 baud, which is
+//                   roughly 12 to 36 words per minute, gives 50 to 150 Hz.
+//   RTTY    261 Hz  45.45 baud, 170 Hz shift, by Carson's rule
+//                   shift + 2 * baud. The amateur HF parameters.
+//
+// PSK31 is the narrowest of those, so a span that reaches HF asks for 31 Hz
+// across four bins, a ceiling of 7.75 Hz per bin.
+//
+// WHAT THAT COSTS, WORKED THROUGH, because the point of HF is that it is
+// cheap. Bin width and frame rate are the same number in this geometry: a
+// coarse channel's stream runs at 2 * rate / channels and a transform of N
+// points over it produces one frame per N samples, so both come out at
+// 2 * rate / (channels * N). On a 1 MS/s HF recording over 64 channels a
+// 16384-point transform is 1.9 Hz per bin at 1.9 frames per second, which is
+// 28 frames inside a 15-second FT8 transmission. The request above is already
+// met at 4096 points; 16384 is what the rate can afford.
+//
+// THE BOUNDARY is 30 MHz, the top of ITU-R V.431-8 band 7. The test is the
+// span's low edge rather than its centre, so a capture straddling the top of
+// HF asks for the finer grid rather than the coarser one.
+//
+// Above it the request is 12.5 kHz across four bins, from the narrowest
+// analogue channel plan in common use. The shipped 36.6 Hz meets that by a
+// factor of 85, so nothing about a VHF or UHF session changes. It is stated
+// rather than left at zero so that the number is on the record and a later
+// geometry cannot get coarser than it without something noticing.
+//
+// A centre at or below zero returns an unstated request. A recording at DC
+// has not said where it was taken, and guessing HF from that would put the
+// finest grid in the project onto every synthesised baseband scene.
+//
+// WHAT THIS DOES NOT KNOW. A weak-signal operator running FT8 on 2 metres
+// wants the HF figure, and nothing reachable from a tuning alone can tell
+// that apart from a repeater listener on the same frequency. The request is a
+// default from the band, and a caller who knows the session overwrites it.
+[[nodiscard]] ResolutionRequest resolution_for_span(dsp::Hertz center, dsp::SampleRate rate);
+
 struct SourceCapabilities {
     // The URI this source was opened from, so a session can be reproduced.
     std::string uri;
@@ -184,6 +284,31 @@ struct SourceCapabilities {
     std::size_t preferred_block_samples = 0;
 
     std::int64_t timestamp_accuracy_ns = 0;
+
+    // How fine a spectrum this source's content needs. See ResolutionRequest.
+    //
+    // NOTHING READS THIS YET, AND THIS IS THE HALF THAT CANNOT DECIDE IT.
+    // The decision belongs to engine::EngineConfig, which already chooses one
+    // side of the same geometry: engine::default_channel_count picks the
+    // coarse channel count from the source's rate, and
+    // EngineConfig::spectrum_transform is the per-channel transform that is
+    // still a caller-supplied constant. Meeting a request means picking that
+    // transform so that 2 * rate / (channels * transform) satisfies
+    // ResolutionRequest::met_by, then reporting what was settled on in
+    // EngineInfo::spectrum the way the clamped channel count already is.
+    //
+    // It is left unwired deliberately rather than being wired from here. A
+    // source that reached up into the graph to size a transform would be the
+    // second place channel-count policy lives, and two copies of a geometry
+    // rule is how the 2.4 MS/s grid came to be applied to a band it was never
+    // measured on.
+    //
+    // The tunable backends leave this unstated on purpose. A dongle's centre
+    // moves under tune() while its capability description does not, so a
+    // stated request there would be right at open and quietly wrong one
+    // retune later. Wiring it up means the engine re-asking on retune, which
+    // is the same lane as the choosing.
+    ResolutionRequest resolution;
 
     [[nodiscard]] bool supports_rate(dsp::SampleRate rate) const;
     [[nodiscard]] bool can_tune(dsp::Hertz frequency) const;

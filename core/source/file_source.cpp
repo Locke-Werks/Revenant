@@ -2351,6 +2351,11 @@ Expected<ResolvedFile> resolve_file(const FileSourceConfig& config)
     caps.clock_sources = {ClockSource::Internal};
     caps.notes = std::move(notes);
 
+    // The source side of the grid question. A recording's span is fixed, so
+    // unlike a dongle's this cannot go stale under a retune. Nothing reads it
+    // yet; see SourceCapabilities::resolution for what should.
+    caps.resolution = resolution_for_span(center_hz, rate);
+
     ResolvedFile out;
     out.caps = std::move(caps);
     out.anchor_ns = anchor_ns;

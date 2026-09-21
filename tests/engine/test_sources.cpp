@@ -1210,3 +1210,95 @@ TEST_CASE("a raw file still needs rate= and still infers its format from the ext
     INFO(no_rate.error().message);
     CHECK(no_rate.error().message.find("rate=") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// The grid: what a source states about the scale of what it carries
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the shipped geometry does not meet what an HF span asks for", "[source][hf]") {
+    // The arithmetic the operator hit from the other direction. A bin is
+    // 2 * rate / (channels * transform) hertz, so the shipped 2.4 MS/s over
+    // 64 channels with a 2048-point transform is 4800000/131072 = 36.62 Hz.
+    // FT8 at 50 Hz is 1.4 bins of that and PSK31 at 31 Hz is under one.
+    //
+    // REJECTS: a met_by that rounds the bin width to integer hertz before
+    // comparing. The exactly-met case below is 31/4 against 31/4, and a
+    // rounding implementation sees 8 Hz against a 7.75 Hz ceiling and answers
+    // no, which would send a caller to a transform twice as large as it needs
+    // for every HF recording.
+    const auto request = source::resolution_for_span(7'100'000, 2'000'000);
+    REQUIRE(request.stated());
+    CHECK(request.narrowest_signal_hz == 31);
+    CHECK(request.bins_across_narrowest == 4);
+    INFO(request.basis);
+
+    // The shipped geometry, as a rational: 2 * 2400000 over 64 * 2048.
+    CHECK_FALSE(request.met_by(2 * 2'400'000, 64 * 2048));
+
+    // A 16384-point transform on a 1 MS/s HF recording over the same 64
+    // channels: 2000000/1048576, which is 1.907 Hz.
+    CHECK(request.met_by(2 * 1'000'000, 64 * 16384));
+
+    // Exactly at the ceiling counts as met, and a hair past it does not.
+    CHECK(request.met_by(31, 4));
+    CHECK_FALSE(request.met_by(7'751, 1'000));
+}
+
+TEST_CASE("the resolution comparison survives a product that would overflow", "[source]") {
+    // REJECTS: the obvious cross-multiply, narrowest * denominator against
+    // bins * numerator. Here that is 200000 * 10^14, which is 2 * 10^19 and
+    // wraps a signed 64-bit integer to a negative number, so the comparison
+    // answers backwards: a bin width of a hundredth of a femtohertz is
+    // reported as too coarse for a 200 kHz signal.
+    source::ResolutionRequest request;
+    request.narrowest_signal_hz = 200'000;
+    request.bins_across_narrowest = 4;
+
+    CHECK(request.met_by(1, 100'000'000'000'000LL));
+    CHECK_FALSE(request.met_by(100'000'000'000'000LL, 1));
+}
+
+TEST_CASE("a span reaching below 30 MHz asks for the HF grid", "[source][hf]") {
+    // REJECTS: an implementation that tests the centre frequency rather than
+    // the span's low edge. A 4 MS/s capture centred at 31 MHz covers 29 to
+    // 33 MHz, so it has the top of the 10 metre band in it and the narrow
+    // modes with it, while its centre sits above the boundary.
+    const auto straddling = source::resolution_for_span(31'000'000, 4'000'000);
+    REQUIRE(straddling.stated());
+    CHECK(straddling.narrowest_signal_hz == 31);
+
+    const auto vhf = source::resolution_for_span(145'000'000, 2'400'000);
+    REQUIRE(vhf.stated());
+    CHECK(vhf.narrowest_signal_hz == 12'500);
+
+    // And the shipped geometry meets the VHF figure comfortably, which is why
+    // nothing about a VHF session changes when the request is honoured.
+    CHECK(vhf.met_by(2 * 2'400'000, 64 * 2048));
+
+    // A recording at DC has not said where it was taken, and guessing HF from
+    // that would put the project's finest grid onto every baseband scene.
+    const auto baseband = source::resolution_for_span(0, 20'000'000);
+    CHECK_FALSE(baseband.stated());
+    CHECK(baseband.met_by(2 * 20'000'000, 64 * 2048));
+}
+
+TEST_CASE("a recording states the grid it needs and a dongle does not", "[source][hf]") {
+    // REJECTS: a backend that fills this in from whatever it was tuned to at
+    // open. A radio's centre moves under tune() while its capability
+    // description does not, so a stated request there is right once and
+    // quietly wrong one retune later, which is the class of failure the whole
+    // capability exists to avoid.
+    const ScratchDir scratch("resolution_source");
+    const auto path = scratch.path("hf.cf32");
+    ScratchDir::write(path, as_bytes_of(ramp_cf32(4'000, 0)));
+
+    auto hf = source::open_source(ScratchDir::uri(path, "rate=1000000&center=7100000"));
+    INFO(test::message_of(hf));
+    REQUIRE(hf.has_value());
+    REQUIRE((*hf)->capabilities().resolution.stated());
+    CHECK((*hf)->capabilities().resolution.narrowest_signal_hz == 31);
+
+    auto synthetic = source::open_source("synthetic:wideband?rate=2400000&emitters=2&seed=1");
+    REQUIRE(synthetic.has_value());
+    CHECK_FALSE((*synthetic)->capabilities().resolution.stated());
+}
