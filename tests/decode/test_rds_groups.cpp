@@ -19,9 +19,11 @@
 #include <cstdint>
 #include <format>
 #include <map>
+#include <print>
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/decode/rds_groups.h"
@@ -1101,6 +1103,349 @@ TEST_CASE("RadioText 2B addresses two characters per segment", "[rds]") {
     feed_group(decoder, GroupWords{0x2345, b2a, chars_to_word('X', 'X'),
                                    chars_to_word('X', 'X'), false});
     CHECK(decoder.state().rt_text() == "XXXX");
+}
+
+// ---------------------------------------------------------------------------
+// A real block error rate
+// ---------------------------------------------------------------------------
+//
+// WHY THIS SECTION EXISTS. Every other case in this file feeds the decoder
+// bits it chose: a clean stream, or a fixed corruption pattern proved
+// uncorrectable before it is used. Both are the right instrument for asking
+// whether a rule does what it says. Neither is the channel.
+//
+// The decoder met a real station on 2026-09-20 and worked: PI 0x2AF6 for
+// KKFM, all four PS segments, all sixteen RadioText segments, 1187.49 bit/s
+// against a nominal 1187.5 and a carrier offset of -0.4 Hz. It also dropped
+// 12.7 percent of blocks, corrected 2, and resynced 5 times in the same
+// capture, and nothing in this tree ran at anything like that rate. Every
+// synthetic case was effectively clean, so the property the conservative
+// corrector was CHOSEN for had never been tested: that what comes out is
+// right or absent, and never wrong in a way that reads as right.
+//
+// That is the failure mode worth a case of its own. A dropped block costs a
+// segment and the next rotation brings it back. A block that passes with the
+// wrong contents puts characters an operator cannot distinguish from the
+// station's own into the middle of a message, and no counter anywhere says
+// it happened.
+//
+// THE CHANNEL MODEL, and it is not independent bit errors. At 26 bits a
+// block, a 12.7 percent block error rate from independent errors needs a bit
+// error rate of 0.52 percent, which puts about 94 percent of failed blocks at
+// a single wrong bit: the corrector repairs every one of them and the capture
+// would have reported hundreds of corrections rather than two. Two
+// corrections against a thousand drops is a channel that destroys blocks
+// whole, which is what a multipath fade does. So: a two-state channel, good
+// and bad, with the bad state flipping each bit with probability one half and
+// lasting tens of bits. The few corrections come from a burst clipping the
+// edge of a block.
+
+namespace {
+
+// Gilbert's two-state burst channel. Good passes bits through; bad returns a
+// coin flip, which is what a demodulator hands up when the subcarrier is
+// under the noise.
+class BurstChannel {
+public:
+    BurstChannel(std::uint64_t seed, double enter_bad, double leave_bad)
+        : generator_(seed), enter_(enter_bad), leave_(leave_bad) {}
+
+    [[nodiscard]] bool next(bool bit) {
+        const bool flip = bad_ && uniform() < 0.5;
+        if (bad_) {
+            if (uniform() < leave_) {
+                bad_ = false;
+            }
+        } else if (uniform() < enter_) {
+            bad_ = true;
+            ++bursts_;
+        }
+        if (flip) {
+            ++flipped_;
+        }
+        return flip ? !bit : bit;
+    }
+
+    [[nodiscard]] std::uint64_t bursts() const { return bursts_; }
+    [[nodiscard]] std::uint64_t flipped() const { return flipped_; }
+
+private:
+    // 53 bits out of the generator rather than a std::uniform_real_-
+    // distribution, whose mapping is implementation defined. A seed printed
+    // with a failure has to reproduce it on the machine that reads it.
+    [[nodiscard]] double uniform() {
+        return (static_cast<double>(generator_() >> 11) + 0.5) * (1.0 / 9007199254740992.0);
+    }
+
+    std::mt19937_64 generator_;
+    double enter_ = 0.0;
+    double leave_ = 0.0;
+    bool bad_ = false;
+    std::uint64_t bursts_ = 0;
+    std::uint64_t flipped_ = 0;
+};
+
+}  // namespace
+
+TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rds]") {
+    constexpr std::uint64_t kSeed = 20260920;
+    INFO("seed " << kSeed);
+
+    // The station from the 2026-09-20 capture. The PI is the real one; the
+    // text is chosen, because what matters is that it is fixed, known and
+    // exactly 64 characters, so a complete RadioText buffer can be compared
+    // character for character with no terminator rule in the way.
+    constexpr std::uint16_t kPi = 0x2AF6;
+    const std::string ps = "KKFM-FM ";
+    const std::string rt = "KKFM 98.1 COLORADO SPRINGS - CLASSIC ROCK THAT REALLY ROCKS     ";
+    REQUIRE(ps.size() == 8);
+    REQUIRE(rt.size() == 64);
+
+    // A burst averaging forty bits, longer than the 26 a block occupies, so
+    // a burst that lands on a block usually destroys it rather than nicking
+    // it. The entry rate is tuned to land on the capture's 12.7 percent, and
+    // the case asserts the rate it achieved rather than trusting the tuning.
+    constexpr double kLeaveBad = 1.0 / 40.0;
+    constexpr double kEnterBad = 0.0027;
+
+    // Sixteen RadioText segments per cycle with a PS group between them, the
+    // rotation a real encoder runs. Forty cycles is 1280 groups, which at
+    // 11.4 groups a second is a hundred and twelve seconds of air.
+    constexpr int kCycles = 40;
+
+    struct Row {
+        std::uint8_t span = 0;
+        double block_error_rate = 0.0;
+        std::uint64_t dropped = 0;
+        std::uint64_t corrected = 0;
+        std::uint64_t good = 0;
+        std::uint64_t resyncs = 0;
+
+        // Blocks the decoder accepted whose sixteen information bits are not
+        // the ones that were transmitted. This is the measurement: everything
+        // downstream, text included, is a consequence of it.
+        std::size_t accepted_wrong = 0;
+        std::size_t accepted_wrong_corrected = 0;
+        std::size_t compared = 0;
+
+        // The consequence at the display. Counted at every rotation of the
+        // message and not only at the end, because a wrong character a later
+        // rotation repairs was still shown.
+        std::size_t wrong_char_sightings = 0;
+        std::size_t audits = 0;
+        int cycles_to_complete = -1;
+        bool complete = false;
+        bool final_rt_right = false;
+        bool final_ps_right = false;
+        std::string final_rt;
+        std::string final_ps;
+    };
+
+    const auto run_at = [&](std::uint8_t span) {
+        Row row;
+        row.span = span;
+
+        RdsDecoder::Options options;
+        options.correctable_burst_span = span;
+        RdsDecoder decoder(options);
+        BurstChannel channel(kSeed, kEnterBad, kLeaveBad);
+
+        std::uint64_t seen_groups = 0;
+
+        // Sends one group and then compares what the decoder made of it with
+        // what went in. The comparison is skipped unless exactly one group
+        // completed, which is what keeps a resync from being scored as a
+        // hundred wrong blocks: after a reacquisition the framing is right
+        // again but the group the decoder finished is not the one just sent.
+        const auto send = [&](const GroupWords& words) {
+            const std::array<std::uint32_t, 4> blocks = encode_group(words);
+            const std::array<std::uint16_t, 4> sent{words.b1, words.b2, words.b3, words.b4};
+            for (const std::uint32_t block : blocks) {
+                for (int i = 25; i >= 0; --i) {
+                    decoder.feed(channel.next(((block >> i) & 1u) != 0));
+                }
+            }
+            const bool aligned = decoder.groups_decoded() == seen_groups + 1;
+            seen_groups = decoder.groups_decoded();
+            if (!aligned || !decoder.last_group().has_value()) {
+                return;
+            }
+            const auto& group = *decoder.last_group();
+            for (std::size_t i = 0; i < 4; ++i) {
+                if (!group.blocks[i].valid) {
+                    continue;
+                }
+                ++row.compared;
+                if (group.blocks[i].value == sent[i]) {
+                    continue;
+                }
+                ++row.accepted_wrong;
+                if (group.blocks[i].corrected) {
+                    ++row.accepted_wrong_corrected;
+                }
+            }
+        };
+
+        const auto audit = [&]() {
+            ++row.audits;
+            const auto& state = decoder.state();
+            const std::string_view shown_ps = state.ps_text();
+            for (std::size_t segment = 0; segment < 4; ++segment) {
+                if ((state.ps_received & (1u << segment)) == 0) {
+                    continue;
+                }
+                for (std::size_t c = segment * 2; c < segment * 2 + 2; ++c) {
+                    if (shown_ps[c] != ps[c]) {
+                        ++row.wrong_char_sightings;
+                    }
+                }
+            }
+            const std::string_view shown_rt = state.rt_text();
+            for (std::size_t segment = 0; segment < 16; ++segment) {
+                if ((state.rt_received & (1u << segment)) == 0) {
+                    continue;
+                }
+                for (std::size_t c = segment * 4; c < segment * 4 + 4; ++c) {
+                    if (c >= shown_rt.size() || shown_rt[c] != rt[c]) {
+                        ++row.wrong_char_sightings;
+                    }
+                }
+            }
+        };
+
+        for (int cycle = 0; cycle < kCycles; ++cycle) {
+            for (std::uint8_t segment = 0; segment < 16; ++segment) {
+                const auto ps_address = static_cast<std::uint8_t>(segment & 0x03u);
+                send(GroupWords{kPi,
+                                type0_block2(10, true, false, true, false, ps_address),
+                                0xE0CD,  // an AF pair, which nothing here reads
+                                chars_to_word(ps[ps_address * 2], ps[ps_address * 2 + 1]),
+                                false});
+
+                const auto rt_b2 = static_cast<std::uint16_t>((2u << 12) | 0x0400u |
+                                                              (10u << 5) | segment);
+                send(GroupWords{kPi, rt_b2,
+                                chars_to_word(rt[segment * 4], rt[segment * 4 + 1]),
+                                chars_to_word(rt[segment * 4 + 2], rt[segment * 4 + 3]),
+                                false});
+                audit();
+            }
+
+            if (!row.complete && decoder.state().rt_received == 0xFFFFu &&
+                decoder.state().ps_received == 0x0Fu) {
+                row.complete = true;
+                row.cycles_to_complete = cycle + 1;
+            }
+        }
+
+        row.dropped = decoder.blocks_dropped();
+        row.corrected = decoder.blocks_corrected();
+        row.good = decoder.blocks_good();
+        row.resyncs = decoder.sync_acquisitions();
+        const auto seen = static_cast<double>(row.good + row.corrected + row.dropped);
+        row.block_error_rate = seen > 0.0 ? static_cast<double>(row.dropped) / seen : 0.0;
+        row.final_rt = std::string(decoder.state().rt_text());
+        row.final_ps = std::string(decoder.state().ps_text());
+        row.final_rt_right = row.final_rt == rt;
+        row.final_ps_right = row.final_ps == ps;
+        return row;
+    };
+
+    std::array<Row, 4> rows{};
+    const std::uint8_t spans[4] = {0, 1, revenant::decode::kDefaultCorrectableBurstSpan,
+                                   revenant::decode::kMaxCorrectableBurstSpan};
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        rows[i] = run_at(spans[i]);
+    }
+
+    std::println("");
+    std::println("RDS group decode over {} groups at an on-air block error rate, against the "
+                 "2026-09-20 capture's 12.7% dropped and 5 resyncs",
+                 2 * 16 * kCycles);
+    std::println("  span  BLER   dropped  corrected   accepted wrong (of them corrected)  "
+                 "wrong chars shown  complete  final text");
+    for (const Row& row : rows) {
+        std::println("  {:>4}  {:4.1f}%  {:7}  {:9}   {:>5} of {:<6} ({:>4})               "
+                     "{:>6} in {:<4}  cycle {:<3}  {}",
+                     row.span, 100.0 * row.block_error_rate, row.dropped, row.corrected,
+                     row.accepted_wrong, row.compared, row.accepted_wrong_corrected,
+                     row.wrong_char_sightings, row.audits, row.cycles_to_complete,
+                     (row.final_rt_right && row.final_ps_right) ? "exact" : "WRONG");
+    }
+    for (const Row& row : rows) {
+        if (row.final_rt_right && row.final_ps_right) {
+            continue;
+        }
+        std::println("  span {} left this on the display: PS \"{}\", RT \"{}\"", row.span,
+                     row.final_ps, row.final_rt);
+    }
+
+    const Row& off = rows[0];
+    const Row& shipped = rows[2];
+    const Row& widest = rows[3];
+
+    for (const Row& row : rows) {
+        INFO(std::format("span {}: BLER {:.4f}, {} dropped, {} corrected, {} accepted wrong of "
+                         "{} ({} of them corrected), {} wrong characters shown in {} audits, "
+                         "complete at cycle {}, rt \"{}\"",
+                         row.span, row.block_error_rate, row.dropped, row.corrected,
+                         row.accepted_wrong, row.compared, row.accepted_wrong_corrected,
+                         row.wrong_char_sightings, row.audits, row.cycles_to_complete,
+                         row.final_rt));
+        INFO(std::format("span {}: ps \"{}\"", row.span, row.final_ps));
+    }
+
+    // The case certifies its own conditions. Every row runs the same channel
+    // from the same seed, so the rows differ in the corrector and in nothing
+    // else.
+    //
+    // The rate is barred on the SHIPPED row and not on all four, because a
+    // dropped block is what is left after the corrector has had its go: a
+    // wider span rescues blocks a narrower one loses, so the column falls
+    // from 16.0 percent at no correction to 8.6 percent at span 5 on one
+    // unchanged channel. 12.7 percent is what the capture reported, and the
+    // capture ran the shipped default, so that is the row it compares with.
+    CHECK(shipped.block_error_rate > 0.11);
+    CHECK(shipped.block_error_rate < 0.16);
+    for (const Row& row : rows) {
+        CHECK(row.compared > 3000);
+    }
+
+    // Correction buys recovery. Every row assembles the whole message, and
+    // the drop count falls as the span widens, which is the half of the
+    // trade the corrector exists for.
+    for (const Row& row : rows) {
+        CHECK(row.complete);
+    }
+    CHECK(shipped.dropped < off.dropped);
+    CHECK(widest.dropped < shipped.dropped);
+
+    // And it costs wrong blocks, which is the half nothing measured before.
+    //
+    // rds_groups.h says the restriction to span 2 "reduces miscorrection and
+    // does not abolish it", cites Kopitz and Marks section 12.2.3 for the
+    // practice, and gives no figure for THIS decoder. These are the figures.
+    // Every accepted-wrong block at a non-zero span is a block the corrector
+    // rewrote into a different valid codeword, and the table above shows how
+    // many of them reach the display as characters an operator cannot tell
+    // from the station's own.
+    // With the corrector off the floor is not zero and the reason is the code
+    // rather than the corrector: an error pattern that is itself a codeword
+    // has a zero syndrome and passes. One in 1024 random patterns is, and 819
+    // blocks were destroyed here, so about one is expected. Two arrived, and
+    // the two of them were shown at 32 of the 640 audits before the next
+    // rotation of the message painted over them.
+    CHECK(off.accepted_wrong <= 4);
+    CHECK(shipped.accepted_wrong > off.accepted_wrong);
+    CHECK(widest.accepted_wrong > shipped.accepted_wrong);
+    CHECK(widest.wrong_char_sightings > shipped.wrong_char_sightings);
+    CHECK(shipped.wrong_char_sightings > off.wrong_char_sightings);
+
+    // The shipped default is the one an operator runs, so its cost is barred
+    // rather than merely printed. The bar is above the measured figure and
+    // below the widest span's, so widening the default without saying so
+    // fails here.
+    CHECK(shipped.accepted_wrong < widest.accepted_wrong / 2);
 }
 
 // ---------------------------------------------------------------------------
