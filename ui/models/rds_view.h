@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include "core/rpc/types.h"
 #include "models/rds_text.h"
@@ -147,9 +148,31 @@ namespace detail {
 // answered is whether a poll has come back at all. Without it an engine
 // that has never been asked is indistinguishable from one that answered
 // with an unlocked decoder, and those are Idle and Unlocked.
-[[nodiscard]] inline RdsView make_rds_view(const rpc::RdsStation& station, bool answered)
+//
+// fault is what stopped the poll from happening or what the engine said
+// when it refused one, and it outranks everything including answered. It
+// has to, because "answered is false" covers two opposite situations: the
+// operator has the RDS switch off, and the window is asking as hard as it
+// can and there is no engine to ask. Both used to render as "not asking for
+// RDS on this receiver.", so a pane with the switch ON read, on
+// disconnection, as a statement that the operator had not asked. That is
+// the exact opposite of what was true, and it is worse than a blank pane
+// because it tells the operator to go and flip a switch that is already on.
+//
+// EngineLink::clear_rds is what supplies it: it is called on a lost
+// connection, on a receiver going away and on the switch being turned off,
+// and only the third of those is silence the operator chose.
+[[nodiscard]] inline RdsView make_rds_view(const rpc::RdsStation& station, bool answered,
+                                           std::string_view fault = {})
 {
     RdsView out;
+
+    if (!fault.empty()) {
+        out.state = RdsState::Faulted;
+        out.is_fault = true;
+        out.status = std::string(fault);
+        return out;
+    }
 
     if (!answered) {
         out.state = RdsState::Idle;

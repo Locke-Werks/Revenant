@@ -230,6 +230,36 @@ TEST_CASE("the four empty panes are four different sentences", "[rds]")
     }
 }
 
+TEST_CASE("a pane with nothing behind it does not blame the operator", "[rds]")
+{
+    // THE WRONG IMPLEMENTATION THIS REJECTS: reading answered=false as
+    // "the operator has the switch off". EngineLink::clear_rds is called
+    // on three paths and only one of them is that. On the other two the
+    // window is asking for RDS as hard as it can, and "not asking for RDS
+    // on this receiver." is the exact opposite of what is true: it sends
+    // the operator to a switch that is already on.
+    const revenant::rpc::RdsStation empty;
+
+    const auto off = make_rds_view(empty, false);
+    CHECK(off.state == RdsState::Idle);
+    CHECK_FALSE(off.is_fault);
+    CHECK(off.status == "not asking for RDS on this receiver.");
+
+    const auto disconnected =
+        make_rds_view(empty, false, "the engine went away, so nothing is decoding RDS.");
+    CHECK(disconnected.state == RdsState::Faulted);
+    CHECK(disconnected.is_fault);
+    CHECK(disconnected.status == "the engine went away, so nothing is decoding RDS.");
+    CHECK(disconnected.status != off.status);
+
+    // And the reason outranks a station struct that still has contents in
+    // it, because the contents are one connection old.
+    const auto stale = make_rds_view(kkfm(), false, "the engine went away.");
+    CHECK(stale.status == "the engine went away.");
+    CHECK(stale.identity.empty());
+    CHECK(stale.ps.text.empty());
+}
+
 TEST_CASE("locked but not synced is its own state", "[rds]")
 {
     // A decoder can be locked to the subcarrier and still hunting for the

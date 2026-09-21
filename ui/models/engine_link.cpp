@@ -234,7 +234,9 @@ void EngineLink::supervise()
             // torn down on an engine that is gone; what this clears is the
             // claim in the window, which would otherwise sit there naming
             // a call sign as though it were still being received.
-            clear_rds();
+            clear_rds(QStringLiteral(
+                "the engine went away, so nothing is decoding RDS. The switch stays on "
+                "and the decoder is rebuilt on the next connection."));
 
             client_->unsubscribe_spectrum();
             client_.reset();

@@ -2003,7 +2003,12 @@ private:
     // side when there is nothing to poll: the switch went off, the
     // receiver went away, the connection went. The engine keeps its
     // decoder; what this clears is the claim on screen.
-    void clear_rds();
+    //
+    // reason is WHICH of those three, and the empty default is the switch
+    // going off. The other two leave the pane asking for RDS with nothing
+    // to ask, and the sentence has to say so rather than read as the
+    // operator's own choice. models/rds_view.h renders it.
+    void clear_rds(const QString& reason = {});
 
     // Qt thread, queued from poll_rds.
     void adopt_rds();

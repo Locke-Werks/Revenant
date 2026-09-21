@@ -19,6 +19,7 @@
 
 using revenant::ui::classify_fit;
 using revenant::ui::FitFlag;
+using revenant::ui::fit_from_status;
 using revenant::ui::fit_sentence;
 using revenant::ui::format_width;
 using revenant::ui::has_flag;
@@ -237,4 +238,44 @@ TEST_CASE("a width is written the way the operator said it", "[fit]")
     // two of them can if either side is read in the wrong order. It prints
     // rather than wrapping into an enormous positive.
     CHECK(format_width(-16'000) == "-16 kHz");
+}
+
+TEST_CASE("a widen drag the engine has not answered yet says nothing", "[fit]")
+{
+    // THE WRONG IMPLEMENTATION THIS REJECTS: building the fit from the
+    // pane's own live request and the engine's last grant. Those are two
+    // different requests during a drag. setReceiverPassband draws a widen
+    // and deliberately does not send it until the gesture ends, because a
+    // width change is a remove and an add and sending one per mouse move
+    // tears the audio once per pixel. So the pane holds 40 kHz, the engine
+    // still holds the 16 kHz it granted, and the subtraction reports a
+    // clamp on a channel that was never asked for anything.
+    //
+    // Reading both numbers off the same status is what makes that
+    // unavailable. The echo is the request the grant answered.
+    const ReceiverFit mid_drag = fit_from_status(-8'000, 8'000, -8'000, 8'000, false, 0.0);
+    CHECK(classify_fit(mid_drag) == 0);
+    CHECK(fit_sentence(mid_drag).empty());
+
+    // A pan hid the defect, which is why it survived: both edges move by
+    // the same amount and the width is held, so asked and granted matched
+    // even when they came from two different requests.
+    const ReceiverFit panned = fit_from_status(-4'000, 12'000, -4'000, 12'000, false, 0.0);
+    CHECK(fit_sentence(panned).empty());
+}
+
+TEST_CASE("the grant is compared with the request it answered", "[fit]")
+{
+    // The clamp still speaks. 200 kHz asked, 71 kHz granted, both off one
+    // status, which is the second of the two mismatches from 2026-09-20.
+    const ReceiverFit clamped =
+        fit_from_status(-100'000, 100'000, -35'500, 35'500, true, 0.0);
+    CHECK(has_flag(classify_fit(clamped), FitFlag::Clamped));
+    CHECK(fit_sentence(clamped) == "asked 200 kHz, channel carries 71 kHz.");
+
+    // And the empty-passband path still reaches the other sentence: a tune
+    // sends zeros, the status echoes zeros, and printing an asked width of
+    // nothing would read as a bug in the line.
+    const ReceiverFit defaulted = fit_from_status(0, 0, -35'500, 35'500, true, 0.0);
+    CHECK(fit_sentence(defaulted) == "the channel clamped this filter to 71 kHz.");
 }

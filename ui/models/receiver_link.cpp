@@ -165,13 +165,13 @@ std::pair<int, int> EngineLink::fit_edges(int low, int high) const
 
 void EngineLink::update_receiver_fit()
 {
-    ReceiverFit fit;
-    fit.asked_low = wanted_.passband_low;
-    fit.asked_high = wanted_.passband_high;
-    fit.granted_low = receiver_status_.placement.granted_low;
-    fit.granted_high = receiver_status_.placement.granted_high;
-    fit.clamped = receiver_status_.placement.bandwidth_clamped;
-    fit.detection_bandwidth_hz = tuned_detection_bandwidth_;
+    // Both halves off the same status. See fit_from_status for why the pane's
+    // own live request is the wrong number here: it is what the operator has
+    // drawn, and during a widen drag the engine has not been asked for it.
+    const ReceiverFit fit = fit_from_status(
+        receiver_status_.params.passband_low, receiver_status_.params.passband_high,
+        receiver_status_.placement.granted_low, receiver_status_.placement.granted_high,
+        receiver_status_.placement.bandwidth_clamped, tuned_detection_bandwidth_);
 
     // Nothing at all when the pane holds no receiver. The status struct
     // keeps its last values across a clear on some paths, and a sentence
@@ -485,8 +485,10 @@ void EngineLink::post_receiver_request(bool recreate)
 
     emit receiverChanged();
 
-    // Every write ends here, so this is the one place the request side of
-    // the fit line has to be rebuilt.
+    // Rebuilt for the RECEIVER's sake rather than the request's: the fit
+    // line reads both of its numbers off the last status, so a write does
+    // not move it, but a write that creates a receiver moves whether there
+    // is a line at all. The next status is what changes the words.
     update_receiver_fit();
 }
 
@@ -787,9 +789,9 @@ void EngineLink::adopt_receiver_status()
         emit receiverChanged();
     }
 
-    // Every answer from the engine ends here, so this is the other place
-    // the fit line has to be rebuilt. It is derived from both sides and
-    // neither one alone can be trusted to have moved last.
+    // Every answer from the engine ends here, and an answer is the only
+    // thing that moves the fit line's words: the request it compares
+    // against is the echo on this same status.
     update_receiver_fit();
 }
 

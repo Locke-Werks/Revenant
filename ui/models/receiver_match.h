@@ -75,6 +75,41 @@ struct ReceiverFit {
     double detection_bandwidth_hz = 0.0;
 };
 
+// Build the fit from ONE status, so both halves of every comparison come off
+// the same answer from the engine.
+//
+// echoed_low and echoed_high are VrxStatus::params' passband pair, which is
+// a verbatim echo of the request the engine was given: the same reply
+// carries the grant, so the two describe each other. granted_low and
+// granted_high are VrxPlacement's.
+//
+// WHY THIS IS A FUNCTION AND NOT FIVE ASSIGNMENTS AT THE CALL SITE. Until
+// 2026-09-21 EngineLink filled asked_low and asked_high from its own live
+// request, which during a drag is the pair drawn on screen and not yet sent.
+// Comparing that against the grant for the PREVIOUS request made every widen
+// drag report a clamp: the operator pulls an edge out, the pane says "asked
+// 40 kHz, channel carries 16 kHz", and the channel was never asked. A pan
+// hid it, because a pan holds the width. Taking both numbers from the status
+// makes the mistake unavailable rather than merely fixed.
+//
+// The cost is that the line lags by one poll after a real change, which is
+// the right lag: until the engine answers, nobody knows what it granted.
+[[nodiscard]] inline ReceiverFit fit_from_status(std::int64_t echoed_low,
+                                                 std::int64_t echoed_high,
+                                                 std::int64_t granted_low,
+                                                 std::int64_t granted_high, bool clamped,
+                                                 double detection_bandwidth_hz)
+{
+    ReceiverFit fit;
+    fit.asked_low = echoed_low;
+    fit.asked_high = echoed_high;
+    fit.granted_low = granted_low;
+    fit.granted_high = granted_high;
+    fit.clamped = clamped;
+    fit.detection_bandwidth_hz = detection_bandwidth_hz;
+    return fit;
+}
+
 enum class FitFlag : std::uint8_t {
     None = 0,
 
@@ -215,11 +250,11 @@ enum class FitFlag : std::uint8_t {
         // TWO SENTENCES, BECAUSE THE REQUEST IS NOT ALWAYS A NUMBER THIS
         // WINDOW HAS. A tune and a mode change both send an empty passband,
         // which is how the client asks for the mode's own default without
-        // carrying a copy of the table, and EngineLink then adopts the
-        // granted pair as the request. So on exactly the path that produces
-        // the worst clamps, the asked width equals the granted one and the
-        // engine's own flag is the only evidence. Printing "asked 71 kHz,
-        // channel carries 71 kHz" there would read as a bug in this line.
+        // carrying a copy of the table. The status echoes that request
+        // verbatim, so on exactly the path that produces the worst clamps
+        // the asked pair is a pair of zeros and the engine's own flag is the
+        // only evidence. Printing "asked 0 Hz, channel carries 71 kHz" there
+        // would read as a bug in this line.
         if (asked_width(fit) > 0 && asked_width(fit) != granted_width(fit)) {
             out += "asked " + format_width(asked_width(fit)) + ", channel carries " +
                    format_width(granted_width(fit)) + ".";

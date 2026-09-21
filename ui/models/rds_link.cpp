@@ -111,7 +111,16 @@ void EngineLink::setRdsRegion(const QString& region)
     emit rdsChanged();
 }
 
-void EngineLink::clear_rds()
+// reason is why there is no decoder, and empty means the operator turned
+// the switch off, which is the one case where silence is what they asked
+// for. Everything else has to say so.
+//
+// WHAT THIS POSTED UNTIL 2026-09-21: nothing but answered=false, on every
+// path. models/rds_view.h renders that as "not asking for RDS on this
+// receiver.", so a pane with the RDS switch ON read exactly backwards the
+// moment the engine went away: the window was asking, there was nothing to
+// ask, and the sentence sent the operator to a switch that was already on.
+void EngineLink::clear_rds(const QString& reason)
 {
     if (rds_polled_vrx_ == 0 && !rds_region_written_) {
         return;
@@ -124,7 +133,7 @@ void EngineLink::clear_rds()
         has_rds_handover_ = true;
         handover_rds_answered_ = false;
         handover_rds_station_ = {};
-        handover_rds_fault_.clear();
+        handover_rds_fault_ = reason;
     }
     QMetaObject::invokeMethod(this, [this] { adopt_rds(); }, Qt::QueuedConnection);
 }
@@ -137,8 +146,23 @@ void EngineLink::poll_rds()
     }
 
     const qulonglong vrx = live_receiver_id_;
-    if (client_ == nullptr || !rds_wanted_.load() || vrx == 0) {
+
+    // Three reasons and they are not the same sentence. Only the switch
+    // being off is the operator's own choice, and that one takes the empty
+    // reason so the view keeps its "not asking" wording.
+    if (!rds_wanted_.load()) {
         clear_rds();
+        return;
+    }
+    if (client_ == nullptr) {
+        clear_rds(QStringLiteral("no engine is connected, so nothing is decoding RDS. "
+                                 "The switch stays on and the decoder is rebuilt when "
+                                 "the connection comes back."));
+        return;
+    }
+    if (vrx == 0) {
+        clear_rds(QStringLiteral("this pane holds no receiver, and the RDS decoder hangs "
+                                 "off one. Tune a receiver and the decoder is built on it."));
         return;
     }
 
@@ -226,7 +250,7 @@ void EngineLink::adopt_rds()
     // for, and this converts the result to QString through fromStdString,
     // which is the UTF-8 conversion. Never fromLatin1: see
     // models/rds_text.h for the byte that makes that mistake invisible.
-    const RdsView view = make_rds_view(rds_station_, answered);
+    const RdsView view = make_rds_view(rds_station_, answered, fault.toStdString());
 
     rds_status_ = QString::fromStdString(view.status);
     rds_is_fault_ = view.is_fault;
@@ -241,17 +265,11 @@ void EngineLink::adopt_rds()
     rds_rt_segments_total_ = view.radio_text.segments_total;
     rds_block_error_rate_ = view.block_error_rate;
 
-    // A refusal outranks the view's own sentence. make_rds_view was handed
-    // answered=false and says "not asking for RDS on this receiver", which
-    // is the wrong sentence for a poll the engine turned down: the window
-    // IS asking, and the engine's own words name which of the four
-    // conditions the receiver failed.
-    if (!fault.isEmpty()) {
-        rds_is_fault_ = true;
-        rds_decoding_ = false;
-        rds_status_ = fault;
-    }
-
+    // The refusal's precedence used to be re-applied here, over the view
+    // this function had just built. It is inside make_rds_view now, with
+    // the rest of the order, because this file decides nothing about what
+    // an empty station means and a second precedence rule out here was
+    // reachable only through the window.
     emit rdsChanged();
 }
 
