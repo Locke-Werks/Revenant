@@ -275,9 +275,22 @@ Expected<RdsBitSync> RdsBitSync::create(const RdsBitsConfig& config)
     sync.decim_real_.assign(sync.decim_taps_.size(), 0.0);
     sync.decim_imag_.assign(sync.decim_taps_.size(), 0.0);
 
-    // The clause 1.7 shaping filter, sampled at the working rate. taps[i] is
-    // h(t)/rate: the continuous impulse response scaled by the sample period,
-    // so the tap sum approaches HT(0) = 1 and the filter has unity DC gain.
+    // The clause 1.7 shaping filter, sampled at the working rate, windowed,
+    // and then scaled to unity DC gain by dividing through by the tap sum.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "taps[i] is h(t)/rate: the continuous
+    // impulse response scaled by the sample period, so the tap sum
+    // approaches HT(0) = 1 and the filter has unity DC gain." That describes
+    // a different filter. Nothing here divides by the rate, the Kaiser window
+    // below has already changed the shape by the time any sum is taken, and
+    // the sum does not approach one: it is divided out, so the DC gain is
+    // exactly one by construction rather than as a property of the sampling.
+    //
+    // The two agree on the DC gain and on nothing else, and the difference
+    // matters to anyone reading a tap value or reasoning about what happens
+    // when the working rate changes. Sampling h(t) at a higher rate makes the
+    // raw sum larger in proportion, and the normalisation absorbs that, so
+    // the taps here are not the sampled impulse response at any scale.
     {
         const auto half =
             static_cast<std::size_t>(std::llround(static_cast<double>(kShapingSpanBits) *
@@ -385,7 +398,7 @@ void RdsBitSync::reset()
     consistency_write_ = 0;
     consistency_filled_ = 0;
     consistency_hits_ = 0;
-    unlock_run_ = 0;
+    unlock_bits_ = 0;
 
     have_previous_ = false;
     previous_bit_ = false;
@@ -409,7 +422,7 @@ void RdsBitSync::begin_reacquisition()
     consistency_write_ = 0;
     consistency_filled_ = 0;
     consistency_hits_ = 0;
-    unlock_run_ = 0;
+    unlock_bits_ = 0;
 
     // Reported as the coin toss an empty window is, rather than left holding
     // the last figure the old lock produced. A caller watching quality has to
@@ -780,14 +793,30 @@ void RdsBitSync::run_timing(const BitSink* sink)
         const bool window_full = consistency_filled_ == consistency_window_.size();
         if (window_full && status_.biphase_consistency >= config_.lock_threshold) {
             status_.lock = RdsLock::Locked;
-            unlock_run_ = 0;
+            unlock_bits_ = 0;
         } else if (window_full && status_.biphase_consistency < config_.unlock_threshold) {
             status_.lock = RdsLock::Acquiring;
             have_previous_ = false;
-            // Give up and re-scan rather than sit in a bad lock. A whole
-            // window below the unlock threshold means the phase is wrong, not
-            // that the signal is briefly weak.
-            if (++unlock_run_ >= consistency_window_.size()) {
+            // Give up and re-scan rather than sit in a bad lock.
+            //
+            // WHAT THIS COMMENT USED TO SAY: "A whole window below the unlock
+            // threshold means the phase is wrong, not that the signal is
+            // briefly weak." A whole window IN A ROW is what that describes
+            // and it is not what is counted. The counter is cleared only on
+            // the branch above, at or over the LOCK threshold, so a bit
+            // landing between the two thresholds neither adds to it nor
+            // clears it, and the bits counted here need never be consecutive.
+            // They are a window's worth of bad bits accumulated since the
+            // last good one, however long that took. The member was named
+            // unlock_run_ as well, saying the same wrong thing a third time,
+            // and is unlock_bits_ now.
+            //
+            // The counting is deliberate and is not what changed. Clearing on
+            // the middle band would let a signal that hovers there, never bad
+            // enough for a whole window in a row and never good enough to
+            // lock, sit in Acquiring for as long as it likes without ever
+            // re-scanning, which is the state this exists to escape.
+            if (++unlock_bits_ >= consistency_window_.size()) {
                 ++status_.reacquisitions;
                 begin_reacquisition();
             }

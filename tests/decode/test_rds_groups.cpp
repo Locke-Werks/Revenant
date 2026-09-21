@@ -1633,6 +1633,18 @@ TEST_CASE("the MJD conversion matches EN 50067 Annex G and refuses to leave its 
     CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2026, 4, 31}));
     CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2026, 2, 29}));
 
+    // A year far outside the window, refused before the arithmetic rather
+    // than after it. Item b) multiplies the year by 365.25 in double and
+    // truncates to int, and a conversion whose value does not fit in an int
+    // is undefined rather than wrapped: past about year 5.88 million there
+    // is no defined value for a later bounds check to read. These pass under
+    // a bound that runs first and mean nothing under one that does not, so
+    // they are here to keep the order.
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{9'000'000, 6, 15}));
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{-9'000'000, 6, 15}));
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{1899, 12, 31}));
+    CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{2101, 1, 1}));
+
     // 1900 is not a leap year and 2000 is, and both are inside the window.
     // 1900-02-29 landed on 15079, which is 1900-03-01, the first valid MJD.
     CHECK_FALSE(revenant::decode::mjd_from_date(CalendarDate{1900, 2, 29}));

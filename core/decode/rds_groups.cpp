@@ -688,6 +688,21 @@ Expected<int> mjd_from_date(CalendarDate date) {
                                 date.month, date.day));
     }
 
+    // The year goes through the window check BEFORE the arithmetic, not after
+    // it with the rest. Item b) multiplies the year by 365.25 in double and
+    // truncates to int, and a conversion whose value does not fit in an int
+    // is undefined rather than wrapped: anything past about year 5.88 million
+    // overflows. This is a public entry point taking an int year from
+    // whatever a caller typed, so it is reachable rather than theoretical,
+    // and the check below cannot catch it because by then the damage is in
+    // the value being checked.
+    if (date.year < kFirstValidYear || date.year > kLastValidYear) {
+        return fail(std::format(
+            "{:04}-{:02}-{:02} is outside the validity window of EN 50067 Annex G, "
+            "1900-03-01 to 2100-02-28",
+            date.year, date.month, date.day));
+    }
+
     // EN 50067 Annex G item b). Y is years since 1900 in the annex.
     const int y = date.year - 1900;
     const int l = (date.month == 1 || date.month == 2) ? 1 : 0;

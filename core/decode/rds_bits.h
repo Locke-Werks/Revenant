@@ -658,9 +658,15 @@ private:
     std::size_t consistency_filled_ = 0;
     std::size_t consistency_hits_ = 0;
 
-    // Bits below the unlock threshold in a row before the decoder gives up and
-    // re-scans rather than hoping.
-    std::size_t unlock_run_ = 0;
+    // Bits below the unlock threshold seen since the last bit at or over the
+    // LOCK threshold. A window's worth of them gives up and re-scans rather
+    // than hoping.
+    //
+    // NOT IN A ROW, which is what this said and what the member's own name
+    // used to say. A bit between the two thresholds neither adds to this nor
+    // clears it, so what is counted need never be consecutive. See the
+    // reset in RdsBitSync::run_timing for why that is on purpose.
+    std::size_t unlock_bits_ = 0;
 
     // Clause 1.6 differential decoder state: the previous received bit.
     bool have_previous_ = false;

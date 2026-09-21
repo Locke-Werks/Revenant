@@ -333,6 +333,15 @@ struct CalendarDate {
 inline constexpr int kMjdFirstValid = 15079;  // 1900-03-01
 inline constexpr int kMjdLastValid = 88127;   // 2100-02-28
 
+// The same window as a pair of years, which is what mjd_from_date can check
+// before it does any arithmetic. Item b) multiplies the year by 365.25 in
+// double and truncates to int, and that conversion is undefined rather than
+// wrapped once the value does not fit, so the year has to be bounded first
+// and the MJD bound afterwards only narrows the two partial years at the
+// ends.
+inline constexpr int kFirstValidYear = 1900;
+inline constexpr int kLastValidYear = 2100;
+
 [[nodiscard]] Expected<CalendarDate> date_from_mjd(int mjd);
 
 // The day is checked against the month's own length, leap years included.
