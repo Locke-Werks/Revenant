@@ -209,6 +209,19 @@ struct EngineInfo {
 
     # Baseband DC in real radio frequency. Every centre below is an offset
     # from this, because that is the only frame the grid has.
+    #
+    # IT MOVES, and it is the only field in EngineInfo that does while a
+    # connection stays up. setSourceCenter tunes the front end and this
+    # follows what the device landed on, so a client that cached it at
+    # connect and kept adding it draws every axis label, every receiver
+    # frequency and every detection a retune's worth of hertz out, on a
+    # display where nothing else looks wrong. Read it back after a tune.
+    #
+    # This said none of that until 2026-09-21. core/engine/engine.h and
+    # core/rpc/types.h were both corrected when the tune call landed in
+    # 4463967 and this file was not, which is a claim going missing rather
+    # than a false one coming back: there was no wrong sentence here to find,
+    # only silence that read as "fixed at open" to everyone who checked.
     sourceCenter @6 :Int64;
 
     ringSamples @7 :UInt64;
@@ -830,12 +843,27 @@ struct AudioChunk {
     # client playing the new stream at the cached rate sounds like a tape at
     # the wrong speed and points at nothing.
     #
-    # channelCount reads 1 on every engine built from this tree. Every
+    # channelCount reads 2 on a WFM receiver decoding stereo and 1 on
+    # everything else. engine::resolve_stereo decides it from the mode,
+    # VrxParams::stereo and the audio rate, and the decision is a request
+    # rather than a promise only in what the two channels CARRY: a station
+    # with no pilot still arrives as two, bit-identical sample for sample,
+    # because the kernel gates the difference channel by multiplying it by
+    # zero. A client that hardcoded 1 plays one channel of a pair at half
+    # speed, which is why the field is here and why it must be read.
+    #
+    # WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-21 it read
+    # "channelCount reads 1 on every engine built from this tree. Every
     # demodulator in core/engine/vrx_stage.cpp sets StageOutput::channels to
-    # 1, and the one stage that sets 2 is the raw complex tap, which cannot be
-    # subscribed to. It is on the wire for WFM stereo, which is the next thing
-    # that will change it, and because a client that hardcoded 1 would then
-    # play one channel of a pair at half speed.
+    # 1, and the one stage that sets 2 is the raw complex tap, which cannot
+    # be subscribed to. It is on the wire for WFM stereo, which is the next
+    # thing that will change it". WFM stereo landed in f3c0544 and is what
+    # changed it. Nothing about the wire moved, because the field was put
+    # here for exactly this; only the sentence saying nobody sends two.
+    # core/engine/vrx.h carried the replacement text on VrxParams::stereo
+    # because the lane that made this false could not edit this file, and a
+    # correction filed where it was discovered rather than where it is read
+    # is how a schema goes on lying to every client author for a day.
     sampleRate @1 :UInt32;
     channelCount @2 :UInt16;
 

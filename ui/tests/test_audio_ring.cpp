@@ -601,12 +601,12 @@ TEST_CASE("an index that goes backwards restarts rather than wrapping", "[audio]
 
 TEST_CASE("stereo is counted in frames and not in samples", "[audio][ring]")
 {
-    // REJECTS: treating samples.size() as the frame count. channelCount
-    // reads 1 on every engine built from this tree today and is on the wire
-    // for WFM stereo, which is the next thing that will change it. A ring
-    // that counted interleaved samples would then report double the depth,
-    // measure every gap at half its size, and place the fill half a frame
-    // out of phase between the two channels.
+    // REJECTS: treating samples.size() as the frame count. A WFM receiver
+    // decoding stereo sends channelCount 2, so a ring that counted
+    // interleaved samples reports double the depth, measures every gap at
+    // half its size, and places the fill half a frame out of phase between
+    // the two channels. That was a prediction when this case was written and
+    // stopped being one in f3c0544.
     AudioRing ring;
     ring.set_depth_millis(kDepthMs);
 

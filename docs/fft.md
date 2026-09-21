@@ -221,6 +221,14 @@ That last sentence held for twelve runs and does not hold for twenty
 thousand. It is corrected below, on the discrete device in its favour and on
 the integrated one against it.
 
+The paragraph below is now false in every particular except its first
+sentence, and the next section replaces it. It is kept word for word rather
+than rewritten because the reasoning that produced it is the trap: twelve
+samples of a one-in-two-thousand event look exactly like a deterministic
+effect of whatever changed between them. The withdrawal used to sit after the
+paragraph instead of in front of it, so a reader who stopped at the end of it
+had been told the wrong thing and had no reason to read on.
+
 **What is not clean is a narrow grid following other dispatches in the same
 process.** M=8, N=256, L=64 passes ten runs in ten when it is the only thing
 a process dispatches. Placed after six sixty-four channel cells it fails
@@ -229,11 +237,6 @@ seed, same cell: what changed is what ran before it. That is state surviving
 between dispatches, and the most likely home for it is the driver's handling
 of many pipelines built from one module with different specialization
 constants, which this kernel does more of than anything else in the tree.
-
-That paragraph is wrong in every particular except the first sentence, and
-the next section replaces it. It is left standing because the reasoning that
-produced it is the trap: twelve samples of a one-in-two-thousand event look
-exactly like a deterministic effect of whatever changed between them.
 
 Two things it is not. It is not a missing shared-memory barrier: adding
 `memoryBarrierShared()` at both barrier sites moved the rate from 4 in 20 to

@@ -184,11 +184,23 @@ Over the wide display, it moves the radio. That is `Source::tune`, and it is
 a different kind of operation with three consequences the fine case does not
 have.
 
-**There is no Engine surface for it.** `Source::tune` exists; `Engine` does
-not expose it, and `EngineInfo::source_center` is a snapshot taken once when
-the source was opened. The comment next to that line says it becomes stale
-the moment a retunable device arrives and that following the tune is "the
-change to make then and not now". Scrolling the wide waterfall is then.
+**The Engine surface exists and the gesture does not.** `Engine` exposes
+`set_source_center`, which tunes the front end and writes the landed centre
+back into `EngineInfo::source_center`; `Session.setSourceCenter` carries it
+and `Session.sourceCanRetune` says whether the source will take it at all, so
+a client can grey the control out rather than discover the refusal by trying.
+`ui/models/source_link.cpp` already drives all three from the frequency
+entry. What is missing is only the wheel over the wide display, which is a
+gesture rather than a surface.
+
+WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-21 it read "**There is no
+Engine surface for it.** `Source::tune` exists; `Engine` does not expose it,
+and `EngineInfo::source_center` is a snapshot taken once when the source was
+opened", and quoted an `engine.cpp` comment saying that following the tune
+was "the change to make then and not now". That change was made in 4463967,
+and the comment it quotes no longer exists to be read. Left standing it told
+anyone costing out this gesture that the engine work was still ahead of them,
+when the only thing left is the gesture itself.
 
 **Every receiver's absolute frequency changes meaning.** The grid is in
 baseband, so it survives a retune untouched. What moves is what baseband DC
@@ -197,6 +209,13 @@ terms, which is not what anybody means by tuning the radio: the receivers
 should hold their absolute frequencies and have their offsets recomputed. Any
 that fall outside the new span have to be parked and said to be parked rather
 than silently producing noise from wherever they landed.
+
+The engine does not do that for you. `Engine::set_source_center` re-places
+every receiver with the params it already held, which keeps each one's
+baseband offset and so drifts every one of them by the whole retune. That is
+the right default for an engine that is not told what the operator meant, and
+it makes recomputing the offsets this gesture's work rather than something to
+assume has happened.
 
 **A device retune is not free and not instant.** An RTL-SDR takes time to
 settle and the sample stream is discontinuous across it. A mouse wheel emits

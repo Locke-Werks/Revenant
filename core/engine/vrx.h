@@ -330,11 +330,25 @@ struct VrxParams {
     // vrx_status() is fed back to set_vrx_params().
     //
     // What that costs is a receiver that does not follow a retuned source on
-    // its own. No choice of frame for this field closes that: source_center
-    // is read once when the source is opened, Engine exposes no tune at all,
-    // and the day one arrives every receiver has to be re-placed and the ones
-    // that fall outside the new span parked and said to be parked.
-    // docs/ui-spectrum.md has the argument.
+    // its own, and the day that costs something has arrived.
+    // Engine::set_source_center moves the front end and writes the landed
+    // centre into EngineInfo::source_center, so this field's frame moves
+    // under a receiver nobody told. The engine re-places every receiver with
+    // the params it already held, which keeps its BASEBAND offset and
+    // therefore slides its absolute frequency by the whole retune. Nothing
+    // falls out of the span doing it, because the span is baseband too and
+    // the retune does not move it. Holding an absolute frequency across a
+    // retune is the client's job, and it is the client that knows whether the
+    // operator meant the receiver to follow the radio or stay where it was.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-21 it read
+    // "source_center is read once when the source is opened, Engine exposes
+    // no tune at all, and the day one arrives every receiver has to be
+    // re-placed and the ones that fall outside the new span parked and said
+    // to be parked". The tune call landed in 4463967 and
+    // core/engine/engine.h was corrected then; this was not, so a reader
+    // working out how to hold a receiver's frequency was told there was
+    // nothing here to follow. docs/ui-spectrum.md has the argument.
     dsp::Hertz center = 0;
 
     // Passband width, and a SHORTHAND rather than the request itself. The
