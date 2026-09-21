@@ -617,3 +617,225 @@ TEST_CASE("a dongle delivers signal rather than a stream of nothing",
     // the floor. A stuck ADC or a buffer that is never written gives one.
     CHECK(distinct >= 8);
 }
+
+TEST_CASE("describing every device first does not stop the dongle tuning after",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE SEQUENCE A DEVICE PICKER PRODUCES, IN ONE PROCESS, which is what
+    // separates this from every other case in this file.
+    //
+    // describe_sources() opens every device to ask it what it can do, and a
+    // client that lists before it opens therefore opens the same dongle twice
+    // in one process: once to describe it, once to stream from it. libusb state
+    // is per process, so that is a different thing from the two-process case
+    // `revenant-engine --list` followed by `revenant-engine <uri>` exercises,
+    // and it is the one the Qt picker does every time somebody opens the panel.
+    //
+    // Observed on 2026-09-21 driving the picker by hand: the dongle opened and
+    // streamed, frames flowed, and every retune failed inside the tuner with
+    // "r82xx_set_freq: failed=-9", which is LIBUSB_ERROR_PIPE on the i2c write.
+    // Three opens of the dongle were logged. "tuning reports where the tuner
+    // landed" above passes on a fresh open, so the tune path and the hardware
+    // are both fine; what this case pins is whether describing the device first
+    // is what breaks them.
+    auto described = source::describe_sources();
+    REQUIRE(described.has_value());
+
+    std::string dongle;
+    for (const source::SourceCapabilities& caps : *described) {
+        if (caps.backend == "rtlsdr" && caps.available()) {
+            dongle = caps.uri;
+            break;
+        }
+    }
+    if (dongle.empty()) {
+        SKIP("no rtlsdr backend described itself as available");
+    }
+
+    // A frequency in the URI for the reason the case above gives: librtlsdr
+    // re-tunes the handle's current frequency as a side effect of setting the
+    // rate, and an R820T asked to lock DC prints "PLL not locked".
+    auto opened = source::open_source(dongle + "?rate=2400000&freq=88M");
+    if (!opened) {
+        SKIP("the dongle could not be opened after being described: " +
+             opened.error().message);
+    }
+
+    constexpr dsp::Hertz kWanted = 100'000'000;
+    auto landed = (*opened)->tune(kWanted);
+    if (!landed) {
+        INFO(landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+
+    const dsp::Hertz offset = *landed - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset << " Hz");
+    CHECK(std::abs(offset) <= kWanted / 10'000);
+    CHECK((*opened)->center() == *landed);
+}
+
+TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE ONE ARRANGEMENT NOTHING IN THIS SUITE EVER EXERCISED, and the one
+    // every retune from a client actually takes.
+    //
+    // "tuning reports where the tuner landed" above tunes a dongle that is
+    // OPEN AND NOT STREAMING. Every other retune case in the tree is against a
+    // synthetic source or a file, both of which refuse in their own words, so
+    // the success path of Engine::set_source_center has only ever been checked
+    // where it could not run. An operator retuning from the window is always
+    // retuning a dongle mid-stream: rtlsdr_set_center_freq is a control
+    // transfer issued while rtlsdr_read_async has bulk transfers in flight.
+    //
+    // Observed on 2026-09-21 driving the Qt picker by hand against a live
+    // R820T: samples flowed and frames reached the client, and every retune
+    // failed inside the tuner with "r82xx_set_freq: failed=-9", which is
+    // LIBUSB_ERROR_PIPE on the i2c write. The stopped-dongle case passes on the
+    // same hardware minutes either side of it, so the difference is the
+    // streaming.
+    constexpr dsp::Hertz kOpenAt = 98'100'000;
+    constexpr dsp::Hertz kWanted = 95'100'000;
+
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+    REQUIRE(radio.center() == kOpenAt);
+
+    Collected collected;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    // Streaming for real before the tune, so this is a retune against
+    // transfers in flight rather than against a handle that has merely been
+    // started. Without the wait a fast machine can reach the tune before the
+    // first transfer completes, which is the arrangement that already works.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock guard(collected.lock);
+            if (collected.samples >= 300'000) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    {
+        std::scoped_lock guard(collected.lock);
+        INFO("samples before the tune: " << collected.samples);
+        REQUIRE(collected.samples >= 300'000);
+    }
+    REQUIRE(radio.running());
+
+    auto landed = radio.tune(kWanted);
+    if (!landed) {
+        INFO(landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+
+    const dsp::Hertz offset = *landed - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset << " Hz");
+    CHECK(std::abs(offset) <= kWanted / 10'000);
+    CHECK(radio.center() == *landed);
+
+    // AND THE STREAM SURVIVES IT. A tune that reports success and kills the
+    // transfer loop is worse than one that refuses: the window would show a new
+    // centre under a waterfall that has stopped.
+    std::uint64_t at_tune = 0;
+    {
+        std::scoped_lock guard(collected.lock);
+        at_tune = collected.samples;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    {
+        std::scoped_lock guard(collected.lock);
+        INFO("samples at the tune " << at_tune << ", after " << collected.samples);
+        CHECK(collected.samples > at_tune);
+    }
+
+    REQUIRE(radio.stop().has_value());
+}
+
+TEST_CASE("describing every device while one is streaming does not wedge its tuner",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE SEQUENCE THAT BROKE TUNING IN THE WINDOW, and the only one of the
+    // four candidate shapes that is not already covered above.
+    //
+    // A picker refreshes its list whenever the panel is opened, and the panel
+    // gets opened while a source is already running: that is what changing radio
+    // twice looks like. describe_sources() opens EVERY device to ask it what it
+    // can do, and docs/rpc.md is explicit about what that costs on this backend:
+    // "for the RTL-SDR backend that is rtlsdr_open, a libusb open, claim and
+    // reset." A reset issued against a dongle another handle is streaming from
+    // is the mechanism this case exists to catch.
+    //
+    // The symptom observed by hand on 2026-09-21 fits it exactly: samples kept
+    // flowing and frames kept reaching the client, so the streaming handle
+    // survived, while every retune failed inside the tuner with
+    // "r82xx_set_freq: failed=-9", LIBUSB_ERROR_PIPE on the i2c write. The
+    // stopped-dongle tune and the streaming tune both pass on this hardware, and
+    // describing before opening passes too; this is what is left.
+    constexpr dsp::Hertz kWanted = 95'100'000;
+
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+
+    Collected collected;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock guard(collected.lock);
+            if (collected.samples >= 300'000) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(radio.running());
+
+    // THE LISTING, AGAINST A DONGLE THIS PROCESS IS ALREADY STREAMING FROM.
+    // It is expected to report the dongle as unavailable, because the claim
+    // cannot succeed while this handle holds it, and that is fine: what must
+    // NOT happen is the attempt disturbing the handle that does hold it.
+    auto described = source::describe_sources();
+    REQUIRE(described.has_value());
+    for (const source::SourceCapabilities& caps : *described) {
+        if (caps.backend == "rtlsdr") {
+            INFO("the listing said: " << (caps.available() ? "available" : caps.unavailable));
+        }
+    }
+
+    // And the stream is still running, which it was before the listing.
+    CHECK(radio.running());
+
+    auto landed = radio.tune(kWanted);
+    if (!landed) {
+        INFO(landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+
+    const dsp::Hertz offset = *landed - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset << " Hz");
+    CHECK(std::abs(offset) <= kWanted / 10'000);
+
+    REQUIRE(radio.stop().has_value());
+}

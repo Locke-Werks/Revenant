@@ -33,6 +33,7 @@
 
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
+#include "core/source/registry.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/support/tone_measure.h"
@@ -1240,4 +1241,99 @@ TEST_CASE("a VHF source keeps the transform the caller chose", "[gpu][engine][m2
     CHECK(eng.info().spectrum.transform == 2048);
     CHECK(eng.info().grid.channels == engine::default_channel_count(kSourceRate));
     CHECK_FALSE(eng.info().ring.clamp_reason.find("bins across") != std::string::npos);
+}
+
+TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
+          "[gpu][engine][m2][device]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE PICKER'S EXACT PATH, minus the RPC and the window: an engine already
+    // streaming something else, a close, an open onto a live dongle, the graph
+    // running, and a retune.
+    //
+    // Observed by hand on 2026-09-21 against a live R820T. Samples flowed and
+    // frames reached the client, so the open and the stream were fine, and every
+    // retune failed inside the tuner with "r82xx_set_freq: failed=-9", which is
+    // LIBUSB_ERROR_PIPE on the i2c write. That message proves the request
+    // reached librtlsdr, so the client was not refusing locally.
+    //
+    // Four narrower shapes were written first and all four pass on this
+    // hardware, in tests/engine/test_rtlsdr_source.cpp: tuning a stopped dongle,
+    // tuning a streaming one, describing every device before opening one, and
+    // describing every device while one streams. What none of them has is the
+    // engine, the graph, and a close of a different backend first.
+    std::string dongle;
+    {
+        auto enumerated = source::enumerate_sources();
+        if (!enumerated) {
+            SKIP("sources could not be enumerated: " + enumerated.error().message);
+        }
+        for (const source::SourceDescriptor& entry : *enumerated) {
+            if (entry.backend == "rtlsdr") {
+                dongle = entry.uri;
+                break;
+            }
+        }
+    }
+    if (dongle.empty()) {
+        SKIP("no RTL-SDR is attached");
+    }
+
+    auto created = engine::Engine::create(default_config());
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    // A synthetic scene first, running, exactly as the window is when somebody
+    // opens the picker. Long enough that it cannot end on its own.
+    REQUIRE(eng.open_source(tone_uri(0, 40'000'000)).has_value());
+    std::thread first([&eng] { static_cast<void>(eng.run()); });
+    for (int i = 0; i < 500 && !eng.running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(eng.running());
+
+    REQUIRE(eng.close_source().has_value());
+    first.join();
+
+    const auto opened = eng.open_source(dongle + "?rate=2400000&freq=98.1M&gain=20");
+    if (!opened) {
+        SKIP("the dongle could not be opened after the close: " + opened.error().message);
+    }
+
+    std::thread second([&eng] { static_cast<void>(eng.run()); });
+    for (int i = 0; i < 500 && !eng.running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(eng.running());
+
+    // Streaming for real before the tune, so the retune lands against transfers
+    // in flight and a GPU graph consuming them.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline &&
+           eng.source_stats().samples_delivered < 600'000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    INFO("samples before the tune: " << eng.source_stats().samples_delivered);
+    REQUIRE(eng.source_stats().samples_delivered >= 600'000);
+
+    const engine::SourceTuning tuning = eng.source_tuning();
+    INFO("can retune " << tuning.can_retune << ", " << tuning.low << " to " << tuning.high);
+    REQUIRE(tuning.can_retune);
+
+    constexpr dsp::Hertz kWanted = 95'100'000;
+    auto landed = eng.set_source_center(kWanted);
+    INFO(test::message_of(landed));
+    REQUIRE(landed.has_value());
+
+    const dsp::Hertz offset = *landed - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset);
+    CHECK(std::abs(offset) <= kWanted / 10'000);
+
+    // EngineInfo follows the tune, which is what every axis label and every
+    // detection is derived from.
+    CHECK(eng.info().source_center == *landed);
+
+    REQUIRE(eng.stop().has_value());
+    second.join();
 }
