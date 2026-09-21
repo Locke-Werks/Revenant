@@ -692,6 +692,10 @@ void print_engine_block(const engine::Engine& eng)
     const std::uint32_t would_choose = engine::default_channel_count(info.source_rate);
     if (info.grid.channels > would_choose &&
         info.channel_spacing < engine::kWidestReceiverHz) {
+        // The block above is buffered and this is not, so it is flushed
+        // first: a warning that appears above the grid line it is about
+        // reads as being about something else.
+        std::fflush(stdout);
         std::println(
             stderr,
             "warning: a {} channel grid on a {} S/s source leaves one channel {} wide, so a "
@@ -807,6 +811,12 @@ void print_engine_block(const engine::Engine& eng)
     }
 
     print_engine_block(eng);
+
+    // stdout is block buffered when it is a pipe and stderr never is, so a
+    // warning written next would otherwise appear above the block it is
+    // about. Both of them are read together by whoever is looking at a
+    // console or a log.
+    std::fflush(stdout);
 
     // A DEMAND SOURCE WITH NO PACE AND A SOURCE THAT CANNOT KEEP UP LOOK
     // IDENTICAL FROM OUTSIDE, AND THIS IS THE ONLY PLACE THAT KNOWS WHICH
