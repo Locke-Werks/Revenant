@@ -215,6 +215,11 @@ void EngineLink::supervise()
             // second and no information.
             poll_audio_stats();
             poll_detections();
+
+            // Last, and on the probe pass only. It is a second info()
+            // call and it exists for the two measured fields alone; see
+            // poll_source_pacing.
+            poll_source_pacing(*alive);
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);
@@ -392,6 +397,13 @@ bool EngineLink::attempt_connect()
     // is the same every time; a window that never asked would have to
     // offer the control and let it refuse, which is what this replaces.
     probe_source_tuning();
+
+    // The pacing measurement belongs to the source this connection found,
+    // so the suppression state goes with the connection. Without this a
+    // new engine whose first sample happened to match the previous one's
+    // would never be published, and the window would keep showing a
+    // sentence about a source that is no longer there.
+    posted_pacing_ = {};
 
     // An engine built with no spectrum stage is the default and is what a
     // headless recording runs. Connecting to one is not a failure, so the

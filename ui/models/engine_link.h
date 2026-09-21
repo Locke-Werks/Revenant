@@ -148,6 +148,7 @@
 #include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/source_pacing.h"
 
 namespace revenant::ui {
 
@@ -588,6 +589,47 @@ class EngineLink : public QObject {
     // A CLOCK AS WELL at the top of this file.
     Q_PROPERTY(double frameRate READ frameRate NOTIFY rateChanged)
 
+    // ------------------------------------------------------------------
+    // Whether the SOURCE is keeping up, which is a different question
+    // from every counter beside it
+    // ------------------------------------------------------------------
+    //
+    // Every other number in this block describes what happened to a frame
+    // after the engine made it: dropped on the wire, not drawn by this
+    // window, decimated on request. None of them says anything about
+    // whether the capture itself is short, and on 2026-09-20 a synthetic
+    // source at 0.20x produced chopped audio that the operator spent
+    // twenty minutes looking for in the audio path, because "starving"
+    // near the volume slider is the only thing that said anything at all.
+    //
+    // realtimeFactor is samples of capture per wall second over the source
+    // rate. sourcePacedBy is the --pace setting, zero for unthrottled, and
+    // it is here because a factor of 0.5 means opposite things depending
+    // on whether anybody asked for it.
+    //
+    // POLLED, NOT CONSTANT, unlike the rest of EngineInfo. It is a
+    // measurement and it moves, so it is re-read on the probe pass once a
+    // second. models/source_pacing.h turns the pair into a verdict and a
+    // sentence, with hysteresis, because a threshold that flickers across
+    // measurement noise is worse than no line at all.
+    Q_PROPERTY(double realtimeFactor READ realtimeFactor NOTIFY pacingChanged)
+    Q_PROPERTY(double sourcePacedBy READ sourcePacedBy NOTIFY pacingChanged)
+
+    // The wire carries the measurement at all. False against an engine
+    // built before the field existed, and it is what stops a missing
+    // field reading as a source stopped dead.
+    Q_PROPERTY(bool pacingCarried READ pacingCarried NOTIFY pacingChanged)
+
+    // The sentence, empty when there is nothing to say, which is the
+    // ordinary case. A status strip that always carries a line is a
+    // status strip nobody reads.
+    Q_PROPERTY(QString pacingText READ pacingText NOTIFY pacingChanged)
+
+    // Whether that sentence is bad news. A source running at 40x is a
+    // recording being read fast and a source paced at 0.5 was asked for;
+    // neither is coloured like a shortfall.
+    Q_PROPERTY(bool sourceBehind READ sourceBehind NOTIFY pacingChanged)
+
     // The two detection knobs, which are different things and must not read
     // as one control.
     //
@@ -916,8 +958,15 @@ public:
     [[nodiscard]] double spanHighHz() const { return frequencyAtFraction(1.0); }
 
     // ------------------------------------------------------------------
-    // Tuning the front end. Implemented in ui/models/source_link.cpp.
+    // Tuning the front end, and whether it is keeping up. Both are
+    // implemented in ui/models/source_link.cpp.
     // ------------------------------------------------------------------
+
+    [[nodiscard]] double realtimeFactor() const { return pacing_.realtime_factor; }
+    [[nodiscard]] double sourcePacedBy() const { return pacing_.paced_by; }
+    [[nodiscard]] bool pacingCarried() const { return pacing_.carried; }
+    [[nodiscard]] QString pacingText() const { return pacing_text_; }
+    [[nodiscard]] bool sourceBehind() const { return pacing_is_fault(pacing_verdict_); }
 
     [[nodiscard]] double sourceCenterHz() const {
         return static_cast<double>(info_.source_center);
@@ -1272,6 +1321,11 @@ signals:
     // frequency axis that no longer applies, which is exactly the case
     // that signal exists for.
     void sourceTuningChanged();
+
+    // The pacing measurement moved, or its verdict did. Emitted only on a
+    // change, because it is polled once a second for the life of the
+    // window and the answer is the same almost every time.
+    void pacingChanged();
 
     // The audio subscription changed: it started, it stopped, the engine
     // refused it, the receiver went away, or the engine's counters moved.
@@ -1632,8 +1686,20 @@ private:
     // moves it while the connection stays up.
     void apply_source_tune();
 
+    // Supervisor thread, probe pass only. Re-reads EngineInfo for the
+    // pacing pair and hands it over when it has moved.
+    //
+    // ONE EXTRA ROUND TRIP A SECOND, AND IT BUYS THE ONE DIAGNOSIS NOBODY
+    // COULD MAKE. Everything else in EngineInfo is fixed for the life of a
+    // connection, so this call exists only for the two measured fields. It
+    // is on the probe pass and not the detection pass for the reason
+    // poll_audio_stats is: nothing acts on it and a status line does not
+    // need four samples a second.
+    void poll_source_pacing(bool engine_running);
+
     // Qt thread, queued from the supervisor.
     void adopt_source_tuning();
+    void adopt_pacing();
 
     // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
     // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per
@@ -1684,6 +1750,24 @@ private:
     // a quarter of a second between pressing return and the radio moving
     // reads as the box not working.
     bool tune_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // The pacing measurement, handed over under source_mutex_ with the
+    // rest of what the supervisor learns about the source.
+    bool handover_has_pacing_ = false;  // guarded by source_mutex_
+    PacingSample handover_pacing_;      // guarded by source_mutex_
+
+    // Supervisor thread only: the last sample handed over, so the
+    // comparison that suppresses a repeated post reads nothing the Qt
+    // thread owns.
+    PacingSample posted_pacing_;
+
+    // Qt thread only. The verdict is held across passes because
+    // classify_pacing takes its own previous answer: that is where the
+    // hysteresis lives, and holding it here is what keeps the rule itself
+    // a pure function a test can drive.
+    PacingSample pacing_;
+    PacingVerdict pacing_verdict_ = PacingVerdict::NotCarried;
+    QString pacing_text_;
 
     // ------------------------------------------------------------------
     // Audio. Implemented in ui/models/audio_link.cpp.

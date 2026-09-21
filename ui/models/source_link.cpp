@@ -189,6 +189,80 @@ void EngineLink::apply_source_tune()
         this, [this] { adopt_source_tuning(); }, Qt::QueuedConnection);
 }
 
+void EngineLink::poll_source_pacing(bool engine_running)
+{
+    // A plain `if` and not `if constexpr`: both arms compile either way,
+    // and the constant is what stops a round trip a second being spent on
+    // an engine whose wire cannot answer. See models/wire_seam.h.
+    if (client_ == nullptr || !kSeamHasPacing) {
+        return;
+    }
+
+    auto info = client_->info();
+    if (!info) {
+        // NOT REPORTED HERE. An info call that fails on a live connection
+        // is the connection going, and the probe above this is what finds
+        // that out and says so. A second sentence about the same event is
+        // worse than one.
+        return;
+    }
+
+    PacingSample sample;
+    sample.carried = true;
+    sample.realtime_factor = seam_realtime_factor(*info).value_or(0.0);
+    sample.paced_by = seam_source_paced_by(*info);
+    // Passed in rather than read off the handover. The running flag lives
+    // under state_mutex_ and belongs to the connection hand-off; the one
+    // caller has just been told the answer by the same probe that decided
+    // this connection is alive, so taking it as an argument is both the
+    // fresher value and one lock fewer.
+    sample.engine_running = engine_running;
+
+    // Posted only on a change. It is asked once a second for the life of
+    // the window and the answer is the same almost every time, so a
+    // metacall per pass would wake the GUI thread every second to tell it
+    // nothing. The comparison is exact rather than within a tolerance:
+    // smoothing belongs in the verdict, which has its own hysteresis, and
+    // doing it twice would make the rule the test drives not the rule the
+    // window runs.
+    if (sample.realtime_factor == posted_pacing_.realtime_factor &&
+        sample.paced_by == posted_pacing_.paced_by &&
+        sample.carried == posted_pacing_.carried &&
+        sample.engine_running == posted_pacing_.engine_running) {
+        return;
+    }
+    posted_pacing_ = sample;
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        handover_has_pacing_ = true;
+        handover_pacing_ = sample;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_pacing(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_pacing()
+{
+    PacingSample sample;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        if (!handover_has_pacing_) {
+            return;
+        }
+        handover_has_pacing_ = false;
+        sample = handover_pacing_;
+    }
+
+    // The previous verdict goes in, which is where the hysteresis lives.
+    // Held on this thread rather than in the rule, so the rule stays a
+    // pure function and a test can drive a whole trajectory through it.
+    pacing_ = sample;
+    pacing_verdict_ = classify_pacing(sample, pacing_verdict_);
+    pacing_text_ = QString::fromStdString(pacing_sentence(pacing_verdict_, sample));
+
+    emit pacingChanged();
+}
+
 void EngineLink::adopt_source_tuning()
 {
     bool geometry_moved = false;

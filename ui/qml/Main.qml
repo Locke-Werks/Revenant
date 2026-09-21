@@ -243,6 +243,52 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // Whether the source is keeping up
+        // ------------------------------------------------------------------
+        //
+        // HERE AND NOT BESIDE THE VOLUME SLIDER. On 2026-09-20 a synthetic
+        // source at 0.20x produced chopped audio and the only thing on
+        // screen that said anything was "starving" next to the audio
+        // counters, which sent the operator into the audio path for twenty
+        // minutes. Starving means the audio is LATE, which points at this
+        // machine; a source that is behind is short at the far end and
+        // every stage downstream of it is doing the right thing with what
+        // it was given.
+        //
+        // So the line sits under the frame rate, which is the other
+        // measurement of how fast the engine is producing, and the two
+        // read together: rows/s is what is reaching the display and this
+        // is whether the radio is supplying it.
+        //
+        // The wording and the threshold are in models/source_pacing.h with
+        // their own cases in ui/tests. This file chooses the colour and
+        // nothing else, which is the rule the whole window follows.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.connected && engineLink.pacingText.length > 0
+
+            Label {
+                Layout.alignment: Qt.AlignTop
+                text: engineLink.sourceBehind ? "source:" : "pace:"
+                color: engineLink.sourceBehind ? window.inkBad : window.inkDim
+                font.pixelSize: 12
+                font.bold: engineLink.sourceBehind
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: engineLink.pacingText
+                color: engineLink.sourceBehind ? window.ink : window.inkDim
+                font.pixelSize: 12
+                font.bold: engineLink.sourceBehind
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Tuning the front end
         // ------------------------------------------------------------------
         //

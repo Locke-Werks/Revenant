@@ -318,6 +318,11 @@ endif()
 # It covers parse_frequency, which decides what unit a bare number typed
 # into the frequency box means and therefore where the radio goes.
 #
+# It covers classify_pacing, which decides when the window says the source
+# is behind. The rule and not the label is the part that can be wrong: a
+# threshold that fires on measurement noise trains an operator to ignore
+# the line, and one that never fires is the state it replaces.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -358,6 +363,7 @@ if(REVENANT_UI_TESTS)
             tests/test_audio_ring.cpp
             tests/test_history_resize.cpp
             tests/test_frequency_entry.cpp
+            tests/test_source_pacing.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE
