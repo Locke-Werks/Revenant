@@ -884,10 +884,29 @@ void SpectrumItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGe
 {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
     if (newGeometry.width() != oldGeometry.width()) {
-        // The reduction changes with the column count, so the headroom does
-        // too. Recomputed against the last frame's bin count, which is the
-        // one the next frame will almost certainly have.
-        resizeColumns(deviceColumns(), reduced_bins_);
+        // THE TRACE IS NOT BLANKED HERE, WHICH IS A REVERSAL.
+        //
+        // This called resizeColumns, and resizeColumns assigns every column
+        // to kSpectrumFloorDb. Against a running engine the next frame
+        // overwrote them tens of milliseconds later and nobody saw it.
+        // Against a stopped engine, a disconnected one or a build with no
+        // spectrum stage there is no next frame, so dragging the window
+        // wider left a flat line at the floor under honest floor and
+        // ceiling labels. That reads as an empty band, which is a
+        // measurement, rather than as no measurement.
+        //
+        // The old samples are kept and stretched across the new width
+        // instead, which is what setTrace does with any column count: they
+        // are the last thing the engine said and they are still true, only
+        // their horizontal resolution is stale, and the next frame fixes
+        // that. render/passband_item.cpp's geometryChange has always left
+        // its columns alone for the same reason.
+        //
+        // The headroom does have to move, because it is a property of the
+        // reduction and the reduction is bins per COLUMN. Recomputed
+        // against the last frame's bin count, which is the one the next
+        // frame will almost certainly have.
+        recomputeHeadroom(deviceColumns());
     }
     if (newGeometry.size() != oldGeometry.size()) {
         rebuildDetections();
@@ -907,8 +926,14 @@ void SpectrumItem::resizeColumns(int columns, std::size_t bins)
     const std::size_t wanted = static_cast<std::size_t>(std::max(columns, 1));
     columns_.assign(wanted, kSpectrumFloorDb);
     reduced_bins_ = bins;
+    recomputeHeadroom(columns);
+}
 
-    const std::size_t bins_per_column = bins == 0 ? 1 : std::max<std::size_t>(1, bins / wanted);
+void SpectrumItem::recomputeHeadroom(int columns)
+{
+    const std::size_t wanted = static_cast<std::size_t>(std::max(columns, 1));
+    const std::size_t bins_per_column =
+        reduced_bins_ == 0 ? 1 : std::max<std::size_t>(1, reduced_bins_ / wanted);
     headroom_db_ = peak_reduction_headroom_db(bins_per_column);
     emit endsChanged();
 }

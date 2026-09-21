@@ -502,10 +502,17 @@ private:
     // picture.
     [[nodiscard]] int deviceColumns() const;
 
-    // Recomputes the reduction headroom for the current column count. The
-    // correction is a function of how many bins one column covers, so it
-    // changes when the item is resized and not when a frame arrives.
+    // Reallocates the reduced trace at this column count, against a frame
+    // of this many bins, and throws away whatever was in it. Only a frame
+    // calls this: it has the samples to refill what it just emptied.
     void resizeColumns(int columns, std::size_t bins);
+
+    // The reduction headroom alone, against whatever bin count the last
+    // frame had. The correction is a function of how many bins one column
+    // covers, so a resize moves it with no frame behind it, and this is the
+    // half of resizeColumns a resize is entitled to do. See the reversal
+    // recorded in geometryChange for why the other half is not.
+    void recomputeHeadroom(int columns);
 
     EngineLink* link_ = nullptr;
     std::vector<float> columns_;
