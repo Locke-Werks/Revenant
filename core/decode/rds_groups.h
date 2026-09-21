@@ -227,6 +227,31 @@ struct BurstCorrection {
 // and a weight-5 codeword and will be "corrected" into the wrong block. That
 // is inherent in the code, not in this choice, and it is the reason the
 // default is 2 rather than 5.
+//
+// HOW MUCH IT DOES NOT ABOLISH, measured rather than cited. The paragraph
+// above stood for months with a textbook behind it and no figure for this
+// decoder, because nothing in the tree ran at a block error rate a radio
+// would produce. tests/decode/test_rds_groups.cpp does now, on the two-state
+// burst channel calibrated to the 2026-09-20 capture's 12.7 percent. 1280
+// groups, one unchanged channel, the span the only thing that differs:
+//
+//   span  blocks dropped  corrected  accepted with the wrong contents
+//      0             819          0     2 of 4297   (a zero syndrome)
+//      1             742         78    15 of 4374
+//      2             698        123    33 of 4418
+//      5             441        388   227 of 4675
+//
+// So span 5 rescues 378 blocks the default loses and rewrites 194 more into
+// something else, and that is the trade the default is taking a side on. It
+// is not a small effect at either end: over 112 seconds of a station whose
+// name never changed, span 2 finished with KKFM-FM on the display as
+// "-FFM-FM" and span 5 also corrupted the RadioText.
+//
+// The floor at span 0 is the code and not the corrector. An error pattern
+// that is itself a codeword has a zero syndrome and passes uncorrected, one
+// random 26-bit pattern in 1024 is one, and 819 blocks were destroyed. No
+// setting here reaches those, which is why StationState::ps_corrected marks
+// what this can be blamed for and says nothing about what it cannot.
 inline constexpr std::uint8_t kMaxCorrectableBurstSpan = 5;
 inline constexpr std::uint8_t kDefaultCorrectableBurstSpan = 2;
 
@@ -538,6 +563,27 @@ struct StationState {
     std::array<char, 8> ps{' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
     std::uint8_t ps_received = 0;
 
+    // WHICH OF THOSE SEGMENTS CAME OUT OF A BLOCK THE CORRECTOR REWROTE, one
+    // bit per segment, and the only thing in this struct that says a
+    // character might not be the station's.
+    //
+    // kDefaultCorrectableBurstSpan explains why correction is restricted and
+    // records that the restriction reduces miscorrection without abolishing
+    // it. What it could not say is what that costs at the display, because
+    // nothing measured it until tests/decode/test_rds_groups.cpp ran the
+    // decoder at the block error rate a real station gave it. At the
+    // capture's 12.7 percent, over 112 seconds of a station whose name never
+    // changed, the shipped default finished showing KKFM-FM as "-FFM-FM":
+    // eight characters that read exactly like a station name and are not
+    // one.
+    //
+    // A cleanly received segment clears its bit and a corrected one sets it,
+    // so this is the latest reception's answer rather than a stain that
+    // never comes off. A consumer can render a set bit differently, or hold
+    // the segment until it arrives clean. One that ignores it is exactly
+    // where this decoder was before.
+    std::uint8_t ps_corrected = 0;
+
     // RadioText, 64 characters over 16 four-character segments in type 2A or
     // 32 characters over 16 two-character segments in type 2B. rt_length is
     // the position of the 0x0D terminator when one has arrived, or the highest
@@ -551,6 +597,13 @@ struct StationState {
     // survives a terminator arriving in front of it.
     std::array<char, 64> rt{};
     std::uint32_t rt_received = 0;  // one bit per segment address 0..15
+
+    // The same question for RadioText, one bit per segment address, set when
+    // any block that wrote the segment had been corrected. See ps_corrected.
+    // A 2A segment is written by two blocks and either of them rewriting the
+    // segment is enough to set the bit, because the segment is what a reader
+    // renders and it cannot render half of one.
+    std::uint32_t rt_corrected = 0;
     std::size_t rt_length = 0;
     std::size_t rt_terminator = kNoRtTerminator;
     std::size_t rt_high_water = 0;

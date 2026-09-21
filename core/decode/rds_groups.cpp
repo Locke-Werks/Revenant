@@ -1212,6 +1212,15 @@ void RdsDecoder::apply_type0(const Group& group) {
         state_.ps[address * 2] = high_char(b4);
         state_.ps[address * 2 + 1] = low_char(b4);
         state_.ps_received = static_cast<std::uint8_t>(state_.ps_received | (1u << address));
+        // Assigned rather than accumulated, so a clean reception of the same
+        // segment clears the doubt the corrected one raised. See
+        // StationState::ps_corrected.
+        if (group.blocks[3].corrected) {
+            state_.ps_corrected = static_cast<std::uint8_t>(state_.ps_corrected | (1u << address));
+        } else {
+            state_.ps_corrected =
+                static_cast<std::uint8_t>(state_.ps_corrected & ~(1u << address));
+        }
     }
 }
 
@@ -1282,6 +1291,7 @@ void RdsDecoder::apply_type2(const Group& group) {
     if (changed) {
         state_.rt.fill('\0');
         state_.rt_received = 0;
+        state_.rt_corrected = 0;
         state_.rt_length = 0;
         state_.rt_terminator = kNoRtTerminator;
         state_.rt_high_water = 0;
@@ -1302,11 +1312,13 @@ void RdsDecoder::apply_type2(const Group& group) {
     };
 
     bool segment_complete = false;
+    bool segment_corrected = false;
     if (group.version_b) {
         if (group.blocks[3].valid) {
             put(base, high_char(group.blocks[3].value));
             put(base + 1, low_char(group.blocks[3].value));
             segment_complete = true;
+            segment_corrected = group.blocks[3].corrected;
         }
     } else {
         if (group.blocks[2].valid) {
@@ -1318,10 +1330,26 @@ void RdsDecoder::apply_type2(const Group& group) {
             put(base + 3, low_char(group.blocks[3].value));
         }
         segment_complete = group.blocks[2].valid && group.blocks[3].valid;
+        segment_corrected = (group.blocks[2].valid && group.blocks[2].corrected) ||
+                            (group.blocks[3].valid && group.blocks[3].corrected);
     }
 
     if (segment_complete) {
         state_.rt_received |= 1u << address;
+    }
+
+    // The mark is set on any write and cleared only on a complete clean one,
+    // and the asymmetry is the whole of it. put() writes whatever blocks
+    // arrived, so a 2A group whose block 3 was corrected and whose block 4
+    // was dropped puts two rewritten characters into a segment that
+    // rt_received already marks as received from an earlier rotation. Tying
+    // the mark to segment_complete would leave those two characters shown as
+    // clean. Clearing needs the whole segment rewritten from good blocks,
+    // because half a clean segment says nothing about the other half.
+    if (segment_corrected) {
+        state_.rt_corrected |= 1u << address;
+    } else if (segment_complete) {
+        state_.rt_corrected &= ~(1u << address);
     }
 
     // THE TERMINATOR BELONGS TO THE MESSAGE, NOT TO THE GROUP.

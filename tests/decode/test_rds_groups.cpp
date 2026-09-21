@@ -1232,6 +1232,21 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
         // message and not only at the end, because a wrong character a later
         // rotation repairs was still shown.
         std::size_t wrong_char_sightings = 0;
+
+        // Of those, the ones the decoder had marked as coming out of a
+        // corrected segment and the ones it had not. The second is the
+        // number that matters: a wrong character shown with nothing beside
+        // it saying so.
+        std::size_t wrong_marked = 0;
+        std::size_t wrong_unmarked = 0;
+
+        // Characters of a received segment that rt_length puts past the end
+        // of the message. A mis-corrected block can write a 0x0D, which
+        // truncates RadioText at that point, and everything behind it is
+        // then ABSENT rather than wrong. Counted apart from the wrong ones
+        // because "right or absent" is the promise and this is the absent
+        // half of it.
+        std::size_t truncated_away = 0;
         std::size_t audits = 0;
         int cycles_to_complete = -1;
         bool complete = false;
@@ -1289,14 +1304,24 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
         const auto audit = [&]() {
             ++row.audits;
             const auto& state = decoder.state();
+            const auto note = [&row](bool marked) {
+                ++row.wrong_char_sightings;
+                if (marked) {
+                    ++row.wrong_marked;
+                } else {
+                    ++row.wrong_unmarked;
+                }
+            };
+
             const std::string_view shown_ps = state.ps_text();
             for (std::size_t segment = 0; segment < 4; ++segment) {
                 if ((state.ps_received & (1u << segment)) == 0) {
                     continue;
                 }
+                const bool marked = (state.ps_corrected & (1u << segment)) != 0;
                 for (std::size_t c = segment * 2; c < segment * 2 + 2; ++c) {
                     if (shown_ps[c] != ps[c]) {
-                        ++row.wrong_char_sightings;
+                        note(marked);
                     }
                 }
             }
@@ -1305,9 +1330,12 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
                 if ((state.rt_received & (1u << segment)) == 0) {
                     continue;
                 }
+                const bool marked = (state.rt_corrected & (1u << segment)) != 0;
                 for (std::size_t c = segment * 4; c < segment * 4 + 4; ++c) {
-                    if (c >= shown_rt.size() || shown_rt[c] != rt[c]) {
-                        ++row.wrong_char_sightings;
+                    if (c >= shown_rt.size()) {
+                        ++row.truncated_away;
+                    } else if (shown_rt[c] != rt[c]) {
+                        note(marked);
                     }
                 }
             }
@@ -1363,13 +1391,14 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
                  "2026-09-20 capture's 12.7% dropped and 5 resyncs",
                  2 * 16 * kCycles);
     std::println("  span  BLER   dropped  corrected   accepted wrong (of them corrected)  "
-                 "wrong chars shown  complete  final text");
+                 "wrong chars shown (marked/not)  complete  final text");
     for (const Row& row : rows) {
         std::println("  {:>4}  {:4.1f}%  {:7}  {:9}   {:>5} of {:<6} ({:>4})               "
-                     "{:>6} in {:<4}  cycle {:<3}  {}",
+                     "{:>6} in {:<4} ({}/{}), {} truncated  cycle {:<3}  {}",
                      row.span, 100.0 * row.block_error_rate, row.dropped, row.corrected,
                      row.accepted_wrong, row.compared, row.accepted_wrong_corrected,
-                     row.wrong_char_sightings, row.audits, row.cycles_to_complete,
+                     row.wrong_char_sightings, row.audits, row.wrong_marked, row.wrong_unmarked,
+                     row.truncated_away, row.cycles_to_complete,
                      (row.final_rt_right && row.final_ps_right) ? "exact" : "WRONG");
     }
     for (const Row& row : rows) {
@@ -1446,6 +1475,124 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
     // below the widest span's, so widening the default without saying so
     // fails here.
     CHECK(shipped.accepted_wrong < widest.accepted_wrong / 2);
+
+    // AND THE WRONG CHARACTERS ARE MARKED, which is the part an operator can
+    // act on. ps_corrected and rt_corrected say which segments came out of a
+    // block the corrector rewrote, so a wrong character shown with its
+    // segment marked is a wrong character the decoder admitted to.
+    //
+    // Not all of them, and the exception is the code rather than the
+    // marking: a block whose error pattern is itself a codeword passes with
+    // a zero syndrome, is never corrected, and is marked clean because by
+    // every test the decoder can apply it IS clean. That is the span 0 row's
+    // whole content, and it bounds what the marking cannot reach.
+    CHECK(off.wrong_marked == 0);
+    CHECK(shipped.wrong_marked > 0);
+    CHECK(widest.wrong_marked > shipped.wrong_marked);
+    CHECK(shipped.wrong_unmarked <= off.wrong_char_sightings);
+    CHECK(widest.wrong_unmarked <= off.wrong_char_sightings);
+}
+
+TEST_CASE("a repaired segment is marked and a clean one unmarks it", "[rds]") {
+    // The mechanics of the marking the case above measures, at one bit
+    // rather than at a channel, because the sweep would still pass if the
+    // bits were sticky and it would still pass if they were set on the wrong
+    // segment. Both of those are the difference between a mark an operator
+    // can act on and a mark that is permanently on.
+    //
+    // One wrong bit is a burst of span 1, inside the shipped default, so the
+    // corrector repairs it and the block is accepted with the right contents
+    // and the corrected flag set. Correction does not run during
+    // acquisition, hence the primer.
+    const std::string ps = "KKFM-FM ";
+
+    const auto ps_group = [&](std::uint8_t address) {
+        return GroupWords{0x2AF6, type0_block2(10, true, false, true, false, address), 0xE0CD,
+                          chars_to_word(ps[address * 2], ps[address * 2 + 1]), false};
+    };
+
+    SECTION("programme service") {
+        RdsDecoder decoder;
+        prime(decoder);
+
+        auto blocks = encode_group(ps_group(1));
+        blocks[3] ^= 1u << 19;  // inside the sixteen information bits
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+        REQUIRE(decoder.blocks_corrected() == 1);
+        CHECK(decoder.state().ps_received == 0x02);
+        CHECK(decoder.state().ps_corrected == 0x02);
+        CHECK(decoder.state().ps_text() == "  FM    ");
+
+        // A different segment arriving clean must not clear the doubt about
+        // the one that was repaired.
+        feed_group(decoder, ps_group(0));
+        CHECK(decoder.state().ps_received == 0x03);
+        CHECK(decoder.state().ps_corrected == 0x02);
+
+        // The same segment arriving clean must.
+        feed_group(decoder, ps_group(1));
+        CHECK(decoder.state().ps_corrected == 0x00);
+        CHECK(decoder.state().ps_text() == "KKFM    ");
+    }
+
+    SECTION("RadioText, where either block of a 2A segment is enough") {
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const auto rt_group = [](std::uint8_t address, const char* four) {
+            const auto b2 = static_cast<std::uint16_t>((2u << 12) | 0x0400u | (10u << 5) |
+                                                       address);
+            return GroupWords{0x2AF6, b2, chars_to_word(four[0], four[1]),
+                              chars_to_word(four[2], four[3]), false};
+        };
+
+        // Block 3 of the group, which is the first two characters of the
+        // segment. The segment is what a reader renders, so the whole
+        // segment is marked.
+        auto blocks = encode_group(rt_group(0, "LIVE"));
+        blocks[2] ^= 1u << 21;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+        REQUIRE(decoder.blocks_corrected() == 1);
+        CHECK(decoder.state().rt_received == 0x0001);
+        CHECK(decoder.state().rt_corrected == 0x0001);
+
+        feed_group(decoder, rt_group(1, " NOW"));
+        CHECK(decoder.state().rt_received == 0x0003);
+        CHECK(decoder.state().rt_corrected == 0x0001);
+
+        feed_group(decoder, rt_group(0, "LIVE"));
+        CHECK(decoder.state().rt_corrected == 0x0000);
+        CHECK(decoder.state().rt_text() == "LIVE NOW");
+    }
+
+    SECTION("a new message clears the marks with the buffer") {
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const auto rt_group = [](bool ab, std::uint8_t address, const char* four) {
+            const auto b2 = static_cast<std::uint16_t>((2u << 12) | (ab ? 0x0010u : 0x0000u) |
+                                                       address);
+            return GroupWords{0x2AF6, b2, chars_to_word(four[0], four[1]),
+                              chars_to_word(four[2], four[3]), false};
+        };
+
+        auto blocks = encode_group(rt_group(false, 0, "OLD "));
+        blocks[3] ^= 1u << 16;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+        REQUIRE(decoder.state().rt_corrected == 0x0001);
+
+        // An A/B toggle starts a new message, and a mark that survived it
+        // would be a mark about characters that are no longer there.
+        feed_group(decoder, rt_group(true, 1, "NEW "));
+        CHECK(decoder.state().rt_received == 0x0002);
+        CHECK(decoder.state().rt_corrected == 0x0000);
+    }
 }
 
 // ---------------------------------------------------------------------------
