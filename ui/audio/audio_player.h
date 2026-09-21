@@ -434,13 +434,19 @@ private:
 
     // The mismatch, as tick() tracks it across passes. moved_pulls_ is the
     // pull thread's count as of the last pass, so a difference means the
-    // sink wrote silence during it; mismatch_ticks_ is how many passes
-    // running that has been true, which is what separates the ordinary
-    // reopen from a sink that is stuck; shown_mismatch_ is what source()
-    // reports. All three are reset by close_sink, because a new pull
+    // sink wrote silence during it; shown_mismatch_ is what source()
+    // reports and, read at the top of the next pass, is also what says the
+    // mismatch has now lasted two passes and is a fault rather than a
+    // reopen in progress. Both are reset by close_sink, because a new pull
     // starts its count at zero.
+    //
+    // There was an int mismatch_ticks_ here counting consecutive passes
+    // towards a threshold of ten. It could never pass one: close_sink()
+    // zeroed it, open_sink() begins with close_sink(), and the reopen runs
+    // on the same condition that produces the mismatch. See the block in
+    // tick() for why the replacement is a transition and not a bigger
+    // threshold.
     std::uint64_t moved_pulls_ = 0;
-    int mismatch_ticks_ = 0;
     bool shown_mismatch_ = false;
 };
 

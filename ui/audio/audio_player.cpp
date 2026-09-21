@@ -21,19 +21,6 @@ constexpr int kStatusTickMs = 50;
 constexpr int kSinkDepthDivisor = 4;
 constexpr int kMinSinkMillis = 20;
 
-// How many consecutive ticks of format mismatch stop being a reopen in
-// progress and start being a fault. One tick is the ordinary cost of a
-// receiver changing rate: the ring re-establishes, the next tick reopens,
-// and the sink writes silence for the 50 ms in between.
-//
-// Ten of them is half a second in which every reopen this object made was
-// already out of date by the time the card pulled. Two things reach that:
-// a reopen that is not happening, and a receiver whose shape is changing
-// faster than a sink can be opened for it. Both are half a second of
-// silence with a healthy wire behind it, which is the state an operator
-// cannot tell from a quiet band without being told.
-constexpr int kMismatchFaultTicks = 10;
-
 [[nodiscard]] int millis_for(std::size_t frames, std::uint32_t rate)
 {
     if (rate == 0) {
@@ -108,7 +95,8 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
         // silence reaching the card, and from out here it is silence
         // reaching the card BECAUSE THIS SINK IS THE WRONG SHAPE. tick()
         // reads the count, says which one it is on the status line, and
-        // raises a fault if it goes on. See kMismatchFaultTicks.
+        // raises a fault when it is still true on the following pass. See
+        // the mismatch block in tick().
         format_moved_pulls_.fetch_add(1, std::memory_order_relaxed);
         return frames * frame_bytes;
     }
@@ -497,7 +485,6 @@ void AudioPlayer::close_sink()
     // BACKWARDS, which is a difference, which is a mismatch reported on a
     // sink that has only just opened at the right format.
     moved_pulls_ = 0;
-    mismatch_ticks_ = 0;
     shown_mismatch_ = false;
     format_fault_.clear();
 
@@ -677,15 +664,44 @@ void AudioPlayer::tick()
 
     // THE MISMATCH, SAID IN WORDS RATHER THAN LEFT AS SILENCE.
     //
-    // mismatch_ticks_ is the whole of the distinction between the ordinary
-    // case and the fault. A receiver changing rate costs exactly one tick
-    // of this, because the reopen above ends it; the status line says so
-    // for that 50 ms and then stops. Running for kMismatchFaultTicks is a
-    // silent sink with a healthy wire behind it, which is the state this
-    // whole change exists to stop being unreadable.
-    mismatch_ticks_ = mismatch ? mismatch_ticks_ + 1 : 0;
-
-    if (mismatch_ticks_ >= kMismatchFaultTicks && pull_ != nullptr) {
+    // RAISED ON THE SECOND CONSECUTIVE PASS, WHICH IS A REPLACEMENT FOR A
+    // TICK COUNTER THAT COULD NOT FIRE.
+    //
+    // What this used to do: mismatch_ticks_ counted passes and the fault
+    // needed ten of them, half a second. It never reached two. close_sink()
+    // zeroes mismatch_ticks_, open_sink() begins with close_sink(), and the
+    // reopen branch above runs on exactly the condition that produces a
+    // mismatch, so every pass that counted one also reset the count. The
+    // sentence below was unreachable for the whole life of the feature, and
+    // the constant behind it read as a tuned threshold.
+    //
+    // The fix is not a bigger number. It is that a count accumulated across
+    // ticks is the wrong shape when the event being counted destroys the
+    // counter: the fault belongs on the TRANSITION into the state and is
+    // cleared explicitly on the way out.
+    //
+    // WHY TWO PASSES AND NOT ONE. One pass of mismatch is the ordinary cost
+    // of a receiver changing rate, and the reopen on that same pass ends
+    // it, so the next pass reads the fresh RingSource's count against a
+    // moved_pulls_ that close_sink zeroed and finds no mismatch. source()
+    // says "format mismatch" for that 50 ms and nothing else needs saying.
+    // Two passes running means the reopen either did not happen or did not
+    // stick, which is 100 ms of silence with a healthy wire behind it and
+    // is the state an operator cannot tell from a quiet band.
+    //
+    // Both of the ways in are still caught. A sink that is not being
+    // reopened keeps the same pull_ and its count keeps climbing. A
+    // receiver whose shape changes faster than a sink can be opened for it
+    // gets a fresh pull_ each pass and that one starts reporting moved
+    // pulls before the next tick.
+    //
+    // shown_mismatch_ holds the previous pass's answer and is assigned at
+    // the bottom of this function, so reading it here reads the pass
+    // before. close_sink() sets it false, which cannot matter from inside
+    // tick(): the assignment below overwrites it either way.
+    if (!mismatch) {
+        format_fault_.clear();
+    } else if (shown_mismatch_ && pull_ != nullptr) {
         // NO DURATION AND NO REMEDY IN THE SENTENCE. A tick count in it
         // would rewrite the string twenty times a second, which is the
         // flicker the reopen branch above refuses for the same reason, and
@@ -702,8 +718,6 @@ void AudioPlayer::tick()
                 .arg(open_at.channel_count)
                 .arg(format.sample_rate)
                 .arg(format.channel_count);
-    } else if (!mismatch) {
-        format_fault_.clear();
     }
 
     const RingCounts counts = ring_state.counts;
