@@ -206,6 +206,13 @@ on the discrete one**. That claim is withdrawn. It had been used to justify
 pinning the spectrum tests to an eight-channel grid, which is how a kernel
 went a day without any test dispatching the configuration the engine runs.
 
+The withdrawal was recorded here and in `tests/reference/test_spectrum.cpp`
+on the day and not in `tests/reference/gpu_fixture.h`, which every GPU case
+in the tree includes and which went on asserting the dead figure, with
+`gpu_fixture.cpp` reusing it to size a probe. Both were corrected on
+2026-09-20. A withdrawal filed where it was discovered and not where it is
+read is not a withdrawal.
+
 **The shipped configuration is clean.** Sixty-four channels at every
 workgroup width the graph can pick, including the 256 it actually dispatches,
 is exact on every run on both devices.
@@ -328,7 +335,12 @@ runs under the same driver; it has no shared-memory transform.
 
 **CI is still not affected, for the reason already given.** One ctest entry
 per Catch2 case means a handful of spectrum dispatches per process, and a
-one-in-1,900 event needs thousands. The gate in `gpu_fixture.cpp` stays.
+one-in-1,900 event needs thousands. The gate in `gpu_fixture.cpp` stays, and
+its name does not say what it is, so: the verdict is a device-type test,
+discrete or not. The probe dispatches above it are a backstop against a
+grossly broken driver. Two attempts at a
+probe that could actually see this event have failed, and the sample size one
+would need is seconds of wall clock in every test process on every device.
 
 One thing this does not explain, and it is the open end. While the spectrum
 auto-scaling was being checked on the integrated device, `revenant-cli

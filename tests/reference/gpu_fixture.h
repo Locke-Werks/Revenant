@@ -38,46 +38,91 @@ namespace revenant::test {
 // Empty when a device is present. Otherwise the driver's own message.
 [[nodiscard]] const std::string& gpu_unavailable_reason();
 
+// Empty unless the environment asked for a device it cannot have.
+//
+// REVENANT_GPU_INDEX that is not a non-negative decimal integer, or an index
+// the context did not honour. core/gpu/context.cpp's index_from_environment
+// returns an optional, so "1" and "one" and "1; rm -rf" are all indis-
+// tinguishable from unset there and selection falls through to "pick the
+// best device". On this machine that is the discrete card, which is leg zero,
+// so a leg aimed at index 1 by a typo would run the discrete device twice and
+// report two green conformance runs.
+//
+// This is operator error rather than a missing device, so a case that hits it
+// FAILS whatever REVENANT_REQUIRE_GPU says. A skip here is the outcome the
+// variable exists to prevent.
+[[nodiscard]] const std::string& gpu_configuration_error();
+
 // Precondition: gpu_available(). Throws otherwise, which Catch2 reports as a
 // failed test rather than a dead process.
 [[nodiscard]] gpu::Context& shared_context();
 
-// Printed by each GPU case so a CI log says which device produced the result.
-// A conformance matrix whose logs do not identify the device is not one.
+// The device, as a line for a log or a failure message.
+//
+// Cases pass this to Catch2's INFO, which holds it back until something
+// fails, so it identifies the device on a red run and on no other. That is
+// the right behaviour for a per-case annotation and it is not a conformance
+// record: a matrix whose GREEN logs do not name the device cannot tell a leg
+// that ran on the discrete card from a leg that ran on the integrated one
+// twice, which is the failure REVENANT_GPU_INDEX exists to prevent.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "Printed by each GPU case so a CI log says
+// which device produced the result. A conformance matrix whose logs do not
+// identify the device is not one." The second sentence is right and the first
+// was not: nothing printed it unless a case failed. The unconditional line is
+// now emitted once per process by the fixture itself, on the first successful
+// device creation. See gpu_fixture.cpp.
 [[nodiscard]] std::string shared_context_description();
 
 // True when the environment demands a GPU, so its absence is a failure rather
 // than a skip. CI sets REVENANT_REQUIRE_GPU=1.
 [[nodiscard]] bool gpu_is_required();
 
-// True when this device runs a workgroup-shared-memory transform
-// reproducibly: the same kernel, the same input, the same bits, every time.
+// True when this device is one whose bit-exactness this suite will referee
+// for core/shaders/spectrum.comp.
 //
-// WHY A TEST SUITE HAS TO MEASURE THIS
+// THE PREDICATE, PLAINLY
 //
-// A bit-exact diff is a claim about a kernel. It can only be made on a device
-// that gives the same answer twice, and one of the two devices in this
-// project's conformance matrix does not. Measured on the AMD integrated part:
-// core/shaders/pfb_fft.comp, unmodified and at its shipped 64-point size, is
-// clean over twelve runs at 1, 4 and 8 workgroups and wrong in 3 of 12 runs
-// at 16, 7 of 12 at 32 and 10 of 12 at 64, with the divergence pattern moving
-// from run to run. The identity kernel copying 512 KiB through the same
-// harness is clean at every size, so it is neither the harness nor the
-// memory path; it is workgroup shared memory. The RTX 4090 is clean at every
-// size tried.
+// Device type: discrete, or not. Nothing in this call measures shared memory
+// and the name is older than the answer. There is a probe underneath it, six
+// rounds of the spectrum kernel over six dispatch shapes with each round
+// required to match the shape's own first answer, and that is a backstop
+// against a grossly broken driver rather than the gate. The fault this gate
+// exists for walks past that probe every time; see gpu_fixture.cpp for why,
+// and for the two attempts at a probe that could catch it.
 //
-// docs/fft.md predicted exactly this while measuring VkFFT on the same
-// device, and recorded one unexplained failure of the channelizer's own
-// transform there in 197 runs. This is that, reproduced on demand.
+// WHAT IS BEING GATED OUT
 //
-// So the probe below is the project's own transform, run repeatedly against
-// itself at the largest size any case here dispatches. A case that needs
-// bit-exactness skips when the probe fails, which says the device could not
-// referee rather than that the kernel is wrong, and it starts running again
-// by itself on a driver where shared memory works.
+// core/shaders/spectrum.comp disagrees with its CPU twin on the AMD
+// integrated part at about one dispatch in 1,900 when each is submitted on
+// its own, and at roughly one in nine when twenty-four share a command
+// buffer, which is what core/engine/graph.cpp does. The RTX 4090 is exact
+// over 200,000 dispatches. pfb_branch, dispatched 40,000 times in the same
+// processes on the same device, is exact. Each event is isolated: the shape
+// gives the right answer, one wrong answer, and the right answer again, with
+// nothing carried forward. docs/fft.md has the sweep, the dissection and
+// what would settle it.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, which is worth keeping because
+// gpu_fixture.cpp went on to size a probe from it: that
+// core/shaders/pfb_fft.comp on the integrated part is "clean over twelve
+// runs at 1, 4 and 8 workgroups and wrong in 3 of 12 runs at 16, 7 of 12 at
+// 32 and 10 of 12 at 64"; that an identity kernel through the same harness
+// ruled out everything but workgroup shared memory; and that this reproduced
+// on demand the VkFFT anomaly docs/fft.md recorded. None of it holds.
+// Raising tests/reference/test_pfb.cpp's kBlocks from 8 to 64, with its
+// output ring raised to match, gives 0 failures in 12 runs on the integrated
+// device and 0 in 12 on the discrete one: the channelizer is reproducible at
+// the workgroup counts it ships at. The fault is one kernel and not a
+// property of shared memory on that device, which pfb_branch's 40,000 clean
+// dispatches settle. The withdrawal was written into test_spectrum.cpp and
+// docs/fft.md at the time and not into this header, which every GPU case
+// includes, so the dead number stayed in front of every reader while the
+// correction sat in two files they had no reason to open.
 [[nodiscard]] bool shared_memory_is_reproducible();
 
-// What the probe measured, for the skip message. Empty until it has run.
+// Why the verdict went the way it did, for the skip message. Empty until the
+// call above has run.
 [[nodiscard]] const std::string& shared_memory_report();
 
 }  // namespace revenant::test
@@ -86,6 +131,9 @@ namespace revenant::test {
 // environment requires one, in which case it fails and says why.
 #define REVENANT_NEEDS_GPU()                                                            \
     do {                                                                                \
+        if (!::revenant::test::gpu_configuration_error().empty()) {                     \
+            FAIL(::revenant::test::gpu_configuration_error());                          \
+        }                                                                               \
         if (!::revenant::test::gpu_available()) {                                       \
             if (::revenant::test::gpu_is_required()) {                                  \
                 FAIL("REVENANT_REQUIRE_GPU is set but no Vulkan device could be used: " \
@@ -95,12 +143,15 @@ namespace revenant::test {
         }                                                                               \
     } while (false)
 
-// Opens every case that demands bit-exactness from a kernel holding its
-// working set in workgroup shared memory. Skips, with the measurement, on a
-// device that cannot reproduce one. Not gated on REVENANT_REQUIRE_GPU: the
-// device is present and working, it is the shared memory that is not
-// reproducible, and a hard failure there would report a driver defect as a
-// kernel regression on every run.
+// Opens every case that demands bit-exactness from core/shaders/spectrum.comp.
+// Skips, with the reason, on a device this suite does not referee that kernel
+// on. Not gated on REVENANT_REQUIRE_GPU: the device is present and working
+// and the kernel is not known to be wrong there, so a hard failure would
+// report a driver defect as a kernel regression on every run.
+//
+// The macro's name says shared memory. The predicate no longer does; see
+// shared_memory_is_reproducible above. Renaming both is a separate change
+// across the files that call it.
 #define REVENANT_NEEDS_REPRODUCIBLE_SHARED_MEMORY()                                  \
     do {                                                                             \
         if (!::revenant::test::shared_memory_is_reproducible()) {                    \
