@@ -291,7 +291,7 @@ four are cleanups applied to code already written; this one changes how a
 switch is written in the first place, and the defect it exists to catch was a
 comment in this tree claiming a guard that was not on.
 
-**The sentence that added it said "makes a new enumerator a build error
+**The sentence that added it used to say "makes a new enumerator a build error
 there", and that was the same mistake one round later.** `/w14062` sets a
 warning level, not an error; nothing but `/WX` makes any warning fatal, and
 this section had already said `/WX` is CI-only two paragraphs earlier.
@@ -303,6 +303,33 @@ on `/w14062` until a later pass the same day. This section was corrected first
 and points at that file as the authority, so for as long as that gap lasted,
 anyone checking the correction by following the pointer read the uncorrected
 copy of it. Retracted in place there too.
+
+## Retiring a claim
+
+A measurement recorded next to the code is the habit that makes this tree
+readable, and the cost is that a well-explained fact ends up explained in
+three or four files with nothing connecting them. Correcting one of them
+leaves the others asserting the old thing, in files a reader trusts and acts
+on. Nine of those were found in a single day and the fix for one of them
+introduced another.
+
+So the retraction is the thing that gets recorded. When a sentence stops being
+true, keep the old wording visible under WHAT THIS PARAGRAPH USED TO SAY, and
+in the same commit add the phrase to `docs/retired-claims.txt` with the date,
+the change that retired it, and one line on what is true instead.
+`scripts/check_retired_claims.py` then hunts every other copy of it for free,
+now and for as long as the phrase is on the list. That file carries the format
+and the two rules that decide whether a phrase is a good one.
+
+An occurrence is allowed when a retraction marker sits on its line or within
+the thirty lines above it, which is what lets a retraction quote itself. The
+markers are the words this tree already writes: "used to say", "used to mean",
+"used to read", "now false", "said the opposite". Nothing else, and in
+particular not the bare word "retracted", which turns up in prose about a
+retraction filed in another file.
+
+Quote the withdrawn sentence rather than paraphrasing it. A retraction that
+summarises what it withdrew leaves the check nothing to hunt.
 
 ## Commits
 

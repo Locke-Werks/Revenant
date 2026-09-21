@@ -56,3 +56,46 @@ endif()
 if(REVENANT_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
     add_subdirectory(tools)
 endif()
+
+# The prose ratchet: no retired claim has come back anywhere in the tree.
+#
+# It is registered here so an ordinary `ctest --preset ci` catches a stale
+# sentence before the push, but CI's guards job is the gate and runs the same
+# script on a hosted runner. That job is the authority because it answers when
+# the GPU workstation is off and because it answers in a minute; a prose check
+# that only speaks after a forty minute conformance run is one people learn to
+# route around.
+#
+# NOT A CATCH2 CASE, and the reason is in the script's own header. The short
+# version: its input is the source tree rather than the build, `git ls-files`
+# answers exactly which files that is, and a test binary would carry every
+# retired phrase in its own read-only data, making the one artifact somebody
+# might grep the one guaranteed to contain all of them.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME retired_claims
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/check_retired_claims.py"
+                --root "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(retired_claims PROPERTIES LABELS "guards" TIMEOUT 120)
+
+    # Proves the matcher still reports what it should and still allows a
+    # retraction quoting itself. A ratchet nobody has watched fail is the same
+    # defect as a stale comment: something everyone believes and nothing has
+    # checked.
+    add_test(
+        NAME retired_claims_self_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/check_retired_claims.py"
+                --self-test
+    )
+    set_tests_properties(retired_claims_self_test PROPERTIES LABELS "guards" TIMEOUT 60)
+else()
+    # Loud rather than silent. CI still runs the check, so this is a developer
+    # losing the local copy of it, not the gate going missing.
+    message(WARNING
+        "No Python 3 interpreter: the retired-claims check will not run in "
+        "ctest here. CI's guards job still runs it.")
+endif()

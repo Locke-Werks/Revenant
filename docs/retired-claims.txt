@@ -1,0 +1,175 @@
+# Claims this project has retired.
+#
+# A fact here gets stated in three or four places, because a comment that
+# records the measurement beside the code is the habit that makes this tree
+# worth reading. The cost is that correcting the fact in one place leaves the
+# other copies asserting the old thing, in files a reader trusts and acts on.
+# Nine of those were found in a single day and the fix for one of them
+# introduced another. Every numeric claim a verifier rebuilt from scratch
+# reproduced; the prose about the arithmetic was the part that lied.
+#
+# So the retraction gets recorded. scripts/check_retired_claims.py walks every
+# tracked file looking for each phrase below and fails naming the file and the
+# line. The first correction is not what this is for. The fifth copy is, three
+# months from now, pasted by somebody who read a file nobody had swept.
+#
+# WHEN YOU RETRACT SOMETHING, ADD IT HERE IN THE SAME COMMIT. The check then
+# finds every other copy for free, which is the whole return on the two minutes
+# this file costs.
+#
+#
+# FORMAT
+#
+# Records are separated by a blank line. Comment lines start with #. Within a
+# record, each line is `key: value`, and a line that starts with whitespace
+# continues the one above it.
+#
+#   phrase   The wording to hunt for. Repeat the key for variants of the same
+#            retired fact; one record per fact, not per sentence. Pick the most
+#            distinctive clause, roughly six to fifteen words. The match is
+#            case-insensitive and whitespace-normalised, so the line wrapping,
+#            the backticks and the capitals do not matter and a claim split
+#            across two comment lines is still found. Under 24 normalised
+#            characters is refused: a phrase that short matches half the tree.
+#
+#            THE PHRASE HAS TO CARRY ITS OWN SUBJECT. Seeding this file turned
+#            up "on both devices in the conformance matrix", retired in
+#            tests/engine/test_engine_passband.cpp because the spectrum kernel
+#            is refereed on one device. The same clause is true, twice, of
+#            pfb_fft in core/dsp/spectrum_reference.h and
+#            core/shaders/spectrum.comp, which are gated by nothing and do run
+#            on both. A clause with the subject left out is a claim about
+#            whatever sentence it lands in, so it was not listed. Length is not
+#            the test and the 24-character floor would not have caught it.
+#
+#            IT ALSO HAS TO BE THE WORDING THAT WAS THERE. A retraction that
+#            paraphrases what it withdrew, "thirteen, twice" in
+#            core/dsp/vrx_reference.h, leaves this check nothing to hunt for.
+#            Quote the old sentence.
+#   retired  YYYY-MM-DD, the day it stopped being true.
+#   commit   The change that made it false, where there is one. Otherwise the
+#            change that recorded the retraction.
+#   instead  One line on what is true now. This is what the failure prints, so
+#            write it for somebody who has just been stopped by it.
+#
+#
+# QUOTING A RETIRED PHRASE ON PURPOSE
+#
+# The convention here is to leave the old wording visible under WHAT THIS
+# PARAGRAPH USED TO SAY, so a retired phrase sits, deliberately, right next to
+# its own correction. That keeps working. An occurrence is allowed when a
+# retraction marker appears on its line or within the 30 lines above it, and
+# the markers are the words this tree already writes:
+#
+#   used to say     used to mean     used to read     now false
+#   said the opposite
+#
+# Nothing else. In particular the bare words "retracted" and "retraction" are
+# not markers, because they turn up in prose about a retraction that lives in
+# another file, and one of those sits 25 lines above a claim this check was
+# written to catch.
+#
+# Proximity rather than a list of allowed file-and-line pairs, for two reasons.
+# An allowlist records WHERE a phrase may appear, which is a second copy of the
+# fact this mechanism exists to stop duplicating, and it rots the first time
+# somebody inserts a line above the entry. Proximity records WHY the occurrence
+# is legitimate, and that reason travels with the text through every reflow and
+# every file move.
+#
+# It can be abused: paste a marker beside a stale claim and it goes quiet. That
+# is a deliberate lie in a diff with the words "used to say" on it, which a
+# reviewer can see. An allowlist entry is a line number nobody reads.
+#
+#
+# WHAT THIS CANNOT DO
+#
+# It catches a false statement coming back. It cannot catch a true statement
+# going missing. core/rpc/revenant.capnp described EngineInfo.sourceCenter
+# without saying it moves, which was as wrong as the copies that said it does
+# not, and there was no phrase to list. That one needs a reader.
+
+
+phrase: This repository is private today and goes public
+retired: 2026-09-20
+commit: 850b61d
+instead: The repository is public. gh repo view reports isPrivate false, and the
+    licence section reasons about the GPL obligations of a published source
+    tree, not a private one.
+
+phrase: the deepest point in the kept band is -6.0206 dB every time
+phrase: -6.0206 dB at taps_per_branch of 4, 5, 8, 12
+retired: 2026-09-20
+commit: 1127cb2
+instead: -6.0206 dB holds at 16 taps per branch and upward. Four of the eleven
+    figures in the withdrawn list do not measure it and one of them, five taps
+    per branch, is not even below it. core/dsp/spectrum_reference.h owns these
+    numbers.
+
+phrase: clean over twelve runs at 1, 4 and 8 workgroups
+retired: 2026-09-20
+commit: fdd023b
+instead: Raising test_pfb.cpp's kBlocks from 8 to 64 gives 0 failures in 12 runs
+    on each device. The fault is one kernel, not a property of workgroup shared
+    memory on the integrated part.
+
+phrase: passes ten runs in ten when it is the only thing a process dispatches
+retired: 2026-09-20
+commit: fdd023b
+instead: Every dispatch is isolated. tools/gpustress measured 240,000 dispatches
+    per device: the divergence runs from 1 ulp to 2.1e9 at about one dispatch in
+    1,900, so nothing is carried between dispatches and no magnitude is steady.
+
+phrase: there is no authentication on this interface yet
+retired: 2026-09-20
+commit: 81b7e00
+instead: Authenticator.login takes a pre-shared token before a caller holds a
+    Session at all, and ServerOptions::token empty is a create() failure rather
+    than an off switch. The loopback default is about the plaintext wire now.
+
+phrase: A remote client wanting audio needs a codec decision
+phrase: a second set_audio_sink replaces the first, so fanning audio out to subscribers
+retired: 2026-09-20
+commit: 44f460c
+instead: Audio crosses as raw float32 PCM through subscribeAudio, and
+    core/engine/engine.h carries AudioFanout and attach_audio_sink, so several
+    subscribers can hold one receiver at once.
+
+phrase: source_center is read once when the source is opened
+phrase: read once when the source was opened
+phrase: a snapshot taken once when the source was opened
+retired: 2026-09-20
+commit: 4463967
+instead: Engine::set_source_center writes what the device landed on back into
+    EngineInfo::source_center. Read it beside the frequency it is being added
+    to rather than caching it across a retune.
+
+phrase: Engine exposes no tune at all
+phrase: There is no Engine surface for it
+phrase: the change to make then and not now
+retired: 2026-09-20
+commit: 4463967
+instead: Engine::set_source_center is the surface, Session.setSourceCenter puts
+    it on the wire, and EngineInfo::source_can_retune says whether the front end
+    will take it.
+
+phrase: makes a new enumerator a build error
+retired: 2026-09-20
+commit: 9630bf1
+instead: /w14062 raises C4062 to warning level 1. Nothing makes a warning fatal
+    but /WX, which only CI sets through REVENANT_WERROR, so on a developer's
+    machine an unhandled enumerator scrolls past with the rest of the build.
+
+phrase: the failure mode is a momentary Held state, not a lost track
+retired: 2026-09-20
+commit: e607ff1
+instead: At the shipped average_seconds the old bar withheld an ordinary 8 dB
+    fade over 3 s from the fourth decision onward, so the track was lost rather
+    than briefly held. core/detect/detector.h carries both withdrawn statements.
+
+phrase: channelCount reads 1 on every engine built from this tree
+phrase: Every demodulator in core/engine/vrx_stage.cpp sets StageOutput::channels to 1
+retired: 2026-09-20
+commit: f3c0544
+instead: A WFM receiver at an ordinary audio rate decodes stereo and sets
+    StageOutput::channels to 2, so a subscriber gets an interleaved pair.
+    VrxParams::stereo is on by default and engine::resolve_stereo decides.

@@ -178,6 +178,30 @@ jobs:
           done
           echo "version parses as $version"
 
+      - name: No retired claim has come back
+        shell: bash
+        run: |
+          # A fact in this tree gets stated in three or four places, because a
+          # comment carrying the measurement beside the code is what makes the
+          # tree worth reading. Correcting it in one place leaves the others
+          # asserting the old thing. Nine of those were found in a single day
+          # and the fix for one of them introduced another, so the retraction
+          # is what gets recorded: docs/retired-claims.txt lists every phrase
+          # that has stopped being true and the check hunts each one.
+          #
+          # Here rather than only in ctest because this job answers when the
+          # GPU workstation is off and answers before anything compiles. The
+          # conformance legs run it too, through ctest, which is the copy a
+          # developer sees.
+          #
+          # The self-test goes first. It plants a retired phrase in a fixture
+          # and requires the matcher to report it, and plants the same phrase
+          # under a retraction marker and requires the matcher to allow it. A
+          # ratchet that cannot fail is worse than no ratchet, because it is
+          # believed.
+          python3 scripts/check_retired_claims.py --self-test
+          python3 scripts/check_retired_claims.py
+
       - name: Every test target suppresses modal dialogs
         shell: bash
         run: |
