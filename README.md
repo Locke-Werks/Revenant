@@ -334,11 +334,25 @@ that matters more than it looks: GPL-2.0-only cannot be combined with
 LGPL-3.0, which is Qt6, so a 2.0-only dependency would have killed the user
 interface along with the licence question.
 
-Relicensing is not publishing. Copyleft obligations attach to distribution,
-so a private repository whose binaries stay on their author's machines owes
-nothing to anyone; the duty to offer corresponding source begins when a
-binary is handed to someone else. This repository is private today and goes
-public when there is a reason to, not because the licence changed.
+Relicensing is not publishing, and the two happened at different times here.
+Copyleft obligations attach to distribution, so a repository whose binaries
+stay on their author's machines owes nothing to anyone; the duty to offer
+corresponding source begins when a binary is handed to someone else. This
+repository is public and its source is published, which discharges the
+source obligation in advance for anything built from it. No binary has been
+handed to anyone yet, so the release obligations in
+[docs/clean-room.md](docs/clean-room.md) are the ones still ahead rather
+than the ones outstanding.
+
+WHAT THIS PARAGRAPH USED TO SAY
+
+Until 2026-09-20 it ended "This repository is private today and goes public
+when there is a reason to, not because the licence changed." The repository
+is public and has been for some time: `gh repo view` reports
+`"isPrivate": false`. Recorded rather than swapped because the false half
+was the premise the rest of the paragraph reasoned from, so anyone who
+worked out their obligations by following it was told the private case
+applied to them when it does not.
 
 Clean-room is still the default everywhere it is affordable, which is
 everywhere a specification is published. The policy, the exceptions and the
