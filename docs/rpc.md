@@ -582,6 +582,113 @@ a Cap'n Proto field number is permanent and three branches appending to one
 schema would collide. Nothing moved when each landed, which is the whole of
 what that bought.
 
+### The front end can be pointed somewhere else
+
+`Session::setSourceCenter` retunes the source and answers with the centre the
+device took, which a synthesiser with a tuning step will round.
+`Session::sourceCanRetune` says whether it will work at all and over what
+range, so a client can grey a control out rather than offering one that
+always refuses.
+
+This is a small engine change and the reason is structural rather than lucky.
+The channelizer, every receiver and the whole spectrum stage work in the
+source's baseband frame and are never told where the front end is pointed:
+`core/engine/vrx_place.cpp` is handed the grid, the rate and the request and
+nothing else. So a retune moves the device's own oscillator and
+`EngineInfo::sourceCenter`, and nothing about a placement, a filter, an audio
+stream or a subscription changes.
+
+**Which is also the trap.** A receiver stays where it is in baseband, so it
+is now hearing a different piece of spectrum. Deciding what each open
+receiver was *for* and moving it is the client's job, because there is no
+reading of "keep this one on 145.1 MHz" that is right for a scanner as well
+as for a panadapter.
+
+Every absolute frequency a client is holding is stale when the call returns.
+Read `info()` again rather than adding the delta: the answer is where the
+device landed, not what was asked for.
+
+**What is deliberately not reset.** The device ring still holds samples
+captured at the old centre. It is a streaming window rather than a cache,
+nothing reads behind the write cursor but the channelizer's own filter
+support, and the stale span is bounded by the prototype length plus one
+block. Renumbering the stream to discard it would break the absolute sample
+index every chunk, frame, recording and counter is correlated against, to
+avoid a transient of tens of milliseconds. The spectrum's colour map is not
+reset either: it tracks percentiles over about thirty seconds and recovers on
+its own, where a reset would make both ends jump after every small retune.
+
+**What is reset.** Every receiver's tuning epoch, by re-queueing each
+receiver's own params so the graph advances it through the path it already
+applies at a block boundary. That is what lets the per-receiver RDS fence
+work for a change that is not per receiver. Above the engine, the server
+drops the wideband detector, whose tracks were measured against the old
+constant and describe a band that is no longer there, and clears every
+decoder.
+
+A refusal comes back in the **source's** own words. A file says a recording's
+centre is a property of bytes on disk and to reopen the URI; a synthetic
+scene says to move the emitters with `span_low` and `span_high`; a dongle
+names the ranges it reaches. Three different things to do about it, and a
+refusal composed in this layer would have replaced all three with a category.
+
+### Whether the source is keeping up
+
+`EngineInfo` carries `realtimeFactor` and `sourcePacedBy`.
+
+The first is capture seconds delivered per wall second, measured over the
+whole run. A synthetic source asked for 20 MS/s generates about 0.20 of
+realtime on the host this was written on, so everything downstream starves
+and audio arrives in fragments. Before this pair existed the only
+client-visible symptom was an audio queue that kept running dry, which is
+true about the queue and names the wrong component: the wire is not slow, the
+samples were never produced. The number itself existed, in
+`revenant-engine`'s own status line as `x 0.20`, in a terminal a GUI operator
+never sees.
+
+The second is the `--pace` the engine was started with, and the pair is the
+point. A factor of 0.5 is a source that cannot keep up when the pace is zero,
+and is exactly what was asked for when the pace is 0.5. A client that drew
+one without the other would raise an alarm on every deliberate half-speed
+replay.
+
+Zero in the factor means **not measured**, which is a third state and not a
+stalled source: it is what `info()` answers between opening the source and
+starting the run. It is also a lifetime mean rather than an instantaneous
+reading, for the reason `RdsHealth` carries no `blockErrorRate`: a source
+that struggled for ten seconds and has been fine since reads low forever. A
+client that wants the rate now differences two polls against
+`SourceStats::samplesDelivered`.
+
+### A clamped passband says so in words
+
+`VrxPlacement::clampReason` is empty unless something was clamped, and is
+otherwise the sentence to put in front of the operator.
+
+The numbers were already on the wire and nothing drew them. An operator
+clicking a broadcast FM station on a 2.4 MS/s dongle with a 64-channel grid
+asks for 200 kHz and is given about 71: `bandwidthClamped` went true,
+`grantedLow` and `grantedHigh` came back narrow, and what the operator got
+was mush out of the loudspeaker while the waterfall showed full strength.
+
+The sentence names both widths and the ratio, says what the widest receiver
+on that grid is, and says the fix is the engine's channel count rather than
+anything the session can change. On NFM and WFM it adds the part that is a
+judgement rather than a number: a discriminator recovers the instantaneous
+frequency of whatever reaches it, so a truncated passband produces the wrong
+audio rather than less of the right audio. On the linear modes it does not,
+because a narrower filter in front of an envelope or product detector is
+exactly a narrower filter, and saying otherwise would train an operator to
+ignore the sentence on the mode where it matters.
+
+It is prose and is never parsed. `bandwidthClamped` and the granted pair are
+the machine-readable half and are not going anywhere.
+
+Nothing infers a mode from a bandwidth. Occupied bandwidth does not determine
+modulation, and a click-to-tune surface that guessed would be a different
+wrong answer; the right source is the classifier `core/detect/detector.h`
+leaves a seam for.
+
 ### Nothing else crosses
 
 No complex baseband, no GPU handles, no device memory. `core/engine/engine.h`
@@ -912,9 +1019,24 @@ A client reconnecting starts from whatever the engine currently holds, and an
 engine restarting starts empty. Saved sessions are a client-side or a
 schema-side feature and neither exists.
 
-**No source control over the wire.** `Session` lists sources and reports
-whether the engine is running, and has no method to open one, start it or stop
-it. An engine is configured and started by whatever process hosts it.
+**No source control over the wire, except the one that matters most.**
+
+**This entry used to read "`Session` lists sources and reports whether the
+engine is running, and has no method to open one, start it or stop it. An
+engine is configured and started by whatever process hosts it."** The second
+sentence still holds and the first no longer does. `setSourceCenter` and
+`sourceCanRetune` landed on 2026-09-20, because the gap that entry described
+as a deferred nicety turned out to be the biggest usability problem the
+program had: the source centre was fixed at launch, so every change of band
+was a process restart that took the operator's receivers, their waterfall
+history and their audio with it.
+
+What is still absent is opening, starting and stopping a source. Those are
+the host process's business and an engine owns one source for its life, for
+the reason `Engine::open_source` gives.
+
+See "The front end can be pointed somewhere else" above for what a retune
+does and does not move.
 
 **`SourceDescriptor` is four fields of `source::SourceCapabilities`.** The tune
 ranges, the gain stages and the sample format are not on the wire. A picker
@@ -923,6 +1045,40 @@ to a schema is the cheap direction.
 
 **No shared GPU texture handle.** Frames cross by copy, at the cost measured
 above. This is the deferred optimisation, not a gap in correctness.
+
+**Five conditions the engine knows about and this wire does not carry.** Kept
+as a list rather than fixed one at a time, because the shape is the point:
+each is something the engine detected, counted or substituted, and no client
+can see it.
+
+A retune the STAGE refused. `setVrxParams` answers success as soon as the
+control op is queued; `core/engine/graph.cpp` applies it at the next block
+boundary and a stage that will not take it counts
+`GraphStats::vrx_retune_refusals` and leaves the receiver where it was.
+`GraphStats` reaches nothing on the wire, so what a client sees is a
+successful call and a receiver that did not move. The counter is required to
+stay at zero, which is why this has not bitten; it is exactly the kind of
+requirement that stops being true quietly.
+
+`GraphStats::frame_stalls`, which `core/engine/graph.h` calls expected on a
+Demand source and a warning sign on a Paced one. Not on the wire either.
+
+The recording's own counters. `AudioEgressStats` carries drops, trims,
+discontinuities, silence inserted over a gap and a faulted backend, and none
+of it crosses, because there is no recording surface on this wire yet. An
+engine writing a WAV for a remote client reports nothing about that file.
+
+What an RTL-SDR landed on at OPEN. `configure()` in
+`core/source/rtlsdr_source.cpp` reads the achieved rate, centre and gain back
+from the device and substitutes them for what was asked, which is correct;
+what nothing states is the DIFFERENCE. `setSourceCenter` states it, by
+answering with the centre the device took so a caller can subtract. The
+command line that opened the source does not.
+
+`Server::frames_dropped` is one server-wide counter charged for every
+spectrum subscriber at once, and `core/rpc/server.cpp` admits it over-counts.
+A slow client's drops appear on a fast client's status line. Audio has the
+per-subscription counters this lacks, in `AudioStats`.
 
 **Nothing pairs the two processes automatically, and CI never builds the
 client.** This entry used to say that nothing served or drove the wire and that
