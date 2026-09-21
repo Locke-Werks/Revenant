@@ -726,6 +726,30 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
     // a new one without dropping the old leaves this side thinking it has two.
     client_->unsubscribe_spectrum();
 
+    // BETWEEN THE UNSUBSCRIBE AND THE RESUBSCRIBE, WHICH IS THE ONLY WINDOW
+    // THESE FOUR CAN BE WRITTEN IN.
+    //
+    // on_frame reads all four and runs on the CLIENT's event loop thread, not
+    // this one. Writing them with a subscription live is a data race, and the
+    // visible half of it is worse than the tearing: first_sequence_ set to zero
+    // after a frame had already established it makes the very next frame look
+    // like a jump of its whole sequence number, and engine_link.cpp turns a
+    // sequence jump into framesDroppedByEngine. The window would report
+    // hundreds of thousands of dropped frames on the first frame of every new
+    // source.
+    //
+    // attempt_connect writes the same four on this thread and is safe for the
+    // same reason rather than by luck: the Client has just been built and
+    // nothing is subscribed yet.
+    //
+    // Everything the two engine-side counters are derived from, back to zero. A
+    // sequence from the stream that just ended has nothing to say about the
+    // distance to a sequence from the one that replaced it.
+    every_nth_ = requested_every_nth_;
+    first_sequence_ = 0;
+    delivered_ = 0;
+    have_span_ = false;
+
     {
         const std::lock_guard<std::mutex> lock(state_mutex_);
         handover_info_ = info;
@@ -751,15 +775,6 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
                 QString::fromStdString(status.error().message);
         }
     }
-
-    // Everything the two engine-side frame counters are derived from, back to
-    // zero, for the reason attempt_connect zeroes them: a sequence from the
-    // stream that just ended has nothing to say about the distance to a
-    // sequence from the one that replaced it.
-    every_nth_ = requested_every_nth_;
-    first_sequence_ = 0;
-    delivered_ = 0;
-    have_span_ = false;
 
     QMetaObject::invokeMethod(
         this,

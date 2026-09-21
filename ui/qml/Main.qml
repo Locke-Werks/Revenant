@@ -623,6 +623,8 @@ ApplicationWindow {
             // comes from a 28.8 MHz clock over an integer and its PLL step is a
             // few hundred hertz, so this is where both show up.
             RowLayout {
+                id: sourceTook
+
                 Layout.fillWidth: true
                 spacing: 8
 
@@ -641,14 +643,14 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     text: {
                         var parts = []
-                        if (parent.askedRate > 0
-                            && parent.askedRate !== engineLink.sourceRate)
-                            parts.push("asked " + parent.askedRate
+                        if (sourceTook.askedRate > 0
+                            && sourceTook.askedRate !== engineLink.sourceRate)
+                            parts.push("asked " + sourceTook.askedRate
                                        + " S/s, took " + engineLink.sourceRate)
-                        if (parent.askedCentre > 0
-                            && parent.askedCentre !== engineLink.sourceCenterHz)
+                        if (sourceTook.askedCentre > 0
+                            && sourceTook.askedCentre !== engineLink.sourceCenterHz)
                             parts.push("asked "
-                                       + (parent.askedCentre / 1.0e6).toFixed(6)
+                                       + (sourceTook.askedCentre / 1.0e6).toFixed(6)
                                        + " MHz, took "
                                        + (engineLink.sourceCenterHz / 1.0e6).toFixed(6)
                                        + " MHz")
