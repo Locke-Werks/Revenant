@@ -557,6 +557,35 @@ struct DetectorConfig {
     // is under one bin at 305 Hz and under five at 36.6 Hz, and splitting a
     // two-tone signal into two detections is the wrong answer for the same
     // reason merging two stations is.
+    //
+    // IT IS A BIN COUNT AND ITS REASON IS A FREQUENCY, WHICH MAKES IT WRONG ON
+    // A FINER GRID BY WHATEVER THE RATIO IS. This is the one constant in this
+    // struct that does not scale with the geometry and cannot be derived from
+    // it, and Engine::open_source now chooses a finer transform when a source
+    // asks for one, so the mismatch is reachable rather than hypothetical.
+    //
+    // Worked through, because the size of it is the point. The paragraph above
+    // defends RTTY at 36.6 Hz per bin, where 170 Hz is 4.6 bins and eight has
+    // margin. An HF recording asking for PSK31 at four bins across gets a
+    // 16384-point transform, about 1.9 Hz per bin: 170 Hz is then 89 bins, so
+    // eight is a gap RTTY's own two tones clear easily and every RTTY signal on
+    // the band splits into two detections.
+    //
+    // WHY THIS IS NOT FIXED BY MAKING IT A FREQUENCY. A single frequency is
+    // wrong across bands in the other direction. Eight bins at 36.6 Hz is about
+    // 293 Hz; carried to HF as a frequency it would refuse to split two FT8
+    // signals 60 Hz apart, and a crowded FT8 sub-band is exactly where they sit
+    // that close. The honest rule is relative to the narrowest signal worth
+    // telling apart, which is source::ResolutionRequest::narrowest_signal_hz
+    // and is already plumbed as far as the grid. Applying it here changes what
+    // the detector does at the shipped VHF geometry: narrowest is 12.5 kHz
+    // there, half of it is 170 bins, and this is eight.
+    //
+    // So it is left alone and recorded. Re-tuning it means measuring against
+    // real HF, and there is nothing to measure against: docs/detection.md's
+    // scoring needs ground truth and a recording carries none. Set this per
+    // band from the caller until then; the field is configurable for exactly
+    // that reason.
     std::uint32_t split_gap_bins = 8;
     double split_gap_db = 1.0;
 

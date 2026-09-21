@@ -563,7 +563,12 @@ void print_usage()
         "                      is the default without --play and is what makes an\n"
         "                      hour of capture take a minute. A live radio sets its\n"
         "                      own rate and ignores both of these.\n"
-        "  --channels <n>      Channelizer channel count, default 64.\n"
+        "  --channels <n>      Channelizer channel count, default 64. Zero lets the\n"
+        "                      engine size the grid from the source, which is the only\n"
+        "                      way to get the fine grid an HF recording asks for: a\n"
+        "                      2 MS/s capture at 7.1 MHz then opens on 256 channels and\n"
+        "                      7.6 Hz bins instead of 30.5. More channels is a narrower\n"
+        "                      widest receiver, and the two trade directly.\n"
         "  --audio-rate <hz>   Default 48000.\n"
         "  --gpu <n>           Device index, default -1, which honours\n"
         "                      REVENANT_GPU_INDEX. See revenant-devices.\n"
@@ -884,8 +889,25 @@ void print_usage()
                 return std::unexpected(number.error());
             }
             if (arg == "--channels") {
-                if (*number < 2 || *number > 65'536) {
-                    return fail("--channels is a power of two between 2 and 65536");
+                // ZERO IS ACCEPTED AND MEANS "LET THE ENGINE CHOOSE", which is
+                // what revenant-engine has always done with it and what this
+                // program refused outright.
+                //
+                // It is not a convenience. Engine::open_source sizes the grid
+                // from the source's own source::ResolutionRequest when the
+                // caller named no count, and that is the only path to the fine
+                // grid HF needs: 2 MS/s at 7.1 MHz opens on 256 channels and
+                // 7.6 Hz bins, where the 64 below gives 30.5 Hz and a detector
+                // that cannot place PSK31's centre inside PSK31. Naming a count
+                // pins it, deliberately, so without a zero there was no way to
+                // ask from here.
+                //
+                // The DEFAULT stays 64. docs/detection.md's measurements are
+                // all taken at 64 channels over 2.4 MS/s, and moving the
+                // default would invalidate a table rather than add an option.
+                if (*number != 0 && (*number < 2 || *number > 65'536)) {
+                    return fail("--channels is a power of two between 2 and 65536, or 0 to let "
+                                "the engine size the grid from the source");
                 }
                 options.channels = static_cast<std::uint32_t>(*number);
             } else if (arg == "--gpu") {

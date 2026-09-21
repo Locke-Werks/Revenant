@@ -287,27 +287,40 @@ struct SourceCapabilities {
 
     // How fine a spectrum this source's content needs. See ResolutionRequest.
     //
-    // NOTHING READS THIS YET, AND THIS IS THE HALF THAT CANNOT DECIDE IT.
-    // The decision belongs to engine::EngineConfig, which already chooses one
-    // side of the same geometry: engine::default_channel_count picks the
-    // coarse channel count from the source's rate, and
-    // EngineConfig::spectrum_transform is the per-channel transform that is
-    // still a caller-supplied constant. Meeting a request means picking that
-    // transform so that 2 * rate / (channels * transform) satisfies
-    // ResolutionRequest::met_by, then reporting what was settled on in
-    // EngineInfo::spectrum the way the clamped channel count already is.
+    // Engine::open_source reads it. A stated request that the caller's
+    // EngineConfig::spectrum_transform does not meet doubles the transform
+    // until it does or until the device's ceiling stops it, and either outcome
+    // is reported through the same clamp sentence a reduced channel count uses.
+    // It is RAISED AND NEVER LOWERED: a request for a coarser grid than the
+    // caller chose would be a request to throw a measurement away, and nothing
+    // in this struct asks for less.
     //
-    // It is left unwired deliberately rather than being wired from here. A
-    // source that reached up into the graph to size a transform would be the
-    // second place channel-count policy lives, and two copies of a geometry
-    // rule is how the 2.4 MS/s grid came to be applied to a band it was never
-    // measured on.
+    // WHAT THIS PARAGRAPH USED TO SAY: "NOTHING READS THIS YET, AND THIS IS THE
+    // HALF THAT CANNOT DECIDE IT. The decision belongs to engine::EngineConfig,
+    // which already chooses one side of the same geometry:
+    // engine::default_channel_count picks the coarse channel count from the
+    // source's rate, and EngineConfig::spectrum_transform is the per-channel
+    // transform that is still a caller-supplied constant. Meeting a request
+    // means picking that transform so that 2 * rate / (channels * transform)
+    // satisfies ResolutionRequest::met_by, then reporting what was settled on in
+    // EngineInfo::spectrum the way the clamped channel count already is." That
+    // is a description of what was built, down to where the reporting goes. The
+    // sentence after it, that the wiring was left out so a source would not
+    // reach up into the graph, is why the decision sits in the engine rather
+    // than here; that part still holds and the engine's own note repeats it.
     //
     // The tunable backends leave this unstated on purpose. A dongle's centre
     // moves under tune() while its capability description does not, so a
     // stated request there would be right at open and quietly wrong one
     // retune later. Wiring it up means the engine re-asking on retune, which
     // is the same lane as the choosing.
+    //
+    // ONE CONSTANT DOWNSTREAM DOES NOT FOLLOW THE GRID, and a finer transform
+    // is what makes that reachable: detect::DetectorConfig::split_gap_bins is
+    // eight bins whose justification is a frequency, so on an HF grid at 1.9 Hz
+    // per bin it splits every RTTY signal into its two tones. Its own note
+    // carries the arithmetic and why neither a bin count nor a frequency is
+    // right for both bands.
     ResolutionRequest resolution;
 
     [[nodiscard]] bool supports_rate(dsp::SampleRate rate) const;

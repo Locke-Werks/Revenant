@@ -51,6 +51,7 @@
 #include <vector>
 
 #include "core/dsp/pfb_fft_reference.h"
+#include "core/dsp/spectrum_reference.h"
 #include "core/engine/graph.h"
 #include "core/engine/ring_consumer.h"
 #include "core/engine/scheduler.h"
@@ -165,21 +166,13 @@ public:
         grid.channels = config_.channels;
         grid.taps_per_branch = config_.taps_per_branch;
 
-        // Zero is "work it out from the source", which is the only answer
-        // that can be right on both a 2.4 MS/s dongle and a 20 MS/s capture.
-        // See default_channel_count. A caller that names a count gets
-        // exactly that count, clamped only by the device.
-        if (grid.channels == 0) {
-            grid.channels = default_channel_count(rate);
-        }
-
-        if (!std::has_single_bit(grid.channels)) {
-            return fail(std::format("channels is {} and the channelizer needs a power of two",
-                                    grid.channels));
-        }
-
         // The device's shared memory, not a guess. See the note at the top of
         // the file and max_fft_transform_size in core/dsp/pfb_fft_reference.h.
+        //
+        // Hoisted above the channel count rather than left below it, because
+        // the resolution request can WIDEN the grid and needs the same ceiling
+        // the clamp below applies. One number, computed once, so a widening
+        // cannot reach past what the clamp would take back.
         const std::uint32_t transform_ceiling =
             dsp::max_fft_transform_size(info_.device.max_workgroup_shared_memory);
         if (transform_ceiling == 0) {
@@ -187,6 +180,89 @@ public:
                                     "holds no transform at all",
                                     info_.device.name, info_.device.max_workgroup_shared_memory));
         }
+
+        // Zero is "work it out from the source", which is the only answer
+        // that can be right on both a 2.4 MS/s dongle and a 20 MS/s capture.
+        // See default_channel_count. A caller that names a count gets
+        // exactly that count, clamped only by the device.
+        const bool channels_chosen_here = grid.channels == 0;
+        if (channels_chosen_here) {
+            grid.channels = default_channel_count(rate);
+        }
+
+        // --- how fine a spectrum this source's content needs ------------------
+        //
+        // THE HALF OF source::ResolutionRequest THAT CHOOSES, and this is the
+        // only place that holds every number it needs: the source's request,
+        // the rate, and the device's ceiling.
+        //
+        // WHAT THE DEFAULT GETS WRONG. Every grid constant here was tuned for
+        // an RTL-SDR watching broadcast FM: 2.4 MS/s over 64 channels with a
+        // 2048-point transform is 65536 bins at 36.6 Hz, and the narrowest
+        // thing on that band is 12.5 kHz, so it is met by a factor of 85. Point
+        // the same geometry at HF and FT8 is 1.4 bins wide and PSK31 is under
+        // one. The detector still fires; what it publishes is a centre it
+        // cannot place inside the signal and a width that is the bin's rather
+        // than the signal's, which is worse than a miss because it reads as a
+        // working detector.
+        //
+        // THE CHANNEL COUNT IS THE LEVER AND THE TRANSFORM IS NOT, which is the
+        // opposite of what SourceCapabilities::resolution used to suggest. Bin
+        // width is rate / (D * N) and D is M/2, so both M and N narrow it, but
+        // N is capped at dsp::kMaxSpectrumTransform, which is 2048 and is a
+        // twiddle-table limit shared with the channelizer rather than a device
+        // one. At the shipped 2048 the transform is already at that cap, so it
+        // has no room left to give. M has plenty: 2 MS/s of HF needs 7.75 Hz
+        // bins, which is M = 256 at N = 2048.
+        //
+        // WHAT IT COSTS, BECAUSE IT IS NOT FREE. More channels is a finer
+        // waterfall and a NARROWER WIDEST RECEIVER, and the two trade directly:
+        // M = 256 over 2 MS/s is 7.8 kHz of channel spacing, so no receiver
+        // wider than that can be placed. That is right for HF, where the
+        // widest thing in the band plan is a few kilohertz, and would be wrong
+        // on VHF, where it would refuse a 12.5 kHz NFM channel. The request is
+        // only stated by sources that know their own span, and
+        // source::resolution_for_span only asks for the fine grid below 30 MHz.
+        //
+        // ONLY WHEN THE CALLER NAMED NO COUNT. The contract above is that a
+        // caller who names one gets exactly that, and overriding it here would
+        // take away the only lever they have. One who named a count too coarse
+        // for the band is told, below, rather than corrected.
+        const source::ResolutionRequest& wanted = source->capabilities().resolution;
+        const auto met_at = [&](std::uint32_t channels) {
+            // rate / (D * N) hertz per bin, exactly, which is the rational
+            // spectrum_geometry_for builds. A rounded integer would put the
+            // decision one bin either side of the truth.
+            const std::uint32_t transform = config_.spectrum_transform == 0
+                                                ? dsp::kMaxSpectrumTransform
+                                                : config_.spectrum_transform;
+            return wanted.met_by(rate, static_cast<std::int64_t>(
+                                           oversampled_decimation(channels)) *
+                                           static_cast<std::int64_t>(transform));
+        };
+
+        if (wanted.stated() && channels_chosen_here && !met_at(grid.channels)) {
+            std::uint32_t finer = grid.channels;
+            while (finer < transform_ceiling && !met_at(finer)) {
+                finer *= 2;
+            }
+            if (finer != grid.channels) {
+                clamp_note_ = std::format(
+                    "this source asks for {} bins across a {} Hz signal ({}), which {} channels "
+                    "do not give at this rate, so the grid was widened to {}. That is {} Hz of "
+                    "channel spacing, and no receiver wider than that can be placed",
+                    wanted.bins_across_narrowest, wanted.narrowest_signal_hz,
+                    wanted.basis.empty() ? "no reason given" : wanted.basis, grid.channels,
+                    finer, rate / static_cast<dsp::SampleRate>(finer));
+                grid.channels = finer;
+            }
+        }
+
+        if (!std::has_single_bit(grid.channels)) {
+            return fail(std::format("channels is {} and the channelizer needs a power of two",
+                                    grid.channels));
+        }
+
         if (grid.channels > transform_ceiling) {
             clamp_note_ = std::format(
                 "{} channels need {} bytes of shared memory and '{}' offers {}, so the grid was "

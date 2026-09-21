@@ -592,6 +592,50 @@ stays the seeded scenes in `tests/detect`, which know their own start and stop
 samples. What the band adds is that the keying was a person on a PTT rather
 than `siggen`.
 
+### HF is the opposite regime, and the grid follows the source now
+
+Every number above was measured at 36.6 Hz per bin, which is 2.4 MS/s over 64
+channels with a 2048-point transform. HF signals are one to three orders
+narrower: FT8 is 50 Hz, PSK31 about 31 Hz, CW 50 to 150 Hz, RTTY around 261 Hz.
+At 36.6 Hz FT8 is 1.4 bins and PSK31 is under one, and what the detector
+publishes there is not a miss. It fires, and reports a centre it cannot place
+inside the signal and a width that is the bin's rather than the signal's, which
+reads as a working detector.
+
+`Engine::open_source` reads `source::SourceCapabilities::resolution` and widens
+the grid to meet it, when the caller named no channel count.
+`source::resolution_for_span` asks for four bins across PSK31's 31 Hz below
+30 MHz and across 12.5 kHz above it, so nothing about a VHF or UHF session
+changes. Measured on a 2 MS/s capture centred on 7.1 MHz:
+
+    grid        M=256 D=128 taps/branch=17
+                channel 15625 S/s, spacing 7.812 kHz
+    spectrum    256 channels x 2048 points, 262144 bins across the span
+                7.629 Hz per bin
+
+**The channel count is the lever, not the transform.** Bin width is
+`rate / (D * N)` and both narrow it, but `dsp::kMaxSpectrumTransform` is 2048 and
+the shipped default is already at it. That cap is a twiddle-table limit shared
+with the channelizer rather than a device one, so raising it is a change to
+`core/dsp/pfb_design.cpp` and wants its own justification.
+
+**What it costs is a narrower widest receiver,** and the two trade directly.
+7.8 kHz of channel spacing is right for HF, where the widest thing in the band
+plan is a few kilohertz, and would refuse a 12.5 kHz NFM channel on VHF.
+`revenant-engine` prints the substitution under the ring line; `revenant-cli`
+pins 64 channels by default and takes `--channels 0` to ask for this.
+
+**One constant here does not follow the grid.** `DetectorConfig::split_gap_bins`
+is eight bins and its justification is a frequency: RTTY's two tones 170 Hz
+apart, which is 4.6 bins at 36.6 Hz. At 7.6 Hz that is 22 bins, so eight is a gap
+RTTY's own tones clear and every RTTY signal splits into two detections. Making
+it a frequency is wrong the other way, because eight bins at 36.6 Hz is about
+293 Hz and carrying that to HF would refuse to split two FT8 signals 60 Hz apart.
+The honest rule is relative to the narrowest signal worth telling apart, which
+changes what the detector does at the shipped VHF geometry, so it is left
+configurable and recorded rather than re-tuned: measuring a new rule needs real
+HF with ground truth, and a recording carries none.
+
 ## Identification
 
 Two tiers, split on cost.

@@ -704,10 +704,25 @@ void print_engine_block(const engine::Engine& eng)
             "rather than narrowing it: a discriminator fed a truncated signal produces the "
             "wrong audio rather than narrow audio, at full strength. So clicking a broadcast "
             "station on this grid will not open a receiver at all. --channels {} is what "
-            "this source rate chooses on its own.",
+            "this source rate chooses on its own{}",
             info.grid.channels, info.source_rate,
             format_hz(static_cast<double>(info.channel_spacing)), engine::kWidestReceiverHz,
-            would_choose);
+            would_choose,
+            // THE LAST SENTENCE USED TO READ AS THOUGH THE OPERATOR CHOSE THE
+            // COUNT, and since the resolution request started widening the grid
+            // that is often false: an HF recording opens on 256 channels
+            // nobody typed. Offering --channels 8 as the fix there is offering
+            // to undo a choice the engine made for a stated reason, which is
+            // the coarse grid the request exists to avoid.
+            //
+            // The clamp reason is what says which happened, and it is now
+            // printed in the block above. This points at it rather than
+            // restating it, because the engine's own sentence names the signal
+            // width and the basis and this warning has neither.
+            info.ring.clamped && !info.ring.clamp_reason.empty()
+                ? ", and the line under the ring above says whether that is what "
+                  "happened or whether the source asked for this grid."
+                : ".");
     }
 
     if (info.spectrum.enabled()) {
@@ -722,6 +737,24 @@ void print_engine_block(const engine::Engine& eng)
 
     std::println("ring        {} samples, {:.2f} s retained", info.ring.capacity_samples,
                  info.ring.seconds_retained);
+
+    // WHAT THE ENGINE BUILT THAT NOBODY ASKED FOR, and until now this program
+    // dropped it.
+    //
+    // EngineInfo::ring.clamp_reason is the one field in EngineInfo that can
+    // carry a sentence, which is why a reduced channel count, a reduced block
+    // size and a widened grid all ride out in it. It is not ring trivia,
+    // despite the field name, and printing the two ring numbers above without
+    // it left an operator looking at a geometry they did not choose with
+    // nothing on screen saying why.
+    //
+    // It bites hardest on the widening the resolution request now does: an HF
+    // recording opens on 256 channels where the rate alone would have picked 8,
+    // and the sentence explaining that is the only thing between the operator
+    // and the warning below, which reads as though they chose it.
+    if (info.ring.clamped && !info.ring.clamp_reason.empty()) {
+        std::println("            {}", info.ring.clamp_reason);
+    }
 }
 
 [[nodiscard]] Status list_sources()

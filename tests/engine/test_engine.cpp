@@ -24,6 +24,8 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdio>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -1105,4 +1107,137 @@ TEST_CASE("closing a running source stops the stream first", "[gpu][engine][m2]"
                                     << after.samples_delivered << " samples");
     CHECK(after.blocks_delivered > 0);
     CHECK(after.samples_delivered > 0);
+}
+
+TEST_CASE("an HF recording gets the finer grid its content needs", "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // THE HALF OF ResolutionRequest THAT CHOOSES, against the half that states.
+    //
+    // A file source calls source::resolution_for_span on its own centre and
+    // rate, and below 30 MHz that asks for four bins across PSK31's 31 Hz,
+    // which is a ceiling of 7.75 Hz per bin. The shipped geometry is 36.6 Hz.
+    // Nothing read the request until Engine::open_source did, and what a
+    // detector does on a grid that coarse is worse than missing the signal: it
+    // fires, and publishes a centre it cannot place inside the signal and a
+    // width that is the bin's rather than the signal's.
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "revenant_test_hf_grid.cf32";
+
+    // Enough samples to open and size a ring against, and no more. Nothing
+    // here runs the stream; the assertion is about the geometry the open
+    // settled on.
+    {
+        const std::vector<dsp::Complex32> data(200'000, dsp::Complex32{0.0F, 0.0F});
+        std::FILE* file = std::fopen(path.string().c_str(), "wb");
+        REQUIRE(file != nullptr);
+        std::fwrite(data.data(), sizeof(dsp::Complex32), data.size(), file);
+        std::fclose(file);
+    }
+
+    struct Remove {
+        std::filesystem::path path;
+        ~Remove() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } remove{path};
+
+    // 7.1 MHz is the 40 m band, well inside HF, and 2 MS/s is an ordinary
+    // width for a wideband HF capture.
+    const std::string hf = "file:///" + path.generic_string() +
+                           "?rate=2000000&format=cf32&center=7100000";
+
+    engine::EngineConfig config = default_config();
+    config.spectrum_transform = 2048;  // the shipped default, and its ceiling
+
+    // ZERO, WHICH IS THE WHOLE CONDITION. The contract is that a caller who
+    // names a channel count gets exactly that count, so the request can only
+    // move a count the engine chose. default_config names 64, which is what
+    // every other case here wants and is what this one must not have.
+    config.channels = 0;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    const auto opened = eng.open_source(hf);
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    const engine::EngineInfo& info = eng.info();
+    INFO("transform " << info.spectrum.transform << ", "
+                      << info.spectrum.bin_width_hz() << " Hz per bin");
+
+    // THE PRECONDITION FIRST, so a failure says which half is wrong. If the
+    // source states no request there is nothing for the engine to meet, and
+    // asserting the consequence first would report the choosing half as broken
+    // when it was the stating half that said nothing.
+    const auto& wanted = eng.source_capabilities().resolution;
+    INFO("asked for " << wanted.bins_across_narrowest << " bins across "
+                      << wanted.narrowest_signal_hz << " Hz: " << wanted.basis);
+    REQUIRE(wanted.stated());
+
+    // And the count this rate would have chosen on its own does NOT meet it, or
+    // the assertions below prove nothing: a request already met needs no
+    // widening, and the choosing half would be dead code that still passed.
+    const std::uint32_t unaided = engine::default_channel_count(info.source_rate);
+    INFO("unaided this rate would have chosen " << unaided << " channels");
+    REQUIRE_FALSE(wanted.met_by(info.source_rate,
+                                static_cast<std::int64_t>(unaided / 2) * 2048));
+
+    // WIDENED, AND THE ASSERTION IS THE REQUEST RATHER THAN A NUMBER. Checking
+    // for 256 specifically would pin an answer that depends on the rate, the
+    // transform and the device's shared memory at once, and would have to be
+    // re-derived by hand every time one of them moved. The request is what this
+    // exists to meet, so the request is what is asserted.
+    //
+    // THE CHANNEL COUNT AND NOT THE TRANSFORM. Bin width is rate / (D * N) and
+    // both narrow it, but dsp::kMaxSpectrumTransform is 2048 and the shipped
+    // default is already at it, so N has nothing left to give. That cap is a
+    // twiddle-table limit shared with the channelizer rather than a device one.
+    CHECK(info.grid.channels > unaided);
+    CHECK(info.spectrum.transform == 2048);
+    CHECK(wanted.met_by(info.spectrum.bin_width_numerator,
+                        info.spectrum.bin_width_denominator));
+
+    // SAID, NOT SILENTLY SUBSTITUTED. The ring's clamp sentence is the one
+    // field in EngineInfo that can carry prose, which is how a reduced channel
+    // count is already reported, and a geometry the caller did not ask for has
+    // to arrive the same way.
+    INFO("clamp reason: " << info.ring.clamp_reason);
+    CHECK(info.ring.clamped);
+    CHECK(info.ring.clamp_reason.find("bins across") != std::string::npos);
+
+    // And it names what the widening COST, which is the part an operator has to
+    // know before they try to place a receiver: more channels is a narrower
+    // widest receiver, and the two trade directly.
+    CHECK(info.ring.clamp_reason.find("channel spacing") != std::string::npos);
+}
+
+TEST_CASE("a VHF source keeps the transform the caller chose", "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE CONTROL ARM, and without it the case above is not evidence that
+    // anything is conditional. A synthetic scene states no resolution request
+    // at all, so nothing should move: an unstated request is met by anything,
+    // and a function that raised the transform regardless would pass every
+    // assertion in the HF case and quietly double the cost of every VHF
+    // session.
+    engine::EngineConfig config = default_config();
+    config.spectrum_transform = 2048;
+    config.channels = 0;
+
+    auto created = engine::Engine::create(config);
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    REQUIRE(eng.open_source(tone_uri(0, 200'000)).has_value());
+
+    CHECK_FALSE(eng.source_capabilities().resolution.stated());
+    CHECK(eng.info().spectrum.transform == 2048);
+    CHECK(eng.info().grid.channels == engine::default_channel_count(kSourceRate));
+    CHECK_FALSE(eng.info().ring.clamp_reason.find("bins across") != std::string::npos);
 }
