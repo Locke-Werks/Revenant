@@ -173,6 +173,37 @@ struct PowerSpectrum {
 [[nodiscard]] std::vector<double> local_baseline(std::span<const double> spectrum,
                                                  std::size_t block);
 
+// The margin every estimator in this directory states its finding against,
+// and the threshold every one of them refuses below.
+//
+// Six decibels, from the measurement in tests/characterise/
+// test_transform.cpp: over a Welch estimate averaged the way
+// analysis_segment arranges, the largest bin in pure noise stands under 4 dB
+// over its own local baseline, so 6 dB is half as much again as the loudest
+// thing an empty channel produces. It is not a probability and it is not
+// derived from one; it is a measured distance from what nothing looks like.
+inline constexpr double kDetectionMarginDb = 6.0;
+
+// Turns a margin into a confidence, by a map that is written down rather
+// than tuned until the numbers looked good.
+//
+//   confidence = 1 - 0.5*exp(-(margin - threshold)/6)
+//
+// which is 0.5 exactly at the threshold, 0.82 six decibels above it, 0.93 at
+// twelve and approaches 1 without reaching it. Below the threshold it is
+// zero, because the caller is refusing rather than reporting.
+//
+// docs/detection.md asks for this to be calibrated, on the grounds that a
+// classifier reporting 0.9 for everything makes the operator's confidence
+// threshold a no-op. What is claimed here is narrower than calibration
+// against a labelled corpus, and saying so is the point: this is a stated
+// monotone function of a measured margin, so two findings can be ordered and
+// a threshold on it is a threshold on how far the evidence stood above the
+// noise. tests/characterise/test_cyclostationary.cpp asserts the ordering
+// holds across an SNR sweep, which is the property a constant would fail.
+[[nodiscard]] double margin_confidence(double margin_db,
+                                       double threshold_db = kDetectionMarginDb);
+
 struct SpectralPeak {
     bool found = false;
 

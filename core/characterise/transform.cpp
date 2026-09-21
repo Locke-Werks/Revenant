@@ -269,6 +269,15 @@ Expected<PowerSpectrum> welch_spectrum_real(std::span<const double> signal,
     return welch_common(widened, rate, segment, hop, true);
 }
 
+double margin_confidence(double margin_db, double threshold_db)
+{
+    if (margin_db < threshold_db) {
+        return 0.0;
+    }
+    constexpr double kScaleDb = 6.0;
+    return 1.0 - 0.5 * std::exp(-(margin_db - threshold_db) / kScaleDb);
+}
+
 std::vector<double> local_baseline(std::span<const double> spectrum, std::size_t block)
 {
     std::vector<double> baseline(spectrum.size(), 0.0);
