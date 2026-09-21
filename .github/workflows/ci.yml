@@ -352,6 +352,24 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # The engine half of the installer payload, from one leg only. Both legs
+      # build the same binary against the same preset and differ solely in
+      # which GPU the suite ran against, so uploading from each would be two
+      # artifacts racing for one name. See docs/packaging.md.
+      - name: Stage the engine half of the payload
+        if: matrix.name == 'nvidia-4090'
+        shell: pwsh
+        run: ./scripts/stage-payload.ps1 -Only engine -Out dist/engine -Clean
+
+      - name: Upload the engine half
+        if: matrix.name == 'nvidia-4090'
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-engine
+          path: dist/engine
+          if-no-files-found: error
+          retention-days: 7
+
   # Qt must never become load-bearing in core. That requirement does not survive
   # being bolted on after the fact: by the time anyone checks, a header has been
   # included somewhere quiet and the dependency is structural. So it is gated
@@ -499,11 +517,319 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-# No signing job. There is no binary to ship until M3, and a signing job that
-# never fires is a job nobody notices has rotted. The scaffold it will use is
-# already in place: signing/signing.env holds the endpoint, account and
-# certificate profile, scripts/New-SigningMetadata.ps1 generates
-# signing/metadata.json from it, and the guard above keeps the generated file
-# out of the tree. Authentication is AZURE_TENANT_ID, AZURE_CLIENT_ID and
-# AZURE_CLIENT_SECRET in the environment: a user principal with a secret, not a
-# federated identity, so there is no trust relationship to configure here.
+      # The client half of the installer payload: revenant-ui.exe and the
+      # subset of the Qt runtime it was measured to load. The prune happens
+      # here rather than in the package job because the windeployqt output is
+      # 114 MB and the pruned tree is 63 MB, and this artifact crosses from
+      # the workstation to a hosted runner.
+      - name: Stage the client half of the payload
+        shell: pwsh
+        working-directory: .
+        run: ./scripts/stage-payload.ps1 -Only client -Out dist/client -Clean
+
+      - name: Upload the client half
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-client
+          path: dist/client
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The installer, unsigned, on every build
+  # ---------------------------------------------------------------------------
+  #
+  # WHY THIS RUNS ON A HOSTED RUNNER. Forging needs no C++ toolchain: lwforge
+  # stamps a config and a payload directory into a copy of a prebuilt stub.
+  # Nothing here needs the GPU, the Vulkan SDK or Qt, so it does not belong on
+  # the workstation, and a fork cannot reach it anyway: it needs two jobs that
+  # a fork pull request skips, and a skipped dependency skips this too.
+  #
+  # WHY UNSIGNED. Payload members are hashed into the container and extracted
+  # verbatim, so signing has to happen before the forge step and the certificate
+  # is not something a per-commit job should be reaching for. The release job
+  # below is where that happens. An installer built here is for testing that the
+  # packaging still works, and the stub says UNSIGNED DEV BUILD on its face so
+  # it cannot be mistaken for a shipping artifact.
+  package:
+    needs: [build-and-test, ui]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      # Pinned, so a Forge release cannot change what this job produces without
+      # somebody choosing it. v0.4.0 is the first release that rejects an
+      # unknown hook phase and the first with build-time checks on a hook, and
+      # installer.toml's [[options]] and `when` need v0.3.0 or later. A pin
+      # older than that does not fail: it inverts the feature, and a `when`
+      # fires unconditionally. See "Which version has what" in
+      # Forge/docs/using-forge-in-ci.md.
+      FORGE_VERSION: v0.4.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-engine
+          path: dist/stage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-client
+          path: dist/stage
+
+      # cmake/RevenantVersion.cmake is the single source of truth and
+      # installer.toml carries its own copy, because lwforge reads a TOML file
+      # and nothing generates it. Two copies of a version drift, so the drift
+      # is what fails here rather than what ships in a version resource that
+      # disagrees with Add/Remove Programs.
+      - name: The installer version matches the source of truth
+        shell: pwsh
+        run: |
+          $cmake = Get-Content cmake/RevenantVersion.cmake -Raw
+          $major = [regex]::Match($cmake, 'REVENANT_VERSION_MAJOR (\d+)').Groups[1].Value
+          $minor = [regex]::Match($cmake, 'REVENANT_VERSION_MINOR (\d+)').Groups[1].Value
+          $patch = [regex]::Match($cmake, 'REVENANT_VERSION_PATCH (\d+)').Groups[1].Value
+          $expected = "$major.$minor.$patch"
+          $toml = [regex]::Match((Get-Content installer.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          "cmake $expected, installer.toml $toml"
+          if ($toml -ne $expected) {
+            throw "installer.toml says $toml and cmake/RevenantVersion.cmake says $expected"
+          }
+
+      # Forge is public, so the workflow's own token reads its releases. gh
+      # refuses to run with no GH_TOKEN at all and says so before it reaches
+      # the network, which reads as a permissions failure and is not one.
+      - name: Fetch Forge
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:FORGE_VERSION --repo Locke-Werks/Forge `
+            --pattern '*.exe' --dir tools
+          foreach ($name in 'lwforge.exe', 'lwstub.exe') {
+            $sig = Get-AuthenticodeSignature "tools/$name"
+            "$name : $($sig.Status)"
+            if ($sig.Status -ne 'Valid') { throw "tools/$name is $($sig.Status)" }
+          }
+
+      # --dev, because the payload arriving here was never signed. Without it
+      # lwforge refuses the unsigned stub, and with an unsigned payload the
+      # honest label is the one the stub prints.
+      - name: Forge the installer
+        shell: pwsh
+        run: |
+          ./tools/lwforge.exe build `
+            --config installer.toml `
+            --payload dist/stage `
+            --stub tools/lwstub.exe `
+            --out dist/Revenant-Setup.exe `
+            --dev
+
+      # Two checks. inspect proves the container is readable, which is the one
+      # that matters once a signature is appended in the release job below.
+      # --check-only lists the option set this installer declares, which is the
+      # only way a deployment tool's /O: switches can be confirmed against the
+      # spelling this version uses. It exits 1603 both for an option id that
+      # does not exist and for a preflight the runner fails, so print the
+      # report: the text distinguishes them and the code does not.
+      - name: Verify
+        shell: pwsh
+        run: |
+          ./tools/lwforge.exe inspect dist/Revenant-Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "the installer cannot read its own container" }
+
+          $report = & ./dist/Revenant-Setup.exe --check-only /O:desktop_shortcut=off 2>&1 | Out-String
+          $report
+          if ($LASTEXITCODE -ne 0) { throw "check-only exited $LASTEXITCODE`n$report" }
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Revenant-Setup-unsigned
+          path: dist/Revenant-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # The signed installer, on a version tag
+  # ---------------------------------------------------------------------------
+  #
+  # Nothing in this job has run. It is wired so that it can, and the first tag
+  # is when it is exercised for real.
+  #
+  # THE ORDER IS THE WHOLE POINT. The payload is signed first, because lwforge
+  # hashes those files into the container and the stub extracts them byte for
+  # byte: an unsigned binary going in is an unsigned binary on the customer's
+  # disk, and signing the finished installer does nothing for it. The installer
+  # is signed last, after resource stamping and after the container is
+  # appended, because the signature is what makes the bytes immutable. The
+  # embedded uninstaller is the stub itself, added as a payload member at
+  # .lw\uninstall.exe and never re-signed on the way out, which is why the
+  # release stub is fetched rather than built.
+  #
+  # Authentication is three values and nothing else: a user principal with a
+  # client secret. There is no OIDC subject, no federated credential and no
+  # azure/login step, and looking for one has already cost a day against a
+  # configuration that was never broken.
+  release:
+    needs: [build-and-test, ui]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    env:
+      FORGE_VERSION: v0.4.0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-engine
+          path: dist/stage
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-client
+          path: dist/stage
+
+      # signing/signing.env is the one place the endpoint, the account and the
+      # certificate profile are written down, and the reason it exists is that
+      # the profile name drifted into three different answers across four
+      # other repositories once it was copied. Writing the literals into this
+      # file would be that copy. A variable of the same name in the
+      # environment wins, which is how a different profile gets selected
+      # without editing a tracked file.
+      - name: Read the signing configuration
+        id: signing
+        shell: pwsh
+        run: |
+          $wanted = @{
+            REVENANT_SIGN_ENDPOINT = 'endpoint'
+            REVENANT_SIGN_ACCOUNT  = 'account'
+            REVENANT_SIGN_PROFILE  = 'profile'
+          }
+          $found = @{}
+          foreach ($line in Get-Content signing/signing.env) {
+            if ($line -match '^\s*#' -or $line -notmatch '=') { continue }
+            $name, $value = $line -split '=', 2
+            $name = $name.Trim()
+            if (-not $wanted.ContainsKey($name)) { continue }
+            $override = [Environment]::GetEnvironmentVariable($name)
+            $found[$name] = if ($override) { $override } else { $value.Trim() }
+          }
+          foreach ($name in $wanted.Keys) {
+            if (-not $found.ContainsKey($name) -or -not $found[$name]) {
+              throw "signing/signing.env does not set $name"
+            }
+            "$($wanted[$name])=$($found[$name])" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+          $found.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }
+
+      - name: Sign the payload
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ steps.signing.outputs.endpoint }}
+          trusted-signing-account-name: ${{ steps.signing.outputs.account }}
+          certificate-profile-name: ${{ steps.signing.outputs.profile }}
+          files-folder: dist/stage
+          files-folder-filter: exe,dll
+          files-folder-recurse: true
+          file-digest: SHA256
+          # Certificates last three days. Without a timestamp the signature
+          # stops validating inside the week. Not optional.
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # The action exiting zero is not the same as the files being signed. A
+      # wrong filter or a folder it never reached looks identical from the
+      # outside, and the failure surfaces on somebody else's machine.
+      - name: Every payload binary is signed
+        shell: pwsh
+        run: |
+          $bad = @()
+          Get-ChildItem dist/stage -Recurse -Include *.exe, *.dll | ForEach-Object {
+            $sig = Get-AuthenticodeSignature $_.FullName
+            if ($sig.Status -ne 'Valid') { $bad += "$($_.Name): $($sig.Status)" }
+          }
+          if ($bad.Count -gt 0) { throw "unsigned payload members:`n" + ($bad -join "`n") }
+
+      - name: Fetch Forge
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download $env:FORGE_VERSION --repo Locke-Werks/Forge `
+            --pattern '*.exe' --dir tools
+          foreach ($name in 'lwforge.exe', 'lwstub.exe') {
+            $sig = Get-AuthenticodeSignature "tools/$name"
+            "$name : $($sig.Status)"
+            if ($sig.Status -ne 'Valid') { throw "tools/$name is $($sig.Status)" }
+          }
+
+      # No --dev here and no --sign either. --sign shells out to
+      # scripts/sign.ps1 resolved against the working directory, which exists
+      # only in the Forge repository, and the failure it produces reads like a
+      # certificate problem.
+      - name: Forge the installer
+        shell: pwsh
+        run: |
+          ./tools/lwforge.exe build `
+            --config installer.toml `
+            --payload dist/stage `
+            --stub tools/lwstub.exe `
+            --out dist/Revenant-Setup.exe
+
+      - name: Sign the installer
+        uses: azure/trusted-signing-action@v0
+        with:
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ steps.signing.outputs.endpoint }}
+          trusted-signing-account-name: ${{ steps.signing.outputs.account }}
+          certificate-profile-name: ${{ steps.signing.outputs.profile }}
+          files-folder: dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      # The publisher reads Specter Point Intelligence, LLC. That is the parent
+      # organisation and a Locke Werks product signed by it is correct.
+      #
+      # The inspect is the check people leave out. Signing appended a
+      # certificate table after the container, and this is what proves the
+      # payload is still reachable behind it rather than orphaned.
+      - name: Verify
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature dist/Revenant-Setup.exe
+          "installer: $($sig.Status)  $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw "the installer is $($sig.Status)" }
+
+          ./tools/lwforge.exe inspect dist/Revenant-Setup.exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "the signed installer cannot read its own container"
+          }
+
+      # THIS STEP IS NOT YET COMPLETE AND THE GAP IS A LICENCE ONE, NOT A
+      # PACKAGING ONE. Revenant is GPL-3.0-or-later and links libusb under
+      # LGPL-2.1-or-later. docs/clean-room.md decided on 2026-09-20 that both
+      # obligations are discharged by section 6d, which is the binary and the
+      # corresponding sources offered from the same designated place. A
+      # release carrying only the installer is not that. What is missing is
+      # listed in docs/packaging.md under "What the container does not carry
+      # yet", and the first tag is when it comes due.
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/Revenant-Setup.exe `
+            --repo "${{ github.repository }}" `
+            --title "Revenant ${{ github.ref_name }}"

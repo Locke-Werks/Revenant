@@ -260,9 +260,15 @@ tree's suite says nothing about the client, which links no part of the engine
 and reaches it over a socket. docs/ci.md lists what that job covers and, file
 by file, what it does not.
 
-## Signing
+## Packaging and signing
 
-Nothing is signed yet. There is no shippable binary until M3.
+docs/packaging.md is the whole of it: what the installer carries, how to build
+one locally, and the order the release job signs in. This section is the two
+sentences somebody looking for a certificate needs.
+
+Nothing is signed yet. The `release` job in `.github/workflows/ci.yml` can sign
+and has never run; `package` produces an unsigned development installer on
+every build.
 
 The scaffold is in place: `signing/signing.env` holds the endpoint, account and
 certificate profile, and `scripts/New-SigningMetadata.ps1` generates

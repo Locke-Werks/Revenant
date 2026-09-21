@@ -222,3 +222,13 @@ instead: engine::place refuses a placement whose clamp would break the
     demodulator, which is the FM modes granted less than their own entry in
     dsp::default_passband. The refusal names the channel count that would
     carry it. The linear modes still clamp and still report on clampReason.
+
+phrase: Raw PCM through QAudioSink is served by the windows platform backend
+phrase: an install that carries only the windows one still plays audio
+retired: 2026-09-21
+commit: fwd/packaging
+instead: The client loads multimedia/ffmpegmediaplugin.dll and the five FFmpeg
+    libraries beside it, and does not load windowsmediaplugin.dll at all. FFmpeg
+    is the default Qt Multimedia backend in Qt 6.8 and nothing sets
+    QT_MEDIA_BACKEND. Measured from the process module list; docs/packaging.md
+    has the run and what those 18.3 MB cost the installer.

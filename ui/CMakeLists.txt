@@ -74,12 +74,22 @@ endif()
 # backend plugin that windeployqt copies below.
 #
 # WHICH BACKEND PLUGIN ACTUALLY MATTERS HERE. Qt 6.8.3 ships two,
-# windowsmediaplugin and ffmpegmediaplugin. Raw PCM through QAudioSink is
-# served by the windows platform backend, so nothing on this path depends on
-# FFmpeg or on the five shared libraries beside it. Both plugins are present
-# at C:/Qt/6.8.3/msvc2022_64 and windeployqt copies what it finds; an install
-# that carries only the windows one still plays audio, which is worth knowing
-# before the Forge installer's payload is decided.
+# windowsmediaplugin and ffmpegmediaplugin, and the client loads the FFmpeg
+# one. Measured 2026-09-21 by launching revenant-ui.exe from a directory with
+# no Qt on PATH and reading the process module list:
+# multimedia/ffmpegmediaplugin.dll is loaded together with avcodec-61,
+# avformat-61, avutil-59, swresample-5 and swscale-8, and
+# windowsmediaplugin.dll is not loaded at all. FFmpeg is the default Qt
+# Multimedia backend in Qt 6.8 and nothing here sets QT_MEDIA_BACKEND, so the
+# backend serving QMediaDevices and QAudioSink is that one. Those six files are
+# 18.3 MB of the installer payload; see docs/packaging.md.
+#
+# WHAT THIS PARAGRAPH USED TO SAY. "Raw PCM through QAudioSink is served by the
+# windows platform backend, so nothing on this path depends on FFmpeg or on the
+# five shared libraries beside it", and that an install that carries only the
+# windows one still plays audio. It was written to decide the Forge payload and
+# was not measured; the payload decision is the one place it would have done
+# real damage, so it is recorded rather than swapped.
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Multimedia Quick QuickControls2)
 find_package(CapnProto CONFIG REQUIRED)
 

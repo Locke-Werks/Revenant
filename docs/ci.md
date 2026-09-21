@@ -65,6 +65,8 @@ merging. A conformance result nobody can trust is worth less than one that is la
 | `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite. A matrix over the two GPUs, one leg per device |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
 | `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
+| `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, and keeps it as an artifact. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
+| `release` | `windows-latest` | On a `v*` tag only: signs the payload, forges, signs the installer, publishes. Has never run. docs/packaging.md holds the order and why it is that order |
 | `sweep` (nightly) | self-hosted | Runs the BER sweep and compares against `tests/baselines/ber-vs-snr.json`, failing on a regression |
 
 The matrix legs select their device with `REVENANT_GPU_INDEX`, which is the same

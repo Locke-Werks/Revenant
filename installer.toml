@@ -1,0 +1,176 @@
+# The Forge installer for Revenant.
+#
+# Forge is C:\Users\vexam\projects\Forge, remote Locke-Werks/Forge. One signed
+# stub, plus lwforge, which stamps this file and a payload directory into a
+# copy of it. docs/config-schema.md over there is the key surface; every
+# decision below cites it or a measurement recorded in docs/packaging.md.
+#
+# The payload is assembled by scripts/stage-payload.ps1 and is not described
+# here: lwforge takes a directory and hashes what it finds. docs/packaging.md
+# says what is in that directory and why.
+#
+# PATHS ARE LITERAL STRINGS, IN SINGLE QUOTES. A TOML basic string processes
+# escapes, so "{InstallDir}\bin" is InstallDir, then a BACKSPACE, then "in".
+# lwforge rejects control characters and names the offender, so the mistake
+# fails the build rather than shipping, but the single quotes stop it being
+# made. See "Backslashes" in docs/config-schema.md.
+
+[product]
+name        = "Revenant"
+version     = "0.1.0"
+publisher   = "Locke Werks"
+description = "A GPU-resident software defined radio"
+copyright   = "Copyright (c) 2026 Locke Werks"
+url         = "https://github.com/Locke-Werks/Revenant"
+icon        = "assets/revenant.ico"
+
+# AppUserModelID, with no version component, which is what keeps a taskbar pin
+# and a toast working across an upgrade. docs/config-schema.md, [product].
+aumid = "LockeWerks.Revenant"
+
+# upgrade_code IS DELIBERATELY ABSENT AND HAS TO BE CHOSEN ONCE.
+#
+# It is stable across versions and keys the single-instance mutex, so it is
+# fixed forever the first time an installer carrying it reaches anybody.
+# Nothing has been released, so leaving it out costs only exit code 1618 when
+# two installers race, and writing a placeholder now would be the one mistake
+# that cannot be taken back. Choose it before the first release.
+
+[install]
+scope = "machine"
+dir   = '{ProgramFiles}\Revenant'
+
+# The default, stated rather than inherited. A machine-scope install writes to
+# Program Files, so it has to elevate, and on-demand would only mean the stub
+# does not elevate itself and then dies at the first write. docs/config-schema.md,
+# [install].
+elevation = "required"
+
+[ui]
+# The GPL's own notice, not a EULA. Forge requires the checkbox before the
+# install proceeds, which is a property of the installer and not a condition
+# the licence imposes: nothing here asks anybody to accept anything in order
+# to run the program. The full text installs beside the binaries as
+# LICENSE.txt, so a recipient with no network still has the terms.
+license_text = """
+Revenant is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more detail.
+
+The complete licence text is installed as LICENSE.txt beside the programs, and
+the source for this build is published at
+https://github.com/Locke-Werks/Revenant.
+"""
+
+# ---------------------------------------------------------------------------
+# What the person installing gets asked
+# ---------------------------------------------------------------------------
+#
+# One option. Each one is a checkbox, a command-line switch, a manifest key and
+# a thing to keep spelled the same across versions, so the bar for adding
+# another is that the product genuinely wants it either way.
+#
+# PATH was considered and is not here. docs/config-schema.md lists the
+# declarations that expand {InstallDir}, and path_append's value is not among
+# them, so an entry would put the literal string {InstallDir} into the user's
+# PATH. That is the failure the token table warns about, and it is silent.
+
+[[options]]
+id      = "desktop_shortcut"
+label   = "Put a Revenant shortcut on the desktop"
+detail  = "The Start Menu entry is created either way."
+default = false
+
+# ---------------------------------------------------------------------------
+# Whether the machine qualifies
+# ---------------------------------------------------------------------------
+
+[[preflight]]
+type = "os_build"
+min  = 22000
+fail = "Revenant needs Windows 11. This machine reports an older build."
+
+[[preflight]]
+# 69.5 MB extracted, measured 2026-09-21 by scripts/stage-payload.ps1, plus the
+# installer's own copy of the container and the rollback journal beside it.
+# 256 MB is that with room for a payload that grows before anyone revisits the
+# number, and it is small enough that no real machine fails it by surprise.
+type  = "free_disk_space"
+bytes = 268435456
+fail  = "Revenant needs about 256 MB free on the install volume."
+
+# THE RUNNING COPY, AND WHY THIS IS A PREFLIGHT RATHER THAN A pre_install HOOK.
+#
+# An upgrade that swaps the files under a running engine leaves every client
+# talking to an image held open out of a renamed backup. Forge offers two ways
+# to stop that and docs/config-schema.md says to pick one, because a
+# process_not_running preflight refuses the install before any hook can run.
+#
+# The hook route needs a payload member that stops the product, depends on
+# nothing but the operating system and itself, and is signed before staging.
+# No such binary exists. The preflight route costs nothing to ship and,
+# with restart_manager, hands the user the option rather than a dead end.
+[[preflight]]
+type            = "process_not_running"
+name            = "revenant-engine.exe"
+restart_manager = true
+fail            = "The Revenant engine is running. Close it and the install can continue."
+
+[[preflight]]
+type            = "process_not_running"
+name            = "revenant-ui.exe"
+restart_manager = true
+fail            = "Revenant is running. Close the window and the install can continue."
+
+# NO VULKAN PREFLIGHT, WHICH IS A DECISION AND NOT AN OVERSIGHT.
+#
+# The engine imports vulkan-1.dll: dumpbin /dependents on revenant-engine.exe
+# lists WS2_32, bcrypt, SHELL32, ADVAPI32, ole32, vulkan-1 and KERNEL32, and
+# nothing else. A file_exists preflight on the loader would therefore predict a
+# real startup failure. It would also block the client, which is a remote user
+# interface that reaches an engine over a socket and has every reason to be
+# installed on a machine that will never open a GPU.
+
+# ---------------------------------------------------------------------------
+# What the install writes outside its own directory
+# ---------------------------------------------------------------------------
+#
+# Everything here is captured before it is written and restored on uninstall.
+# That is the reason to prefer a declaration over a hook wherever a hook would
+# do: a hook is an opaque signed binary and the engine cannot undo it.
+
+[[actions]]
+type = "arp"
+
+[[actions]]
+type   = "shortcut"
+target = '{InstallDir}\revenant-ui.exe'
+name   = "Revenant"
+
+[[actions]]
+type   = "shortcut"
+where  = "desktop"
+target = '{InstallDir}\revenant-ui.exe'
+name   = "Revenant"
+when   = "desktop_shortcut"
+
+# NO SERVICE. The engine holds a GPU context and a radio, and a machine-wide
+# service would hold both against whoever is logged in. It is started by a
+# person, or by a scheduled task they write, until there is a design for
+# multi-user arbitration.
+#
+# NO FILE ASSOCIATIONS. The file source reads SigMF and RIFF WAV recordings, and
+# .wav belongs to whatever a person already plays audio with. Registering it,
+# even additively through OpenWithProgids, puts Revenant in a list where nobody
+# asked for it.
+#
+# NO HOOKS. Nothing in this install needs code to run, and a hook can only run
+# a payload member, digest-pinned and signed before staging. The two candidates
+# are covered: stopping a running copy is the preflight above, and the RPC token
+# is created by the engine on first run under the invoking user's own
+# %LOCALAPPDATA%, which is the one place an elevated installer must not write.
