@@ -56,8 +56,10 @@ namespace {
 
 // Every demodulator's name, in enumerator order, so the table and the enum
 // cannot drift: demod_name() is the single spelling and this reads it back.
-constexpr Demod kAllDemods[] = {Demod::Raw, Demod::Am,  Demod::Nfm, Demod::Wfm,
-                                Demod::Usb, Demod::Lsb, Demod::Dsb, Demod::Cw};
+constexpr Demod kAllDemods[] = {Demod::Raw,   Demod::Am,    Demod::Nfm,
+                                Demod::Wfm,   Demod::Usb,   Demod::Lsb,
+                                Demod::Dsb,   Demod::Cw,    Demod::P25p1,
+                                Demod::Dstar, Demod::Tetra};
 
 // Rounds a quotient of integers to the nearest integer, halves away from zero.
 //

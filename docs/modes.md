@@ -123,13 +123,12 @@ what these systems carry in the clear.
 
 | Mode | Numbers | Specification | Effort |
 | --- | --- | --- | --- |
-| DMR Tier I/II/III | 4FSK, 4800 sym/s, 9600 bit/s, 12.5 kHz, 2-slot TDMA, 30 ms slots in 60 ms frames | ETSI TS 102 361-1 through -4, free from etsi.org | Medium |
 | dPMR446 and licensed modes 2/3 | 4FSK, 2400 sym/s, 4800 bit/s, 6.25 kHz FDMA | ETSI TS 102 490 and TS 102 658, free | Medium |
 | NXDN (IDAS, NEXEDGE) | 4FSK; 6.25 kHz at 2400 sym/s, 80 ms frames; 12.5 kHz at 4800 sym/s, 40 ms frames; RRC alpha 0.2 | NXDN TS 1-A v1.3, November 2011, free from the NXDN Forum, download permitted and redistribution forbidden | Medium |
 | P25 Phase 1 FDMA | C4FM 4FSK, 4800 sym/s, 9600 bit/s, 12.5 kHz; CQPSK/LSM on simulcast at the same symbol rate | TIA-102.BAAA-A plus the TIA-102.AABx trunking set, purchasable | Large |
 | TETRA V+D and Direct Mode | pi/4-DQPSK, 18000 sym/s, 36 kbit/s, 25 kHz, 4-slot TDMA, 14.167 ms slots | ETSI EN 300 392-2 and the EN 300 396 series, free | Large |
 | TEDS | pi/8-D8PSK and 4/16/64-QAM in 25, 50, 100 and 150 kHz, 2.7 kHz subcarrier spacing | ETSI EN 300 392-2 V3.x, free | Large |
-| D-STAR DV | GMSK BT 0.5, 4800 bit/s, 6.25 kHz; 2400 AMBE plus 1200 FEC plus 1200 data | JARL Digitalization Technology Standard for D-STAR, English edition free at jarl.org | Small |
+| D-STAR DV | GMSK BT 0.5, 4800 bit/s, 6.25 kHz; 2400 AMBE plus 1200 FEC plus 1200 data | JARL "アマチュア無線のデジタル化技術の標準方式" Ver 7.0, free at `jarl.com/d-star/STD7_0.pdf`. Japanese only: the English edition this row used to name is gone, see the note below the table | Small |
 | D-STAR DD | GMSK 128 kbit/s on 23 cm, Ethernet frames, roughly 150 kHz | Same JARL standard | Medium |
 | M17 | 4FSK, 4800 sym/s, h=1/3, 9 kHz occupied, 384-bit 40 ms frames, PRBS9 randomiser, Golay(24,12), punctured r=1/2 K=5, QPP interleaver, CRC-16 0x5935 init 0xFFFF | M17 Protocol Specification Part I, free at spec.m17project.org, complete to bit level | Medium |
 | FreeDV 1600, 700C, 700D, 700E | OFDM in an SSB passband; 1600 is 16 DQPSK carriers in about 1.1 kHz; 700D is 17 coherent QPSK carriers at 25 baud, 160 ms frame, 2 ms cyclic prefix, LDPC | No standards document. Project design notes and the FreeDV user manual, cited per file with a retrieval date | Large |
@@ -137,7 +136,16 @@ what these systems carry in the clear.
 | Opulent Voice | 40 ms frames of 134 bytes, CCSDS K=7 r=1/2 to 268 bytes, 67x32 interleaver, 24-bit sync 0x02B8DB, roughly 81.3 kHz | `opulent_voice_protocol.md` in OpenResearchInstitute/interlocutor, free and public | Medium |
 | MPT-1327 | FFSK 1200 bit/s sub-audio over analogue FM, 12.5 or 25 kHz, 64-bit codewords, BCH(63,48) plus parity | MPT 1327, UK DTI 1988 rev 1997, now Ofcom, free | Small |
 
-Two cautions carried forward.
+Three cautions carried forward.
+
+**The English edition of the JARL standard no longer exists.** This row said
+"English edition free at jarl.org" and that was wrong on 2026-09-21. The page
+that offered it, `jarl.com/d-star/shogen.htm`, still contains the sentence
+"the English version of the standard is here", commented out in the HTML with
+an empty `href`. So JARL withdrew the link rather than moved it, and there is
+no English edition to find. Ver 7.0 in Japanese is the first-party document
+and is what `core/decode/dstar.cpp` is written from. Its clause numbers are
+the ones in that file.
 
 **Opulent Voice's modulation as published is self-inconsistent.** Minimum shift
 keying carrying two bits per symbol at 27100 sym/s is almost certainly 4-ary FSK
@@ -505,6 +513,7 @@ pool. Paying does not fix this. Each row says when to look again.
 
 | Mode | Patent position | Revisit |
 | --- | --- | --- |
+| DMR Tier I/II/III | Motorola's US8306071, active to 2027-02-19, declared essential to ETSI TS 102 361-1 and claiming a method that receives a burst and compares its synchronisation pattern against known patterns. Three further Motorola patents run to 2031 and read on transmitting rather than receiving. A narrowing limitation in claim 1 gives a receive-only decoder an argument, and an argument is the reason this is excluded rather than shipped. The full query is in "The ETSI IPR query, and what it did to DMR" below | 2027-02-19, when US8306071 expires and the question closes with it. The physical layer is 4FSK at 4800 sym/s, which is the same path P25 Phase 1 already has, so the cost on that day is the framing and not the demodulator |
 | LoRa physical layer | EP2449690B1, Semtech, priority 2009-07-02, filed 2010-07-02, granted 2016-01-06, expiry 2030-07-02, with claims covering the receiver: multiply by a locally generated conjugate chirp and apply an FFT. Later receiver-specific grants EP3264622B1 and US10305535B2 run to 2036. There is also no published specification, which measurement would now answer, so the exclusion rests on the patent alone | 2030 for the base claim, 2036 for the receiver grants |
 | LoRaWAN | Inherits the LoRa physical layer. The L2 1.0.4 and RP002 documents are free and complete, and the MAC is genuinely specified | With LoRa |
 | Meshtastic | Inherits the LoRa physical layer. Nothing above it is a problem: the documentation is good, the protobuf schema is published, and the clear header is the useful part | With LoRa. Put it first in the queue on that day |
@@ -568,18 +577,168 @@ on a lookup. None should be started before an answer.
 | DVB-S2 | Sisvel runs a DVB-S2 licensing programme. The underlying LDPC and APSK filings from 2001 to 2003 have run their twenty years, and a live programme means somebody believes otherwise. Section 11 means taking the licence would not solve it, because a licence that stops at the licensee bars conveyance rather than permitting it. Whether the programme reaches receive-only decoder software is the question |
 | C-V2X PC5 | Listed under live patents above. The specification being a free 3GPP download is not clearance |
 
-**The ETSI IPR database has never been queried.** Not by any survey and not
-since. TS 102 361 (DMR) is the one that matters, because it is scheduled work
-under task #39 and the declarations against the series are acknowledged to
-exist. DMR, dPMR and NXDN were included on "nothing identified reading on
-receive-only framing" over specifications that carry FRAND declarations, while
-mioty and Sigfox were excluded because somebody found a named pool. That
-difference is search effort presented as a legal distinction. It does not flip
-either verdict today, and for a named LLC publishing signed binaries it is not
-defensible on a mode that is about to be built. Query ipr.etsi.org against
-TS 102 361, and against TS 102 744, TS 101 376 and ETS 300 133-4 while there.
+**The ETSI IPR database was queried on 2026-09-21. DMR is now excluded.** The
+query is recorded in full below, under "The ETSI IPR query, and what it did to
+DMR". The short version: TS 102 361-1 and -2 carry four licensing declarations
+from Motorola, the most recent signed 2024-05-16, and one of the declared
+patents is live until 2027-02-19 with a claim whose first step is receiving a
+burst and comparing its synchronisation pattern. That is the operation a
+framing decoder exists to perform. DMR moves to the live-patent exclusion
+table.
+
+TETRA was queried at the same time and came back clean, which is why EN 300
+392-2 work proceeded.
+
+## The ETSI IPR query, and what it did to DMR
+
+Done 2026-09-21, against the question this document had been carrying open.
+Recorded at length because the answer removed a scheduled mode, and because
+the next person to ask should be able to check the work rather than repeat it.
+
+**How it was queried.** `ipr.etsi.org` is an ASP.NET form and its search
+cannot be driven without a browser session, so the query went against the
+bulk export the site itself publishes at `docbox.etsi.org/IPR/Open`:
+`ISLD-export.zip`, the Information Statement and Licensing Declarations, which
+unpacks to a 2.4 GB CSV, and `GD-export.zip`, the General Declarations. Both
+were retrieved on 2026-09-21 with the file timestamps ETSI's directory listing
+gave as 05:07 and 05:08 that morning. The CSV carries one row per declared
+patent family member, with the ETSI deliverable number in its own column, so a
+deliverable is queried by matching that column.
+
+**One thing about that column cost a wrong answer for ten minutes and is worth
+stating.** The deliverable number carries the part suffix. Matching `102 361`
+as a whole field returns nothing at all, because every row reads `102 361-1`
+or `102 361-2`, and "nothing found" is exactly what a reader hoping for a
+clean answer is primed to accept. A prefix match returns 111 rows.
+
+### What is declared against TS 102 361
+
+Four licensing declarations, all Motorola, plus one general declaration.
+
+| Declaration | Signed | Against | Declared patents |
+| --- | --- | --- | --- |
+| ISLD-200505-004 | 2005-04-29 | TS 102 361-1 | US7203207, US7339917, and the continuation US8306071 |
+| ISLD-200607-003 | 2006-06-19 | TS 102 361-1 | US7200129, US7499441 |
+| ISLD-202405-025 | 2024-05-16 | TS 102 361-1 and -2 | US7500170 (sections 6.2, 7.1.1, 8.2.1.0, B.3.12, 9.3.6), US8503409 (section 5.2.2.4), US8457104 and US8599826 (sections 6.2.1.0, 6.2.2, 6.2.3) |
+| ISLD-202405-026 | 2024-05-16 | TS 102 361-2 | GB2451015 (sections 6.3.1 to 6.3.4, 7.2.20) |
+| GD-200407-001 | 2004-06-25 | work item DTS/ERM-TG32DMR-052 | general declaration, no patents enumerated |
+
+Legal status and anticipated expiry, read from each patent's record on
+2026-09-21:
+
+| Patent | Status | Anticipated expiry | Claim 1 begins |
+| --- | --- | --- | --- |
+| US7203207 | Expired | ran from a 2004-03-12 filing | receiving a burst comprising payload and a synchronization field |
+| US7339917 | Expired | same filing | receiving a plurality of bursts comprising a superframe |
+| US7200129 | Expired | same filing | at a subscriber, in a TDMA system |
+| US7499441 | Expired | 2026-01-23 | determining that a subscriber unit is provisioned for polite access |
+| **US8306071** | **Active** | **2027-02-19** | **receiving a burst comprising payload and a synchronization field, then comparing the received synchronization pattern against a first and a second known synchronization pattern** |
+| **US7500170** | **Active** | **2027-03-16** | generating a data block with an error detection portion |
+| **US8503409** | **Active** | **2031-02-19** | assigning a radio to transmit on a desired time slot |
+| **US8599826** | **Active** | **2031-01-17** | receiving, by a first radio, direct mode RF transmissions defining time slot boundaries |
+| **US8457104** | **Active** | 2031, same family | receiving a communication defining time slot boundaries |
+| **GB2451015** | **Active** | ran from a 2007-03-02 filing | interrupting a transmitting subscriber |
+
+### Why that excludes DMR
+
+The inclusion rule at the top of this document is that no live third-party
+patent reads on a receiver. Four of the six live patents are about
+transmitting: assigning a slot to transmit on, generating a data block,
+interrupting somebody else's transmission, and the pair on how a radio brings
+its own transmissions into slot alignment. A receive-only decoder does none of
+those, and on those four the rule is satisfied on the merits rather than by
+argument.
+
+US8306071 is the one that is not. Its claim 1 is a method whose steps are
+receiving a burst, reading the synchronisation field, comparing that pattern
+against two known patterns, and selecting an operating mode from the result.
+That is a description of burst synchronisation, which is the first thing any
+framing decoder for this mode has to do and the specific thing task #39 asked
+for. It is declared essential to TS 102 361-1 by its own holder. It is live
+until 2027-02-19.
+
+There is a narrowing limitation. The claim requires two known patterns
+associated with two different air interface types at two different
+frequencies, and dependent claim 3 names those as FDMA and TDMA. A decoder
+that correlates only the DMR patterns and never selects between air interface
+types has an argument that it does not practise the claim. The argument is
+real and it is an argument, which is the problem: whether a receive-only
+framing decoder infringes turns on a claim limitation, and resolving that is a
+claim construction rather than a reading of a database.
+
+So the position is not "DMR infringes". It is that DMR is the one mode in this
+document where the receiver question is genuinely open, on a live patent,
+against a holder who re-declared essentiality sixteen months ago. For a named
+LLC signing and publishing binaries that is not a call to make from a CSV. The
+mode is excluded until the patent expires on 2027-02-19, at which point the
+whole question disappears along with it, or until somebody qualified says
+otherwise.
+
+This is also the answer to the inconsistency this document has been carrying.
+DMR was included on "no patent identified" while mioty and Sigfox were
+excluded on found pools, and that difference really was search effort rather
+than a legal distinction. Having done the search, the verdicts now agree with
+each other.
+
+### What the same query said about the other three modes
+
+**TETRA, EN 300 392-2: clear.** Eight declarations against the deliverable,
+from Alcatel, Ericsson, Nokia, Motorola, Orange and Sepura. The newest
+declared basis patent is GB2415332, filed 2005-04-27 and showing expired;
+every other one has a filing date between 1987 and 2005. Nothing declared
+against EN 300 392-2 is inside a twenty-year term as of 2026-09-21. EN 300
+392-7 carries live Motorola declarations, and that part is the security
+specification this project does not implement.
+
+**P25 Phase 1 and D-STAR are not ETSI deliverables**, so this database is
+silent on both by construction and their rows above are unchanged by it. This
+query answers a question about ETSI declarations and nothing wider.
+
+**The other three deliverables this document asked about while there.**
+TS 102 744 (BGAN) carries 338 declarations from Inmarsat, TS 101 376 (GMR-1)
+carries 551 from Hughes Network Systems and others, and ETS 300 133-4 carries
+none. All three are metadata-only rows whose payloads are barred for other
+reasons, so none of this changes a verdict. TS 102 490 (dPMR) carries 70
+Motorola declarations and TS 102 658 carries 72 from Motorola and Kenwood;
+neither mode is built, and both now need the same patent-by-patent pass DMR
+just had before either is scheduled.
 
 ## Done
+
+**P25 Phase 1, D-STAR DV and TETRA V+D, physical layer and framing.** Three
+demodulator modes, `p25p1`, `dstar` and `tetra`, appended to the Demod enum
+after `cw`. They are complex taps rather than kernels: the receiver hands out
+baseband at the channel's width and `core/decode` recovers the symbols on the
+host, which `core/engine/vrx.h` explains at `is_complex_tap`.
+
+| Mode | File | Document | What comes out |
+| --- | --- | --- | --- |
+| P25 Phase 1 | `core/decode/p25p1.cpp` | TIA-102.BAAA-A clauses 8 and 9 and the clause 10.2 annex, with reserved values from TIA-102.BAAC | Frame sync, the Network Access Code and Data Unit ID through the (63,16,23) BCH code, and from a header data unit the talkgroup, the manufacturer, the key and algorithm identifiers and the message indicator |
+| D-STAR DV | `core/decode/dstar.cpp` | JARL Ver 7.0 clauses 4.1.1, 4.1.2, Ap1 and Ap2 | Bit and frame sync, the radio header through the rate 1/2 convolutional code and the 24 bit interleave, with all five callsigns and the flag byte, and the voice and data frames with the resynchronisation signals marked |
+| TETRA V+D | `core/decode/tetra.cpp` | EN 300 392-2 V3.8.1 clauses 5, 8.2, 8.3.1.2, 9.4.4 and 21.4.4.2 | Burst sync from the synchronisation training sequence, and the SYNC PDU off the broadcast synchronisation channel: colour code, system code, timeslot, frame and multiframe number, and the country and network codes |
+
+All three stop at the bits. P25's voice is IMBE and goes to
+`core/decode/imbe.cpp`; D-STAR's is AMBE and has nowhere to go; TETRA's is
+ACELP and is not implemented. Where a P25 header says a call is encrypted, the
+decoder reports that, reports the talkgroup and the network, and stops.
+
+`core/dsp/synth/dv_mod.cpp` is the transmitter for all three, written from the
+same clauses, and `tests/decode/test_p25p1.cpp`, `test_dstar.cpp` and
+`test_tetra.cpp` are the round trips. Each measures a bit or symbol error rate
+at a high and a low signal to noise and reports the figure rather than
+asserting it tight.
+
+Four things these three do not reach, recorded so nobody assumes otherwise.
+P25's Link Control in LDU1 and encryption sync in LDU2 both sit under a
+Reed-Solomon code over GF(2^6) that this work did not build, so a receiver
+joining a call mid-transmission gets the DUID sequence and the network but not
+the talkgroup until the next header. The P25 transmitter leaves the
+Reed-Solomon parity hexbits zero for the same reason, so its output is
+decodable by this project and not by a radio. TETRA stops at the broadcast
+synchronisation channel and does not follow the traffic or signalling channels
+that the recovered colour code would unscramble. And the JARL standard states
+no bandwidth-time product for D-STAR's GMSK, so the value at both ends of that
+round trip is this project's choice and the round trip cannot see it.
 
 RDS and RBDS, shipped. `core/decode/rds_bits.cpp` is the physical layer, from a
 recovered 57 kHz subcarrier to a differentially decoded bitstream, implementing

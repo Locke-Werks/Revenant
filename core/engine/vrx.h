@@ -55,7 +55,29 @@ namespace revenant::engine {
 // it is selected the same way: it hands out complex baseband at the VRX's
 // bandwidth, which is what lets external tooling and the decoder framework
 // attach before any decoder exists.
-enum class Demod : std::uint8_t { Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw };
+// The three digital voice modes are APPENDED, never inserted. Their ordinals
+// cross the wire and reach a specialization constant, and core/rpc/convert.h
+// asserts every pair; a reorder would retune every receiver in a saved
+// session and nothing about the failure would point at this line.
+//
+// DMR is deliberately absent from a list that names its three neighbours.
+// ETSI TS 102 361 carries a live Motorola patent whose claim 1 receives a
+// burst and compares its synchronisation pattern, which is what a framing
+// decoder does. docs/modes.md has the query and the reasoning, and the
+// exclusion lifts on 2027-02-19 when that patent expires.
+enum class Demod : std::uint8_t {
+    Raw,
+    Am,
+    Nfm,
+    Wfm,
+    Usb,
+    Lsb,
+    Dsb,
+    Cw,
+    P25p1,
+    Dstar,
+    Tetra,
+};
 
 [[nodiscard]] constexpr const char* demod_name(Demod mode) {
     switch (mode) {
@@ -67,14 +89,48 @@ enum class Demod : std::uint8_t { Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw };
         case Demod::Lsb: return "lsb";
         case Demod::Dsb: return "dsb";
         case Demod::Cw: return "cw";
+        case Demod::P25p1: return "p25p1";
+        case Demod::Dstar: return "dstar";
+        case Demod::Tetra: return "tetra";
     }
     return "unknown";
 }
 
 [[nodiscard]] Expected<Demod> demod_from_name(std::string_view name);
 
+// True when the mode hands out complex baseband rather than real audio.
+//
+// The raw tap was the only one of these until the digital voice modes
+// arrived, and they join it rather than getting a kernel of their own. What
+// each of them needs from the receiver is a channel filter of the right width
+// and a sample rate above twice its symbol rate; the recovery, the framing
+// and the metadata are pure functions of a span of complex samples and live
+// in core/decode. A kernel that discriminated for them would be doing work
+// core/decode/dv_phy.cpp has to do anyway, and doing it at the wrong rate:
+// P25 wants its discriminator after the receive filter, not before.
+//
+// The consequence a caller has to know is that these four produce two floats
+// per sample and no audio. produces_audio below is the predicate for that and
+// this is the predicate for the tap path.
+[[nodiscard]] constexpr bool is_complex_tap(Demod mode) {
+    switch (mode) {
+        case Demod::Raw:
+        case Demod::P25p1:
+        case Demod::Dstar:
+        case Demod::Tetra: return true;
+        case Demod::Am:
+        case Demod::Nfm:
+        case Demod::Wfm:
+        case Demod::Usb:
+        case Demod::Lsb:
+        case Demod::Dsb:
+        case Demod::Cw: return false;
+    }
+    return false;
+}
+
 // True when the mode produces real audio rather than complex baseband.
-[[nodiscard]] constexpr bool produces_audio(Demod mode) { return mode != Demod::Raw; }
+[[nodiscard]] constexpr bool produces_audio(Demod mode) { return !is_complex_tap(mode); }
 
 // The receiver's audio de-emphasis curve.
 //
@@ -211,7 +267,7 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         // being unwise is a request the operator cannot make; what stops it
         // being a trap is that nothing has to make it, because Default
         // already gives that receiver the right answer.
-        return (mode == Demod::Raw) ? Deemphasis::None : requested;
+        return is_complex_tap(mode) ? Deemphasis::None : requested;
     }
 
     switch (mode) {
@@ -237,7 +293,13 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:
-        case Demod::Cw: return Deemphasis::None;
+        case Demod::Cw:
+
+        // The three digital modes carry no analogue audio at all, so there is
+        // no curve to apply and no transmitter that applied one.
+        case Demod::P25p1:
+        case Demod::Dstar:
+        case Demod::Tetra: return Deemphasis::None;
     }
 
     // Not an enumerator at all. Nothing is known about the mode, so nothing
@@ -283,7 +345,10 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:
-        case Demod::Cw: return false;
+        case Demod::Cw:
+        case Demod::P25p1:
+        case Demod::Dstar:
+        case Demod::Tetra: return false;
     }
     return false;
 }
@@ -584,7 +649,13 @@ struct VrxPlacement {
 // narrower raw tap is a narrower raw tap, and whatever is reading it knows
 // what to do about that.
 //
-// No default case. A ninth demodulator has to answer this question here
+// The digital modes are grouped there for the same reason. Nothing in the
+// engine demodulates them; the fine stage hands complex baseband to
+// core/decode, so a clamped passband costs intersymbol interference rather
+// than a different signal, and the decoder reports that as a bit error rate
+// instead of hiding it.
+//
+// No default case. A twelfth demodulator has to answer this question here
 // rather than inherit an answer, which is the same rule
 // dsp::default_passband states for its own table.
 [[nodiscard]] constexpr bool clamp_breaks_demodulator(Demod mode) {
@@ -596,7 +667,10 @@ struct VrxPlacement {
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:
-        case Demod::Cw: return false;
+        case Demod::Cw:
+        case Demod::P25p1:
+        case Demod::Dstar:
+        case Demod::Tetra: return false;
     }
     return false;
 }

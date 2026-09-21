@@ -28,6 +28,19 @@ find_package(rtlsdr CONFIG REQUIRED)
 # rds_groups.cpp is the block and group layer above it. imbe.cpp is the P25
 # Phase 1 voice codec, decode side, channel bits to 8 kHz PCM.
 #
+# dv_phy.cpp, dv_codes.cpp, p25p1.cpp, dstar.cpp and tetra.cpp are the three
+# digital voice physical layers and the machinery under them. dv_phy.cpp is
+# the part with no standard in it: matched filtering, symbol timing recovery
+# and sync correlation, which all three share and none of them owns.
+# dv_codes.cpp is the error control codes the three standards specify, each
+# citing its clause. The three mode files then contain their standards and
+# little else, which is what makes them checkable against those standards.
+#
+# All three stop at the bits. Voice is a separate seam: P25's is imbe.cpp,
+# D-STAR's is AMBE with no published algorithm, and TETRA's is ACELP and
+# unimplemented. docs/modes.md has the scope and the reasoning, including why
+# DMR is absent from a list naming its three neighbours.
+#
 # vocoder.cpp is the voice-codec seam every implementation writes against. It
 # carries no codec and not one frame size; core/decode/vocoder.h says why a
 # constant here would have no citation to give. vocoder_plugin.cpp is the
@@ -48,9 +61,14 @@ add_library(revenant_core STATIC
     characterise/periodicity.cpp
     characterise/tones.cpp
     characterise/transform.cpp
+    decode/dstar.cpp
+    decode/dv_codes.cpp
+    decode/dv_phy.cpp
     decode/imbe.cpp
+    decode/p25p1.cpp
     decode/rds_bits.cpp
     decode/rds_groups.cpp
+    decode/tetra.cpp
     decode/vocoder.cpp
     decode/vocoder_plugin.cpp
     detect/detector.cpp
@@ -65,6 +83,7 @@ add_library(revenant_core STATIC
     dsp/spectrum_reference.cpp
     dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
+    dsp/synth/dv_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/wfm_mod.cpp

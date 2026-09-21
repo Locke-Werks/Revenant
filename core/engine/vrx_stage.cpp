@@ -983,10 +983,13 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
 void install_default_vrx_stages() {
     install_vrx_stage_factory(
         [](const VrxStageRequest& request) -> Expected<std::unique_ptr<VrxStage>> {
-            if (request.params.demod == Demod::Raw) {
+            if (is_complex_tap(request.params.demod)) {
                 // Declined, not failed. The graph's own raw tap is a buffer
                 // copy of a channel that is already contiguous, and a null
-                // stage is how the seam says so.
+                // stage is how the seam says so. The digital voice modes
+                // decline here too: what they want is that same contiguous
+                // complex baseband, and core/decode does the rest on the
+                // host.
                 return std::unique_ptr<VrxStage>{};
             }
             return DemodStage::create(request);

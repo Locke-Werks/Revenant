@@ -84,6 +84,9 @@ schema::Demod to_schema(engine::Demod mode) {
         case engine::Demod::Lsb: return schema::Demod::LSB;
         case engine::Demod::Dsb: return schema::Demod::DSB;
         case engine::Demod::Cw:  return schema::Demod::CW;
+        case engine::Demod::P25p1: return schema::Demod::P25P1;
+        case engine::Demod::Dstar: return schema::Demod::DSTAR;
+        case engine::Demod::Tetra: return schema::Demod::TETRA;
     }
     return schema::Demod::RAW;
 }
@@ -169,7 +172,7 @@ Expected<decode::Region> from_schema(schema::RdsRegion region) {
 
 Expected<engine::Demod> from_schema(schema::Demod mode) {
     const auto ordinal = static_cast<std::uint16_t>(mode);
-    if (ordinal > static_cast<std::uint16_t>(engine::Demod::Cw)) {
+    if (ordinal > static_cast<std::uint16_t>(engine::Demod::Tetra)) {
         return fail(std::format(
             "demodulator ordinal {} is not one this engine knows; the caller was built "
             "against a newer schema",

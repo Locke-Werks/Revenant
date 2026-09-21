@@ -2975,12 +2975,13 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
         stage = std::move(*built);
     }
     if (stage == nullptr) {
-        if (params.demod != Demod::Raw) {
+        if (!is_complex_tap(params.demod)) {
             return fail(std::format(
                 "no stage factory is installed, so '{}' cannot be built. The graph ships one "
-                "stage of its own, the raw complex tap (Demod::Raw), which needs no kernel. "
-                "Every other demodulator arrives with the fine-stage package and installs "
-                "itself through engine::install_vrx_stage_factory",
+                "stage of its own, the raw complex tap, which needs no kernel and which the "
+                "digital voice modes share because they are taps too. Every other "
+                "demodulator arrives with the fine-stage package and installs itself "
+                "through engine::install_vrx_stage_factory",
                 demod_name(params.demod)));
         }
         stage = std::make_unique<RawTapStage>(request);

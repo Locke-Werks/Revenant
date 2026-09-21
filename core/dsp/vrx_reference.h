@@ -305,6 +305,14 @@ inline constexpr std::uint32_t kDemodLsb = 5;
 inline constexpr std::uint32_t kDemodDsb = 6;
 inline constexpr std::uint32_t kDemodCw = 7;
 
+// The digital voice modes. These never reach the kernel: engine::is_complex_tap
+// routes them down the raw tap's path, which is a buffer copy and no
+// specialization constant at all. The values exist so the enum and this list
+// stay in step if one of them ever does get a kernel.
+inline constexpr std::uint32_t kDemodP25p1 = 8;
+inline constexpr std::uint32_t kDemodDstar = 9;
+inline constexpr std::uint32_t kDemodTetra = 10;
+
 static_assert(static_cast<std::uint32_t>(engine::Demod::Raw) == kDemodRaw);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Am) == kDemodAm);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Nfm) == kDemodNfm);
@@ -313,6 +321,9 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Usb) == kDemodUsb);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Lsb) == kDemodLsb);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Dsb) == kDemodDsb);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Cw) == kDemodCw);
+static_assert(static_cast<std::uint32_t>(engine::Demod::P25p1) == kDemodP25p1);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Dstar) == kDemodDstar);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Tetra) == kDemodTetra);
 
 // What those eight catch and what they do not, because the difference has
 // already been got wrong once in this tree.

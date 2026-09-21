@@ -2408,9 +2408,10 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         receiver.spec = spec;
         // The raw tap is not a demodulator: it hands back one grid channel as
         // interleaved complex at the channel rate, so its stream is two
-        // channels and is not at the audio rate. Everything else is mono
-        // audio. Taken from the placement rather than assumed.
-        if (spec.demod == Demod::Raw) {
+        // channels and is not at the audio rate. The three digital voice
+        // modes are taps on the same terms. Everything else is mono audio.
+        // Taken from the placement rather than assumed.
+        if (is_complex_tap(spec.demod)) {
             receiver.rate = status->placement.channel_rate;
             receiver.channels = 2;
         } else {

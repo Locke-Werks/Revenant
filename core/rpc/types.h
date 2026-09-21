@@ -43,7 +43,19 @@ struct Rational {
 // Mirrors revenant::engine::Demod ordinal for ordinal. The static_asserts
 // that hold that true live in core/rpc/convert.h, which is the only file
 // that sees both this and the engine.
-enum class Demod : std::uint8_t { Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw };
+enum class Demod : std::uint8_t {
+    Raw,
+    Am,
+    Nfm,
+    Wfm,
+    Usb,
+    Lsb,
+    Dsb,
+    Cw,
+    P25p1,
+    Dstar,
+    Tetra,
+};
 
 struct DeviceInfo {
     std::uint32_t index = 0;

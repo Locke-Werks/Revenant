@@ -103,6 +103,18 @@ enum Demod {
     lsb @5;
     dsb @6;
     cw @7;
+
+    # Appended, never renumbered. The three digital voice physical layers.
+    # They are complex taps like raw: the engine hands out baseband and
+    # core/decode recovers the symbols, so a client selecting one of these
+    # gets two channels at the channel rate rather than mono audio.
+    #
+    # DMR is absent on purpose. ETSI TS 102 361 carries a live patent whose
+    # claim receives a burst and compares its synchronisation pattern; see
+    # docs/modes.md. If it is ever added it goes after tetra, like these.
+    p25p1 @8;
+    dstar @9;
+    tetra @10;
 }
 
 struct DeviceInfo {

@@ -910,6 +910,25 @@ Passband default_passband(engine::Demod mode) {
         // 25 wpm keying envelope. The sidetone is a mix and not an edge, so
         // it does not appear here.
         case engine::Demod::Cw: return Passband{-250, 250};
+
+        // P25 Phase 1 FDMA occupies a 12.5 kHz channel. TIA-102.BAAA-A
+        // clause 9.3 puts the transmit filter's stopband at 2880 Hz of
+        // baseband, and the peak deviation is 1800 Hz (Table 9-1), so
+        // Carson gives about 9.4 kHz of occupied bandwidth inside it. The
+        // channel is the right window because the adjacent one is another
+        // P25 carrier.
+        case engine::Demod::P25p1: return Passband{-6'250, 6'250};
+
+        // D-STAR DV is a 6.25 kHz channel. The JARL standard's system
+        // specification table gives the occupied bandwidth as 6 kHz or less
+        // and the carrier spacing as 6.25 kHz or more, so the occupied
+        // bandwidth is the window and the spacing is the plan.
+        case engine::Demod::Dstar: return Passband{-3'000, 3'000};
+
+        // TETRA V+D is a 25 kHz channel carrying 18000 symbols per second
+        // through a root raised cosine of roll-off 0.35 (EN 300 392-2
+        // clauses 5.3 and 5.5), which occupies 18000 * 1.35 = 24.3 kHz.
+        case engine::Demod::Tetra: return Passband{-12'500, 12'500};
     }
 
     // Not an enumerator. Nothing is known about the mode, so nothing is
@@ -971,12 +990,18 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
         case engine::Demod::Nfm:
         case engine::Demod::Wfm:
         case engine::Demod::Dsb:
-        case engine::Demod::Cw: return Passband{-half, half};
+        case engine::Demod::Cw:
+
+        // The three digital modes are symmetric about their carrier, like
+        // the four above, because a linear modulation's spectrum is.
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+        case engine::Demod::Tetra: return Passband{-half, half};
         case engine::Demod::Usb: return Passband{0, params.bandwidth};
         case engine::Demod::Lsb: return Passband{-params.bandwidth, 0};
     }
 
-    return fail(std::format("resolve_passband: demodulator {} is not one of the eight",
+    return fail(std::format("resolve_passband: demodulator {} is not one of the eleven",
                             static_cast<std::uint32_t>(params.demod)));
 }
 
@@ -1115,7 +1140,19 @@ Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
         case engine::Demod::Usb:
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
-        case engine::Demod::Cw: return 0;
+        case engine::Demod::Cw:
+
+        // Zero for the digital modes even though two of the three are
+        // frequency modulations, and the reason is where the discriminator
+        // sits rather than whether there is one. This value scales a kernel
+        // that these modes never reach: engine::is_complex_tap routes them
+        // down the raw tap, and core/decode/dv_phy.cpp discriminates after
+        // its own receive filter, which is where TIA-102.BAAA-A clause 9.6
+        // puts it. A deviation here would scale nothing and would read as a
+        // claim that the kernel detects them.
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+        case engine::Demod::Tetra: return 0;
     }
 
     // Not an enumerator at all. No mode, so no channel plan, so no deviation.
@@ -1197,6 +1234,27 @@ Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame) {
             // the shared floor is a claim about these four detectors and not
             // a fallback.
             return floor_rate;
+
+        // The three digital modes are complex taps, so nothing detects them
+        // here and the reach term would be the whole story, except that the
+        // thing on the other end of the tap has a floor of its own. The
+        // timing recovery in core/decode/dv_phy.cpp is a Gardner detector,
+        // which needs a sample halfway between symbol instants to look at,
+        // so it needs two samples per symbol and refuses below that.
+        //
+        // Putting that here rather than leaving the decoder to complain is
+        // what makes a receiver opened at 8 kHz for P25 fail at the plan
+        // instead of at the first block, where the error would name the
+        // decoder and not the rate the operator chose.
+        case engine::Demod::P25p1:
+            // TIA-102.BAAA-A clause 9.2: 4800 symbols per second.
+            return std::max<Hertz>(floor_rate, 9'600);
+        case engine::Demod::Dstar:
+            // JARL Ver 7.0 clause 4.1.2 b: 96 bits every 20 ms, so 4800.
+            return std::max<Hertz>(floor_rate, 9'600);
+        case engine::Demod::Tetra:
+            // EN 300 392-2 clause 5.3: 36 kbit/s at two bits per symbol.
+            return std::max<Hertz>(floor_rate, 36'000);
     }
 
     // Not an enumerator. Unreachable from plan_vrx, which range-checks the
@@ -1269,8 +1327,8 @@ Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
 
 float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation) {
     // The same exhaustive-switch guard as its two neighbours above, for the
-    // same reason: unity is correct for six of the eight modes and is
-    // therefore what a ninth would silently inherit. The two discriminator
+    // same reason: unity is correct for nine of the eleven modes and is
+    // therefore what a twelfth would silently inherit. The two discriminator
     // cases break out to the scaling below; a value that is no enumerator at
     // all falls through with them and is caught by the deviation test, since
     // fm_deviation returns zero for it.
@@ -1283,6 +1341,16 @@ float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation)
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
         case engine::Demod::Cw:
+
+        // Unity for the digital modes, on the same reasoning as Raw: they
+        // are taps and the samples they hand out are the channel's, at the
+        // channel's own level. Scaling them would put a constant between
+        // core/decode's slicers and the deviation figures their standards
+        // state, which is the one thing those slicers are entitled to
+        // assume about their input.
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+        case engine::Demod::Tetra:
             // Raw is a passthrough, AM's envelope is already in the same
             // units as the input, and a product detector's real part is too.
             // Unity keeps every mode on the one convention: a unit-amplitude

@@ -18,6 +18,21 @@
 # tables against the constraints the standard states elsewhere, and the
 # decoder end to end.
 #
+# test_p25p1.cpp, test_dstar.cpp and test_tetra.cpp are the three digital
+# voice physical layers, and they follow the RDS pattern with one addition.
+# Each has two groups of cases. The first checks the standard's own codes
+# against the standard's own printed tables, which is what lets the
+# implementation carry a generator rather than a copied matrix: a case that
+# regenerates the matrix establishes that the rule in the code is the rule in
+# the document, where retyping the matrix would establish only that it was
+# retyped correctly. The second is the round trip against the transmitters in
+# core/dsp/synth/dv_mod.cpp.
+#
+# Every error rate in those three is measured and reported in an INFO line and
+# the assertion around it is loose. A bit error rate asserted to three decimal
+# places is a test that fails when somebody improves the receiver, and the
+# number a reader wants is in the log either way.
+#
 # IMBE has no synthetic transmitter behind it and is not getting one, which is
 # the one place this directory departs from the rule above. An IMBE encoder is
 # sections 5 and 10 of the same standard, four fifths of the work again, and a
@@ -94,9 +109,12 @@ inline constexpr const char* kTestVocoderPluginRefuseCreate = R"($<TARGET_FILE:r
 
 add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
+    test_dstar.cpp
     test_imbe.cpp
+    test_p25p1.cpp
     test_rds_bits.cpp
     test_rds_groups.cpp
+    test_tetra.cpp
     test_vocoder_plugin.cpp
 )
 

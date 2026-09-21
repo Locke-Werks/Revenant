@@ -117,6 +117,14 @@ void check_params_match(const rpc::VrxParams& got, const rpc::VrxParams& sent) {
         case rpc::Demod::Lsb: return 3'000;
         case rpc::Demod::Dsb: return 6'000;
         case rpc::Demod::Cw: return 500;
+
+        // The three digital voice modes, at their own channel widths:
+        // 12.5 kHz for P25 Phase 1, 6.25 kHz for D-STAR DV and 25 kHz for
+        // TETRA. core/dsp/vrx_reference.cpp's default_passband cites the
+        // clause behind each.
+        case rpc::Demod::P25p1: return 12'500;
+        case rpc::Demod::Dstar: return 6'000;
+        case rpc::Demod::Tetra: return 25'000;
     }
     return 12'000;
 }
@@ -675,9 +683,10 @@ TEST_CASE("all eight demodulator modes survive a round trip", "[gpu][rpc][m1]") 
     // static_asserts hold true. A mode reordered on one side and not the
     // other would retune every receiver in a saved session, so the list is
     // written out rather than iterated as a range of integers.
-    constexpr rpc::Demod kModes[] = {rpc::Demod::Raw, rpc::Demod::Am,  rpc::Demod::Nfm,
-                                     rpc::Demod::Wfm, rpc::Demod::Usb, rpc::Demod::Lsb,
-                                     rpc::Demod::Dsb, rpc::Demod::Cw};
+    constexpr rpc::Demod kModes[] = {rpc::Demod::Raw,   rpc::Demod::Am,    rpc::Demod::Nfm,
+                                     rpc::Demod::Wfm,   rpc::Demod::Usb,   rpc::Demod::Lsb,
+                                     rpc::Demod::Dsb,   rpc::Demod::Cw,    rpc::Demod::P25p1,
+                                     rpc::Demod::Dstar, rpc::Demod::Tetra};
 
     std::vector<std::uint64_t> ids;
     for (const rpc::Demod mode : kModes) {
@@ -737,7 +746,12 @@ TEST_CASE("a demodulator ordinal the engine does not know is refused, not cast",
     // of, and a blind cast would land on whichever mode sits at that ordinal
     // in this build. Mode is the one receiver parameter where being wrong is
     // inaudible until the recording turns out to be unintelligible.
-    constexpr auto kUnknownOrdinal = 9;
+    // One past the last enumerator, derived rather than written, so this
+    // test keeps testing an unknown ordinal after a mode is appended
+    // instead of quietly testing a known one. It was the literal 9 until
+    // the digital voice modes landed on 8, 9 and 10 and turned it into a
+    // test that a valid mode is refused.
+    constexpr auto kUnknownOrdinal = static_cast<int>(rpc::Demod::Tetra) + 1;
 
     rpc::VrxParams params = distinctive_params();
     params.demod = static_cast<rpc::Demod>(kUnknownOrdinal);
@@ -745,7 +759,7 @@ TEST_CASE("a demodulator ordinal the engine does not know is refused, not cast",
     auto added = harness.client().add_vrx(params);
     REQUIRE_FALSE(added.has_value());
     INFO(added.error().message);
-    CHECK(added.error().message.find("demodulator ordinal 9") != std::string::npos);
+    CHECK(added.error().message.find("demodulator ordinal " + std::to_string(kUnknownOrdinal)) != std::string::npos);
 
     // Nothing was created. An engine that refused the mode and added the
     // receiver anyway would be worse than one that cast it.
@@ -764,7 +778,7 @@ TEST_CASE("a demodulator ordinal the engine does not know is refused, not cast",
     const auto applied = harness.client().set_vrx_params(*id, bad);
     REQUIRE_FALSE(applied.has_value());
     INFO(applied.error().message);
-    CHECK(applied.error().message.find("demodulator ordinal 9") != std::string::npos);
+    CHECK(applied.error().message.find("demodulator ordinal " + std::to_string(kUnknownOrdinal)) != std::string::npos);
 
     auto after = harness.client().vrx_status(*id);
     REQUIRE(after.has_value());
