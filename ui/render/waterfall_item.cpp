@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include <QColor>
@@ -143,8 +144,8 @@ void WaterfallItem::onConnectionChanged()
     // A new engine, and the axis under this item has changed with it. Every
     // stored row was drawn against the previous span, so keeping them would
     // put a signal at a frequency it was never at. That is the same reason
-    // this file's header gives for discarding history on a resize, and it
-    // applies harder here: a resize keeps the band and only moves the
+    // this file's header gives for discarding history on a WIDTH change, and
+    // it applies harder here: a resize keeps the band and only moves the
     // pixels, where a new engine can be tuned somewhere else entirely.
     if (!history_.isNull()) {
         history_.fill(kBackground);
@@ -162,12 +163,74 @@ void WaterfallItem::onConnectionChanged()
 void WaterfallItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry)
 {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
-    if (newGeometry.size() != oldGeometry.size()) {
-        const QSize wanted = deviceSize();
-        rebuild(wanted.width(), wanted.height(), reduced_bins_);
-        rebuildDetections();
-        update();
+    if (newGeometry.size() == oldGeometry.size()) {
+        return;
     }
+
+    const QSize wanted = deviceSize();
+
+    // A HEIGHT CHANGE IS NOT A WIDTH CHANGE AND USED TO BE TREATED AS ONE.
+    //
+    // This called rebuild() on any size change, and rebuild() throws every
+    // row away. Only the WIDTH has to: a column covers a run of bins, the
+    // run depends on the column count, and the same stored row is a
+    // different frequency per pixel at a different width, so keeping it
+    // would draw a signal where it never was. That argument says nothing
+    // about height. Making the item taller or shorter moves no row sideways
+    // and changes no column's bins.
+    //
+    // It is not a rare gesture either. The detail pane opens and closes
+    // above this item, which resizes it in height alone, and the first
+    // click-to-tune does exactly that: the pane appears, the waterfall
+    // shortens, and the history an operator was reading to decide what to
+    // tune vanished in the act of tuning it. Twice, because the pane's
+    // own layout settles in a second pass.
+    if (wanted.width() == history_.width() && wanted.height() != history_.height()) {
+        resizeRows(wanted.height());
+    } else if (wanted != history_.size()) {
+        rebuild(wanted.width(), wanted.height(), reduced_bins_);
+    }
+
+    rebuildDetections();
+    update();
+}
+
+void WaterfallItem::resizeRows(int rows)
+{
+    const int wide = history_.width();
+    const int old_tall = history_.height();
+    const int tall = std::max(rows, 1);
+
+    const HistoryRemap plan =
+        plan_history_resize(old_tall, write_row_, filled_rows_, tall);
+
+    QImage fresh(wide, tall, QImage::Format_RGBX8888);
+    fresh.fill(kBackground);
+    std::vector<RowSpan> spans(static_cast<std::size_t>(tall), RowSpan{});
+
+    // The pixels and the spans move together, because a row's frequency
+    // axis is in the pixels and its time axis is in the span, and a
+    // rectangle on this display is placed from both. Copying one without
+    // the other puts every detection rectangle on the wrong rows.
+    const auto row_bytes = static_cast<std::size_t>(wide) * sizeof(std::uint32_t);
+    for (int row = 0; row < plan.rows_kept; ++row) {
+        const int from = history_source_row(plan, old_tall, row);
+        std::memcpy(fresh.scanLine(row), history_.constScanLine(from), row_bytes);
+        spans[static_cast<std::size_t>(row)] =
+            row_spans_[static_cast<std::size_t>(from)];
+    }
+
+    history_ = std::move(fresh);
+    row_spans_ = std::move(spans);
+    write_row_ = plan.write_row;
+    filled_rows_ = plan.rows_kept;
+
+    // Every tile, because every one of them is a texture built from pixels
+    // that have just moved. columns_, reduced_bins_ and headroom_db_ are
+    // deliberately untouched: the width did not change, so the reduction
+    // did not either.
+    const int tiles = (tall + kTileRows - 1) / kTileRows;
+    tile_dirty_.assign(static_cast<std::size_t>(tiles), std::uint8_t{1});
 }
 
 QSize WaterfallItem::deviceSize() const

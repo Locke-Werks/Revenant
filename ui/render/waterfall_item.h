@@ -43,13 +43,33 @@
 // session had. Tiles also cost one draw call each, which is what keeps them
 // from being one row apiece.
 //
-// WHAT A RESIZE COSTS
+// WHAT A RESIZE COSTS, WHICH DEPENDS ON WHICH AXIS MOVED
 //
-// The history is discarded. A column covers a run of bins, and the run
-// depends on the column count, so the same stored row means a different
-// frequency per pixel at a different width. Rescaling the history would
-// draw a signal at a frequency it was never at. Losing the picture on a
-// resize is visible and honest; moving a carrier is neither.
+// A WIDTH change discards the history. A column covers a run of bins, and
+// the run depends on the column count, so the same stored row means a
+// different frequency per pixel at a different width. Rescaling it would
+// draw a signal at a frequency it was never at. Losing the picture there is
+// visible and honest; moving a carrier is neither.
+//
+// A HEIGHT change keeps it. The ring is reallocated and the newest
+// min(filled rows, new height) rows are copied across with their row spans,
+// so a taller item gains empty rows below the history and a shorter one
+// drops the oldest.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// Until 2026-09-20 it was one sentence, "the history is discarded", with the
+// bins-per-column argument behind it, and geometryChange called rebuild() on
+// any size change at all. The argument is correct and it is about width
+// alone: a height change moves no row sideways and changes no column's bins.
+// The cost of the overreach was not theoretical. The detail pane opens above
+// this item, which resizes it in height only, so the first click-to-tune
+// threw away the history the operator had just read to decide what to tune,
+// twice, because the pane's layout settles in a second pass.
+//
+// render/history_resize.h holds the index arithmetic for the height case and
+// says why it is not in this file: a wrapped ring index is the part that can
+// be off by one, and none of it needs a window to test.
 //
 // WHAT THE DETECTION OVERLAY IS DOING IN HERE
 //
@@ -71,6 +91,7 @@
 #include <vector>
 
 #include "models/engine_link.h"
+#include "render/history_resize.h"
 #include "render/spectrum_item.h"
 #include "render/spectrum_scale.h"
 
@@ -144,6 +165,12 @@ private:
     void takeDetections();
     void onConnectionChanged();
     void rebuild(int columns, int rows, std::size_t bins);
+
+    // Reallocates the ring at a new HEIGHT and carries the rows over. Only
+    // legal when the width has not moved; see the note in geometryChange
+    // for why the width case cannot do this. render/history_resize.h holds
+    // the index arithmetic, and ui/tests covers it.
+    void resizeRows(int rows);
     void rebuildDetections();
     void placeLabels();
     void setHovered(std::uint64_t id);

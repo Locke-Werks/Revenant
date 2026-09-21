@@ -310,6 +310,10 @@ endif()
 # indicator. That class holds every decision on the audio path that can be
 # wrong in a way a person would not hear until much later.
 #
+# It covers plan_history_resize, which is the waterfall's ring arithmetic
+# across a height change: which wrapped index a kept row comes from, how
+# many rows survive, and where the write cursor lands.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -333,13 +337,22 @@ if(REVENANT_UI_TESTS)
         include(CTest)
         include(Catch)
 
-        # audio_ring.cpp and nothing else of ours. The point of the class is
-        # that it holds no Qt type, and a test target that linked Qt would
-        # stop that being true the first time somebody reached for QString in
-        # there.
+        # audio_ring.cpp and nothing else of ours that has a .cpp. The point
+        # of that class is that it holds no Qt type, and a test target that
+        # linked Qt would stop that being true the first time somebody
+        # reached for QString in there.
+        #
+        # render/history_resize.h is the other side of the same rule and has
+        # no source file: it is the waterfall's ring arithmetic lifted out of
+        # a QQuickItem so it can be asserted without a window. Anything else
+        # pulled out for a test belongs in a header of that shape rather than
+        # in a .cpp added here, because a .cpp that includes a Qt type would
+        # fail this link with a message about symbols and not about the rule
+        # it broke.
         add_executable(revenant_ui_tests
             audio/audio_ring.cpp
             tests/test_audio_ring.cpp
+            tests/test_history_resize.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE
