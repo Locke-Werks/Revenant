@@ -2265,9 +2265,9 @@ interface Session {
 
     # Opens a source on an engine that has none.
     #
-    # THE ENTRY IN docs/rpc.md THAT THIS RETIRES read: "What is still absent
-    # is opening, starting and stopping a source. Those are the host process's
-    # business and an engine owns one source for its life, for the reason
+    # THE ENTRY IN docs/rpc.md USED TO READ: "What is still absent is opening,
+    # starting and stopping a source. Those are the host process's business and
+    # an engine owns one source for its life, for the reason
     # Engine::open_source gives." Opening and stopping are here. Starting is
     # still the host's: run() is a blocking call on a thread this service does
     # not own, and tools/engined/main.cpp loops on it.

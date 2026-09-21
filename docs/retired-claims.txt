@@ -253,3 +253,17 @@ instead: It serves both now. supervise() skipped a pass early only when there
     WAS a client, so with none the reconnect ran at kDetectionPollInterval,
     four attempts a second rather than one, which is where adopt()'s own 240
     passes a minute came from. The guard requires a probe pass.
+
+phrase: has no method to open one, start it or stop it
+phrase: What is still absent is opening, starting and stopping a source
+phrase: an engine owns one source for its life
+phrase: The session cannot open or stop a source
+phrase: A source is owned for the life of the engine
+retired: 2026-09-21
+commit: f008362
+instead: Session.openSource and Session.closeSource are served over
+    Engine::close_source, which stops the stream and drops the graph and the
+    ring. Starting is still the host's, because Engine::run blocks for the length
+    of a stream; tools/engined/main.cpp loops on it and reads
+    EngineInfo::source_epoch to tell a client changing radios from a source that
+    ran out.

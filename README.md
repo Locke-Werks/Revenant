@@ -132,7 +132,7 @@ broadcast stations decode bright and one channel only. Nothing saves a set of
 receivers across a restart; that one is in `docs/rpc.md` with what it would take
 and what the gap costs meanwhile.
 
-This paragraph used to end "The session cannot open or stop a source, and
+This paragraph used to read "The session cannot open or stop a source, and
 nothing saves a set of receivers across a restart. Those last two are in
 `docs/rpc.md`, each with what it would take and what the gap costs meanwhile."
 The first half is no longer true. `openSource` and `closeSource` are on the
