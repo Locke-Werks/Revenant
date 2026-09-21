@@ -418,9 +418,25 @@ using AudioSink = std::function<Status(const AudioChunk&)>;
 
 // One consumer's place in a receiver's audio.
 //
-// Issued by Engine::attach_audio_sink, unique for the life of one Engine and
-// never reused. A token that has already been detached therefore detaches
-// nothing, rather than detaching whichever consumer arrived next.
+// Issued by Engine::attach_audio_sink, drawn from one counter for the whole
+// process and never reused by anything. A token that has already been
+// detached therefore detaches nothing, rather than detaching whichever
+// consumer arrived next, and that holds across receivers and across engines
+// as well as within one.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, AND WHY THE COUNTER MOVED. Until
+// 2026-09-20 it said "unique for the life of one Engine and never reused"
+// while the counter it described was a member of AudioFanout, and there is
+// one fan-out per receiver. Token 1 was therefore issued to the first
+// consumer of every receiver, so detach_audio_sink called with the right
+// token and the wrong VrxId detached a real consumer instead of refusing,
+// and the error text below promised that could not happen. Worse, the
+// engine erases a fan-out the moment its last consumer detaches, which took
+// the counter with it: the next attach on that receiver started at 1 again
+// and reissued a token that had already been handed out and given back. It
+// was latent only because core/rpc/server.cpp erases its own bookkeeping
+// before every detach, so no live caller held a token long enough to collide
+// with one.
 using AudioSinkId = std::uint64_t;
 
 // More than one consumer on one receiver's audio.
@@ -509,7 +525,7 @@ public:
     // Control thread. Returns the token that detaches this one consumer.
     [[nodiscard]] AudioSinkId attach(AudioSink sink) {
         const std::scoped_lock held(lock_);
-        const AudioSinkId token = next_++;
+        const AudioSinkId token = next_.fetch_add(1, std::memory_order_relaxed);
 
         // Copy, append, publish. The list the producer thread may be walking
         // right now is never written to, so it needs no lock to read one.
@@ -584,7 +600,19 @@ private:
     // it with one atomic load and no lock. Never null.
     std::atomic<std::shared_ptr<const Entries>> live_{std::make_shared<const Entries>()};
 
-    AudioSinkId next_ = 1;
+    // ONE COUNTER FOR THE PROCESS, not one per fan-out.
+    //
+    // The token space has to outlive any single fan-out, because Engine
+    // erases a fan-out as soon as its last consumer detaches and a member
+    // here would be destroyed with it and restart at 1. Making it static is
+    // what lets AudioSinkId mean what the comment on it says without every
+    // holder of a fan-out having to pass a counter in. A uint64 issued one
+    // per attach does not wrap in any run this will see.
+    //
+    // Relaxed is enough: nothing is published through this value. The
+    // ordering that matters is the lock above, which is what serialises the
+    // list rebuild.
+    inline static std::atomic<AudioSinkId> next_{1};
 };
 
 // One full-span spectrum frame, handed to the caller on the host.

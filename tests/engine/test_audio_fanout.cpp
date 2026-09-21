@@ -215,3 +215,40 @@ TEST_CASE("a token that is not attached detaches nothing", "[engine][audio][fano
     REQUIRE(fanout.deliver(empty_chunk()).has_value());
     CHECK(calls == 10);
 }
+
+TEST_CASE("two fan-outs never issue the same token", "[engine][audio][fanout]") {
+    // The property AudioSinkId's comment states and detach_audio_sink's
+    // refusal rests on. Engine keeps one fan-out per receiver, so a counter
+    // living in the fan-out would hand the first consumer of every receiver
+    // the same number, and detach_audio_sink called with the right token and
+    // the wrong VrxId would then detach a stranger instead of refusing.
+    engine::AudioFanout first;
+    engine::AudioFanout second;
+
+    const engine::AudioSinkId a = first.attach([](const engine::AudioChunk&) -> Status {
+        return {};
+    });
+    const engine::AudioSinkId b = second.attach([](const engine::AudioChunk&) -> Status {
+        return {};
+    });
+    CHECK(a != b);
+
+    // And the token space survives the fan-out itself. Engine erases a
+    // fan-out the moment its last consumer detaches, so a counter that was a
+    // member died with it and the next attach on that receiver reissued a
+    // token already handed out once.
+    engine::AudioSinkId reborn = 0;
+    {
+        engine::AudioFanout transient;
+        const engine::AudioSinkId leaving =
+            transient.attach([](const engine::AudioChunk&) -> Status { return {}; });
+        CHECK(transient.detach(leaving));
+        CHECK(transient.empty());
+    }
+    {
+        engine::AudioFanout replacement;
+        reborn = replacement.attach([](const engine::AudioChunk&) -> Status { return {}; });
+    }
+    CHECK(reborn != a);
+    CHECK(reborn != b);
+}
