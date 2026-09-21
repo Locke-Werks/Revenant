@@ -544,8 +544,21 @@ Expected<Token> load_token(const std::string& path) {
         return std::unexpected(permitted.error());
     }
 
-    // One byte more than the file should hold, so a longer one is refused by
-    // token_from_hex rather than silently truncated to the right length here.
+    // Larger than any file this should accept, so one carrying more than a
+    // token is refused by token_from_hex rather than silently truncated to
+    // the right length here.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "One byte more than the file should
+    // hold". The buffer is seventy-two bytes and a minted file is
+    // sixty-five, the sixty-four hex characters and a newline, so the slack
+    // is seven bytes and not one. Eight are reserved because the line ending
+    // an operator's editor leaves is not known here and only a run of
+    // trailing whitespace is stripped; the point of the slack is that a
+    // sixty-five byte read and a seventy-two byte read are distinguishable,
+    // and any size past the longest acceptable file does that. The size was
+    // right and the sentence describing it was not, which is the worse way
+    // round: a reader trimming the buffer to match the sentence would have
+    // cut it to sixty-six.
     std::array<char, (kTokenBytes * 2) + 8> buffer{};
     DWORD read = 0;
     const BOOL ok = ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &read,
