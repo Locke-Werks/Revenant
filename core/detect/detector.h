@@ -87,6 +87,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -105,6 +106,55 @@ namespace revenant::detect {
 // is exactly what makes one operator threshold mean one thing across a span
 // carrying a 50 Hz carrier and a 200 kHz broadcast at the same time.
 inline constexpr double kReferenceBandwidthHz = 2500.0;
+
+// Equal parts the residual rule checks a decaying band in, one at a time, as
+// well as checking it whole. See DetectorConfig::residual_rate_tolerance for
+// the case that needs it, which is a quiet emitter merged into a loud one
+// that stops.
+//
+// Eight rather than four, and the difference is whether any part of the band
+// holds the quiet emitter and nothing else. Measured 2026-09-20 on "a
+// transmitter beside one that stopped is not withheld with it": at four
+// parts, the part covering the quiet emitter still held three bins of the
+// loud one against five of the quiet one, which is enough to make it fall
+// with the loud one until that is 20 dB down, and the blackout stayed at
+// 4.26 s. At eight the same part is the quiet emitter alone, it does not
+// fall at all, and the blackout is 0.00 s.
+//
+// The bound on going finer is the ripple. A part's measured level carries the
+// averaged spectrum's own fluctuation, which is 1/sqrt(N * K) of the level
+// over N bins at K effective frames: at the shipped second of averaging and
+// this file's 125 frames a second that is 0.27 dB on one bin and 0.10 dB on
+// eight, against a fall of about 1.7 dB over the shortest run the rule will
+// act on. A part has to hold enough bins for its fall to mean something, and
+// eight parts of a narrow candidate is already one or two bins each.
+inline constexpr std::size_t kResidualParts = 8;
+
+// How much of the BAND's OWN measured fall each part has to have managed for
+// the band to read as emptying everywhere.
+//
+// Of the measured fall and not of the predicted one, which is the difference
+// between a uniformity test and a second rate test. An average with no input
+// empties everywhere at once, so every part falls by whatever the whole fell
+// by, whatever that is; tying the floor to the prediction instead re-imposes
+// a minimum rate, and residual_rate_tolerance at 1.0 is documented to remove
+// exactly that. Measured 2026-09-20: against the prediction, both cases that
+// open the window to its far end to prove the rule has teeth stopped firing
+// at all, "a station that fades keeps its track" withholding 0 candidates
+// where it withholds 40 now.
+//
+// One-sided, because a part falling FASTER than the whole is the ripple on a
+// few bins and says nothing on its own. The whole is still bounded above by
+// the window.
+//
+// Half is the loosest value that answers the case and it is loose on purpose.
+// A part of a shaped signal is its skirt, whose excess is a small number
+// carrying the same relative ripple as a large one, and the rule has to
+// survive that: the three-station post-stop scene stops publishing 3.27 to
+// 3.30 s after each station stops, unchanged from before this test existed.
+// The part that catches the two-emitter case is not near the edge, it has
+// stopped falling altogether.
+inline constexpr double kResidualPartFloor = 0.5;
 
 // What a track is, once something decides. Nothing in this file sets anything
 // but Unknown, and the detector does not infer one: docs/detection.md puts
@@ -555,12 +605,19 @@ struct DetectorConfig {
     // percent over a factor of 2.5 in the time constant.
     //
     // A candidate is suppressed when its band's mean per-bin excess has
-    // fallen at residual_decisions consecutive decisions AND the total fall
+    // fallen at residual_decisions consecutive decisions, AND the total fall
     // over that run is within residual_rate_tolerance, relatively, of what
-    // pure decay would produce over the same span of source seconds.
-    // Suppression is at the candidate and not at the track on purpose: a
-    // track-level rule leaves the candidate free, and a new track is then
-    // born from it every time the old one times out.
+    // pure decay would produce over the same span of source seconds, AND no
+    // one of the kResidualParts parts of the band has fallen by less than
+    // kResidualPartFloor of what the band as a whole fell by. Suppression is
+    // at the candidate and not at the track on purpose: a track-level rule
+    // leaves the candidate free, and a new track is then born from it every
+    // time the old one times out.
+    //
+    // THE PART TEST IS NOT A REFINEMENT. Without it the rule silences
+    // transmitters that never stopped, and the table further down cannot see
+    // it happen, because every cell of that table is one emitter. See TWO
+    // EMITTERS below.
     //
     // Measured over a band fixed at the run's start rather than over the
     // candidate's current extent. snr_2500_db scales with the extent the
@@ -695,6 +752,11 @@ struct DetectorConfig {
     // rule starves a fade" in tests/detect/test_detector.cpp is this table and
     // re-measures every cell of it on each run.
     //
+    // EVERY CELL IS ONE EMITTER FADING, and that is a property of the table
+    // and not of the rule. Read it as the cost of the rule to a signal that
+    // is alone in its band. TWO EMITTERS below is the other case and it is
+    // not on this surface anywhere.
+    //
     //   depth  2.00   3.00   3.20   3.30   3.60   4.34   6.00  10.00  13.30 dB/s
     //       8  0.00   0.00   0.00   0.00   0.00   0.00   0.00   0.10   0.42
     //      13  0.00   0.00   0.00   0.00   0.00   0.00   1.14   2.18   2.50
@@ -719,6 +781,34 @@ struct DetectorConfig {
     // A signal fading deeper than that is leaving, and losing it is still a
     // lost track rather than a momentary Held one. What is no longer claimed
     // is that anyone can tell which case they are in from the rate.
+    //
+    // TWO EMITTERS, which is the case the surface above cannot reach and the
+    // one the part test exists for.
+    //
+    // Two signals closer together than split_gap_bins come back as ONE
+    // candidate. When the loud one stops, the mean over that band falls at
+    // exactly the rate an emptying average falls at, because the loud one
+    // dominates the sum, and it goes on doing so until the loud one's
+    // residual has come down to the quiet one's level: the whole separation
+    // in decibels, at 4.343 dB/s, which at 20 dB is 4.6 s against a 3.0 s
+    // hold. The candidate withheld through all of that is the one describing
+    // the quiet emitter, which never stopped. It is dropped from tracks(),
+    // nothing is reborn from it because the suppression sits on the
+    // candidate, and candidates_residual increments the whole time, which
+    // reads as the rule working.
+    //
+    // Measured 2026-09-20, "a transmitter beside one that stopped is not
+    // withheld with it" in tests/detect/test_detector.cpp: a 40 dB emitter
+    // seven bins wide, two bins of bare noise from a 33-bin emitter at 60 dB
+    // that stops. Without the part test, 5.51 s with no candidate over the
+    // quiet emitter and 2.81 s with no track over it at all. With it, 0.00
+    // and 0.10, and the 0.10 is the merged track's id going to the loud one's
+    // remnant when the band finally splits, which is the merge rule and not
+    // this one.
+    //
+    // The part test costs the single-emitter surface above nothing: every
+    // cell of that table is the same after it as before, because a lone
+    // emitter's band empties everywhere at once and every part of it passes.
     double residual_rate_tolerance = 0.25;
     std::uint32_t residual_decisions = 4;
 
@@ -949,6 +1039,14 @@ private:
         double run_level_db = 0.0;
         double run_seconds = 0.0;
         std::uint32_t run = 0;
+
+        // The same level at the run's start, over each equal part of the
+        // support taken on its own. An average with no input empties
+        // everywhere at once, so every part falls by what the whole falls
+        // by; a band holding one dead emitter and one live one does not, and
+        // the mean cannot see the difference. See
+        // DetectorConfig::residual_rate_tolerance.
+        std::array<double, kResidualParts> run_part_db{};
     };
     std::vector<Decaying> decaying_;
     std::vector<Decaying> decaying_next_;

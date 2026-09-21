@@ -1431,6 +1431,178 @@ TEST_CASE("how long the residual rule starves a fade", "[detect]") {
     CHECK(honest.longest_starved_seconds > hold_seconds);
 }
 
+// THE TWO-EMITTER CASE, which the surface above cannot reach at all.
+//
+// Every cell of that sweep is ONE emitter, so the band the rule measures holds
+// nothing but the thing that is fading and the whole cost of the rule is the
+// starvation that surface prints. Two emitters closer together than
+// split_gap_bins are one candidate, and that is a different question with a
+// different answer.
+//
+// The mean per-bin excess over a band follows whichever emitter carries the
+// power. When the loud one stops, the mean falls at exactly the rate an
+// emptying average falls at, and goes on doing so until the loud one's
+// residual has come down to the quiet one's level: the separation in
+// decibels, at 4.343 dB/s. The candidate withheld through all of that is the
+// one describing the quiet emitter, which never stopped.
+//
+// So what this costs is not starvation of a fading signal. It is a
+// transmitter at full strength, never interrupted, withheld for as long as
+// its dead neighbour takes to empty, while candidates_residual increments the
+// whole time and reads as the rule working. Measured here without the part
+// test: 5.51 s with no candidate over the quiet emitter and 2.81 s with no
+// track over it, against a 3.00 s hold.
+//
+// The two numbers this prints are the measurement. The assertions are that
+// neither reaches the hold, which is the mechanism: what loses the track is
+// going longer than the hold with no detection, and nothing else.
+TEST_CASE("a transmitter beside one that stopped is not withheld with it", "[detect]") {
+    constexpr std::uint64_t kSeed = 41209;
+    INFO("seed " << kSeed);
+
+    // Two bins of bare noise between them, under the eight split_gap_bins
+    // needs, so the search hands back one band across the pair rather than
+    // two and the splitter leaves it alone until the loud one is far enough
+    // down for the gap to show. Twenty decibels of separation, so the loud
+    // one's residual takes 4.6 s to reach the quiet one's level against a
+    // 3.0 s hold.
+    constexpr std::size_t kLoudCentre = 480;   // bins 464..496
+    constexpr std::size_t kLoudWidth = 33;
+    constexpr std::size_t kQuietCentre = 502;  // bins 499..505
+    constexpr std::size_t kQuietWidth = 7;
+    constexpr std::uint32_t kQuietFirstBin = 499;
+    constexpr std::uint32_t kQuietLastBin = 505;
+
+    constexpr Emitter kLoud{
+        .centre_bin = kLoudCentre, .width_bins = kLoudWidth, .snr_2500_db = 60.0};
+    constexpr Emitter kQuiet{
+        .centre_bin = kQuietCentre, .width_bins = kQuietWidth, .snr_2500_db = 40.0};
+
+    // Under the hold, so the child of a merge is not dropped for being merged
+    // too long, which is a different rule and would mask this one.
+    constexpr double kTogetherSeconds = 1.5;
+    constexpr double kAfterSeconds = 10.0;
+
+    Scene scene(-90.0, kSeed);
+    detect::DetectorConfig config = base_config();
+    config.average_seconds = 1.0;
+    config.decision_interval_seconds = 0.1;
+
+    auto made = detect::Detector::create(config, scene.geometry());
+    REQUIRE(made);
+    detect::Detector detector = std::move(*made);
+
+    // The quiet one alone first, so it has an id before the loud one arrives
+    // and the pair becomes one band.
+    scene.set({kQuiet});
+    run_for(detector, scene, 3.0);
+    const detect::Track* alone = find_near(detector, scene.frequency_of(kQuietCentre), 6000);
+    REQUIRE(alone != nullptr);
+    const std::uint64_t id = alone->id;
+
+    scene.set({kLoud, kQuiet});
+    run_for(detector, scene, kTogetherSeconds);
+
+    // The loud one stops. The quiet one does not, and nothing below touches
+    // the scene again.
+    scene.set({kQuiet});
+
+    const double quiet_low_hz = static_cast<double>(scene.frequency_of(kQuietFirstBin));
+    const double quiet_high_hz = static_cast<double>(scene.frequency_of(kQuietLastBin));
+
+    const std::uint64_t residual_before = detector.stats().candidates_residual;
+    std::uint64_t seen_decisions = detector.stats().decisions;
+    double last_candidate = 0.0;
+    double last_track = 0.0;
+    double longest_blank = 0.0;
+    double longest_unlisted = 0.0;
+    bool covered_at_end = false;
+
+    const auto frames = static_cast<std::size_t>(std::llround(kAfterSeconds / kFrameSeconds));
+    for (std::size_t i = 0; i < frames; ++i) {
+        auto fed = detector.consume(scene.next());
+        if (!fed) {
+            FAIL("consume refused a frame: " << fed.error().message);
+        }
+        if (detector.stats().decisions == seen_decisions) {
+            continue;
+        }
+        seen_decisions = detector.stats().decisions;
+
+        const double now = static_cast<double>(i + 1) * kFrameSeconds;
+
+        covered_at_end = false;
+        for (const detect::Candidate& candidate : detector.candidates()) {
+            if (candidate.last_bin >= kQuietFirstBin && candidate.first_bin <= kQuietLastBin) {
+                covered_at_end = true;
+                break;
+            }
+        }
+        if (covered_at_end) {
+            last_candidate = now;
+        } else {
+            longest_blank = std::max(longest_blank, now - last_candidate);
+        }
+
+        bool listed = false;
+        for (const detect::Track& track : detector.tracks()) {
+            const double half = 0.5 * static_cast<double>(track.bandwidth);
+            if (static_cast<double>(track.center) + half >= quiet_low_hz &&
+                static_cast<double>(track.center) - half <= quiet_high_hz) {
+                listed = true;
+                break;
+            }
+        }
+        if (listed) {
+            last_track = now;
+        } else {
+            longest_unlisted = std::max(longest_unlisted, now - last_track);
+        }
+    }
+
+    const double hold_seconds = config.bootstrap_hold_seconds;
+    const detect::Track* after = find_near(detector, scene.frequency_of(kQuietCentre), 6000);
+
+    std::println("");
+    std::println("a 40 dB emitter 2 bins from a 60 dB one that stops, against the {:.1f} s hold",
+                 hold_seconds);
+    std::println("  longest stretch with no candidate over it: {:.2f} s", longest_blank);
+    std::println("  longest stretch with no track over it:     {:.2f} s", longest_unlisted);
+    std::println("  candidates withheld after the stop:        {}",
+                 detector.stats().candidates_residual - residual_before);
+
+    INFO(describe(detector));
+    INFO("longest stretch with no candidate over the quiet emitter: " << longest_blank
+                                                                      << " s against a "
+                                                                      << hold_seconds << " s hold");
+    INFO("longest stretch with no track over it: " << longest_unlisted << " s");
+    INFO("candidates withheld after the stop: "
+         << detector.stats().candidates_residual - residual_before);
+    INFO("the quiet emitter's id before the loud one arrived: " << id);
+
+    // The measurement the rest follows from: the quiet emitter is never left
+    // without a candidate for anything like the hold, so the loud one's
+    // residual cannot take its track with it. Measured 0.00 s, because the
+    // part of the band that is the quiet emitter alone never falls and the
+    // rule never fires on the pair.
+    CHECK(longest_blank < hold_seconds);
+    CHECK(covered_at_end);
+
+    // And the consequence, which is the one an operator sees. The row over
+    // the quiet emitter is never gone for anything like the hold: measured
+    // 0.10 s, a single decision at the handover described below.
+    CHECK(longest_unlisted < hold_seconds);
+    REQUIRE(after != nullptr);
+    CHECK(after->state == detect::TrackState::Live);
+
+    // The id is NOT asserted, and the reason is a different rule. When the
+    // band finally splits, the merged track's id goes to whichever piece
+    // matches its width best, which is the loud one's remnant, and the quiet
+    // emitter takes a fresh id: that is the merge and split rule the case
+    // below covers, it happens with a track over the emitter at every
+    // decision, and it is not this rule withholding anything.
+}
+
 TEST_CASE("two signals merge into one track and split back into two", "[detect]") {
     constexpr std::uint64_t kSeed = 86420;
     INFO("seed " << kSeed);

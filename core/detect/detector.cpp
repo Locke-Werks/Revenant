@@ -984,6 +984,17 @@ void Detector::reject_residual(double elapsed_seconds) {
         return linear_to_db(excess / count);
     };
 
+    // The p'th of kResidualParts equal parts of [first, last]. A support
+    // narrower than the part count gives overlapping one-bin parts rather
+    // than empty ones, which measures the same band several times and is
+    // harmless; an empty one would divide by zero.
+    const auto part_of = [&level_of](std::uint32_t first, std::uint32_t last, std::size_t p) {
+        const auto span = static_cast<std::uint64_t>(last - first + 1U);
+        const auto low = first + static_cast<std::uint32_t>(span * p / kResidualParts);
+        const auto high = first + static_cast<std::uint32_t>(span * (p + 1) / kResidualParts) - 1U;
+        return level_of(low, std::max(low, high));
+    };
+
     decaying_next_.clear();
     decaying_next_.reserve(candidates_.size());
 
@@ -1041,6 +1052,30 @@ void Detector::reject_residual(double elapsed_seconds) {
                      .run_seconds = 0.0,
                      .run = 0};
 
+        // A RESTART WHEN THE CANDIDATE LEAVES THE FROZEN SUPPORT WAS TRIED
+        // HERE AND TAKEN BACK OUT, recorded so it is not tried again.
+        //
+        // The argument for it is sound on its face: level_of reads the frozen
+        // support and the verdict lands on the current candidate, so if the
+        // candidate has grown past the support the measurement is not about
+        // the band being suppressed. It rests on a premise that is false,
+        // which is that a decaying signal's accepted extent only ever
+        // shrinks. It does not: the local noise floor under a loud wide
+        // station is biased up by the station itself, so as the station
+        // decays the percentile estimate comes down, the excess at the edge
+        // bins rises and the growth stage reaches further. Measured
+        // 2026-09-20 on the three-station post-stop scene, restarting on that
+        // put each station's Live time after its stop up from 0.32 s to
+        // 0.90 s and the published row from 3.30 s to 3.95 s, past the 3.8 s
+        // bar in tests/detect/test_detector_scene.cpp, and both cases that
+        // open the window to its far end to prove the rule has teeth stopped
+        // dropping anything.
+        //
+        // And it does not answer the case it was proposed for. The two
+        // emitters' shared band settles at one extent and stays there for the
+        // whole blackout, so containment holds throughout: with the restart
+        // and nothing else the blackout was 3.54 s against a 3.00 s hold.
+        // What answers it is the part test below.
         bool decaying = false;
         if (matched != nullptr) {
             const double carried = level_of(matched->run_first_bin, matched->run_last_bin);
@@ -1049,10 +1084,34 @@ void Detector::reject_residual(double elapsed_seconds) {
                 const double expected = kDbPerNeper * seconds / config_.average_seconds;
                 const double fall = matched->run_level_db - carried;
 
+                // AND NO PART OF THE BAND MAY BE HOLDING UP, which is the
+                // half a mean cannot answer and the reason this rule used to
+                // silence transmitters that never stopped.
+                //
+                // An average with no input empties everywhere at once, so
+                // every part of the band falls by whatever the whole fell by.
+                // A band carrying a dead emitter and a live one does not, and
+                // the mean cannot tell: it follows whichever carries the
+                // power. Two emitters closer than split_gap_bins are one
+                // candidate, so a loud one stopping beside a quiet one reads
+                // as the whole band emptying for as long as the loud one's
+                // average takes to come down to the quiet one's level, which
+                // is its whole separation in decibels and several times the
+                // hold. The part holding the quiet emitter sees it at once,
+                // because that part never falls at all. See
+                // DetectorConfig::residual_rate_tolerance.
+                bool uniform = true;
+                for (std::size_t p = 0; uniform && p < kResidualParts; ++p) {
+                    const double part_fall =
+                        matched->run_part_db[p] -
+                        part_of(matched->run_first_bin, matched->run_last_bin, p);
+                    uniform = part_fall >= kResidualPartFloor * fall;
+                }
+
                 // Two-sided. A fall short of the window is a signal fading of
                 // its own accord and a fall past it is geometry or noise, and
                 // neither is an average emptying out.
-                if (fall >= (1.0 - config_.residual_rate_tolerance) * expected &&
+                if (uniform && fall >= (1.0 - config_.residual_rate_tolerance) * expected &&
                     fall <= (1.0 + config_.residual_rate_tolerance) * expected) {
                     decaying = true;
                     now.run_first_bin = matched->run_first_bin;
@@ -1061,6 +1120,7 @@ void Detector::reject_residual(double elapsed_seconds) {
                     now.run_level_db = matched->run_level_db;
                     now.run_seconds = seconds;
                     now.run = matched->run + 1;
+                    now.run_part_db = matched->run_part_db;
                 }
             }
         }
@@ -1069,6 +1129,9 @@ void Detector::reject_residual(double elapsed_seconds) {
             // decision compares like with like.
             now.level_db = level_of(now.run_first_bin, now.run_last_bin);
             now.run_level_db = now.level_db;
+            for (std::size_t p = 0; p < kResidualParts; ++p) {
+                now.run_part_db[p] = part_of(now.run_first_bin, now.run_last_bin, p);
+            }
         }
         decaying_next_.push_back(now);
 
