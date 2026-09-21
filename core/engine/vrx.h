@@ -72,6 +72,183 @@ enum class Demod : std::uint8_t { Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw };
 // True when the mode produces real audio rather than complex baseband.
 [[nodiscard]] constexpr bool produces_audio(Demod mode) { return mode != Demod::Raw; }
 
+// The receiver's audio de-emphasis curve.
+//
+// THIS IS A DEFECT REPORT, NOT A FEATURE FLAG. Until 2026-09-20 nothing in
+// the demodulation path applied any de-emphasis at all: a grep for deemph,
+// emphasis or tau across core/shaders, core/dsp and core/engine returned
+// nothing, and every broadcast FM reception this program had ever produced
+// was several decibels too bright at the top of the audio band. On an
+// operator's first real station it read as harsh and unclear speech rather
+// than as distortion, which is why a year of synthetic testing did not find
+// it: tests/decode/test_rds_bits.cpp renders a station, demodulates it and
+// decodes RDS, and it passed throughout, because RDS rides 57 kHz and an
+// audio curve never touches it.
+//
+// Broadcast FM boosts the top of the audio band at the transmitter so the
+// discriminator's rising noise spectrum is cut back along with the boost at
+// the receiver. A receiver that does not apply the matching cut delivers the
+// boost. core/dsp/synth/wfm_mod.h has the transmit half and has had it since
+// before this existed, which is how the two halves came to disagree.
+//
+// ONE GEOGRAPHY, TWO CONSUMERS. Us75 and Eu50 are the same split as RDS
+// against RBDS, which core/decode/rds_groups.h already carries as
+// decode::Region: Us75 goes with Region::kRbds, NRSC-4-B and ITU region 2,
+// and Eu50 goes with Region::kRds, EN 50067 and ITU regions 1 and 3. A
+// client that has already asked an operator which region they are in has
+// already answered this question and must not ask a second time. This header
+// does not include core/decode to say so: core/engine reaches into
+// core/decode nowhere else and one enumerator pair is not worth the edge.
+//
+// None is a legitimate setting and not an off switch for something broken. A
+// composite tap feeding an RDS decoder must not be de-emphasised, and neither
+// must a measurement; see the note on Default below for which paths can
+// reach a curve at all.
+enum class Deemphasis : std::uint8_t {
+    // "I did not say", answered by the mode's own channel plan, exactly as
+    // VrxParams::bandwidth of zero is answered by default_passband. It is
+    // the zero value so a caller that never heard of this field gets the
+    // right curve rather than none.
+    Default = 0,
+
+    None,
+
+    // 75 microseconds. North America, 47 CFR 73.333.
+    //
+    // NOT OPENED FOR THIS WORK. The rule prints the curve as a figure rather
+    // than as a time constant; 75 us is the constant that curve is
+    // universally quoted as and is what is implemented. docs/clean-room.md
+    // asks a citation to name a document somebody read, so this one names
+    // the document and says plainly that nobody here read it.
+    // core/dsp/synth/wfm_mod.h states the transmit side on the same terms.
+    Us75,
+
+    // 50 microseconds. Europe and most of the rest of the world, ITU-R
+    // BS.450. NOT OPENED FOR THIS WORK, on the same terms as Us75.
+    Eu50,
+};
+
+[[nodiscard]] constexpr const char* deemphasis_name(Deemphasis curve) {
+    switch (curve) {
+        case Deemphasis::Default: return "default";
+        case Deemphasis::None: return "none";
+        case Deemphasis::Us75: return "75us";
+        case Deemphasis::Eu50: return "50us";
+    }
+    return "unknown";
+}
+
+// Inline here rather than beside demod_from_name in core/engine/vrx_place.cpp
+// because it needs nothing that file has. Same spellings the transmit side
+// accepts in siggen::preemphasis_from_name, so a test that renders a station
+// and receives it names the curve once.
+[[nodiscard]] inline Expected<Deemphasis> deemphasis_from_name(std::string_view name) {
+    if (name == "default") return Deemphasis::Default;
+    if (name == "none" || name == "off") return Deemphasis::None;
+    if (name == "75us" || name == "us") return Deemphasis::Us75;
+    if (name == "50us" || name == "eu") return Deemphasis::Eu50;
+    return fail(std::string("no de-emphasis curve is called '") + std::string(name) +
+                "'. The curves are default, none, 75us and 50us");
+}
+
+// The audio rate at and above which a WFM receiver is handing out the
+// MULTIPLEX rather than programme audio, and so takes no curve by default.
+//
+// Twice the 57 kHz RDS subcarrier. Below it the subcarrier cannot be
+// represented at all and whatever comes out is programme audio; at or above
+// it the receiver is a composite tap, which is what core/decode/rds_bits.h
+// is fed and what tools/cli --rds opens at 171000 S/s.
+//
+// THIS BOUND IS WHY THE FIRST ON-AIR RDS DECODE STILL WORKS. De-emphasising
+// a composite pulls the data band down 28.6 dB at 75 us and tilts it by
+// 1.6 dB across its own width, and the decoder would report a quality
+// figure for whatever survived rather than faulting. The number is spelled
+// out here rather than taken from decode::kSubcarrierHz because core/engine
+// depends on core/decode nowhere and one constant is not worth the edge;
+// core/decode/rds_bits.h is the definition and this is a copy that says so.
+inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
+
+// The curve a receiver actually runs: the request, or the mode's own when
+// the request is Default.
+//
+// The switch is over Demod with every enumerator spelled out and no default
+// label, which is the shape /w14062 diagnoses, for the same reason
+// dsp::fm_deviation, dsp::minimum_demod_rate and dsp::vrx_demod_gain are
+// written that way. None is correct for seven of the eight modes, which is
+// exactly what makes it dangerous to hand over by omission: a ninth mode in
+// the FM family would inherit a flat response and sound wrong in a way
+// nothing measures.
+//
+// audio_rate of zero means the receiver took the engine's default, which is
+// programme audio, so zero and 48000 answer the same.
+//
+// Here in core/engine rather than in core/dsp because VrxStatus has to call
+// it and core/dsp already depends on core/engine, so the other direction is
+// a cycle.
+[[nodiscard]] constexpr Deemphasis resolve_deemphasis(Demod mode, Deemphasis requested,
+                                                      dsp::SampleRate audio_rate) {
+    if (requested != Deemphasis::Default) {
+        // Raw is complex baseband at the receiver's bandwidth and is not
+        // audio, so there is no curve to apply and a request for one is not
+        // refused, it is simply not a thing the raw tap has. Making it a
+        // refusal would mean a client that sets a curve once and sweeps
+        // modes gets an error on one of them.
+        //
+        // An EXPLICIT curve on a composite tap is honoured, unlike the
+        // default below. Explicit is explicit, and a request refused for
+        // being unwise is a request the operator cannot make; what stops it
+        // being a trap is that nothing has to make it, because Default
+        // already gives that receiver the right answer.
+        return (mode == Demod::Raw) ? Deemphasis::None : requested;
+    }
+
+    switch (mode) {
+        // North America, because that is where the radio is. An operator
+        // elsewhere sets Eu50 the same way they set Region::kRds.
+        case Demod::Wfm:
+            return (audio_rate >= kCompositeAudioRateHz) ? Deemphasis::None
+                                                         : Deemphasis::Us75;
+
+        // Nfm is the one that looks like it should be here and is not. Land
+        // mobile does run a 750 microsecond curve, but nothing in this tree
+        // transmits one, so a de-emphasis nobody has ever measured against a
+        // matching transmitter would be a guess shipped as a correction. It
+        // is requestable and it is not a default.
+        //
+        // NFM is also the other half of the composite tap: core/rpc's RDS
+        // surface admits an NFM receiver at 171000 beside a WFM one, because
+        // both reach the same atan2 and only the gain differs. A default
+        // curve here would have broken that path too.
+        case Demod::Nfm:
+        case Demod::Raw:
+        case Demod::Am:
+        case Demod::Usb:
+        case Demod::Lsb:
+        case Demod::Dsb:
+        case Demod::Cw: return Deemphasis::None;
+    }
+
+    // Not an enumerator at all. Nothing is known about the mode, so nothing
+    // is known about its channel plan.
+    return Deemphasis::None;
+}
+
+// The curve's time constant in seconds, and zero for None and Default.
+//
+// Default is zero rather than 75 microseconds on purpose: everything that
+// designs a filter goes through resolve_deemphasis first, so a Default
+// arriving here is a caller that skipped it, and a flat response is the
+// answer that makes that visible rather than the one that hides it.
+[[nodiscard]] constexpr double deemphasis_seconds(Deemphasis curve) {
+    switch (curve) {
+        case Deemphasis::Us75: return 75.0e-6;
+        case Deemphasis::Eu50: return 50.0e-6;
+        case Deemphasis::None:
+        case Deemphasis::Default: return 0.0;
+    }
+    return 0.0;
+}
+
 struct VrxId {
     std::uint32_t value = 0;
 
@@ -186,6 +363,23 @@ struct VrxParams {
 
     Demod demod = Demod::Nfm;
 
+    // The audio de-emphasis curve, or Default to take the mode's own.
+    //
+    // Default resolves to Us75 for Wfm and to None for every other mode,
+    // including Nfm: land mobile does run a 750 us curve, but nothing in
+    // this tree transmits one and a de-emphasis nobody measured is worse
+    // than none. dsp::resolve_deemphasis is the one place that decides, and
+    // it switches over Demod with no default label so a ninth mode has to
+    // say what it wants.
+    //
+    // Raw is not audio and never carries a curve whatever this says. That
+    // matters concretely: tools/cli --rds taps the 171000 S/s composite
+    // through the raw mode and decoded a real station on 2026-09-20. A curve
+    // on that path would lift the 57 kHz subcarrier by 28.6 dB at 75 us and
+    // the decoder would report a clean eye while every sensitivity figure
+    // measured against it was optimistic by that much.
+    Deemphasis deemphasis = Deemphasis::Default;
+
     // Audio output rate. 0 takes the engine's default.
     dsp::SampleRate audio_rate = 0;
 
@@ -294,6 +488,23 @@ struct VrxStatus {
     // dragging the passband edges reads this to tell a change it can send
     // live from one that will break the audio.
     dsp::SampleRate demod_rate = 0;
+
+    // The de-emphasis curve this receiver is ACTUALLY running, which
+    // Default never is: Default is a question and this is the answer. A
+    // client that sent Default and reads Us75 back is being told which curve
+    // it got rather than being left to work it out from the sound, which is
+    // the whole complaint this exists to answer.
+    //
+    // A FUNCTION AND NOT A FIELD, DELIBERATELY. Every other result on this
+    // struct is written by core/engine/graph.cpp, and a field here would be
+    // one more thing that file has to remember: a receiver whose curve
+    // changed and whose status still said Us75 would be the same silence
+    // this whole change is about. The answer is a pure function of two
+    // fields that are already echoed verbatim above, so there is nothing to
+    // forget and nothing to get stale.
+    [[nodiscard]] constexpr Deemphasis applied_deemphasis() const {
+        return resolve_deemphasis(params.demod, params.deemphasis, params.audio_rate);
+    }
 
     // Signal level in the passband, dBFS, updated per block. This is what
     // drives the meter in the receiver rack.

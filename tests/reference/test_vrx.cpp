@@ -40,6 +40,8 @@
 #include <vector>
 
 #include "core/dsp/pfb.h"
+#include "core/dsp/synth/modulators.h"
+#include "core/dsp/synth/wfm_mod.h"
 #include "core/dsp/types.h"
 #include "core/dsp/vrx_reference.h"
 #include "core/engine/vrx.h"
@@ -95,11 +97,15 @@ constexpr std::uint32_t kFineMask = kFineCapacity - 1U;
 // ---------------------------------------------------------------------------
 
 dsp::VrxPlan make_plan(engine::Demod mode, dsp::Hertz centre, dsp::Hertz bandwidth,
-                       const dsp::GridParams& grid) {
+                       const dsp::GridParams& grid,
+                       engine::Deemphasis curve = engine::Deemphasis::Default,
+                       dsp::SampleRate audio_rate = 0) {
     engine::VrxParams params;
     params.center = centre;
     params.bandwidth = bandwidth;
     params.demod = mode;
+    params.deemphasis = curve;
+    params.audio_rate = audio_rate;
 
     auto placed = engine::place(grid, kSourceRate, params);
     INFO(test::message_of(placed));
@@ -1539,7 +1545,17 @@ TEST_CASE("each demodulator recovers its own modulation at the stated level",
     };
 
     for (const auto& item : cases) {
-        const auto plan = make_plan(item.mode, item.centre, item.bandwidth, *item.grid);
+        // Every case here runs with the de-emphasis curve OFF, including
+        // WFM, whose default is 75 us from 2026-09-20. That is not the
+        // curve being excused: this case measures the DETECTOR's gain
+        // convention, and a receiver that also runs a curve reads 0.907 at
+        // a kilohertz because the curve is doing exactly what it is for.
+        // Asserting 1.0 with the curve on would mean asserting a number
+        // that is a property of the audio frequency the case happened to
+        // pick. The curve has its own case below, which asserts the shape
+        // of the response rather than one point on it.
+        const auto plan = make_plan(item.mode, item.centre, item.bandwidth, *item.grid,
+                                    engine::Deemphasis::None);
         const std::uint32_t count = demod_count(plan.demod, kFineCapacity, item.count);
 
         const auto demod_rate = static_cast<double>(plan.demod_rate);
@@ -1641,5 +1657,396 @@ TEST_CASE("the raw tap hands back exactly what it was given", "[gpu][vrx][m1]") 
         INFO("sample " << i);
         CHECK(audio[2U * i] == expected.real());
         CHECK(audio[2U * i + 1U] == expected.imag());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// De-emphasis
+// ---------------------------------------------------------------------------
+//
+// THE TEST THAT SHOULD HAVE CAUGHT THIS AND DID NOT.
+// tests/decode/test_rds_bits.cpp renders a broadcast station, demodulates it
+// and decodes RDS, and it passed on every commit while no de-emphasis
+// existed anywhere in the tree. It passed because RDS rides 57 kHz and an
+// audio curve never touches it. So every case here asserts on the AUDIO
+// BAND, which is the band that was wrong, and the end-to-end one renders
+// with pre-emphasis and requires the recovered audio to match the signal
+// that went IN to the pre-emphasis rather than the one that came out of it.
+
+namespace {
+
+// A larger fine ring for the curve cases. The folded audio filter is around
+// 880 taps at 48 kHz of audio, which leaves too few outputs in a 4096-sample
+// ring to measure a 500 Hz tone against.
+constexpr std::uint32_t kCurveFineCapacity = 1U << 14;
+constexpr std::uint32_t kCurveFineMask = kCurveFineCapacity - 1U;
+
+// The one-pole's magnitude in the continuous-time prototype the transmitter
+// pre-emphasised with: |1 / (1 + j*2*pi*f*tau)|.
+//
+// This is what the receiver is trying to be and NOT what it is. The kernel
+// runs the impulse-invariant discrete pole, exp(-1/(tau*Fa)), whose response
+// is this one aliased; the gap is zero at DC and grows with frequency, and
+// the cases below measure it rather than assuming it away.
+[[nodiscard]] double analog_deemphasis_gain(engine::Deemphasis curve, double frequency_hz) {
+    const double tau = engine::deemphasis_seconds(curve);
+    if (tau <= 0.0) {
+        return 1.0;
+    }
+    const double omega_tau = test::kTwoPi * frequency_hz * tau;
+    return 1.0 / std::sqrt(1.0 + omega_tau * omega_tau);
+}
+
+[[nodiscard]] double to_db(double ratio) { return 20.0 * std::log10(ratio); }
+
+// A ring of sinusoidal FM at exactly the plan's peak deviation, periodic in
+// the ring so every history read wraps onto continuous signal. Correct audio
+// with no curve is +/-1 by the definition of the mode's gain, so what the
+// curve does is read straight off the amplitude.
+[[nodiscard]] std::vector<dsp::Complex32> fm_ring_at(const dsp::VrxPlan& plan,
+                                                     std::uint32_t capacity,
+                                                     double modulation_hz) {
+    const auto demod_rate = static_cast<double>(plan.demod_rate);
+    const double beta = static_cast<double>(plan.deviation) / modulation_hz;
+
+    std::vector<dsp::Complex32> ring(capacity);
+    for (std::size_t m = 0; m < ring.size(); ++m) {
+        const double turns =
+            std::fmod(modulation_hz * static_cast<double>(m) / demod_rate, 1.0);
+        const double phase = beta * std::sin(test::kTwoPi * turns);
+        ring[m] = dsp::Complex32{static_cast<float>(std::cos(phase)),
+                                 static_cast<float>(std::sin(phase))};
+    }
+    return ring;
+}
+
+// The nearest modulation frequency that fits a whole number of periods in
+// the ring, so the ring is seamless.
+[[nodiscard]] double seamless_hz(const dsp::VrxPlan& plan, std::uint32_t capacity,
+                                 double wanted_hz) {
+    const auto demod_rate = static_cast<double>(plan.demod_rate);
+    const double periods =
+        std::max(1.0, std::round(wanted_hz * static_cast<double>(capacity) / demod_rate));
+    return demod_rate * periods / static_cast<double>(capacity);
+}
+
+// The recovered audio amplitude at one modulation frequency, through the
+// GPU kernel, for a plan whose ring is kCurveFineCapacity wide.
+[[nodiscard]] test::AudioFit curve_response(const dsp::VrxPlan& plan, double modulation_hz) {
+    const auto ring = fm_ring_at(plan, kCurveFineCapacity, modulation_hz);
+
+    const std::uint32_t count =
+        demod_count(plan.demod, kCurveFineCapacity, kCurveFineCapacity);
+    REQUIRE(count > 64);
+
+    dsp::VrxDemodParams params;
+    params.in_mask = kCurveFineMask;
+    params.in_offset = 4096;
+    params.count = count;
+    params.gain = plan.demod_gain;
+
+    const auto audio = run_demod_on_gpu(plan.demod, params, ring, plan.demod_weights, 64);
+
+    // No settling to skip: the ring is periodic and every tap of every
+    // filter reads valid signal. The eighth taken off the front is the same
+    // margin the audio-convention case uses, so a transient that did appear
+    // would show as an amplitude error rather than being averaged away.
+    const std::size_t skip = audio.size() / 8;
+    REQUIRE(audio.size() > skip);
+    const std::span<const float> settled(audio.data() + skip, audio.size() - skip);
+    return test::measure_audio_tone(settled, static_cast<double>(plan.output_rate),
+                                    modulation_hz);
+}
+
+}  // namespace
+
+TEST_CASE("the de-emphasis curve resolves per mode and never reaches a composite tap",
+          "[vrx][m1]") {
+    // No GPU. This is the resolution rule, which is where the defect that
+    // matters most would live: a curve on the 171000 S/s composite tap would
+    // pull the 57 kHz data band down 28.6 dB, and tools/cli --rds decoded a
+    // real station through exactly that path on 2026-09-20.
+
+    SECTION("broadcast FM at an ordinary audio rate takes the North American curve") {
+        const auto plan = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid);
+        CHECK(plan.deemphasis == engine::Deemphasis::Us75);
+        CHECK(plan.deemphasis_taps > 1);
+        CHECK_FALSE(plan.deemphasis_truncated_early);
+
+        // Folded into the decimation filter rather than run beside it, so
+        // the kernel still applies exactly one FIR.
+        CHECK(plan.demod.audio_taps ==
+              plan.audio_decimation_taps +
+                  (plan.deemphasis_taps - 1U) * plan.demod.decimation);
+
+        // And the audio band is the channel plan's 15 kHz with its stopband
+        // starting before the 19 kHz pilot, not 0.45 of the audio rate.
+        CHECK(plan.audio_pass_hz == Approx(15'000.0));
+        CHECK(plan.audio_stop_hz == Approx(19'000.0));
+
+        const std::string words = dsp::describe_audio_chain(plan);
+        INFO(words);
+        CHECK(words.find("75us de-emphasis") != std::string::npos);
+    }
+
+    SECTION("the composite tap takes no curve and keeps its wide audio filter") {
+        // A WFM receiver at 171000 S/s of audio is the RDS composite tap:
+        // three times the 57 kHz subcarrier and 144 times the bit rate.
+        const auto plan =
+            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid,
+                      engine::Deemphasis::Default, 171'000);
+        REQUIRE(plan.audio_rate == 171'000);
+        CHECK(plan.deemphasis == engine::Deemphasis::None);
+        CHECK(plan.deemphasis_taps == 1);
+
+        // The 15 kHz ceiling must not reach this receiver either. Its
+        // passband edge is 0.4 of the audio rate, which is 68400 Hz, and the
+        // composite reaches 59375.
+        CHECK(plan.audio_pass_hz == Approx(0.4 * 171'000.0));
+        CHECK(plan.demod.audio_taps == plan.audio_decimation_taps);
+
+        const std::string words = dsp::describe_audio_chain(plan);
+        INFO(words);
+        CHECK(words.find("NO DE-EMPHASIS") != std::string::npos);
+    }
+
+    SECTION("every other mode defaults to none and the raw tap refuses one outright") {
+        for (const engine::Demod mode :
+             {engine::Demod::Am, engine::Demod::Nfm, engine::Demod::Usb, engine::Demod::Lsb,
+              engine::Demod::Dsb, engine::Demod::Cw}) {
+            INFO("mode " << engine::demod_name(mode));
+            CHECK(engine::resolve_deemphasis(mode, engine::Deemphasis::Default, 48'000) ==
+                  engine::Deemphasis::None);
+        }
+
+        // Raw is complex baseband and is not audio, so a curve asked for
+        // explicitly is not applied rather than being an error.
+        CHECK(engine::resolve_deemphasis(engine::Demod::Raw, engine::Deemphasis::Us75,
+                                         48'000) == engine::Deemphasis::None);
+        const auto raw = make_plan(engine::Demod::Raw, 196'500, 12'000, kGrid,
+                                   engine::Deemphasis::Us75);
+        CHECK(raw.deemphasis == engine::Deemphasis::None);
+        CHECK(raw.demod.audio_taps == 1U);
+    }
+
+    SECTION("an explicit curve is honoured on the modes that can carry one") {
+        const auto eu = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid,
+                                  engine::Deemphasis::Eu50);
+        CHECK(eu.deemphasis == engine::Deemphasis::Eu50);
+
+        const auto nfm =
+            make_plan(engine::Demod::Nfm, 196'500, 12'000, kGrid, engine::Deemphasis::Us75);
+        CHECK(nfm.deemphasis == engine::Deemphasis::Us75);
+
+        // VrxStatus answers the same question from the same function, so a
+        // status and a plan cannot disagree about which curve is running.
+        engine::VrxStatus status;
+        status.params.demod = engine::Demod::Wfm;
+        status.params.deemphasis = engine::Deemphasis::Default;
+        status.params.audio_rate = 48'000;
+        CHECK(status.applied_deemphasis() == engine::Deemphasis::Us75);
+        status.params.audio_rate = 171'000;
+        CHECK(status.applied_deemphasis() == engine::Deemphasis::None);
+    }
+
+    SECTION("a flat curve leaves the audio filter bit-identical to no curve at all") {
+        const auto off = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid,
+                                   engine::Deemphasis::None);
+        REQUIRE(off.demod.audio_taps == off.audio_decimation_taps);
+
+        // fold_deemphasis short-circuits the identity rather than
+        // convolving with it, so "the curve is off" and "there is no curve"
+        // are the same table and not two that differ in the last place.
+        auto identity = dsp::design_deemphasis_taps(engine::Deemphasis::None, 48'000);
+        REQUIRE(identity.has_value());
+        REQUIRE(identity->taps.size() == 1);
+        CHECK(identity->taps[0] == 1.0F);
+
+        auto folded = dsp::fold_deemphasis(dsp::ConstRealSpan(off.demod_weights)
+                                               .first(off.audio_decimation_taps),
+                                           dsp::ConstRealSpan(identity->taps), 7);
+        REQUIRE(folded.has_value());
+        for (std::size_t i = 0; i < folded->size(); ++i) {
+            INFO("tap " << i);
+            REQUIRE((*folded)[i] == off.demod_weights[i]);
+        }
+    }
+}
+
+TEST_CASE("a de-emphasised receiver follows the one-pole across the audio band",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The curve, measured rather than described. A receiver with no curve
+    // recovers +/-1 at every modulation frequency, because that is what the
+    // discriminator's gain is defined to do, so the amplitude a de-emphasised
+    // receiver recovers IS the curve's magnitude response and needs no
+    // reference measurement to divide by.
+    //
+    // The bar is the CONTINUOUS-time prototype, because that is what the
+    // transmitter pre-emphasised with. The kernel runs the impulse-invariant
+    // discrete pole instead, which is the standard one-pole form and is
+    // aliased rather than exact; the gap is reported per point and bounded
+    // once, so a future change that swapped the pole mapping would move a
+    // number here rather than passing silently.
+    constexpr double kWarpBudgetDb = 0.5;
+
+    const double wanted[] = {500.0, 1000.0, 2122.0, 5000.0, 8000.0};
+
+    for (const engine::Deemphasis curve :
+         {engine::Deemphasis::Us75, engine::Deemphasis::Eu50}) {
+        const auto plan =
+            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid, curve);
+        REQUIRE(plan.deemphasis == curve);
+
+        const auto flat = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid,
+                                    engine::Deemphasis::None);
+
+        for (const double target : wanted) {
+            const double modulation_hz = seamless_hz(plan, kCurveFineCapacity, target);
+
+            const auto with_curve = curve_response(plan, modulation_hz);
+            const auto without = curve_response(flat, modulation_hz);
+
+            const double expected = analog_deemphasis_gain(curve, modulation_hz);
+            const double error_db = to_db(with_curve.amplitude / expected);
+
+            INFO(engine::deemphasis_name(curve)
+                 << " at " << modulation_hz << " Hz: recovered " << with_curve.amplitude
+                 << " (" << to_db(with_curve.amplitude) << " dB), the continuous curve wants "
+                 << expected << " (" << to_db(expected) << " dB), gap " << error_db
+                 << " dB. With no curve the same receiver recovers " << without.amplitude
+                 << ", purity " << with_curve.purity);
+
+            // The reference leg: no curve is still the mode's +/-1.
+            CHECK(without.amplitude == Approx(1.0).margin(0.02));
+
+            CHECK(std::abs(error_db) < kWarpBudgetDb);
+            CHECK(with_curve.purity > 0.95);
+        }
+    }
+}
+
+TEST_CASE("a pre-emphasised station comes back at the level it had before pre-emphasis",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The whole loop, and the case tests/decode/test_rds_bits.cpp could not
+    // be: a real broadcast station is rendered WITH pre-emphasis by
+    // core/dsp/synth/wfm_mod.cpp, demodulated by the kernel, and the
+    // recovered audio is required to match the programme level that went IN
+    // to the pre-emphasis. With no de-emphasis it comes back at the
+    // pre-emphasised level instead, which at 6 kHz is 9.5 dB too loud, and
+    // that is the defect an operator heard on air as harshness.
+    constexpr std::uint64_t kSeed = 0x565258000000000CULL;
+    constexpr dsp::SampleRate kStationRate = 336'000;
+    constexpr std::size_t kStationSamples = 40'000;
+    constexpr std::uint32_t kRingCapacity = 1U << 16;
+    constexpr std::uint32_t kRingMask = kRingCapacity - 1U;
+    constexpr std::uint32_t kRingOrigin = 1024;
+
+    // 15000 Hz of deviation is 0.2 of the 75 kHz full scale, which leaves
+    // room for the 6 kHz tone's own pre-emphasis gain of 3.9 plus the pilot
+    // and the data without the station over deviating.
+    constexpr dsp::Hertz kAudioDeviationHz = 15'000;
+    const double expected_level =
+        static_cast<double>(kAudioDeviationHz) / static_cast<double>(siggen::kCompositePeakDeviationHz);
+
+    struct Case {
+        dsp::Hertz tone_hz;
+        engine::Deemphasis curve;
+        siggen::Preemphasis transmitted;
+        double budget_db;
+    };
+
+    const Case cases[] = {
+        // At a kilohertz the discrete pole and the continuous curve agree to
+        // six thousandths of a decibel, so this one is held tight.
+        {1'000, engine::Deemphasis::Us75, siggen::Preemphasis::Us75, 0.1},
+        {1'000, engine::Deemphasis::Eu50, siggen::Preemphasis::Eu50, 0.1},
+        // At six the impulse-invariant pole is 0.22 dB above the curve it is
+        // approximating. Held to 0.4 and reported, rather than widened to
+        // whatever passes.
+        {6'000, engine::Deemphasis::Us75, siggen::Preemphasis::Us75, 0.4},
+    };
+
+    for (const auto& item : cases) {
+        siggen::WfmSpec spec;
+        spec.rate = kStationRate;
+        spec.programme.stereo = false;
+        spec.programme.left_tone_hz = item.tone_hz;
+        spec.programme.right_tone_hz = item.tone_hz;
+        spec.programme.audio_deviation_hz = kAudioDeviationHz;
+        spec.programme.preemphasis = item.transmitted;
+        spec.rds.bits = siggen::random_bits(256, kSeed);
+        spec.rds.rds_deviation_hz = 2'000;
+
+        auto station = siggen::generate_wfm(spec, kStationSamples);
+        INFO(test::message_of(station));
+        REQUIRE(station.has_value());
+        CHECK_FALSE(station->over_deviated);
+
+        const auto plan =
+            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid, item.curve);
+        REQUIRE(plan.demod_rate == kStationRate);
+        REQUIRE(plan.deemphasis == item.curve);
+
+        // Straight into the fine ring: the station is already at the
+        // demodulation rate and on the receiver's own centre, so nothing
+        // here runs the channelizer or the fine stage. What is under test is
+        // the detector, its audio filter and the curve folded into it.
+        std::vector<dsp::Complex32> ring(kRingCapacity, dsp::Complex32{});
+        std::copy(station->samples.begin(), station->samples.end(),
+                  ring.begin() + kRingOrigin);
+
+        const std::uint32_t history = plan.demod.audio_taps + 1U;
+        const std::uint32_t first = kRingOrigin + history;
+        const auto count = static_cast<std::uint32_t>(
+            (kStationSamples - history - 8U) / plan.demod.decimation);
+        REQUIRE(count > 1024);
+
+        dsp::VrxDemodParams params;
+        params.in_mask = kRingMask;
+        params.in_offset = first;
+        params.count = count;
+        params.gain = plan.demod_gain;
+
+        const auto audio = run_demod_on_gpu(plan.demod, params, ring, plan.demod_weights, 64);
+        const auto fit = test::measure_audio_tone(audio, static_cast<double>(plan.output_rate),
+                                                  static_cast<double>(item.tone_hz));
+
+        const double transmitted_gain =
+            siggen::preemphasis_gain(item.transmitted, item.tone_hz);
+        const double uncorrected = expected_level * transmitted_gain;
+        const double error_db = to_db(fit.amplitude / expected_level);
+
+        INFO(engine::deemphasis_name(item.curve)
+             << " against a " << siggen::preemphasis_name(item.transmitted)
+             << " transmitter at " << item.tone_hz << " Hz: recovered " << fit.amplitude
+             << ", the programme level before pre-emphasis is " << expected_level
+             << ", after it is " << uncorrected << ". Error against the un-emphasised level "
+             << error_db << " dB; a receiver with no curve would read "
+             << to_db(uncorrected / expected_level) << " dB high. Purity " << fit.purity);
+
+        CHECK(std::abs(error_db) < item.budget_db);
+
+        // And the thing that fails without the fix, stated as its own
+        // assertion rather than left implied: the curve accounts for nearly
+        // all of the boost the transmitter applied, so a receiver that had
+        // none would land at the other end of this gap.
+        //
+        // Scaled by the boost rather than fixed, because the boost is what
+        // the case is measuring and it runs from 0.4 dB at 50 us and a
+        // kilohertz to 9.5 dB at 75 us and six. A fixed floor would either
+        // be unreachable for the first or free for the last.
+        const double boost_db = std::abs(to_db(transmitted_gain));
+        CHECK(std::abs(to_db(fit.amplitude / uncorrected)) > 0.8 * boost_db);
+
+        // The 19 kHz pilot and the 57 kHz data are both in this composite
+        // and neither belongs in the audio. The old 0.45-of-the-audio-rate
+        // filter passed the pilot at 19.2 kHz; this is what notices.
+        CHECK(fit.purity > 0.98);
     }
 }

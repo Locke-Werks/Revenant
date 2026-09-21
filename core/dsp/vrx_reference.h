@@ -327,8 +327,31 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Cw) == kDemodCw);
 // error in all three. Keep them that way; a default label in any of them
 // puts the silent answer back.
 
-inline constexpr std::uint32_t kMaxAudioTaps = 1024;
+// The longest audio FIR the kernel may be asked to run, and the longest the
+// DECIMATION DESIGN is allowed to spend on its own.
+//
+// WHAT kMaxAudioTaps USED TO BE AND WHY IT MOVED. Until 2026-09-20 it was
+// 1024 and it was both numbers at once, because the audio filter had only
+// one job. It now has two: the de-emphasis curve is folded into the same
+// table, since the kernel has no state to run a one-pole with, and the
+// folded length is the decimation filter's plus (deemphasis_taps - 1) times
+// the decimation. A WFM receiver at 48 kHz spends about 420 taps on the
+// decimation and about 410 on the curve. Leaving the cap at 1024 would have
+// made every second WFM plan a clamp.
+//
+// The design budget stays at exactly the old number, so no filter this tree
+// designed before today comes out different: design_vrx clamps the
+// decimation length to kMaxDecimationTaps and nothing else reads it.
+inline constexpr std::uint32_t kMaxAudioTaps = 4096;
+inline constexpr std::uint32_t kMaxDecimationTaps = 1024;
 inline constexpr std::uint32_t kMaxDcTaps = 4096;
+
+// The longest de-emphasis expansion, before folding. 75 microseconds at
+// 192 kHz of audio wants 240; this is four times that, and it is a cap on
+// the truncation rather than on the curve, so hitting it costs accuracy at
+// the very bottom of the audio band and nothing else. design_deemphasis_taps
+// reports what it spent and what the truncation floor came out at.
+inline constexpr std::uint32_t kMaxDeemphasisTaps = 1024;
 
 // The four specialization constants of core/shaders/vrx_demod.comp, at ids 1
 // to 4.
@@ -716,12 +739,89 @@ struct Passband {
                                                                 double attenuation_db);
 
 // The audio decimation filter: a real Kaiser-windowed sinc lowpass at the
-// demodulation rate with its cutoff at 0.45 of the audio rate, normalised to
-// unit gain at DC. Length is forced odd so the group delay is an integer.
+// demodulation rate, normalised to unit gain at DC. Length is forced odd so
+// the group delay is an integer.
+//
+// cutoff_hz of zero takes 0.45 of the audio rate, which is what this always
+// did and is right for every mode whose audio band is simply "as much as the
+// rate carries". WFM is the exception and is why the parameter exists: its
+// audio band stops at 15 kHz by the channel plan and the 19 kHz pilot sits
+// between there and the fold, so a receiver that filtered to 0.45 of 48 kHz
+// would pass the pilot into the audio at -21 dB and, worse, into the stereo
+// difference channel where it lands on top of the programme. Defaulted
+// rather than required because tests/decode/test_rds_bits.cpp calls this
+// with four arguments to build the composite path by hand.
 [[nodiscard]] Expected<std::vector<float>> design_audio_taps(std::uint32_t taps,
                                                              SampleRate demod_rate,
                                                              SampleRate audio_rate,
-                                                             double attenuation_db);
+                                                             double attenuation_db,
+                                                             double cutoff_hz = 0.0);
+
+// The de-emphasis curve, as a truncated FIR at the AUDIO rate.
+//
+// The curve is the standard one-pole, H(s) = 1/(1 + s*tau), which in
+// discrete time is y[n] = (1-a)x[n] + a*y[n-1] with a = exp(-1/(tau*Fa)).
+// That is a recursion, and core/shaders/vrx_demod.comp has nowhere to put
+// one: every invocation computes its own output from the ring alone, with no
+// state carried between blocks, which is what makes the audio a pure
+// function of the absolute sample index and lets a block be recomputed.
+//
+// So the recursion is written out. Its impulse response is (1-a)*a^k, which
+// decays geometrically, and this returns it truncated at the point a^k falls
+// below float32's own resolution and renormalised to sum to exactly one so
+// the DC gain is exact. That is the same shape core/shaders/vrx_demod.comp's
+// AM DC-removal window already uses and for the same reason.
+//
+// It is NOT an approximation anybody has to reason about at runtime: the
+// difference from the true one-pole is bounded by the truncation floor,
+// which is below the difference between two adjacent floats, and
+// DeemphasisDesign reports the figure rather than asserting it.
+struct DeemphasisDesign {
+    // (1-a)*a^k renormalised, k ascending. Exactly {1.0f} for a flat curve,
+    // which folds to the identity.
+    std::vector<float> taps;
+
+    // a, the pole. Zero for a flat curve.
+    double pole = 0.0;
+
+    // a^N, the fraction of the true impulse response that was cut off, as
+    // positive decibels below the direct term. Infinity for a flat curve.
+    double truncation_db = 0.0;
+
+    // True when kMaxDeemphasisTaps stopped the expansion before the floor
+    // did, so truncation_db is worse than the design wanted. The caller says
+    // so rather than the operator hearing it.
+    bool truncated_early = false;
+
+    // Group delay at DC, in samples of the audio rate: sum(k*h[k]).
+    double group_delay_audio_samples = 0.0;
+};
+
+[[nodiscard]] Expected<DeemphasisDesign> design_deemphasis_taps(engine::Deemphasis curve,
+                                                                SampleRate audio_rate);
+
+// The decimation filter and the de-emphasis curve as ONE filter at the
+// demodulation rate.
+//
+// The kernel applies one FIR to the detector output and then takes every
+// Rth result. The de-emphasis belongs after that decimation, at the audio
+// rate. Those are the same filter: a rate change after H(z^R) is H(z) after
+// the rate change, the noble identity, and convolution commutes, so
+// decimation_taps convolved with the curve zero-stuffed by R, applied before
+// the decimation, is exactly the curve applied after it. One table, one
+// loop, no second pass and nothing carried.
+//
+// THE ORDER THAT MATTERS IS NOT THIS ONE. De-emphasis goes on L and R and
+// never on the composite, which is a statement about where in the STEREO
+// matrix it sits, not about where in the filter chain. Both the sum and the
+// difference path get this same folded table, and the matrix that follows is
+// linear, so folding here is applying the curve to L and R.
+// core/dsp/synth/wfm_mod.h documents the same order on the transmit side.
+//
+// Returns decimation_taps unchanged when the curve is flat.
+[[nodiscard]] Expected<std::vector<float>> fold_deemphasis(ConstRealSpan decimation_taps,
+                                                           ConstRealSpan deemphasis_taps,
+                                                           std::uint32_t decimation);
 
 // The AM DC-removal window: a Hann window normalised to sum to one, so that
 // subtracting it from the direct term nulls DC exactly. Hann rather than a
@@ -797,6 +897,36 @@ struct VrxPlan {
 
     // Peak deviation the FM gain was derived from. Zero outside FM.
     Hertz deviation = 0;
+
+    // The de-emphasis curve this receiver is running, RESOLVED. Never
+    // engine::Deemphasis::Default: the plan is the answer and Default is the
+    // question. engine::resolve_deemphasis decides, once, and both this and
+    // engine::VrxStatus::applied_deemphasis call it, so a status and a plan
+    // cannot disagree.
+    engine::Deemphasis deemphasis = engine::Deemphasis::None;
+
+    // What the curve cost and how well it came out. Zero taps' worth and an
+    // infinite floor when the curve is flat.
+    std::uint32_t deemphasis_taps = 1;
+    double deemphasis_truncation_db = 0.0;
+    bool deemphasis_truncated_early = false;
+
+    // The decimation filter's own length, BEFORE the curve was folded into
+    // it, and the two edges it was designed between.
+    //
+    // demod.audio_taps is the folded length, which is what the kernel runs
+    // and what its ring history has to cover. These three are what
+    // audio_stopband_db was computed from, so a reader comparing a stopband
+    // figure against a tap count reads these and not that.
+    //
+    // The edges are 0.4 and 0.5 of the audio rate for every mode except a
+    // WFM receiver delivering programme audio, whose band stops at 15 kHz
+    // and whose stopband has to start before the 19 kHz pilot. Both are
+    // zero when the demodulation rate is already the audio rate and there is
+    // no filter at all.
+    std::uint32_t audio_decimation_taps = 1;
+    double audio_pass_hz = 0.0;
+    double audio_stop_hz = 0.0;
 
     // What the design achieved, reported rather than assumed.
     //
@@ -904,6 +1034,19 @@ struct VrxShape {
 // translation units is one copy away from a client that stops recognising
 // half of them.
 [[nodiscard]] std::string describe_shape_change(const VrxShape& from, const VrxShape& to);
+
+// What this receiver is doing to the audio, in one sentence, for a surface
+// to print where the operator is looking.
+//
+// THE REASON THIS EXISTS. An operator tuned a real broadcast station on
+// 2026-09-20 and heard audio that was harsh at the top of the band, and
+// nothing anywhere in the program could have told him why: there was no
+// de-emphasis, no field said so, and 361 passing tests agreed. A curve that
+// is applied silently is only half the fix, because the next time the
+// question is "is it on?" the answer has to be somewhere other than the
+// sound. This is that somewhere. It names the curve, the audio band the
+// filter was built for, and what a clamp took away when one did.
+[[nodiscard]] std::string describe_audio_chain(const VrxPlan& plan);
 
 // ---------------------------------------------------------------------------
 // Per-block parameters

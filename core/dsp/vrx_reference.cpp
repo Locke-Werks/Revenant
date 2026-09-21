@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <numbers>
 #include <numeric>
 #include <string>
@@ -71,6 +72,23 @@ constexpr std::uint32_t kDefaultNcoLog2 = 16;
 // out of the passband, and short enough that the window is a few hundred taps
 // rather than a few thousand.
 constexpr SampleRate kAmDcCornerHz = 200;
+
+// The top of the FM broadcast audio band, and the pilot that sits above it.
+//
+// 15 kHz is the ceiling core/dsp/synth/wfm_mod.cpp enforces on the transmit
+// side, for the reason it gives there: the sum channel has to stay clear of
+// the 19 kHz pilot, and the difference channel's upper sideband has to stay
+// clear of the RDS subcarrier's lower edge at 54625 Hz.
+//
+// A WFM receiver's audio filter stops between them. Cutting at 0.45 of a
+// 48 kHz audio rate instead, which is what every WFM receiver in this tree
+// did until 2026-09-20, puts its passband edge at 19.2 kHz and passes the
+// pilot: audible as a whine to anyone who can still hear it, and fatal to
+// stereo, because the difference channel is recovered by multiplying the
+// composite with a 38 kHz reference and the pilot lands from there straight
+// on top of the programme.
+constexpr double kFmAudioCeilingHz = 15'000.0;
+constexpr double kFmPilotHz = 19'000.0;
 
 // Polyphase branches. With linear interpolation between adjacent branches the
 // residual timing error is second order in 1/P, so 256 buys roughly 100 dB of
@@ -1320,7 +1338,7 @@ Expected<std::vector<Complex32>> design_fine_taps(const VrxFineConfig& config,
 
 Expected<std::vector<float>> design_audio_taps(std::uint32_t taps, SampleRate demod_rate,
                                                SampleRate audio_rate,
-                                               double attenuation_db) {
+                                               double attenuation_db, double cutoff_hz) {
     if (taps == 0 || taps > kMaxAudioTaps) {
         return fail(std::format("design_audio_taps: {} taps is outside [1, {}]", taps,
                                 kMaxAudioTaps));
@@ -1335,12 +1353,30 @@ Expected<std::vector<float>> design_audio_taps(std::uint32_t taps, SampleRate de
                                 audio_rate, demod_rate));
     }
 
-    // Cutoff at 0.45 of the audio rate, midway between a 0.4 passband edge
-    // and the 0.5 that folds. Nothing in this project puts content above
-    // 0.4*Fa: 19.2 kHz at 48 kHz is already above the FM broadcast audio
-    // limit and far above any voice channel.
-    const double cutoff = 0.45 * static_cast<double>(audio_rate) /
-                          static_cast<double>(demod_rate);
+    if (cutoff_hz < 0.0 || cutoff_hz >= 0.5 * static_cast<double>(audio_rate)) {
+        if (cutoff_hz != 0.0) {
+            return fail(std::format(
+                "design_audio_taps: a cutoff of {} Hz is outside (0, {}), which is what a "
+                "{} S/s audio stream can represent. Pass zero to take 0.45 of the rate",
+                cutoff_hz, 0.5 * static_cast<double>(audio_rate), audio_rate));
+        }
+    }
+
+    // Cutoff at 0.45 of the audio rate unless the caller named one, midway
+    // between a 0.4 passband edge and the 0.5 that folds.
+    //
+    // WHAT THIS COMMENT USED TO CLAIM. Until 2026-09-20 it read "Nothing in
+    // this project puts content above 0.4*Fa: 19.2 kHz at 48 kHz is already
+    // above the FM broadcast audio limit and far above any voice channel."
+    // The first half is true of the programme audio and false of what a WFM
+    // discriminator hands this filter, which is the whole multiplex: the
+    // 19 kHz pilot sits below 19.2 kHz, inside the passband, and a stereo
+    // decoder folds it straight onto the difference channel. The claim was
+    // right about the audio and was being made about the composite.
+    const double cutoff = (cutoff_hz > 0.0)
+                              ? cutoff_hz / static_cast<double>(demod_rate)
+                              : 0.45 * static_cast<double>(audio_rate) /
+                                    static_cast<double>(demod_rate);
     const double centre = (static_cast<double>(taps) - 1.0) / 2.0;
     const double beta = kaiser_beta(attenuation_db);
     const double i0_beta = bessel_i0(beta);
@@ -1386,6 +1422,124 @@ std::vector<float> design_dc_weights(std::uint32_t taps) {
     const double scale = (sum < 1e-12) ? 1.0 : 1.0 / sum;
     for (std::uint32_t i = 0; i < taps; ++i) {
         result[i] = static_cast<float>(window[i] * scale);
+    }
+    return result;
+}
+
+Expected<DeemphasisDesign> design_deemphasis_taps(engine::Deemphasis curve,
+                                                  SampleRate audio_rate) {
+    DeemphasisDesign design;
+
+    const double tau = engine::deemphasis_seconds(curve);
+    if (tau <= 0.0) {
+        // The identity. One unit tap, so a caller can fold unconditionally
+        // and get its own filter back rather than branching.
+        design.taps = std::vector<float>{1.0F};
+        design.truncation_db = std::numeric_limits<double>::infinity();
+        return design;
+    }
+    if (audio_rate <= 0) {
+        return fail(std::format("design_deemphasis_taps: audio rate must be positive, got {}",
+                                audio_rate));
+    }
+
+    // a = exp(-T/tau), the impulse-invariant pole of 1/(1 + s*tau). The
+    // bilinear transform is the other standard mapping and would warp the
+    // corner; at 2122 Hz against a 24 kHz Nyquist the warp is under a
+    // percent, so this is a choice between two defensible answers rather
+    // than between right and wrong, and the exponential is the one whose
+    // impulse response is exactly the geometric series being truncated here.
+    const double period = 1.0 / static_cast<double>(audio_rate);
+    const double pole = std::exp(-period / tau);
+    design.pole = pole;
+
+    // The point where a^k is below the gap between 1.0 and the next float,
+    // so a longer expansion cannot change any output bit. 2^-24 rather than
+    // 2^-23 because the terms are summed and the accumulated tail is up to
+    // a^N/(1-a) rather than a^N.
+    constexpr double kFloatFloor = 1.0 / 16'777'216.0;
+    const double exact_length = std::log(kFloatFloor * (1.0 - pole)) / std::log(pole);
+    auto length = static_cast<std::uint32_t>(std::ceil(std::max(1.0, exact_length))) + 1U;
+    if (length > kMaxDeemphasisTaps) {
+        length = kMaxDeemphasisTaps;
+        design.truncated_early = true;
+    }
+
+    std::vector<double> response(length, 0.0);
+    double sum = 0.0;
+    double weighted = 0.0;
+    double term = 1.0;
+    for (std::uint32_t k = 0; k < length; ++k) {
+        response[k] = term;
+        sum += term;
+        weighted += static_cast<double>(k) * term;
+        term *= pole;
+    }
+
+    // Renormalised to sum to exactly one rather than scaled by (1-a). Both
+    // give unity at DC for an untruncated series and only this one does for
+    // a truncated one, and a DC gain that is 1 - a^N instead of 1 is a
+    // level error the operator would hear as the curve being slightly quiet.
+    const double scale = 1.0 / sum;
+    design.taps.resize(length);
+    for (std::uint32_t k = 0; k < length; ++k) {
+        design.taps[k] = static_cast<float>(response[k] * scale);
+    }
+
+    // term is a^length by now, which is the fraction of the direct term the
+    // expansion threw away.
+    design.truncation_db = (term > 0.0) ? -20.0 * std::log10(term)
+                                        : std::numeric_limits<double>::infinity();
+    design.group_delay_audio_samples = weighted / sum;
+    return design;
+}
+
+Expected<std::vector<float>> fold_deemphasis(ConstRealSpan decimation_taps,
+                                             ConstRealSpan deemphasis_taps,
+                                             std::uint32_t decimation) {
+    if (decimation_taps.empty() || deemphasis_taps.empty()) {
+        return fail("fold_deemphasis: both filters need at least one tap");
+    }
+    if (decimation == 0) {
+        return fail("fold_deemphasis: decimation is zero");
+    }
+
+    // A single unit tap is the identity whichever side it is on, and
+    // returning the other side untouched keeps a flat curve bit-identical
+    // to the table this tree designed before de-emphasis existed. That is
+    // what makes "the curve is off" and "there is no curve" the same plan
+    // rather than two that differ in the last place.
+    if (deemphasis_taps.size() == 1 && deemphasis_taps[0] == 1.0F) {
+        return std::vector<float>(decimation_taps.begin(), decimation_taps.end());
+    }
+
+    const std::size_t stride = static_cast<std::size_t>(decimation);
+    const std::size_t length =
+        decimation_taps.size() + (deemphasis_taps.size() - 1U) * stride;
+    if (length > kMaxAudioTaps) {
+        return fail(std::format(
+            "fold_deemphasis: a {}-tap decimation filter and a {}-tap de-emphasis curve at a "
+            "decimation of {} fold to {} taps, and the kernel's audio filter holds {}",
+            decimation_taps.size(), deemphasis_taps.size(), decimation, length,
+            kMaxAudioTaps));
+    }
+
+    // In double and rounded once, which is the same discipline every other
+    // table in this file is built with. Nothing here is a twin: both the
+    // kernel and reference_vrx_demod read the floats this produces, so the
+    // arithmetic that made them has no operation order to match.
+    std::vector<double> folded(length, 0.0);
+    for (std::size_t k = 0; k < deemphasis_taps.size(); ++k) {
+        const double weight = static_cast<double>(deemphasis_taps[k]);
+        const std::size_t offset = k * stride;
+        for (std::size_t j = 0; j < decimation_taps.size(); ++j) {
+            folded[offset + j] += weight * static_cast<double>(decimation_taps[j]);
+        }
+    }
+
+    std::vector<float> result(length, 0.0F);
+    for (std::size_t i = 0; i < length; ++i) {
+        result[i] = static_cast<float>(folded[i]);
     }
     return result;
 }
@@ -1590,27 +1744,80 @@ namespace {
     plan.demod.decimation = (plan.mode == kDemodRaw) ? 1U : decimation;
     plan.output_rate = (plan.mode == kDemodRaw) ? plan.demod_rate : plan.audio_rate;
 
+    // The audio band this receiver is delivering, which is not always "as
+    // much as the rate carries".
+    //
+    // Every mode but one wants its passband edge at 0.4 of the audio rate
+    // and its stopband at the 0.5 that folds, which is what this always did
+    // and what these two lines still compute for them, to the hertz.
+    //
+    // WFM delivering PROGRAMME audio is the exception: its band stops at
+    // 15 kHz by the channel plan and the pilot is at 19 kHz, so the filter
+    // has a real stopband edge to hit that has nothing to do with the rate.
+    // WFM delivering the MULTIPLEX is not an exception, because the whole
+    // point of that receiver is that the composite comes out intact; the
+    // predicate is the same audio rate engine::resolve_deemphasis uses, so a
+    // composite tap cannot get an audio band and a curve separately.
+    const bool programme_audio =
+        (plan.mode == kDemodWfm) && plan.audio_rate < engine::kCompositeAudioRateHz;
+    const double audio_nyquist = 0.5 * static_cast<double>(plan.audio_rate);
+    const double audio_pass_hz =
+        programme_audio ? std::min(kFmAudioCeilingHz, 0.8 * audio_nyquist) : 0.8 * audio_nyquist;
+    const double audio_stop_hz =
+        programme_audio ? std::min(kFmPilotHz, audio_nyquist) : audio_nyquist;
+
+    plan.deemphasis =
+        engine::resolve_deemphasis(params.demod, params.deemphasis, plan.audio_rate);
+    auto curve = design_deemphasis_taps(plan.deemphasis, plan.audio_rate);
+    if (!curve) {
+        return std::unexpected(with_context(curve.error(), "plan_vrx de-emphasis"));
+    }
+    plan.deemphasis_taps = static_cast<std::uint32_t>(curve->taps.size());
+    plan.deemphasis_truncation_db = curve->truncation_db;
+    plan.deemphasis_truncated_early = curve->truncated_early;
+
     if (plan.demod.decimation == 1U) {
-        plan.demod.audio_taps = 1U;
+        plan.audio_decimation_taps = 1U;
+        plan.audio_pass_hz = 0.0;
+        plan.audio_stop_hz = 0.0;
         plan.audio_stopband_db = 0.0;
     } else {
-        // Transition from 0.4 to 0.5 of the audio rate, expressed at the
-        // demodulation rate the filter actually runs at.
+        // Expressed at the demodulation rate the filter actually runs at.
         const double audio_transition_fraction =
-            0.1 * static_cast<double>(plan.audio_rate) / static_cast<double>(plan.demod_rate);
-        std::uint32_t audio_taps = std::clamp(
-            kaiser_taps_for(kAudioAttenuationDb, audio_transition_fraction), 3U, kMaxAudioTaps);
+            (audio_stop_hz - audio_pass_hz) / static_cast<double>(plan.demod_rate);
+        plan.audio_pass_hz = audio_pass_hz;
+        plan.audio_stop_hz = audio_stop_hz;
+        std::uint32_t audio_taps =
+            std::clamp(kaiser_taps_for(kAudioAttenuationDb, audio_transition_fraction), 3U,
+                       kMaxDecimationTaps);
         // Odd, so the group delay is a whole number of samples and the filter
         // is linear phase with no half-sample bookkeeping downstream.
         if ((audio_taps % 2U) == 0U) {
             ++audio_taps;
         }
-        plan.demod.audio_taps = std::min(audio_taps, kMaxAudioTaps);
+        plan.audio_decimation_taps = std::min(audio_taps, kMaxDecimationTaps);
         plan.audio_stopband_db =
-            -attenuation_reachable(plan.demod.audio_taps, audio_transition_fraction);
+            -attenuation_reachable(plan.audio_decimation_taps, audio_transition_fraction);
     }
+
+    // The folded length, which is what the kernel loops over and what its
+    // ring history has to cover. fold_deemphasis states the arithmetic and
+    // refuses a pair that will not fit; asking it here rather than
+    // reproducing the expression is what stops the shape and the table
+    // disagreeing about a length.
+    {
+        const std::vector<float> identity(plan.audio_decimation_taps, 0.0F);
+        auto folded = fold_deemphasis(ConstRealSpan(identity), ConstRealSpan(curve->taps),
+                                      plan.demod.decimation);
+        if (!folded) {
+            return std::unexpected(with_context(folded.error(), "plan_vrx audio filter"));
+        }
+        plan.demod.audio_taps = static_cast<std::uint32_t>(folded->size());
+    }
+
     plan.audio_group_delay_demod_samples =
-        (static_cast<double>(plan.demod.audio_taps) - 1.0) / 2.0;
+        (static_cast<double>(plan.audio_decimation_taps) - 1.0) / 2.0 +
+        static_cast<double>(plan.demod.decimation) * curve->group_delay_audio_samples;
 
     if (plan.mode == kDemodAm) {
         const auto window = static_cast<std::uint32_t>(
@@ -1655,10 +1862,38 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
     }
     plan.fine_nco_delta = *delta;
 
-    auto audio_taps_table = design_audio_taps(plan.demod.audio_taps, plan.demod_rate,
-                                              plan.audio_rate, kAudioAttenuationDb);
+    const double audio_cutoff_hz =
+        (plan.audio_stop_hz > 0.0) ? 0.5 * (plan.audio_pass_hz + plan.audio_stop_hz) : 0.0;
+    auto decimation_table = design_audio_taps(plan.audio_decimation_taps, plan.demod_rate,
+                                              plan.audio_rate, kAudioAttenuationDb,
+                                              audio_cutoff_hz);
+    if (!decimation_table) {
+        return std::unexpected(with_context(decimation_table.error(), "plan_vrx audio taps"));
+    }
+
+    // Designed a second time rather than carried out of design_vrx. It costs
+    // a logarithm and at most a thousand multiplies, it is deterministic, and
+    // the alternative is a vector on VrxPlan that vrx_shape_for would have to
+    // allocate on every retune to answer a question about a tap count.
+    auto curve = design_deemphasis_taps(plan.deemphasis, plan.audio_rate);
+    if (!curve) {
+        return std::unexpected(with_context(curve.error(), "plan_vrx de-emphasis"));
+    }
+    auto audio_taps_table = fold_deemphasis(ConstRealSpan(*decimation_table),
+                                            ConstRealSpan(curve->taps), plan.demod.decimation);
     if (!audio_taps_table) {
         return std::unexpected(with_context(audio_taps_table.error(), "plan_vrx audio taps"));
+    }
+    if (audio_taps_table->size() != plan.demod.audio_taps) {
+        // The shape said one length and the table came out another, which
+        // core/engine/vrx_stage.cpp would meet as a bad copy into a buffer
+        // sized from the shape rather than as a refusal. Both numbers come
+        // from fold_deemphasis, so this fires only if the two calls were
+        // handed different inputs.
+        return fail(std::format(
+            "plan_vrx: the audio filter's shape says {} taps and the table it designed holds "
+            "{}",
+            plan.demod.audio_taps, audio_taps_table->size()));
     }
     const std::vector<float> dc_weights = design_dc_weights(plan.demod.dc_taps);
 
@@ -1702,6 +1937,62 @@ std::string describe_shape_change(const VrxShape& from, const VrxShape& to) {
         "or the audio rate is a remove and an add",
         from.fine.taps, from.demod_rate, from.output_rate, to.fine.taps, to.demod_rate,
         to.output_rate);
+}
+
+std::string describe_audio_chain(const VrxPlan& plan) {
+    if (plan.mode == kDemodRaw) {
+        return std::format(
+            "raw tap: complex baseband at {} S/s, no detector, no audio filter and no "
+            "de-emphasis. This is the composite a decoder attaches to, not programme audio",
+            plan.output_rate);
+    }
+
+    std::string text =
+        std::format("{} at {} S/s", engine::demod_name(static_cast<engine::Demod>(plan.mode)),
+                    plan.output_rate);
+
+    if (plan.audio_decimation_taps > 1) {
+        text += std::format(", audio filtered flat to {:.0f} Hz and {:.0f} dB down by "
+                            "{:.0f} Hz",
+                            plan.audio_pass_hz, -plan.audio_stopband_db, plan.audio_stop_hz);
+    } else {
+        text += ", no audio filter: the demodulation rate is already the audio rate";
+    }
+
+    if (plan.deemphasis == engine::Deemphasis::None) {
+        // Naming the reason and not only the state. "No de-emphasis" on a
+        // broadcast station is a fault and on a composite tap is correct,
+        // and an operator reading one line cannot tell those apart from the
+        // word alone.
+        if (plan.mode == kDemodWfm) {
+            text += std::format(
+                ", NO DE-EMPHASIS: this receiver's {} S/s audio is at or above the {} S/s "
+                "that carries the whole multiplex, so it is a composite tap and a curve "
+                "would pull the 57 kHz data band down 28.6 dB",
+                plan.audio_rate, engine::kCompositeAudioRateHz);
+        } else {
+            text += ", no de-emphasis, which is what this mode's channel plan asks for";
+        }
+    } else {
+        text += std::format(", {} de-emphasis in {} taps folded into the audio filter",
+                            engine::deemphasis_name(plan.deemphasis), plan.deemphasis_taps);
+        if (plan.deemphasis_truncated_early) {
+            text += std::format(
+                ". THE CURVE WAS CUT SHORT at {} taps, so it is only {:.0f} dB of the true "
+                "one-pole rather than the 144 dB the expansion wanted: the bottom of the "
+                "audio band is lifted slightly",
+                plan.deemphasis_taps, plan.deemphasis_truncation_db);
+        }
+    }
+
+    if (plan.bandwidth_clamped) {
+        text += std::format(
+            ". THE PASSBAND WAS CLAMPED to {} to {} Hz by one grid channel, so this is "
+            "narrower than what was asked for",
+            plan.passband.low, plan.passband.high);
+    }
+
+    return text;
 }
 
 // ---------------------------------------------------------------------------
