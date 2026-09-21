@@ -228,8 +228,25 @@ void dft_in_place(std::vector<std::complex<double>>& data) {
     }
 
     // Sixteen times oversampled, capped so that an absurdly long prototype
-    // costs bounded memory. The cap only bites above about 130,000 taps, where
-    // the oversampling falls to eight and the understatement to 0.17 dB.
+    // costs bounded memory.
+    //
+    // The cap starts to bite once bit_ceil of the tap count passes 2^17, so
+    // above 131,072 taps, and it keeps biting harder from there: the point
+    // count is pinned at 2^21 while the filter goes on getting longer, so
+    // the samples per sidelobe halve with every doubling. Reading the
+    // understatement off cos(pi/(2P)) for P samples per sidelobe, as the
+    // 0.04 dB above is: 8 samples at 262,144 taps for 0.17 dB, 4 at 524,288
+    // for 0.69 dB, and 2 at the 2^20-tap ceiling validate() enforces, where
+    // it is 3.0 dB.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "The cap only bites above about
+    // 130,000 taps, where the oversampling falls to eight and the
+    // understatement to 0.17 dB." It read as a bound and it is the FIRST
+    // step of one. Three dB at the largest grid this file will design,
+    // M = 2048 by 512 taps per branch, is the same order as the difference
+    // between a filter and a mistake that the clamp below exists to catch,
+    // and PrototypeFilter::stopband_db is the number a test asserts against.
+    // Nothing in the tree designs a prototype near that ceiling today.
     constexpr std::size_t kMaxPoints = std::size_t{1} << 21;
     std::size_t points = std::bit_ceil(taps.size());
     for (int doubling = 0; doubling < 4 && points < kMaxPoints; ++doubling) {
