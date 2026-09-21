@@ -330,11 +330,20 @@ struct VrxStatus {
     // reached nothing.
     //
     // audio_dropped is the engine's own loss and only the engine's: frames
+    // this receiver produced that this engine could not deliver. Two sites
+    // add to it and both end the run, so it is normally zero and a non-zero
+    // value means the run is on its way out rather than that a listener
+    // missed a syllable. A sink was handed the chunk and refused it, which
+    // core/engine/graph.cpp turns into a failing dispatch; or the frames
+    // never reached the host at all, because the readback out of the mapped
+    // region failed and there was nothing to hand anybody.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it read "frames
     // handed to this receiver's sink and refused by it. That is the whole of
-    // it, and it is normally zero, because core/engine/graph.cpp turns a
-    // refusing sink into a failing dispatch and ends the run. A non-zero
-    // value here means the run is on its way out, not that a listener missed
-    // a syllable.
+    // it". It was not: the readback failure path moved neither this counter
+    // nor the stream index, so the next chunk carried the index the lost
+    // frames should have had and the hole in AudioChunk::start closed over
+    // itself silently.
     //
     // WHAT THIS PAIR USED TO SAY, AND WHY THE NARROWER READING IS THE HONEST
     // ONE. Until 2026-09-20 the comment read "audio samples produced and

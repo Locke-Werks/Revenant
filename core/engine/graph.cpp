@@ -1588,11 +1588,33 @@ struct Graph::Impl {
             if (floats == 0) {
                 continue;
             }
+            // THE TWO FAILURE PATHS BELOW MOVE THE STREAM INDEX ON, and that
+            // is what `lost` is for. The frames were produced on the device
+            // and this host pass could not carry them, so they are a hole in
+            // the receiver's audio. Leaving slot.audio_index where it was
+            // would give the next chunk the index these frames should have
+            // had, and every consumer downstream reads AudioChunk::start as
+            // the stream position: a hole nothing declares reads as
+            // continuous audio, which is the one reading that cannot be
+            // recovered from later. Counting them in audio_dropped is the
+            // same treatment the sink refusal below gets, for the same
+            // reason.
+            //
+            // audio_samples and the graph-wide audio_frames are deliberately
+            // not moved here. Those count frames that reached a consumer and
+            // these did not.
+            const auto lose_frames = [&] {
+                slot.audio_index += entry.output.frames;
+                slot.audio_dropped.fetch_add(entry.output.frames, std::memory_order_relaxed);
+                audio_dropped.fetch_add(entry.output.frames, std::memory_order_relaxed);
+            };
+
             if (floats > slot.scratch.size()) {
                 outcome = fail(std::format(
                     "receiver {} produced {} floats and its scratch holds {}: audio_bytes_for "
                     "returned less than the stage went on to write",
                     slot.id.value, floats, slot.scratch.size()));
+                lose_frames();
                 continue;
             }
 
@@ -1601,6 +1623,7 @@ struct Graph::Impl {
                 !read) {
                 outcome = std::unexpected(with_context(
                     read.error(), std::format("receiver {} readback", slot.id.value)));
+                lose_frames();
                 continue;
             }
 
