@@ -119,6 +119,37 @@ ApplicationWindow {
         engineLink.tuneReceiver(centerHz, "")
     }
 
+    // THE SELECTION AND THE READOUT GO WITH THE CONNECTION.
+    //
+    // EngineLink::adopt clears its detection list on both edges and says
+    // why: the rows are absolute frequencies measured by one engine's
+    // detector, and track ids are issued from one by each detector, so a
+    // held selection silently becomes a different signal. Everything it
+    // could clear it does. It cannot clear these, because they live here.
+    //
+    // Left alone, the first track the next engine issues comes up already
+    // selected and outlined on both displays, chosen by nobody, and the row
+    // beside it still names the previous engine's frequency and bandwidth
+    // as "tune track N". That reads as a measurement of the band now on
+    // screen and is a measurement of a band that may never have been
+    // scanned.
+    //
+    // On both edges rather than only the way up, for the reason adopt gives
+    // for the same choice: the reading that has just been orphaned is as
+    // wrong as the one that would be inherited.
+    Connections {
+        target: engineLink
+        function onConnectionChanged() {
+            window.selectedDetection = 0
+            window.tunedId = 0
+            window.tunedHz = 0
+            window.tunedBandwidthHz = 0
+            window.tunedCandidates = 0
+            window.tunedRank = 0
+            window.tunedExhausted = false
+        }
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 8

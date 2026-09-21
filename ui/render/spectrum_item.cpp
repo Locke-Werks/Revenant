@@ -876,6 +876,14 @@ void SpectrumItem::onConnectionChanged()
     have_frame_ = false;
     reduced_bins_ = 0;
     boxes_.clear();
+
+    // The click cycle's remembered answers are ids from the previous
+    // engine's detector, and every detector issues from one. A second click
+    // at the same pixel after a reconnect would be ranked against a list of
+    // ids that now mean other signals. Narrow, and one line to close.
+    click_cycle_ = {};
+    hovered_detection_ = 0;
+
     rebuildDetections();
     update();
 }

@@ -156,6 +156,13 @@ void WaterfallItem::onConnectionChanged()
     std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
     boxes_.clear();
+
+    // The same two SpectrumItem clears here and for the same reason: the
+    // cycle remembers ids from the previous engine's detector and every
+    // detector issues from one.
+    click_cycle_ = {};
+    hovered_detection_ = 0;
+
     rebuildDetections();
     update();
 }
