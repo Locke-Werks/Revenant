@@ -208,7 +208,7 @@ phrase: Nothing infers a mode from a bandwidth
 phrase: a click-to-tune surface that guessed would be a different wrong answer
 phrase: the mode is left as it is rather than guessed from the bandwidth
 retired: 2026-09-21
-commit: 5d15408
+commit: 4404a7a
 instead: engine::demod_for_signal picks the demodulator from the measured
     occupied bandwidth, and from a characterise::ModulationFamily when one is
     known. Inferring nothing was never neutral: VrxParams::demod defaults to
@@ -217,7 +217,7 @@ instead: engine::demod_for_signal picks the demodulator from the measured
 phrase: asks for 200 kHz and is given about 71
 phrase: the requested bandwidth did not fit and the receiver was given the widest that does
 retired: 2026-09-21
-commit: 5d15408
+commit: 4404a7a
 instead: engine::place refuses a placement whose clamp would break the
     demodulator, which is the FM modes granted less than their own entry in
     dsp::default_passband. The refusal names the channel count that would
