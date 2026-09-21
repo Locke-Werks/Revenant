@@ -267,3 +267,13 @@ instead: Session.openSource and Session.closeSource are served over
     of a stream; tools/engined/main.cpp loops on it and reads
     EngineInfo::source_epoch to tell a client changing radios from a source that
     ran out.
+
+phrase: SourceDescriptor is four fields of source::SourceCapabilities
+phrase: The tune ranges, the gain stages and the sample format are not on the wire
+phrase: Mirrors the first four fields of revenant::source::SourceCapabilities
+retired: 2026-09-21
+commit: eb36dce
+instead: SourceDescriptor carries the notes, tune ranges, discrete rates with min
+    and max, native format and bit width, gain stages with their steps and auto
+    flag, flow control, seekability and length. The fields still absent are the
+    four with no reader, named in the struct's own comment.

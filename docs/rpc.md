@@ -1163,9 +1163,11 @@ libusb timeout per absent dongle.
 See "The front end can be pointed somewhere else" above for what a retune
 does and does not move.
 
-**`SourceDescriptor` carries what a picker configures with.** This entry used to
-read **"`SourceDescriptor` is four fields of `source::SourceCapabilities`. The
-tune ranges, the gain stages and the sample format are not on the wire. A picker
+**`SourceDescriptor` carries what a picker configures with.**
+
+This entry used to read: **"`SourceDescriptor` is four fields of
+`source::SourceCapabilities`. The tune ranges, the gain stages and the sample
+format are not on the wire. A picker
 needs to list what exists before it needs to configure one, and adding fields
 to a schema is the cheap direction."** The cheap direction was taken. Listing
 what exists was enough while the source URI was a command-line argument;
