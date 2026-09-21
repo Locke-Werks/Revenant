@@ -4,6 +4,10 @@
 #include <cstring>
 
 #include <QMediaDevices>
+#include <QSettings>
+#include <QVariant>
+
+#include "models/settings.h"
 
 namespace revenant::ui {
 namespace {
@@ -132,6 +136,25 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
 
 AudioPlayer::AudioPlayer(EngineLink& link, QObject* parent) : QObject(parent), link_(link)
 {
+    // WHAT THE OPERATOR CHOSE LAST TIME, READ BEFORE THE DEVICE LIST IS
+    // BUILT. refresh_devices matches wanted_device_id_ against the
+    // enumeration and sets device_index_ from it, so the id has to be in
+    // hand first or the first pass resolves to the system default and the
+    // remembered choice is lost before anything can apply it.
+    //
+    // BY ID AND NOT BY INDEX. QMediaDevices reorders its list when a
+    // device appears or goes, so an index remembered overnight names
+    // whichever output happened to take the slot. An id that no longer
+    // matches anything resolves to the system default and says so through
+    // device_fault_, which is the same path a headset being unplugged
+    // takes and wants the same sentence.
+    const QSettings store;
+    wanted_device_id_ =
+        store.value(settings::kAudioDeviceId).toByteArray();
+    volume_ = std::clamp(store.value(settings::kAudioVolume, volume_).toDouble(),
+                         qreal{0.0}, qreal{1.0});
+    muted_ = store.value(settings::kAudioMuted, false).toBool();
+
     refresh_devices();
 
     // The list moves under us when a headset is plugged in or pulled out,
@@ -246,6 +269,12 @@ void AudioPlayer::setDevice(int index)
     wanted_device_id_ =
         index == 0 ? QByteArray{} : device_handles_.at(index - 1).id();
 
+    // The id and not the index, for the reason the constructor gives. An
+    // empty one means the system default, which is a promise to follow
+    // whatever Windows is defaulting to rather than a device at all, and
+    // that promise is worth remembering as much as a named output is.
+    QSettings().setValue(settings::kAudioDeviceId, wanted_device_id_);
+
     // A device change is a new sink. The ring is not touched, so the audio
     // buffered for the old device is played out of the new one rather than
     // thrown away.
@@ -290,6 +319,15 @@ void AudioPlayer::setVolume(qreal value)
     if (sink_ != nullptr) {
         sink_->setVolume(sink_gain());
     }
+
+    // WRITTEN ON EVERY MOVE AND NOT ON EXIT. A window that saves at
+    // shutdown loses everything when it is killed or crashes, and the one
+    // setting an operator most wants kept is the one they changed just
+    // before something went wrong. QSettings batches writes itself and
+    // the drag is already filtered by the fuzzy compare above, so this
+    // costs a registry write per distinct value rather than per pixel.
+    QSettings().setValue(settings::kAudioVolume, volume_);
+
     emit volumeChanged();
 }
 
@@ -306,6 +344,7 @@ void AudioPlayer::setMuted(bool value)
     if (sink_ != nullptr) {
         sink_->setVolume(sink_gain());
     }
+    QSettings().setValue(settings::kAudioMuted, muted_);
     emit volumeChanged();
 }
 

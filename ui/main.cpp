@@ -37,13 +37,25 @@
 #include <string_view>
 
 #include <QGuiApplication>
+#include <QObject>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QRect>
+#include <QScreen>
+#include <QSettings>
 #include <QStringList>
+#include <QVariant>
+#include <QWindow>
 
 #include "audio/audio_player.h"
 #include "models/engine_link.h"
+#include "models/settings.h"
+
+// main() is at global scope, unlike everything it constructs. An alias
+// rather than a using-directive, so the keys still read as settings::
+// here exactly as they do inside the client.
+namespace settings = revenant::ui::settings;
 
 namespace {
 
@@ -92,8 +104,29 @@ int main(int argc, char* argv[])
     // spectrum draws with.
     QQuickStyle::setStyle(QStringLiteral("Basic"));
 
-    QString address = QStringLiteral("127.0.0.1");
-    std::uint16_t port = kDefaultPort;
+    // WHERE THE ENGINE WAS LAST TIME, UNDER WHAT ARGV SAYS AND OVER THE
+    // COMPILED DEFAULT.
+    //
+    // Three layers and the order is deliberate. A remembered value is a
+    // convenience and a command line is an instruction: a shortcut or a
+    // script that names an address is naming it for a reason, and a
+    // remembered one that overrode it would be unexplainable from outside
+    // the window. So argv wins, the remembered value fills in what argv
+    // leaves out, and the loopback default is what a first run gets.
+    //
+    // Read before the parse and written after it, so a rejected port does
+    // not get remembered.
+    const QSettings store;
+    QString address =
+        store.value(settings::kEngineAddress, QStringLiteral("127.0.0.1")).toString();
+    auto port = static_cast<std::uint16_t>(
+        store.value(settings::kEnginePort, kDefaultPort).toUInt());
+    if (port == 0) {
+        // A stored zero is a settings file somebody edited. Zero binds an
+        // ephemeral port on the server side and is not a thing to connect
+        // to, so it falls back rather than being tried.
+        port = kDefaultPort;
+    }
     std::uint32_t every_nth = kDefaultEveryNth;
 
     const QStringList args = QGuiApplication::arguments();
@@ -121,6 +154,15 @@ int main(int argc, char* argv[])
             return 2;
         }
         port = static_cast<std::uint16_t>(parsed);
+    }
+
+    // Written after the parse, so a rejected port is never stored, and
+    // written whether or not argv supplied one: rewriting the remembered
+    // value with itself costs nothing and keeps this to one line.
+    {
+        QSettings out;
+        out.setValue(settings::kEngineAddress, address);
+        out.setValue(settings::kEnginePort, static_cast<unsigned>(port));
     }
 
     // Constructed here rather than by QML so the address from argv reaches
@@ -158,6 +200,80 @@ int main(int argc, char* argv[])
     engine.loadFromModule("Revenant", "Main");
     if (engine.rootObjects().isEmpty()) {
         return 1;
+    }
+
+    // WHERE THE WINDOW WAS, RESTORED HERE AND NOT IN THE QML.
+    //
+    // QtCore's QML Settings type would do this in four lines, and it
+    // would add a QML module to what windeployqt has to find and to what
+    // the Forge installer has to carry. This is the same four lines in
+    // C++ against the QSettings the rest of the client already uses, and
+    // it keeps every key in ui/models/settings.h where a typo is a
+    // compile error.
+    //
+    // THE GEOMETRY IS CHECKED AGAINST A SCREEN BEFORE IT IS APPLIED. A
+    // window restored onto a monitor that has since been unplugged comes
+    // up off-screen, with no title bar to drag it back by, and the only
+    // repair is editing the registry. So a remembered rectangle that
+    // intersects no available screen is discarded and the window opens
+    // where QML put it.
+    if (auto* window = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
+        const QRect saved = store.value(settings::kWindowGeometry).toRect();
+        if (saved.isValid()) {
+            bool on_a_screen = false;
+            for (const QScreen* screen : QGuiApplication::screens()) {
+                if (screen->availableGeometry().intersects(saved)) {
+                    on_a_screen = true;
+                    break;
+                }
+            }
+            if (on_a_screen) {
+                window->setGeometry(saved);
+            }
+        }
+
+        // Maximised comes back maximised. Without this a window that was
+        // maximised is restored to whatever size it had before it was,
+        // which is not where the operator left it.
+        //
+        // Only these two are honoured. Minimised, hidden and full screen
+        // are all states a window can be left in by something other than
+        // a preference, and coming up in any of them looks like the
+        // client failed to start.
+        const auto visibility = static_cast<QWindow::Visibility>(
+            store.value(settings::kWindowVisibility,
+                        static_cast<int>(QWindow::Windowed))
+                .toInt());
+        if (visibility == QWindow::Maximized) {
+            window->setVisibility(QWindow::Maximized);
+        }
+
+        // SAVED ON THE WAY OUT AND NOT ON EVERY MOVE, which is the
+        // opposite of what the audio settings do, because the two have
+        // opposite costs. A volume change is one event an operator made;
+        // a geometry change is a continuous stream of them during a drag,
+        // and writing each would be a registry write per frame of the
+        // resize.
+        //
+        // geometry() and setGeometry() are the pair, deliberately: both
+        // are the CLIENT area. Mixing them with frameGeometry walks the
+        // window down and right by the title bar height on every launch,
+        // because what was saved includes the frame and what is restored
+        // does not.
+        QObject::connect(&app, &QGuiApplication::aboutToQuit, window, [window] {
+            QSettings out;
+            const auto visible = window->visibility();
+            out.setValue(settings::kWindowVisibility, static_cast<int>(visible));
+
+            // A maximised window's geometry is the screen, which is not
+            // where it would go if it were unmaximised. Qt does not
+            // publish the restore rectangle, so the saved one from the
+            // last windowed moment is left in place rather than
+            // overwritten with the full screen.
+            if (visible == QWindow::Windowed) {
+                out.setValue(settings::kWindowGeometry, window->geometry());
+            }
+        });
     }
 
     return QGuiApplication::exec();

@@ -664,10 +664,20 @@ ApplicationWindow {
                 // hardcoded number would not.
                 to: engineLink.maxConfidenceBar
                 stepSize: 0.01
-                // EngineLink starts the bar at zero, which is everything
-                // the engine will send, and the handle starts there with
-                // it.
-                value: 0.0
+
+                // SEEDED FROM THE LINK AND NOT BOUND TO IT, on the same
+                // pattern the volume slider uses and for the same reason:
+                // a binding is broken by the first drag anyway, and a
+                // half-live binding is worse than none. This control is
+                // the only writer.
+                //
+                // WHAT THIS USED TO BE. A literal 0.0, with a comment
+                // saying EngineLink starts the bar at zero. It no longer
+                // does: the bar is remembered across launches, so a
+                // literal here would put the handle at the bottom while
+                // the link filtered at last night's setting, and the
+                // number beside the handle is read off the handle.
+                Component.onCompleted: value = engineLink.confidenceBar
 
                 // The bar this handle is asking for. The label prints this
                 // and the link is written this, from one expression, so the

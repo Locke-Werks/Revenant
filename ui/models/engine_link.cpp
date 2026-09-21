@@ -13,7 +13,11 @@
 #include "core/rpc/token.h"
 
 #include <QMetaObject>
+#include <QSettings>
 #include <QString>
+#include <QVariant>
+
+#include "models/settings.h"
 
 namespace revenant::ui {
 namespace {
@@ -66,7 +70,34 @@ constexpr int kRateTickMs = 250;
 
 }  // namespace
 
-EngineLink::EngineLink(QObject* parent) : QObject(parent) {}
+EngineLink::EngineLink(QObject* parent) : QObject(parent)
+{
+    // WHAT THE OPERATOR LEFT SET LAST TIME.
+    //
+    // Read in the constructor, which runs on the Qt thread before start()
+    // makes the supervisor, so the supervisor's first pass already sees
+    // these rather than picking them up a pass later. Nothing here can
+    // reach the engine and nothing here emits: no QML has connected yet,
+    // and the initial values are what bindings read when they first
+    // evaluate.
+    //
+    // Clamped on the way in, on the same argument setConfidenceBar makes
+    // for clamping on the way out: a settings file is editable, and a bar
+    // of 2 read straight into the atomic would refuse every poll for the
+    // whole session with nothing on screen to explain it.
+    const QSettings store;
+    confidence_bar_.store(
+        std::clamp(store.value(settings::kConfidenceBar, 0.0).toDouble(), 0.0,
+                   kMaxConfidenceBar),
+        std::memory_order_release);
+
+    // The listen switch, which is a switch and not a state: it survives a
+    // retune, a mode change and a reconnect within a session, and this is
+    // that same fact across a restart. It is safe this early because it
+    // is an atomic and a flag the supervisor has not been started to
+    // read yet, and because nothing plays until a receiver exists.
+    audio_wanted_.store(store.value(settings::kAudioListen, false).toBool());
+}
 
 EngineLink::~EngineLink()
 {
@@ -860,6 +891,13 @@ void EngineLink::setConfidenceBar(double bar)
         return;
     }
     confidence_bar_.store(clamped, std::memory_order_release);
+
+    // THE CLAMPED VALUE AND NOT THE ARGUMENT. This property is remembered
+    // across launches, and what is stored has to be what the link is
+    // actually using: storing the request would let a bar the engine
+    // refuses survive a restart and refuse every poll of the next
+    // session, with the slider apparently in a legal place.
+    QSettings().setValue(settings::kConfidenceBar, clamped);
 
     // No signal here. The bar changes what the next poll asks for, and the
     // poll emits detectionsChanged when the answer differs. Emitting now

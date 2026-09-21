@@ -42,6 +42,10 @@
 #include <utility>
 
 #include <QMetaObject>
+#include <QSettings>
+#include <QVariant>
+
+#include "models/settings.h"
 
 namespace revenant::ui {
 namespace {
@@ -89,6 +93,11 @@ void EngineLink::setAudioWanted(bool wanted)
     // post_receiver_request gives: a quarter of a second between clicking
     // listen and hearing anything reads as the control not working.
     supervisor_wake_.notify_all();
+
+    // Remembered, because it is a switch. Written here on the click
+    // rather than at shutdown, so the setting an operator changed just
+    // before something went wrong is the one that survives it.
+    QSettings().setValue(settings::kAudioListen, wanted);
 
     // Emitted on the write and not on the engine's answer, so the switch
     // moves under the pointer. audioActive is the property that waits for
