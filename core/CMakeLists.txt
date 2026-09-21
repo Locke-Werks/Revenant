@@ -18,7 +18,8 @@ find_package(Threads REQUIRED)
 find_package(rtlsdr CONFIG REQUIRED)
 
 # The decoders. rds_bits.cpp is the RDS physical layer, subcarrier to bits;
-# rds_groups.cpp is the block and group layer above it.
+# rds_groups.cpp is the block and group layer above it. imbe.cpp is the P25
+# Phase 1 voice codec, decode side, channel bits to 8 kHz PCM.
 #
 # vocoder.cpp is the voice-codec seam every implementation writes against. It
 # carries no codec and not one frame size; core/decode/vocoder.h says why a
@@ -34,6 +35,7 @@ find_package(rtlsdr CONFIG REQUIRED)
 # worse, nothing at all. A missing source is now a broken build, which is
 # what it is.
 add_library(revenant_core STATIC
+    decode/imbe.cpp
     decode/rds_bits.cpp
     decode/rds_groups.cpp
     decode/vocoder.cpp
