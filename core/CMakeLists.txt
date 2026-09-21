@@ -17,6 +17,13 @@ find_package(Threads REQUIRED)
 # against. docs/rtlsdr-provenance.md has the finding.
 find_package(rtlsdr CONFIG REQUIRED)
 
+# characterise/ is the waveform characteriser: what a signal IS, without
+# decoding it. It reads complex baseband rather than the power spectrum,
+# because symbol rate, modulation order, tone structure and frame period are
+# not in a magnitude spectrum at all, and it is a pure library over a span of
+# samples with no engine seam of its own yet. core/characterise/characterise.h
+# says why that is deliberate and what wiring it later will cost.
+#
 # The decoders. rds_bits.cpp is the RDS physical layer, subcarrier to bits;
 # rds_groups.cpp is the block and group layer above it. imbe.cpp is the P25
 # Phase 1 voice codec, decode side, channel bits to 8 kHz PCM.
@@ -35,6 +42,7 @@ find_package(rtlsdr CONFIG REQUIRED)
 # worse, nothing at all. A missing source is now a broken build, which is
 # what it is.
 add_library(revenant_core STATIC
+    characterise/transform.cpp
     decode/imbe.cpp
     decode/rds_bits.cpp
     decode/rds_groups.cpp
