@@ -148,6 +148,41 @@ conformance legs pass an explicit index, so a driver update that reorders
 enumeration shows up as the wrong device name in the log rather than as one
 device silently being tested twice.
 
+### A value the test suite cannot read is an error, not a fallback
+
+`index_from_environment` in `core/gpu/context.cpp` returns an optional, so a
+value it cannot parse is indistinguishable there from the variable being
+unset, and selection falls back to "pick the best device". On this machine that
+is index 0. A leg meant for the integrated part would then run the discrete one
+twice and report two green runs.
+
+The test suite does not accept that. `tests/reference/gpu_fixture.cpp` reads the
+variable again with `std::from_chars` and every GPU case fails, with the reason,
+on a value it cannot read. It then checks that the device the context opened is
+the index that was asked for, so an index that parsed but was not honoured fails
+too.
+
+The fixture is the stricter of the two readers, measured by running both forms
+over the same strings. `std::from_chars` takes neither leading whitespace nor a
+leading `+`, so `" 1"` and `"+1"` select device 1 for the engine and are a
+configuration error for the suite. Both agree on `1`, `0` and `01`, and both
+reject `one`, `-1` and anything with trailing text.
+
+### `REVENANT_REQUIRE_GPU`
+
+GPU cases skip when no device can be opened, so that a developer without Vulkan
+still gets the rest of the suite. On a runner that is the wrong behaviour: a
+driver that has quietly died would report a green build having tested nothing on
+the device.
+
+Set `REVENANT_REQUIRE_GPU=1` and a missing device is a failure naming the
+driver's own message instead of a skip. Both CI conformance legs set it. Set it
+locally whenever a green run is supposed to mean the kernels were actually
+executed.
+
+It does not govern the configuration errors above. Those fail whatever it is set
+to, because a skip there is the outcome the variable exists to prevent.
+
 Validation layers default to on in a Debug build and off otherwise. They are the
 difference between a descriptive error and a driver hang, so leave them on while
 writing a kernel.
