@@ -72,6 +72,23 @@ mechanism a developer uses locally. There is one runner, so the legs execute in 
 rather than in parallel. That is fine at this scale and is the reason the long sweeps are
 nightly rather than per-commit.
 
+### Both test steps pass `--no-tests=error`
+
+A bare `ctest` prints `No tests were found!!!` and exits **0**. Measured, not assumed: an
+empty `CTestTestfile.cmake` gives exit 0 bare and exit 8 with the flag.
+
+So a `tests/CMakeLists.txt` or a `ui/CMakeLists.txt` that stopped registering targets
+would turn a gate into a compile check, and the only sign would be a run that got faster.
+Both `ctest` invocations in `ci.yml` carry the flag. It matters most in `ui`, which has
+exactly one test target, so the empty set there is one deleted `add_test` away rather
+than six.
+
+What the flag catches is zero tests, not too few. `catch_discover_tests` registers one
+ctest entry per Catch2 case, so the count moves with every commit and a floor on it would
+be a number somebody has to keep raising. `scripts/build.ps1` does not pass the flag: a
+person running it reads `No tests were found!!!` on their own screen, which is the case
+the flag is not for.
+
 ## The `ui` job, and why it is a job rather than a step
 
 `ui/` is a second CMake project. Qt 6.8.3 is built against the dynamic CRT and the

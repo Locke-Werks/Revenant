@@ -178,6 +178,80 @@ jobs:
           done
           echo "version parses as $version"
 
+      - name: Every test target suppresses modal dialogs
+        shell: bash
+        run: |
+          # tests/support/no_modal_dialogs.cpp stops a test process opening a
+          # window it then sits behind. On a desktop that is a popup somebody
+          # dismisses. On the runner it is a job that hangs to its timeout and
+          # reports nothing, because the message the process wanted to print is
+          # in a dialog no one will see.
+          #
+          # Nothing links it automatically. Every target lists the path itself,
+          # so a new one gets the file by somebody remembering, and the header
+          # said so: "a blanket claim nobody has checked is how the next target
+          # gets added without it." This is the check, so the claim stops being
+          # blanket.
+          #
+          # It scans ui/ as well as tests/, because the one target that has
+          # never had the file is the one in the other CMake project, which is
+          # exactly the place a guard rooted in tests/ would not look.
+          #
+          # revenant_ui_tests is exempt and named. That target opens no Vulkan
+          # context and holds no abort() path of its own, so it is the cheapest
+          # of the seven to leave out, and adding the source to ui/ is a change
+          # to that project rather than to this file. Naming it here is the
+          # difference between a known gap and an unnoticed one: an eighth
+          # target arrives red, not quiet.
+          exempt="revenant_ui_tests"
+
+          report=$(find tests ui -name CMakeLists.txt -print0 \
+                   | xargs -0 awk '
+              /add_executable[[:space:]]*\(/ {
+                  line = $0
+                  sub(/.*add_executable[[:space:]]*\([[:space:]]*/, "", line)
+                  sub(/[[:space:]].*/, "", line)
+                  sub(/\).*/, "", line)
+                  if (line ~ /_tests$/) { target = line; inside = 1; has = 0 }
+              }
+              inside && /no_modal_dialogs\.cpp/ { has = 1 }
+              inside && /\)/ { print target, has, FILENAME; inside = 0 }
+          ')
+
+          count=0
+          missing=""
+          while read -r target has file; do
+            [ -z "$target" ] && continue
+            count=$((count + 1))
+            if [ "$has" = "1" ]; then
+              echo "ok      $target ($file)"
+              continue
+            fi
+            case " $exempt " in
+              *" $target "*) echo "exempt  $target ($file)"; continue ;;
+            esac
+            missing="$missing
+            $target in $file"
+          done <<< "$report"
+
+          # A guard that scanned nothing and passed is the shape this whole
+          # round is about. tests/ holds six test targets today, so zero means
+          # the tree moved and this step is no longer looking at it.
+          if [ "$count" -eq 0 ]; then
+            echo "no *_tests targets found under tests/ or ui/; this guard is looking in the wrong place"
+            exit 1
+          fi
+          echo "scanned $count test target(s)"
+
+          if [ -n "$missing" ]; then
+            echo
+            echo "these test targets do not list tests/support/no_modal_dialogs.cpp:$missing"
+            echo
+            echo "Add the path to the target's source list, or add the target to"
+            echo "the exempt list in this step with the reason it does not need it."
+            exit 1
+          fi
+
   # The conformance suite diffs GPU compute kernels against CPU reference
   # implementations. A hosted runner has no discrete GPU, so it cannot execute
   # the one thing this project's correctness argument rests on. The runner is a
@@ -275,8 +349,21 @@ jobs:
       - name: Build
         run: cmake --build --preset ci
 
+      # --no-tests=error, because a bare ctest prints "No tests were found!!!"
+      # and exits 0. Measured, not assumed: an empty CTestTestfile.cmake gives
+      # exit 0 bare and exit 8 with the flag. Without it, a tests/CMakeLists.txt
+      # that stopped registering targets would turn this job from a conformance
+      # gate into a compile check, and the only sign would be a run that got
+      # faster.
+      #
+      # What it catches is zero tests, not too few. catch_discover_tests
+      # registers one ctest entry per Catch2 case, so the count moves with every
+      # commit and a floor on it would be a number somebody has to keep pushing
+      # up. Losing one target out of six while five still register is not
+      # covered here; it is covered by the suite's own coverage of what those
+      # targets test.
       - name: Test
-        run: ctest --preset ci
+        run: ctest --preset ci --no-tests=error
 
       # A red conformance run is expensive to reproduce: it needs this machine,
       # this driver and this device. Keeping the diff output means the next step
@@ -409,8 +496,14 @@ jobs:
       # compiles and that the audio timeline arithmetic holds. It proves
       # nothing about the QML, the scene graph or the audio device, none of
       # which a headless agent can open.
+      #
+      # --no-tests=error for the reason given on the engine's Test step, and
+      # it matters more here: ui/ has exactly ONE test target, so the empty
+      # set is one deleted add_test away rather than six. The step as first
+      # written would have gone green on it, which would have undone the point
+      # of adding this job at all.
       - name: Test
-        run: ctest --test-dir build/vs -C RelWithDebInfo --output-on-failure
+        run: ctest --test-dir build/vs -C RelWithDebInfo --output-on-failure --no-tests=error
 
       - name: CTest output
         if: failure()
