@@ -1335,24 +1335,51 @@ struct RdsStation {
     # terminator is inside the payload and a client scanning for it cannot
     # tell an unreceived NUL from a short message.
     #
-    # ONCE A TERMINATOR HAS ARRIVED THIS DOES NOT GROW PAST IT. rt[0,
-    # rtLength) is the message and rt[rtLength] is the 0x0D itself, so a
-    # client renders exactly that span and never scans for the terminator
-    # again. Whatever lands at a higher index afterwards is beyond the end
-    # of the message: clause 3.1.5.3 gives 0x0D as where the message stops,
-    # and a segment carrying bytes past it is padding, a repeat, or a
-    # transmitter that has stopped following the clause. None of the three
-    # lengthens what the station said.
+    # rt[0, rtLength) IS WHAT THE STATION HAS SAID SO FAR, AND THAT IS THE
+    # WHOLE OF WHAT THIS PROMISES. It is a span to render. It is not a claim
+    # about the byte at rtLength and it is not monotonic.
     #
-    # It returns to zero only at the start of a NEW message, which is a
-    # toggle of rtAb or a change of rtVersionB, and that clears rt and
-    # rtReceived in the same step.
+    # THE VALUE MOVES IN BOTH DIRECTIONS WITHIN ONE MESSAGE. The decoder
+    # recomputes it on every RadioText group by scanning the assembled buffer
+    # for the first 0x0D, so it falls the moment a terminator arrives in
+    # front of the highest index already received, and it rises again if the
+    # segment carrying that 0x0D is later rewritten with ordinary characters
+    # under the same A/B flag. Both are ordinary: segments arrive in whatever
+    # order the transmitter sends them and a shorter message with the flag
+    # unchanged is a transmitter the standard allows. A client redraws the
+    # span it is given rather than keeping the longest one it has seen.
     #
-    # Stated because it is an invariant of the WIRE and not an implementation
-    # note. A client that trusts it reads a fixed span out of a 64-byte
-    # field; a value that had crept past the terminator would render the tail
-    # of a longer earlier message as though this station had just sent it,
-    # and nothing in the struct would say otherwise.
+    # WHAT THIS PARAGRAPH USED TO SAY, AND THE SHIPPING DECODER VIOLATES
+    # BOTH HALVES OF IT
+    #
+    # It was headed "ONCE A TERMINATOR HAS ARRIVED THIS DOES NOT GROW PAST
+    # IT" and read: "rt[0, rtLength) is the message and rt[rtLength] is the
+    # 0x0D itself, so a client renders exactly that span and never scans for
+    # the terminator again. Whatever lands at a higher index afterwards is
+    # beyond the end of the message". It then said the value "returns to zero
+    # only at the start of a NEW message, which is a toggle of rtAb or a
+    # change of rtVersionB", and closed by calling all of it an invariant of
+    # the wire rather than an implementation note.
+    #
+    # rt[rtLength] is the 0x0D only when one has arrived. Until then rtLength
+    # is the high-water mark, the byte at it is an unreceived NUL, and on a
+    # message that fills the field it is one past the end of a 64-byte
+    # payload. A client that read the terminator back to confirm the span
+    # would have found neither.
+    #
+    # And it does grow past a terminator, by the overwrite above.
+    # core/decode/rds_groups.cpp says so in its own words where it explains
+    # why the scan is a scan rather than a remembered index: "a segment can
+    # be overwritten: same A/B flag, a shorter message, and the group
+    # carrying the 0x0D is rewritten with ordinary characters." The two
+    # documents were written in the same pass and only one of them was right.
+    #
+    # The paragraph was not harmless. Calling it an invariant of the wire is
+    # an instruction to build on it, and what it invited is a client that
+    # latches rtLength at the first terminator and never reads it again.
+    # On a station that sends a long message and then a short one without
+    # toggling the flag, that client renders the tail of the long one
+    # forever.
     rtLength @25 :UInt32;
 
     # The A/B flag. A TOGGLE OF THIS IS THE ONLY SIGNAL THAT THE MESSAGE

@@ -670,6 +670,22 @@ struct RdsStation {
     // character index received plus one until then. Carried because the
     // terminator is inside the payload and a client scanning for it cannot
     // tell an unreceived byte from a transmitted one.
+    //
+    // rt[0, rt_length) IS THE SPAN TO RENDER AND THAT IS ALL IT IS. It says
+    // nothing about the byte at rt_length, which is the 0x0D only once one
+    // has arrived and is an unreceived NUL or one past the end of the field
+    // until then. And it is NOT MONOTONIC: the decoder rescans the buffer on
+    // every RadioText group, so it falls when a terminator lands in front of
+    // the highest index received and rises again if the segment carrying
+    // that terminator is overwritten with ordinary characters under the same
+    // A/B flag. Redraw the span each poll rather than latching the longest
+    // one seen.
+    //
+    // The schema said the opposite until 2026-09-20, as a stated invariant
+    // of the wire, and core/rpc/revenant.capnp carries the retraction. A
+    // client written against the old text latches at the first terminator
+    // and renders the tail of a long message forever once the station sends
+    // a shorter one without toggling the flag.
     std::uint32_t rt_length = 0;
 
     // A TOGGLE OF rt_ab IS THE ONLY SIGNAL THAT THE MESSAGE CHANGED, and a
