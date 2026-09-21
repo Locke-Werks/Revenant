@@ -104,11 +104,16 @@ TEST_CASE("a sink that refuses does not rob the sinks behind it",
 
 TEST_CASE("a sink that throws is that sink's failure and not the process's",
           "[engine][audio][fanout]") {
-    // Without the catch this case does not fail, it ends the test binary:
-    // deliver runs on the completion thread, which core/engine/scheduler.cpp
-    // creates with std::thread, and an exception leaving a std::thread's
-    // callable is std::terminate. The sinks behind the thrower would also
-    // never be called, which contradicts the ordering promise on AudioFanout.
+    // Run against the fan-out as it was before 2026-09-20 this reports
+    // "unexpected exception with message: the consumer's own bug" and the
+    // sink behind the thrower is never called. Catch2 wraps each case in its
+    // own try, which is why it is a failure here and not a dead binary; in
+    // the engine deliver runs on the completion thread, which
+    // core/engine/scheduler.cpp creates with std::thread, and an exception
+    // leaving a std::thread's callable is std::terminate with no catch
+    // anywhere between. So this case checks two things the engine cannot
+    // check for itself: that the throw becomes an ordinary error, and that
+    // it does not rob the sinks behind it the way it did.
     engine::AudioFanout fanout;
     int before = 0;
     int after = 0;
