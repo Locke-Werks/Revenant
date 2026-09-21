@@ -13,7 +13,18 @@
 # test_rds_bits.cpp covers recovered subcarrier to differentially decoded
 # bits. test_rds_groups.cpp covers block sync, the checkword and the group
 # parsers. test_vocoder_plugin.cpp covers the vocoder seam and the plugin
-# loader, and the five DLLs below are what it loads.
+# loader, and the five DLLs below are what it loads. test_imbe.cpp covers the
+# P25 Phase 1 vocoder: the two error control codes on their own, the annex
+# tables against the constraints the standard states elsewhere, and the
+# decoder end to end.
+#
+# IMBE has no synthetic transmitter behind it and is not getting one, which is
+# the one place this directory departs from the rule above. An IMBE encoder is
+# sections 5 and 10 of the same standard, four fifths of the work again, and a
+# round trip through a twin this project wrote would prove the two halves
+# agree rather than that either matches the document. Those tests assert
+# against invariants the standard states instead, and each one names the
+# clause at the assertion.
 #
 # Both were behind an EXISTS guard while they landed on separate branches in
 # the same session. Both have landed, and the guard is gone. On a test
@@ -83,6 +94,7 @@ inline constexpr const char* kTestVocoderPluginRefuseCreate = R"($<TARGET_FILE:r
 
 add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
+    test_imbe.cpp
     test_rds_bits.cpp
     test_rds_groups.cpp
     test_vocoder_plugin.cpp
