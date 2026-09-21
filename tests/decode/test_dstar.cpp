@@ -267,7 +267,9 @@ TEST_CASE("D-STAR bit error rate against noise, measured", "[decode][dstar]") {
         double snr_db;
         double allowed_bit_error_rate;
     };
-    const Point points[] = {{30.0, 0.002}, {6.0, 0.25}};
+    // Measured on 2026-09-21: 0 bit errors in 11994 at 30 dB, and a bit
+    // error rate of 0.056 at 2 dB.
+    const Point points[] = {{30.0, 0.002}, {2.0, 0.09}};
 
     for (const Point& point : points) {
         INFO("signal to noise " << point.snr_db << " dB across the whole " << kRate
@@ -301,7 +303,7 @@ TEST_CASE("D-STAR bit error rate against noise, measured", "[decode][dstar]") {
         for (std::size_t i = 0; i < got.size(); ++i) {
             recovered[i] = got[i] ? 1.0F : -1.0F;
         }
-        std::vector<float> head(64, 0.0F);
+        std::vector<float> head(128, 0.0F);
         for (std::size_t i = 0; i < head.size(); ++i) {
             head[i] = sent[i] ? 1.0F : -1.0F;
         }

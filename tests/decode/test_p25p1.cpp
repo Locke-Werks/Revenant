@@ -444,7 +444,12 @@ TEST_CASE("P25 symbol error rate against noise, measured", "[decode][p25]") {
     };
     // Full-sample-rate signal to noise, per docs/snr-convention.md, which is
     // the basis that names its bandwidth rather than assuming one.
-    const Point points[] = {{30.0, 0.001}, {8.0, 0.35}};
+    // Measured on 2026-09-21: 0 symbol errors in 5911 at 30 dB, and a
+    // symbol error rate of 0.047 at 4 dB. The allowances are set above the
+    // measured figures rather than at them, because the number that matters
+    // is in the INFO line and an assertion pinned to three decimals is one
+    // that fails when somebody improves the receiver.
+    const Point points[] = {{30.0, 0.001}, {4.0, 0.08}};
 
     for (const Point& point : points) {
         INFO("signal to noise " << point.snr_db << " dB across the whole "
@@ -483,7 +488,7 @@ TEST_CASE("P25 symbol error rate against noise, measured", "[decode][p25]") {
 
         // Correlate the first 64 transmitted symbols against the recovered run
         // to find where the stream starts.
-        const std::span<const float> head(reference.data(), 64);
+        const std::span<const float> head(reference.data(), 128);
         auto hit = decode::correlate_pattern(recovered, head);
         REQUIRE(hit.has_value());
         INFO("stream found at recovered symbol " << hit->offset << ", correlation "

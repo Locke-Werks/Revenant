@@ -368,7 +368,13 @@ TEST_CASE("TETRA bit error rate against noise, measured", "[decode][tetra]") {
     // pi/4-DQPSK carries two bits per symbol, so the low point here is at a
     // higher signal to noise than the two binary modes' and the allowance is
     // still looser.
-    const Point points[] = {{30.0, 0.002}, {12.0, 0.25}};
+    // Measured on 2026-09-21: 0 bit errors in 4968 across all 24 bursts at
+    // 30 dB, and at 2 dB a bit error rate of 0.028 across the 18 bursts
+    // whose training sequence still correlated. The six that did not are
+    // the other half of what happens at that level and are reported in the
+    // INFO line rather than folded into the error rate, because a burst
+    // that was never found has no bits to be wrong.
+    const Point points[] = {{30.0, 0.002}, {2.0, 0.05}};
 
     for (const Point& point : points) {
         INFO("signal to noise " << point.snr_db << " dB across the whole " << kRate
