@@ -256,6 +256,412 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // The device picker
+        // ------------------------------------------------------------------
+        //
+        // WHAT THIS REPLACES. Until openSource landed the source URI was a
+        // command-line argument to revenant-engine, so changing radio meant
+        // restarting the process and losing the operator's receivers, their
+        // waterfall history and their audio. Retuning the front end has worked
+        // over the wire since 2026-09-20; opening one did not.
+        //
+        // AN INLINE PANEL AND NOT A MODAL DIALOG. A modal would be the obvious
+        // shape and is the wrong one here: choosing a radio is something an
+        // operator does while watching the waterfall they are about to lose,
+        // and a dialog covering it takes away the one thing that says whether
+        // the change was worth making.
+        //
+        // EVERY RULE UNDER IT IS IN ui/models/source_choice.h WITH ITS OWN
+        // CASES IN ui/tests, which is the rule the whole window follows: which
+        // keys a backend takes, where a rate lands, which gain step a request
+        // rounds to and whether a control is offered at all. This file binds
+        // names and chooses colours.
+        RowLayout {
+            id: sourceRow
+
+            // What the operator has picked in the list, as an index into
+            // engineLink.sources. -1 is nothing picked.
+            //
+            // AN INDEX AND NOT A COPY OF THE ROW. composeSourceUri takes the
+            // index and reads the descriptor C++ side, so the settings are
+            // applied against the device's own description rather than against
+            // whatever a QML copy still held after a refresh replaced the list.
+            property int chosen: -1
+            property bool open: false
+
+            // A refresh replaces the list wholesale, so an index into the old
+            // one means nothing against the new. Cleared rather than kept,
+            // because the alternative is a selection that silently moves to
+            // whichever device now sits at that position.
+            Connections {
+                target: engineLink
+                function onSourcesChanged() {
+                    if (sourceRow.chosen >= engineLink.sources.length)
+                        sourceRow.chosen = -1
+                }
+            }
+
+            // The chosen row, or null when there is not one.
+            //
+            // EVERY GUARD BELOW TESTS THIS FOR TRUTH AND NOT FOR `!== null`,
+            // and the difference is not style. `chosen` can point past the end
+            // of `sources`: it is set from a list that a refresh replaces
+            // wholesale, so a device unplugged between two refreshes leaves an
+            // index with nothing at it. `sources[n]` is then `undefined`, and
+            // `undefined !== null` is TRUE in JavaScript, so a guard written
+            // that way passes and the next line dereferences it.
+            //
+            // Measured rather than reasoned about: with the panel forced open
+            // and chosen at 0 before the first listing arrived, the window
+            // logged eight "TypeError: Cannot read property ... of undefined"
+            // on startup. They are invisible without QT_FORCE_STDERR_LOGGING,
+            // because this is a GUI-subsystem binary and Qt's warnings do not
+            // reach stderr in one by default. A binding that throws leaves its
+            // property at the last value it held, so the panel would have shown
+            // the previous device's controls for the new one.
+            readonly property var picked:
+                (chosen >= 0 && chosen < engineLink.sources.length)
+                ? engineLink.sources[chosen] : null
+
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.connected
+
+            Label {
+                text: "source"
+                color: window.inkDim
+                font.pixelSize: 13
+                font.bold: true
+            }
+
+            // WHAT IS OPEN, WHICH IS A STATE THE WINDOW COULD NOT BE IN BEFORE
+            // closeSource EXISTED. An engine with no source is connected, has a
+            // device, and has no rate, no grid and no spectrum; without this
+            // line it reads as an engine that is somehow broken.
+            Label {
+                Layout.minimumWidth: 0
+                text: engineLink.sourceOpen
+                      ? engineLink.sourceRate + " S/s"
+                      : "no source open"
+                color: engineLink.sourceOpen ? window.ink : window.inkWarn
+                font.pixelSize: 12
+                font.bold: !engineLink.sourceOpen
+                elide: Text.ElideRight
+            }
+
+            Button {
+                text: sourceRow.open ? "hide" : "change radio"
+                font.pixelSize: 12
+                onClicked: {
+                    sourceRow.open = !sourceRow.open
+
+                    // Asked when the panel opens rather than on a timer. The
+                    // listing opens every device index to answer, including
+                    // ones with nothing behind them, so it pays a libusb
+                    // timeout per absent dongle: that is a cost to pay when
+                    // somebody is looking at the list, not once a second
+                    // forever.
+                    if (sourceRow.open)
+                        engineLink.refreshSources()
+                }
+            }
+
+            Button {
+                text: "close source"
+                font.pixelSize: 12
+                enabled: engineLink.sourceOpen
+                onClicked: {
+                    sourceRow.chosen = -1
+                    engineLink.closeSource()
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Label {
+                Layout.minimumWidth: 0
+                visible: engineLink.sourcesBusy
+                text: "asking every device…"
+                color: window.inkDim
+                font.pixelSize: 12
+            }
+        }
+
+        // What the last open or close said when it refused. Its own row rather
+        // than beside the button, because a registry refusal names the backends
+        // it does know and that sentence is longer than a status strip.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.sourceFault.length > 0
+
+            Label {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                text: engineLink.sourceFault
+                color: window.inkBad
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            visible: engineLink.connected && sourceRow.open
+
+            Repeater {
+                model: engineLink.sources
+
+                RowLayout {
+                    id: sourceEntry
+
+                    required property var modelData
+                    required property int index
+
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Label {
+                        text: sourceEntry.index === sourceRow.chosen ? "▸" : " "
+                        color: window.inkTune
+                        font.pixelSize: 12
+                    }
+
+                    Label {
+                        Layout.minimumWidth: 0
+                        Layout.fillWidth: true
+                        text: sourceEntry.modelData.displayName
+                              + (sourceEntry.modelData.length.length > 0
+                                 ? "  ·  " + sourceEntry.modelData.length : "")
+                        // AN UNAVAILABLE BACKEND IS SHOWN AND NOT HIDDEN. A
+                        // missing DLL and an unplugged radio are different
+                        // problems, and a list that omits both looks identical
+                        // to a list with nothing attached.
+                        color: sourceEntry.modelData.available ? window.ink : window.inkDim
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: sourceEntry.modelData.available
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: sourceRow.chosen = sourceEntry.index
+                        }
+                    }
+
+                    Label {
+                        Layout.minimumWidth: 0
+                        text: sourceEntry.modelData.available
+                              ? sourceEntry.modelData.backend
+                              : sourceEntry.modelData.unavailable
+                        color: sourceEntry.modelData.available
+                               ? window.inkDim : window.inkWarn
+                        font.pixelSize: 12
+                        elide: Text.ElideRight
+                    }
+                }
+            }
+
+            // The conditions that did not stop the source opening. Each one is
+            // the answer to "why is this at the wrong frequency" an hour later:
+            // a WAV whose auxi chunk carries no centre, a SigMF sidecar with an
+            // empty captures array. A listing that showed only failures would
+            // say nothing about any of them.
+            Repeater {
+                model: sourceRow.picked ? sourceRow.picked.notes : []
+
+                Label {
+                    required property string modelData
+
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: "note: " + modelData
+                    color: window.inkWarn
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            // The settings, and only the ones this device has. A control that
+            // could never work is not offered, which is the case where a clean
+            // refusal is not good enough because the operator has to discover
+            // it by trying.
+            RowLayout {
+                id: sourceSettings
+
+                // sourceRow.picked, not a second lookup. One place decides
+                // what "a row is chosen" means, and its note says why that
+                // cannot be a `!== null` test.
+                readonly property var row: sourceRow.picked
+
+                Layout.fillWidth: true
+                spacing: 8
+                visible: !!sourceSettings.row
+
+                Label {
+                    visible: !!sourceSettings.row && sourceSettings.row.tunable
+                    text: "centre"
+                    color: window.inkDim
+                    font.pixelSize: 12
+                }
+
+                TextField {
+                    id: sourceFreqField
+
+                    visible: !!sourceSettings.row && sourceSettings.row.tunable
+                    Layout.preferredWidth: 120
+                    font.pixelSize: 12
+                    placeholderText: "98.1M"
+                    selectByMouse: true
+                }
+
+                Label {
+                    text: "rate"
+                    color: window.inkDim
+                    font.pixelSize: 12
+                }
+
+                TextField {
+                    id: sourceRateField
+
+                    Layout.preferredWidth: 110
+                    font.pixelSize: 12
+                    placeholderText: "2400000"
+                    selectByMouse: true
+                }
+
+                Label {
+                    visible: !!sourceSettings.row && sourceSettings.row.hasGain
+                    text: sourceSettings.row && sourceSettings.row.hasGain
+                          ? sourceSettings.row.gainName + " gain" : ""
+                    color: window.inkDim
+                    font.pixelSize: 12
+                }
+
+                // GAIN IS A NUMBER AND auto IS A CHECKBOX BESIDE IT, rather
+                // than "auto" being the bottom of the slider. They are
+                // different requests: a number asks the device for a gain, and
+                // auto hands the decision to the tuner's own AGC, which
+                // maximises the level at its output and is therefore set by the
+                // loudest thing anywhere in the span. Measured on air on
+                // 2026-09-20 that put three intermodulation products in the
+                // detector's track list at confidence 1.00; README.md carries
+                // the measurement and the 5.7 dB it cost the wanted station.
+                TextField {
+                    id: sourceGainField
+
+                    visible: !!sourceSettings.row
+                             && sourceSettings.row.hasGain
+                             && !sourceGainAuto.checked
+                    Layout.preferredWidth: 70
+                    font.pixelSize: 12
+                    placeholderText: "20"
+                    selectByMouse: true
+                }
+
+                CheckBox {
+                    id: sourceGainAuto
+
+                    visible: !!sourceSettings.row
+                             && sourceSettings.row.hasGain
+                             && sourceSettings.row.gainHasAuto
+                    text: "auto"
+                    font.pixelSize: 12
+                }
+
+                Item { Layout.fillWidth: true }
+
+                // WHAT WILL ACTUALLY BE SENT, before anything is sent.
+                // Composed by the same call the button makes, so the line
+                // cannot disagree with the request: a preview built separately
+                // in QML would be a second copy of every settling rule.
+                Label {
+                    Layout.minimumWidth: 0
+                    Layout.maximumWidth: 420
+                    visible: !!sourceSettings.row
+                    text: engineLink.composeSourceUri(
+                              sourceRow.chosen,
+                              engineLink.parseHz(sourceFreqField.text),
+                              engineLink.parseHz(sourceRateField.text),
+                              parseFloat(sourceGainField.text || "0"),
+                              sourceGainAuto.checked)
+                    color: window.inkDim
+                    font.pixelSize: 11
+                    elide: Text.ElideMiddle
+                }
+
+                Button {
+                    text: "open"
+                    font.pixelSize: 12
+                    enabled: !!sourceSettings.row && sourceSettings.row.available
+                    onClicked: engineLink.openSource(
+                                   engineLink.composeSourceUri(
+                                       sourceRow.chosen,
+                                       engineLink.parseHz(sourceFreqField.text),
+                                       engineLink.parseHz(sourceRateField.text),
+                                       parseFloat(sourceGainField.text || "0"),
+                                       sourceGainAuto.checked))
+                }
+            }
+
+            // WHAT THE DEVICE ACTUALLY TOOK, which is the fifth of the five
+            // conditions docs/rpc.md lists and the one that is deliberately not
+            // a wire field.
+            //
+            // configure() in the RTL-SDR backend reads the achieved rate and
+            // centre back from the device and substitutes them for what was
+            // asked, which is correct; what nothing states is the DIFFERENCE.
+            // It does not need a field, because the asker holds both halves:
+            // this window composed the request and EngineInfo carries what the
+            // device took. An engine re-deriving a request the client never
+            // forgot would be the same number twice, and the one on the wire
+            // would be the one that could go stale.
+            //
+            // Only when they differ, because on a device with a fine enough
+            // step they agree and a line saying so is noise. The RTL-SDR's rate
+            // comes from a 28.8 MHz clock over an integer and its PLL step is a
+            // few hundred hertz, so this is where both show up.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                readonly property double askedRate:
+                    engineLink.parseHz(sourceRateField.text)
+                readonly property double askedCentre:
+                    engineLink.parseHz(sourceFreqField.text)
+
+                visible: engineLink.sourceOpen
+                         && ((askedRate > 0 && askedRate !== engineLink.sourceRate)
+                             || (askedCentre > 0
+                                 && askedCentre !== engineLink.sourceCenterHz))
+
+                Label {
+                    Layout.minimumWidth: 0
+                    Layout.fillWidth: true
+                    text: {
+                        var parts = []
+                        if (parent.askedRate > 0
+                            && parent.askedRate !== engineLink.sourceRate)
+                            parts.push("asked " + parent.askedRate
+                                       + " S/s, took " + engineLink.sourceRate)
+                        if (parent.askedCentre > 0
+                            && parent.askedCentre !== engineLink.sourceCenterHz)
+                            parts.push("asked "
+                                       + (parent.askedCentre / 1.0e6).toFixed(6)
+                                       + " MHz, took "
+                                       + (engineLink.sourceCenterHz / 1.0e6).toFixed(6)
+                                       + " MHz")
+                        return "the device " + parts.join("  ·  ")
+                    }
+                    color: window.inkWarn
+                    font.pixelSize: 12
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Whether the source is keeping up
         // ------------------------------------------------------------------
         //

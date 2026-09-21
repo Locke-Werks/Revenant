@@ -190,6 +190,7 @@ void EngineLink::supervise()
             // receiver applied before it would be placed against the
             // previous centre and moved a pass later, which on a drag is a
             // filter that jumps after the radio has already landed.
+            apply_source_request();
             apply_source_tune();
 
             // Then the receiver work. A drag posts a request and wakes this
@@ -223,7 +224,8 @@ void EngineLink::supervise()
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
             supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
                 return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
-                                      tune_work_pending_ || rds_work_pending_) &&
+                                      tune_work_pending_ || rds_work_pending_ ||
+                                      source_work_pending_) &&
                                      client_ != nullptr);
             });
             if (stopping_) {
@@ -300,6 +302,7 @@ void EngineLink::supervise()
             // the window: connected, geometry on screen, and a frame rate
             // frozen at whatever it last was.
             note_running(*alive);
+            apply_source_request();
             apply_source_tune();
             apply_receiver_request();
             apply_audio_request();
@@ -337,7 +340,8 @@ void EngineLink::supervise()
         // thread.
         supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
             return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
-                                  tune_work_pending_ || rds_work_pending_) &&
+                                  tune_work_pending_ || rds_work_pending_ ||
+                                  source_work_pending_) &&
                                  client_ != nullptr);
         });
         if (stopping_) {

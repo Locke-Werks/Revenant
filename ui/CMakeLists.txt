@@ -388,6 +388,7 @@ if(REVENANT_UI_TESTS)
             tests/test_frequency_entry.cpp
             tests/test_rds_text.cpp
             tests/test_receiver_match.cpp
+            tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
         )
 

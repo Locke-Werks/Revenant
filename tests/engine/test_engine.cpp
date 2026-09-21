@@ -1085,4 +1085,24 @@ TEST_CASE("closing a running source stops the stream first", "[gpu][engine][m2]"
     // And the engine is usable again rather than merely not crashed.
     REQUIRE(eng.open_source(tone_uri(0, 200'000)).has_value());
     CHECK(eng.info().source_epoch == 2);
+
+    // THE SECOND STREAM HAS TO ACTUALLY RUN, which is the assertion this case
+    // was missing and the one that matters. Opening a source proves the grid
+    // and the ring were rebuilt; it says nothing about whether the cancel that
+    // ended the first stream left anything behind that stops the second.
+    //
+    // It did. Graph::cancel poisons the ring as well as the graph, on purpose
+    // and permanently, because the thread it has to reach is the source's and
+    // it is parked inside the ring's reserve_blocking. close_source replaces
+    // the ring, so that much is clean; what this case caught is the whole
+    // second run returning immediately instead of delivering a block.
+    const auto second = eng.run();
+    INFO(test::message_of(second));
+    CHECK(second.has_value());
+
+    const source::SourceStats after = eng.source_stats();
+    INFO("second stream delivered " << after.blocks_delivered << " blocks, "
+                                    << after.samples_delivered << " samples");
+    CHECK(after.blocks_delivered > 0);
+    CHECK(after.samples_delivered > 0);
 }

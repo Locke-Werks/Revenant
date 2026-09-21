@@ -134,6 +134,8 @@ public:
     }
 
     [[nodiscard]] Status open_source(std::string_view uri) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+
         if (source_ != nullptr) {
             return fail("this engine already has a source open. Close it first: this is two "
                         "calls rather than a replace, because a replace that failed on the new "
@@ -361,6 +363,13 @@ public:
     }
 
     [[nodiscard]] Status close_source() override {
+        // HELD ACROSS THE WHOLE TEARDOWN, WHICH IS WHAT MAKES has_source AN
+        // ANSWER RATHER THAN A GLIMPSE. See the note on lifecycle_lock_: a host
+        // that reads has_source() between run() returning and this function
+        // finishing sees a source that is open and a stream that has ended, and
+        // concludes the source ran out.
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+
         // Idempotent on an engine with nothing open. The caller wanted no
         // source and there is none, and answering with a refusal would make a
         // client that closes before every open have to know which state it was
@@ -477,7 +486,20 @@ public:
         return {};
     }
 
-    [[nodiscard]] bool has_source() const override { return source_ != nullptr; }
+    [[nodiscard]] bool has_source() const override {
+        // UNDER THE LOCK, AND THAT IS THE WHOLE POINT OF THE FUNCTION. A plain
+        // read of the pointer is one instruction and would be wrong exactly
+        // when it matters: a host loops on this to tell "a client closed the
+        // source" from "the source ran out", and the two are indistinguishable
+        // in the window between run() returning and close_source finishing its
+        // teardown. Taking the lock makes the answer a completed transition.
+        //
+        // Measured rather than reasoned about. revenant-engine exited the first
+        // time a client changed radios through the picker, reporting the
+        // cancellation message from the stream it had just been asked to end.
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        return source_ != nullptr;
+    }
 
     [[nodiscard]] const source::SourceCapabilities& source_capabilities() const override {
         return capabilities_;
@@ -705,8 +727,30 @@ public:
             return fail("this engine is already running");
         }
 
-        stop_requested_.store(false, std::memory_order_release);
-        running_.store(true, std::memory_order_release);
+        // THE START SECTION IS UNDER THE LIFECYCLE LOCK AND THE WAIT IS NOT.
+        //
+        // Without it a run() that arrived while close_source was tearing the
+        // graph down would read source_ and graph_ as this function's opening
+        // lines just did, find them non-null, and start a stream on objects
+        // about to be destroyed. The guards above are re-checked inside, which
+        // is not belt and braces: they were true a moment ago and the lock is
+        // the first thing that makes them still true.
+        //
+        // It is released before the wait below, so close_source can take it
+        // while a stream is running: that is the ordinary case, and a lock held
+        // for the length of a stream would make every close wait for the source
+        // to end on its own, which is the opposite of what it is for.
+        {
+            const std::scoped_lock lifecycle(lifecycle_lock_);
+            if (source_ == nullptr || graph_ == nullptr) {
+                return fail("Engine::run before a source is open");
+            }
+            if (running_.load(std::memory_order_acquire)) {
+                return fail("this engine is already running");
+            }
+            stop_requested_.store(false, std::memory_order_release);
+            running_.store(true, std::memory_order_release);
+        }
 
         // Before the source starts, so the elapsed time includes whatever
         // the first block cost to produce. Measuring from the first block
@@ -865,6 +909,33 @@ private:
     // path never touches either.
     mutable std::mutex run_lock_;
     std::condition_variable run_signal_;
+
+    // Serialises open_source, close_source and the START of run(), and makes
+    // has_source() an answer rather than a glimpse.
+    //
+    // WHAT IT IS NOT: a lock on the sample path. It is taken three times per
+    // source and never per block, and run() releases it before parking for the
+    // length of the stream, so a close does not wait for a source to end.
+    //
+    // WHAT IT IS FOR. A source can now be closed while a stream is running,
+    // which puts two threads on the same objects: the host's, inside run(),
+    // and whoever called close_source, usually an RPC loop. Two things go
+    // wrong without this and both did.
+    //
+    // A run() that arrived mid-teardown found source_ and graph_ non-null and
+    // started a stream on objects about to be destroyed.
+    //
+    // A host that read has_source() in the window between run() returning and
+    // close_source finishing saw a source that was open and a stream that had
+    // ended, which is indistinguishable from a source that ran out.
+    // revenant-engine exited the first time a client changed radios in the
+    // picker, reporting the cancellation message from the stream it had just
+    // been asked to end.
+    //
+    // mutable because has_source() is const and the lock is what the
+    // constness is about: the answer is only meaningful when no transition is
+    // half-applied.
+    mutable std::mutex lifecycle_lock_;
 };
 
 }  // namespace

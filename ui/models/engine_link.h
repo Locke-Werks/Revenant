@@ -139,11 +139,14 @@
 #include <optional>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QTimer>
+#include <QVariantList>
+#include <QVariantMap>
 #include <QtQmlIntegration>
 
 #include "audio/audio_ring.h"
@@ -554,6 +557,19 @@ class EngineLink : public QObject {
     // errorText for the reason detectionFault and receiverFault are: a
     // refused frequency is not a lost engine.
     Q_PROPERTY(QString tuneFault READ tuneFault NOTIFY sourceTuningChanged)
+
+    // The device picker. One signal for the list, the busy flag and the
+    // refusal, because one panel reads all three and none of them repaints a
+    // display.
+    Q_PROPERTY(QVariantList sources READ sources NOTIFY sourcesChanged)
+    Q_PROPERTY(bool sourcesBusy READ sourcesBusy NOTIFY sourcesChanged)
+    Q_PROPERTY(QString sourceFault READ sourceFault NOTIFY sourcesChanged)
+
+    // Whether a source is open at all, and which stream its indices belong to.
+    // On connectionChanged because both are read off EngineInfo, which is
+    // replaced whole on every pass that finds the engine there.
+    Q_PROPERTY(bool sourceOpen READ sourceOpen NOTIFY connectionChanged)
+    Q_PROPERTY(qulonglong sourceEpoch READ sourceEpoch NOTIFY connectionChanged)
 
     // What was asked for and what the source took. A device with a tuning
     // step rounds, and the two differ by up to that step. Both zero until
@@ -1161,6 +1177,22 @@ public:
     // commit rather than sending something nobody meant.
     [[nodiscard]] Q_INVOKABLE bool tuneTextValid(const QString& text) const;
 
+    // The same parse, as a number, for the boxes in the device picker.
+    //
+    // HERE AND NOT IN JAVASCRIPT, because the rule is not obvious and is
+    // already written down once: ui/models/frequency_entry.h decides that a
+    // bare number under a million is megahertz and at or above it is hertz,
+    // accumulates digits into a 64-bit mantissa rather than going through a
+    // double, and refuses what does not parse. A parseFloat in QML would be a
+    // second reading of "98.1" that differs from the tune box's by a factor of
+    // a million.
+    //
+    // ZERO FOR TEXT THAT DOES NOT PARSE, including empty, which is what an
+    // untouched box holds. compose_source_uri reads a zero rate as "leave the
+    // key off and take the backend's default", so an empty box asks for the
+    // default rather than for nothing.
+    [[nodiscard]] Q_INVOKABLE double parseHz(const QString& text) const;
+
     // Retune the front end to what the text says. Returns false and writes
     // tuneFault when the text is not a frequency; everything else is the
     // engine's answer and arrives asynchronously, like every other write
@@ -1169,6 +1201,77 @@ public:
 
     // The same, from a number a band button holds.
     Q_INVOKABLE void tuneSourceHz(double hertz);
+
+    // ---- the device picker -------------------------------------------------
+    //
+    // WHY THIS IS A LIST OF MAPS AND NOT A QAbstractListModel. There are two
+    // or three entries, they are replaced wholesale on every refresh rather
+    // than edited, and nothing scrolls. A model exists to make an incremental
+    // change cheap on a long list; neither half of that is true here, and it
+    // would be a class with four overrides to answer questions nobody asks.
+    //
+    // Each map carries the descriptor's own fields under the names QML reads,
+    // plus the two the panel needs and the wire does not send: the composed
+    // tuning envelope, and a length written as a duration.
+    [[nodiscard]] QVariantList sources() const { return sources_; }
+
+    // Asks the engine what exists. ASYNCHRONOUS LIKE EVERY OTHER WRITE HERE,
+    // and slower than the rest of them: listSources opens every device index
+    // to ask, including ones with nothing behind them, so it pays a libusb
+    // timeout per absent dongle. sourcesBusy is true while it runs, and the
+    // panel says so rather than looking hung.
+    Q_INVOKABLE void refreshSources();
+    [[nodiscard]] bool sourcesBusy() const { return sources_busy_; }
+
+    // Whether the engine has a source open at all, which is a state the window
+    // could not be in before closeSource existed.
+    //
+    // Read off EngineInfo::source_rate rather than kept as a flag: a flag here
+    // would be a second copy of a fact the engine already publishes, and the
+    // two would disagree for a poll interval after every open.
+    [[nodiscard]] bool sourceOpen() const { return info_.source_rate > 0; }
+
+    // Which stream the indices this window is holding belong to. Zero before
+    // any source has been opened on this engine.
+    //
+    // PUBLISHED BECAUSE THE WATERFALL HAS TO SEE IT. Closing a source and
+    // opening another starts a new stream numbered from zero, so a history
+    // drawn against the old one is a picture of a different radio. See
+    // EngineInfo::source_epoch.
+    [[nodiscard]] qulonglong sourceEpoch() const {
+        return static_cast<qulonglong>(info_.source_epoch);
+    }
+
+    // Opens what the picker composed, closing whatever is open first.
+    //
+    // TWO CALLS ON THE WIRE AND ONE HERE, deliberately. openSource is refused
+    // when a source is already open, because a replace that failed on the new
+    // URI would have destroyed the working one; that argument is about the
+    // ENGINE, which cannot know whether a caller meant to replace. This one
+    // can: an operator who picked a device in the panel meant to change to it.
+    // So the close and the open are sequenced here, and a failed open leaves
+    // the window with no source and the engine's sentence in sourceFault,
+    // which is a state the panel shows and can open out of.
+    Q_INVOKABLE void openSource(const QString& uri);
+    Q_INVOKABLE void closeSource();
+
+    // What the last open or close said when it refused, and empty otherwise.
+    // Kept apart from errorText for the reason detectionFault and tuneFault
+    // are: that field belongs to the connection, and a refused open on a
+    // healthy connection is not a connection problem.
+    [[nodiscard]] QString sourceFault() const { return source_fault_; }
+
+    // The URI for a device in the list, with an operator's settings on it.
+    //
+    // ui/models/source_choice.h does the work and is where the argument for
+    // every rule lives: which keys a backend accepts, where a rate lands when
+    // the device only takes some of them, and which gain step a request rounds
+    // to. This is the QML-facing wrapper and holds no policy of its own.
+    //
+    // An index outside the list answers empty rather than throwing, because
+    // QML will call this during a rebind when the list has just been replaced.
+    [[nodiscard]] Q_INVOKABLE QString composeSourceUri(int index, double center_hz, double rate,
+                                                       double gain_db, bool gain_auto) const;
 
     [[nodiscard]] bool clamped() const { return info_.ring_clamped; }
     [[nodiscard]] QString clampReason() const;
@@ -1547,6 +1650,10 @@ signals:
     // frequency axis that no longer applies, which is exactly the case
     // that signal exists for.
     void sourceTuningChanged();
+
+    // The device list, the refresh's busy flag, or the last open or close
+    // refusal moved.
+    void sourcesChanged();
 
     // The pacing measurement moved, or its verdict did. Emitted only on a
     // change, because it is polled once a second for the life of the
@@ -1982,6 +2089,22 @@ private:
     void adopt_pacing();
     void adopt_front_end();
 
+    // Supervisor thread, from poll_source_pacing, which already fetches the
+    // EngineInfo this reads. Notices that the stream underneath a connection
+    // that never dropped has been replaced, and re-establishes everything that
+    // went with it.
+    void note_source_epoch(const rpc::EngineInfo& info);
+
+    // Supervisor thread. Takes whatever the picker posted and applies it in
+    // the order it was posted: the listing, then a close, then an open. That
+    // order is the only one that works when a panel refreshes and opens in one
+    // gesture, and the engine refuses an open over a live source, so a close
+    // that ran after its open would leave nothing running.
+    void apply_source_request();
+
+    // Qt thread, queued from apply_source_request.
+    void adopt_sources();
+
     // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
     // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per
     // connection; the tune answer arrives per write. A single struct would
@@ -2031,6 +2154,45 @@ private:
     // a quarter of a second between pressing return and the radio moving
     // reads as the box not working.
     bool tune_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // ---- the device picker -------------------------------------------------
+
+    // What the Qt thread asked for, taken by the supervisor on its next pass.
+    // Under source_mutex_ rather than atomics because a URI is a string, and
+    // because a listing and an open posted together have to be applied in that
+    // order rather than in whichever the supervisor noticed.
+    bool want_listing_ = false;       // guarded by source_mutex_
+    bool want_open_ = false;          // guarded by source_mutex_
+    bool want_close_ = false;         // guarded by source_mutex_
+    QString wanted_uri_;              // guarded by source_mutex_
+
+    // What the supervisor learned, waiting for the Qt thread to adopt it.
+    bool handover_has_sources_ = false;      // guarded by source_mutex_
+    std::vector<rpc::SourceDescriptor> handover_sources_;  // guarded by source_mutex_
+    bool handover_has_source_fault_ = false;  // guarded by source_mutex_
+    QString handover_source_fault_;           // guarded by source_mutex_
+    bool handover_sources_busy_ = false;      // guarded by source_mutex_
+
+    // Qt thread only: what the properties above hand out.
+    QVariantList sources_;
+    std::vector<rpc::SourceDescriptor> source_rows_;
+    QString source_fault_;
+    bool sources_busy_ = false;
+
+    // Supervisor thread only. The epoch this window last drew against. Zero
+    // until the first EngineInfo arrives, which is why the first sighting is
+    // not treated as a change: nothing moved, this window is only seeing the
+    // number for the first time.
+    //
+    // Reset to zero by a failed re-subscribe, so the difference stays and the
+    // next pass tries again rather than leaving the display unfed forever.
+    std::uint64_t seen_source_epoch_ = 0;
+
+    // Set by refreshSources, openSource and closeSource, cleared by the
+    // supervisor when it has applied them. In the wait predicate for the
+    // reason tune_work_pending_ is: a device list that arrives a quarter of a
+    // second after the button reads as the button not working.
+    bool source_work_pending_ = false;  // guarded by supervisor_mutex_
 
     // The pacing measurement, handed over under source_mutex_ with the
     // rest of what the supervisor learns about the source.

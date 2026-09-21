@@ -23,16 +23,21 @@
 
 #include "models/engine_link.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <QMetaObject>
 #include <QString>
+#include <QVariantList>
+#include <QVariantMap>
 
 #include "core/rpc/client.h"
 #include "models/frequency_entry.h"
+#include "models/source_choice.h"
 #include "models/wire_seam.h"
 
 namespace revenant::ui {
@@ -50,6 +55,12 @@ QString EngineLink::previewTune(const QString& text) const
 bool EngineLink::tuneTextValid(const QString& text) const
 {
     return parse_frequency(text.toStdString()).has_value();
+}
+
+double EngineLink::parseHz(const QString& text) const
+{
+    const auto parsed = parse_frequency(text.toStdString());
+    return parsed.has_value() ? static_cast<double>(parsed->hertz) : 0.0;
 }
 
 bool EngineLink::tuneSource(const QString& text)
@@ -217,6 +228,12 @@ void EngineLink::poll_source_pacing(bool engine_running)
         // worse than one.
         return;
     }
+
+    // ON THE BACK OF THE ROUND TRIP THIS FUNCTION ALREADY PAYS FOR. The epoch
+    // lives on EngineInfo and this is the one call that fetches EngineInfo on
+    // every pass, so noticing a source change here costs nothing and a poll of
+    // its own would cost a round trip a second forever.
+    note_source_epoch(*info);
 
     PacingSample sample;
     sample.carried = true;
@@ -397,6 +414,400 @@ void EngineLink::adopt_source_tuning()
         // carries, word for word, for a new engine; a retune is the same
         // event for the same reason.
         emit connectionChanged();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The device picker
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// One descriptor as the panel reads it.
+//
+// THE DERIVED FIELDS ARE COMPUTED HERE AND NOT IN QML, which is the split
+// every other computed thing in this client takes: ui/models/source_choice.h
+// owns the rules, ui/tests asserts them, and the QML binds names. A tuning
+// envelope composed in JavaScript would be a second copy of the rule that an
+// inverted range describes nothing, in a language with no test behind it.
+[[nodiscard]] QVariantMap describe(const rpc::SourceDescriptor& source)
+{
+    QVariantMap out;
+    out.insert(QStringLiteral("uri"), QString::fromStdString(source.uri));
+    out.insert(QStringLiteral("backend"), QString::fromStdString(source.backend));
+    out.insert(QStringLiteral("displayName"), QString::fromStdString(source.display_name));
+    out.insert(QStringLiteral("unavailable"), QString::fromStdString(source.unavailable));
+    out.insert(QStringLiteral("available"), source.available());
+
+    QStringList notes;
+    notes.reserve(static_cast<qsizetype>(source.notes.size()));
+    for (const std::string& note : source.notes) {
+        notes.append(QString::fromStdString(note));
+    }
+    out.insert(QStringLiteral("notes"), notes);
+
+    const TuneEnvelope envelope = tune_envelope(source);
+    out.insert(QStringLiteral("tunable"), envelope.tunable);
+    out.insert(QStringLiteral("tuneLowHz"), static_cast<double>(envelope.low_hz));
+    out.insert(QStringLiteral("tuneHighHz"), static_cast<double>(envelope.high_hz));
+
+    out.insert(QStringLiteral("minRate"), static_cast<double>(source.min_rate));
+    out.insert(QStringLiteral("maxRate"), static_cast<double>(source.max_rate));
+
+    QVariantList rates;
+    rates.reserve(static_cast<qsizetype>(source.sample_rates.size()));
+    for (const std::uint32_t rate : source.sample_rates) {
+        rates.append(static_cast<double>(rate));
+    }
+    out.insert(QStringLiteral("sampleRates"), rates);
+
+    out.insert(QStringLiteral("format"),
+               QString::fromLatin1(rpc::sample_format_name(source.native_format)));
+    out.insert(QStringLiteral("bitsPerComponent"), source.bits_per_component);
+
+    // ONE STAGE AND NOT THE LIST, because compose_source_uri emits one gain
+    // key: it is singular in every grammar this can reach, and the RTL-SDR has
+    // exactly one stage. Publishing three while only the first could be set
+    // would offer an operator two controls that do nothing. A device with
+    // several needs per-stage keys on the wire first, and the panel grows then.
+    out.insert(QStringLiteral("hasGain"), !source.gain_stages.empty());
+    if (!source.gain_stages.empty()) {
+        const rpc::GainStage& stage = source.gain_stages.front();
+        out.insert(QStringLiteral("gainName"), QString::fromStdString(stage.name));
+        out.insert(QStringLiteral("gainMinDb"), stage.min_db);
+        out.insert(QStringLiteral("gainMaxDb"), stage.max_db);
+        out.insert(QStringLiteral("gainHasAuto"), stage.has_auto);
+        out.insert(QStringLiteral("gainStepped"), !stage.steps_db.empty());
+    }
+
+    out.insert(QStringLiteral("paced"), source.flow == rpc::FlowControl::Paced);
+    out.insert(QStringLiteral("seekable"), source.seekable);
+    out.insert(QStringLiteral("length"), QString::fromStdString(describe_length(source)));
+    return out;
+}
+
+}  // namespace
+
+void EngineLink::refreshSources()
+{
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        want_listing_ = true;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
+    // Set on this thread rather than waiting for the supervisor to say so,
+    // because the whole point of the flag is that listSources is slow: it opens
+    // every device index to ask, including ones with nothing behind them, and
+    // pays a libusb timeout for each absent one. A busy flag that arrived with
+    // the answer would light up for no time at all.
+    sources_busy_ = true;
+    emit sourcesChanged();
+}
+
+void EngineLink::openSource(const QString& uri)
+{
+    if (uri.isEmpty()) {
+        source_fault_ =
+            QStringLiteral("there is nothing to open: pick a device in the list first.");
+        emit sourcesChanged();
+        return;
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        wanted_uri_ = uri;
+        want_open_ = true;
+
+        // ALWAYS, AND NOT ONLY WHEN ONE IS OPEN. openSource is refused over a
+        // live source, deliberately: a replace that failed on the new URI would
+        // have destroyed the working one already, and the ENGINE cannot know
+        // whether a caller meant to replace. This window can. An operator who
+        // picked a device in the panel meant to change to it, so the close and
+        // the open are sequenced here. Closing an engine with nothing open is a
+        // success, so asking when there is nothing to close costs one message,
+        // and guessing wrong costs a refused open that reads as a broken panel.
+        want_close_ = true;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
+    source_fault_.clear();
+    emit sourcesChanged();
+}
+
+void EngineLink::closeSource()
+{
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        want_close_ = true;
+
+        // An open posted and not yet applied is dropped. The operator changed
+        // their mind between the two gestures, and applying both would open the
+        // device they just asked to close.
+        want_open_ = false;
+        wanted_uri_.clear();
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
+    source_fault_.clear();
+    emit sourcesChanged();
+}
+
+QString EngineLink::composeSourceUri(int index, double center_hz, double rate, double gain_db,
+                                     bool gain_auto) const
+{
+    if (index < 0 || static_cast<std::size_t>(index) >= source_rows_.size()) {
+        return {};
+    }
+    const rpc::SourceDescriptor& source = source_rows_[static_cast<std::size_t>(index)];
+
+    SourceChoice choice;
+    choice.center_hz = static_cast<std::int64_t>(center_hz);
+    choice.rate = static_cast<std::int64_t>(rate);
+    if (!source.gain_stages.empty()) {
+        choice.gains.push_back(GainChoice{.stage = source.gain_stages.front().name,
+                                          .automatic = gain_auto,
+                                          .db = gain_db});
+    }
+    return QString::fromStdString(compose_source_uri(source, choice));
+}
+
+void EngineLink::apply_source_request()
+{
+    if (client_ == nullptr) {
+        return;
+    }
+
+    // THE FLAG IS CLEARED BEFORE THE REQUEST IS TAKEN, which is the order
+    // apply_source_tune and apply_receiver_request already use and for the
+    // reason apply_source_tune states: the other way round, a request posted
+    // between the take and the clear sets both, and then this clears the flag
+    // the wake depended on.
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = false;
+    }
+
+    bool listing = false;
+    bool closing = false;
+    bool opening = false;
+    QString uri;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        listing = std::exchange(want_listing_, false);
+        closing = std::exchange(want_close_, false);
+        opening = std::exchange(want_open_, false);
+        uri = wanted_uri_;
+        if (opening) {
+            wanted_uri_.clear();
+        }
+    }
+
+    if (!listing && !closing && !opening) {
+        return;
+    }
+
+    QString fault;
+    bool have_fault = false;
+    bool have_sources = false;
+    std::vector<rpc::SourceDescriptor> listed;
+
+    if (listing) {
+        auto answer = client_->list_sources();
+        if (answer) {
+            have_sources = true;
+            listed = std::move(*answer);
+        } else {
+            have_fault = true;
+            fault = QString::fromStdString(answer.error().message);
+        }
+    }
+
+    // The close, then the open, in that order and never the reverse: the engine
+    // refuses an open over a live source, so an open that ran first would be
+    // refused and a close after it would then leave nothing running.
+    if (closing) {
+        if (auto closed = client_->close_source(); !closed) {
+            have_fault = true;
+            fault = QString::fromStdString(closed.error().message);
+
+            // AND THE OPEN IS ABANDONED. A close that failed left the old
+            // source running, so the open would be refused for a reason that
+            // says nothing about the device the operator picked, and that
+            // second message would replace the first one that explained it.
+            opening = false;
+        }
+    }
+
+    if (opening) {
+        if (auto opened = client_->open_source(uri.toStdString()); !opened) {
+            have_fault = true;
+            fault = QString::fromStdString(opened.error().message);
+        } else {
+            // The range answer belongs to the source that was just closed. Ask
+            // again now rather than waiting for the next connection, or the
+            // frequency box keeps the previous radio's stops and refuses
+            // locally, in this client's own words, a tune the new one would
+            // have taken.
+            probe_source_tuning();
+        }
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        handover_sources_busy_ = false;
+        if (have_sources) {
+            handover_has_sources_ = true;
+            handover_sources_ = std::move(listed);
+        }
+        handover_has_source_fault_ = true;
+        handover_source_fault_ = have_fault ? fault : QString();
+    }
+
+    QMetaObject::invokeMethod(
+        this, [this] { adopt_sources(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
+{
+    if (info.source_epoch == seen_source_epoch_) {
+        return;
+    }
+
+    const bool first = seen_source_epoch_ == 0;
+    seen_source_epoch_ = info.source_epoch;
+    if (first) {
+        // The epoch this connection opened on. Nothing changed under this
+        // window; it is only seeing the number for the first time.
+        return;
+    }
+
+    // A NEW STREAM ON A CONNECTION THAT NEVER DROPPED, WHICH IS A STATE THIS
+    // WINDOW COULD NOT BE IN BEFORE closeSource EXISTED
+    //
+    // Everything below already happens when the ENGINE goes away, because the
+    // Client is destroyed and rebuilt. Here the connection is fine and the
+    // stream underneath it was replaced, so nothing tears itself down and the
+    // window goes on drawing the previous radio: a frozen waterfall under a
+    // frequency axis taken from a grid that no longer exists.
+    //
+    // Measured. Changing radio through the picker left "103 frames sent" on
+    // the engine's status line and a waterfall that stopped, because the
+    // server ended every subscription with the source and this client had no
+    // reason to ask for another.
+    live_receiver_id_ = 0;
+    live_audio_vrx_ = 0;
+    live_audio_granted_ = 0;
+    audio_ring_.reset();
+    work_audio_stats_ = {};
+    clear_rds(QStringLiteral(
+        "the source was replaced, so nothing is decoding RDS. The switch stays on and the "
+        "decoder is rebuilt on the next receiver."));
+
+    // The detector went with the source and its tracks were measured against
+    // the old centre. A held refusal goes too, or the next source inherits a
+    // sentence about a band it was never pointed at.
+    clear_detection_fault();
+
+    // THE OLD SUBSCRIPTION IS DROPPED AND NOT RE-USED. The server ended it
+    // with the source, so the capability this client holds is dead; asking for
+    // a new one without dropping the old leaves this side thinking it has two.
+    client_->unsubscribe_spectrum();
+
+    {
+        const std::lock_guard<std::mutex> lock(state_mutex_);
+        handover_info_ = info;
+        handover_connected_ = true;
+    }
+
+    if (info.spectrum.enabled()) {
+        // A failure is not fatal and is not silent either. The source is open
+        // and everything but the display works; the next pass tries again,
+        // because this function runs whenever the epoch differs from the one
+        // this window last drew against and a failed subscribe leaves that
+        // difference in place.
+        const auto status = client_->subscribe_spectrum(
+            requested_every_nth_,
+            [this](const rpc::SpectrumFrame& frame) { on_frame(frame); });
+        if (!status) {
+            seen_source_epoch_ = 0;
+            const std::lock_guard<std::mutex> lock(source_mutex_);
+            handover_has_source_fault_ = true;
+            handover_source_fault_ =
+                QStringLiteral("the source opened and the spectrum subscription did not, so "
+                               "the display is not being fed: ") +
+                QString::fromStdString(status.error().message);
+        }
+    }
+
+    // Everything the two engine-side frame counters are derived from, back to
+    // zero, for the reason attempt_connect zeroes them: a sequence from the
+    // stream that just ended has nothing to say about the distance to a
+    // sequence from the one that replaced it.
+    every_nth_ = requested_every_nth_;
+    first_sequence_ = 0;
+    delivered_ = 0;
+    have_span_ = false;
+
+    QMetaObject::invokeMethod(
+        this,
+        [this] {
+            // adopt(), which emits connectionChanged, and that is the point.
+            // render/waterfall_item.cpp and render/spectrum_item.cpp read that
+            // signal as a new engine: the waterfall fills its ring with
+            // background and the trace forgets its bin count. A new source IS
+            // a new engine to both of them, because every row they hold was
+            // drawn against a grid that has been replaced.
+            adopt();
+            emit sourcesChanged();
+        },
+        Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_sources()
+{
+    bool moved = false;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        if (handover_has_sources_) {
+            handover_has_sources_ = false;
+            source_rows_ = std::move(handover_sources_);
+            handover_sources_.clear();
+
+            sources_.clear();
+            sources_.reserve(static_cast<qsizetype>(source_rows_.size()));
+            for (const rpc::SourceDescriptor& source : source_rows_) {
+                sources_.append(describe(source));
+            }
+            moved = true;
+        }
+        if (handover_has_source_fault_) {
+            handover_has_source_fault_ = false;
+            if (source_fault_ != handover_source_fault_) {
+                source_fault_ = handover_source_fault_;
+                moved = true;
+            }
+        }
+        if (sources_busy_ != handover_sources_busy_) {
+            sources_busy_ = handover_sources_busy_;
+            moved = true;
+        }
+    }
+
+    if (moved) {
+        emit sourcesChanged();
     }
 }
 
