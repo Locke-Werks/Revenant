@@ -301,6 +301,7 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
     out.setRingClampReason(in.ring.clamp_reason);
     out.setRealtimeFactor(pacing.realtime_factor);
     out.setSourcePacedBy(pacing.paced_by);
+    out.setSourceEpoch(in.source_epoch);
 }
 
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,

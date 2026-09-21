@@ -93,6 +93,7 @@
 using namespace revenant;
 using test::Harness;
 using test::HarnessOptions;
+using test::scene_uri;
 
 namespace {
 
@@ -1239,4 +1240,65 @@ TEST_CASE("a squelched receiver sends silence at the full rate rather than stopp
     CHECK(status->audio_dropped == 0);
 
     harness.client().unsubscribe_audio(*vrx);
+}
+
+TEST_CASE("closing the source ends a live audio subscription and says why",
+          "[gpu][rpc][audio][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE PATH THAT WOULD BE A USE-AFTER-FREE WITHOUT THE TEARDOWN ORDER
+    //
+    // A running engine, a live audio subscription, and a close. Engine::run
+    // holds a raw Graph* in the source callback and flushes the graph after
+    // the stream ends, the server holds an audio sink token on a receiver that
+    // the graph owns, and closing destroys the graph. Everything here is about
+    // that happening in the right order rather than about any one assertion:
+    // the close detaches from the engine while the graph still exists, and only
+    // then asks the engine to tear it down.
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto granted = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    INFO(test::message_of(granted));
+    REQUIRE(granted.has_value());
+
+    // A stream that is actually flowing, so the close races real delivery
+    // rather than an idle subscription.
+    const std::size_t seen = wait_for_chunks(*log, 10, 4000);
+    INFO("chunks received before the close: " << seen);
+    REQUIRE(seen >= 10);
+
+    const auto closed = harness.client().close_source();
+    INFO(test::message_of(closed));
+    REQUIRE(closed.has_value());
+
+    // TOLD, RATHER THAN LEFT TO NOTICE. Audio is the one of the three streams
+    // that has an ended() call, so the close uses it: a subscriber whose
+    // chunks simply stopped cannot tell a closed source from a receiver that
+    // went quiet, and the two want different things done about them.
+    REQUIRE(wait_for_ended(*log, 4000));
+    INFO(log->reason());
+    CHECK(log->reason().find("closed") != std::string::npos);
+
+    // And the engine is between sources rather than wedged.
+    auto info = harness.client().info();
+    INFO(test::message_of(info));
+    REQUIRE(info.has_value());
+    CHECK(info->source_rate == 0);
+
+    // Which is the state a new source opens from, with the subscription's
+    // receiver gone. The point is that the server is serving rather than
+    // holding a sink on a graph that no longer exists.
+    const auto reopened = harness.client().open_source(scene_uri(2'400'032));
+    INFO(test::message_of(reopened));
+    REQUIRE(reopened.has_value());
+
+    auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(ids->empty());
 }

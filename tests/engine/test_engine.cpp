@@ -942,3 +942,147 @@ TEST_CASE("the realtime factor is measured over the run and frozen when it ends"
     CHECK(later.realtime_factor == done.realtime_factor);
     CHECK(later.elapsed_seconds == done.elapsed_seconds);
 }
+
+TEST_CASE("a source closes and another opens on the same engine", "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    auto created = engine::Engine::create(default_config());
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    // Before anything, and this is the one place the epoch is zero. A
+    // consumer that correlated against zero would be correlating against a
+    // stream that has never existed, which is why the first open makes it one
+    // rather than leaving the first stream at zero.
+    CHECK_FALSE(eng.has_source());
+    CHECK(eng.info().source_epoch == 0);
+
+    // Closing an engine with nothing open is a success and not a refusal. A
+    // client that closes before every open should not have to know which
+    // state it was in to read the answer.
+    CHECK(eng.close_source().has_value());
+
+    REQUIRE(eng.open_source(tone_uri(0, 200'000)).has_value());
+    CHECK(eng.has_source());
+    CHECK(eng.info().source_epoch == 1);
+    CHECK(eng.info().source_rate == kSourceRate);
+
+    // A SECOND OPEN IS REFUSED RATHER THAN REPLACING THE FIRST, and the
+    // refusal names the call that gets from one to the other. A replace that
+    // failed on the new URI would have destroyed the working source already.
+    auto second = eng.open_source(tone_uri(0, 200'000));
+    REQUIRE_FALSE(second.has_value());
+    INFO(second.error().message);
+    CHECK(second.error().message.find("Close it first") != std::string::npos);
+
+    // A receiver, so the close has something to tear down that a caller can
+    // see the absence of afterwards.
+    engine::VrxParams params;
+    params.demod = engine::Demod::Raw;
+    params.center = 0;
+    params.bandwidth = 12'000;
+    auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+    REQUIRE(eng.vrx_ids().size() == 1);
+
+    const auto closed = eng.close_source();
+    INFO(test::message_of(closed));
+    REQUIRE(closed.has_value());
+
+    CHECK_FALSE(eng.has_source());
+
+    // EVERY RECEIVER WENT WITH THE GRAPH. Their placement was computed
+    // against a grid that no longer exists and their centre is an offset from
+    // a baseband whose meaning was the closed source's.
+    CHECK(eng.vrx_ids().empty());
+
+    // And the receiver that was there is refused by id rather than answered
+    // with a zeroed status, which is what a client polling one across a close
+    // has to be told.
+    auto stale = eng.vrx_status(*added);
+    CHECK_FALSE(stale.has_value());
+
+    // Everything describing a source is back to nothing, and the device is
+    // not: it belongs to the engine rather than to the stream.
+    CHECK(eng.info().source_rate == 0);
+    CHECK(eng.info().grid.channels == 0);
+    CHECK(eng.info().source_center == 0);
+    CHECK_FALSE(eng.info().device.name.empty());
+
+    // THE EPOCH IS KEPT AND NOT CLEARED. An engine between sources still
+    // answers truthfully about which stream the indices a client is holding
+    // belonged to: that one, and it has ended.
+    CHECK(eng.info().source_epoch == 1);
+
+    // A second source, at a different rate, so the grid and the ring have to
+    // be rebuilt rather than reused. This is the case a replace could not do
+    // safely and the whole reason the lifecycle was opened up.
+    const std::string other = "synthetic:wideband?rate=1200000&emitters=1&modes=am&seed=99"
+                              "&noise_dbfs=-120&snr_min=60&snr_max=60&samples=200000";
+    const auto reopened = eng.open_source(other);
+    INFO(test::message_of(reopened));
+    REQUIRE(reopened.has_value());
+
+    CHECK(eng.has_source());
+    CHECK(eng.info().source_rate == 1'200'000);
+    CHECK(eng.info().source_epoch == 2);
+
+    // The grid was sized against the new rate rather than carried over.
+    CHECK(eng.info().grid.channels > 0);
+    CHECK(eng.info().grid.decimation > 0);
+    CHECK(eng.info().channel_rate ==
+          1'200'000 / static_cast<dsp::SampleRate>(eng.info().grid.decimation));
+
+    // Receiver ids do NOT restart. They are monotonic for the life of the
+    // engine so that a client holding one from the previous source cannot
+    // address a live one on this one.
+    auto after = eng.add_vrx(params);
+    INFO(test::message_of(after));
+    REQUIRE(after.has_value());
+    CHECK(after->value > added->value);
+}
+
+TEST_CASE("closing a running source stops the stream first", "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    auto created = engine::Engine::create(default_config());
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    // Long enough that the run cannot finish on its own while this case is
+    // closing it. The point is the close racing a LIVE stream, which is the
+    // arrangement that would be a use-after-free without the wait: run()
+    // holds a raw Graph* in the source callback and flushes the graph after
+    // the stream ends.
+    REQUIRE(eng.open_source(tone_uri(0, 40'000'000)).has_value());
+
+    std::thread runner([&eng] { static_cast<void>(eng.run()); });
+
+    // Wait for the stream to actually be running rather than assuming the
+    // thread got there, so the close below is measured against a stream and
+    // not against a race this case happened to win.
+    for (int i = 0; i < 500 && !eng.running(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(eng.running());
+
+    const auto closed = eng.close_source();
+    INFO(test::message_of(closed));
+    REQUIRE(closed.has_value());
+
+    // close_source waited for run() to be finished with the graph, so by the
+    // time it returned the engine was no longer running. Asserting it here
+    // rather than after the join is the point: the join would make this true
+    // whether or not the wait existed.
+    CHECK_FALSE(eng.running());
+    CHECK_FALSE(eng.has_source());
+
+    runner.join();
+
+    // And the engine is usable again rather than merely not crashed.
+    REQUIRE(eng.open_source(tone_uri(0, 200'000)).has_value());
+    CHECK(eng.info().source_epoch == 2);
+}

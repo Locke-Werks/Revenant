@@ -313,6 +313,13 @@ struct PromiseValue<kj::Promise<T>> {
     // other raises an alarm on every deliberate half-speed replay.
     out.realtime_factor = in.getRealtimeFactor();
     out.source_paced_by = in.getSourcePacedBy();
+
+    // The only other field here that moves while a connection stays up, and
+    // the one a client has to read on every poll rather than at connect. See
+    // EngineInfo::source_epoch: it says which stream the sample indices in
+    // every frame and chunk belong to, and two streams' zeros are different
+    // instants.
+    out.source_epoch = in.getSourceEpoch();
     return out;
 }
 
@@ -861,6 +868,8 @@ public:
 
     [[nodiscard]] Expected<std::int64_t> set_source_center(std::int64_t center_hz) override;
     [[nodiscard]] Expected<SourceTuning> source_can_retune() override;
+    [[nodiscard]] Status open_source(std::string_view uri) override;
+    [[nodiscard]] Status close_source() override;
 
     [[nodiscard]] Expected<std::uint64_t> add_vrx(const VrxParams& params) override;
     [[nodiscard]] Status remove_vrx(std::uint64_t id) override;
@@ -1312,6 +1321,25 @@ Expected<SourceTuning> ClientImpl::source_can_retune() {
             out.high_hz = response.getHighHz();
             return out;
         });
+    });
+}
+
+Status ClientImpl::open_source(std::string_view uri) {
+    // Copied into the request rather than referenced, because the lambda runs
+    // on the loop thread and on_loop's contract does not promise the caller's
+    // buffer outlives the round trip. capnp::Text::Reader wants a NUL, which a
+    // string_view does not carry, so the std::string is not avoidable either.
+    const std::string owned(uri);
+    return on_loop("open_source", [&owned](LoopState& state) {
+        auto request = state.session.openSourceRequest();
+        request.setUri(capnp::Text::Reader(owned.c_str(), owned.size()));
+        return request.send().ignoreResult();
+    });
+}
+
+Status ClientImpl::close_source() {
+    return on_loop("close_source", [](LoopState& state) {
+        return state.session.closeSourceRequest().send().ignoreResult();
     });
 }
 

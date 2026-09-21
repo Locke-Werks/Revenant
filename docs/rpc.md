@@ -1086,21 +1086,79 @@ A client reconnecting starts from whatever the engine currently holds, and an
 engine restarting starts empty. Saved sessions are a client-side or a
 schema-side feature and neither exists.
 
-**No source control over the wire, except the one that matters most.**
+**Only starting a source is still the host's, and that is `run()` being a
+blocking call rather than a gap in this wire.**
 
 **This entry used to read "`Session` lists sources and reports whether the
 engine is running, and has no method to open one, start it or stop it. An
-engine is configured and started by whatever process hosts it."** The second
-sentence still holds and the first no longer does. `setSourceCenter` and
-`sourceCanRetune` landed on 2026-09-20, because the gap that entry described
-as a deferred nicety turned out to be the biggest usability problem the
-program had: the source centre was fixed at launch, so every change of band
-was a process restart that took the operator's receivers, their waterfall
-history and their audio with it.
+engine is configured and started by whatever process hosts it."** Then, on
+2026-09-20, it read **"What is still absent is opening, starting and stopping a
+source. Those are the host process's business and an engine owns one source for
+its life, for the reason `Engine::open_source` gives."** `setSourceCenter` and
+`sourceCanRetune` retired the first of those, because the gap it described as a
+deferred nicety turned out to be the biggest usability problem the program had:
+the source centre was fixed at launch, so every change of band was a process
+restart that took the operator's receivers, their waterfall history and their
+audio with it.
 
-What is still absent is opening, starting and stopping a source. Those are
-the host process's business and an engine owns one source for its life, for
-the reason `Engine::open_source` gives.
+`openSource` and `closeSource` retire the second. The reason it gave was real
+rather than an excuse, and it was dealt with rather than waived: an engine owned
+one source for its life because `Engine::open_source` sizes the grid and the
+ring against the source's rate and nothing could take either down.
+`Engine::close_source` can.
+
+What is left is starting, and it is not a method this wire is missing.
+`Engine::run` blocks for the length of a stream on a thread this service does
+not own, so the host runs it. `tools/engined/main.cpp` loops on it: `run()`
+returns when the stream ends, and `EngineInfo::sourceEpoch` is what tells that
+loop whether a client changed radios underneath it or the source simply ran out.
+`has_source()` alone cannot, because a close followed immediately by an open
+looks like a source that is open and running.
+
+### What a source change costs, which is more than a retune
+
+Closing a source is not a bigger retune. A retune keeps the stream and moves one
+constant; this ends the stream. Every one of these is gone when `closeSource`
+returns, and the client re-establishes them:
+
+- **Every receiver**, with its audio, its passband and its RDS decoder. A
+  receiver's centre is an offset from a baseband whose meaning was the closed
+  source's, so carrying one forward would place it at a plausible offset from the
+  wrong centre, and a receiver at the wrong absolute frequency looks exactly like
+  a working one.
+- **Every subscription.** An audio subscriber is told, through `ended()`, with
+  the reason naming the close. A spectrum or passband subscriber finds out by the
+  frames stopping, which is the shape those two already have and is why neither
+  grew an `ended()` for this.
+- **The detector**, and any threshold set on it. It is sized in bins against the
+  old geometry; fed the next source's frames at a matching bin count and a
+  different bin width it would report tracks at frequencies that do not exist.
+- **The server's own sink state.** `sink_installed_` is sticky, so without this
+  the next `subscribeSpectrum` would skip `ensure_sink` and hand back a
+  subscription nothing feeds. `ServerImpl::release_source_state` is the whole
+  teardown and it runs before the engine's, so every sink is detached while the
+  graph it names still exists.
+
+**And the sample indices start again.** `EngineInfo::sourceEpoch` is the only
+thing separating the new stream's index zero from the old one's. Read it on every
+poll, compare it for equality, and re-derive rather than adjust: there is no
+offset between two streams, because the gap between them is however long an
+operator spent choosing a radio. A client that ignores it lines up audio from one
+radio against a spectrum frame from another and finds the arithmetic consistent,
+because both are honest indices into streams nothing said were different.
+
+`openSource` is refused when a source is already open, and that is deliberate
+rather than a missing convenience. A replace that failed on the new URI would
+have destroyed the working source already, and the client would hold a two-valued
+answer to a three-valued question. Two calls means a failed open leaves an engine
+with no source, which is a state the client asked for and can see.
+
+Both calls run on the event loop and block it: one named device opened or closed,
+which is what `setSourceCenter` already does there. `core/rpc/server.cpp` has the
+measurement and what would change it. `listSources` is the one engine-facing call
+that gets a worker thread, and the reason is its own shape rather than a general
+rule: it opens every index, including ones with nothing behind them, and pays a
+libusb timeout per absent dongle.
 
 See "The front end can be pointed somewhere else" above for what a retune
 does and does not move.

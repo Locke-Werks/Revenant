@@ -372,7 +372,16 @@ struct PassbandGeometry {
 struct EngineInfo {
     gpu::DeviceInfo device;
     RingGeometry ring;
+
+    // A MEASUREMENT OF THE OPEN SOURCE AND NOT A SETTING, which matters
+    // because dsp::GridParams does not default to empty: on its own it
+    // constructs to the design's canonical M=64 D=32 and 17 taps per branch.
+    // Those are the right defaults for a caller who did not name a grid and
+    // the wrong ones to report from an engine that has no source, so
+    // Engine::close_source zeroes all three rather than leaving the struct's.
+    // Zero channels means no source, and source_rate of zero says the same.
     dsp::GridParams grid;
+
     dsp::SampleRate source_rate = 0;
     dsp::SampleRate channel_rate = 0;
     dsp::Hertz channel_spacing = 0;
@@ -412,6 +421,37 @@ struct EngineInfo {
     // every detection a retune's worth of hertz out, on a display where
     // nothing else looks wrong.
     dsp::Hertz source_center = 0;
+
+    // WHICH STREAM THE SAMPLE INDICES BELONG TO. Zero before any source has
+    // been opened, one for the first, and one higher for every open after it.
+    //
+    // THIS IS THE ONE THING A RE-OPENABLE SOURCE BREAKS THAT A RETUNE DOES
+    // NOT, and it is worth being plain about the difference. A retune leaves
+    // the stream alone: the samples keep arriving, the index keeps counting,
+    // and what changes is the constant in source_center. Closing a source and
+    // opening another starts a NEW stream, and docs/conventions.md is explicit
+    // that time in this engine is an exact sample index from the start of the
+    // stream. So the second stream's index 0 is a different instant from the
+    // first stream's index 0, and every AudioChunk::start, SpectrumFrame
+    // index, PassbandFrame window and recording offset is numbered against
+    // whichever stream produced it.
+    //
+    // Without this field those two are indistinguishable. A consumer that
+    // correlates by index, which is every consumer this engine has, would
+    // silently line up audio from one radio against a spectrum frame from
+    // another and find the arithmetic consistent, because it is: both are
+    // honest indices into streams nothing said were different.
+    //
+    // It is a COUNT AND NOT A HANDLE. Compare it for equality against the
+    // epoch a frame or a chunk was correlated at, and re-derive rather than
+    // adjust when it differs: there is no offset between two streams, because
+    // the gap between them is however long an operator spent choosing a
+    // radio.
+    //
+    // Monotonic for the life of the engine and never reused, on the same
+    // ground the receiver ids are: a number that came back would make a stale
+    // correlation look current.
+    std::uint64_t source_epoch = 0;
 };
 
 // Whether the front end can be pointed somewhere else, and where.
@@ -987,7 +1027,63 @@ public:
     // Opens a source by URI and sizes the grid and the ring against it. The
     // engine takes ownership: a source outliving the graph that reads it is a
     // use-after-free waiting for a scheduling accident.
+    //
+    // REFUSED WHEN A SOURCE IS ALREADY OPEN, and close_source below is how a
+    // caller gets from one to the other. It is not a replace, deliberately: a
+    // replace that failed on the new URI would have already destroyed the
+    // working source, and the caller would be holding a success-or-failure
+    // answer to a question with three outcomes. Two calls means a failed open
+    // leaves an engine with no source, which is a state the caller asked for.
+    //
+    // WHAT THE REFUSAL USED TO SAY: "this engine already has a source open. A
+    // source is owned for the life of the engine, because a source outliving
+    // the graph that reads it is a use-after-free waiting for a scheduling
+    // accident." The second sentence conflated two things. Ownership for the
+    // life of the GRAPH is what stops the use-after-free and that still holds;
+    // ownership for the life of the ENGINE was a consequence of there being no
+    // way to take the graph down, and there is one now.
     [[nodiscard]] virtual Status open_source(std::string_view uri) = 0;
+
+    // Stops the stream, tears the graph and the ring down, and leaves an
+    // engine that open_source can be called on again.
+    //
+    // WHAT IT COSTS, WHICH IS MORE THAN A CALLER WOULD GUESS
+    //
+    // Every receiver goes. They live in the graph and their placement was
+    // computed against this grid, so there is nothing to carry forward: a
+    // receiver's centre is an offset from a baseband whose meaning is set by
+    // the source that is being closed. Re-placing them on the next source's
+    // grid would put each one at a plausible offset from the wrong centre,
+    // which is worse than dropping them, because a receiver at the wrong
+    // absolute frequency looks like a receiver.
+    //
+    // Every sink goes with them: audio, passband, and the full-span spectrum.
+    // The audio fan-outs this class holds are dropped too, so a subscriber's
+    // callable is released here rather than being kept alive by a map keyed on
+    // a receiver that no longer exists.
+    //
+    // The next stream is numbered from zero again and EngineInfo::source_epoch
+    // is how a consumer tells the two apart. Read that field's note: it is the
+    // whole of what makes a re-openable source safe to correlate against.
+    //
+    // IT BLOCKS ON A RUNNING ENGINE AND IT HAS TO. run() holds a raw Graph*
+    // in the source callback and calls graph_->flush() after the stream ends,
+    // so destroying the graph while run() is between those two is a
+    // use-after-free. This requests the stop and waits for run() to have
+    // finished with both. That means it MUST NOT be called on the thread that
+    // called run(), which would wait for itself; every caller in this tree
+    // runs the engine on a thread of its own for unrelated reasons.
+    //
+    // A source that will not stop is reported rather than waited on forever.
+    // Idempotent: closing an engine with no source open succeeds and does
+    // nothing, because the caller's intent is already satisfied.
+    [[nodiscard]] virtual Status close_source() = 0;
+
+    // Whether a source is open. A host that serves an engine whose source can
+    // be closed and reopened loops on this, because run() refuses with no
+    // source and returns when one is closed.
+    [[nodiscard]] virtual bool has_source() const = 0;
+
     [[nodiscard]] virtual const source::SourceCapabilities& source_capabilities() const = 0;
 
     [[nodiscard]] virtual const EngineInfo& info() const = 0;
@@ -1167,6 +1263,22 @@ public:
 protected:
     Engine() = default;
 
+    // Releases every fan-out this class is holding, for an implementation that
+    // has just destroyed the receivers they were installed on.
+    //
+    // PROTECTED BECAUSE THE MAP IS PRIVATE AND THE TEARDOWN IS NOT. close_source
+    // destroys the graph, which takes every receiver and every audio slot with
+    // it, and the entries left here would then be fan-outs on receivers that no
+    // longer exist. attach_audio_sink prunes one of those when somebody happens
+    // to ask about that id again, which is enough for a removed receiver and is
+    // not enough here: after a close there is no id anybody will ask about, so
+    // every entry would be held for the life of the engine along with the
+    // subscriber callables inside it.
+    //
+    // It does not call set_audio_sink on the way out, unlike detach_audio_sink.
+    // There is no graph left to call it on.
+    void drop_audio_fanouts();
+
 private:
     // The fan-outs this engine has installed, one per receiver that has at
     // least one attached consumer. Control-plane state on an otherwise pure
@@ -1179,6 +1291,11 @@ private:
     std::mutex audio_fanout_lock_;
     std::map<std::uint32_t, std::shared_ptr<AudioFanout>> audio_fanouts_;
 };
+
+inline void Engine::drop_audio_fanouts() {
+    const std::scoped_lock held(audio_fanout_lock_);
+    audio_fanouts_.clear();
+}
 
 inline Expected<AudioSinkId> Engine::attach_audio_sink(VrxId id, AudioSink sink) {
     if (!sink) {

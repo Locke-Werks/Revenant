@@ -69,6 +69,21 @@ namespace {
 // callback on Source, which would delete this.
 constexpr std::chrono::milliseconds kRunPollInterval{2};
 
+// How long close_source waits for a running stream to stop before reporting
+// that it would not.
+//
+// What it is waiting for is a device stop plus a GPU flush: on an RTL-SDR that
+// is rtlsdr_cancel_async through libusb and the worker joining, and on the
+// device side it is the scheduler retiring whatever is already submitted. Both
+// are milliseconds on the hardware this has run on, so five seconds is not a
+// budget, it is the point past which the honest answer is that something is
+// wedged and a caller should hear about it rather than block.
+//
+// Bounded at all because the caller in the deployment that needs this is an RPC
+// loop thread. A wait with no deadline there is a client that hangs, and a
+// client that hangs is diagnosed as a network fault.
+constexpr std::chrono::milliseconds kCloseStopTimeout{5000};
+
 // The 2x-oversampled design. A critically sampled bank splits a signal sitting
 // on a channel edge across two channels and neither one is usable, which is
 // the whole reason core/dsp/pfb.h calls D = M/2 the project's choice rather
@@ -120,10 +135,16 @@ public:
 
     [[nodiscard]] Status open_source(std::string_view uri) override {
         if (source_ != nullptr) {
-            return fail("this engine already has a source open. A source is owned for the life "
-                        "of the engine, because a source outliving the graph that reads it is a "
-                        "use-after-free waiting for a scheduling accident");
+            return fail("this engine already has a source open. Close it first: this is two "
+                        "calls rather than a replace, because a replace that failed on the new "
+                        "URI would have destroyed the working source already");
         }
+
+        // A CLAMP NOTE FROM A PREVIOUS SOURCE IS NOT THIS SOURCE'S. It is
+        // appended to rather than assigned, so without this the second open on
+        // an engine reports the first one's ring clamp beside its own, and the
+        // third reports both.
+        clamp_note_.clear();
 
         auto opened = source::open_source(uri);
         if (!opened) {
@@ -286,6 +307,19 @@ public:
         info_.spectrum = graph_->geometry().spectrum;
         info_.passband_transform = graph_->geometry().passband_transform;
 
+        // HERE AND NOT IN close_source, SO THE NUMBER ONLY EVER NAMES A STREAM
+        // THAT EXISTS. Incrementing on the way out would leave an engine with
+        // no source carrying the epoch of a stream that has been torn down, and
+        // a consumer comparing against it would find its stale correlation
+        // still current. An engine between sources keeps the epoch of the last
+        // one it served, which is the truthful answer to "which stream were
+        // those indices in": that one, and it has ended.
+        //
+        // Past the last failure point in this function, so a refused open does
+        // not consume an epoch. Nothing depends on them being consecutive, but
+        // a gap would be a stream nobody could ever produce a sample for.
+        ++info_.source_epoch;
+
         // The starting point, and set_source_center keeps it current from
         // here on.
         //
@@ -325,6 +359,125 @@ public:
 
         return {};
     }
+
+    [[nodiscard]] Status close_source() override {
+        // Idempotent on an engine with nothing open. The caller wanted no
+        // source and there is none, and answering with a refusal would make a
+        // client that closes before every open have to know which state it was
+        // in to interpret the answer.
+        if (source_ == nullptr && graph_ == nullptr && ring_ == nullptr) {
+            return {};
+        }
+
+        // THE WAIT IS THE WHOLE OF THE DIFFICULTY AND NONE OF IT IS OPTIONAL
+        //
+        // run() captures `Graph* graph = graph_.get()` into the source callback
+        // and calls graph_->flush() after the stream ends. running_ is stored
+        // false only after that flush has returned, which makes it the exact
+        // marker for "run() is finished with the graph and the source". Tearing
+        // either down before it is a use-after-free on the source's own thread,
+        // which is the hardest kind to see: it reads as a driver fault or a
+        // corrupt frame rather than as a lifetime bug here.
+        if (running_.load(std::memory_order_acquire)) {
+            if (auto asked = stop(); !asked) {
+                return std::unexpected(with_context(asked.error(), "Engine::close_source"));
+            }
+
+            // BOUNDED, BECAUSE A SOURCE THAT WILL NOT STOP MUST NOT TAKE THE
+            // CALLER WITH IT. This runs on an RPC loop thread in the deployment
+            // that needs it, and a wait with no deadline there is a client that
+            // hangs rather than one that is told what happened.
+            //
+            // Generous, because what it is waiting for is a device stop plus a
+            // GPU flush: rtlsdr_cancel_async through libusb plus the
+            // scheduler's outstanding submissions. Five seconds is far past
+            // either on the hardware this has been measured on and short enough
+            // that an operator does not conclude the program has died.
+            const auto deadline = std::chrono::steady_clock::now() + kCloseStopTimeout;
+            {
+                std::unique_lock lock(run_lock_);
+                while (running_.load(std::memory_order_acquire)) {
+                    if (std::chrono::steady_clock::now() >= deadline) {
+                        break;
+                    }
+                    run_signal_.wait_for(lock, kRunPollInterval);
+                }
+            }
+
+            if (running_.load(std::memory_order_acquire)) {
+                // Nothing is torn down. An engine still streaming is a working
+                // engine, and a close that gave up half way would leave one
+                // that is neither.
+                return fail(std::format(
+                    "Engine::close_source asked the stream to stop and it was still running "
+                    "{} ms later, so nothing has been torn down and this engine is still "
+                    "serving its old source. A source that will not stop is the fault to "
+                    "chase; core/source/rtlsdr_source.cpp's cancel path is the usual one",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(kCloseStopTimeout)
+                        .count()));
+            }
+        }
+
+        // Before the graph, because a fan-out's entry names a receiver the
+        // graph is about to destroy. See Engine::drop_audio_fanouts for why
+        // attach_audio_sink's on-demand pruning does not cover this.
+        drop_audio_fanouts();
+
+        // The destructor's order, for the destructor's reasons: the source's
+        // thread calls into the graph, the graph's completion thread calls into
+        // the receivers' sinks, and the ring outlives both. ring_ is reset here
+        // and not in the destructor because there the member order does it.
+        source_.reset();
+        graph_.reset();
+        ring_.reset();
+
+        capabilities_ = source::SourceCapabilities{};
+        prototype_ = dsp::PrototypeFilter{};
+        block_samples_ = 0;
+        clamp_note_.clear();
+
+        // The device survives and everything describing a source does not.
+        // Assigning a fresh EngineInfo and putting the device back is one line
+        // per field that stays rather than one per field that goes, which is
+        // the direction that does not rot: a field added to EngineInfo for a
+        // future source property is cleared here by default instead of being
+        // left behind by an omission nobody notices.
+        //
+        // source_epoch is carried over for the reason open_source gives.
+        const gpu::DeviceInfo device = info_.device;
+        const std::uint64_t epoch = info_.source_epoch;
+        info_ = EngineInfo{};
+        info_.device = device;
+        info_.source_epoch = epoch;
+
+        // AND THE GRID IS ZEROED ON TOP OF THAT, BECAUSE ITS DEFAULT IS NOT
+        // EMPTY. dsp::GridParams default-constructs to the design's canonical
+        // values, M=64 D=32 and 17 taps per branch, which is right for a
+        // caller who did not name a grid and wrong for this: a fresh
+        // EngineInfo would report a 64-channel grid on an engine with no
+        // source, and a client reading it would believe a measurement that had
+        // never been taken. source_rate of zero is the marker for no source,
+        // but nothing stops a client reading grid.channels without checking it,
+        // and a zero there is unmistakable where a 64 is not.
+        info_.grid.channels = 0;
+        info_.grid.decimation = 0;
+        info_.grid.taps_per_branch = 0;
+
+        // Not reset, and each for its own reason.
+        //
+        // next_id_ keeps counting. Receiver ids are monotonic for the life of
+        // the engine so that a stale id is detectable; restarting them here
+        // would make a client holding a receiver from the previous source
+        // address a live one on this one.
+        //
+        // stream_start_ns_ and stream_stop_ns_ are left to run(), which writes
+        // both at the top of every run. Clearing them here would report a
+        // realtime factor of zero, which SourcePacing defines as "not
+        // measured", and that is already what an engine between sources is.
+        return {};
+    }
+
+    [[nodiscard]] bool has_source() const override { return source_ != nullptr; }
 
     [[nodiscard]] const source::SourceCapabilities& source_capabilities() const override {
         return capabilities_;
@@ -537,6 +690,15 @@ public:
 
     [[nodiscard]] Status run() override {
         if (source_ == nullptr || graph_ == nullptr) {
+            // A HOST THAT LOOPS HAS TO TELL THIS FROM A FAULT, AND has_source
+            // IS HOW. Since close_source landed this refusal has two causes: a
+            // host that called run() before opening anything, which is a bug,
+            // and a source closed between the host's check and this call, which
+            // is an operator changing radios and is not. Neither this call nor
+            // the other can distinguish them, because by the time either is
+            // asked the state is the same. The host asks has_source() after a
+            // failed run: false means it raced a close and should go back to
+            // waiting. tools/engined/main.cpp is the worked example.
             return fail("Engine::run before a source is open");
         }
         if (running_.load(std::memory_order_acquire)) {
@@ -592,6 +754,18 @@ public:
                                   .count(),
                               std::memory_order_release);
         running_.store(false, std::memory_order_release);
+
+        // AFTER the store and not before it, because close_source is parked on
+        // this waiting for exactly that store: running_ going false is what says
+        // run() has finished with the graph and the source, so a notify ahead of
+        // it would wake a waiter that finds nothing changed.
+        //
+        // Not under run_lock_. A missed wakeup here is a close_source that waits
+        // out one more kRunPollInterval rather than one that hangs, because that
+        // loop re-tests the atomic on a timeout. Taking the lock would mean
+        // taking it on the path that ends every stream, for two milliseconds of
+        // latency in the one case where somebody is waiting.
+        run_signal_.notify_all();
 
         if (!ended) {
             return ended;

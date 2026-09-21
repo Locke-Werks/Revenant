@@ -152,6 +152,44 @@ public:
     // inside the gap. Outside it, do not bother asking.
     [[nodiscard]] virtual Expected<SourceTuning> source_can_retune() = 0;
 
+    // Opens a source on an engine that has none, and closes the one it has.
+    //
+    // The URI is the grammar the command line takes, which is what
+    // list_sources hands back in SourceDescriptor::uri. Build one by appending
+    // the settings an operator chose to that string; do not parse it, because
+    // each backend's grammar is its own.
+    //
+    // open_source IS REFUSED WHEN A SOURCE IS ALREADY OPEN. Close first. It is
+    // not a replace, because a replace that failed on the new URI would have
+    // destroyed the working one already.
+    //
+    // EVERYTHING THIS CLIENT WAS HOLDING IS GONE AFTER A CLOSE, which is more
+    // than a retune costs and is worth listing rather than discovering:
+    //
+    //   Every receiver, with its audio, its passband and its RDS decoder.
+    //   Their centres were offsets from a baseband whose meaning was the
+    //   closed source's, so carrying one forward would place it at a plausible
+    //   offset from the wrong centre.
+    //
+    //   Every subscription. An audio subscriber is told, through ended(); a
+    //   spectrum or passband subscriber finds out by the frames stopping,
+    //   which is the shape those two already have.
+    //
+    //   The detector, and any threshold set on it.
+    //
+    // AND THE SAMPLE INDICES START AGAIN. EngineInfo::source_epoch is what
+    // separates the new stream's index zero from the old one's. Read it on
+    // every poll rather than at connect: nothing else distinguishes two
+    // honest indices into two different streams.
+    //
+    // close_source succeeds on an engine with nothing open, so a client that
+    // closes before every open does not have to know which state it was in. It
+    // BLOCKS while the stream stops, which is a device stop plus a GPU flush,
+    // and is refused with nothing torn down if that takes longer than five
+    // seconds.
+    [[nodiscard]] virtual Status open_source(std::string_view uri) = 0;
+    [[nodiscard]] virtual Status close_source() = 0;
+
     [[nodiscard]] virtual Expected<std::uint64_t> add_vrx(const VrxParams& params) = 0;
     [[nodiscard]] virtual Status remove_vrx(std::uint64_t id) = 0;
     [[nodiscard]] virtual Status set_vrx_params(std::uint64_t id, const VrxParams& params) = 0;

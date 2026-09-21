@@ -294,6 +294,39 @@ struct EngineInfo {
     # of those a factor below 1.0 is the ring refusing samples, which
     # SourceStats::overrunEvents counts.
     sourcePacedBy @12 :Float64;
+
+    # WHICH STREAM THE SAMPLE INDICES ON THIS WIRE BELONG TO. Zero before any
+    # source has been opened, one for the first, and one higher for every
+    # openSource after it.
+    #
+    # THIS IS THE SECOND FIELD IN EngineInfo THAT MOVES WHILE A CONNECTION
+    # STAYS UP, and sourceCenter above is the first. The difference between
+    # them is the difference between a retune and a source change, and it is
+    # the whole reason this field exists.
+    #
+    # A retune leaves the stream alone: samples keep arriving, the index keeps
+    # counting, and what changed is the constant relating baseband to real
+    # radio frequency. Closing a source and opening another starts a NEW
+    # stream, numbered from zero again, because time in this engine is an
+    # exact sample index from the start of the stream and this is a different
+    # stream.
+    #
+    # So AudioChunk::startSample, SpectrumFrame::startSample,
+    # PassbandFrame::startSample and every counter derived from them are
+    # numbered against whichever stream produced them, and two streams' zeros
+    # are different instants. Without this field a client correlating by index
+    # across an openSource lines up audio from one radio against a spectrum
+    # frame from another and finds the arithmetic consistent, because it is:
+    # both are honest indices into streams nothing said were different.
+    #
+    # COMPARE IT FOR EQUALITY AND RE-DERIVE WHEN IT DIFFERS. There is no offset
+    # between two streams to adjust by: the gap between them is however long an
+    # operator spent choosing a radio.
+    #
+    # An engine between sources keeps the epoch of the last one it served,
+    # which is the truthful answer to "which stream were those indices in":
+    # that one, and it has ended. Monotonic and never reused.
+    sourceEpoch @13 :UInt64;
 }
 
 struct SourceDescriptor {
@@ -2229,4 +2262,60 @@ interface Session {
     # that already refuses cleanly: a refusal is the right answer to a
     # request, and a control that can never work should not be offered.
     sourceCanRetune @17 () -> (canRetune :Bool, lowHz :Int64, highHz :Int64);
+
+    # Opens a source on an engine that has none.
+    #
+    # THE ENTRY IN docs/rpc.md THAT THIS RETIRES read: "What is still absent
+    # is opening, starting and stopping a source. Those are the host process's
+    # business and an engine owns one source for its life, for the reason
+    # Engine::open_source gives." Opening and stopping are here. Starting is
+    # still the host's: run() is a blocking call on a thread this service does
+    # not own, and tools/engined/main.cpp loops on it.
+    #
+    # The reason that entry gave was real and has been dealt with rather than
+    # waved away. An engine owned one source for its life because
+    # Engine::open_source sizes the grid and the ring against the source's
+    # rate, and nothing could take either down. Engine::close_source can, and
+    # the note on it lists what that costs.
+    #
+    # REFUSED WHEN A SOURCE IS ALREADY OPEN, and closeSource is how a client
+    # gets from one to the other. Not a replace: a replace that failed on the
+    # new URI would have destroyed the working one already, and the client
+    # would be holding a two-valued answer to a three-valued question. Two
+    # calls means a failed open leaves an engine with no source, which is a
+    # state the client asked for and can see.
+    #
+    # The URI is the same grammar the command line takes, which is the one
+    # listSources hands back in SourceDescriptor::uri. A client builds one by
+    # taking that string and appending the settings an operator chose; it does
+    # not have to parse it, and should not, because each backend's grammar is
+    # its own.
+    #
+    # WHAT A CLIENT MUST RE-ESTABLISH AFTERWARDS, ALL OF IT. Every receiver is
+    # gone, with its audio, its passband and its RDS decoder; every
+    # subscription this session held has ended; the detector is rebuilt on the
+    # next detections call and the threshold set on it goes back to the
+    # engine's default. None of that is this call being unhelpful: a receiver's
+    # centre is an offset from a baseband whose meaning was the closed
+    # source's, so carrying one forward would put it at a plausible offset
+    # from the wrong centre, which looks exactly like a working receiver.
+    #
+    # AND THE SAMPLE INDICES START AGAIN. EngineInfo::sourceEpoch is what
+    # separates the new stream's index zero from the old one's; read its note
+    # before correlating anything across this call.
+    openSource @18 (uri :Text) -> ();
+
+    # Closes the source, leaving an engine that openSource can be called on
+    # again.
+    #
+    # A success on an engine with nothing open, rather than a refusal. A client
+    # that closes before every open should not have to know which state it was
+    # in to read the answer.
+    #
+    # IT BLOCKS UNTIL THE STREAM HAS STOPPED and that is a device stop plus a
+    # GPU flush, milliseconds on the hardware this has run on. It is refused,
+    # with nothing torn down, if the stream will not stop inside five seconds:
+    # an engine still streaming is a working engine, and a close that gave up
+    # half way would leave one that is neither.
+    closeSource @19 () -> ();
 }

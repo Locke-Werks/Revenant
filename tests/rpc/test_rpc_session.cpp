@@ -57,6 +57,7 @@ using test::kOverLargeSpectrumTransform;
 using test::kSourceRate;
 using test::kSpectrumTransform;
 using test::kUnclampedRingSeconds;
+using test::scene_uri;
 
 namespace {
 
@@ -1345,4 +1346,155 @@ TEST_CASE("a linear mode's clamp is reported without calling the demodulator bro
     INFO(reason);
     CHECK(reason.find("percent of what was asked for") != std::string::npos);
     CHECK(reason.find("wrong audio") == std::string::npos);
+}
+
+TEST_CASE("a client closes the source and opens another over the wire",
+          "[gpu][rpc][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{.spectrum_transform = kSpectrumTransform});
+
+    auto first = harness.client().info();
+    INFO(test::message_of(first));
+    REQUIRE(first.has_value());
+    const std::uint64_t epoch = first->source_epoch;
+
+    // One, not zero: the harness opened a source before the server was built.
+    // Zero on this wire means an engine that has never had one.
+    CHECK(epoch == 1);
+    CHECK(first->source_rate > 0);
+
+    // A receiver, so the close has something a client can see the absence of.
+    rpc::VrxParams params;
+    params.center = 0;
+    params.bandwidth = 12'000;
+    params.demod = rpc::Demod::Nfm;
+    params.squelch_dbfs = -200.0;
+    params.agc_attack_ms = 5.0;
+    params.agc_decay_ms = 200.0;
+    auto added = harness.client().add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    // A SECOND OPEN IS REFUSED RATHER THAN REPLACING, and the refusal is the
+    // engine's own sentence carried across the wire rather than a category
+    // composed by the server.
+    auto replace = harness.client().open_source(scene_uri(400'000));
+    REQUIRE_FALSE(replace.has_value());
+    INFO(replace.error().message);
+    CHECK(replace.error().message.find("Close it first") != std::string::npos);
+
+    const auto closed = harness.client().close_source();
+    INFO(test::message_of(closed));
+    REQUIRE(closed.has_value());
+
+    // Everything describing a source is gone and the device is not.
+    auto between = harness.client().info();
+    INFO(test::message_of(between));
+    REQUIRE(between.has_value());
+    CHECK(between->source_rate == 0);
+    CHECK(between->grid.channels == 0);
+    CHECK_FALSE(between->device.name.empty());
+
+    // THE EPOCH IS KEPT ACROSS THE GAP. An engine between sources still
+    // answers truthfully about which stream the indices a client is holding
+    // belonged to.
+    CHECK(between->source_epoch == epoch);
+
+    // The receiver went with the graph, so the list is empty and the id is
+    // refused rather than answered with a zeroed status.
+    auto ids = harness.client().vrx_ids();
+    INFO(test::message_of(ids));
+    REQUIRE(ids.has_value());
+    CHECK(ids->empty());
+
+    auto stale = harness.client().vrx_status(*added);
+    CHECK_FALSE(stale.has_value());
+
+    // Closing twice is a success. A client that closes before every open
+    // should not have to know which state it was in to read the answer.
+    CHECK(harness.client().close_source().has_value());
+
+    // A different rate, so the grid and the ring are rebuilt rather than
+    // reused. This is the case a replace could not have done safely.
+    const std::string other =
+        "synthetic:wideband?rate=1200000&emitters=1&modes=am&seed=77&samples=400000";
+    const auto reopened = harness.client().open_source(other);
+    INFO(test::message_of(reopened));
+    REQUIRE(reopened.has_value());
+
+    auto second = harness.client().info();
+    INFO(test::message_of(second));
+    REQUIRE(second.has_value());
+    CHECK(second->source_rate == 1'200'000);
+
+    // THE ONE FIELD THAT SAYS THE INDICES STARTED AGAIN. Without it a client
+    // correlating by sample index across this call lines up the new stream's
+    // frames against the old stream's audio and finds the arithmetic
+    // consistent, because both are honest indices into different streams.
+    CHECK(second->source_epoch == epoch + 1);
+
+    // And the session is usable rather than merely not broken: a receiver is
+    // placed on the new grid.
+    auto after = harness.client().add_vrx(params);
+    INFO(test::message_of(after));
+    REQUIRE(after.has_value());
+
+    // Ids do not restart, so a client holding the old one cannot address the
+    // new receiver by accident.
+    CHECK(*after > *added);
+}
+
+TEST_CASE("an empty URI is refused before the source registry sees it", "[gpu][rpc][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    REQUIRE(harness.client().close_source().has_value());
+
+    // Said by the session rather than passed down, because what
+    // source::open_source makes of an empty string reads as a parse failure
+    // and this is a caller who sent nothing. The refusal names where a client
+    // gets a URI to start from.
+    auto empty = harness.client().open_source("");
+    REQUIRE_FALSE(empty.has_value());
+    INFO(empty.error().message);
+    CHECK(empty.error().message.find("listSources") != std::string::npos);
+
+    // And nothing was opened by the attempt.
+    auto info = harness.client().info();
+    REQUIRE(info.has_value());
+    CHECK(info->source_rate == 0);
+}
+
+TEST_CASE("a failed open leaves an engine with no source rather than the old one",
+          "[gpu][rpc][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    REQUIRE(harness.client().close_source().has_value());
+
+    // A backend nothing registers. The registry's refusal crosses the wire
+    // naming what it does know, which is the answer a picker wants.
+    auto nonsense = harness.client().open_source("nosuchbackend://0?rate=2400000");
+    REQUIRE_FALSE(nonsense.has_value());
+    INFO(nonsense.error().message);
+
+    auto info = harness.client().info();
+    REQUIRE(info.has_value());
+    CHECK(info->source_rate == 0);
+
+    // THE POINT OF TWO CALLS RATHER THAN A REPLACE. A failed open leaves an
+    // engine with no source, which is the state the client asked for when it
+    // closed, and it can see that state and try another URI. A replace would
+    // have had to answer "the new one failed and the old one is gone" with one
+    // bool.
+    REQUIRE(harness.client().open_source(scene_uri(400'000)).has_value());
+    auto recovered = harness.client().info();
+    REQUIRE(recovered.has_value());
+    CHECK(recovered->source_rate > 0);
 }

@@ -128,10 +128,18 @@ runs both trees.
 
 What does not: every decoder but RDS. `docs/modes.md` is the scoped list and
 none of the rest of it is written. WFM is mono and has no de-emphasis, so
-broadcast stations decode bright and one channel only. The session cannot open
-or stop a source, and nothing saves a set of receivers across a restart. Those
-last two are in `docs/rpc.md`, each with what it would take and what the gap
-costs meanwhile.
+broadcast stations decode bright and one channel only. Nothing saves a set of
+receivers across a restart; that one is in `docs/rpc.md` with what it would take
+and what the gap costs meanwhile.
+
+This paragraph used to end "The session cannot open or stop a source, and
+nothing saves a set of receivers across a restart. Those last two are in
+`docs/rpc.md`, each with what it would take and what the gap costs meanwhile."
+The first half is no longer true. `openSource` and `closeSource` are on the
+session, an engine's source can be closed and another opened without restarting
+the process, and `EngineInfo::sourceEpoch` is what tells a client the sample
+indices started again. Starting is still the host's, because `run()` blocks for
+the length of a stream; `revenant-engine` loops on it.
 
 This paragraph used to read "every decoder. Audio and RDS have a shape on the
 wire and nothing behind them, so the client is still silent and the command

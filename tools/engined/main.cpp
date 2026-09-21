@@ -970,7 +970,56 @@ void print_engine_block(const engine::Engine& eng)
         }
     });
 
-    Status ran = eng.run();
+    // ONE SOURCE PER run(), AND THIS PROGRAM NOW SERVES MORE THAN ONE
+    //
+    // run() returns when the stream ends, and since Session.closeSource landed
+    // that has three causes rather than one. Two of them are this process
+    // finishing and one of them is an operator changing radios, so a single
+    // call would exit the program the first time somebody picked a different
+    // dongle in the client.
+    //
+    //   The source ran out, or --duration was reached, or Ctrl-C. Exit, which
+    //   is what every script and every test that drives this program expects.
+    //
+    //   A client called closeSource. Wait for it to open another.
+    //
+    //   A client called closeSource and then openSource, fast enough that both
+    //   happened before this loop looked. There is a source open and it is not
+    //   the one that just ended.
+    //
+    // THE EPOCH IS WHAT SEPARATES THE LAST TWO FROM THE FIRST, and has_source
+    // on its own cannot. Reading only has_source would see the third case as a
+    // source that is open and running, conclude the stream ended by itself and
+    // exit, and changing radios is precisely the sequence that produces it.
+    // EngineInfo::source_epoch counts opens, so a number that moved means a
+    // client intervened however quickly it did so.
+    //
+    // A refused run() is not special-cased, because it does not have to be: if
+    // the source went between the has_source() below and the call, the engine
+    // refuses with "before a source is open" and this loop finds has_source
+    // false and goes back to waiting, which is the answer either way.
+    constexpr auto kSourceWaitPoll = std::chrono::milliseconds(20);
+    Status ran;
+    for (;;) {
+        if (g_stop_requested.load(std::memory_order_acquire)) {
+            break;
+        }
+        if (!eng.has_source()) {
+            std::this_thread::sleep_for(kSourceWaitPoll);
+            continue;
+        }
+
+        const std::uint64_t epoch = eng.info().source_epoch;
+        ran = eng.run();
+
+        if (g_stop_requested.load(std::memory_order_acquire)) {
+            break;
+        }
+        if (!eng.has_source() || eng.info().source_epoch != epoch) {
+            continue;
+        }
+        break;
+    }
 
     finished.store(true, std::memory_order_release);
     monitor.join();

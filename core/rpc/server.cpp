@@ -970,6 +970,41 @@ public:
     // loop must stay free while it runs.
     [[nodiscard]] kj::Promise<SourceListing> list_sources();
 
+    // Event loop thread. Opens and closes the engine's source, and takes this
+    // server's own source-derived state down with it.
+    //
+    // WHY THE SERVER HAS TO DO ANYTHING AT ALL, given the engine tears its own
+    // graph down. Everything this class holds that describes a stream outlives
+    // that graph, and each piece fails differently if it is left:
+    //
+    //   sink_installed_ is sticky, so the next subscribeSpectrum would find it
+    //   set, skip ensure_sink, and hand back a subscription nothing feeds.
+    //
+    //   The detector is sized against the old geometry, in bins. Fed the next
+    //   source's frames it would either refuse them or, at a matching bin
+    //   count and a different bin width, report tracks at frequencies that do
+    //   not exist.
+    //
+    //   Audio routes, passband nodes and RDS decoders name receivers that went
+    //   with the graph, and each holds an engine sink token for one. Left
+    //   alone they are dropped one at a time by whoever happens to ask about
+    //   that id again, which after a close is nobody.
+    //
+    //   The pending frame copies are the old stream's last frames, numbered in
+    //   its sample indices, queued to be delivered after the close.
+    //
+    // ORDER: detach from the engine while the graph still exists, then close.
+    // The reverse leaves the engine destroying sinks this server believes it
+    // still owns.
+    //
+    // It runs on the loop thread, which is what makes the loop-thread-only
+    // maps readable here at all. stop() does the same walk and has to join the
+    // loop first; this is called from a Cap'n Proto method and is already
+    // there.
+    void release_source_state(kj::StringPtr reason);
+    [[nodiscard]] Status open_source(std::string_view uri);
+    [[nodiscard]] Status close_source();
+
     // Event loop thread, all three. See the detector notes at the top of the
     // file for why the object is built on demand and locked as a whole.
     [[nodiscard]] Status ensure_detector();
@@ -1736,6 +1771,38 @@ public:
         results.setCanRetune(tuning.can_retune);
         results.setLowHz(tuning.low);
         results.setHighHz(tuning.high);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> openSource(OpenSourceContext context) override {
+        const capnp::Text::Reader uri = context.getParams().getUri();
+
+        // Before the engine, because the engine's own refusal for an empty URI
+        // is whatever source::open_source makes of an empty string, and that
+        // reads as a parse failure rather than as a caller who sent nothing.
+        if (uri.size() == 0) {
+            return to_exception(
+                Error{"openSource was given an empty URI. listSources hands back the string to "
+                      "start from in SourceDescriptor::uri; append the settings an operator "
+                      "chose to it rather than composing one from scratch"});
+        }
+
+        if (auto opened = owner_.open_source(std::string_view(uri.begin(), uri.size()));
+            !opened) {
+            return to_exception(opened.error());
+        }
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> closeSource(CloseSourceContext context) override {
+        // The context is unused and named anyway, because the generated
+        // signature requires the parameter and a nameless one would read as
+        // an oversight rather than as a call with no results.
+        static_cast<void>(context);
+
+        if (auto closed = owner_.close_source(); !closed) {
+            return to_exception(closed.error());
+        }
         return kj::READY_NOW;
     }
 
@@ -3473,6 +3540,150 @@ void ServerImpl::end_subscription(const std::shared_ptr<Subscription>& subscript
     std::erase(subscriptions_, subscription);
     refresh_subscriber_summary();
 }
+
+void ServerImpl::release_source_state(kj::StringPtr reason) {
+    // Audio first, because it is the only one of the four that tells the
+    // client. A subscriber holding an AudioSubscription hears the stream end
+    // with this reason in it; a spectrum or passband subscriber finds out by
+    // the frames stopping, which is the shape those two already have and is
+    // why neither grew an ended() call for this.
+    //
+    // A copy of the keys, because end_audio_for_vrx erases from audio_routes_
+    // through end_audio and walking the map while it does is a dangling
+    // iterator. The same for the two maps below it.
+    std::vector<std::uint32_t> audio_ids;
+    audio_ids.reserve(audio_routes_.size());
+    for (const auto& entry : audio_routes_) {
+        audio_ids.push_back(entry.first);
+    }
+    for (const std::uint32_t id : audio_ids) {
+        end_audio_for_vrx(engine::VrxId{id}, reason);
+    }
+
+    std::vector<std::uint32_t> rds_ids;
+    rds_ids.reserve(rds_routes_.size());
+    for (const auto& entry : rds_routes_) {
+        rds_ids.push_back(entry.first);
+    }
+    for (const std::uint32_t id : rds_ids) {
+        end_rds_for_vrx(engine::VrxId{id});
+    }
+
+    // Every passband node, through end_passband so the per-receiver refcount
+    // and the engine detach both happen exactly as they do for a cancel. A
+    // copy again: end_passband erases from passband_nodes_.
+    const std::vector<std::shared_ptr<PassbandNode>> nodes = passband_nodes_;
+    for (const auto& node : nodes) {
+        end_passband(node);
+    }
+
+    // Belt and braces after that walk. end_passband only detaches when the
+    // count it decrements reaches zero, and a receiver whose nodes were all
+    // already cancelled leaves a count behind with no node to drive it to
+    // zero. Nothing should be left here; anything that is would be a sink on
+    // a graph about to be destroyed.
+    for (const auto& entry : passband_sinks_) {
+        detach_passband_sink(engine::VrxId{entry.first});
+    }
+    passband_sinks_.clear();
+
+    const std::vector<std::shared_ptr<Subscription>> spectrum = subscriptions_;
+    for (const auto& subscription : spectrum) {
+        end_subscription(subscription);
+    }
+    subscriptions_.clear();
+    refresh_subscriber_summary();
+
+    {
+        std::scoped_lock held(sink_lock_);
+        if (sink_installed_) {
+            static_cast<void>(engine_.set_spectrum_sink({}));
+            sink_installed_ = false;
+        }
+    }
+
+    // The detector, and the front end monitor that reads its arrays. Under
+    // detect_lock_ alone rather than after a join, unlike stop(): the two
+    // threads that can be inside the detector are this one and the engine's
+    // completion thread, this one is here, and the completion thread takes
+    // this lock to feed it.
+    //
+    // detector_fault_ is cleared as well. A fault is a statement about the
+    // stream that produced it, so carrying one across a close would refuse
+    // every detections call on the next source for a reason that happened to
+    // a different radio.
+    {
+        std::scoped_lock held(detect_lock_);
+        detecting_.store(false, std::memory_order_relaxed);
+        detector_.reset();
+        detector_fault_.clear();
+        front_end_.reset();
+        have_front_end_decision_ = false;
+        last_front_end_decision_ = 0;
+    }
+
+    // The queued copies, which are the old stream's frames numbered in its
+    // sample indices. The spare pools are left: they are memory this server
+    // reuses and carry no stream in them.
+    {
+        std::scoped_lock held(frame_lock_);
+        if (pending_ != nullptr) {
+            spare_.push_back(std::move(pending_));
+            pending_.reset();
+        }
+        passband_pending_.clear();
+    }
+}
+
+Status ServerImpl::open_source(std::string_view uri) {
+    if (auto opened = engine_.open_source(uri); !opened) {
+        return opened;
+    }
+
+    // Put back at once rather than left to the next subscribeSpectrum, for
+    // the reason Server::create installs it in the first place: a recorder
+    // with no subscribers still wants the detector and the front-end monitor
+    // to have frames, and both are fed from this sink.
+    //
+    // DISCARDED, ON EXACTLY create's REASONING AND NOT OUT OF HASTE. The
+    // source is open. Returning this refusal would answer a call that
+    // succeeded with a failure, and a client reading that would undo an open
+    // that worked or, worse, open again and be told it already has one. An
+    // engine built with spectrum_transform at zero refuses here for the life
+    // of the server and serves everything else perfectly well; subscribeSpectrum
+    // makes the same call and reports the engine's own sentence to whoever
+    // asks for a spectrum.
+    static_cast<void>(ensure_sink());
+    return {};
+}
+
+Status ServerImpl::close_source() {
+    release_source_state("the engine's source was closed, so this stream has ended");
+    return engine_.close_source();
+}
+
+// BOTH OF THOSE BLOCK THE EVENT LOOP, AND THAT IS A CHOICE RATHER THAN AN
+// OVERSIGHT.
+//
+// The note at the top of this file says listSources is the only engine-facing
+// call that opens hardware and that the loop must stay free while it runs. That
+// rule is about listSources specifically and the reason is in its own shape: it
+// opens EVERY device, including indices with nothing behind them, so it pays a
+// libusb timeout per absent dongle and can take seconds on a machine with none.
+//
+// These two open or close ONE named device, which is what setSourceCenter
+// already does on this loop: rtlsdr_set_center_freq is a USB control transfer
+// and nobody moved it off. rtlsdr_open plus a claim and a reset, and on the way
+// out rtlsdr_cancel_async plus the worker joining and the scheduler retiring
+// what is already submitted, are tens to low hundreds of milliseconds on the
+// hardware this has run on. On the loop that is a hitch in the other polls, not
+// a freeze, and Engine::close_source's five second ceiling bounds the worst
+// case rather than leaving it open.
+//
+// What would change this: a backend whose open is slow enough to matter, or a
+// second client whose polls must not hitch while the first changes radios.
+// list_sources is the worked pattern for moving it, and it costs a worker
+// thread, a queue and a cross-thread fulfiller.
 
 void ServerImpl::drop_cancelled() {
     std::erase_if(subscriptions_, [](const std::shared_ptr<Subscription>& subscription) {

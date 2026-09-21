@@ -122,6 +122,24 @@ struct EngineInfo {
     // The engine's --pace, as a multiple of realtime. Zero is unthrottled,
     // and means nothing at all on a live radio, which runs on its own clock.
     double source_paced_by = 0.0;
+
+    // Which stream the sample indices on this connection belong to. Zero
+    // before any source has been opened, one for the first, one higher for
+    // every openSource after it.
+    //
+    // THE SECOND FIELD HERE THAT MOVES WHILE A CONNECTION STAYS UP, and
+    // source_center is the first. That is the difference between a retune and
+    // a source change: a retune keeps the stream and moves the constant
+    // relating baseband to real frequency, and a source change starts a new
+    // stream numbered from zero.
+    //
+    // Compare it for equality against the epoch a correlation was made at and
+    // re-derive when it differs. There is no offset between two streams to
+    // adjust by. core/rpc/revenant.capnp's note on sourceEpoch has the whole
+    // argument, including what a client that ignores this gets wrong: audio
+    // from one radio lined up against a spectrum frame from another, with the
+    // arithmetic consistent throughout.
+    std::uint64_t source_epoch = 0;
 };
 
 // Whether the front end can be pointed somewhere else, and where.
