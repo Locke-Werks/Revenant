@@ -19,17 +19,24 @@
 // all six: revenant_reference_tests, revenant_decode_tests,
 // revenant_detect_tests, revenant_engine_tests, revenant_rpc_tests and
 // revenant_tool_tests. Each one lists this file by path; there is no library
-// to link and nothing that adds it automatically, so a seventh target gets it
-// by somebody remembering.
+// to link and nothing that adds it automatically.
 //
-// WHAT THIS PARAGRAPH USED TO SAY: "Linked into every test executable."
-// revenant_ui_tests is a test executable and does not have it. ui/ is a
-// separate CMake project and adding it there means one more source path in
-// ui/CMakeLists.txt, which nothing has done, so the claim has been false
-// since that project was added. It matters least there of the seven: that
-// target opens no Vulkan context and holds no abort() path of its own. It is
-// recorded anyway, because a blanket claim nobody has checked is how the next
-// target gets added without it.
+// revenant_ui_tests, the seventh, does not have it and is not going to get it
+// from here. ui/ is a separate CMake project with its own CMakeLists.txt, and
+// of the seven it is the one where this matters least: that target opens no
+// Vulkan context and holds no abort() path of its own.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: first "Linked into every test executable",
+// which revenant_ui_tests made false the day ui/ was added; then, after that
+// was corrected, "a seventh target gets it by somebody remembering", which
+// left the correction as a note rather than a gate. Both are closed now. The
+// "Every test target suppresses modal dialogs" step in .github/workflows/ci.yml
+// reads the add_executable source list of every *_tests target under tests/
+// AND under ui/, and fails the build for one that does not list this file.
+// revenant_ui_tests is named in that step's exempt list with the reason above,
+// so the one known gap is a decision written down in the place that checks
+// rather than a claim nobody had checked. An eighth target added without the
+// file arrives red.
 //
 // Costs nothing on a non-Windows build.
 

@@ -61,7 +61,7 @@ merging. A conformance result nobody can trust is worth less than one that is la
 
 | Job | Runner | What it does |
 | --- | --- | --- |
-| `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, and checks the version parses. Cheap, and it answers even when the workstation is off |
+| `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, checks the version parses, and checks every test target suppresses modal dialogs. Cheap, and it answers even when the workstation is off |
 | `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite. A matrix over the two GPUs, one leg per device |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
 | `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
@@ -71,6 +71,27 @@ The matrix legs select their device with `REVENANT_GPU_INDEX`, which is the same
 mechanism a developer uses locally. There is one runner, so the legs execute in sequence
 rather than in parallel. That is fine at this scale and is the reason the long sweeps are
 nightly rather than per-commit.
+
+### The modal-dialog guard, and the one target exempt from it
+
+`tests/support/no_modal_dialogs.cpp` stops a test process opening a window it then sits
+behind. On a desktop that is a popup somebody dismisses; on the runner it is a job that
+hangs to its timeout and reports nothing, because the message the process wanted to print
+is in a dialog no one will ever see.
+
+Nothing links it automatically. Each target lists the path in its own `add_executable`,
+so until today a new target got the file by somebody remembering. The `guards` step reads
+the source list of every `*_tests` target under `tests/` **and** under `ui/` and fails on
+one that does not list it. It scans `ui/` deliberately: the only target that has ever been
+without the file is the one in the other CMake project, which is exactly where a guard
+rooted in `tests/` would not look.
+
+`revenant_ui_tests` is exempt and named in the step. It opens no Vulkan context and holds
+no `abort()` path of its own, and adding the source belongs to `ui/CMakeLists.txt`. The
+point of naming it is that the gap is a decision written in the place that checks, rather
+than a claim nobody had checked.
+
+The step fails when it finds zero targets, rather than passing having looked at nothing.
 
 ### Both test steps pass `--no-tests=error`
 
