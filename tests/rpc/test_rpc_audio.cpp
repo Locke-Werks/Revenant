@@ -56,6 +56,8 @@
 //                                         enforced, not the milliseconds
 //   a fan-out outliving its receiver      a later attach is refused rather
 //                                         than joining a dead one
+//   a receiver that THREW on a chunk      ended() carries the call's own
+//                                         failure, and nothing else stops
 //
 // THE SOURCE IS PACED, as it is in test_rpc_spectrum.cpp and nowhere else in
 // this suite. An unthrottled synthetic source retires in tens of
@@ -74,6 +76,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -270,6 +273,24 @@ private:
 
 [[nodiscard]] rpc::Client::AudioEndedCallback ending(std::shared_ptr<AudioLog> log) {
     return [log](const std::string& reason) { log->end(reason); };
+}
+
+// A receiver that THROWS, which is not the same failure as one that is slow
+// or one that went away, and the server has to tell the three apart.
+//
+// core/rpc/client.cpp calls this from inside AudioReceiverImpl::chunk and
+// returns only once it comes back, so an exception out of here leaves the
+// chunk() call as a remote failure on the server's send. The connection is
+// fine, the client is still holding the subscription, and what failed is
+// this one call.
+[[nodiscard]] rpc::Client::AudioCallback throwing_after(std::shared_ptr<AudioLog> log,
+                                                        std::size_t good) {
+    return [log, good](const rpc::AudioChunk& chunk) {
+        log->record(chunk);
+        if (log->size() > good) {
+            throw std::runtime_error("the test receiver refused this chunk");
+        }
+    };
 }
 
 [[nodiscard]] std::size_t wait_for_chunks(const AudioLog& log, std::size_t wanted,
@@ -948,6 +969,77 @@ TEST_CASE("the two-chunk floor overrides a depth shorter than two chunks",
     CHECK(stats->drop_events == 0);
 
     harness.client().unsubscribe_audio(*vrx);
+}
+
+TEST_CASE("a subscription killed by a receiver that threw is told it was killed",
+          "[gpu][rpc][audio]") {
+    // NOT A SHAPE OF A SUBSCRIPTION, like the four listed at the top: it is
+    // a property of the server's own send path.
+    //
+    // A chunk call that comes back failed ends the subscription, and until
+    // 2026-09-20 it ended it in silence. The comment where it happened said
+    // no ended() was sent because "the capability it would travel on is the
+    // one that failed", which is true of a dropped connection and false of
+    // a receiver that threw: the client is still there, the capability
+    // still works, and what it got instead was a stream that stopped
+    // looking exactly like a quiet channel. AudioSubscription::stats then
+    // refused, blaming the engine for a failure the engine had no part in.
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    auto vrx = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    // The control arm, as in the removal case below: a second subscription
+    // on this client that nothing touches. Without it these assertions are
+    // satisfied by a server that tore down every audio subscription it had
+    // over one bad call.
+    auto keeper = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(keeper));
+    REQUIRE(keeper.has_value());
+
+    auto keeper_log = std::make_shared<AudioLog>();
+    auto kept =
+        harness.client().subscribe_audio(*keeper, 0, into(keeper_log), ending(keeper_log));
+    INFO(test::message_of(kept));
+    REQUIRE(kept.has_value());
+
+    // Five good chunks first, so the failure lands on a stream that was
+    // working rather than on a subscription that never started.
+    constexpr std::size_t kGoodChunks = 5;
+    auto log = std::make_shared<AudioLog>();
+    auto opened = harness.client().subscribe_audio(*vrx, 0, throwing_after(log, kGoodChunks),
+                                                   ending(log));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    REQUIRE(wait_for_chunks(*log, kGoodChunks + 1, 4000) >= kGoodChunks + 1);
+
+    // THE WHOLE OF THE FINDING. Silence here is what a quiet channel sounds
+    // like, and the client cannot otherwise tell that its subscription is
+    // over.
+    REQUIRE(wait_for_ended(*log, 4000));
+
+    // And the reason is the receiver's own failure rather than a sentence
+    // about the engine. The text the callback threw crosses back, because
+    // the server has nothing better to say about a call it did not make.
+    INFO(log->reason());
+    CHECK(log->reason().find("refused this chunk") != std::string::npos);
+
+    // Really finished rather than merely quiet.
+    const std::size_t at_end = log->size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(log->size() == at_end);
+
+    // THE CONTROL. The other subscription on the same client and the same
+    // connection never noticed, so one failed call ended one subscription.
+    const std::size_t keeper_at_end = keeper_log->size();
+    REQUIRE(wait_for_chunks(*keeper_log, keeper_at_end + 10, 4000) >= keeper_at_end + 10);
+    CHECK_FALSE(keeper_log->ended());
+
+    harness.client().unsubscribe_audio(*keeper);
 }
 
 // --- shape 4 ----------------------------------------------------------------

@@ -299,6 +299,7 @@
 #include <kj/async.h>
 #include <kj/exception.h>
 #include <kj/memory.h>
+#include <kj/string.h>
 
 #include "core/detect/detector.h"
 #include "core/rpc/convert.h"
@@ -911,6 +912,18 @@ public:
     // substring cannot satisfy it by accident.
     void end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason);
 
+    // Event loop thread. One ended() on one subscription, at most once for
+    // the life of that subscription, best effort and never retried. Split
+    // out because two paths end a stream the client did not ask to end and
+    // both owe it the same call: a receiver removed, and a chunk call the
+    // receiver itself failed.
+    //
+    // It does NOT check node->cancelled. The delivery-failure path sets
+    // that flag before it gets here, because the node is finished either
+    // way; a caller that must not speak to a client-cancelled subscription
+    // checks the flag itself, which is what end_audio_for_vrx does.
+    void send_audio_ended(const std::shared_ptr<AudioNode>& node, kj::StringPtr reason);
+
     // Event loop thread. Queues a listing for the worker and hands back a
     // promise this loop resolves when the worker is done. See the note at the
     // top: this is the only engine-facing call that opens hardware, and the
@@ -1173,10 +1186,21 @@ public:
         // ENDED IS NOT CANCELLED AND THE NULL CHECK ABOVE DOES NOT COVER IT
         //
         // end() is what clears node_, and it runs for a cancel and for the
-        // destructor. A subscription the SERVER ended, which is the receiver
-        // being removed out from under it, leaves node_ set and the node
-        // frozen at its last counts. Answering from it reports a healthy
-        // subscription on a receiver that no longer exists.
+        // destructor. A subscription the SERVER ended leaves node_ set and
+        // the node frozen at its last counts. Answering from it reports a
+        // healthy subscription on a stream that stopped.
+        //
+        // THERE ARE TWO WAYS THE SERVER ENDS ONE, AND THIS USED TO NAME
+        // ONE OF THEM. The paragraph read "which is the receiver being
+        // removed out from under it" and the refusal below said "ended by
+        // the engine ... AudioReceiver::ended carried the reason". The
+        // other way is a chunk call this receiver failed, which pump_audio
+        // cancels the node for, and until 2026-09-20 that path sent no
+        // ended() at all: the client was told nothing, and then told by
+        // this refusal that the engine had done it. The engine had no part
+        // in it. pump_audio sends ended() with the call's own failure now,
+        // and the wording here no longer attributes anything it cannot
+        // know.
         //
         // core/rpc/client.h's client drops its capability the moment ended()
         // arrives, so it never reaches this line. The guard is here because
@@ -1184,9 +1208,10 @@ public:
         // across an ended.
         if (node_->cancelled) {
             return to_exception(
-                Error{"this audio subscription was ended by the engine, so its counters are "
-                      "frozen at whatever the stream stopped on. AudioReceiver::ended carried "
-                      "the reason"});
+                Error{"this audio subscription was ended by the server rather than cancelled "
+                      "by this client, so its counters are frozen at whatever the stream "
+                      "stopped on. AudioReceiver::ended carried the reason, which is either "
+                      "the receiver being removed or a chunk call this receiver failed"});
         }
 
         auto out = context.getResults().initStats();
@@ -3062,14 +3087,35 @@ void ServerImpl::pump_audio(const std::shared_ptr<AudioNode>& node) {
                 pump_audio(live);
             }
         },
-        [weak](kj::Exception&&) {
-            // A receiver that threw or went away is not coming back. Ended
-            // here rather than retried, and with no ended() call: the
-            // capability it would travel on is the one that failed.
-            if (auto live = weak.lock()) {
-                live->in_flight = false;
-                live->cancelled = true;
+        [this, weak](kj::Exception&& failure) {
+            // A receiver that threw or went away is not coming back, so the
+            // subscription ends here rather than being retried.
+            //
+            // WHAT THIS COMMENT USED TO SAY: "and with no ended() call: the
+            // capability it would travel on is the one that failed." That
+            // is true of one of the two failures and false of the other,
+            // and the difference is the whole of whether the client ever
+            // learns. DISCONNECTED is the connection going, and there is
+            // nothing left to send on. Anything else is this RECEIVER
+            // throwing on this one call, which says nothing about the
+            // connection: the client is still there, still holding a
+            // subscription that has silently stopped delivering, and
+            // AudioSubscription::stats then refuses. The silence was the
+            // heavier half of that, so the reason travels back on the same
+            // capability in the case where it can arrive.
+            auto live = weak.lock();
+            if (live == nullptr) {
+                return;
             }
+            live->in_flight = false;
+            live->cancelled = true;
+            if (failure.getType() == kj::Exception::Type::DISCONNECTED) {
+                return;
+            }
+            send_audio_ended(live,
+                             kj::str("this receiver failed the chunk call, so the "
+                                     "subscription was ended: ",
+                                     failure.getDescription()));
         }));
 
     // Recycled only now, after the samples are in the outgoing message, so
@@ -3171,6 +3217,22 @@ void ServerImpl::end_audio(const std::shared_ptr<AudioNode>& node) {
     route->owner = nullptr;
 }
 
+void ServerImpl::send_audio_ended(const std::shared_ptr<AudioNode>& node,
+                                  kj::StringPtr reason) {
+    // Best effort, which the schema says rather than promises. A server
+    // whose loop has already stopped has no sends_ to put this on, and a
+    // send that fails is dropped: the capability this would travel on is
+    // the one the client would have to be holding for the answer to reach
+    // it anyway.
+    if (node->ended_sent || sends_ == nullptr) {
+        return;
+    }
+    node->ended_sent = true;
+    auto request = node->receiver.endedRequest();
+    request.setReason(reason);
+    sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+}
+
 void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
     auto found = audio_routes_.find(vrx.value);
     if (found == audio_routes_.end()) {
@@ -3184,15 +3246,12 @@ void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
     }
 
     for (const auto& node : nodes) {
-        // Best effort, which the schema says rather than promises. At most
-        // once per subscription, and never for a cancel the client asked
-        // for: this path is only reached when something else ended the
-        // stream.
-        if (!node->cancelled && !node->ended_sent && sends_ != nullptr) {
-            node->ended_sent = true;
-            auto request = node->receiver.endedRequest();
-            request.setReason(reason);
-            sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+        // Never for a cancel the client asked for, which is the check
+        // send_audio_ended deliberately does not make: this path reaches
+        // nodes the client is still using, where the delivery-failure path
+        // reaches one it has already lost.
+        if (!node->cancelled) {
+            send_audio_ended(node, reason);
         }
         end_audio(node);
     }
