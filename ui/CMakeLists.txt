@@ -323,6 +323,10 @@ endif()
 # threshold that fires on measurement noise trains an operator to ignore
 # the line, and one that never fires is the state it replaces.
 #
+# It covers classify_fit and format_width, which are the arithmetic behind
+# "16 kHz receiver on a 145 kHz detection" and behind the decision not to
+# say anything about the far more common case where the filter fits.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -363,6 +367,7 @@ if(REVENANT_UI_TESTS)
             tests/test_audio_ring.cpp
             tests/test_history_resize.cpp
             tests/test_frequency_entry.cpp
+            tests/test_receiver_match.cpp
             tests/test_source_pacing.cpp
         )
 

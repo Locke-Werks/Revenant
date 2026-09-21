@@ -116,7 +116,15 @@ ApplicationWindow {
         //
         // The centre caveat below still stands and is why the mode is left
         // as it is rather than guessed from the bandwidth.
-        engineLink.tuneReceiver(centerHz, "")
+        //
+        // The measured width IS handed over, on a separate entry point,
+        // and it is not used as a passband for the reason just given. It
+        // is used to say whether the filter the engine built fits the
+        // signal that was clicked on: a 16 kHz NFM receiver on a 145 kHz
+        // broadcast block is the mismatch that cost an evening, and this
+        // is the only moment in the whole window where both numbers are in
+        // one place.
+        engineLink.tuneReceiverToDetection(centerHz, "", bandwidthHz)
     }
 
     // THE SELECTION AND THE READOUT GO WITH THE CONNECTION.
@@ -1057,6 +1065,33 @@ ApplicationWindow {
                     font.pixelSize: 11
                     elide: Text.ElideRight
                 }
+            }
+
+            // WHY THIS RECEIVER IS WRONG FOR THIS SIGNAL, when it is.
+            //
+            // Two mismatches bit on 2026-09-20 and neither said anything.
+            // A click on a 145 kHz detection produced a 16 kHz NFM
+            // receiver, and every number on screen was individually
+            // correct: the detection row said 145 kHz, the readout above
+            // said 16 kHz, and nothing put them beside each other. A
+            // second receiver asked for 200 kHz and got 71, which the
+            // overlay answered with a dimmer shade of the same colour.
+            //
+            // The arithmetic and the wording are in
+            // models/receiver_match.h with their own cases in ui/tests.
+            // This row decides the colour, and it is inkWarn rather than
+            // inkBad: the receiver works, it is pointed at the wrong
+            // shape of thing, and that is something the operator fixes
+            // with the mode buttons or the handles above.
+            Label {
+                Layout.fillWidth: true
+                visible: engineLink.receiverFitText.length > 0
+                text: engineLink.receiverFitText
+                color: window.inkWarn
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
             }
 
             Label {

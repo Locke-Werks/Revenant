@@ -818,6 +818,25 @@ class EngineLink : public QObject {
     // engine and must not read as one.
     Q_PROPERTY(QString receiverFault READ receiverFault NOTIFY receiverFaultChanged)
 
+    // WHY THE RECEIVER IS WRONG FOR THE SIGNAL, in one line, or empty.
+    //
+    // Two mismatches bit on 2026-09-20 and neither said anything. A click
+    // on a 145 kHz broadcast detection produced a 16 kHz NFM receiver, and
+    // every number on screen was individually correct: the detection said
+    // 145 kHz, the readout said 16 kHz, and nothing put the two together.
+    // A second receiver asked for 200 kHz and got 71, which the overlay
+    // answered with a dimmer shade of the same colour.
+    //
+    // Both are subtraction over numbers this object already holds.
+    // models/receiver_match.h does the arithmetic and writes the sentence,
+    // with its own cases in ui/tests, and this carries the result.
+    //
+    // The detection comparison is only made when the receiver was placed
+    // BY a detection. A receiver tuned by hand or from the frequency box
+    // has no measured signal behind it, and inventing one to compare
+    // against would be worse than saying nothing.
+    Q_PROPERTY(QString receiverFitText READ receiverFitText NOTIFY receiverFitChanged)
+
     // A width change is drawn and has not been sent, because sending it
     // mid-gesture would break the audio once per pixel. It goes out on
     // release. The readout says so, because a filter that is drawn where
@@ -1093,6 +1112,7 @@ public:
     [[nodiscard]] bool passbandActive() const { return passband_active_; }
     [[nodiscard]] QString receiverFault() const { return receiver_fault_; }
     [[nodiscard]] bool receiverPending() const { return width_uncommitted_; }
+    [[nodiscard]] QString receiverFitText() const { return receiver_fit_text_; }
 
     // Puts the detail pane on a receiver at this absolute frequency in this
     // mode, adding one if there is none and retuning the one there is.
@@ -1107,6 +1127,25 @@ public:
     // nfm, wfm, usb, lsb, dsb, cw. An empty string keeps the mode the pane
     // already has.
     Q_INVOKABLE void tuneReceiver(double absolute_hz, const QString& mode);
+
+    // The same, from a click on a detection, carrying the bandwidth the
+    // detector measured.
+    //
+    // A SEPARATE ENTRY POINT AND NOT A DEFAULTED ARGUMENT, because the
+    // absence of a measurement is a fact worth stating rather than a zero
+    // that fell through. tuneReceiver CLEARS the remembered bandwidth: a
+    // receiver placed by hand has no signal measurement behind it, and one
+    // left over from the previous click would be compared against a band
+    // it was never measured in.
+    //
+    // The passband is still left unstated, so the engine answers with the
+    // mode's own default. The measured width is NOT handed over as a
+    // passband, for the reason ui/qml/Main.qml gives at the call site: on
+    // USB the occupied band is entirely above a suppressed carrier, so
+    // using it as a width parks the filter in the wrong place. It is used
+    // only to say whether what the engine built fits what was found.
+    Q_INVOKABLE void tuneReceiverToDetection(double absolute_hz, const QString& mode,
+                                             double detection_bandwidth_hz);
 
     // Changes the mode in place as far as the operator is concerned, which
     // is a remove and an add underneath: the demodulator IS the stage and
@@ -1310,6 +1349,11 @@ signals:
     void passbandChanged();
 
     void receiverFaultChanged();
+
+    // receiverFitText changed. Its own signal because it is derived from
+    // BOTH the request and the grant, so neither receiverChanged nor
+    // receiverStatusChanged covers it, and a property may name only one.
+    void receiverFitChanged();
 
     // The source's tuning surface changed: the range came back on a new
     // connection, a retune was granted, or one was refused. Separate from
@@ -1576,6 +1620,30 @@ private:
 
     // Qt thread. The request the pane holds, fitted to the engine's limits.
     [[nodiscard]] std::pair<int, int> fit_edges(int low, int high) const;
+
+    // Qt thread. Recomputes receiverFitText from the request, the grant
+    // and the detection that placed the receiver, and emits only when it
+    // changed.
+    //
+    // CALLED FROM BOTH SIDES OF THE ASYNCHRONY, which is the whole reason
+    // it is a function and not a getter. The request moves on the Qt
+    // thread and the grant arrives from the supervisor, and a line derived
+    // from both has to be rebuilt on either. post_receiver_request covers
+    // every write, because every Q_INVOKABLE ends there, and
+    // adopt_receiver_status covers every answer.
+    void update_receiver_fit();
+
+    // The body both Q_INVOKABLE tune entry points share. Private because
+    // the bandwidth argument is not a thing QML should be able to make up:
+    // it is a measurement or it is absent.
+    void tune_receiver(double absolute_hz, const QString& mode,
+                       double detection_bandwidth_hz);
+
+    // The bandwidth of the detection this receiver was placed by, or zero
+    // for one placed by hand. Zero suppresses the signal comparison
+    // entirely; see tuneReceiverToDetection.
+    double tuned_detection_bandwidth_ = 0.0;
+    QString receiver_fit_text_;
 
     // Qt thread only. The pane's own authoritative copy of the request,
     // which is what the overlay draws and what the supervisor sends. Its

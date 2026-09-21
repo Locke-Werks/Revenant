@@ -40,6 +40,8 @@
 #include <QMetaObject>
 #include <QString>
 
+#include "models/receiver_match.h"
+
 namespace revenant::ui {
 namespace {
 
@@ -161,7 +163,50 @@ std::pair<int, int> EngineLink::fit_edges(int low, int high) const
     return {low, high};
 }
 
+void EngineLink::update_receiver_fit()
+{
+    ReceiverFit fit;
+    fit.asked_low = wanted_.passband_low;
+    fit.asked_high = wanted_.passband_high;
+    fit.granted_low = receiver_status_.placement.granted_low;
+    fit.granted_high = receiver_status_.placement.granted_high;
+    fit.clamped = receiver_status_.placement.bandwidth_clamped;
+    fit.detection_bandwidth_hz = tuned_detection_bandwidth_;
+
+    // Nothing at all when the pane holds no receiver. The status struct
+    // keeps its last values across a clear on some paths, and a sentence
+    // about a receiver that is gone reads as a sentence about the next
+    // one.
+    QString text;
+    if (receiver_id_ != 0) {
+        text = QString::fromStdString(fit_sentence(fit));
+    }
+
+    if (text == receiver_fit_text_) {
+        return;
+    }
+    receiver_fit_text_ = text;
+    emit receiverFitChanged();
+}
+
+void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode,
+                                         double detection_bandwidth_hz)
+{
+    tune_receiver(absolute_hz, mode,
+                  detection_bandwidth_hz > 0.0 ? detection_bandwidth_hz : 0.0);
+}
+
+// A receiver placed by hand has no measured signal behind it, so the
+// bandwidth goes to zero and the comparison is suppressed. Leaving the
+// previous click's measurement in place would compare the new receiver
+// against a band it was never measured in.
 void EngineLink::tuneReceiver(double absolute_hz, const QString& mode)
+{
+    tune_receiver(absolute_hz, mode, 0.0);
+}
+
+void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
+                               double detection_bandwidth_hz)
 {
     bool moved = false;
 
@@ -213,6 +258,12 @@ void EngineLink::tuneReceiver(double absolute_hz, const QString& mode)
     // A tune is a new receiver whenever the pane is on none, and a retune
     // of the one it has otherwise. Moving the dial is a push constant and a
     // new tap table, which the engine does in place.
+    //
+    // Recorded before the request goes out, so post_receiver_request's own
+    // call to update_receiver_fit sees the measurement this tune came with
+    // rather than the previous click's.
+    tuned_detection_bandwidth_ = detection_bandwidth_hz;
+
     post_receiver_request(receiver_id_ == 0);
 }
 
@@ -377,6 +428,10 @@ void EngineLink::removeReceiver()
     receiver_edge_limit_ = 0;
     edges_touched_ = false;
 
+    // The measurement belonged to the receiver that has just gone, and a
+    // receiver placed later by hand has none.
+    tuned_detection_bandwidth_ = 0.0;
+
     {
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
         has_receiver_request_ = false;
@@ -392,6 +447,7 @@ void EngineLink::removeReceiver()
     emit receiverChanged();
     emit receiverStatusChanged();
     emit passbandChanged();
+    update_receiver_fit();
 }
 
 void EngineLink::post_receiver_request(bool recreate)
@@ -428,6 +484,10 @@ void EngineLink::post_receiver_request(bool recreate)
     supervisor_wake_.notify_all();
 
     emit receiverChanged();
+
+    // Every write ends here, so this is the one place the request side of
+    // the fit line has to be rebuilt.
+    update_receiver_fit();
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +786,11 @@ void EngineLink::adopt_receiver_status()
     if (identity_moved || edges_resolved) {
         emit receiverChanged();
     }
+
+    // Every answer from the engine ends here, so this is the other place
+    // the fit line has to be rebuilt. It is derived from both sides and
+    // neither one alone can be trusted to have moved last.
+    update_receiver_fit();
 }
 
 void EngineLink::adopt_receiver_fault()
