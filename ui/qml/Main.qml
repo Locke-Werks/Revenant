@@ -599,7 +599,23 @@ ApplicationWindow {
                 Button {
                     text: "open"
                     font.pixelSize: 12
+
+                    // A TUNABLE DEVICE NEEDS A CENTRE AND THE BUTTON SAYS SO BY
+                    // BEING DEAD, rather than letting the operator press it and
+                    // read a refusal.
+                    //
+                    // An RTL-SDR opened with no freq= is refused by its own
+                    // backend, because leaving the tuner where opening it left it
+                    // means asking it to lock DC, which fails and leaves it
+                    // unable to tune at all. That refusal is correct and it is
+                    // still the wrong thing for an operator to discover by
+                    // pressing a button that looked ready.
+                    //
+                    // Only for a device that HAS a tuner. A file and a synthetic
+                    // scene have no centre to give and no box to give it in.
                     enabled: !!sourceSettings.row && sourceSettings.row.available
+                             && (!sourceSettings.row.tunable
+                                 || engineLink.parseHz(sourceFreqField.text) > 0)
                     onClicked: engineLink.openSource(
                                    engineLink.composeSourceUri(
                                        sourceRow.chosen,
@@ -607,6 +623,27 @@ ApplicationWindow {
                                        sourceRateField.text,
                                        sourceGainField.text,
                                        sourceGainAuto.checked))
+                }
+            }
+
+            // Why the open button is dead, which is one cause and worth a
+            // sentence: a tuner with nowhere to point cannot be opened.
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                visible: !!sourceSettings.row && sourceSettings.row.available
+                         && sourceSettings.row.tunable
+                         && engineLink.parseHz(sourceFreqField.text) <= 0
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: "this device needs a centre frequency before it can be opened: "
+                          + "opening a tuner with nowhere to point leaves it unable to tune "
+                          + "at all afterwards."
+                    color: window.inkDim
+                    font.pixelSize: 12
+                    wrapMode: Text.WordWrap
                 }
             }
 

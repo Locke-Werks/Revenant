@@ -898,3 +898,68 @@ TEST_CASE("a dongle opened at the bottom of its range can still be tuned away",
 
     REQUIRE(radio.stop().has_value());
 }
+
+TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE ONE THE PICKER FOUND, and the only case in this file that opens an
+    // rtlsdr for real without freq=.
+    //
+    // Nothing in this tree had ever done it. Every documented example and every
+    // other case here supplies a frequency, so the path was reachable only from
+    // a GUI that omits a key whose box is empty. What it used to do was skip
+    // rtlsdr_set_center_freq entirely and leave the tuner where rtlsdr_open put
+    // it, at 0 Hz. That is not a quiet no-op: setting the sample rate re-tunes
+    // the handle's current frequency as a side effect, so an R820T is asked to
+    // lock DC, its PLL does not, and every later rtlsdr_set_center_freq returns
+    // LIBUSB_ERROR_PIPE.
+    //
+    // The symptom reached the operator as "the tuner refused 435000000 Hz:
+    // librtlsdr returned -9", naming the frequency they asked for rather than
+    // the one nobody asked for. Six narrower cases were written chasing it and
+    // all six passed, because every one of them supplied a centre.
+    auto opened = source::open_source("rtlsdr://0?rate=2400000");
+
+    // A dongle whose tuner can reach DC is a different question and is not this
+    // case: tune_ranges_for reports {0, xtal/2} under direct sampling, and an
+    // open with no centre is legitimate there. Every tuner this has run on
+    // starts above DC, so a success here means the hardware changed and the case
+    // needs its own arm rather than a louder assertion.
+    if (opened.has_value()) {
+        INFO("this dongle opened with no centre, so its tuner reaches DC");
+        CHECK((*opened)->center() == 0);
+        return;
+    }
+
+    INFO(opened.error().message);
+    CHECK(opened.error().message.find("needs a centre frequency") != std::string::npos);
+
+    // AND IT NAMES THE RANGE, so the refusal is actionable rather than a
+    // complaint. An operator who did not know what to type is exactly who
+    // reaches this.
+    //
+    // Checked as "reaches" plus a bound rather than as a unit: tune_ranges_text
+    // writes plain hertz, and asserting "MHz" was this case's own first mistake.
+    CHECK(opened.error().message.find("It reaches") != std::string::npos);
+    CHECK(opened.error().message.find("1766000000") != std::string::npos);
+
+    // THE DONGLE IS STILL USABLE AFTERWARDS, which is the half that matters and
+    // the half a refusal could get wrong. Refusing after having already set the
+    // rate would leave the tuner in the same failed state the refusal exists to
+    // prevent, so the next open has to work.
+    auto again = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+    if (!again) {
+        INFO(again.error().message);
+    }
+    REQUIRE(again.has_value());
+
+    auto landed = (*again)->tune(95'100'000);
+    if (!landed) {
+        INFO(landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+    CHECK(std::abs(*landed - 95'100'000) <= 95'100'000 / 10'000);
+}

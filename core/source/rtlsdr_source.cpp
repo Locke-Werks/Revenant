@@ -1254,6 +1254,45 @@ struct Applied {
         }
     }
 
+    // A TUNABLE DONGLE OPENED WITH NO CENTRE IS REFUSED, AND THE REASON IS THAT
+    // LEAVING IT ALONE WEDGES THE TUNER.
+    //
+    // With no freq= this function used to skip the block below entirely, so
+    // rtlsdr_set_center_freq was never called and the tuner stayed where
+    // rtlsdr_open left it, which is 0 Hz. That is not a quiet no-op. Setting the
+    // sample rate re-tunes the handle's current frequency as a side effect, so
+    // the R820T is then asked to lock DC, its PLL does not, and it prints "PLL
+    // not locked" on the way to failing. The tuner is in a failed state from
+    // that moment: every later rtlsdr_set_center_freq returns
+    // LIBUSB_ERROR_PIPE, which reaches an operator as "the tuner refused
+    // 435000000 Hz: librtlsdr returned -9" and points at the frequency they
+    // asked for rather than at the one nobody asked for.
+    //
+    // Observed on 2026-09-21. The device picker omits a key whose box is empty,
+    // which is right, and this was the one backend that could not take the
+    // omission. Nothing in this tree had ever streamed from an rtlsdr without
+    // freq=, because every documented example and every test supplies one, so a
+    // silently under-specified open had no way to surface until a GUI produced
+    // one.
+    //
+    // NOT REFUSED WHEN THE DEVICE CAN LEGITIMATELY SIT AT DC, which is direct
+    // sampling: tune_ranges_for reports {0, xtal/2} there, so the test is
+    // whether zero is reachable rather than whether a mode was named. A caller
+    // who wants HF through the direct-sampling branch is asking for something
+    // real and gets it.
+    if (!config.center_given) {
+        const bool dc_reachable =
+            std::any_of(tune_ranges.begin(), tune_ranges.end(),
+                        [](const TuneRange& range) { return range.contains(0); });
+        if (!dc_reachable) {
+            return fail(std::format(
+                "this dongle needs a centre frequency: freq= was not given, and leaving the "
+                "tuner where opening it left it means asking an {} to lock DC, which fails and "
+                "leaves it unable to tune at all afterwards. It reaches {}.",
+                tuner_name(rtlsdr_get_tuner_type(device)), tune_ranges_text(tune_ranges)));
+        }
+    }
+
     if (config.center_given) {
         const bool reachable = std::any_of(
             tune_ranges.begin(), tune_ranges.end(),
