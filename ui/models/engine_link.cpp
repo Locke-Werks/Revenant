@@ -466,6 +466,31 @@ void EngineLink::adopt()
         frames_drawn_ = 0;
     }
 
+    // THE FRAME GOES WITH THE CONNECTION, ON BOTH EDGES, FOR THE REASON
+    // EVERYTHING ELSE IN THIS FUNCTION DOES.
+    //
+    // The bins in display_ were measured by one engine against one span, and
+    // info_ has just been replaced with the next engine's. Left alone they
+    // are read back immediately: this function emits connectionChanged and
+    // then frameChanged, SpectrumItem::onConnectionChanged clears have_frame_
+    // on the first, and takeFrame re-reads frame() on the second, finds the
+    // PREVIOUS engine's bins still there and sets have_frame_ again against
+    // the NEW engine's axis. Run an engine at 98.1 MHz, stop it, start one at
+    // 461 MHz: the trace and the top waterfall row draw 98.1 MHz energy under
+    // 461 MHz labels, and it stays until another frame arrives, which on a
+    // no-spectrum build or an engine that is up and not running is never.
+    //
+    // Worse on the way down, where adopt() runs on every failed reconnect:
+    // a minute of downtime is about 240 passes, each appending another copy
+    // of the dead engine's last row to the waterfall.
+    //
+    // Cleared unconditionally rather than only on the way up. The empty frame
+    // is what makes both takeFrame slots hit their early return, and that is
+    // the whole mechanism; the keep-the-last-trace behaviour on a disconnect
+    // is unaffected, because SpectrumItem draws from its own columns_ and
+    // WaterfallItem from its own ring.
+    display_ = {};
+
     // Zeroed on both edges rather than only on the way down. A rate is a
     // statement about one connection, and the connection that just ended and
     // the one that just began have each drawn nothing under it. Leaving it
