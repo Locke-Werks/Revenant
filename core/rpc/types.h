@@ -309,6 +309,23 @@ struct SourceStats {
     // monitor has seen. Descriptive, a session low-water mark, and no
     // verdict rests on it.
     double front_end_floor_lift_db = 0.0;
+
+    // Retunes a stage refused, which are the ones set_vrx_params reported as
+    // successes: the call answers when the op is QUEUED and the graph applies
+    // it a block later.
+    //
+    // REQUIRED TO STAY AT ZERO. A placement the demodulator cannot carry is
+    // refused before the op is queued, so a non-zero value here is not an
+    // operator asking for the impossible; it is placement and the stage
+    // disagreeing. Read it as a defect rather than as a condition to handle.
+    std::uint64_t vrx_retune_refusals = 0;
+
+    // Times the recording thread waited for a frame slot. EXPECTED ON A DEMAND
+    // SOURCE AND A WARNING ON A PACED ONE, so read it beside
+    // SourceDescriptor::flow: a client that draws this without the flow control
+    // reports the healthy case as a fault on every file and every synthetic
+    // scene.
+    std::uint64_t frame_stalls = 0;
 };
 
 struct VrxParams {

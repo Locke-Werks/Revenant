@@ -1430,7 +1430,7 @@ public:
 
     kj::Promise<void> sourceStats(SourceStatsContext context) override {
         write_source_stats(context.getResults().initStats(), owner_.engine().source_stats(),
-                           owner_.front_end());
+                           owner_.front_end(), owner_.engine().graph_conditions());
         return kj::READY_NOW;
     }
 

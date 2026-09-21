@@ -937,6 +937,23 @@ public:
         return out;
     }
 
+    [[nodiscard]] GraphConditions graph_conditions() const override {
+        GraphConditions out;
+        if (graph_ == nullptr) {
+            // Zero on an engine between sources, which is the truth: no graph
+            // has refused anything and no thread has waited for a slot. The
+            // counters of the graph that just went are not carried forward,
+            // because they were about a stream that has ended and a client
+            // comparing them against the next one would read a step as
+            // activity.
+            return out;
+        }
+        const GraphStats stats = graph_->stats();
+        out.vrx_retune_refusals = stats.vrx_retune_refusals;
+        out.frame_stalls = stats.frame_stalls;
+        return out;
+    }
+
     [[nodiscard]] const Graph* graph() const { return graph_.get(); }
     [[nodiscard]] const Scheduler* scheduler() const { return scheduler_.get(); }
     [[nodiscard]] const dsp::PrototypeFilter& prototype() const { return prototype_; }

@@ -1217,39 +1217,69 @@ client a control that refuses everything.
 **No shared GPU texture handle.** Frames cross by copy, at the cost measured
 above. This is the deferred optimisation, not a gap in correctness.
 
-**Five conditions the engine knows about and this wire does not carry.** Kept
-as a list rather than fixed one at a time, because the shape is the point:
-each is something the engine detected, counted or substituted, and no client
-can see it.
+**Two conditions the engine knows about and this wire does not carry, from a
+list that used to be five.**
 
-A retune the STAGE refused. `setVrxParams` answers success as soon as the
-control op is queued; `core/engine/graph.cpp` applies it at the next block
-boundary and a stage that will not take it counts
-`GraphStats::vrx_retune_refusals` and leaves the receiver where it was.
-`GraphStats` reaches nothing on the wire, so what a client sees is a
-successful call and a receiver that did not move. The counter is required to
-stay at zero, which is why this has not bitten; it is exactly the kind of
-requirement that stops being true quietly.
+This entry used to read **"Five conditions the engine knows about and this wire
+does not carry. Kept as a list rather than fixed one at a time, because the
+shape is the point: each is something the engine detected, counted or
+substituted, and no client can see it."** Three of the five are gone. Working
+through them one at a time is exactly what the entry said not to do, and it was
+right about two of them and wrong about the third in a way only a fix would have
+found.
 
-`GraphStats::frame_stalls`, which `core/engine/graph.h` calls expected on a
-Demand source and a warning sign on a Paced one. Not on the wire either.
+**Carried now.** `SourceStats::vrxRetuneRefusals` and `SourceStats::frameStalls`
+cross on the message this wire already polls once a second.
+`Engine::graph_conditions` is the accessor and `engine::GraphConditions` is the
+struct, which is separate from `source::SourceStats` because that one is the
+SOURCE's and neither of these is a loss the source could know about.
+
+The refusal counter is the one that matters. `setVrxParams` answers success as
+soon as the control op is queued, the graph applies it at the next block
+boundary, and a stage that will not take it counts one and leaves the receiver
+where it was, so what a client saw was a successful call and a receiver that did
+not move. It is required to stay at zero, which is why it has never bitten, and
+that is exactly the kind of requirement that stops being true quietly. Read a
+non-zero value as a defect rather than as a condition to handle: `engine::place`
+refuses a placement the demodulator cannot carry before the op is ever queued, so
+a refusal here means placement and the stage disagree.
+
+`frameStalls` has to be read beside `SourceDescriptor::flow`. It is expected on a
+Demand source, where waiting IS the backpressure, and a warning on a Paced one,
+where the next thing to move is `overrunEvents`. A client that draws it without
+the flow control reports the healthy case as a fault on every file and every
+synthetic scene.
+
+**Was never true, and the fix is what found it.** The entry used to end
+**"`Server::frames_dropped` is one server-wide counter charged for every spectrum
+subscriber at once, and `core/rpc/server.cpp` admits it over-counts. A slow
+client's drops appear on a fast client's status line. Audio has the
+per-subscription counters this lacks, in `AudioStats`."** The second sentence
+cannot happen. `Server::frames_dropped` never crosses this wire: it is a host
+accessor, `revenant-engine`'s status line and one test are its only readers, and
+no client has ever been able to see it. A client's own drops are exact and always
+were, from `SpectrumFrame::sequence` jumping by more than the `everyNth` it asked
+for, which is what `ui/models/engine_link.cpp` counts and publishes as
+`framesDroppedByEngine`. What is true is narrower and is what the server's own
+comment says: the host-side counter over-counts **only** when two subscriptions
+ask for different rates, because the filter that ran was the gcd of both.
+
+**Still absent, both with a reason rather than a plan.**
 
 The recording's own counters. `AudioEgressStats` carries drops, trims,
-discontinuities, silence inserted over a gap and a faulted backend, and none
-of it crosses, because there is no recording surface on this wire yet. An
-engine writing a WAV for a remote client reports nothing about that file.
+discontinuities, silence inserted over a gap and a faulted backend, and none of it
+crosses, because there is no recording surface on this wire at all. An engine
+writing a WAV for a remote client reports nothing about that file. This one is
+not a field to add: it needs a recording to exist on the wire first.
 
 What an RTL-SDR landed on at OPEN. `configure()` in
-`core/source/rtlsdr_source.cpp` reads the achieved rate, centre and gain back
-from the device and substitutes them for what was asked, which is correct;
-what nothing states is the DIFFERENCE. `setSourceCenter` states it, by
-answering with the centre the device took so a caller can subtract. The
-command line that opened the source does not.
-
-`Server::frames_dropped` is one server-wide counter charged for every
-spectrum subscriber at once, and `core/rpc/server.cpp` admits it over-counts.
-A slow client's drops appear on a fast client's status line. Audio has the
-per-subscription counters this lacks, in `AudioStats`.
+`core/source/rtlsdr_source.cpp` reads the achieved rate, centre and gain back from
+the device and substitutes them for what was asked, which is correct; what nothing
+states is the DIFFERENCE. It is deliberately not a field, because the asker
+already holds both halves: `openSource` is given a URI the client composed, and
+`EngineInfo::sourceRate` and `sourceCenter` are what the device took. The picker
+in `ui/` compares its own `SourceChoice` against them. A wire field would be the
+engine re-deriving a request the client never forgot.
 
 **Nothing pairs the two processes automatically, and CI never builds the
 client.** This entry used to say that nothing served or drove the wire and that

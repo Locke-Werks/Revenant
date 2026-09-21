@@ -392,7 +392,8 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
 }
 
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,
-                        const detect::FrontEndObservation& front_end) {
+                        const detect::FrontEndObservation& front_end,
+                        const engine::GraphConditions& conditions) {
     out.setBlocksDelivered(in.blocks_delivered);
     out.setSamplesDelivered(in.samples_delivered);
     out.setOverrunEvents(in.overrun_events);
@@ -402,6 +403,13 @@ void write_source_stats(schema::SourceStats::Builder out, const source::SourceSt
     out.setFrontEnd(to_schema(front_end.verdict));
     out.setFrontEndSlope(front_end.slope);
     out.setFrontEndFloorLiftDb(front_end.floor_lift_db);
+
+    // The graph's two, on the source's message because that is the one this
+    // wire already polls once a second and neither is worth a call of its own.
+    // engine::GraphConditions is where the argument lives for why they are not
+    // fields on source::SourceStats.
+    out.setVrxRetuneRefusals(conditions.vrx_retune_refusals);
+    out.setFrameStalls(conditions.frame_stalls);
 }
 
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in) {

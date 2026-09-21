@@ -571,6 +571,41 @@ struct SourceStats {
     # only, and no verdict rests on it. It is here because it is the number
     # that makes the sentence concrete.
     frontEndFloorLiftDb @8 :Float64;
+
+    # RETUNES THE STAGE REFUSED, WHICH ARE THE ONES setVrxParams REPORTED AS
+    # SUCCESSES.
+    #
+    # setVrxParams answers as soon as the control op is QUEUED. The graph
+    # applies it at the next block boundary and a stage that will not take it
+    # counts one here and leaves the receiver where it was. So the only thing a
+    # client saw until this field existed was a call that returned success and a
+    # receiver that did not move, with nothing anywhere saying which.
+    #
+    # THE REQUIREMENT IS THAT IT STAYS AT ZERO. engine::place refuses a
+    # placement the demodulator cannot carry before the op is ever queued, so a
+    # non-zero value here is not an operator asking for something impossible: it
+    # is a request that passed placement and then failed at the stage, which
+    # means those two disagree. Show it, and read it as a defect rather than as
+    # a condition to handle.
+    #
+    # Engine-wide and not per receiver, because GraphStats is. A client that
+    # sees it move re-reads vrxStatus on every receiver it holds to find which
+    # one did not move.
+    vrxRetuneRefusals @9 :UInt64;
+
+    # Times the recording thread waited for a frame slot.
+    #
+    # EXPECTED ON A DEMAND SOURCE AND A WARNING ON A PACED ONE, which is why it
+    # is not a fault and has to be read beside SourceDescriptor::flow. A Demand
+    # source advances at exactly the rate its consumer retires work, so waiting
+    # IS the backpressure and this climbing is the mechanism running. A Paced
+    # source has its own clock and nowhere to put samples that keep arriving, so
+    # a wait there is the graph falling behind the device and the next thing to
+    # move is overrunEvents.
+    #
+    # A client that draws this without the flow control beside it reports the
+    # healthy case as a fault on every file and every synthetic scene.
+    frameStalls @10 :UInt64;
 }
 
 struct VrxParams {

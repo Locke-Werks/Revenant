@@ -162,7 +162,8 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
 // its spectrum, and a caller that set the three front-end fields afterwards
 // would be the second place a wire struct is filled.
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,
-                        const detect::FrontEndObservation& front_end);
+                        const detect::FrontEndObservation& front_end,
+                        const engine::GraphConditions& conditions);
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in);
 
 // The placement, plus the sentence VrxPlacement::clampReason carries.

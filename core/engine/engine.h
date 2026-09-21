@@ -1015,6 +1015,43 @@ struct PassbandFrame {
 
 using PassbandSink = std::function<Status(const PassbandFrame&)>;
 
+// Two things the graph detected that nothing outside this process could see.
+//
+// Both are counted rather than logged, on the same ground every other counter
+// in this engine is: a condition that reaches a log line is a condition nothing
+// downstream can act on. What makes these two different from the losses in
+// source::SourceStats is that neither is a loss, so neither belongs in the
+// struct that carries them.
+struct GraphConditions {
+    // Retunes a STAGE refused, which are the ones set_vrx_params reported as
+    // successes.
+    //
+    // set_vrx_params answers as soon as the control op is queued;
+    // core/engine/graph.cpp applies it at the next block boundary and a stage
+    // that will not take it counts one here and leaves the receiver where it
+    // was. Until this crossed, what a caller saw was a successful call and a
+    // receiver that did not move.
+    //
+    // REQUIRED TO STAY AT ZERO, which is what makes it worth reporting rather
+    // than handling. engine::place refuses a placement the demodulator cannot
+    // carry before the op is queued, so a non-zero value is not an operator
+    // asking for the impossible: it is a request that passed placement and then
+    // failed at the stage, which means the two disagree. It is exactly the kind
+    // of requirement that stops being true quietly.
+    std::uint64_t vrx_retune_refusals = 0;
+
+    // Times the recording thread waited for a frame slot.
+    //
+    // EXPECTED ON A DEMAND SOURCE AND A WARNING ON A PACED ONE, so it has to be
+    // read beside source::SourceCapabilities::flow. A Demand source advances at
+    // exactly the rate its consumer retires work, so waiting IS the
+    // backpressure and this climbing is the mechanism running; a Paced source
+    // has its own clock and nowhere to put samples that keep arriving, so a
+    // wait there is the graph falling behind and overrun_events is the next
+    // thing to move.
+    std::uint64_t frame_stalls = 0;
+};
+
 class Engine {
 public:
     [[nodiscard]] static Expected<std::unique_ptr<Engine>> create(const EngineConfig& config);
@@ -1259,6 +1296,18 @@ public:
     // looks continuous and is not, with nothing downstream able to tell, is
     // the failure mode a log line produces.
     [[nodiscard]] virtual source::SourceStats source_stats() const = 0;
+
+    // What the GRAPH counted that the source cannot know.
+    //
+    // A SEPARATE CALL AND NOT TWO MORE FIELDS ON SourceStats, because that
+    // struct is the SOURCE's and these are not. source_stats already folds the
+    // ring's losses into it, and that fold is argued for: a sample the graph
+    // could not place is gone in precisely the way a sample the device dropped
+    // is gone, and the frozen Engine has one place to report a counted loss.
+    // Neither of these is a loss, so neither has that argument behind it, and
+    // putting them there would make a client reading "the source's stats"
+    // reason about two numbers the source has never heard of.
+    [[nodiscard]] virtual GraphConditions graph_conditions() const = 0;
 
 protected:
     Engine() = default;

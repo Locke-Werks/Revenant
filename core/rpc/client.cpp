@@ -434,6 +434,12 @@ struct PromiseValue<kj::Promise<T>> {
                         : FrontEndState::Unmeasured;
     out.front_end_slope = in.getFrontEndSlope();
     out.front_end_floor_lift_db = in.getFrontEndFloorLiftDb();
+
+    // The graph's two, which the source has never heard of. See
+    // engine::GraphConditions for why they ride on this message and not on a
+    // call of their own.
+    out.vrx_retune_refusals = in.getVrxRetuneRefusals();
+    out.frame_stalls = in.getFrameStalls();
     return out;
 }
 
