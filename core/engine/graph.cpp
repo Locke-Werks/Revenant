@@ -124,6 +124,7 @@
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/vrx_reference.h"
 #include "core/engine/record_util.h"
+#include "core/engine/signal_meter.h"
 #include "core/engine/spectrum_scale.h"
 #include "core/engine/ring_consumer.h"
 #include "core/gpu/buffer.h"
@@ -219,11 +220,6 @@ constexpr VkBufferUsageFlags kReadbackUsage =
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
 constexpr std::uint32_t kComplexBytes = 8;
-
-// Below this a sample is silence for every purpose in this engine, and taking
-// its logarithm produces -inf, which propagates into a meter and a squelch
-// comparison as a NaN nobody can source.
-constexpr double kSilenceFloorDbfs = -200.0;
 
 [[nodiscard]] std::span<const std::uint32_t> convert_shader_for(source::SampleFormat format) {
     switch (format) {
@@ -395,14 +391,6 @@ constexpr double kSilenceFloorDbfs = -200.0;
     return taps;
 }
 
-[[nodiscard]] double dbfs_of(double rms) {
-    if (!(rms > 0.0)) {
-        return kSilenceFloorDbfs;
-    }
-    const double value = 20.0 * std::log10(rms);
-    return value < kSilenceFloorDbfs ? kSilenceFloorDbfs : value;
-}
-
 // The process-wide stage factory. Control plane, read once per graph.
 //
 // A function-local static rather than a namespace-scope object so that a
@@ -448,6 +436,7 @@ public:
         StageOutput out;
         out.frames = record.block_count;
         out.channels = 2;
+        out.complex_iq = true;
         out.rate = channel_rate_;
         if (record.block_count == 0) {
             return out;
@@ -636,6 +625,13 @@ struct Graph::Impl {
         // channel and never asks the planner, so a raw receiver whose
         // passband the planner would refuse is still added.
         bool shape_known = false;
+
+        // What with_audio_rate resolved this receiver's audio rate to, which
+        // is params.audio_rate unless that was zero and the engine's default
+        // answered. Kept beside the params rather than derived in
+        // vrx_status, because shape.output_rate is only there for a receiver
+        // the planner could plan and the raw tap is not one.
+        dsp::SampleRate resolved_audio_rate = 0;
 
         // The recording thread's own copy, so that a retune landing while a
         // block is being recorded cannot tear a field out from under it. The
@@ -1638,22 +1634,16 @@ struct Graph::Impl {
             // The signal meter. Complex output is metered on magnitude, which
             // is what makes a raw tap's level comparable with a demodulator's
             // rather than reading 3 dB low for being two real channels.
-            double sum = 0.0;
-            if (entry.output.channels == 2) {
-                for (std::size_t i = 0; i + 1 < floats; i += 2) {
-                    const double re = static_cast<double>(audio[i]);
-                    const double im = static_cast<double>(audio[i + 1]);
-                    sum += re * re + im * im;
-                }
-                sum /= static_cast<double>(entry.output.frames);
-            } else {
-                for (const float value : audio) {
-                    const double v = static_cast<double>(value);
-                    sum += v * v;
-                }
-                sum /= static_cast<double>(floats);
-            }
-            const double level = dbfs_of(std::sqrt(sum));
+            //
+            // WHAT THIS BRANCHED ON UNTIL 2026-09-21: entry.output.channels
+            // == 2, which read a stereo WFM receiver's L and R pair as one
+            // complex sample and divided the sum of squares by frames rather
+            // than by samples. Every stereo receiver's level, and therefore
+            // its squelch comparison, read 3.01 dB high. StageOutput::
+            // complex_iq is the field that says which of the two a pair is,
+            // because the channel count cannot.
+            const double level =
+                meter_dbfs(audio, entry.output.frames, entry.output.complex_iq);
             slot.store_level(level);
 
             // Squelched means muted, not stopped. The level is stored above
@@ -3001,6 +2991,7 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     slot->params = params;
     slot->placement = placement;
     slot->recording_params = params;
+    slot->resolved_audio_rate = resolved.audio_rate;
     if (auto shape = dsp::vrx_shape_for(impl.grid, impl.config.source_rate, resolved,
                                         placement)) {
         slot->shape = *shape;
@@ -3157,6 +3148,7 @@ Status Graph::set_vrx_params(VrxId id, const VrxParams& params, const VrxPlaceme
         slot->placement = placement;
         slot->shape = *planned;
         slot->shape_known = true;
+        slot->resolved_audio_rate = resolved.audio_rate;
 
         // MOVED HERE, UNDER THE LOCK AND AFTER THE LAST REFUSAL, so that
         // vrx_status called the instant this returns already reports the
@@ -3289,6 +3281,7 @@ Expected<VrxStatus> Graph::vrx_status(VrxId id) const {
     status.params = slot->params;
     status.placement = slot->placement;
     status.demod_rate = slot->shape.demod_rate;
+    status.resolved_audio_rate = slot->resolved_audio_rate;
     status.tuning_epoch = slot->queued_epoch;
     status.level_dbfs = slot->load_level();
     status.squelch_open = slot->squelch_open.load(std::memory_order_relaxed);

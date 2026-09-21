@@ -173,3 +173,26 @@ commit: f3c0544
 instead: A WFM receiver at an ordinary audio rate decodes stereo and sets
     StageOutput::channels to 2, so a subscriber gets an interleaved pair.
     VrxParams::stereo is on by default and engine::resolve_stereo decides.
+
+phrase: tools/cli --rds taps the 171000 S/s composite through the raw mode
+retired: 2026-09-21
+commit: 09e998f
+instead: --rds builds an ordinary Wfm receiver at decode::RdsBitsConfig::rate
+    with the mode's own 200 kHz passband. What keeps the curve off it is
+    engine::kCompositeAudioRateHz, not the Raw branch of resolve_deemphasis.
+
+phrase: audio_rate of zero means the receiver took the engine's default,
+    which is programme audio
+retired: 2026-09-21
+commit: 09e998f
+instead: EngineConfig::audio_rate is a field, so the default is not always
+    programme audio. Resolve the rate before asking anything of it;
+    VrxStatus::resolved_audio_rate is what the receiver actually runs at and
+    the echo stays zero.
+
+phrase: 1 for real audio, 2 for a raw complex tap presented as interleaved
+retired: 2026-09-21
+commit: f3c0544
+instead: StageOutput::channels reads 2 for a stereo pair as well as for the
+    raw tap, and StageOutput::complex_iq is what tells the two apart. The
+    signal meter read the count and metered stereo 3.01 dB high.

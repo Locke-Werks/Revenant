@@ -179,8 +179,16 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
 // the FM family would inherit a flat response and sound wrong in a way
 // nothing measures.
 //
-// audio_rate of zero means the receiver took the engine's default, which is
-// programme audio, so zero and 48000 answer the same.
+// audio_rate is the rate the receiver RUNS at and never the zero a request
+// carries for "the engine's default". Resolve it first: the graph does that
+// in with_audio_rate before it plans anything, and VrxStatus carries the
+// resolved value beside the echo so a caller has it without asking.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "audio_rate of zero means the receiver
+// took the engine's default, which is programme audio, so zero and 48000
+// answer the same". EngineConfig::audio_rate is a field, so the default is
+// not always programme audio, and on an engine configured at 171000 a zero
+// here answered Us75 for a composite tap.
 //
 // Here in core/engine rather than in core/dsp because VrxStatus has to call
 // it and core/dsp already depends on core/engine, so the other direction is
@@ -429,12 +437,28 @@ struct VrxParams {
     // it switches over Demod with no default label so a ninth mode has to
     // say what it wants.
     //
-    // Raw is not audio and never carries a curve whatever this says. That
-    // matters concretely: tools/cli --rds taps the 171000 S/s composite
-    // through the raw mode and decoded a real station on 2026-09-20. A curve
-    // on that path would lift the 57 kHz subcarrier by 28.6 dB at 75 us and
-    // the decoder would report a clean eye while every sensitivity figure
-    // measured against it was optimistic by that much.
+    // Raw is not audio and never carries a curve whatever this says.
+    //
+    // The composite tap is the case that matters and it is NOT the raw mode.
+    // tools/cli --rds builds an ordinary Wfm receiver at
+    // decode::RdsBitsConfig::rate, 171000 S/s, with the mode's own 200 kHz
+    // passband, and decoded a real station on 2026-09-20. What keeps the
+    // curve off that path is kCompositeAudioRateHz above: resolve_deemphasis
+    // answers None for a Wfm receiver at or above 114000, because at that
+    // rate the receiver is handing out the multiplex rather than programme
+    // audio. A curve there would lift the 57 kHz subcarrier by 28.6 dB at
+    // 75 us and the decoder would report a clean eye while every sensitivity
+    // figure measured against it was optimistic by that much.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-21 it read "tools/cli
+    // --rds taps the 171000 S/s composite through the raw mode". It does
+    // not, and it could not: the raw tap is one coarse channel copied out
+    // of the channel ring with no fine mixing and no resampling, so it has
+    // no audio rate to set to 171000 and produces complex baseband rather
+    // than the real composite core/decode/rds_bits.h is fed. The sentence
+    // credited the wrong branch of resolve_deemphasis with the decode, so a
+    // reader changing the composite bound would have looked at Raw and
+    // found nothing to change.
     Deemphasis deemphasis = Deemphasis::Default;
 
     // Decode FM stereo when the mode and the rate allow it, which
@@ -448,19 +472,14 @@ struct VrxParams {
     // reads a stereo stream as mono at double speed, which is why this is
     // stated on the chunk rather than inferred from the mode.
     //
-    // ONE DOCUMENT IS NOW FALSE BECAUSE OF THIS FIELD, and it is not in this
-    // lane's file list, so the correction is recorded here instead of made
-    // there. core/rpc/revenant.capnp's AudioChunk says "channelCount reads 1
-    // on every engine built from this tree. Every demodulator in
-    // core/engine/vrx_stage.cpp sets StageOutput::channels to 1, and the one
-    // stage that sets 2 is the raw complex tap, which cannot be subscribed
-    // to. It is on the wire for WFM stereo, which is the next thing that
-    // will change it". WFM stereo is what changed it, on 2026-09-20: a
-    // broadcast receiver at an ordinary audio rate sets StageOutput::channels
-    // to 2 and a subscriber gets an interleaved pair. The paragraph's own
-    // last clause is the reason the field was put on the wire, so nothing
-    // about the wire needs to move; only the sentence claiming nobody sends
-    // two.
+    // THE DOCUMENT THIS FIELD MADE FALSE IS CORRECTED WHERE IT IS READ.
+    // core/rpc/revenant.capnp's AudioChunk described channelCount as always
+    // reading 1, which stopped being true the day this landed. The lane that
+    // broke it could not edit the schema and left the replacement text here;
+    // the schema carries it now, with its own retraction naming the commit,
+    // and this header no longer holds a second copy. A correction filed
+    // where it was discovered rather than where it is read is how a schema
+    // goes on lying to every client author for a day.
     bool stereo = true;
 
     // Audio output rate. 0 takes the engine's default.
@@ -572,6 +591,38 @@ struct VrxStatus {
     // live from one that will break the audio.
     dsp::SampleRate demod_rate = 0;
 
+    // The audio rate this receiver ACTUALLY runs at, which params.audio_rate
+    // is not when the request named none.
+    //
+    // A RESULT, ON A STRUCT WHOSE OTHER RATE IS AN ECHO. VrxParams::
+    // audio_rate of zero means "the engine's default", the graph resolves it
+    // once in with_audio_rate and builds the stage and the plan from the
+    // resolved value, and this is that value. The echo above still reads
+    // zero, because feeding a status back into set_vrx_params must leave the
+    // receiver on the default rather than pinning it to whatever the default
+    // happened to be.
+    //
+    // Everything below that asks a question OF the audio rate asks it here.
+    // applied_deemphasis and decoding_stereo both turn on
+    // kCompositeAudioRateHz, and resolving them against the echo answered
+    // "programme audio" for a receiver that took a default the engine had
+    // been configured to put above that bound: EngineConfig::audio_rate is a
+    // field and not a constant, and an engine built at 171000 hands every
+    // receiver that named no rate a composite tap. The two functions then
+    // reported Us75 and stereo on a receiver running neither, on the one
+    // surface that exists to stop an operator working the curve out from the
+    // sound.
+    //
+    // Zero means nobody filled it in, which is a default-constructed status
+    // and not a receiver. The two functions fall back to the echo there,
+    // because it is the only number in hand.
+    dsp::SampleRate resolved_audio_rate = 0;
+
+    // The audio rate the two answers below are resolved against.
+    [[nodiscard]] constexpr dsp::SampleRate effective_audio_rate() const {
+        return resolved_audio_rate != 0 ? resolved_audio_rate : params.audio_rate;
+    }
+
     // The de-emphasis curve this receiver is ACTUALLY running, which
     // Default never is: Default is a question and this is the answer. A
     // client that sent Default and reads Us75 back is being told which curve
@@ -582,11 +633,11 @@ struct VrxStatus {
     // struct is written by core/engine/graph.cpp, and a field here would be
     // one more thing that file has to remember: a receiver whose curve
     // changed and whose status still said Us75 would be the same silence
-    // this whole change is about. The answer is a pure function of two
-    // fields that are already echoed verbatim above, so there is nothing to
-    // forget and nothing to get stale.
+    // this whole change is about. The answer is a pure function of the mode
+    // and the curve echoed verbatim above and of the resolved rate beside
+    // them, so there is nothing to forget and nothing to get stale.
     [[nodiscard]] constexpr Deemphasis applied_deemphasis() const {
-        return resolve_deemphasis(params.demod, params.deemphasis, params.audio_rate);
+        return resolve_deemphasis(params.demod, params.deemphasis, effective_audio_rate());
     }
 
     // Whether the stereo decoder is running, on the same terms and for the
@@ -595,7 +646,7 @@ struct VrxStatus {
     // transmitting it: the pilot decides that, per sample, and a consumer
     // reads it off two channels that are bit-identical.
     [[nodiscard]] constexpr bool decoding_stereo() const {
-        return resolve_stereo(params.demod, params.stereo, params.audio_rate);
+        return resolve_stereo(params.demod, params.stereo, effective_audio_rate());
     }
 
     // Signal level in the passband, dBFS, updated per block. This is what

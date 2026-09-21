@@ -42,6 +42,11 @@
 # top of it, so that case is a crash rather than an assertion when it
 # regresses.
 
+# test_signal_meter.cpp needs no GPU either. The meter used to live inside
+# Graph::complete behind a readback, where the only way to check it was to
+# run a receiver on a device; core/engine/signal_meter.h exists so the
+# divisor a buffer of interleaved floats takes is assertable on its own.
+
 # test_audio_fanout.cpp needs neither a GPU nor a sound card. AudioFanout is
 # the one part of core/engine/engine.h that is pure host code, and the wire
 # cases in tests/rpc rest on it, so its ordering and its failure semantics are
@@ -59,6 +64,7 @@ add_executable(revenant_engine_tests
     test_engine_spectrum.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp
+    test_signal_meter.cpp
     test_sources.cpp
     test_spectrum_scale.cpp
 )

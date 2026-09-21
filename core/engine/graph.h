@@ -151,8 +151,21 @@ struct StageOutput {
     // the ring's wrap is one crossing of the bus.
     std::uint32_t readbacks = 0;
 
-    // 1 for real audio, 2 for a raw complex tap presented as interleaved I/Q.
+    // 1 for mono audio, 2 for a stereo pair or for a raw complex tap
+    // presented as interleaved I/Q. Two different things, and this field
+    // cannot tell them apart; complex_iq below is what does.
     std::uint32_t channels = 1;
+
+    // Whether a pair of floats is one complex sample rather than two audio
+    // channels. Only the graph's own raw tap sets it.
+    //
+    // A SEPARATE FIELD BECAUSE THE COUNT WAS OVERLOADED AND SOMETHING READ
+    // IT. The signal meter branched on channels == 2 and metered a stereo
+    // WFM receiver on magnitude, so its level and its squelch comparison
+    // both read 3.01 dB high from the day FM stereo landed. A stage that
+    // leaves this false and sets channels to 2 is saying "two real audio
+    // channels", which is what every demodulator means.
+    bool complex_iq = false;
 
     dsp::SampleRate rate = 0;
 

@@ -1881,9 +1881,41 @@ TEST_CASE("the de-emphasis curve resolves per mode and never reaches a composite
         status.params.demod = engine::Demod::Wfm;
         status.params.deemphasis = engine::Deemphasis::Default;
         status.params.audio_rate = 48'000;
+        status.resolved_audio_rate = 48'000;
         CHECK(status.applied_deemphasis() == engine::Deemphasis::Us75);
         status.params.audio_rate = 171'000;
+        status.resolved_audio_rate = 171'000;
         CHECK(status.applied_deemphasis() == engine::Deemphasis::None);
+    }
+
+    SECTION("a receiver that took the engine's default is resolved against what it got") {
+        // VrxParams::audio_rate of zero is "the engine's default" and the
+        // echo on a status keeps it as zero, deliberately, so that feeding a
+        // status back into set_vrx_params does not pin the receiver to
+        // whatever the default happened to be. Both answers below therefore
+        // have to come off resolved_audio_rate, which the graph fills with
+        // what with_audio_rate decided.
+        //
+        // EngineConfig::audio_rate is a field, so "the default is programme
+        // audio" is a property of one configuration rather than of the
+        // engine. An engine built at the composite rate hands a receiver
+        // that named no rate a multiplex tap, and resolving against the echo
+        // reported Us75 and stereo for it.
+        engine::VrxStatus composite;
+        composite.params.demod = engine::Demod::Wfm;
+        composite.params.deemphasis = engine::Deemphasis::Default;
+        composite.params.stereo = true;
+        composite.params.audio_rate = 0;
+        composite.resolved_audio_rate = 171'000;
+        CHECK(composite.applied_deemphasis() == engine::Deemphasis::None);
+        CHECK_FALSE(composite.decoding_stereo());
+
+        // The ordinary configuration, same echo, and it still answers the
+        // way it always did.
+        engine::VrxStatus programme = composite;
+        programme.resolved_audio_rate = 48'000;
+        CHECK(programme.applied_deemphasis() == engine::Deemphasis::Us75);
+        CHECK(programme.decoding_stereo());
     }
 
     SECTION("a flat curve leaves the audio filter bit-identical to no curve at all") {
