@@ -1,5 +1,6 @@
 #include "tests/reference/gpu_fixture.h"
 
+#include <bit>
 #include <charconv>
 #include <cstdlib>
 #include <cstdint>
@@ -131,8 +132,16 @@ void attempt_once() {
     // this lands once per process in the CTest log rather than once per run;
     // that is more lines than strictly needed and it is the version that
     // cannot go missing.
+    //
+    // The denormal answer rides with it because it is the other half of the
+    // bit-exact contract and it is a property of this device, so a log that
+    // names the device and not this is half a record. It costs one
+    // one-element dispatch per process.
     std::println("[revenant] device {}: {}", state.context->info().index,
                  state.context->info().describe());
+    std::println("[revenant] fp32 denormals: {} ({})",
+                 device_flushes_fp32_denormals() ? "flushed to zero" : "NOT flushed",
+                 denormal_measurement_report());
 }
 
 bool env_flag_set(const char* name) {
@@ -144,6 +153,76 @@ bool env_flag_set(const char* name) {
     // reason, and treating "0" as on would surprise someone trying to disable
     // it for one run.
     return !(raw[0] == '0' && raw[1] == '\0');
+}
+
+// ---------------------------------------------------------------------------
+// The device half of the denormal contract
+// ---------------------------------------------------------------------------
+
+struct Denormals {
+    bool attempted = false;
+    bool flushes = false;
+    std::string report;
+};
+
+Denormals& denormals() {
+    static Denormals state;
+    return state;
+}
+
+// One dispatch of core/shaders/cmul.comp, whose real part is a.x*b.x - a.y*b.y.
+//
+// With both imaginary parts zero the answer is a.x*b.x exactly, and 1e-20
+// squared is 1e-40, which is below the 1.175e-38 smallest normal float and so
+// denormal. A device that flushes writes exact zero; a device that preserves
+// writes the denormal. That is the whole measurement, and it is the same
+// observation core/dsp/denormal_mode.h opens with, made deliberately instead
+// of by surprise.
+//
+// Run once per process, on first use, and only for cases that need a device.
+void measure_denormals_once() {
+    Denormals& state = denormals();
+    if (state.attempted) {
+        return;
+    }
+    state.attempted = true;
+
+    if (!gpu_available()) {
+        state.report = "no Vulkan device";
+        return;
+    }
+
+    const std::array<dsp::Complex32, 1> lhs{dsp::Complex32{1.0e-20F, 0.0F}};
+    const std::array<dsp::Complex32, 1> rhs{dsp::Complex32{1.0e-20F, 0.0F}};
+    std::array<dsp::Complex32, 1> out{dsp::Complex32{1.0F, 1.0F}};
+
+    const std::uint32_t count = 1;
+
+    gpu::KernelInvocation invocation;
+    invocation.spirv = gpu::shaders::cmul();
+    invocation.inputs = {std::as_bytes(std::span<const dsp::Complex32>(lhs)),
+                         std::as_bytes(std::span<const dsp::Complex32>(rhs))};
+    invocation.outputs = {std::as_writable_bytes(std::span<dsp::Complex32>(out))};
+    invocation.push_constants = std::as_bytes(std::span<const std::uint32_t>(&count, 1));
+    invocation.invocations = count;
+
+    if (auto ran = gpu::run_kernel(*shared().context, invocation); !ran) {
+        state.report = ran.error().message;
+        return;
+    }
+
+    const float real = out[0].real();
+    const DenormalSupport advertised = device_fp32_denormals();
+
+    // Exactly zero, sign included: a device that wrote -0.0 has still
+    // flushed. Anything else is the denormal surviving.
+    state.flushes = real == 0.0F;
+    state.report = std::format(
+        "1e-20 squared through core/shaders/cmul.comp came back as {:g} (bits {:#010x}); "
+        "the driver advertises shaderDenormFlushToZeroFloat32 {} and "
+        "shaderDenormPreserveFloat32 {}",
+        static_cast<double>(real), std::bit_cast<std::uint32_t>(real),
+        advertised.flush_to_zero ? "yes" : "no", advertised.preserve ? "yes" : "no");
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +527,40 @@ std::string shared_context_description() {
 }
 
 bool gpu_is_required() { return env_flag_set("REVENANT_REQUIRE_GPU"); }
+
+DenormalSupport device_fp32_denormals() {
+    DenormalSupport support;
+    if (!gpu_available()) {
+        return support;
+    }
+
+    // Vulkan 1.2 core, promoted from VK_KHR_shader_float_controls, so a 1.3
+    // instance can chain it unconditionally. A driver that does not fill it
+    // in leaves the zeroes above, which reads as "cannot flush" and fails
+    // loudly rather than passing on an unanswered question.
+    VkPhysicalDeviceFloatControlsProperties controls{};
+    controls.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 props{};
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props.pNext = &controls;
+
+    vkGetPhysicalDeviceProperties2(shared().context->physical_device(), &props);
+
+    support.flush_to_zero = controls.shaderDenormFlushToZeroFloat32 == VK_TRUE;
+    support.preserve = controls.shaderDenormPreserveFloat32 == VK_TRUE;
+    return support;
+}
+
+bool device_flushes_fp32_denormals() {
+    measure_denormals_once();
+    return denormals().flushes;
+}
+
+const std::string& denormal_measurement_report() {
+    measure_denormals_once();
+    return denormals().report;
+}
 
 bool shared_memory_is_reproducible() {
     probe_shared_memory_once();

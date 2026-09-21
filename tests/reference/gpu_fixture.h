@@ -78,6 +78,47 @@ namespace revenant::test {
 // than a skip. CI sets REVENANT_REQUIRE_GPU=1.
 [[nodiscard]] bool gpu_is_required();
 
+// What the device says it can be ASKED to do about fp32 denormals, read from
+// VkPhysicalDeviceFloatControlsProperties.
+//
+// Both of these are false on the RTX 4090 in this machine, which is the first
+// thing the query is here to say: core/dsp/denormal_mode.h asserted that
+// "shaderDenormFlushToZeroFloat32 is the behaviour NVIDIA advertises and
+// shaderDenormPreserveFloat32 is not offered for fp32 at all", and the driver
+// advertises neither. Nor could either one settle the question, because they
+// say what a SPIR-V execution mode may request and none of these kernels sets
+// one. They go in the device line so that the next argument about a one-ulp
+// diff near the denormal boundary starts from the driver's own answer.
+//
+// The gate is the measurement below, not this.
+struct DenormalSupport {
+    bool flush_to_zero = false;
+    bool preserve = false;
+};
+
+[[nodiscard]] DenormalSupport device_fp32_denormals();
+
+// True when this device actually flushes an fp32 denormal result to zero.
+//
+// core/dsp/denormal_mode.h is the project's numerical policy: denormals are
+// flushed everywhere, and the CPU reference is brought into line with the
+// device by ScopedDenormalFlush because the device is the side that cannot be
+// changed. tests/reference/test_denormal_mode.cpp asserts the CPU half. This
+// is the device half, which nothing asserted for as long as that header said
+// there was nothing on the device side to ask.
+//
+// It is measured rather than queried: one dispatch of core/shaders/cmul.comp,
+// the same kernel whose exact zeros started this policy, with operands whose
+// product is 1e-40 and therefore denormal. A device that returns exact zero
+// flushes. A device that returns the denormal preserves, and on that device
+// every bit-exact diff in this suite is comparing a flushing reference
+// against a preserving kernel, which is the one failure the policy exists to
+// prevent and the one no capability bit reports.
+[[nodiscard]] bool device_flushes_fp32_denormals();
+
+// What that dispatch returned, for the failure message. Empty until it ran.
+[[nodiscard]] const std::string& denormal_measurement_report();
+
 // True when this device is one whose bit-exactness this suite will referee
 // for core/shaders/spectrum.comp.
 //
@@ -140,6 +181,13 @@ namespace revenant::test {
                      << ::revenant::test::gpu_unavailable_reason());                    \
             }                                                                           \
             SKIP("no Vulkan device: " << ::revenant::test::gpu_unavailable_reason());   \
+        }                                                                               \
+        if (!::revenant::test::device_flushes_fp32_denormals()) {                       \
+            FAIL("this device does not flush fp32 denormals, so core/dsp/"              \
+                 "denormal_mode.h's policy does not hold on it and every bit-exact "    \
+                 "diff here compares a flushing CPU reference against a preserving "    \
+                 "kernel: "                                                             \
+                 << ::revenant::test::denormal_measurement_report());                   \
         }                                                                               \
     } while (false)
 
