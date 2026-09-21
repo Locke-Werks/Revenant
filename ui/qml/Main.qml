@@ -114,16 +114,21 @@ ApplicationWindow {
         // instead, which is what an empty passband on VrxParams asks for,
         // and the operator drags from there.
         //
-        // The centre caveat below still stands and is why the mode is left
-        // as it is rather than guessed from the bandwidth.
-        //
         // The measured width IS handed over, on a separate entry point,
         // and it is not used as a passband for the reason just given. It
-        // is used to say whether the filter the engine built fits the
-        // signal that was clicked on: a 16 kHz NFM receiver on a 145 kHz
-        // broadcast block is the mismatch that cost an evening, and this
-        // is the only moment in the whole window where both numbers are in
-        // one place.
+        // does two other things. It says whether the filter the engine
+        // built fits the signal that was clicked on, which is the only
+        // moment in the whole window where both numbers are in one place.
+        // And it CHOOSES THE MODE.
+        //
+        // The empty string used to mean "leave the mode alone", and that
+        // is what gave a 145 kHz broadcast block a 16 kHz NFM receiver: a
+        // paragraph here once argued the mode should not be guessed from
+        // the bandwidth, and the bandwidth was the only evidence anybody
+        // had. It now means "choose from the measurement", which
+        // EngineLink::tuneReceiverToDetection does through
+        // ui::demod_for_detection. A named mode still wins, for a caller
+        // that knows something the detector does not.
         engineLink.tuneReceiverToDetection(centerHz, "", bandwidthHz)
     }
 

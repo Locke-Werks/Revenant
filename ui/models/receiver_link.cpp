@@ -192,8 +192,26 @@ void EngineLink::update_receiver_fit()
 void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode,
                                          double detection_bandwidth_hz)
 {
-    tune_receiver(absolute_hz, mode,
-                  detection_bandwidth_hz > 0.0 ? detection_bandwidth_hz : 0.0);
+    const double measured = detection_bandwidth_hz > 0.0 ? detection_bandwidth_hz : 0.0;
+
+    // THE MODE COMES FROM THE MEASUREMENT, NOT FROM WHAT THE PANE HAPPENS TO
+    // HOLD. An empty mode means "keep what is there" on tuneReceiver, where
+    // there is nothing else to go on, and it meant the same thing here until
+    // 2026-09-21. It should not: a click on a detection is the one place the
+    // client has a measurement of the signal, and letting the previous
+    // receiver's mode survive it is how a 145 kHz broadcast station opened
+    // in NFM with a 16 kHz filter. rpc::VrxParams::demod's Nfm default was
+    // the value that arrived; nothing overriding it was the defect.
+    //
+    // A mode named explicitly still wins, because that is a caller saying
+    // something the detector cannot: QML passes one when the operator picked
+    // a mode for this click rather than asking for the signal.
+    QString chosen = mode;
+    if (chosen.isEmpty() && measured > 0.0) {
+        chosen = demod_name(demod_for_detection(measured));
+    }
+
+    tune_receiver(absolute_hz, chosen, measured);
 }
 
 // A receiver placed by hand has no measured signal behind it, so the

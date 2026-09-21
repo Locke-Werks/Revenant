@@ -660,34 +660,65 @@ that struggled for ten seconds and has been fine since reads low forever. A
 client that wants the rate now differences two polls against
 `SourceStats::samplesDelivered`.
 
-### A clamped passband says so in words
+### A clamped passband says so in words, and an FM one is refused instead
 
 `VrxPlacement::clampReason` is empty unless something was clamped, and is
-otherwise the sentence to put in front of the operator.
+otherwise the sentence to put in front of the operator. It names both
+widths and the ratio, says what the widest receiver on that grid is, and
+says the fix is the engine's channel count rather than anything the session
+can change.
 
-The numbers were already on the wire and nothing drew them. An operator
-clicking a broadcast FM station on a 2.4 MS/s dongle with a 64-channel grid
-asks for 200 kHz and is given about 71: `bandwidthClamped` went true,
-`grantedLow` and `grantedHigh` came back narrow, and what the operator got
-was mush out of the loudspeaker while the waterfall showed full strength.
+**WHAT THIS SECTION USED TO SAY**, before 2026-09-21: an operator clicking a
+broadcast FM station on a 2.4 MS/s dongle with a 64-channel grid "asks for
+200 kHz and is given about 71", and the sentence was the fix. Reporting the
+clamp was not enough and could not have been. The operator hears the audio
+several seconds before they read a status line, and on an FM mode a
+truncated passband is not a quieter version of the station: a discriminator
+recovers the instantaneous frequency of whatever reaches it, so what comes
+out is the wrong audio at full strength while the waterfall shows a strong
+clean carrier.
 
-The sentence names both widths and the ratio, says what the widest receiver
-on that grid is, and says the fix is the engine's channel count rather than
-anything the session can change. On NFM and WFM it adds the part that is a
-judgement rather than a number: a discriminator recovers the instantaneous
-frequency of whatever reaches it, so a truncated passband produces the wrong
-audio rather than less of the right audio. On the linear modes it does not,
-because a narrower filter in front of an envelope or product detector is
-exactly a narrower filter, and saying otherwise would train an operator to
-ignore the sentence on the mode where it matters.
+So `addVrx` and `setVrxParams` now **refuse** that placement rather than
+narrowing it. The refusal is on the call that asked for it, carries the same
+facts, and names the channel count that would have worked, because the grid
+is sized in `Engine::open_source` and cannot be changed while the source is
+running: it fixes the prototype filter, the twiddle table, the whole graph,
+the ring's floor capacity and `EngineInfo::spectrum`, whose geometry every
+spectrum subscriber read once.
 
-It is prose and is never parsed. `bandwidthClamped` and the granted pair are
-the machine-readable half and are not going anywhere.
+The refusal is narrow on purpose, two conditions together. The mode has to
+be one where a clamp changes what the demodulator produces rather than how
+much of it, which is NFM and WFM and nothing else. And the grant has to
+have fallen below the mode's own entry in `dsp::default_passband`: a WFM
+receiver asking for 300 kHz and granted 250 still has the whole broadcast
+channel. Everything else clamps and reports exactly as before, because an
+envelope or product detector given a narrower filter is exactly a receiver
+with a narrower filter, and refusing those would train an operator to
+ignore the refusal on the mode where it matters.
 
-Nothing infers a mode from a bandwidth. Occupied bandwidth does not determine
-modulation, and a click-to-tune surface that guessed would be a different
-wrong answer; the right source is the classifier `core/detect/detector.h`
-leaves a seam for.
+`clampReason` is prose and is never parsed. `bandwidthClamped` and the
+granted pair are the machine-readable half and are not going anywhere.
+
+### Where a mode comes from
+
+**WHAT THIS SECTION USED TO SAY**: "Nothing infers a mode from a bandwidth.
+Occupied bandwidth does not determine modulation, and a click-to-tune
+surface that guessed would be a different wrong answer." That was true about
+modulation and wrong about what it implied, which was that the honest move
+was to infer nothing. Inferring nothing is not neutral: `VrxParams::demod`
+defaults to `nfm`, so a client that chose nothing chose NFM, and NFM with a
+16 kHz filter on a 145 kHz broadcast station is the guess that cost the
+evening.
+
+`engine::demod_for_signal` is the rule now. It takes the occupied bandwidth
+the detector measured and, when a `characterise::ModulationFamily` is known,
+that too; `core/engine/vrx_place.cpp` carries the derivation and the list of
+what the rule gets wrong, which is long and starts with AM. Nothing on the
+wire carries a family yet, because `core/characterise` reads complex
+baseband and is not wired into the engine, so a client working from
+`Detection` alone uses the width. `ui/models/receiver_match.h` is the Qt
+client's copy of the width half, on the same terms as `kDemodNames`: the
+client links no part of the engine.
 
 ### Nothing else crosses
 

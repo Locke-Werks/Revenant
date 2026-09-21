@@ -1279,8 +1279,16 @@ public:
     // mode's own default. The measured width is NOT handed over as a
     // passband, for the reason ui/qml/Main.qml gives at the call site: on
     // USB the occupied band is entirely above a suppressed carrier, so
-    // using it as a width parks the filter in the wrong place. It is used
-    // only to say whether what the engine built fits what was found.
+    // using it as a width parks the filter in the wrong place.
+    //
+    // AN EMPTY MODE MEANS SOMETHING DIFFERENT HERE than it does on
+    // tuneReceiver above. There it keeps the mode the pane has, because
+    // nothing else is known. Here it means "pick one from the measurement",
+    // through ui::demod_for_detection in models/receiver_match.h: a click
+    // on a detection is the one place this client holds a measurement of
+    // the signal, and letting the previous receiver's mode ride through it
+    // is what put a 16 kHz NFM filter on a 145 kHz broadcast station. A
+    // named mode still wins.
     Q_INVOKABLE void tuneReceiverToDetection(double absolute_hz, const QString& mode,
                                              double detection_bandwidth_hz);
 

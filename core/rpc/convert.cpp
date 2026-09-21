@@ -180,37 +180,6 @@ Expected<engine::Demod> from_schema(schema::Demod mode) {
 
 namespace {
 
-// Whether cutting this mode's passband short makes the demodulator wrong or
-// merely narrow. The distinction is the whole reason the clamp sentence is
-// prose rather than two numbers.
-//
-// A discriminator recovers the instantaneous frequency of whatever reaches
-// it, so truncating the sidebands of an FM signal does not produce quieter
-// audio in less bandwidth: it produces different audio. The envelope
-// detector and the four product detectors are linear in the passband, so a
-// narrower filter in front of one of those is exactly a narrower filter.
-//
-// The raw tap is neither, because nothing demodulates it. A caller reading
-// complex baseband out of a channel gets less band than it asked for and
-// knows what to do about that, so it is grouped with the honest ones.
-//
-// No default case. A ninth demodulator has to answer this question here
-// rather than inherit an answer, which is the same rule
-// dsp::default_passband states for its own table.
-[[nodiscard]] bool clamp_breaks_demodulator(engine::Demod mode) {
-    switch (mode) {
-        case engine::Demod::Nfm:
-        case engine::Demod::Wfm: return true;
-        case engine::Demod::Raw:
-        case engine::Demod::Am:
-        case engine::Demod::Usb:
-        case engine::Demod::Lsb:
-        case engine::Demod::Dsb:
-        case engine::Demod::Cw: return false;
-    }
-    return false;
-}
-
 // The sentence VrxPlacement::clampReason carries, or nothing.
 //
 // Built from the request and the grant together, which is why this is here
@@ -247,7 +216,12 @@ namespace {
     if (wanted > 0 && got < wanted) {
         out += std::format(", which is {} percent of what was asked for",
                            (100 * got) / wanted);
-        if (clamp_breaks_demodulator(request.demod)) {
+        // engine::clamp_breaks_demodulator, which used to be a copy here.
+        // engine::place reads the same predicate to decide which clamps it
+        // refuses outright, and two copies of that would be two policies:
+        // this sentence would keep describing a receiver the engine had
+        // already declined to build, or stop describing one it still does.
+        if (engine::clamp_breaks_demodulator(request.demod)) {
             out += std::format(
                 ". A {} receiver on a truncated passband is not a narrower version of the "
                 "same receiver: the discriminator recovers the instantaneous frequency of "

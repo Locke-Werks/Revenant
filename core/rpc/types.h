@@ -212,6 +212,15 @@ struct VrxParams {
     std::int64_t passband_low = 0;
     std::int64_t passband_high = 0;
 
+    // WHAT A CALLER WITH NO EVIDENCE GETS, AND NOT A DECISION. Nfm is right
+    // for a land mobile channel and wrong for everything wider, and a
+    // client that leaves it alone while tuning from a measurement is
+    // choosing a demodulator by omission. That is what produced a 16 kHz
+    // receiver on a 145 kHz broadcast station: nothing overrode this, so
+    // nothing had to be wrong for the audio to be mush.
+    //
+    // A caller holding a measurement asks engine::demod_for_signal, which
+    // is the one rule and carries its own record of what it gets wrong.
     Demod demod = Demod::Nfm;
     std::uint32_t audio_rate = 0;
     double squelch_dbfs = -200.0;

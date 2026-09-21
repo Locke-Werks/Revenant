@@ -47,6 +47,13 @@
 # run a receiver on a device; core/engine/signal_meter.h exists so the
 # divisor a buffer of interleaved floats takes is assertable on its own.
 
+# test_vrx_tune.cpp is click-to-tune: which demodulator a measured signal
+# gets, and what happens when the grid cannot carry the receiver that choice
+# implies. Most of it is pure and needs no device, because the decision rule
+# and the grid arithmetic are integer functions. Its last two cases do need
+# one, because "a receiver that can actually hear it" is a claim about a
+# receiver that is running rather than about a placement struct.
+
 # test_audio_fanout.cpp needs neither a GPU nor a sound card. AudioFanout is
 # the one part of core/engine/engine.h that is pure host code, and the wire
 # cases in tests/rpc rest on it, so its ordering and its failure semantics are
@@ -67,6 +74,7 @@ add_executable(revenant_engine_tests
     test_signal_meter.cpp
     test_sources.cpp
     test_spectrum_scale.cpp
+    test_vrx_tune.cpp
 )
 
 target_link_libraries(revenant_engine_tests PRIVATE

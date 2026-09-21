@@ -28,7 +28,58 @@
 #include <cstdint>
 #include <string>
 
+#include "core/rpc/types.h"
+
 namespace revenant::ui {
+
+// ---------------------------------------------------------------------------
+// Which demodulator a measured signal wants
+// ---------------------------------------------------------------------------
+//
+// The other half of the 145 kHz case this file's header describes. The
+// sentence below the spectrum was one half: it said the filter did not fit
+// the signal. This is the half that stops it happening, by choosing the
+// mode from what the detector measured instead of leaving
+// rpc::VrxParams::demod at its struct default.
+//
+// A COPY OF engine::demod_for_signal, AND A COPY ON PURPOSE, on the same
+// terms as kDemodNames in models/engine_link.h: this process links no part
+// of the engine, which is the whole reason ui/CMakeLists.txt exists. What
+// keeps the two honest is that both derive the threshold from the same
+// published fact rather than from each other, and that
+// core/engine/vrx_place.cpp carries the argument and the list of what the
+// rule gets wrong. Read it there before changing the number here.
+//
+// The engine's version takes a modulation family from core/characterise as
+// well. This one does not, because nothing on the wire carries one: the
+// characteriser reads complex baseband and the detector publishes a centre,
+// a width and an SNR. When a family reaches a client, it arrives as a field
+// on rpc::Detection and this function grows an argument.
+
+// The widest occupied bandwidth that is still one narrowband FM channel.
+//
+// dsp::default_passband(rpc::Demod::Nfm) is +/-8 kHz and the engine derives
+// it from land mobile in a 25 kHz channel: 5 kHz deviation plus 3 kHz of
+// audio, doubled by Carson, is 16 kHz occupied inside a 25 kHz allocation.
+// The channel rather than the Carson figure is the line, because a detector
+// measures where the energy is and reports something between the two.
+inline constexpr double kNarrowbandChannelHz = 25'000.0;
+
+// The demodulator to open on a detection, from the bandwidth it measured.
+//
+// Zero or less is "no measurement", and gives back the same Nfm a caller
+// that said nothing would have got. Above the narrowband channel is Wfm,
+// which is deliberately the direction to be wrong in: a WFM receiver on a
+// narrow signal passes the whole signal plus noise and sounds quiet, while
+// an NFM receiver on a wide one truncates it and sounds broken at full
+// strength.
+[[nodiscard]] inline rpc::Demod demod_for_detection(double occupied_hz)
+{
+    if (!(occupied_hz > 0.0)) {
+        return rpc::Demod::Nfm;
+    }
+    return occupied_hz > kNarrowbandChannelHz ? rpc::Demod::Wfm : rpc::Demod::Nfm;
+}
 
 // The granted passband is called narrow for the signal when it is under
 // this fraction of the detected bandwidth.

@@ -243,9 +243,19 @@ inline constexpr dsp::Hertz kWidestReceiverHz = 200'000;
 // keeps the oversampling that stops a signal on a boundary falling between
 // two channels.
 //
+// WHAT HAPPENS WHEN A CALLER PINS SOMETHING NARROWER ANYWAY, which this
+// function cannot stop and which is why it is not the whole answer. A count
+// named explicitly is honoured, so a 64-channel grid over 2.4 MS/s is still
+// reachable and a broadcast FM receiver still does not fit on it. That case
+// is refused at placement rather than clamped: engine::place, which calls
+// engine::channel_count_for against the mode's own channel plan to name the
+// count that would have worked. The grid is chosen here, once, and
+// core/engine/vrx_place.cpp lists what holding it fixed buys.
+//
 // Pure, and exported so revenant-engine can say what the default would have
 // been when an operator pins something narrower. Two copies of this rule
-// would be two policies.
+// would be two policies, which is also why the arithmetic itself lives in
+// engine::channel_count_for and this is that function at kWidestReceiverHz.
 [[nodiscard]] std::uint32_t default_channel_count(dsp::SampleRate rate);
 
 // The frequency axis of a spectrum frame, and how wide one is.

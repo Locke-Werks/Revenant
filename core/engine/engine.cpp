@@ -696,15 +696,11 @@ private:
 }  // namespace
 
 std::uint32_t default_channel_count(dsp::SampleRate rate) {
-    if (rate <= 0) {
-        return 2;
-    }
-    const auto guaranteed_at_one =
-        static_cast<std::uint64_t>(rate) / static_cast<std::uint64_t>(kWidestReceiverHz);
-    if (guaranteed_at_one < 2) {
-        return 2;
-    }
-    return static_cast<std::uint32_t>(std::bit_floor(guaranteed_at_one));
+    // The arithmetic moved to engine::channel_count_for so that place() can
+    // name the count that would have carried a receiver it had to refuse.
+    // Its own refusal is about one mode's channel plan rather than about
+    // kWidestReceiverHz, so it needs the width as an argument.
+    return channel_count_for(rate, kWidestReceiverHz);
 }
 
 Expected<std::unique_ptr<Engine>> Engine::create(const EngineConfig& config) {

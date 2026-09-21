@@ -700,9 +700,11 @@ void print_engine_block(const engine::Engine& eng)
             stderr,
             "warning: a {} channel grid on a {} S/s source leaves one channel {} wide, so a "
             "receiver asking for more than that is clamped. A {} Hz broadcast FM receiver is "
-            "the case this bites: the passband is cut short, the discriminator is fed a "
-            "truncated signal and the audio is wrong rather than narrow, while the waterfall "
-            "shows full strength. --channels {} is what this source rate chooses on its own.",
+            "the case this bites, and on the FM modes the engine now REFUSES the placement "
+            "rather than narrowing it: a discriminator fed a truncated signal produces the "
+            "wrong audio rather than narrow audio, at full strength. So clicking a broadcast "
+            "station on this grid will not open a receiver at all. --channels {} is what "
+            "this source rate chooses on its own.",
             info.grid.channels, info.source_rate,
             format_hz(static_cast<double>(info.channel_spacing)), engine::kWidestReceiverHz,
             would_choose);

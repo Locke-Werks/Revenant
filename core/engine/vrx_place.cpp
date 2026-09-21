@@ -41,6 +41,7 @@
 
 #include "core/engine/vrx.h"
 
+#include <bit>
 #include <cstdlib>
 #include <format>
 #include <numeric>
@@ -77,7 +78,112 @@ constexpr Demod kAllDemods[] = {Demod::Raw, Demod::Am,  Demod::Nfm, Demod::Wfm,
     return (remainder < 0) ? quotient - 1 : quotient + 1;
 }
 
+// The widest occupied bandwidth that is still one narrowband FM channel.
+//
+// Not a new number. dsp::default_passband(Demod::Nfm) is +/-8 kHz and
+// core/dsp/vrx_reference.cpp derives it from land mobile in a 25 kHz
+// channel: 5 kHz deviation plus 3 kHz of audio, doubled by Carson, is
+// 16 kHz of occupied bandwidth inside a 25 kHz allocation. 16 kHz is what
+// the transmitter occupies at full modulation and 25 kHz is the channel it
+// is entitled to, and a detector measuring where the energy is reports
+// something between the two. So the channel, not the Carson figure, is the
+// line: a signal wider than a whole allocation is not living in one.
+constexpr dsp::Hertz kNarrowbandChannelHz = 25'000;
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Choosing a demodulator from a measurement
+// ---------------------------------------------------------------------------
+
+// THE DECISION RULE, AND WHAT IT GETS WRONG.
+//
+// Two inputs, and only one of them is ever populated today.
+//
+// `occupied_hz` is what core/detect measures per track and is present on
+// every click-to-tune. The rule over it is one threshold:
+// kNarrowbandChannelHz above. At or below it the signal fits a narrowband
+// channel and the answer is Nfm; above it the answer is Wfm. Both ends of
+// that are sourced from dsp::default_passband's own table rather than
+// picked: Nfm's passband is derived from a 25 kHz channel and Wfm's is the
+// 200 kHz the broadcast band plan allocates, so the threshold sits at the
+// top of the narrower mode's channel rather than anywhere between the two.
+//
+// `family` is core/characterise's answer and is Unknown on every path that
+// exists today, because that stage reads complex baseband and is not wired
+// into the engine. Where it IS known it overrides the width, because it is
+// a measurement of the modulation and the width is a measurement of the
+// occupancy: Unmodulated is a carrier and wants Cw, and Psk and Ofdm have
+// no analogue demodulator that does anything useful with them, so the
+// honest answer there is the raw tap rather than a mode that will produce
+// noise confidently. Fsk falls through to the width, because a discriminator
+// is the front end of every FSK voice mode this project will decode and
+// the width is what says which one.
+//
+// WHAT THIS GETS WRONG, IN THE ORDER IT WILL BITE.
+//
+// One: AM. Broadcast AM occupies 10 kHz and comes back Nfm, which is a
+// discriminator on an amplitude-modulated carrier and produces noise. Width
+// cannot separate them and nothing else here tries. The separation exists
+// and is measured: characterise::EnvelopeStats against
+// CharacteriseConfig::constant_envelope_variance answers it in one number,
+// and that number arrives here the day an extract does.
+//
+// Two: SSB and CW. Both come back Nfm for the same reason, and CW is worse
+// because a keyed carrier is narrow enough to look like a quiet FM channel.
+// A sideband is also not centred on what the detector calls the centre, so
+// even the right mode would need the detector to say which side the energy
+// is on, which it does not.
+//
+// Three: the band between one narrowband channel and a broadcast station.
+// Nothing standard lives from 25 kHz to about 150 kHz, and everything in it
+// is called Wfm. That is the deliberate direction to be wrong in: a WFM
+// receiver on a narrow signal passes the whole signal plus noise and the
+// audio is quiet but intact, while an NFM receiver on a wide signal
+// truncates it and the audio is wrong at full strength. One of those an
+// operator can hear past.
+//
+// Four: digital voice in a 25 kHz channel. DMR, P25 and the rest come back
+// Nfm, which is right about the front end and wrong about the result: the
+// discriminator output is correct and there is no vocoder behind it, so
+// what comes out is a buzz. docs/modes.md is the scope for that and
+// core/engine has no mode to name yet.
+Demod demod_for_signal(const SignalEvidence& evidence) {
+    switch (evidence.family) {
+        case characterise::ModulationFamily::Unmodulated: return Demod::Cw;
+
+        // A linear constellation or a multicarrier waveform. No analogue
+        // detector in the table demodulates either, so the receiver hands
+        // out baseband and whatever is listening decides.
+        case characterise::ModulationFamily::Psk:
+        case characterise::ModulationFamily::Ofdm: return Demod::Raw;
+
+        case characterise::ModulationFamily::AnalogueFm:
+        case characterise::ModulationFamily::Fsk:
+        case characterise::ModulationFamily::Unknown: break;
+    }
+
+    // Nothing measured. The struct default is what a caller with no
+    // evidence would have got anyway, and this says so in one place
+    // instead of leaving it implicit in core/rpc/types.h.
+    if (evidence.occupied_hz <= 0) {
+        return Demod::Nfm;
+    }
+
+    return evidence.occupied_hz > kNarrowbandChannelHz ? Demod::Wfm : Demod::Nfm;
+}
+
+std::uint32_t channel_count_for(dsp::SampleRate rate, dsp::Hertz widest_receiver_hz) {
+    if (rate <= 0 || widest_receiver_hz <= 0) {
+        return 2;
+    }
+    const auto guaranteed_at_one = static_cast<std::uint64_t>(rate) /
+                                   static_cast<std::uint64_t>(widest_receiver_hz);
+    if (guaranteed_at_one < 2) {
+        return 2;
+    }
+    return static_cast<std::uint32_t>(std::bit_floor(guaranteed_at_one));
+}
 
 Expected<Demod> demod_from_name(std::string_view name) {
     for (const Demod mode : kAllDemods) {
@@ -212,6 +318,88 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
     placement.granted_low = granted.low;
     placement.granted_high = granted.high;
     placement.bandwidth_clamped = granted != *requested;
+
+    // WHERE THE CLAMP STOPS BEING A FIT AND BECOMES A DIFFERENT RECEIVER.
+    //
+    // Everything above narrows a request to what one channel can carry and
+    // reports the pair, which is right for every mode that is linear in its
+    // passband: an AM receiver given 9 kHz instead of 10 has less audio
+    // bandwidth and nothing else. It was wrong for the two FM modes, and
+    // wrong in the way that is hardest to diagnose from the operator's
+    // chair. Clicking a 145 kHz broadcast station on a 64-channel grid over
+    // 2.4 MS/s produced a receiver granted 37.5 kHz, the discriminator was
+    // fed a fifth of the signal, and what came out was distortion at full
+    // strength while the waterfall showed a strong clean carrier. Every
+    // number on every surface was correct and the radio sounded broken.
+    //
+    // TWO CONDITIONS, BOTH NEEDED.
+    //
+    // clamp_breaks_demodulator is the first: it is the FM modes and nothing
+    // else, so a linear mode keeps the behaviour its callers already have
+    // and its tests already pin.
+    //
+    // The second is that the grant fell below the mode's OWN channel plan,
+    // dsp::default_passband. A WFM receiver asking for 300 kHz and granted
+    // 250 still has the whole broadcast channel and works; one asking for
+    // 200 and granted 37.5 does not have a channel at all. Using the
+    // request rather than the table would refuse the first of those, and
+    // using "clamped at all" would refuse a receiver that is fine.
+    //
+    // WHY THIS IS A REFUSAL AND NOT A REGRID.
+    //
+    // The grid is chosen once, in Engine::open_source, and
+    // engine::default_channel_count already sizes it from the widest
+    // receiver a source rate can carry, which is why a source opened
+    // without a named channel count never reaches this branch. Changing it
+    // after that is not a parameter edit. grid.channels fixes the prototype
+    // filter and the twiddle table, the whole Graph and its pipelines and
+    // descriptor sets, the DeviceRing's floor capacity (four times the
+    // prototype span plus a block), the block size that was reduced to fit
+    // that ring, and EngineInfo::spectrum, whose bin count and bin width
+    // every spectrum subscriber read once when it subscribed. It also
+    // invalidates every placement already handed out, because a channel
+    // index, a residual and a channel rate are all relative to the grid the
+    // receiver was placed on. Rebuilding that set while samples are flowing
+    // means tearing down the graph under the scheduler and renumbering
+    // subscriptions that have no way to be told, so the engine refuses and
+    // names the count instead.
+    //
+    // The message says what to pass because the fix is one argument at
+    // startup and an operator who is not told will not find it.
+    if (placement.bandwidth_clamped && clamp_breaks_demodulator(params.demod)) {
+        const dsp::Passband plan = dsp::default_passband(params.demod);
+        const std::int64_t got = granted.high - granted.low;
+        if (plan.width() > 0 && got < plan.width()) {
+            const std::uint32_t would_carry = channel_count_for(rate, plan.width());
+            const auto guaranteed = static_cast<std::int64_t>(rate) /
+                                    static_cast<std::int64_t>(would_carry);
+
+            std::string advice;
+            if (guaranteed >= plan.width()) {
+                advice = std::format(
+                    "{} channels on this source guarantee {} Hz to a receiver placed "
+                    "anywhere, so --channels {} carries it. The grid is sized when the "
+                    "source is opened and cannot be changed while it is running",
+                    would_carry, guaranteed, would_carry);
+            } else {
+                advice = std::format(
+                    "No channel count helps: at {} S/s even a two-channel grid guarantees "
+                    "only {} Hz, so the source rate itself is the limit",
+                    rate, static_cast<std::int64_t>(rate) / 2);
+            }
+
+            return fail(std::format(
+                "place: a {} receiver needs {} Hz of passband and one channel of this {} "
+                "channel grid could carry {} Hz of it, {} to {} about the receiver's "
+                "centre. This is refused rather than narrowed because a discriminator "
+                "recovers the instantaneous frequency of whatever reaches it, so a {} "
+                "receiver on a truncated passband produces the wrong audio rather than "
+                "less of the right audio, at full strength and with nothing on the "
+                "display saying so. {}",
+                demod_name(params.demod), plan.width(), grid.channels, got, granted.low,
+                granted.high, demod_name(params.demod), advice));
+        }
+    }
 
     return placement;
 }

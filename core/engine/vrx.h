@@ -41,6 +41,10 @@
 #include <string>
 #include <string_view>
 
+// For ModulationFamily alone, which SignalEvidence carries. catalogue.h
+// pulls in nothing of this project's, so the engine does not acquire a
+// dependency on the characteriser's estimators by naming its vocabulary.
+#include "core/characterise/catalogue.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -556,8 +560,95 @@ struct VrxPlacement {
 
 // Work out which channel a receiver attaches to and what the fine stage has to
 // undo. Pure: it depends on the grid and the request and nothing else.
+//
+// REFUSES RATHER THAN CLAMPS WHERE THE CLAMP WOULD BREAK THE DEMODULATOR.
+// See clamp_breaks_demodulator below and the long note in
+// core/engine/vrx_place.cpp on what the grid can and cannot be asked to do
+// once a source is open. Every other clamp still comes back as a granted
+// pair with bandwidth_clamped set, which is what the linear modes want.
 [[nodiscard]] Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
                                             const VrxParams& params);
+
+// Whether narrowing this mode's passband changes what the demodulator
+// produces rather than how much of it.
+//
+// The FM modes are the two where it does. A discriminator recovers the
+// instantaneous frequency of everything that reaches it, so a truncated
+// passband does not hand back a narrower version of the same audio: it
+// hands back different audio, and the operator hears distortion at full
+// strength rather than a quiet signal. Every other mode here is linear in
+// its passband, so less bandwidth is less audio bandwidth and nothing is
+// broken.
+//
+// Raw is grouped with the honest ones because it is not a demodulator: a
+// narrower raw tap is a narrower raw tap, and whatever is reading it knows
+// what to do about that.
+//
+// No default case. A ninth demodulator has to answer this question here
+// rather than inherit an answer, which is the same rule
+// dsp::default_passband states for its own table.
+[[nodiscard]] constexpr bool clamp_breaks_demodulator(Demod mode) {
+    switch (mode) {
+        case Demod::Nfm:
+        case Demod::Wfm: return true;
+        case Demod::Raw:
+        case Demod::Am:
+        case Demod::Usb:
+        case Demod::Lsb:
+        case Demod::Dsb:
+        case Demod::Cw: return false;
+    }
+    return false;
+}
+
+// What the detector and, when one has been run, the characteriser have to
+// say about a signal somebody clicked on.
+//
+// Two fields and not one because they come from different stages and
+// either can be absent. core/detect publishes an occupied bandwidth per
+// track and always has one; core/characterise reads complex baseband and is
+// not wired into the engine at all, so `family` is Unknown on every path
+// that exists today and is here so that the path which does run it has
+// somewhere to put the answer rather than a second decision rule.
+struct SignalEvidence {
+    // Occupied bandwidth in hertz, as detect::Track measures it. Zero or
+    // negative means nothing was measured.
+    dsp::Hertz occupied_hz = 0;
+
+    characterise::ModulationFamily family = characterise::ModulationFamily::Unknown;
+};
+
+// The demodulator to open on a signal, from what was measured about it.
+//
+// This is what click-to-tune asks instead of taking VrxParams::demod's
+// struct default, which is Nfm and is right for one band out of several.
+// The rule and everything it gets wrong are written out in
+// core/engine/vrx_place.cpp; read that before changing a threshold here,
+// because the thresholds are derived from dsp::default_passband's table
+// rather than chosen.
+[[nodiscard]] Demod demod_for_signal(const SignalEvidence& evidence);
+
+// The largest channel count whose narrowest guaranteed channel still
+// carries a receiver this wide, at this source rate.
+//
+// GUARANTEED, which is the word doing the work. The grid is 2x
+// oversampled, so one channel's stream is 2*rate/M wide and a receiver
+// sits up to half a spacing off its channel's centre;
+// dsp::max_channel_bandwidth turns that into rate/M for a receiver landing
+// anywhere, and twice that for one landing exactly on a centre. This
+// answers against the first figure, because a receiver's frequency is the
+// operator's choice and not the grid's.
+//
+// Two is the floor rather than one: a source too narrow to carry the width
+// at any M cannot be helped by this function, and one channel is a
+// channelizer that channelizes nothing. Zero or a non-positive width
+// answers the floor as well rather than dividing by it.
+//
+// engine::default_channel_count is this function at kWidestReceiverHz, and
+// place() calls it to name the count that would have carried a receiver it
+// had to refuse. Two copies of the arithmetic would be two policies.
+[[nodiscard]] std::uint32_t channel_count_for(dsp::SampleRate rate,
+                                              dsp::Hertz widest_receiver_hz);
 
 // What a receiver reports about itself while running.
 struct VrxStatus {

@@ -18,12 +18,38 @@
 #include "models/receiver_match.h"
 
 using revenant::ui::classify_fit;
+using revenant::ui::demod_for_detection;
 using revenant::ui::FitFlag;
 using revenant::ui::fit_from_status;
 using revenant::ui::fit_sentence;
 using revenant::ui::format_width;
 using revenant::ui::has_flag;
 using revenant::ui::ReceiverFit;
+
+TEST_CASE("the mode comes from the measured width", "[fit]")
+{
+    // THE OTHER HALF OF THE 145 kHz CASE. classify_fit below says the
+    // filter did not fit the signal; this is what stops it happening, by
+    // choosing the mode from the detection instead of leaving
+    // rpc::VrxParams::demod at its Nfm default.
+    //
+    // The wrong implementation here is one that keeps the mode the pane
+    // already has, which is what the client did until 2026-09-21 and is
+    // the reason the first station anybody clicked sounded broken.
+    CHECK(demod_for_detection(145'000.0) == revenant::rpc::Demod::Wfm);
+
+    // A land mobile allocation stays narrowband, and the first hertz past
+    // it does not. 25 kHz is the channel the engine derives
+    // dsp::default_passband(Nfm) from.
+    CHECK(demod_for_detection(16'000.0) == revenant::rpc::Demod::Nfm);
+    CHECK(demod_for_detection(25'000.0) == revenant::rpc::Demod::Nfm);
+    CHECK(demod_for_detection(25'001.0) == revenant::rpc::Demod::Wfm);
+
+    // No measurement is not a measurement of zero: with nothing to go on
+    // the answer is the same default a caller that said nothing would get.
+    CHECK(demod_for_detection(0.0) == revenant::rpc::Demod::Nfm);
+    CHECK(demod_for_detection(-1.0) == revenant::rpc::Demod::Nfm);
+}
 
 TEST_CASE("the 16 kHz receiver on the 145 kHz detection", "[fit]")
 {

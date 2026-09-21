@@ -550,6 +550,21 @@ struct VrxPlacement {
     # engine-wide and set before the source is opened, so it is the
     # engine's command line rather than anything this session can change.
     #
+    # THE FM CASE ABOVE NO LONGER REACHES THIS FIELD, as of 2026-09-21, and
+    # the paragraphs above are kept because they are why it exists. What
+    # this paragraph used to describe as the field's headline case, a
+    # broadcast FM receiver clamped three to one and reported here, is now
+    # refused by engine::place before a receiver is created: a status field
+    # is read after the audio is heard, and the audio was the complaint.
+    # The refusal carries the same facts and the channel count that would
+    # have worked.
+    #
+    # The field is not vestigial. Every linear mode still clamps and still
+    # reports here, which is right, because an envelope or product detector
+    # given a narrower filter is exactly a receiver with a narrower filter.
+    # An FM receiver whose grant fell short of the REQUEST but still covers
+    # the mode's own channel plan reaches it too.
+    #
     # Prose for a human, and never parsed. A client displays it beside the
     # receiver and decides whether to draw anything from bandwidthClamped
     # and the granted pair, which are the machine-readable half and are not

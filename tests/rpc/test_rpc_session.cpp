@@ -660,7 +660,16 @@ TEST_CASE("all eight demodulator modes survive a round trip", "[gpu][rpc][m1]") 
     REVENANT_NEEDS_GPU();
 
     Harness harness;
-    bring_up(harness, HarnessOptions{});
+
+    // Eight channels rather than this fixture's sixty-four, because one of
+    // the eight modes is wfm and engine::place now refuses a WFM receiver
+    // whose channel cannot carry the broadcast channel rather than handing
+    // back a truncated one. At kSourceRate a 64-channel grid guarantees
+    // 37500 Hz and an 8-channel grid guarantees 300004, so this is the
+    // smallest change that keeps the case about mode ordinals instead of
+    // about the grid. The clamp cases below are where the grid is the
+    // subject.
+    bring_up(harness, HarnessOptions{.channels = 8});
 
     // Ordinal for ordinal with engine::Demod, which is what convert.h's
     // static_asserts hold true. A mode reordered on one side and not the
@@ -1183,10 +1192,12 @@ TEST_CASE("a deliberately paced source reports the pace it was given", "[gpu][rp
 }
 
 // ---------------------------------------------------------------------------
-// A clamped passband, in words
+// A passband one channel cannot carry: refused on the FM modes, clamped and
+// reported in words on the linear ones
 // ---------------------------------------------------------------------------
 
-TEST_CASE("a receiver clamped to fit one channel says so in words", "[gpu][rpc][m1]") {
+TEST_CASE("a WFM receiver a channel cannot carry is refused rather than narrowed",
+          "[gpu][rpc][m1]") {
     REVENANT_NEEDS_GPU();
 
     Harness harness;
@@ -1194,8 +1205,16 @@ TEST_CASE("a receiver clamped to fit one channel says so in words", "[gpu][rpc][
 
     // The case the operator hit on air. A 64-channel grid on this fixture's
     // 2400032 S/s source puts one coarse channel at 75001 S/s, so a
-    // broadcast FM receiver asking for 200 kHz of passband cannot have it,
-    // and every surface reported that correctly while the audio was mush.
+    // broadcast FM receiver asking for 200 kHz of passband cannot have it.
+    //
+    // WHAT THIS CASE USED TO ASSERT, AND WHY IT CHANGED. Until 2026-09-21
+    // the receiver was created with a 37 kHz passband and the sentence
+    // below was carried on VrxPlacement::clampReason, which a client had to
+    // poll for and read. Every surface reported it correctly and the radio
+    // still sounded broken: the operator hears the audio long before they
+    // read a status line, and the audio is not a narrower version of the
+    // station, it is the wrong signal. So the placement is refused, with
+    // the same facts in the refusal, at the call that asked for it.
     rpc::VrxParams wide;
     wide.center = 0;
     wide.demod = rpc::Demod::Wfm;
@@ -1203,32 +1222,60 @@ TEST_CASE("a receiver clamped to fit one channel says so in words", "[gpu][rpc][
     wide.passband_high = 100'000;
 
     auto added = harness.client().add_vrx(wide);
+    REQUIRE_FALSE(added.has_value());
+
+    const std::string& refusal = added.error().message;
+    INFO(refusal);
+
+    // What the mode needs, and what one channel of this grid could carry.
+    CHECK(refusal.find("wfm receiver needs 200000 Hz") != std::string::npos);
+    CHECK(refusal.find("64 channel grid") != std::string::npos);
+
+    // The judgement rather than the number: on an FM mode a truncated
+    // passband is not a narrower receiver. A discriminator recovers the
+    // instantaneous frequency of whatever reaches it, so the audio is
+    // wrong rather than narrow-band, and that is the sentence the operator
+    // needed.
+    CHECK(refusal.find("wrong audio") != std::string::npos);
+
+    // And what to do about it, which is not something this session can
+    // change: the grid is sized when the source is opened. 2400032 over
+    // 200000 is 12, and the largest power of two under it is 8.
+    CHECK(refusal.find("--channels 8") != std::string::npos);
+    CHECK(refusal.find("cannot be changed while it is running") != std::string::npos);
+
+    // Nothing was created. A refusal that left a receiver behind would be
+    // worse than the clamp it replaced.
+    CHECK(harness.engine().vrx_ids().empty());
+}
+
+TEST_CASE("a WFM receiver narrower than its channel is built as asked", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // The other side of the refusal above, and the reason it is gated on
+    // the clamp rather than on the mode. A caller that ASKS for a narrow
+    // WFM receiver gets one: the RDS cases in tests/rpc/test_rpc_rds.cpp
+    // open exactly this to prove a decoder faults on a passband too narrow
+    // for the composite, and a rule that refused every narrow WFM receiver
+    // would have taken that case with it.
+    rpc::VrxParams narrow_wfm;
+    narrow_wfm.center = 0;
+    narrow_wfm.demod = rpc::Demod::Wfm;
+    narrow_wfm.passband_low = -20'000;
+    narrow_wfm.passband_high = 20'000;
+
+    auto added = harness.client().add_vrx(narrow_wfm);
+    INFO(test::message_of(added));
     REQUIRE(added.has_value());
 
     auto status = harness.client().vrx_status(*added);
     REQUIRE(status.has_value());
-    REQUIRE(status->placement.bandwidth_clamped);
-
-    const std::string& reason = status->placement.clamp_reason;
-    INFO(reason);
-    REQUIRE_FALSE(reason.empty());
-
-    // What was asked for, and what one channel could carry. The numbers are
-    // already on the wire as granted_low and granted_high; what no client
-    // did was put them in front of anybody.
-    CHECK(reason.find("200000 Hz of passband") != std::string::npos);
-    CHECK(reason.find("percent of what was asked for") != std::string::npos);
-
-    // And the part that is a judgement rather than a number: on an FM mode
-    // a truncated passband is not a narrower receiver. A discriminator
-    // recovers the instantaneous frequency of whatever reaches it, so the
-    // audio is wrong rather than narrow-band, and that is the sentence the
-    // operator needed.
-    CHECK(reason.find("wrong audio") != std::string::npos);
-
-    // Including what to do about it, which is not something this session
-    // can change: the grid is sized when the source is opened.
-    CHECK(reason.find("--channels") != std::string::npos);
+    CHECK_FALSE(status->placement.bandwidth_clamped);
+    CHECK(status->placement.granted_low == -20'000);
+    CHECK(status->placement.granted_high == 20'000);
 }
 
 TEST_CASE("a receiver that fits its channel carries no clamp sentence", "[gpu][rpc][m1]") {
