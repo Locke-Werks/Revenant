@@ -3,11 +3,30 @@
 //
 // A test suite that has never been shown to fail is not evidence. This kernel
 // is core/shaders/cmul.comp with the sign of the real part's second term
-// flipped: it computes a*conj(b) rather than a*b. The output is entirely
-// finite, entirely plausible, and entirely wrong, which is exactly the failure
-// mode the whole reference-diff apparatus exists to catch. If the harness ever
-// passes this, the harness is broken and every green run before it meant
-// nothing.
+// flipped, and nothing else changed. The output is entirely finite, entirely
+// plausible, and entirely wrong, which is exactly the failure mode the whole
+// reference-diff apparatus exists to catch. If the harness ever passes this,
+// the harness is broken and every green run before it meant nothing.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "it computes a*conj(b) rather than a*b."
+// It computes neither. a*conj(b) is (a.x*b.x + a.y*b.y, a.y*b.x - a.x*b.y),
+// so its real part is what the flipped line below produces and its imaginary
+// part is the one below that with ITS second term negated too. One sign was
+// flipped, so the real part is conj's and the imaginary part is still a*b's.
+// The result is not a complex product of anything.
+//
+// That is the better subject for this test and the reason to correct the
+// prose rather than the code: one flipped sign is the smallest wrong kernel
+// there is, and it leaves half the output correct, which is harder for a
+// harness to catch than a wholly different answer.
+//
+// It also means only the EVEN indices of the flattened diff can diverge,
+// which is the one property of this kernel a test could check and does not.
+// tests/reference/test_divergence.cpp asserts that first_divergence is even.
+// The real part of element 0 is wrong for any input where a.y*b.y is not
+// zero, so first_divergence is 0 on every run and 0 % 2 == 0 whatever the
+// imaginary part does. Checking that NO odd index diverges is the assertion
+// that would notice; that file is not this lane's to change.
 //
 // It lives under tests/ and is never linked into the engine.
 
