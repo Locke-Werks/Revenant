@@ -206,6 +206,12 @@ private:
     void resizeColumns(int columns, std::size_t bins);
     [[nodiscard]] int deviceColumns() const;
 
+    // Forgets the trace and the axis it was measured on, plus the rescale
+    // the axis was easing through. Everything below that a FRAME wrote and
+    // nothing a gesture did: a drag in progress is the operator's and is
+    // not this function's to cancel.
+    void dropFrame();
+
     // Arms the ease at the end of a gesture; starts it when a frame brings
     // a span that actually differs. See kRescaleArmMs.
     void armRescale();

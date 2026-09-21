@@ -397,6 +397,24 @@ void PassbandItem::takeFrame()
     }
     const rpc::PassbandFrame& frame = link_->passbandFrame();
     if (frame.power_db.empty()) {
+        // AN EMPTY FRAME IS NEWS AND NOT A NO-OP, WHICH IS THE OPPOSITE OF
+        // WHAT SpectrumItem DOES WITH ONE.
+        //
+        // EngineLink empties this whenever the pane's receiver changes
+        // identity, mode or frequency, so an empty frame here means the
+        // trace in hand was measured on a receiver that is gone. Over on
+        // the span the same signal means the engine went away and the last
+        // reading is still the best one there is, because the axis under it
+        // has not moved. Here the axis HAS moved: it is taken from the
+        // frame's own geometry around the receiver's centre, and the centre
+        // is exactly what changed.
+        //
+        // Returning instead left the old mode's trace on screen under the
+        // new mode's rules. On nfm to raw, where the engine refuses a
+        // passband subscription outright, it left it there for good.
+        dropFrame();
+        rebuildQuads();
+        update();
         return;
     }
 
@@ -436,15 +454,25 @@ void PassbandItem::takeStatus()
     update();
 }
 
-void PassbandItem::onConnectionChanged()
+void PassbandItem::dropFrame()
 {
     have_frame_ = false;
     columns_.clear();
     levels_.clear();
+    reduced_bins_ = 0;
     frame_axis_ = {};
+
+    // The ease is a move between two of these axes, so it has nothing left
+    // to move between. Left running it would step towards a span that no
+    // frame is going to confirm.
     rescale_armed_ = false;
     rescaling_ = false;
     rescale_tick_.stop();
+}
+
+void PassbandItem::onConnectionChanged()
+{
+    dropFrame();
     grab_ = PassbandGrab::None;
     hovered_ = PassbandGrab::None;
     at_limit_ = false;

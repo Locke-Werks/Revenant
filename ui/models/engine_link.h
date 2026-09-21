@@ -1376,6 +1376,27 @@ private:
     // Qt thread. Takes whatever passband frame is waiting.
     void drain_passband();
 
+    // Qt thread. Drops the held passband frame and the flag saying one has
+    // arrived, which together are the detail pane's whole picture: the frame
+    // carries the axis passbandFrequencyAtFraction reads, and the flag is
+    // what suppresses the "waiting for the first passband frame" plate.
+    //
+    // ONE FUNCTION BECAUSE THE TWO MUST NEVER BE CLEARED SEPARATELY, AND
+    // CALLED FROM EVERY TRANSITION THAT INVALIDATES THEM. passband_active_
+    // used to be set in drain_passband and cleared in removeReceiver and the
+    // connection adopt alone, so it latched across a retune and a mode
+    // change. An nfm receiver switched to raw is the entrance that needs no
+    // race: subscribe_passband is refused for a raw tap by contract, no
+    // frame ever arrives for the new receiver, and the pane went on drawing
+    // the nfm trace with the waiting plate suppressed. The axis was wrong
+    // with it, because bin_zero came off the dead frame while
+    // receiverCenterHz came off the live receiver, and that mapping is what
+    // places the drawn filter rules and answers grabAt.
+    //
+    // Returns whether anything was actually dropped, so a caller on the
+    // frame path emits only when there is news.
+    bool reset_passband_display();
+
     // Qt thread. The request the pane holds, fitted to the engine's limits.
     [[nodiscard]] std::pair<int, int> fit_edges(int low, int high) const;
 

@@ -163,11 +163,14 @@ std::pair<int, int> EngineLink::fit_edges(int low, int high) const
 
 void EngineLink::tuneReceiver(double absolute_hz, const QString& mode)
 {
+    bool moved = false;
+
     if (mode.isEmpty()) {
         // Keep the mode the pane has.
     } else if (auto parsed = demod_from_name(mode)) {
         if (*parsed != wanted_.demod) {
             wanted_.demod = *parsed;
+            moved = true;
 
             // A new mode means a new default passband unless the operator
             // has placed the edges themselves on this receiver.
@@ -188,9 +191,24 @@ void EngineLink::tuneReceiver(double absolute_hz, const QString& mode)
     // offset from the source's own centre and nothing between here and
     // there rebases it, so the subtraction is this caller's job and is done
     // here because this is the object holding EngineInfo::sourceCenter.
-    wanted_.center =
+    const std::int64_t center =
         static_cast<std::int64_t>(std::llround(absolute_hz)) - info_.source_center;
+    moved = moved || center != wanted_.center;
+    wanted_.center = center;
     wanted_.bandwidth = 0;
+
+    // The held frame was measured around the old centre in the old mode, so
+    // the moment either moves it is describing a receiver that no longer
+    // exists. Dropped here rather than waited out, because the frame that
+    // would replace it may never come: a raw tap is refused a passband
+    // subscription outright. See reset_passband_display.
+    //
+    // Only when something actually moved. Re-tuning to the frequency already
+    // held is what a second click on the same detection does, and blanking
+    // the pane for it would flash the waiting plate for no reason.
+    if (moved && reset_passband_display()) {
+        emit passbandChanged();
+    }
 
     // A tune is a new receiver whenever the pane is on none, and a retune
     // of the one it has otherwise. Moving the dial is a push constant and a
@@ -220,6 +238,14 @@ void EngineLink::setReceiverDemod(const QString& mode)
         wanted_.passband_low = 0;
         wanted_.passband_high = 0;
         wanted_.bandwidth = 0;
+    }
+
+    // The frame in hand belongs to the old mode's receiver, which is about
+    // to be removed. This is the entrance reset_passband_display exists for:
+    // nfm to raw, where subscribe_passband is refused by contract and no
+    // later frame corrects the pane.
+    if (reset_passband_display()) {
+        emit passbandChanged();
     }
 
     // A remove and an add, because the demodulator IS the stage: the engine
@@ -346,8 +372,7 @@ void EngineLink::removeReceiver()
     }
 
     receiver_id_ = 0;
-    passband_active_ = false;
-    passband_display_ = {};
+    static_cast<void>(reset_passband_display());
     receiver_status_ = {};
     receiver_edge_limit_ = 0;
     edges_touched_ = false;
@@ -635,6 +660,15 @@ void EngineLink::adopt_receiver_status()
     if (have_id && id != receiver_id_) {
         receiver_id_ = id;
         identity_moved = true;
+
+        // The supervisor rebuilt the receiver, so whatever the pane is
+        // holding was measured on the one before it. This is the path a
+        // rebuild takes that no Qt-thread write went through: a width
+        // change the engine refused in place comes back here as a new id
+        // and nothing else says so.
+        if (reset_passband_display()) {
+            emit passbandChanged();
+        }
     }
 
     bool edges_resolved = false;
@@ -755,19 +789,50 @@ void EngineLink::drain_passband()
         has_passband_ready_ = false;
     }
 
-    // A frame that belongs to a receiver the pane has moved off is drawn by
+    // A frame that belongs to a receiver the pane is not on is drawn by
     // nobody. It can only be one already on the wire when the subscription
     // was replaced, which is the case unsubscribe's ordered cancel narrows
     // and does not close: the add of the next receiver happens on the
     // supervisor and the Qt thread learns the new id separately.
-    if (receiver_id_ != 0 && passband_display_.vrx != receiver_id_) {
+    //
+    // TWO THINGS CHANGED HERE AND BOTH MATTER.
+    //
+    // receiver_id_ == 0 is inside the test rather than an exemption from it.
+    // It used to read "the pane does not know its id, so take anything",
+    // and the pane holds no id at exactly two moments, after a remove and
+    // while the link is down. A frame at either of those belongs to a
+    // receiver that is gone.
+    //
+    // And a rejected frame is DROPPED rather than merely not drawn. The swap
+    // above has already put it in passband_display_, which is what
+    // passbandFrequencyAtFraction reads whether or not anything repaints, so
+    // returning alone left the foreign frame as the pane's axis.
+    if (passband_display_.vrx != receiver_id_) {
+        if (reset_passband_display()) {
+            emit passbandChanged();
+        }
         return;
     }
 
-    if (!passband_active_) {
-        passband_active_ = true;
-    }
+    passband_active_ = true;
     emit passbandChanged();
+}
+
+bool EngineLink::reset_passband_display()
+{
+    if (!passband_active_ && passband_display_.vrx == 0 &&
+        passband_display_.power_db.empty()) {
+        return false;
+    }
+
+    passband_active_ = false;
+
+    // Assigned rather than cleared field by field, so a field added to
+    // PassbandFrame cannot be forgotten here. The vector's capacity goes
+    // with it, which costs one allocation on the next frame and is the
+    // right trade for a pane that may be off a receiver for hours.
+    passband_display_ = {};
+    return true;
 }
 
 }  // namespace revenant::ui

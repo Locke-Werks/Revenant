@@ -575,8 +575,7 @@ void EngineLink::adopt()
     receiver_id_ = 0;
     receiver_status_ = {};
     receiver_edge_limit_ = 0;
-    passband_active_ = false;
-    passband_display_ = {};
+    static_cast<void>(reset_passband_display());
     emit receiverStatusChanged();
     emit passbandChanged();
 
