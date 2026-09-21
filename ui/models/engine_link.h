@@ -1386,6 +1386,16 @@ private:
     rpc::VrxParams wanted_;
     qulonglong receiver_id_ = 0;
 
+    // Qt thread only. The pane held a receiver when the link went away, so
+    // the next connection puts one back from wanted_.
+    //
+    // A member and not a local, because a reconnection is two adopt() calls
+    // and the fact is known in the first and needed in the second. adopt()
+    // sets it when it zeroes a non-zero receiver_id_ and clears it on the
+    // connecting edge that acts on it; see the block there for what the
+    // local it replaced could not do.
+    bool restore_receiver_ = false;
+
     // The operator has moved an edge on this receiver, so a mode change
     // keeps their edges instead of taking the new mode's default.
     bool edges_touched_ = false;

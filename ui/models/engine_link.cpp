@@ -548,11 +548,30 @@ void EngineLink::adopt()
     audio_stats_ = {};
     emit audioChanged();
 
-    // Whether the pane HAD a receiver, which is the test for putting one
-    // back. Not "wanted_.center is non-zero": a receiver tuned exactly to
-    // the source's own centre is an ordinary thing to want and would never
-    // have been restored.
-    const bool had_receiver = receiver_id_ != 0;
+    // WHETHER THE PANE HAD A RECEIVER, CARRIED ACROSS THE TWO adopt() CALLS
+    // A RECONNECTION MAKES RATHER THAN RECOMPUTED INSIDE ONE.
+    //
+    // Not "wanted_.center is non-zero": a receiver tuned exactly to the
+    // source's own centre is an ordinary thing to want and would never have
+    // been restored.
+    //
+    // WHAT THIS USED TO BE. A local `const bool had_receiver = receiver_id_
+    // != 0;` read a few lines above the clear below and tested against
+    // `connected_ && !was_connected` in the same pass. No single pass can
+    // meet that. A reconnection is two adopts: on the way down the id is
+    // there and connected_ is false, and on the way up connected_ is true
+    // and the id was zeroed by the pass before. So the restore below never
+    // ran once, an engine restart silently lost the operator's receiver and
+    // the audio that follows it, and the empty pane read as the engine's
+    // fault. Three comments in this function assured the reader it recovered.
+    //
+    // So the fact is recorded where it is known and read where it is needed.
+    // Set and never cleared while the link is down, because adopt() runs
+    // again on every failed reconnect and every later pass finds the id
+    // already zero.
+    if (receiver_id_ != 0) {
+        restore_receiver_ = true;
+    }
     receiver_id_ = 0;
     receiver_status_ = {};
     receiver_edge_limit_ = 0;
@@ -561,11 +580,16 @@ void EngineLink::adopt()
     emit receiverStatusChanged();
     emit passbandChanged();
 
-    if (connected_ && !was_connected && had_receiver) {
+    if (connected_ && !was_connected && restore_receiver_) {
         // The pane had a receiver before the engine went away, so put it
         // back rather than making the operator retune by hand. Recreated
         // rather than retuned, because there is nothing on the new engine
         // to retune.
+        //
+        // Cleared here and only here: this is the pass that acts on it, and
+        // leaving it set would recreate a receiver the operator removed
+        // after the reconnection on whatever reconnection came next.
+        restore_receiver_ = false;
         post_receiver_request(true);
     } else {
         emit receiverChanged();
