@@ -42,6 +42,43 @@
 // cycle. ToneSearch::valley_fraction is where the line is drawn and
 // ToneStructure::valley_ratio is the measurement, so a caller can see how
 // close the call was rather than only which side of it the answer fell.
+//
+// THIS IS A HIGH SIGNAL-TO-NOISE INSTRUMENT, AND THE FIGURE IS WORSE THAN
+// IT LOOKS
+//
+// The instantaneous frequency is a per-sample quantity computed on the
+// extract as handed in, so the noise on it is set by the extract's
+// FULL-BAND signal-to-noise ratio and by its sample rate, not by the
+// signal's own bandwidth. One sample of phase difference carries a noise
+// of roughly 1/sqrt(SNR) radians, which is rate/(2*pi*sqrt(SNR)) hertz,
+// and that has to stay well under half the tone spacing for the modes to
+// stay apart.
+//
+// Measured 2026-09-21 by tests/characterise/test_tones.cpp, on 4FSK at
+// 4800 baud with 1296 Hz between tones, in an unfiltered 48 kS/s extract:
+// four tones at 45 dB in 2500 Hz and above, a refusal on the mode width
+// at 40, and one merged mode from 35 down. The estimators in
+// core/characterise/cyclostationary.h work thirty decibels below that on
+// the same signal, so this is the weakest link in the stage by a wide
+// margin, and it is where the work goes next.
+//
+// Two levers, in the order they are worth taking. The extract:
+// docs/detection.md's probe-receiver section already concludes that a
+// classifier wants a real DemodStage rather than a raw coarse channel,
+// and the 7.8 dB this case throws away by carrying 48 kHz of noise for an
+// 8 kHz signal is exactly that argument in numbers. Then averaging the
+// instantaneous frequency across a symbol, which divides the noise by the
+// square root of the samples per symbol and costs nothing at the
+// transitions IF the symbol timing is known. Neither is done here: this
+// file takes a span and a rate and knows no symbol timing, and inventing
+// one would make the estimator depend on another estimator's output
+// without saying so.
+//
+// What it does do is refuse rather than report a merged pair as one tone
+// at the average of two spacings. tests/characterise/test_characterise.cpp
+// asserts that a 4FSK signal past this limit comes back as a
+// constant-envelope waveform with an unattributed cycle frequency, which
+// is a weaker claim and a true one.
 
 #pragma once
 
@@ -198,10 +235,12 @@ struct ToneStructure {
     std::size_t samples_kept = 0;
     std::size_t samples_gated = 0;
 
-    // Standard deviation of the whole instantaneous-frequency distribution,
-    // robust to outliers: the interquartile range over 1.349, which is the
-    // factor that makes the two agree for a Gaussian. An unmodulated
-    // carrier's is the phase noise and nothing else.
+    // Standard deviation of the whole instantaneous-frequency
+    // distribution, taken as the interquartile range over 1.349, which is
+    // the factor that makes the two agree for a Gaussian. A percentile
+    // rather than a moment, so one sample of phase noise across an
+    // envelope null does not set it. An unmodulated carrier's is the phase
+    // noise and nothing else.
     double frequency_spread_hz = 0.0;
 };
 

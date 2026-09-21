@@ -182,7 +182,7 @@ TEST_CASE("a broadcast FM station is analogue FM, and no symbol rate", "[charact
     // them there, and reporting one as a symbol rate would be a
     // measurement attached to the wrong thing.
     REQUIRE_FALSE(result->symbol_rate.found);
-    REQUIRE(result->summary.find("No symbol rate is reported") != std::string::npos);
+    REQUIRE(result->summary.find("not reported as a symbol rate") != std::string::npos);
 
     REQUIRE(names(*result, "FM broadcast"));
     REQUIRE_FALSE(names(*result, "Narrowband FM land mobile"));
@@ -226,6 +226,64 @@ TEST_CASE("an OFDM burst comes back as OFDM with its own symbol period", "[chara
     REQUIRE(result->ofdm.subcarrier_spacing_hz == Approx(187.5).epsilon(0.01));
     REQUIRE(result->candidates.empty());
     REQUIRE(result->summary.find("nothing in the catalogue") != std::string::npos);
+}
+
+// REJECTS: a characteriser that keeps naming a tone count as its extract
+// gets weaker. This is the SAME 4FSK signal as the first case, in enough
+// noise that the histogram's four modes have merged, and it is the case
+// where a mode counter starts reporting three tones at the average of two
+// real spacings, which matches a catalogue row that has nothing to do with
+// the signal.
+//
+// What the stage has to do instead is fall back to the weaker claim it can
+// still support and say so. That claim is constant envelope with a
+// continuous instantaneous frequency, which IS what a 4FSK signal whose
+// tones cannot be separated looks like, at half confidence, with the
+// cycle frequency reported and explicitly not called a symbol rate.
+//
+// tests/characterise/test_tones.cpp measures where the separation goes, at
+// 45 dB in 2500 Hz on an unfiltered 48 kS/s extract, and core/characterise/
+// tones.h says why that figure is as high as it is and what the lever is.
+TEST_CASE("a 4FSK signal too weak to separate falls back rather than guessing",
+          "[characterise]")
+{
+    characterise_test::MfskSpec spec;
+    spec.rate = kRate;
+    spec.tone_count = 4;
+    spec.spacing_hz = 1296;
+    spec.symbol_rate = 4800.0;
+    spec.seed = kSeed + 6;
+    std::println("test_characterise weak 4fsk: seed {}", spec.seed);
+
+    auto samples = characterise_test::mfsk_signal(spec, kSamples);
+    REQUIRE(samples.size() == kSamples);
+    const auto noise = siggen::add_awgn(dsp::ComplexSpan(samples),
+                                        siggen::NoiseLevel::snr_in_2500_hz_db(30.0), kRate,
+                                        siggen::derive_seed(spec.seed, 1));
+    REQUIRE(noise.has_value());
+
+    const auto result = characterise::characterise(dsp::ConstComplexSpan(samples), config(kRate));
+    REQUIRE(result.has_value());
+    report("4FSK at 30 dB in 2500 Hz", *result);
+    CAPTURE(result->tones.tone_count, result->tones.refusal, result->refusal,
+            result->frequency_transition.symbol_rate_hz);
+
+    // Not a tone set, and not a WRONG tone set either, which is the
+    // failure this case exists for.
+    REQUIRE_FALSE(result->tones.found);
+    REQUIRE(result->family != ModulationFamily::Fsk);
+    REQUIRE(result->family != ModulationFamily::Psk);
+
+    REQUIRE(result->family == ModulationFamily::AnalogueFm);
+    REQUIRE(result->family_confidence == Approx(0.5));
+    REQUIRE_FALSE(result->symbol_rate.found);
+
+    // And the symbol rate is still in there, reported as the unattributed
+    // cycle frequency it is rather than thrown away.
+    REQUIRE(result->frequency_transition.found);
+    REQUIRE(result->frequency_transition.symbol_rate_hz == Approx(4800.0).epsilon(0.02));
+    REQUIRE(result->summary.find("cycle frequency") != std::string::npos);
+    REQUIRE(result->summary.find("Nothing here decides which") != std::string::npos);
 }
 
 // REJECTS: a characteriser with no unmodulated branch, which reports a

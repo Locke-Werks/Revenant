@@ -178,13 +178,29 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
         out.family_confidence = 0.5;
         query.family = ModulationFamily::AnalogueFm;
         out.candidates = match_protocols(query);
+        // The cycle frequency is reported and not attributed, which is a
+        // different thing from suppressing it. On a broadcast carrier the
+        // frequency-transition feature carries lines at the composite's
+        // own tones, and on a 4FSK signal too weak for its tones to
+        // separate it carries one at the symbol rate. The two are the
+        // same measurement and nothing here tells them apart, so the
+        // number goes in the summary saying exactly that, rather than
+        // being thrown away or being called a symbol rate.
+        const std::string cycle =
+            out.frequency_transition.found
+                ? std::format(
+                      ". A cycle frequency of {} stands {:.1f} dB up in the phase-curvature "
+                      "feature. On an analogue carrier that is a modulation tone; on a digital "
+                      "one it would be the symbol rate. Nothing here decides which, so it is "
+                      "not reported as a symbol rate",
+                      hertz(out.frequency_transition.symbol_rate_hz),
+                      out.frequency_transition.margin_db)
+                : std::string();
         out.summary = std::format(
             "constant envelope with a continuously distributed instantaneous frequency spanning "
             "{} inside {}: analogue FM, or a continuous-phase digital mode whose tones this "
-            "extract cannot separate. No symbol rate is reported, because a cycle frequency on "
-            "a signal like this is a modulation tone and naming one as a symbol rate is the "
-            "confident wrong answer{}",
-            hertz(out.tones.frequency_spread_hz), hertz(out.band.bandwidth_hz),
+            "extract cannot separate{}{}",
+            hertz(out.tones.frequency_spread_hz), hertz(out.band.bandwidth_hz), cycle,
             candidate_clause(out.candidates));
     } else if (out.order.found && !constant_envelope) {
         out.family = ModulationFamily::Psk;

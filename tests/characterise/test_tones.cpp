@@ -13,6 +13,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +23,7 @@
 
 #include "core/characterise/tones.h"
 #include "core/characterise/transform.h"
+#include "core/dsp/synth/channel.h"
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/wfm_mod.h"
 #include "tests/characterise/signal_lab.h"
@@ -282,4 +284,81 @@ TEST_CASE("the envelope statistic is a property of the waveform, not the gain",
         analysis_of(characterise_test::gaussian_noise(kSamples, 3.0, kSeed + 5)));
     CAPTURE(noise_stats.normalised_power_variance);
     REQUIRE(noise_stats.normalised_power_variance == Approx(1.0).epsilon(0.05));
+}
+
+// REJECTS: a working range for the tone estimator that nobody measured,
+// and the failure mode that matters more than the range itself.
+//
+// Noise on the phase difference widens every mode, so as the extract gets
+// weaker the histogram's four spikes become four lumps and then one. There
+// are two ways out of that and only one of them is acceptable. The width
+// rule can fire and the estimator refuses, which is right. Or two adjacent
+// lumps can merge while the outer two stay separate, and the estimator
+// then reports a clean, confident, WRONG tone count of three, with a
+// spacing that is the average of two real spacings and matches a catalogue
+// row that has nothing to do with the signal.
+//
+// The per-point assertion is what rules the second out: every answer the
+// estimator gives across the sweep has to be four tones at the right
+// spacing, and the points where it cannot manage that have to be
+// refusals. The table is printed, so the range is a measurement in the log
+// rather than a sentence in a header nobody re-runs.
+TEST_CASE("the tone estimator degrades measurably, not silently", "[characterise]")
+{
+    characterise_test::MfskSpec spec;
+    spec.rate = kRate;
+    spec.tone_count = 4;
+    spec.spacing_hz = 1296;
+    spec.symbol_rate = 4800.0;
+    spec.seed = kSeed + 6;
+    std::println("test_tones snr sweep: seed {}", spec.seed);
+
+    const auto clean = characterise_test::mfsk_signal(spec, kSamples);
+    REQUIRE(clean.size() == kSamples);
+
+    double lowest_working_db = 1000.0;
+    bool refused_somewhere = false;
+    for (const double snr_db : {55.0, 50.0, 45.0, 40.0, 35.0, 30.0, 20.0, 10.0}) {
+        auto noisy = clean;
+        const auto noise = siggen::add_awgn(dsp::ComplexSpan(noisy),
+                                            siggen::NoiseLevel::snr_in_2500_hz_db(snr_db), kRate,
+                                            siggen::derive_seed(spec.seed, 1));
+        REQUIRE(noise.has_value());
+
+        const auto structure = characterise::estimate_tone_structure(analysis_of(noisy), kRate);
+        REQUIRE(structure.has_value());
+        std::println("  snr_2500 {:>6.1f} dB  found {}  {} modes  spacing {:>7.1f} Hz  "
+                     "widest {:.3f}  valley {:.3f}",
+                     snr_db, structure->found ? "yes" : " no", structure->tone_count,
+                     structure->spacing_hz, structure->widest_tone_fraction,
+                     structure->valley_ratio);
+
+        CAPTURE(snr_db, structure->tone_count, structure->spacing_hz, structure->refusal);
+        if (structure->found) {
+            REQUIRE(structure->tone_count == 4);
+            REQUIRE(structure->spacing_hz ==
+                    Approx(static_cast<double>(spec.spacing_hz)).epsilon(0.05));
+            lowest_working_db = std::min(lowest_working_db, snr_db);
+        } else {
+            refused_somewhere = true;
+            REQUIRE_FALSE(structure->refusal.empty());
+        }
+    }
+
+    // 45 dB in 2500 Hz, which is a demanding figure and is the honest one.
+    //
+    // The instantaneous frequency is a per-sample quantity, so its noise
+    // is set by the extract's FULL-BAND signal-to-noise ratio: 45 dB in
+    // 2500 Hz is 32 dB across this 48 kS/s buffer, which puts about 190 Hz
+    // of noise on a 1296 Hz spacing. Carrying 48 kHz of noise for an 8 kHz
+    // signal throws away 7.8 dB of that before anything else happens, and
+    // core/characterise/tones.h says what the two levers are. The
+    // estimators in cyclostationary.h work thirty decibels lower on the
+    // same signal, which is why this bound is recorded rather than
+    // rounded.
+    CAPTURE(lowest_working_db);
+    REQUIRE(lowest_working_db <= 45.0);
+    // And it has to stop somewhere in the swept range, or the per-point
+    // assertion above never ran against a hard case.
+    REQUIRE(refused_somewhere);
 }
