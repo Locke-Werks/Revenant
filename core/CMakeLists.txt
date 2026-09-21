@@ -43,6 +43,7 @@ find_package(rtlsdr CONFIG REQUIRED)
 # what it is.
 add_library(revenant_core STATIC
     characterise/cyclostationary.cpp
+    characterise/periodicity.cpp
     characterise/tones.cpp
     characterise/transform.cpp
     decode/imbe.cpp
