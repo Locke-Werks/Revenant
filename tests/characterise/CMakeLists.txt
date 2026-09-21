@@ -17,6 +17,7 @@ add_executable(revenant_characterise_tests
     ../support/no_modal_dialogs.cpp
     signal_lab.cpp
     test_cyclostationary.cpp
+    test_tones.cpp
     test_transform.cpp
 )
 

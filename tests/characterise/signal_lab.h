@@ -8,10 +8,10 @@
 // modulators, which moved out of tools/siggen once the engine could open a
 // synthetic scene.
 //
-// Neither argument reaches these three. A reference twin is shipped because
-// the kernel it referees is shipped. A modulator is shipped because the
-// engine transmits from it. Nothing here is either: these are stimuli for the
-// characteriser, and two of the three are not signals anybody would transmit.
+// Neither argument reaches these. A reference twin is shipped because the
+// kernel it referees is shipped. A modulator is shipped because the engine
+// transmits from it. Nothing here is either: these are stimuli for the
+// characteriser, and the first of them is not a signal at all.
 //
 //   gaussian_noise is the refusal case. There is no wanted signal in it at
 //   all, which is the point.
@@ -21,11 +21,13 @@
 //   has to be scored against the degenerate case separately from the keyed
 //   one.
 //
-//   ofdm_signal is the one that would belong in core/dsp/synth if this lane
-//   owned that directory, and it does not. The cyclic-prefix estimator needs
-//   a multicarrier signal with a known useful-symbol length and a known
-//   guard, and no mode in modulators.h produces one. When synth grows an
-//   OFDM mode this moves there and this file keeps the other two.
+//   ofdm_signal and mfsk_signal are the two that would belong in
+//   core/dsp/synth if this lane owned that directory, and it does not.
+//   modulators.h has Fsk2 and no M-ary FSK at all, so nothing in the tree
+//   can produce the four-level signal every 4FSK row in docs/modes.md
+//   describes, and nothing can produce a multicarrier signal with a known
+//   useful-symbol length and a known guard. When synth grows those modes
+//   these move there and this file keeps the first two.
 //
 // Everything here follows the same contract the modulators do: pure
 // functions of their arguments and an explicit seed, no clock read, and
@@ -95,6 +97,38 @@ struct OfdmSpec {
 // framing. Empty when the spec is not renderable, which the caller checks by
 // asking for a size it knows.
 [[nodiscard]] std::vector<Complex32> ofdm_signal(const OfdmSpec& spec);
+
+struct MfskSpec {
+    SampleRate rate = 48000;
+
+    // Tones, evenly spaced and centred on the carrier. Two is the
+    // degenerate case and is deliberately reachable, so a test can check
+    // this instrument against core/dsp/synth's own Fsk2 rather than
+    // trusting it.
+    std::size_t tone_count = 4;
+
+    // Between adjacent tones. The whole set spans (tone_count - 1) times
+    // this, which is the number a 4FSK catalogue row states.
+    Hertz spacing_hz = 1944;
+
+    Hertz carrier_offset = 0;
+
+    // Samples per symbol has to come out whole, or the tone boundaries
+    // would land between samples and the histogram would carry a smear
+    // that is this instrument's fault rather than the signal's.
+    double symbol_rate = 4800.0;
+
+    std::uint64_t seed = 0;
+    double amplitude = 1.0;
+};
+
+// Continuous-phase M-ary FSK: the phase runs on without a jump at a symbol
+// boundary, which is what every waveform in docs/modes.md's 4FSK rows does
+// and what makes the instantaneous frequency a clean staircase.
+//
+// Empty when rate/symbol_rate is not a whole number, or the tone set does
+// not fit inside the Nyquist band. The caller asks for a size it knows.
+[[nodiscard]] std::vector<Complex32> mfsk_signal(const MfskSpec& spec, std::size_t sample_count);
 
 // Sum of two buffers, truncated to the shorter. Used to place a signal in
 // noise when the noise power was decided by something other than

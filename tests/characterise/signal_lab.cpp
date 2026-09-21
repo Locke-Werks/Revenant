@@ -118,6 +118,51 @@ std::vector<Complex32> ofdm_signal(const OfdmSpec& spec)
     return out;
 }
 
+std::vector<Complex32> mfsk_signal(const MfskSpec& spec, std::size_t sample_count)
+{
+    if (spec.tone_count < 2 || spec.rate <= 0 || !(spec.symbol_rate > 0.0)) {
+        return {};
+    }
+    const double exact = static_cast<double>(spec.rate) / spec.symbol_rate;
+    const auto samples_per_symbol = static_cast<std::size_t>(std::llround(exact));
+    if (samples_per_symbol == 0 || std::abs(exact - static_cast<double>(samples_per_symbol)) >
+                                       1e-9) {
+        return {};
+    }
+
+    const double half = 0.5 * static_cast<double>(spec.tone_count - 1);
+    const double edge = std::abs(static_cast<double>(spec.carrier_offset)) +
+                        half * std::abs(static_cast<double>(spec.spacing_hz));
+    if (edge >= 0.5 * static_cast<double>(spec.rate)) {
+        return {};
+    }
+
+    std::vector<Complex32> out(sample_count);
+    std::mt19937_64 engine(spec.seed);
+
+    // One running phase, wrapped every sample. Continuous by construction:
+    // the increment changes at a symbol boundary and the phase does not.
+    double phase = 0.0;
+    double increment = 0.0;
+    for (std::size_t n = 0; n < sample_count; ++n) {
+        if (n % samples_per_symbol == 0) {
+            const auto level = static_cast<double>(engine() % spec.tone_count);
+            const double tone = static_cast<double>(spec.carrier_offset) +
+                                (level - half) * static_cast<double>(spec.spacing_hz);
+            increment = 2.0 * std::numbers::pi * tone / static_cast<double>(spec.rate);
+        }
+        out[n] = Complex32(static_cast<float>(spec.amplitude * std::cos(phase)),
+                           static_cast<float>(spec.amplitude * std::sin(phase)));
+        phase += increment;
+        if (phase > std::numbers::pi) {
+            phase -= 2.0 * std::numbers::pi;
+        } else if (phase < -std::numbers::pi) {
+            phase += 2.0 * std::numbers::pi;
+        }
+    }
+    return out;
+}
+
 std::vector<Complex32> add_buffers(const std::vector<Complex32>& a,
                                    const std::vector<Complex32>& b)
 {
