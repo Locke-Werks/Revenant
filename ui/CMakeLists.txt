@@ -150,6 +150,7 @@ qt_add_executable(revenant_ui
     models/engine_link.cpp
     models/engine_link.h
     models/receiver_link.cpp
+    models/source_link.cpp
     render/passband_item.cpp
     render/passband_item.h
     render/spectrum_item.cpp
@@ -314,6 +315,9 @@ endif()
 # across a height change: which wrapped index a kept row comes from, how
 # many rows survive, and where the write cursor lands.
 #
+# It covers parse_frequency, which decides what unit a bare number typed
+# into the frequency box means and therefore where the radio goes.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -353,6 +357,7 @@ if(REVENANT_UI_TESTS)
             audio/audio_ring.cpp
             tests/test_audio_ring.cpp
             tests/test_history_resize.cpp
+            tests/test_frequency_entry.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE

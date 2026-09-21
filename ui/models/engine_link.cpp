@@ -129,6 +129,13 @@ void EngineLink::supervise()
             // this loop immediately rather than waiting out the poll
             // interval, so this is the path a moving filter edge takes and
             // the status poll behind it is what reads the grant back.
+            // Before the receiver work, because a retune moves the source
+            // centre and the receiver's absolute frequency with it. A
+            // receiver applied first would be placed against the previous
+            // centre and moved a pass later, which on a drag is a filter
+            // that jumps after the radio has already landed.
+            apply_source_tune();
+
             apply_receiver_request();
 
             // After the receiver work and before the status poll. A
@@ -140,9 +147,9 @@ void EngineLink::supervise()
             poll_detections();
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
             supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
-                return stopping_ ||
-                       ((receiver_work_pending_ || audio_work_pending_) &&
-                        client_ != nullptr);
+                return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
+                                      tune_work_pending_) &&
+                                     client_ != nullptr);
             });
             if (stopping_) {
                 break;
@@ -197,6 +204,7 @@ void EngineLink::supervise()
             // the window: connected, geometry on screen, and a frame rate
             // frozen at whatever it last was.
             note_running(*alive);
+            apply_source_tune();
             apply_receiver_request();
             apply_audio_request();
             poll_receiver_status();
@@ -219,8 +227,9 @@ void EngineLink::supervise()
         // client_ is the supervisor's own and is read here on its own
         // thread.
         supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
-            return stopping_ ||
-                   ((receiver_work_pending_ || audio_work_pending_) && client_ != nullptr);
+            return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
+                                  tune_work_pending_) &&
+                                 client_ != nullptr);
         });
         if (stopping_) {
             break;
@@ -376,6 +385,13 @@ bool EngineLink::attempt_connect()
         handover_error_.clear();
     }
     QMetaObject::invokeMethod(this, [this] { adopt(); }, Qt::QueuedConnection);
+
+    // Asked once per connection, because it is a property of the source
+    // and the source does not change under a live engine. A window that
+    // asked per pass would spend a round trip a second on an answer that
+    // is the same every time; a window that never asked would have to
+    // offer the control and let it refuse, which is what this replaces.
+    probe_source_tuning();
 
     // An engine built with no spectrum stage is the default and is what a
     // headless recording runs. Connecting to one is not a failure, so the

@@ -243,6 +243,167 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // Tuning the front end
+        // ------------------------------------------------------------------
+        //
+        // THE CONTROL IS GREYED RATHER THAN OFFERED AND REFUSED. A file and
+        // a synthetic source cannot retune, and a control that always fails
+        // teaches an operator that the window lies. sourceCanRetune is
+        // asked once per connection and this row reads it; when it is
+        // false, the reason is on screen beside the dead box rather than
+        // arriving as a refusal after the first attempt.
+        //
+        // THE ECHO UNDER THE BOX IS NOT DECORATION. A bare number has to be
+        // guessed at, and models/frequency_entry.h guesses megahertz below
+        // a million. previewTune says which reading was taken before
+        // anything is sent, and the granted line afterwards says what the
+        // device actually did with it, because a tuning step rounds.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.connected
+
+            Label {
+                text: "tune"
+                color: engineLink.sourceCanRetune ? window.inkTune : window.inkDim
+                font.pixelSize: 13
+                font.bold: true
+            }
+
+            TextField {
+                id: tuneField
+
+                Layout.preferredWidth: 150
+                enabled: engineLink.sourceCanRetune
+                font.pixelSize: 13
+                placeholderText: "95.1 or 95.1M"
+                selectByMouse: true
+
+                // Seeded once from where the radio is, not bound. A binding
+                // would rewrite the box under an operator who is halfway
+                // through typing, every time a retune landed.
+                Component.onCompleted:
+                    text = engineLink.sourceCenterHz > 0
+                           ? (engineLink.sourceCenterHz / 1.0e6).toFixed(6) : ""
+
+                onAccepted: {
+                    if (engineLink.tuneSource(tuneField.text))
+                        tuneField.selectAll()
+                }
+            }
+
+            // What the text resolves to, before it is sent. Red when it
+            // does not resolve at all, which is the one state where
+            // pressing return does nothing useful.
+            Label {
+                Layout.minimumWidth: 0
+                visible: tuneField.enabled && tuneField.text.length > 0
+                text: engineLink.tuneTextValid(tuneField.text)
+                      ? "→ " + engineLink.previewTune(tuneField.text)
+                      : "not a frequency"
+                color: engineLink.tuneTextValid(tuneField.text)
+                       ? window.inkDim : window.inkBad
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
+            // The bands somebody actually reaches for. Each one is the
+            // CENTRE the front end is put at, not the edge of the
+            // allocation: the span the engine captures is centred here and
+            // reaches half a source rate either side.
+            //
+            // 462.5625 MHz is the standing real-radio test band from
+            // docs/, which is why it is on this row rather than only in a
+            // document.
+            Repeater {
+                model: [
+                    { "label": "FM", "hz": 98100000 },
+                    { "label": "AIR", "hz": 124000000 },
+                    { "label": "2m", "hz": 145000000 },
+                    { "label": "70cm", "hz": 435000000 },
+                    { "label": "GMRS", "hz": 462562500 }
+                ]
+
+                Label {
+                    required property var modelData
+
+                    text: modelData.label
+                    color: engineLink.sourceCanRetune ? window.inkDim : "#3a4250"
+                    font.pixelSize: 12
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        enabled: engineLink.sourceCanRetune
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            engineLink.tuneSourceHz(parent.modelData.hz)
+                            tuneField.text =
+                                (parent.modelData.hz / 1.0e6).toFixed(6)
+                        }
+                    }
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            // WHAT THE DEVICE ACTUALLY TOOK. Only when it differs from what
+            // was asked, because on a source with a fine enough step the
+            // two agree and a line saying so is noise. An RTL-SDR's PLL
+            // step is a few hundred hertz and this is where that shows up.
+            Label {
+                Layout.minimumWidth: 0
+                visible: engineLink.tuneAnswered
+                         && engineLink.tuneGrantedHz !== engineLink.tuneRequestedHz
+                text: "asked " + (engineLink.tuneRequestedHz / 1.0e6).toFixed(6)
+                      + ", took " + (engineLink.tuneGrantedHz / 1.0e6).toFixed(6)
+                      + " MHz"
+                color: window.inkWarn
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
+            // Why the box is dead. Two causes and they are different news:
+            // a recording cannot retune, and a client built against a wire
+            // with no such call is this window's own limitation.
+            Label {
+                Layout.minimumWidth: 0
+                visible: !engineLink.sourceCanRetune
+                         && engineLink.sourceRetuneUnavailable.length > 0
+                text: engineLink.sourceRetuneUnavailable
+                color: window.inkDim
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+        }
+
+        // The engine refused a frequency, in its own words, or this window
+        // refused the text before sending it.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.tuneFault.length > 0
+
+            Label {
+                Layout.alignment: Qt.AlignTop
+                text: "tune refused:"
+                color: window.inkWarn
+                font.pixelSize: 12
+                font.bold: true
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: engineLink.tuneFault
+                color: window.ink
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
+                elide: Text.ElideRight
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Why there is no engine
         // ------------------------------------------------------------------
         // The supervisor keeps trying for as long as the window is open, so

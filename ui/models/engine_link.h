@@ -514,6 +514,55 @@ class EngineLink : public QObject {
     Q_PROPERTY(double spanLowHz READ spanLowHz NOTIFY connectionChanged)
     Q_PROPERTY(double spanHighHz READ spanHighHz NOTIFY connectionChanged)
 
+    // ------------------------------------------------------------------
+    // Tuning the front end
+    // ------------------------------------------------------------------
+    //
+    // WHERE THE SOURCE IS, WHICH IS NOT WHERE THE RECEIVER IS. This is the
+    // centre of the whole captured span. The receiver's own centre is an
+    // offset within it, and a retune moves this without moving that: the
+    // receiver keeps its baseband offset, so its absolute frequency
+    // follows the front end. That is what the engine does and the readouts
+    // follow it rather than being corrected here.
+
+    // The source's centre in absolute hertz, which is EngineInfo::
+    // sourceCenter. It moves on a granted retune, unlike everything else
+    // in EngineInfo, which is why it notifies.
+    Q_PROPERTY(double sourceCenterHz READ sourceCenterHz NOTIFY connectionChanged)
+
+    // Whether the source will retune at all, and the range it will take.
+    // Answered once per connection by Session.sourceCanRetune, so a
+    // control can be greyed out rather than offering something that always
+    // refuses. False for every file and synthetic source.
+    Q_PROPERTY(bool sourceCanRetune READ sourceCanRetune NOTIFY sourceTuningChanged)
+    Q_PROPERTY(double sourceTuneLowHz READ sourceTuneLowHz NOTIFY sourceTuningChanged)
+    Q_PROPERTY(double sourceTuneHighHz READ sourceTuneHighHz NOTIFY sourceTuningChanged)
+
+    // WHY THE CONTROL IS GREYED, WHICH HAS TWO CAUSES AND THEY ARE NOT THE
+    // SAME NEWS. A source that cannot retune is the ordinary answer for a
+    // recording. A client compiled against an engine wire that has no such
+    // call is this client's own limitation and must not read as the
+    // engine's. models/wire_seam.h says which, and this carries whichever
+    // sentence applies.
+    Q_PROPERTY(QString sourceRetuneUnavailable READ sourceRetuneUnavailable
+                   NOTIFY sourceTuningChanged)
+
+    // The engine refused a retune, in its own words. Kept apart from
+    // errorText for the reason detectionFault and receiverFault are: a
+    // refused frequency is not a lost engine.
+    Q_PROPERTY(QString tuneFault READ tuneFault NOTIFY sourceTuningChanged)
+
+    // What was asked for and what the source took. A device with a tuning
+    // step rounds, and the two differ by up to that step. Both zero until
+    // a retune has been attempted on this connection.
+    Q_PROPERTY(double tuneRequestedHz READ tuneRequestedHz NOTIFY sourceTuningChanged)
+    Q_PROPERTY(double tuneGrantedHz READ tuneGrantedHz NOTIFY sourceTuningChanged)
+
+    // A retune has been answered on this connection, so the pair above
+    // means something. Without it a granted centre of zero is
+    // indistinguishable from a source tuned to DC.
+    Q_PROPERTY(bool tuneAnswered READ tuneAnswered NOTIFY sourceTuningChanged)
+
     // Per frame. framesDropped is the two unrequested losses added together,
     // which is the one number a status line has room for; the two beside it
     // say which layer, and framesSkipped is decimation that was asked for
@@ -866,6 +915,55 @@ public:
     [[nodiscard]] double spanLowHz() const { return frequencyAtFraction(0.0); }
     [[nodiscard]] double spanHighHz() const { return frequencyAtFraction(1.0); }
 
+    // ------------------------------------------------------------------
+    // Tuning the front end. Implemented in ui/models/source_link.cpp.
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] double sourceCenterHz() const {
+        return static_cast<double>(info_.source_center);
+    }
+    [[nodiscard]] bool sourceCanRetune() const { return source_can_retune_; }
+    [[nodiscard]] double sourceTuneLowHz() const {
+        return static_cast<double>(source_tune_low_);
+    }
+    [[nodiscard]] double sourceTuneHighHz() const {
+        return static_cast<double>(source_tune_high_);
+    }
+    [[nodiscard]] QString sourceRetuneUnavailable() const {
+        return source_retune_unavailable_;
+    }
+    [[nodiscard]] QString tuneFault() const { return tune_fault_; }
+    [[nodiscard]] double tuneRequestedHz() const {
+        return static_cast<double>(tune_requested_hz_);
+    }
+    [[nodiscard]] double tuneGrantedHz() const {
+        return static_cast<double>(tune_granted_hz_);
+    }
+    [[nodiscard]] bool tuneAnswered() const { return tune_answered_; }
+
+    // What a typed string resolves to, before anything is sent, as
+    // megahertz to six places. Empty when the text is not a frequency.
+    //
+    // THE ECHO IS THE WHOLE POINT. models/frequency_entry.h has to guess
+    // the unit of a bare number, and the guess is stated here rather than
+    // discovered when the radio lands somewhere unexpected. A box binds a
+    // label to this and the operator reads the reading before pressing
+    // return.
+    [[nodiscard]] Q_INVOKABLE QString previewTune(const QString& text) const;
+
+    // Whether the typed string parses at all, so a box can refuse to
+    // commit rather than sending something nobody meant.
+    [[nodiscard]] Q_INVOKABLE bool tuneTextValid(const QString& text) const;
+
+    // Retune the front end to what the text says. Returns false and writes
+    // tuneFault when the text is not a frequency; everything else is the
+    // engine's answer and arrives asynchronously, like every other write
+    // on this object.
+    Q_INVOKABLE bool tuneSource(const QString& text);
+
+    // The same, from a number a band button holds.
+    Q_INVOKABLE void tuneSourceHz(double hertz);
+
     [[nodiscard]] bool clamped() const { return info_.ring_clamped; }
     [[nodiscard]] QString clampReason() const;
 
@@ -1163,6 +1261,17 @@ signals:
     void passbandChanged();
 
     void receiverFaultChanged();
+
+    // The source's tuning surface changed: the range came back on a new
+    // connection, a retune was granted, or one was refused. Separate from
+    // connectionChanged because that one is read as a new engine by every
+    // item holding history, and a refused retune is not one.
+    //
+    // A GRANTED retune emits connectionChanged as well, and deliberately:
+    // the span moved, so every row already drawn was drawn under a
+    // frequency axis that no longer applies, which is exactly the case
+    // that signal exists for.
+    void sourceTuningChanged();
 
     // The audio subscription changed: it started, it stopped, the engine
     // refused it, the receiver went away, or the engine's counters moved.
@@ -1506,6 +1615,75 @@ private:
     // the loop rather than on the next poll interval: 250 ms of latency on
     // a filter edge is felt as the handle sticking.
     bool receiver_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // ------------------------------------------------------------------
+    // Tuning the front end. Implemented in ui/models/source_link.cpp.
+    // ------------------------------------------------------------------
+
+    // Supervisor thread. Asks the source whether it retunes and over what
+    // range, once per connection, and hands the answer over. Called from
+    // attempt_connect after the EngineInfo is in hand.
+    void probe_source_tuning();
+
+    // Supervisor thread. Applies a retune the Qt thread asked for, reads
+    // the new EngineInfo back and hands both over. The re-read is not
+    // optional: EngineInfo::sourceCenter is what every absolute frequency
+    // in this client is derived from, and a retune is the one thing that
+    // moves it while the connection stays up.
+    void apply_source_tune();
+
+    // Qt thread, queued from the supervisor.
+    void adopt_source_tuning();
+
+    // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
+    // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per
+    // connection; the tune answer arrives per write. A single struct would
+    // have forced the supervisor to fill in the fields it was not changing
+    // by reading the Qt thread's own copies, which is a data race on every
+    // one of them.
+    std::mutex source_mutex_;
+
+    bool handover_has_range_ = false;      // guarded by source_mutex_
+    bool handover_can_retune_ = false;     // guarded by source_mutex_
+    std::int64_t handover_tune_low_ = 0;   // guarded by source_mutex_
+    std::int64_t handover_tune_high_ = 0;  // guarded by source_mutex_
+    QString handover_retune_unavailable_;  // guarded by source_mutex_
+
+    bool handover_has_tune_ = false;          // guarded by source_mutex_
+    QString handover_tune_fault_;             // guarded by source_mutex_
+    std::int64_t handover_tune_granted_ = 0;  // guarded by source_mutex_
+    bool handover_tune_answered_ = false;     // guarded by source_mutex_
+
+    // The new geometry a granted retune produced, handed over with the
+    // rest so the centre and the tuning state land in one adopt. Two
+    // adopts would put the old centre on screen beside the new granted
+    // frequency for one turn of the event loop, which is a readout
+    // claiming the radio is somewhere it is not.
+    rpc::EngineInfo handover_tuned_info_;        // guarded by source_mutex_
+    bool has_tuned_info_ = false;                // guarded by source_mutex_
+
+    // Written by the Qt thread, consumed by the supervisor. An atomic
+    // pair rather than a lock because it is one integer and a flag, and
+    // the last write wins by design: an operator typing twice before the
+    // supervisor wakes wants the second frequency.
+    std::atomic<bool> tune_pending_{false};
+    std::atomic<std::int64_t> requested_center_hz_{0};
+
+    // Qt thread only: what the properties above hand out.
+    bool source_can_retune_ = false;
+    std::int64_t source_tune_low_ = 0;
+    std::int64_t source_tune_high_ = 0;
+    QString source_retune_unavailable_;
+    QString tune_fault_;
+    std::int64_t tune_requested_hz_ = 0;
+    std::int64_t tune_granted_hz_ = 0;
+    bool tune_answered_ = false;
+
+    // Set by tuneSource, cleared by the supervisor when it has applied
+    // one. In the wait predicate for the reason receiver_work_pending_ is:
+    // a quarter of a second between pressing return and the radio moving
+    // reads as the box not working.
+    bool tune_work_pending_ = false;  // guarded by supervisor_mutex_
 
     // ------------------------------------------------------------------
     // Audio. Implemented in ui/models/audio_link.cpp.
