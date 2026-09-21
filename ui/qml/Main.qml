@@ -527,7 +527,12 @@ ApplicationWindow {
 
                     Layout.preferredWidth: 110
                     font.pixelSize: 12
-                    placeholderText: "2400000"
+
+                    // SAMPLES PER SECOND, and the placeholder says so with a
+                    // unit because the box next to it is a frequency and reads
+                    // a bare number the other way. engineLink.parseRateHz is
+                    // what parses this; see frequency_entry.h's BareNumber.
+                    placeholderText: "2400000 S/s"
                     selectByMouse: true
                 }
 
@@ -583,7 +588,7 @@ ApplicationWindow {
                     text: engineLink.composeSourceUri(
                               sourceRow.chosen,
                               engineLink.parseHz(sourceFreqField.text),
-                              engineLink.parseHz(sourceRateField.text),
+                              engineLink.parseRateHz(sourceRateField.text),
                               parseFloat(sourceGainField.text || "0"),
                               sourceGainAuto.checked)
                     color: window.inkDim
@@ -599,7 +604,7 @@ ApplicationWindow {
                                    engineLink.composeSourceUri(
                                        sourceRow.chosen,
                                        engineLink.parseHz(sourceFreqField.text),
-                                       engineLink.parseHz(sourceRateField.text),
+                                       engineLink.parseRateHz(sourceRateField.text),
                                        parseFloat(sourceGainField.text || "0"),
                                        sourceGainAuto.checked))
                 }
@@ -629,7 +634,7 @@ ApplicationWindow {
                 spacing: 8
 
                 readonly property double askedRate:
-                    engineLink.parseHz(sourceRateField.text)
+                    engineLink.parseRateHz(sourceRateField.text)
                 readonly property double askedCentre:
                     engineLink.parseHz(sourceFreqField.text)
 

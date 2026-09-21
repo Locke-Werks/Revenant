@@ -139,7 +139,36 @@ namespace detail {
 //
 // Zero is accepted as a value and is a legal parse. Whether a source will
 // tune to DC is the source's answer, not this function's.
-[[nodiscard]] inline std::optional<ParsedFrequency> parse_frequency(std::string_view text)
+// WHAT A BARE NUMBER MEANS, WHICH IS THE ONE THING A RATE BOX AND A TUNING BOX
+// DO NOT AGREE ON.
+//
+// Everything else about the two is identical: the digit accumulation, the
+// separators, the suffixes, the refusals, and the no-floating-point rule. The
+// rule at the top of this file, that a bare number under a million is
+// megahertz, was chosen for a TUNING box and argued for there: "95.1" is
+// 95.1 MHz to every operator alive.
+//
+// It is wrong for a SAMPLE RATE, and silently so. The device picker's rate box
+// used parse_frequency on 2026-09-21 and an operator typing 250000, meaning
+// 250 kS/s, got 250000 MHz: refused as out of range by nothing, because
+// ui/models/source_choice.h's settle_rate then clamped it to the device's
+// maximum and opened at 3.2 MS/s. A wrong answer that looks like a working
+// control is the class of defect this header's own notes exist to prevent, and
+// putting the rule behind a parameter is the whole fix.
+//
+// Hertz is the right reading for a rate because a rate has no convention to
+// violate: nobody writes a sample rate as "2.4" and means anything but 2.4 M,
+// and they write the suffix when they do. The suffix still wins either way.
+enum class BareNumber : std::uint8_t {
+    // A bare number under kBareHertzFloor is megahertz. For a tuning box.
+    Megahertz,
+
+    // A bare number is always hertz, whatever its size. For a rate box.
+    Hertz,
+};
+
+[[nodiscard]] inline std::optional<ParsedFrequency> parse_frequency(
+    std::string_view text, BareNumber bare = BareNumber::Megahertz)
 {
     std::size_t begin = 0;
     std::size_t end = text.size();
@@ -248,7 +277,8 @@ namespace detail {
             return std::nullopt;
         }
         const std::uint64_t written = mantissa / static_cast<std::uint64_t>(*divisor);
-        out.unit = written < static_cast<std::uint64_t>(kBareHertzFloor)
+        out.unit = bare == BareNumber::Megahertz &&
+                           written < static_cast<std::uint64_t>(kBareHertzFloor)
                        ? FrequencyUnit::Megahertz
                        : FrequencyUnit::Hertz;
         out.unit_inferred = true;

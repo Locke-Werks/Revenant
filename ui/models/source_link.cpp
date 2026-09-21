@@ -63,6 +63,12 @@ double EngineLink::parseHz(const QString& text) const
     return parsed.has_value() ? static_cast<double>(parsed->hertz) : 0.0;
 }
 
+double EngineLink::parseRateHz(const QString& text) const
+{
+    const auto parsed = parse_frequency(text.toStdString(), BareNumber::Hertz);
+    return parsed.has_value() ? static_cast<double>(parsed->hertz) : 0.0;
+}
+
 bool EngineLink::tuneSource(const QString& text)
 {
     const auto parsed = parse_frequency(text.toStdString());

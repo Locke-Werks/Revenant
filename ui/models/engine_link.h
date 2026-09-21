@@ -1193,6 +1193,16 @@ public:
     // default rather than for nothing.
     [[nodiscard]] Q_INVOKABLE double parseHz(const QString& text) const;
 
+    // The same parse for a SAMPLE RATE box, where a bare number is hertz.
+    //
+    // A SEPARATE CALL AND NOT A FLAG, so a QML author cannot reach for the wrong
+    // one by omission. The two differ in exactly one rule and the difference is
+    // silent when it bites: the picker's rate box used parseHz until
+    // 2026-09-21, and an operator typing 250000 meaning 250 kS/s got 250000 MHz,
+    // which settle_rate then clamped to the device's maximum and opened at
+    // 3.2 MS/s. See ui/models/frequency_entry.h's BareNumber.
+    [[nodiscard]] Q_INVOKABLE double parseRateHz(const QString& text) const;
+
     // Retune the front end to what the text says. Returns false and writes
     // tuneFault when the text is not a frequency; everything else is the
     // engine's answer and arrives asynchronously, like every other write

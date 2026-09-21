@@ -205,3 +205,41 @@ TEST_CASE("what a box types round-trips through what it prints", "[frequency]")
         CHECK(reparsed->hertz == value);
     }
 }
+
+TEST_CASE("a bare number is hertz for a rate and megahertz for a tuning", "[ui][frequency]")
+{
+    // The wrong implementation is one parser for both boxes, which is what the
+    // device picker shipped with on 2026-09-21. An operator typing 250000 into
+    // a RATE box means 250 kS/s; read by the tuning rule that is 250000 MHz,
+    // which nothing refuses, because source_choice.h's settle_rate then clamps
+    // it to the device's maximum and opens at 3.2 MS/s. A control that silently
+    // does something else is worse than one that refuses.
+    using revenant::ui::BareNumber;
+
+    // The tuning rule, unchanged and still the default, because every existing
+    // caller is a tuning box and "95.1" is 95.1 MHz to every operator alive.
+    CHECK(parse_frequency("95.1")->hertz == 95'100'000);
+    CHECK(parse_frequency("250000")->hertz == 250'000'000'000);
+
+    // The rate rule reads the same text as hertz.
+    CHECK(parse_frequency("250000", BareNumber::Hertz)->hertz == 250'000);
+    CHECK(parse_frequency("2400000", BareNumber::Hertz)->hertz == 2'400'000);
+    CHECK(parse_frequency("1", BareNumber::Hertz)->hertz == 1);
+
+    // A SUFFIX WINS UNDER BOTH RULES, which is what makes the rate box usable
+    // for somebody who thinks in megasamples: the rule only ever decides what a
+    // number with no unit on it meant.
+    CHECK(parse_frequency("2.4M", BareNumber::Hertz)->hertz == 2'400'000);
+    CHECK(parse_frequency("250k", BareNumber::Hertz)->hertz == 250'000);
+    CHECK(parse_frequency("2.4M")->hertz == 2'400'000);
+
+    // And the inference flag still says the rule was used, so a box can echo
+    // which reading it took. It is about whether a unit was WRITTEN, not about
+    // which rule resolved it.
+    CHECK(parse_frequency("250000", BareNumber::Hertz)->unit_inferred);
+    CHECK_FALSE(parse_frequency("250k", BareNumber::Hertz)->unit_inferred);
+
+    // Above the floor the two rules already agreed, so nothing moves there.
+    CHECK(parse_frequency("95100000")->hertz == 95'100'000);
+    CHECK(parse_frequency("95100000", BareNumber::Hertz)->hertz == 95'100'000);
+}
