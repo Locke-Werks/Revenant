@@ -105,9 +105,11 @@ inline constexpr std::size_t kMaxProfileLag = 1U << 16;
 struct OfdmSearch {
     // Shortest and longest useful symbol the search will consider, in
     // samples. Zero means 32 and 8192, which at 48 kS/s is 0.67 ms to
-    // 170 ms and covers everything multicarrier in docs/modes.md by a wide
-    // margin: DAB Mode I's useful symbol is 1 ms and DRM30's longest is
-    // 26.66 ms.
+    // 170 ms. docs/modes.md's DAB Mode I row puts that system's carriers
+    // 1 kHz apart, so its useful symbol is 1 ms, comfortably inside; the
+    // HF multicarrier rows there give a bandwidth and not a symbol
+    // duration, so the upper bound is chosen from what a search can afford
+    // rather than from a figure in a standard nobody here has opened.
     std::size_t min_symbol_samples = 0;
     std::size_t max_symbol_samples = 0;
 

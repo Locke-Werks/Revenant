@@ -42,6 +42,7 @@ find_package(rtlsdr CONFIG REQUIRED)
 # worse, nothing at all. A missing source is now a broken build, which is
 # what it is.
 add_library(revenant_core STATIC
+    characterise/catalogue.cpp
     characterise/cyclostationary.cpp
     characterise/periodicity.cpp
     characterise/tones.cpp
