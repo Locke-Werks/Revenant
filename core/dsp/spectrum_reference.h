@@ -231,9 +231,23 @@ inline constexpr float kMaxSpectrumCorrectionDb = 12.0F;
 // defaults are the canonical grid's: 17 is what GridParams and EngineConfig
 // both hold, and 120 dB is design_prototype's own default, which is what
 // core/engine/engine.cpp asks for. A caller running a different prototype
-// length has to pass it. core/engine/graph.cpp does not yet, so
-// `revenant-engine --taps` away from 17 leaves up to about 1.8 dB of the droop
-// uncorrected near the seams; closing that is one argument at its call site.
+// length has to pass it, and core/engine/graph.cpp does: the full-span stage
+// calls build_spectrum_window(points, impl.grid.taps_per_branch), so
+// `revenant-engine --taps` away from 17 is corrected for the prototype the
+// grid actually built.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "core/engine/graph.cpp does not yet, so
+// `revenant-engine --taps` away from 17 leaves up to about 1.8 dB of the
+// droop uncorrected near the seams; closing that is one argument at its call
+// site." The argument was added at that call site and this sentence was not
+// taken out with it. Left standing it tells anybody chasing a seam-edge level
+// that up to 1.8 dB of known droop is still in the data and that the cause is
+// elsewhere, which is the most expensive kind of comment to leave behind.
+//
+// One caller still defaults the tap count on purpose. passband_window in
+// core/engine/graph.cpp overwrites the correction half of the buffer with
+// unity, because a passband frame has no seam to hide, so the parameters that
+// built that half are irrelevant there. Its own comment says so.
 //
 // Both halves are built on the host in double and rounded to float once, for
 // the same reason the prototype filter and the twiddle table are: nothing that
