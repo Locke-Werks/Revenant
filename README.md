@@ -103,13 +103,17 @@ the terminal, auto-scaling measured on the device, the per-receiver passband
 spectrum, the wideband detector, the RDS and RBDS decoder, the Cap'n Proto
 session that carries all of it to another process, the Qt client that draws it
 and plays its audio, and the conformance suite that diffs every GPU kernel
-against a scalar twin and demands identical bits. 351 tests pass on an
-RTX 4090. `ui/` is a separate CMake project and has a suite of its own.
+against a scalar twin and demands identical bits. 361 tests on an RTX 4090,
+0 failures; 3 of them skip without an RTL-SDR plugged in. `ui/` is a separate
+CMake project with a suite of its own, 26 tests, and CI configures, builds and
+runs both trees.
 
 What does not: every decoder but RDS. `docs/modes.md` is the scoped list and
-none of the rest of it is written. The session cannot open or stop a source,
-and nothing saves a set of receivers across a restart. Those are in
-`docs/rpc.md`, each with what it would take and what the gap costs meanwhile.
+none of the rest of it is written. WFM is mono and has no de-emphasis, so
+broadcast stations decode bright and one channel only. The session cannot open
+or stop a source, and nothing saves a set of receivers across a restart. Those
+last two are in `docs/rpc.md`, each with what it would take and what the gap
+costs meanwhile.
 
 This paragraph used to read "every decoder. Audio and RDS have a shape on the
 wire and nothing behind them, so the client is still silent and the command
@@ -305,6 +309,8 @@ will comfortably outlast them.
   a library, with the measurements that decided it
 - [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
   what it does not
+- [docs/modes.md](docs/modes.md), every mode Revenant will implement, what each one
+  needs and which are out of reach
 - [docs/rpc.md](docs/rpc.md), why the client is a second process, what crosses
   the wire and what does not
 - [docs/ui-spectrum.md](docs/ui-spectrum.md), how the spectrum and waterfall scale
