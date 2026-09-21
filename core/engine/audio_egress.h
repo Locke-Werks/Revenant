@@ -34,9 +34,23 @@
 //   realtime. It exists for Push backends, the file case, and it blocks on
 //   the filesystem by design: a slow disk turns into backlog in the ring and
 //   then into counted drops on the producer, which is the correct place for
-//   that cost to land. It does not allocate at all, including on its fault
-//   path, which is why a fault message is copied into a fixed buffer in the
-//   slot rather than into a std::string.
+//   that cost to land. It allocates nothing on the path that moves samples,
+//   which is why a fault message is copied into a fixed buffer in the slot
+//   rather than into a std::string.
+//
+//   THAT SENTENCE USED TO READ "it does not allocate at all, including on its
+//   fault path", and the fault path has always allocated: Error carries a
+//   std::string and the backend builds one to fail with. The promise that is
+//   true, and the one a reader needs, is about the steady state. A fault
+//   allocates at most once per receiver, because the slot stops draining the
+//   instant one is recorded.
+//
+//   IT IS ALSO THE THREAD AN EXCEPTION KILLS THE PROCESS FROM. It is a
+//   std::thread, so anything thrown out of a backend's write() is
+//   std::terminate. core/engine/audio_egress.cpp catches at the call for the
+//   reason core/engine/engine.h gives for call_sink, and a backend is
+//   therefore allowed to throw even though returning a Status is what this
+//   interface asks for.
 //
 // PUSH AND PULL, which is the seam a device backend arrives through.
 //
@@ -233,6 +247,14 @@ public:
     [[nodiscard]] virtual Status close() = 0;
 
     // Push only. Interleaved, always a whole number of frames.
+    //
+    // Returning an error is how this says no, and a throw is caught rather
+    // than forbidden. The caller is the drain thread, which is a std::thread,
+    // so an escaping exception would be std::terminate; the catch at the call
+    // site turns one into the same recorded fault a returned Error produces,
+    // and the what() string is carried through. An implementation should
+    // still return the error, because the message it builds that way is the
+    // one it chose.
     [[nodiscard]] virtual Status write(std::span<const float>)
     {
         return fail("this audio backend is not a Push backend and has no write()");

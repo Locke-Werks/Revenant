@@ -35,8 +35,10 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <exception>
 #include <format>
 #include <mutex>
+#include <span>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -68,6 +70,63 @@ constexpr std::size_t kFaultMessageBytes = 256;
 // constexpr so it is in the image rather than built at startup, and shared
 // because nothing writes to it.
 constexpr std::size_t kSilenceSamples = 512;
+
+// The message for a backend that threw, built where a second failure cannot
+// escape.
+//
+// std::format and the string inside Error both allocate, and this runs in a
+// catch block on a thread where an escaping exception is std::terminate. An
+// Error with no message is a poor report and an enormous improvement on the
+// process ending without one. Same shape and same reasoning as
+// engine::sink_threw in core/engine/engine.h.
+[[nodiscard]] Status backend_threw(const char* method, const char* detail) noexcept
+{
+    try {
+        return fail(detail != nullptr
+                        ? std::format("the audio backend's {}() threw an exception: {}", method,
+                                      detail)
+                        : std::format("the audio backend's {}() threw an exception that is not "
+                                      "a std::exception",
+                                      method));
+    } catch (...) {
+    }
+    return std::unexpected(Error{});
+}
+
+// Calls AudioBackend::write and turns a throw into the ordinary error the
+// fault path already records.
+//
+// WHY THE CATCH IS HERE AND NOT SOMEWHERE FURTHER OUT. drain_loop runs on a
+// std::thread this class spawned, so an exception leaving write() is
+// std::terminate: the process is gone, with no error of its own, on the one
+// path whose whole design is that one receiver's disk filling up does not
+// stop the other forty-nine. AudioBackend is an interface a caller
+// implements, so what it throws is not this file's to enumerate.
+//
+// core/engine/engine.h gave the completion thread exactly this catch, in
+// call_sink, and said why at length. The sweep that added it stopped at the
+// engine's own sinks and did not reach the thread one layer above them. The
+// other caller, final_drain, is on the control thread where a throw would
+// merely unwind through a Status-returning API rather than end the process;
+// it goes through here too, because a caller that gets a Status back for a
+// disk error and an exception for a bug in the same backend has to handle
+// both to handle either.
+//
+// The success path allocates nothing, which is what the drain thread's
+// contract in core/engine/audio_egress.h requires. The failure path
+// allocates a message, once per slot, exactly as a returned Error already
+// does: record_fault copies it into the slot's fixed buffer and the slot
+// stops draining, so there is no second one.
+[[nodiscard]] Status write_to_backend(AudioBackend& backend, std::span<const float> samples)
+{
+    try {
+        return backend.write(samples);
+    } catch (const std::exception& thrown) {
+        return backend_threw("write", thrown.what());
+    } catch (...) {
+        return backend_threw("write", nullptr);
+    }
+}
 constexpr std::array<float, kSilenceSamples> kSilence{};
 
 // How long the control thread sleeps while waiting for the drain thread to
@@ -625,7 +684,8 @@ private:
             if (got == 0) {
                 return {};
             }
-            if (auto written = slot.backend->write(std::span<const float>(buffer.data(), got));
+            if (auto written =
+                    write_to_backend(*slot.backend, std::span<const float>(buffer.data(), got));
                 !written) {
                 record_fault(slot, written.error());
                 return std::unexpected(written.error());
@@ -702,7 +762,8 @@ private:
         if (got == 0) {
             return false;
         }
-        if (auto written = slot.backend->write(std::span<const float>(scratch_.data(), got));
+        if (auto written =
+                write_to_backend(*slot.backend, std::span<const float>(scratch_.data(), got));
             !written) {
             record_fault(slot, written.error());
             return false;

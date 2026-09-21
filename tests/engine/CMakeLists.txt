@@ -35,6 +35,13 @@
 # engine configuration, a small block so the window gate is exercised at all,
 # and because the two would otherwise share a fixture that suited neither.
 
+# test_audio_egress.cpp needs neither either. What it covers is the failure
+# paths nothing else reaches: a backend that returns an error and a backend
+# that throws. The second used to end the process, because the drain thread is
+# a std::thread and an exception out of a caller-supplied write() reaches the
+# top of it, so that case is a crash rather than an assertion when it
+# regresses.
+
 # test_audio_fanout.cpp needs neither a GPU nor a sound card. AudioFanout is
 # the one part of core/engine/engine.h that is pure host code, and the wire
 # cases in tests/rpc rest on it, so its ordering and its failure semantics are
@@ -44,6 +51,7 @@
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
+    test_audio_egress.cpp
     test_audio_fanout.cpp
     test_audio_wasapi.cpp
     test_engine.cpp
