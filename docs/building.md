@@ -237,6 +237,29 @@ three placeholders, that there was no `ui/CMakeLists.txt`, and that the
 commands above were the shape of a build rather than one that runs. All three
 were true until the client was built and none is now.
 
+### Running the client's tests
+
+`ui/CMakePresets.json` has no test preset, so `ctest` needs the build directory
+by hand. From inside `ui/`:
+
+```powershell
+cmake --preset vs
+cmake --build --preset vs
+ctest --test-dir build\vs -C RelWithDebInfo --output-on-failure
+```
+
+That is `revenant_ui_tests`, 26 cases over `AudioRing` and the waterfall's
+resize arithmetic. It links no Qt: the rule in `ui/CMakeLists.txt` is that
+anything pulled out for a test goes in a header or a `.cpp` with no Qt type in
+it, so a test target that started linking Qt would be the sign that rule had
+been broken. The target is skipped, with a message, when Catch2 is missing from
+the `x64-windows` triplet; `revenant-ui` itself still builds.
+
+CI runs this as the `ui` job. Until 2026-09-20 nothing did, and the engine
+tree's suite says nothing about the client, which links no part of the engine
+and reaches it over a socket. docs/ci.md lists what that job covers and, file
+by file, what it does not.
+
 ## Signing
 
 Nothing is signed yet. There is no shippable binary until M3.

@@ -130,10 +130,58 @@ The job passes `-DREVENANT_WERROR=ON` to match the engine's `ci` preset.
 `ui/CMakeLists.txt` defaults that off so a developer's first build of the client is not a
 wall of errors out of a Qt header; a merge gate is the other case.
 
-What it covers is thin and stating that is the point. `revenant_ui_tests` is one file over
-`AudioRing`. A green run says the client compiles and that the audio timeline arithmetic
-holds. It says nothing about the QML, the scene graph, or the audio device, none of which
-a headless agent can open.
+### What the `ui` job actually covers
+
+Thin, and stating it exactly is the point of this section. A green run says three things
+and no more.
+
+The client compiles, with `REVENANT_WERROR=ON`, which also fires the eight `static_assert`
+declarations in `models/engine_link.h` that nothing else in CI reaches. `qt_add_qml_module`
+runs `qmlcachegen` over `qml/Main.qml`, so a syntax error there is a red build; nothing
+checks what the QML does.
+
+`revenant_ui_tests` passes: 26 Catch2 cases in two files.
+
+- `tests/test_audio_ring.cpp`, 20 cases over `audio/audio_ring.cpp`. Gap fill, resync past
+  a ring-length gap, overrun eviction, a starved read, a read at the wrong format, the
+  gate, stereo counted in frames, and the timeline accounting for every frame the engine
+  indexed.
+- `tests/test_history_resize.cpp`, 6 cases over `render/history_resize.h`. The waterfall's
+  ring arithmetic across a grow, a shrink and a no-op resize, including after the cursor
+  has wrapped.
+
+WHAT THIS SECTION USED TO SAY: "`revenant_ui_tests` is one file over `AudioRing`." Two
+files, and the second is not `AudioRing`. The job and `test_history_resize.cpp` were
+written thirteen minutes apart on separate lanes and met in a merge.
+
+### What is still unguarded in `ui/`
+
+Everything below has no test of any kind. Compilation is the only thing standing over it.
+
+**`render/spectrum_scale.cpp` is the one that should not be on this list.** It includes
+`<cstddef>`, `<cstdint>`, `<span>`, `<algorithm>`, `<array>` and `<cmath>` and no Qt
+header at all, and it exports five pure functions: `reduce_peak`,
+`peak_reduction_headroom_db`, `map_ends`, `colour_at` and `colour_argb_at`. That is
+exactly the shape `ui/CMakeLists.txt` says a testable piece has, the same shape as
+`history_resize.h`, and it carries the max-of-K floor correction, which is arithmetic
+with a right answer that a wrong one would show as a display that reads as a solid wall.
+It needs a test file and one line in the target, nothing more.
+
+**`models/engine_link.cpp`, `models/receiver_link.cpp`, `models/audio_link.cpp`.** The
+RPC-facing state: connection lifecycle, reconnect, the detection and RDS surfaces, and
+what happens when the engine goes away mid-stream. These hold Qt types and want an event
+loop and a server on the other end, so covering them is a harness, not a test file.
+
+**`render/spectrum_item.cpp`, `render/waterfall_item.cpp`, `render/passband_item.cpp`.**
+Scene graph nodes. A headless agent cannot open a window, and the geometry they build is
+only meaningful once something rasterises it.
+
+**`audio/audio_player.cpp`.** WASAPI in shared mode. Needs a sound card.
+
+**`main.cpp` and `qml/Main.qml`.** Wiring and layout.
+
+None of this is covered by the engine tree's 361 tests: `ui/` links no part of the engine
+and talks to it over a socket.
 
 ## Coverage, stated honestly
 
