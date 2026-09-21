@@ -976,6 +976,22 @@ void Detector::reject_residual(double elapsed_seconds) {
     // run is measured on, and it is measured over a band that does not move
     // while a run lasts, so that a fall is the power falling rather than the
     // accepted extent shrinking. See DetectorConfig::residual_rate_tolerance.
+    // THE CLAMP HERE IS A BACKSTOP AGAINST UNDEFINED BEHAVIOUR AND NOT A
+    // RANGE RULE, and treating it as one is how part_of below went wrong for
+    // months.
+    //
+    // Every caller passes bins from a candidate, and emit_candidate refuses
+    // anything with last >= bins_, so on correct input neither min() ever
+    // fires. That makes it silent by construction: a caller that computed a
+    // nonsense bin gets a plausible number back rather than a crash or a
+    // refusal, and the nonsense is laundered into a decibel figure the rule
+    // above then acts on. part_of handed this 0xFFFFFFFF and got the mean
+    // over the whole spectrum, which reads exactly like a band that is not
+    // falling.
+    //
+    // It stays, because the alternative at this point is indexing
+    // excess_cumulative_ out of bounds. Anything computing a bin to pass in
+    // bounds it itself.
     const auto level_of = [this](std::uint32_t first, std::uint32_t last) {
         const std::size_t low = std::min<std::size_t>(first, bins_ - 1);
         const std::size_t high = std::min<std::size_t>(last, bins_ - 1);
