@@ -196,3 +196,10 @@ commit: f3c0544
 instead: StageOutput::channels reads 2 for a stereo pair as well as for the
     raw tap, and StageOutput::complex_iq is what tells the two apart. The
     signal meter read the count and metered stereo 3.01 dB high.
+
+phrase: span 5 rescues 378 blocks the default loses and rewrites 194 more
+retired: 2026-09-21
+commit: fe9f58b
+instead: 378 was measured against span 0 and 194 against span 2, so one
+    sentence used two baselines. Against the default, span 5 drops 257 fewer
+    blocks and 194 of those 257 arrive with contents the station never sent.

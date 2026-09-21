@@ -1449,6 +1449,17 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
     CHECK(shipped.dropped < off.dropped);
     CHECK(widest.dropped < shipped.dropped);
 
+    // THE TRADE IS READ OFF THE DEFAULT'S ROW AND NOT OFF SPAN 0, which is
+    // the arithmetic rds_groups.h states and got wrong once by quoting the
+    // drop against one baseline and the wrong-contents figure against
+    // another. Every block the widest span stops dropping is a block it
+    // accepts, so the two columns move by the same amount and the wrong
+    // ones are carved out of that number rather than added to it.
+    CHECK(shipped.dropped - widest.dropped == widest.compared - shipped.compared);
+    CHECK(widest.accepted_wrong > shipped.accepted_wrong);
+    CHECK(widest.accepted_wrong - shipped.accepted_wrong <
+          shipped.dropped - widest.dropped);
+
     // And it costs wrong blocks, which is the half nothing measured before.
     //
     // rds_groups.h says the restriction to span 2 "reduces miscorrection and
@@ -1491,6 +1502,24 @@ TEST_CASE("at an on-air block error rate the corrector's cost is measured", "[rd
     CHECK(widest.wrong_marked > shipped.wrong_marked);
     CHECK(shipped.wrong_unmarked <= off.wrong_char_sightings);
     CHECK(widest.wrong_unmarked <= off.wrong_char_sightings);
+
+    // NOT ONE UNMARKED WRONG CHARACTER AT ANY NON-ZERO SPAN, which is the
+    // stronger statement and is only true since the marking started
+    // counting block 2. The segment address lives in block 2, so a
+    // mis-correction there put clean characters from a clean block 4 into a
+    // segment the station never sent them in, and the old rule, which
+    // looked at the character blocks alone, called that a clean reception.
+    // It was the one way a wrong character reached the display with nothing
+    // beside it saying so: 14 characters at span 1, 14 at span 2 and 24 at
+    // span 5 on this very run, measured before the rule changed.
+    CHECK(shipped.wrong_unmarked == 0);
+    CHECK(widest.wrong_unmarked == 0);
+    CHECK(rows[1].wrong_unmarked == 0);
+
+    // Span 0 is the exception and it is the code rather than the marking: a
+    // pattern that is itself a codeword has a zero syndrome, is never
+    // corrected, and is clean by every test the decoder can apply.
+    CHECK(off.wrong_unmarked == off.wrong_char_sightings);
 }
 
 TEST_CASE("a repaired segment is marked and a clean one unmarks it", "[rds]") {
@@ -1592,6 +1621,115 @@ TEST_CASE("a repaired segment is marked and a clean one unmarks it", "[rds]") {
         feed_group(decoder, rt_group(true, 1, "NEW "));
         CHECK(decoder.state().rt_received == 0x0002);
         CHECK(decoder.state().rt_corrected == 0x0000);
+    }
+}
+
+TEST_CASE("a rewritten block 2 marks the segment it addressed", "[rds]") {
+    // THE HOLE THE MARKING HAD. ps_corrected and rt_corrected were driven by
+    // the character blocks alone, and the segment ADDRESS is not in a
+    // character block. It is two bits of block 2 for programme service and
+    // four for RadioText, so a block 2 the corrector rewrote into a
+    // different valid codeword puts the station's own characters, carried by
+    // a block that arrived clean, into a segment the station never sent them
+    // in. Marking block 4 alone reported that as a clean reception.
+    //
+    // A REAL MIS-CORRECTION AND NOT A REPAIR. The error pattern below is a
+    // codeword of the (26,16) code exclusive-ORed with a one-bit burst. The
+    // codeword contributes nothing to the syndrome, so the decoder sees the
+    // syndrome of a span 1 burst, applies that burst, and hands back a block
+    // that is a faultless codeword and is not the one transmitted. That is
+    // the failure rds_groups.h's kDefaultCorrectableBurstSpan note says the
+    // restriction reduces and does not abolish, constructed rather than
+    // waited for.
+    //
+    // The codeword is built from this file's own polynomial arithmetic, so
+    // it is not the implementation certifying itself: information word 1,
+    // check bits (1 * x^10) mod g, which flips exactly the low bit of the
+    // segment address and nothing else.
+    const std::uint32_t kAddressCodeword = (1u << 10) | poly_mod(1u << 10);
+    const std::uint32_t kSpanOneBurst = 1u;
+    const std::uint32_t kPattern = kAddressCodeword ^ kSpanOneBurst;
+
+    // It has to BE a codeword or the premise is wrong: a pattern with a
+    // syndrome of its own would be corrected as itself.
+    REQUIRE(poly_mod(kAddressCodeword) == 0u);
+
+    SECTION("programme service") {
+        const std::string ps = "KKFM-FM ";
+        RdsDecoder decoder;
+        prime(decoder);
+
+        // Segment 1, which carries "FM".
+        GroupWords words{0x2AF6, type0_block2(10, true, false, true, false, 1), 0xE0CD,
+                         chars_to_word(ps[2], ps[3]), false};
+        auto blocks = encode_group(words);
+        blocks[1] ^= kPattern;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.blocks_corrected() == 1);
+
+        // The group now addresses segment 0, and "FM" is at the front of a
+        // station name that begins "KK".
+        CHECK(decoder.state().ps_received == 0x01);
+        CHECK(decoder.state().ps_text().substr(0, 2) == "FM");
+
+        // Nothing is wrong with those two characters and nothing is wrong
+        // with the block that carried them. What is wrong is where they
+        // went, and the block that decided that was rewritten.
+        CHECK(decoder.state().ps_corrected == 0x01);
+    }
+
+    SECTION("RadioText") {
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const auto rt_b2 = static_cast<std::uint16_t>((2u << 12) | 0x0400u | (10u << 5) | 1u);
+        GroupWords words{0x2AF6, rt_b2, chars_to_word('L', 'I'), chars_to_word('V', 'E'),
+                         false};
+        auto blocks = encode_group(words);
+        blocks[1] ^= kPattern;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.blocks_corrected() == 1);
+        CHECK(decoder.state().rt_received == 0x0001);
+        CHECK(decoder.state().rt_text().substr(0, 4) == "LIVE");
+        CHECK(decoder.state().rt_corrected == 0x0001);
+    }
+
+    SECTION("and a clean block 2 still unmarks the segment") {
+        // The mark has to come off, or it is a stain rather than the latest
+        // reception's answer. Both halves of the rule are the same rule.
+        const std::string ps = "KKFM-FM ";
+        RdsDecoder decoder;
+        prime(decoder);
+
+        const auto segment_zero = [&] {
+            return GroupWords{0x2AF6, type0_block2(10, true, false, true, false, 0), 0xE0CD,
+                              chars_to_word(ps[0], ps[1]), false};
+        };
+
+        auto blocks = encode_group(segment_zero());
+        blocks[1] ^= kAddressCodeword ^ (1u << 2);  // still lands on segment 1
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+        REQUIRE(decoder.blocks_corrected() == 1);
+        REQUIRE(decoder.state().ps_corrected == 0x02);
+
+        feed_group(decoder, segment_zero());
+        CHECK(decoder.state().ps_corrected == 0x02);
+
+        // The segment the mis-correction wrote into, received cleanly this
+        // time, clears its own bit.
+        feed_group(decoder,
+                   GroupWords{0x2AF6, type0_block2(10, true, false, true, false, 1), 0xE0CD,
+                              chars_to_word(ps[2], ps[3]), false});
+        CHECK(decoder.state().ps_corrected == 0x00);
+        CHECK(decoder.state().ps_text().substr(0, 4) == "KKFM");
     }
 }
 

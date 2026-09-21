@@ -241,11 +241,47 @@ struct BurstCorrection {
 //      2             698        123    33 of 4418
 //      5             441        388   227 of 4675
 //
-// So span 5 rescues 378 blocks the default loses and rewrites 194 more into
-// something else, and that is the trade the default is taking a side on. It
-// is not a small effect at either end: over 112 seconds of a station whose
-// name never changed, span 2 finished with KKFM-FM on the display as
+// Read the trade off the DEFAULT's row, which is span 2. Span 5 drops 257
+// fewer blocks than it and accepts 194 more with contents the station never
+// sent, and those 194 come out of the same 257: the accepted column rises by
+// exactly 257 as the dropped column falls by it, and a syndrome that names a
+// span 2 burst names the same one at span 5, so the default's 33 wrong
+// blocks are a subset of the widest's 227. The net is 63 blocks rescued
+// intact against 194 rewritten into something else, and that is the trade
+// the default is taking a side on.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "span 5 rescues 378 blocks the default
+// loses and rewrites 194 more into something else". The second figure was
+// against span 2 and the first was against span 0, 819 minus 441, so one
+// sentence compared the widest span with two different baselines and the
+// half a reader would quote was the flattering one.
+//
+// It is not a small effect at either end: over 112 seconds of a station
+// whose name never changed, span 2 finished with KKFM-FM on the display as
 // "-FFM-FM" and span 5 also corrupted the RadioText.
+//
+// WHAT REACHES THE DISPLAY, AND WHETHER IT IS MARKED. Same run, counted at
+// every rotation of the message rather than at the end, because a wrong
+// character a later rotation repairs was still shown. The last column is
+// what the same run produced before the marking started counting block 2:
+//
+//   span  wrong characters shown  marked  unmarked  unmarked before
+//      0                      32       0        32               32
+//      1                      94      94         0               14
+//      2                     198     198         0               14
+//      5                    1189    1189         0               24
+//
+// Every wrong character a correction produced is now marked. The 32 at span
+// 0 are the code rather than the corrector: an error pattern that is itself
+// a codeword has a zero syndrome, is never corrected, and is clean by every
+// test the decoder can apply.
+//
+// The 14, 14 and 24 are the ones the marking used to miss, and they are the
+// worst kind: a wrong character on the display with nothing beside it
+// saying so. Every one of them came from a block 2 the corrector rewrote.
+// The segment address is in block 2, so the characters were the station's
+// own, carried by a character block that arrived clean, and they landed in
+// a segment the station never sent them in.
 //
 // The floor at span 0 is the code and not the corrector. An error pattern
 // that is itself a codeword has a zero syndrome and passes uncorrected, one
@@ -582,6 +618,14 @@ struct StationState {
     // never comes off. A consumer can render a set bit differently, or hold
     // the segment until it arrives clean. One that ignores it is exactly
     // where this decoder was before.
+    //
+    // CORRECTED ANYWHERE IN THE GROUP THAT DECIDED THE SEGMENT, which is
+    // block 2 as well as block 4. The segment address is two bits of block
+    // 2, so a mis-corrected block 2 puts the station's own two characters
+    // into a segment it never sent them in. Nothing about those characters
+    // is wrong and the block that carried them was clean; what moved is
+    // where they landed, and marking block 4 alone called that a clean
+    // reception.
     std::uint8_t ps_corrected = 0;
 
     // RadioText, 64 characters over 16 four-character segments in type 2A or
@@ -599,10 +643,13 @@ struct StationState {
     std::uint32_t rt_received = 0;  // one bit per segment address 0..15
 
     // The same question for RadioText, one bit per segment address, set when
-    // any block that wrote the segment had been corrected. See ps_corrected.
-    // A 2A segment is written by two blocks and either of them rewriting the
-    // segment is enough to set the bit, because the segment is what a reader
-    // renders and it cannot render half of one.
+    // any block the segment DEPENDS ON had been corrected. See ps_corrected.
+    // A 2A segment is written by two character blocks and either of them
+    // rewriting the segment is enough to set the bit, because the segment is
+    // what a reader renders and it cannot render half of one. Block 2
+    // counts too: it carries the four-bit segment address and the A/B flag,
+    // so a mis-correction there can place a clean pair of blocks in the
+    // wrong segment or clear a message that had not ended.
     std::uint32_t rt_corrected = 0;
     std::size_t rt_length = 0;
     std::size_t rt_terminator = kNoRtTerminator;

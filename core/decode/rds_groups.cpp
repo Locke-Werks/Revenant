@@ -1212,10 +1212,24 @@ void RdsDecoder::apply_type0(const Group& group) {
         state_.ps[address * 2] = high_char(b4);
         state_.ps[address * 2 + 1] = low_char(b4);
         state_.ps_received = static_cast<std::uint8_t>(state_.ps_received | (1u << address));
+
+        // BLOCK 2 COUNTS AS WELL AS BLOCK 4, because `address` came out of
+        // block 2. A mis-corrected block 2 is rewritten into a different
+        // valid codeword, and two of the bits that moved may be the segment
+        // address: the station's own characters are then written into a
+        // segment they do not belong to, and marking only block 4 says the
+        // pair arrived clean, which they did. What is wrong is where they
+        // landed, and the block that decided that is block 2.
+        //
+        // WHAT THIS USED TO READ: group.blocks[3].corrected alone. The
+        // display then showed a segment nothing had touched in this
+        // rotation as a clean reception of the station's name.
+        const bool corrected = group.blocks[1].corrected || group.blocks[3].corrected;
+
         // Assigned rather than accumulated, so a clean reception of the same
         // segment clears the doubt the corrected one raised. See
         // StationState::ps_corrected.
-        if (group.blocks[3].corrected) {
+        if (corrected) {
             state_.ps_corrected = static_cast<std::uint8_t>(state_.ps_corrected | (1u << address));
         } else {
             state_.ps_corrected =
@@ -1312,13 +1326,24 @@ void RdsDecoder::apply_type2(const Group& group) {
     };
 
     bool segment_complete = false;
-    bool segment_corrected = false;
+
+    // BLOCK 2 IS PART OF EVERY SEGMENT IT ADDRESSES. `address` is four bits
+    // of block 2 and the A/B flag is a fifth, so a mis-corrected block 2
+    // writes the station's own characters into the wrong segment, or clears
+    // a message that had not ended. Either way the segment this group
+    // touches is not one the station sent, and marking only the character
+    // blocks reported it clean.
+    //
+    // WHAT THIS USED TO READ: the two character blocks alone. The 2A
+    // segment written by a rewritten address then showed as a clean
+    // reception in the middle of a RadioText nobody transmitted.
+    bool segment_corrected = group.blocks[1].corrected;
     if (group.version_b) {
         if (group.blocks[3].valid) {
             put(base, high_char(group.blocks[3].value));
             put(base + 1, low_char(group.blocks[3].value));
             segment_complete = true;
-            segment_corrected = group.blocks[3].corrected;
+            segment_corrected = segment_corrected || group.blocks[3].corrected;
         }
     } else {
         if (group.blocks[2].valid) {
@@ -1330,7 +1355,8 @@ void RdsDecoder::apply_type2(const Group& group) {
             put(base + 3, low_char(group.blocks[3].value));
         }
         segment_complete = group.blocks[2].valid && group.blocks[3].valid;
-        segment_corrected = (group.blocks[2].valid && group.blocks[2].corrected) ||
+        segment_corrected = segment_corrected ||
+                            (group.blocks[2].valid && group.blocks[2].corrected) ||
                             (group.blocks[3].valid && group.blocks[3].corrected);
     }
 
