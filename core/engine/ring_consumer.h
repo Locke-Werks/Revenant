@@ -2,13 +2,11 @@
 // contract in core/engine/device_ring.h declares no home for.
 //
 // device_ring.h fixes the shape a consumer sees (ConsumerKind, RingConsumer,
-// ConsumerCursor, claim and retire) and nothing else. Four things have to
-// exist around that shape, and none of them can be added to it without editing
-// a committed contract that three other work packages compile against:
+// ConsumerCursor, claim and retire) and nothing else. What has to exist
+// around that shape lives here, because none of it can be added to that
+// header without editing a committed contract that three other work packages
+// compile against:
 //
-//   RingWindow      the push-constant block a consumer kernel takes. This is
-//                   the seam with the channelizer, so it is frozen here rather
-//                   than reinvented once per kernel.
 //   plan_ring_geometry
 //                   the sizing arithmetic, taking a device's limits as plain
 //                   integers. Separated from DeviceRing::create so that both
@@ -74,55 +72,32 @@ inline constexpr dsp::SampleIndex kMaxRingCapacitySamples = dsp::SampleIndex{1} 
 inline constexpr std::uint32_t kMaxRingConsumers = 64;
 
 // ---------------------------------------------------------------------------
-// The kernel seam
+// THE KERNEL SEAM THAT WAS HERE, AND WHY IT IS GONE
 // ---------------------------------------------------------------------------
-
-// The push-constant block every consumer kernel takes, and the reason the ring
-// capacity is a power of two.
 //
-// A kernel computes its own ring offset per invocation as
-// (base_index + i) & capacity_mask, which is one AND. A non-power-of-two
-// capacity would need a 64-bit modulo in every invocation instead. The payoff
-// is that a window straddling the wrap needs no special case anywhere in a
-// consumer: each invocation masks its own index independently, so the window
-// the kernel sees is contiguous in index space whatever it does in the buffer.
+// This section declared `RingWindow`, called "the push-constant block every
+// consumer kernel takes" and "the seam with the channelizer", and `ReadLease`
+// around it. It was removed on 2026-09-20 because no kernel ever took it and
+// none could.
 //
-// std430 layout: two 8-byte scalars then two 4-byte scalars, 24 bytes total,
-// well inside the 256-byte maxPushConstantsSize both devices report.
-struct RingWindow {
-    // Absolute sample index, from stream start, of the first sample of the
-    // window. Never a ring offset: the ring offset is derived in the shader
-    // and exists nowhere on the host.
-    std::uint64_t base_index = 0;
-
-    std::uint64_t capacity_mask = 0;
-
-    std::uint32_t count = 0;
-
-    // std430 padding. Written as zero so the push-constant bytes are
-    // reproducible and a memcmp of two windows means what it looks like.
-    std::uint32_t reserved = 0;
-};
-
-static_assert(sizeof(RingWindow) == 24, "RingWindow is a push-constant block and its layout is a "
-                                        "contract with every consumer kernel");
-static_assert(alignof(RingWindow) == 8, "std430 aligns the uint64 members to 8");
-
-// What a consumer is handed for one dispatch: where to read, and the timeline
-// value its dispatch must wait on before it may read there.
+// RingWindow's first two members were uint64. GLSL has no 64-bit integer
+// without GL_ARB_gpu_shader_int64, which nothing in core/shaders enables, so
+// a shader declaring that block would not compile against this tree. The
+// channelizer the comment named settled the question in the other direction
+// and wrote down why: core/shaders/pfb_branch.comp takes `uint ring_mask` and
+// `uint base_offset` and says "this kernel never sees an absolute sample
+// index ... the host owns the index and hands down a 32-bit ring offset. Pass
+// a truncated absolute index instead and it works for three and a half
+// minutes at 20 MS/s and then does not." core/engine/graph.cpp does exactly
+// that, in dsp::ConvertParams, dsp::PfbBranchParams and every other push
+// block it fills.
 //
-// The timeline value is supplied by the scheduler rather than by the ring. The
-// frozen DeviceRing owns no VkSemaphore, so it cannot mint one; see the note
-// in device_ring.cpp about the producer API the contract is missing.
-struct ReadLease {
-    RingWindow window{};
-
-    // The ring timeline value at which the samples in `window` are known to be
-    // in device memory. Zero means "no wait recorded", which is correct only
-    // for a host-side reader that never dispatches.
-    std::uint64_t timeline_value = 0;
-};
-
+// A frozen contract nothing implements is worse than no contract: the next
+// consumer kernel would have been written against a 24-byte block that has
+// never once crossed to a device. What the real seam looks like is in
+// core/dsp, one params struct per kernel, each asserted against its own
+// shader.
+//
 // ---------------------------------------------------------------------------
 // Sizing
 // ---------------------------------------------------------------------------
@@ -943,10 +918,6 @@ public:
         claim.begin_ = begin;
         claim.end_ = begin + taken;
         claim.skipped_ = skipped;
-        claim.lease_.window.base_index = begin;
-        claim.lease_.window.capacity_mask = ring.geometry().capacity_mask;
-        claim.lease_.window.count = static_cast<std::uint32_t>(taken);
-        claim.lease_.window.reserved = 0;
 
         if (auto status = ring.claim(consumer, claim.end_); !status) {
             return std::unexpected(with_context(status.error(), "ScopedClaim::open"));
@@ -972,9 +943,6 @@ public:
 
     ~ScopedClaim() { retire_if_held(); }
 
-    [[nodiscard]] const ReadLease& lease() const { return lease_; }
-    [[nodiscard]] ReadLease& lease() { return lease_; }
-
     [[nodiscard]] dsp::SampleIndex begin() const { return begin_; }
     [[nodiscard]] dsp::SampleIndex end() const { return end_; }
     [[nodiscard]] std::uint64_t count() const { return end_ - begin_; }
@@ -984,10 +952,6 @@ public:
     [[nodiscard]] std::uint64_t skipped() const { return skipped_; }
 
     [[nodiscard]] bool held() const { return held_; }
-
-    // Records the timeline value the consumer's dispatch will wait on, so the
-    // lease handed to the kernel carries it.
-    void set_timeline_value(std::uint64_t value) { lease_.timeline_value = value; }
 
     // Hands retirement to whoever completes the dispatch. After this the
     // destructor does nothing, and the window stays open until someone calls
@@ -1008,7 +972,6 @@ private:
     void adopt(ScopedClaim&& other) noexcept {
         ring_ = other.ring_;
         consumer_ = other.consumer_;
-        lease_ = other.lease_;
         begin_ = other.begin_;
         end_ = other.end_;
         skipped_ = other.skipped_;
@@ -1032,7 +995,6 @@ private:
 
     DeviceRing* ring_ = nullptr;
     const RingConsumer* consumer_ = nullptr;
-    ReadLease lease_{};
     dsp::SampleIndex begin_ = 0;
     dsp::SampleIndex end_ = 0;
     std::uint64_t skipped_ = 0;

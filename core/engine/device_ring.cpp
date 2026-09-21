@@ -75,12 +75,21 @@
 //
 // 3. THE WRAP, WHICH THE HOST SPLITS AND A KERNEL DOES NOT
 //
-// A consumer kernel never special-cases the wrap. Each invocation masks its
-// own absolute index, offset = uint32(index & capacity_mask), which is one AND
-// because the capacity is a power of two. A window straddling the wrap is
-// therefore contiguous in index space no matter where it lands in the buffer,
-// and that is what lets the channelizer overlap the previous block by design
-// without any of its arithmetic knowing the ring exists.
+// A consumer kernel never special-cases the wrap. It masks per invocation,
+// offset = (base_offset + i) & ring_mask, which is one AND because the
+// capacity is a power of two. A window straddling the wrap is therefore
+// contiguous in index space no matter where it lands in the buffer, and that
+// is what lets the channelizer overlap the previous block by design without
+// any of its arithmetic knowing the ring exists.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it read "each invocation
+// masks its own absolute index, offset = uint32(index & capacity_mask)". The
+// index a kernel masks is NOT absolute and cannot be: GLSL has no 64-bit
+// integer without an extension nothing in core/shaders enables, so the host
+// masks the absolute index down to a 32-bit ring offset and hands that down.
+// core/shaders/pfb_branch.comp says the same thing from the other side, and
+// says what a truncated absolute index costs: it works for three and a half
+// minutes at 20 MS/s and then does not.
 //
 // The host-side writer is the one place that does split. vkCmdCopyBuffer takes
 // a contiguous destination range, so a block whose destination crosses the
@@ -121,9 +130,15 @@
 // The ring owns no VkSemaphore. Section 2(a) describes the ordering half of
 // the producer's job in terms of a ring timeline, and the timeline that
 // actually plays that part belongs to the graph: core/engine/graph.cpp creates
-// it, signals it once per submission and the scheduler waits on it. That is
-// why ring_consumer.h has the caller fill in ReadLease::timeline_value rather
-// than the ring filling it in.
+// it, signals it once per submission and the scheduler waits on it. A
+// consumer that dispatches therefore takes its timeline value from the graph
+// and has nowhere to ask the ring for one.
+//
+// That last sentence used to read "which is why ring_consumer.h has the
+// caller fill in ReadLease::timeline_value rather than the ring filling it
+// in". ReadLease was deleted on 2026-09-20 along with the push-constant block
+// it carried, unused by any kernel and uncompilable by one; the note standing
+// in its place in ring_consumer.h has the reasoning.
 //
 // It holds while one graph is both the ring's only producer and its only
 // consumer, which is the case today. A second consumer dispatching against the
