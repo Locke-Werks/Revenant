@@ -171,12 +171,33 @@ nothing downstream can tell.
 One kernel per file, under `core/shaders/`, named for what it does.
 
 Workgroup size is a specialization constant. Never hardcoded, never a `#define`
-patched at build time.
+patched at build time. One line, and it is the same line in all eleven kernels
+under `core/shaders/`:
 
 ```glsl
 layout(local_size_x_id = 0) in;
-layout(constant_id = 0) const uint kWorkgroupSize = 64;
 ```
+
+Id 0 is reserved for the workgroup size and nothing else. A kernel's own
+specialization constants start at 1, which is why every one of them reads
+`layout(constant_id = 1)` upward. `kLocalSizeXConstantId` and
+`kDefaultLocalSizeX` in `core/gpu/kernel.h` are the source of truth for the id
+and for the 64 the host specializes when a caller asks for nothing else, and
+`ComputePipeline` rejects a size above `DeviceInfo::max_workgroup_size_x`
+rather than letting the driver do it.
+
+WHAT THIS SNIPPET USED TO SAY: it carried a second line,
+`layout(constant_id = 0) const uint kWorkgroupSize = 64;`. No shader in this
+tree has ever written it, and the name `kWorkgroupSize` appears in no `.comp`
+file. Read literally it also contradicted the sentence above it, since it is a
+default size written into the shader. The 64 is real and it is host-side.
+
+`local_size_x_id` compiles to the SPIR-V `LocalSizeId` execution mode, which is
+why `core/gpu/context.cpp` requires `maintenance4` of a device rather than
+treating it as optional: without it a driver may ignore the specialized size,
+launch one invocation per workgroup, and leave most of the output buffer
+untouched, which surfaces as a reference diff failing for what looks like an
+arithmetic reason.
 
 The conformance suite runs the same kernel on every device in the machine and
 those devices have different limits. `DeviceInfo::max_workgroup_size_x` in
