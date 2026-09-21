@@ -47,6 +47,13 @@ Shared& shared() {
 // nothing else, so a typo there does not fail, it runs the wrong device and
 // reports green. The fixture reads it again rather than trusting that.
 //
+// Strictly also means stricter than context.cpp, not merely different.
+// std::from_chars accepts neither leading whitespace nor a leading '+', so
+// " 1" and "+1" are an error here and are index 1 to strtol. Both readers
+// agree on "1", "0" and "01", and both reject "one", "1; rm -rf" and "-1".
+// Where they part the fixture fails, which is the direction that cannot
+// silently run the wrong device.
+//
 // The outcome is one of three: unset, a non-negative integer, or an error
 // string that every GPU case fails on.
 struct RequestedDevice {

@@ -42,11 +42,27 @@ namespace revenant::test {
 //
 // REVENANT_GPU_INDEX that is not a non-negative decimal integer, or an index
 // the context did not honour. core/gpu/context.cpp's index_from_environment
-// returns an optional, so "1" and "one" and "1; rm -rf" are all indis-
-// tinguishable from unset there and selection falls through to "pick the
-// best device". On this machine that is the discrete card, which is leg zero,
-// so a leg aimed at index 1 by a typo would run the discrete device twice and
-// report two green conformance runs.
+// returns an optional, so a value it cannot parse is indistinguishable from
+// unset there and selection falls through to "pick the best device". On this
+// machine that is the discrete card, which is leg zero, so a leg aimed at
+// index 1 by a typo would run the discrete device twice and report two green
+// conformance runs.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: that '"1" and "one" and "1; rm -rf" are
+// all indistinguishable from unset there'. "1" is not. It is the ordinary
+// case and the one the whole conformance matrix rests on: index_from_environment
+// runs strtol base 10 and accepts it, returning 1, and leg one would be broken
+// outright if it did not. "one" and "1; rm -rf" do come back as nullopt, so the
+// hazard the paragraph describes is real; naming the value that works alongside
+// the two that do not made the function look far worse than it is, and a reader
+// who checked would have stopped trusting the rest of the paragraph too.
+//
+// Where the two readers actually disagree, measured by running both forms over
+// the same strings: this fixture parses with std::from_chars, which takes
+// neither leading whitespace nor a leading '+', so " 1" and "+1" are a
+// configuration error here while context.cpp's strtol honours both as index 1.
+// The fixture is the stricter of the two on purpose and fails rather than
+// guessing. "01" is index 1 to both.
 //
 // This is operator error rather than a missing device, so a case that hits it
 // FAILS whatever REVENANT_REQUIRE_GPU says. A skip here is the outcome the
