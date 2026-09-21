@@ -162,10 +162,18 @@ interactive user.
 
 ## Cost
 
-The repository is private, so Actions minutes are metered, but only `guards` consumes
-them. Everything else runs on hardware that is already paid for. The nightly is scheduled
-rather than frequent for the same reason the sweeps are not in the PR gate: they take
-real time on a machine somebody else is using.
+WHAT THIS PARAGRAPH USED TO SAY: "The repository is private, so Actions minutes are
+metered, but only `guards` consumes them." The repository is public, which the fork-gate
+section above says in the sentence that explains why the gate exists, and a public
+repository's hosted-runner minutes are not metered at all. Both halves of that sentence
+were wrong and they pointed opposite ways, so nobody reading either one alone would have
+caught it.
+
+Nothing here costs GitHub minutes. `guards` runs on `ubuntu-latest`, which is free on a
+public repository, and every other job runs on hardware that is already paid for. What
+those jobs do cost is the workstation, which is why the nightly is scheduled rather than
+frequent and why the long sweeps are not in the pull-request gate: they take real time on
+a machine somebody is using.
 
 A scheduled workflow on a self-hosted runner only fires when the machine is on. That is
 accepted here, not a fault to chase.
