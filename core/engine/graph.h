@@ -139,6 +139,18 @@ struct StageOutput {
     // Audio frames, not floats. A stereo frame is two floats.
     std::uint32_t frames = 0;
 
+    // What this call actually put in the command buffer, which is not a
+    // function of the receiver existing. A stage returns early with none of
+    // these recorded when it has no whole audio sample to make this time
+    // round, and GraphStats counts commands rather than receivers, so the
+    // stage is the only thing that can report them.
+    std::uint32_t dispatches = 0;
+
+    // Device-to-host copies, which is vkCmdCopyBuffer calls into a mapped
+    // readback buffer and not the regions inside one: a copy split in two by
+    // the ring's wrap is one crossing of the bus.
+    std::uint32_t readbacks = 0;
+
     // 1 for real audio, 2 for a raw complex tap presented as interleaved I/Q.
     std::uint32_t channels = 1;
 
@@ -403,10 +415,27 @@ struct GraphStats {
     // stage grew its own submission.
     std::uint64_t submissions = 0;
 
-    // Device-to-host copies. One per block per receiver, all inside the one
-    // command buffer, so they cost no extra submission and no extra wait.
+    // Device-to-host copies recorded: a receiver's audio, a passband frame
+    // and its two percentiles, the spectrum frame and its two percentiles.
+    // All of them sit inside the one command buffer, so they cost no extra
+    // submission and no extra wait.
+    //
+    // WHAT THIS USED TO SAY, AND WHAT IT USED TO COUNT. Until 2026-09-20 it
+    // read "one per block per receiver" and the graph added the number of
+    // active receivers once per block, which was wrong in both directions at
+    // once. A receiver whose stage had no whole audio sample this dispatch
+    // records no copy and was counted anyway; the spectrum's two copies and
+    // each passband's two were not counted at all. The number now comes back
+    // from whatever recorded the command, which is the only place that knows
+    // whether it did.
     std::uint64_t readbacks = 0;
 
+    // Compute dispatches recorded, by the same rule and for the same reason.
+    // Until 2026-09-20 this counted the convert, the channelizer's two, the
+    // spectrum's two and the passband's three per receiver, and silently
+    // omitted every VrxStage: the fine filter and the demodulator, which are
+    // the two dispatches per receiver per block that the whole per-receiver
+    // path consists of.
     std::uint64_t dispatches = 0;
     std::uint64_t channel_blocks = 0;
 

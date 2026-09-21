@@ -487,8 +487,11 @@ public:
                                     total, record.block_count, record.audio_bytes));
         }
 
+        // One crossing of the bus whether the wrap split it into two regions
+        // or not, which is what GraphStats::readbacks counts.
         vkCmdCopyBuffer(record.commands, record.channel_ring, record.audio_destination,
                         region_count, regions);
+        out.readbacks = 1;
         return out;
     }
 
@@ -1565,6 +1568,11 @@ struct Graph::Impl {
         }
 
         dispatches.fetch_add(3 * planned, std::memory_order_relaxed);
+
+        // Two per receiver: the assembled frame and its percentiles. The
+        // device-to-device copies that assemble the frame from the two
+        // passes are not readbacks and are not counted here.
+        readbacks.fetch_add(2 * planned, std::memory_order_relaxed);
     }
 
     // The completion thread, once per submitted frame, in submission order.
@@ -3765,6 +3773,10 @@ Status Graph::on_block(const source::SourceBlock& block) {
             static_cast<dsp::SampleIndex>(impl.geometry.spectrum.transform) * decimation;
         frame.spectrum_recorded = true;
         impl.dispatches.fetch_add(2, std::memory_order_relaxed);
+
+        // The frame and its two percentiles, which are two crossings of the
+        // bus and were counted as none until 2026-09-20.
+        impl.readbacks.fetch_add(2, std::memory_order_relaxed);
     }
 
     if (block_count > 0 && !impl.active.empty()) {
@@ -3804,7 +3816,18 @@ Status Graph::on_block(const source::SourceBlock& block) {
             entry.passband_sink = slot->passband_sink;
             frame.vrxs.push_back(std::move(entry));
         }
-        impl.readbacks.fetch_add(frame.vrxs.size(), std::memory_order_relaxed);
+
+        // What the stages recorded, asked of the stages. A receiver with no
+        // whole audio sample this dispatch records neither its demodulator
+        // nor its copy, so counting receivers here counted intentions.
+        std::uint64_t stage_dispatches = 0;
+        std::uint64_t stage_readbacks = 0;
+        for (const Impl::FrameVrx& entry : frame.vrxs) {
+            stage_dispatches += entry.output.dispatches;
+            stage_readbacks += entry.output.readbacks;
+        }
+        impl.dispatches.fetch_add(stage_dispatches, std::memory_order_relaxed);
+        impl.readbacks.fetch_add(stage_readbacks, std::memory_order_relaxed);
 
         // After every fine stage, so that all of them sit in one dependency
         // region and their transforms can overlap.

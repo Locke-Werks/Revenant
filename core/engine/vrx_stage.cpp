@@ -842,6 +842,7 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
                        VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_ACCESS_SHADER_READ_BIT);
         next_output_ += count;
+        out.dispatches += 1;
     }
 
     // What a passband transform may look at. first_output_ and not a live
@@ -909,6 +910,8 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
 
     next_audio_ += audio_count;
     out.frames = audio_count;
+    out.dispatches += 1;
+    out.readbacks += 1;
     return out;
 }
 
