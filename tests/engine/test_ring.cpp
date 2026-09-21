@@ -3,9 +3,18 @@
 // Most of the risk in a ring is not on the device. It is in the sizing, which
 // fails on one machine and not another; in the retirement floor, which is what
 // stops the writer overwriting a window somebody is reading; and in the wrap,
-// which is correct for about three and a half minutes at 20 MS/s if the index
-// arithmetic is done in 32 bits by mistake. All three are worth testing
-// exhaustively rather than incidentally.
+// where the host owns a 64-bit index and every consumer kernel addresses the
+// buffer in 32 bits. All three are worth testing exhaustively rather than
+// incidentally.
+//
+// WHAT THIS PARAGRAPH USED TO SAY of the wrap: "correct for about three and
+// a half minutes at 20 MS/s if the index arithmetic is done in 32 bits by
+// mistake." Reducing the index to 32 bits before masking is not a mistake and
+// never was; with a power-of-two capacity it is exact forever, which is the
+// whole reason the kernels take a 32-bit offset. The case near the bottom of
+// this file says what the hazard actually is. The same sentence sits in
+// core/shaders/pfb_branch.comp and core/shaders/convert_cu8_cf32.comp, which
+// this lane does not own.
 //
 // The sizing and the wrap need no GPU at all. The retirement floor is
 // exercised through DeviceRing, because that is the API a producer and a
@@ -15,6 +24,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdint>
 #include <thread>
@@ -130,33 +140,108 @@ TEST_CASE("a rate of zero is refused rather than producing a ring with no retent
     CHECK_FALSE(planned.has_value());
 }
 
-TEST_CASE("index to offset stays correct past the 32-bit boundary", "[engine][ring][m1]") {
-    // The trap this guards. SampleIndex is 64 bits and the ring offset is 32,
-    // so an implementation that reduces the index to 32 bits before masking is
-    // correct until the index passes 2^32, which at 20 MS/s is three and a
-    // half minutes. A capture is fine for one coffee break and wrong for the
-    // rest of the session.
-    constexpr std::uint64_t kCapacity = 1ULL << 20;
-    constexpr std::uint64_t kMask = kCapacity - 1;
+TEST_CASE("the branch kernel's 32-bit ring addressing agrees with the 64-bit index",
+          "[engine][ring][m1]") {
+    // WHAT THIS CASE USED TO BE, because the shape is worth naming. It
+    // declared a capacity and a mask of its own, walked a list of indices,
+    // and checked that `index & kMask` equalled `index % kCapacity`. Both
+    // sides were written out in the case body, in 64 bits, from the same two
+    // constants, so it was an identity over a power of two and could not
+    // fail. The comment above it said the trap was "an implementation that
+    // reduces the index to 32 bits before masking", and that trap does not
+    // exist: for a mask of 2^k - 1 with k <= 32, truncating to 32 bits first
+    // gives the same answer forever, which is exactly why every kernel in
+    // core/shaders/ is allowed to take a 32-bit offset from the host. And
+    // DeviceRing::offset_of, the function the case was standing in for, has
+    // no callers: every consumer masks inline.
+    //
+    // THE REAL HAZARD is a 32-bit accumulator upstream of the mask, which is
+    // what core/shaders/pfb_branch.comp runs. The host hands down
+    // base_offset, already reduced; the shader adds block * D to it and
+    // subtracts a tap index from that, all in GLSL uint, and only then
+    // masks. That is exact, and it is exact only because the mask is 2^k - 1
+    // with k <= 32: the wrap at 2^32 and the wrap at the capacity are then
+    // the same reduction. Take either property away and the kernel reads the
+    // wrong sample with nothing saying so. Both are invariants of the
+    // planner, so they are asserted here against a geometry the planner
+    // produced rather than against a literal.
+    //
+    // The subtraction is the half that looks like a bug and is not. At the
+    // start of a stream a tap index exceeds the absolute index and the uint
+    // underflows, which lands on the right offset for the same reason. An
+    // implementation that "fixed" that by clamping to zero would pass every
+    // assertion the old case made and fail every one below.
+    engine::RingConfig config;
+    config.rate = 20'000'000;
+    config.seconds_wanted = 0.05;
 
-    const dsp::SampleIndex probes[] = {
-        0,
-        1,
-        kCapacity - 1,
-        kCapacity,
-        kCapacity + 7,
-        (1ULL << 32) - 1,
-        1ULL << 32,
-        (1ULL << 32) + 12345,
-        (1ULL << 40) + 999,
-        0xFFFF'FFFF'FFFF'FFFFULL,
+    const auto planned = engine::plan_ring_geometry(config, kIntegrated);
+    REQUIRE(planned.has_value());
+
+    const std::uint64_t capacity = planned->capacity_samples;
+    const std::uint64_t mask = planned->capacity_mask;
+    INFO("capacity " << capacity << ", mask " << mask);
+
+    REQUIRE(std::has_single_bit(capacity));
+    REQUIRE(mask == capacity - 1);
+    REQUIRE(capacity <= engine::kMaxRingCapacitySamples);
+    REQUIRE(mask <= 0xFFFF'FFFFULL);
+
+    // core/shaders/pfb_branch.comp, transcribed. Every operand is a GLSL
+    // uint, so every operation here is uint32_t and wraps modulo 2^32.
+    const auto branch_address = [](std::uint32_t base_offset, std::uint32_t block,
+                                   std::uint32_t decimation, std::uint32_t tap,
+                                   std::uint32_t ring_mask) {
+        const std::uint32_t base = base_offset + block * decimation;
+        return static_cast<std::uint32_t>((base - tap) & ring_mask);
     };
 
-    for (const dsp::SampleIndex index : probes) {
-        const auto expected = static_cast<std::uint32_t>(index % kCapacity);
-        const auto masked = static_cast<std::uint32_t>(index & kMask);
-        INFO("index " << index);
-        CHECK(masked == expected);
+    // The canonical grid: M = 64, D = M/2, 17 taps per branch, so the tap
+    // index n = q*M + r runs to M*taps_per_branch - 1.
+    constexpr std::uint32_t kDecimation = 32;
+    constexpr std::uint32_t kTapReach = 64 * 17;
+
+    // Output blocks chosen so that the absolute input index they name sits
+    // below the capacity, straddles it, passes 2^32, and passes 2^40. At
+    // 20 MS/s the 2^32 crossing is three and a half minutes in, which is the
+    // one a session reaches and a test run does not.
+    const std::uint64_t first_blocks[] = {
+        0,
+        1,
+        capacity / kDecimation - 1,
+        capacity / kDecimation,
+        (1ULL << 32) / kDecimation - 1,
+        (1ULL << 32) / kDecimation,
+        (1ULL << 40) / kDecimation + 7,
+    };
+
+    for (const std::uint64_t first_block : first_blocks) {
+        const std::uint64_t base_absolute = first_block * kDecimation;
+        const auto base_offset = static_cast<std::uint32_t>(base_absolute & mask);
+
+        for (const std::uint32_t block : {0U, 1U, 7U, 63U}) {
+            const std::uint64_t absolute =
+                base_absolute + static_cast<std::uint64_t>(block) * kDecimation;
+
+            for (const std::uint32_t tap : {0U, 1U, 17U, 64U, kTapReach - 1}) {
+                const std::uint32_t got = branch_address(base_offset, block, kDecimation, tap,
+                                                         static_cast<std::uint32_t>(mask));
+
+                // The reference is a modulo over the 64-bit index and shares
+                // no arithmetic with the expression above.
+                std::uint32_t expected = 0;
+                if (absolute >= tap) {
+                    expected = static_cast<std::uint32_t>((absolute - tap) % capacity);
+                } else {
+                    const std::uint64_t below = (tap - absolute) % capacity;
+                    expected = static_cast<std::uint32_t>((capacity - below) % capacity);
+                }
+
+                INFO("first_block " << first_block << ", block " << block << ", tap " << tap
+                                    << ", absolute " << absolute);
+                CHECK(got == expected);
+            }
+        }
     }
 }
 
