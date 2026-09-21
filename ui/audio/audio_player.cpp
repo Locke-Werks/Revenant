@@ -398,13 +398,23 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
     if (!out.isFormatSupported(wanted)) {
         // A DEVICE THAT REFUSES MONO IS THE ORDINARY CASE, NOT AN EDGE ONE.
         //
-        // Every engine built from this tree sets AudioChunk::channelCount
-        // to 1, and plenty of outputs take stereo and nothing else: the
-        // default output on the machine this was written on is a Blackmagic
-        // DeckLink Mini Monitor 4K, which offers 48000 Hz on 2 channels and
-        // refuses the same rate on 1. Refusing outright there means the
-        // operator can never listen on the device their machine is already
-        // using, which is not a defensible answer to "play the audio".
+        // Plenty of outputs take stereo and nothing else: the default output
+        // on the machine this was written on is a Blackmagic DeckLink Mini
+        // Monitor 4K, which offers 48000 Hz on 2 channels and refuses the same
+        // rate on 1. Refusing outright there means the operator can never
+        // listen on the device their machine is already using, which is not a
+        // defensible answer to "play the audio".
+        //
+        // WHAT THIS PARAGRAPH USED TO SAY, in its opening sentence: "Every
+        // engine built from this tree sets AudioChunk::channelCount to 1".
+        // WFM stereo landed in
+        // f3c0544 and a broadcast receiver at an ordinary audio rate sets 2.
+        // core/rpc/revenant.capnp was corrected on 2026-09-21 and this copy was
+        // not, because the phrase was never listed in docs/retired-claims.txt
+        // for the check to hunt, which is the failure that file exists to stop.
+        //
+        // The CODE below was always right and is unchanged: the widening is
+        // gated on one input channel, so a stereo stream has never reached it.
         //
         // So a mono stream is widened by DUPLICATION, which is a copy and
         // not a conversion. Every output channel gets the same sample, no

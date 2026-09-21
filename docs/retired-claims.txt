@@ -168,6 +168,7 @@ instead: At the shipped average_seconds the old bar withheld an ordinary 8 dB
 
 phrase: channelCount reads 1 on every engine built from this tree
 phrase: Every demodulator in core/engine/vrx_stage.cpp sets StageOutput::channels to 1
+phrase: Every engine built from this tree sets AudioChunk::channelCount to 1
 retired: 2026-09-20
 commit: f3c0544
 instead: A WFM receiver at an ordinary audio rate decodes stereo and sets
@@ -277,3 +278,10 @@ instead: SourceDescriptor carries the notes, tune ranges, discrete rates with mi
     and max, native format and bit width, gain stages with their steps and auto
     flag, flow control, seekability and length. The fields still absent are the
     four with no reader, named in the struct's own comment.
+
+phrase: WFM is mono and has no de-emphasis, so broadcast stations decode bright
+retired: 2026-09-20
+commit: 09e998f
+instead: WFM decodes the pilot-tone stereo system on the device and applies 75
+    microsecond de-emphasis, both with a CPU twin the conformance suite diffs
+    bit-exactly. f3c0544 is the stereo half and 09e998f the de-emphasis half.

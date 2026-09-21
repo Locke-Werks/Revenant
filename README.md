@@ -127,10 +127,18 @@ CMake project with a suite of its own, 26 tests, and CI configures, builds and
 runs both trees.
 
 What does not: every decoder but RDS. `docs/modes.md` is the scoped list and
-none of the rest of it is written. WFM is mono and has no de-emphasis, so
-broadcast stations decode bright and one channel only. Nothing saves a set of
-receivers across a restart; that one is in `docs/rpc.md` with what it would take
-and what the gap costs meanwhile.
+none of the rest of it is written. Nothing saves a set of receivers across a
+restart; that one is in `docs/rpc.md` with what it would take and what the gap
+costs meanwhile.
+
+This paragraph used to read "WFM is mono and has no de-emphasis, so broadcast
+stations decode bright and one channel only." Both halves stopped being true in
+`09e998f` and `f3c0544`, and this sentence went on asserting them. WFM decodes
+the pilot-tone stereo system on the device: pilot recovery, coherent detection
+at twice the pilot, the matrix, and 75 microsecond de-emphasis, with a CPU twin
+the conformance suite diffs bit-exactly. A station with no pilot comes back as
+two bit-identical channels rather than faded, so a consumer tests for that
+rather than thresholding a level.
 
 This paragraph used to read "The session cannot open or stop a source, and
 nothing saves a set of receivers across a restart. Those last two are in
