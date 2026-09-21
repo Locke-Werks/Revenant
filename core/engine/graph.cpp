@@ -3320,7 +3320,21 @@ Status Graph::on_block(const source::SourceBlock& block) {
     const dsp::SampleIndex target_end =
         block.stamp.start + static_cast<dsp::SampleIndex>(block.sample_count);
     const dsp::SampleIndex reserved = impl.ring->reserved_index();
-    if (target_end <= reserved) {
+
+    // The test is on the block's FIRST sample, not its last. A block that
+    // starts below the reservation and ends above it overlaps samples the
+    // ring has already placed, and it is backwards in exactly the way this
+    // refuses: the ring's index is the stream's index, so the same index
+    // cannot mean two different samples.
+    //
+    // WHAT THIS USED TO SAY. Until 2026-09-20 the test was `target_end <=
+    // reserved`, which let an overlapping block straight through, and the
+    // two subtractions below then ran on a start that was less than
+    // `reserved`. `gap` is unsigned, so it wrapped to about 1.8e19 and was
+    // added to samples_dropped as reported loss, while `need` stayed small
+    // enough that the capacity check waved it past. The counter went from a
+    // number an operator reads to a number nothing can mean.
+    if (block.stamp.start < reserved) {
         return fail(std::format(
             "the source delivered samples [{}, {}) and the ring has already reserved through {}. "
             "A source that moves backwards has to be reopened, because the ring's index is the "
