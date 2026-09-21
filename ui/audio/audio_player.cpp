@@ -234,7 +234,23 @@ void AudioPlayer::setDevice(int index)
     if (index < 0 || index > device_handles_.size()) {
         return;
     }
-    if (index == device_index_) {
+
+    // PICKING THE DEVICE ALREADY SELECTED IS NOT A NO-OP AFTER IT HAS
+    // FAILED, WHICH IS EXACTLY WHAT THE MESSAGE ASKS FOR.
+    //
+    // This returned on index == device_index_ and nothing else cleared
+    // sink_failed_, so "plug it back in and pick it again" did not work when
+    // the operator picked the same entry they were already on, which is what
+    // plugging the same headset back in leaves them on. The combo reported
+    // the right device, the latch stayed set, tick() refused to reopen, and
+    // there was no way back to audio short of restarting the window.
+    //
+    // refresh_devices clears the latch too, and covers the case where Qt
+    // notices the device list move. It does not cover a device that stopped
+    // with an error while still enumerated, which is the IOError a stalled
+    // endpoint raises.
+    const bool moved = index != device_index_;
+    if (!moved && !sink_failed_) {
         return;
     }
 
@@ -256,7 +272,9 @@ void AudioPlayer::setDevice(int index)
     // stopped with an error. See that branch.
     sink_failed_ = false;
     close_sink();
-    emit deviceChanged();
+    if (moved) {
+        emit deviceChanged();
+    }
     emit statusChanged();
 }
 
@@ -599,7 +617,28 @@ void AudioPlayer::tick()
 
     const bool want = link_.audioActive();
 
-    if (!want || !format.valid()) {
+    if (!want) {
+        if (sink_ != nullptr) {
+            close_sink();
+        }
+
+        // THE THIRD THING THAT CLEARS THE LATCH, AND THE ONE AN OPERATOR
+        // REACHES FOR FIRST.
+        //
+        // sink_failed_ was cleared by setDevice and refresh_devices alone,
+        // and close_sink does not touch it, so switching listen off and
+        // back on after a device error hit the branch below and did
+        // nothing. That is the first thing anyone tries and it looked like
+        // the switch was broken rather than the output.
+        //
+        // Cleared on !want rather than on !format.valid(), which is why the
+        // two are no longer one branch. The operator turning listening off
+        // is a deliberate act and the next attempt is worth making; a
+        // stream that has momentarily no format is not an act at all, and
+        // clearing there would turn the latch back into the retry loop it
+        // exists to stop, at twenty attempts a second.
+        sink_failed_ = false;
+    } else if (!format.valid()) {
         if (sink_ != nullptr) {
             close_sink();
         }

@@ -361,7 +361,18 @@ private:
     // cannot close the sink from inside that sink's own signal, so this
     // says tick() has to, and it then latches the reopen off: a device
     // that has just failed fails again, and this branch runs twenty times
-    // a second. Cleared by setDevice and by refresh_devices.
+    // a second.
+    //
+    // THREE THINGS CLEAR IT, AND THEY ARE THE THREE DELIBERATE ACTS THAT
+    // MAKE ANOTHER ATTEMPT WORTH MAKING. setDevice, including a re-pick of
+    // the entry already selected, which is what plugging the same headset
+    // back in leaves the operator on. refresh_devices, which is Qt saying
+    // the set of outputs moved. And tick() finding the listen switch off,
+    // because turning it off and on again is the first thing anyone tries.
+    //
+    // The first and the third were missing until 2026-09-20 and the fault
+    // message asked for the first of them in as many words. With both
+    // absent there was no way back to audio short of restarting the window.
     bool sink_failed_ = false;
 
     QTimer tick_;
