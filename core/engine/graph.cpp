@@ -927,6 +927,22 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> completed{0};
     std::atomic<bool> cancelled{false};
 
+    // What a recording thread waiting for a frame slot parks on, bumped by
+    // both things that can make waiting the wrong answer: a frame retiring
+    // and cancel().
+    //
+    // Separate from `completed` because `completed` is the slot arithmetic
+    // itself. cancel() cannot move it to wake anybody, since a cancel that
+    // added one would tell the recording thread a frame in flight had
+    // finished and hand out its slot. Until 2026-09-20 cancel() called
+    // completed.notify_all() and changed nothing, and std::atomic::wait
+    // re-reads the value on every notify and parks again when it has not
+    // moved, so that call woke nothing: a cancel arriving while the
+    // recording thread was parked on a frame slot left it parked until the
+    // GPU happened to retire something, and on a wedged device that is for
+    // ever.
+    std::atomic<std::uint64_t> frame_epoch{0};
+
     std::atomic<std::uint64_t> blocks_in{0};
     std::atomic<std::uint64_t> samples_in{0};
     std::atomic<std::uint64_t> submissions{0};
@@ -1707,7 +1723,11 @@ struct Graph::Impl {
         // Last, and after everything the frame owns has been read: this is
         // what lets the recording thread reuse the slot.
         completed.fetch_add(1, std::memory_order_release);
-        completed.notify_all();
+
+        // Bumped after `completed`, so a thread woken by it and reading
+        // `completed` sees the retirement this frame just published.
+        frame_epoch.fetch_add(1, std::memory_order_release);
+        frame_epoch.notify_all();
         return outcome;
     }
 
@@ -3376,6 +3396,12 @@ Status Graph::on_block(const source::SourceBlock& block) {
     const auto in_flight = static_cast<std::uint64_t>(impl.geometry.frames_in_flight);
     bool counted_stall = false;
     for (;;) {
+        // The epoch snapshot comes first, before anything this loop tests,
+        // for the reason written on Impl::frame_epoch and on the completion
+        // thread's own park in scheduler.cpp: a waker that bumps the counter
+        // after the state it published cannot be missed by a reader that
+        // snapshotted the counter before reading that state.
+        const std::uint64_t epoch = impl.frame_epoch.load(std::memory_order_acquire);
         const std::uint64_t done = impl.completed.load(std::memory_order_acquire);
         if (ticket - done < in_flight) {
             break;
@@ -3401,7 +3427,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
             impl.ring->release_reservation(granted);
             return fail("the engine was stopped while waiting for a frame slot");
         }
-        impl.completed.wait(done, std::memory_order_acquire);
+        impl.frame_epoch.wait(epoch, std::memory_order_acquire);
     }
 
     const auto frame_index = static_cast<std::uint32_t>(ticket % in_flight);
@@ -3845,7 +3871,12 @@ void Graph::cancel() {
     if (impl.ring != nullptr) {
         impl.ring->stop();
     }
-    impl.completed.notify_all();
+
+    // Bumped, not merely notified. See Impl::frame_epoch: a notify that
+    // leaves the value alone wakes a parked thread only to have it park
+    // again, which is why this call did nothing until 2026-09-20.
+    impl.frame_epoch.fetch_add(1, std::memory_order_release);
+    impl.frame_epoch.notify_all();
 }
 
 GraphStats Graph::stats() const {

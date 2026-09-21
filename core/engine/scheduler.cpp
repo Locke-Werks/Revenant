@@ -445,10 +445,34 @@ struct Scheduler::Impl {
             Completion item{};
             const std::size_t got = queue->read(std::span<Completion>(&item, 1));
             if (got == 0) {
+                // The snapshot comes FIRST, before either test that could
+                // make parking the wrong answer, and that order is what
+                // makes the park safe rather than merely usual.
+                //
+                // stop() stores `stopping` and then bumps `signal`, both
+                // release. Either this acquire load already includes that
+                // bump, in which case it synchronises with the fetch_add and
+                // the load of `stopping` below is guaranteed to read true, or
+                // it does not, in which case the bump lands after the
+                // snapshot and wait() returns at once because the value has
+                // moved. post() is the same argument with the queue write in
+                // place of the flag.
+                //
+                // WHAT THIS USED TO DO. Until 2026-09-20 `stopping` was read
+                // first and `signal` second, with no re-read of the flag
+                // afterwards. A stop() that ran entirely between the two
+                // reads left this thread waiting on the value stop() had just
+                // written, with the one notify already spent on a waiter that
+                // did not exist yet and nothing left to move the counter
+                // again: Scheduler::stop() then blocked in join() for the
+                // rest of the process's life. WorkStealingPool::worker_loop
+                // in this file and RingConsumer::reserve_blocking in
+                // ring_consumer.h both already read their counter before
+                // testing their flag, the second with the reason written out.
+                const auto observed = signal.load(std::memory_order_acquire);
                 if (stopping.load(std::memory_order_acquire)) {
                     return;
                 }
-                const auto observed = signal.load(std::memory_order_acquire);
                 if (queue->readable() != 0) {
                     continue;
                 }
