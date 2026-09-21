@@ -109,14 +109,26 @@ inline constexpr float kSpectrumFloorDb = -200.0F;
 // A guard against a table entry that is not a number, not a working part.
 // Every prototype design_prototype builds puts its cutoff at half a channel
 // spacing, which is exactly where the kept band ends, so what the correction
-// has to undo is the cutoff and never the stopband. Measured at a 120 dB
-// target and a 2048-point transform, the deepest point in the kept band is
-// -6.0206 dB at taps_per_branch of 4, 5, 8, 12, 16, 17, 24, 33, 48, 64 and
-// 129, and the one outlier is a three-tap branch at -8.0045 dB. So 12 dB
-// clears the worst of those by four decibels and the clamp never fires; it
+// has to undo is the cutoff and never the stopband.
+//
+// Measured at a 120 dB target and a 2048-point transform, the deepest point
+// in the kept band is its outer edge in every case, and its depth settles on
+// the half-power crossover as the prototype lengthens. -6.0206 dB, which is
+// 20*log10(0.5), at taps_per_branch of 16 and upward: 16, 17, 24, 33, 48, 64
+// and 129 all agree to four decimals. Below that the transition has not
+// finished by the band edge and the figure drifts either way: -6.0208 dB at
+// 12, -6.0279 at 8, -5.9909 at 5, -6.0627 at 4 and -8.0045 at 3. So 12 dB
+// clears the deepest of them by four decibels and the clamp never fires; it
 // exists because a response of zero would put an infinity in an array that
 // gets uploaded to a device, and an infinity there poisons a whole frame
 // rather than one bin.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "the deepest point in the kept band is
+// -6.0206 dB at taps_per_branch of 4, 5, 8, 12, 16, 17, 24, 33, 48, 64 and
+// 129, and the one outlier is a three-tap branch at -8.0045 dB." Four of
+// those eleven do not measure -6.0206 and one of them, five taps per branch,
+// is not even below it. The list read as eleven independent confirmations of
+// one number and was one number plus four that had been rounded into it.
 inline constexpr float kMaxSpectrumCorrectionDb = 12.0F;
 
 // Bins one channel contributes: the central half of its transform.
