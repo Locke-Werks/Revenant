@@ -80,18 +80,27 @@ hangs to its timeout and reports nothing, because the message the process wanted
 is in a dialog no one will ever see.
 
 Nothing links it automatically. Each target lists the path in its own `add_executable`,
-so until today a new target got the file by somebody remembering. The `guards` step reads
-the source list of every `*_tests` target under `tests/` **and** under `ui/` and fails on
-one that does not list it. It scans `ui/` deliberately: the only target that has ever been
-without the file is the one in the other CMake project, which is exactly where a guard
-rooted in `tests/` would not look.
+so until today a new target got the file by somebody remembering. `scripts/check_modal_dialogs.py`
+reads the source list of every `*_tests` target under `tests/` **and** under `ui/` and
+fails on one that does not list it. It scans `ui/` deliberately: the only target that has
+ever been without the file is the one in the other CMake project, which is exactly where a
+guard rooted in `tests/` would not look. The `guards` job runs it, and so does `ctest` as
+`modal_dialogs`, the same arrangement the retired-claims ratchet has.
 
-`revenant_ui_tests` is exempt and named in the step. It opens no Vulkan context and holds
+`revenant_ui_tests` is exempt and named in the script. It opens no Vulkan context and holds
 no `abort()` path of its own, and adding the source belongs to `ui/CMakeLists.txt`. The
 point of naming it is that the gap is a decision written in the place that checks, rather
 than a claim nobody had checked.
 
-The step fails when it finds zero targets, rather than passing having looked at nothing.
+The check fails when it finds zero targets, rather than passing having looked at nothing,
+and it fails on an `add_executable` whose target name it cannot read rather than skipping it.
+
+**It was an inline `awk` until 2026-09-21, and the `awk` covered less than this paragraph
+said.** It pulled the target name off the same line as `add_executable(` and matched
+nothing when the name sat on the line below, which CMake allows. Such a target was not
+reported, not counted and not exempt: it was absent, and the zero-targets backstop could
+never fire on it while the other six were being found. The script's self-test runs that
+exact shape every time, which is why the self-test runs before the check in both places.
 
 ### Both test steps pass `--no-tests=error`
 

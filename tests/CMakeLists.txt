@@ -93,10 +93,34 @@ if(Python3_Interpreter_FOUND)
                 --self-test
     )
     set_tests_properties(retired_claims_self_test PROPERTIES LABELS "guards" TIMEOUT 60)
+
+    # Every test target lists tests/support/no_modal_dialogs.cpp, or is named
+    # as an exception. Same arrangement as the ratchet above and for the same
+    # reason: CI's guards job is the gate and this is the copy a developer
+    # runs before pushing. It reads CMakeLists files rather than the build, so
+    # it is a script and not a Catch2 case.
+    add_test(
+        NAME modal_dialogs
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/check_modal_dialogs.py"
+                --root "${CMAKE_SOURCE_DIR}"
+    )
+    set_tests_properties(modal_dialogs PROPERTIES LABELS "guards" TIMEOUT 60)
+
+    # The scanner used to drop a target whose name sat on the line below
+    # add_executable(, which is a guard covering less than it claimed. The
+    # second self-test case is that shape.
+    add_test(
+        NAME modal_dialogs_self_test
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/scripts/check_modal_dialogs.py"
+                --self-test
+    )
+    set_tests_properties(modal_dialogs_self_test PROPERTIES LABELS "guards" TIMEOUT 60)
 else()
-    # Loud rather than silent. CI still runs the check, so this is a developer
-    # losing the local copy of it, not the gate going missing.
+    # Loud rather than silent. CI still runs both checks, so this is a
+    # developer losing the local copy of them, not the gate going missing.
     message(WARNING
-        "No Python 3 interpreter: the retired-claims check will not run in "
-        "ctest here. CI's guards job still runs it.")
+        "No Python 3 interpreter: the retired-claims and modal-dialog checks "
+        "will not run in ctest here. CI's guards job still runs them.")
 endif()

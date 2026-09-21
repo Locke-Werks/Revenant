@@ -209,72 +209,22 @@ jobs:
           # window it then sits behind. On a desktop that is a popup somebody
           # dismisses. On the runner it is a job that hangs to its timeout and
           # reports nothing, because the message the process wanted to print is
-          # in a dialog no one will see.
+          # in a dialog no one will see. Nothing links it automatically, so
+          # every target lists the path itself and this is what checks that
+          # every target did.
           #
-          # Nothing links it automatically. Every target lists the path itself,
-          # so a new one gets the file by somebody remembering, and the header
-          # said so: "a blanket claim nobody has checked is how the next target
-          # gets added without it." This is the check, so the claim stops being
-          # blanket.
+          # A SCRIPT RATHER THAN THE AWK THAT WAS HERE. The awk read the target
+          # name off the same line as add_executable( and silently skipped any
+          # call that put it on the next line, which CMake allows and which the
+          # count backstop could never catch while six other targets were being
+          # found. scripts/check_modal_dialogs.py has the whole argument and a
+          # self-test whose second case is exactly that shape.
           #
-          # It scans ui/ as well as tests/, because the one target that has
-          # never had the file is the one in the other CMake project, which is
-          # exactly the place a guard rooted in tests/ would not look.
-          #
-          # revenant_ui_tests is exempt and named. That target opens no Vulkan
-          # context and holds no abort() path of its own, so it is the cheapest
-          # of the seven to leave out, and adding the source to ui/ is a change
-          # to that project rather than to this file. Naming it here is the
-          # difference between a known gap and an unnoticed one: an eighth
-          # target arrives red, not quiet.
-          exempt="revenant_ui_tests"
-
-          report=$(find tests ui -name CMakeLists.txt -print0 \
-                   | xargs -0 awk '
-              /add_executable[[:space:]]*\(/ {
-                  line = $0
-                  sub(/.*add_executable[[:space:]]*\([[:space:]]*/, "", line)
-                  sub(/[[:space:]].*/, "", line)
-                  sub(/\).*/, "", line)
-                  if (line ~ /_tests$/) { target = line; inside = 1; has = 0 }
-              }
-              inside && /no_modal_dialogs\.cpp/ { has = 1 }
-              inside && /\)/ { print target, has, FILENAME; inside = 0 }
-          ')
-
-          count=0
-          missing=""
-          while read -r target has file; do
-            [ -z "$target" ] && continue
-            count=$((count + 1))
-            if [ "$has" = "1" ]; then
-              echo "ok      $target ($file)"
-              continue
-            fi
-            case " $exempt " in
-              *" $target "*) echo "exempt  $target ($file)"; continue ;;
-            esac
-            missing="$missing
-            $target in $file"
-          done <<< "$report"
-
-          # A guard that scanned nothing and passed is the shape this whole
-          # round is about. tests/ holds six test targets today, so zero means
-          # the tree moved and this step is no longer looking at it.
-          if [ "$count" -eq 0 ]; then
-            echo "no *_tests targets found under tests/ or ui/; this guard is looking in the wrong place"
-            exit 1
-          fi
-          echo "scanned $count test target(s)"
-
-          if [ -n "$missing" ]; then
-            echo
-            echo "these test targets do not list tests/support/no_modal_dialogs.cpp:$missing"
-            echo
-            echo "Add the path to the target's source list, or add the target to"
-            echo "the exempt list in this step with the reason it does not need it."
-            exit 1
-          fi
+          # The self-test goes first, for the reason the retired-claims step
+          # gives: a ratchet nobody has watched fail is believed rather than
+          # trusted.
+          python3 scripts/check_modal_dialogs.py --self-test
+          python3 scripts/check_modal_dialogs.py
 
   # The conformance suite diffs GPU compute kernels against CPU reference
   # implementations. A hosted runner has no discrete GPU, so it cannot execute
