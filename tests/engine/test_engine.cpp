@@ -763,6 +763,100 @@ TEST_CASE("receivers on several modes run together", "[gpu][engine][m1]") {
 }
 
 // ---------------------------------------------------------------------------
+// The grid the source implies
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the default channel count carries the widest receiver at every rate",
+          "[engine][m1]") {
+    // No GPU. This is the arithmetic that decides whether an operator
+    // clicking a broadcast FM station gets a working receiver, and it has
+    // one answer per source rate rather than the constant 64 it used to
+    // have.
+    //
+    // The guaranteed width is rate/M, per dsp::max_channel_bandwidth: a
+    // receiver landing halfway between two channel centres keeps only that
+    // much of the 2*rate/M its channel stream carries. So the bar each case
+    // below checks is rate/M against 200 kHz.
+    struct Case {
+        dsp::SampleRate rate;
+        std::uint32_t expect;
+    };
+
+    // 2.4 MS/s is the dongle the operator was on. 64 channels there is
+    // 37.5 kHz guaranteed, which is a fifth of a broadcast FM passband; 8
+    // is 300 kHz and is what revenant-engine's own --help example has been
+    // telling the reader to pass by hand.
+    //
+    // 20 MS/s answers 64, which is why nothing about a wideband capture
+    // changes.
+    const Case cases[] = {
+        {250'000, 2},      // too narrow at any M, so the floor
+        {400'000, 2},      // exactly two 200 kHz channels
+        {2'400'000, 8},    // bit_floor(12)
+        {2'400'032, 8},    // the RPC fixture's rate, for the same reason
+        {10'000'000, 32},  // bit_floor(50)
+        {20'000'000, 64},  // bit_floor(100), the figure that used to be the constant
+    };
+
+    for (const Case& one : cases) {
+        const std::uint32_t chosen = engine::default_channel_count(one.rate);
+        INFO(one.rate << " S/s chose " << chosen << " channels");
+        CHECK(chosen == one.expect);
+
+        // Every answer has to be a grid the channelizer will take, which is
+        // a power of two, and has to carry the widest receiver unless the
+        // source is too narrow to at any count.
+        CHECK(std::has_single_bit(chosen));
+        const auto guaranteed = static_cast<dsp::Hertz>(one.rate) /
+                                static_cast<dsp::Hertz>(chosen);
+        if (one.rate >= 2 * engine::kWidestReceiverHz) {
+            CHECK(guaranteed >= engine::kWidestReceiverHz);
+        }
+    }
+
+    // A rate nobody should be able to reach, answered rather than divided
+    // by. open_source refuses a non-positive rate on its own, and this
+    // function is exported, so it answers the floor instead of dividing by
+    // zero somewhere a caller cannot see.
+    CHECK(engine::default_channel_count(0) == 2);
+}
+
+TEST_CASE("an engine given no channel count sizes the grid against the source",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    engine::EngineConfig config = default_config();
+    config.channels = 0;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    const auto opened = eng.open_source(tone_uri(300'000, 200'000));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    const engine::EngineInfo& info = eng.info();
+    CHECK(info.grid.channels == engine::default_channel_count(kSourceRate));
+
+    // The point of the whole change: a broadcast FM receiver placed
+    // anywhere on this grid is not clamped. At the old constant 64 it was,
+    // by about three to one.
+    engine::VrxParams wide;
+    wide.center = 300'000;
+    wide.demod = engine::Demod::Wfm;
+    wide.passband_low = -100'000;
+    wide.passband_high = 100'000;
+
+    auto placement = engine::place(info.grid, info.source_rate, wide);
+    INFO(test::message_of(placement));
+    REQUIRE(placement.has_value());
+    CHECK_FALSE(placement->bandwidth_clamped);
+    CHECK(placement->granted_high - placement->granted_low == 200'000);
+}
+
+// ---------------------------------------------------------------------------
 // Retuning the front end, and the pacing measurement
 // ---------------------------------------------------------------------------
 

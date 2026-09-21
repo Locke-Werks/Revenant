@@ -352,6 +352,11 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.bandwidth_clamped = in.getBandwidthClamped();
     out.granted_low = in.getGrantedLow();
     out.granted_high = in.getGrantedHigh();
+
+    // Empty unless something was clamped. The numbers above say that
+    // something was; this says what it means and what to do about it, which
+    // is the part no client worked out for itself.
+    out.clamp_reason = read_text(in.getClampReason());
     return out;
 }
 

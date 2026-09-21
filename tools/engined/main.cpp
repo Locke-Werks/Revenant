@@ -190,7 +190,12 @@ struct Options {
     // Mint over whatever is there, rather than loading it.
     bool new_token = false;
 
-    std::uint32_t channels = 64;
+    // Zero is "work it out from the source rate", which is what the engine
+    // does with EngineConfig::channels at zero. See default_channel_count in
+    // core/engine/engine.cpp: 64 is a good grid at 20 MS/s and an unusable
+    // one at 2.4 MS/s, where it leaves a broadcast FM receiver clamped to a
+    // fraction of the passband it asked for.
+    std::uint32_t channels = 0;
     std::uint32_t taps_per_branch = 17;
     SampleRate audio_rate = 48'000;
     int gpu = -1;
@@ -258,7 +263,12 @@ void print_usage()
         "                      already bought.\n"
         "\n"
         "Engine:\n"
-        "  --channels <n>      Channelizer channel count, default 64. A power of two.\n"
+        "  --channels <n>      Channelizer channel count, a power of two. The default\n"
+        "                      is chosen from the source rate so that one channel can\n"
+        "                      carry a 200 kHz broadcast FM receiver wherever it\n"
+        "                      lands: 64 at 20 MS/s, 8 at 2.4 MS/s. Naming a count\n"
+        "                      pins it. More channels is a finer waterfall and a\n"
+        "                      narrower widest receiver, and the two trade directly.\n"
         "  --taps <n>          Taps per polyphase branch, default 17.\n"
         "  --audio-rate <hz>   Default 48000. A receiver may ask for its own.\n"
         "  --gpu <n>           Device index, default -1, which honours\n"
@@ -669,6 +679,30 @@ void print_engine_block(const engine::Engine& eng)
                  info.grid.decimation, info.grid.taps_per_branch);
     std::println("            channel {} S/s, spacing {}", info.channel_rate,
                  format_hz(static_cast<double>(info.channel_spacing)));
+
+    // The number an operator needs before they click on anything, and the
+    // one the grid line does not say. A receiver landing anywhere is
+    // guaranteed one spacing; one landing on a channel centre gets the whole
+    // channel rate. Anything wider is clamped, and on an FM mode a clamp is
+    // not a narrower receiver but a broken one.
+    std::println("            widest receiver {} anywhere, {} on a channel centre",
+                 format_hz(static_cast<double>(info.channel_spacing)),
+                 format_hz(static_cast<double>(info.channel_rate)));
+
+    const std::uint32_t would_choose = engine::default_channel_count(info.source_rate);
+    if (info.grid.channels > would_choose &&
+        info.channel_spacing < engine::kWidestReceiverHz) {
+        std::println(
+            stderr,
+            "warning: a {} channel grid on a {} S/s source leaves one channel {} wide, so a "
+            "receiver asking for more than that is clamped. A {} Hz broadcast FM receiver is "
+            "the case this bites: the passband is cut short, the discriminator is fed a "
+            "truncated signal and the audio is wrong rather than narrow, while the waterfall "
+            "shows full strength. --channels {} is what this source rate chooses on its own.",
+            info.grid.channels, info.source_rate,
+            format_hz(static_cast<double>(info.channel_spacing)), engine::kWidestReceiverHz,
+            would_choose);
+    }
 
     if (info.spectrum.enabled()) {
         std::println("spectrum    {} channels x {} points, {} bins across the span",

@@ -1172,3 +1172,107 @@ TEST_CASE("a deliberately paced source reports the pace it was given", "[gpu][rp
     // "source is behind" indicator before a single block has arrived.
     CHECK(info->source_paced_by == 0.5);
 }
+
+// ---------------------------------------------------------------------------
+// A clamped passband, in words
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a receiver clamped to fit one channel says so in words", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // The case the operator hit on air. A 64-channel grid on this fixture's
+    // 2400032 S/s source puts one coarse channel at 75001 S/s, so a
+    // broadcast FM receiver asking for 200 kHz of passband cannot have it,
+    // and every surface reported that correctly while the audio was mush.
+    rpc::VrxParams wide;
+    wide.center = 0;
+    wide.demod = rpc::Demod::Wfm;
+    wide.passband_low = -100'000;
+    wide.passband_high = 100'000;
+
+    auto added = harness.client().add_vrx(wide);
+    REQUIRE(added.has_value());
+
+    auto status = harness.client().vrx_status(*added);
+    REQUIRE(status.has_value());
+    REQUIRE(status->placement.bandwidth_clamped);
+
+    const std::string& reason = status->placement.clamp_reason;
+    INFO(reason);
+    REQUIRE_FALSE(reason.empty());
+
+    // What was asked for, and what one channel could carry. The numbers are
+    // already on the wire as granted_low and granted_high; what no client
+    // did was put them in front of anybody.
+    CHECK(reason.find("200000 Hz of passband") != std::string::npos);
+    CHECK(reason.find("percent of what was asked for") != std::string::npos);
+
+    // And the part that is a judgement rather than a number: on an FM mode
+    // a truncated passband is not a narrower receiver. A discriminator
+    // recovers the instantaneous frequency of whatever reaches it, so the
+    // audio is wrong rather than narrow-band, and that is the sentence the
+    // operator needed.
+    CHECK(reason.find("wrong audio") != std::string::npos);
+
+    // Including what to do about it, which is not something this session
+    // can change: the grid is sized when the source is opened.
+    CHECK(reason.find("--channels") != std::string::npos);
+}
+
+TEST_CASE("a receiver that fits its channel carries no clamp sentence", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // The control arm. Without it the case above is asserting a field that
+    // is always set, which is the defect shape this round is about in its
+    // own right.
+    rpc::VrxParams narrow;
+    narrow.center = 0;
+    narrow.demod = rpc::Demod::Nfm;
+    narrow.passband_low = -8'000;
+    narrow.passband_high = 8'000;
+
+    auto added = harness.client().add_vrx(narrow);
+    REQUIRE(added.has_value());
+
+    auto status = harness.client().vrx_status(*added);
+    REQUIRE(status.has_value());
+    CHECK_FALSE(status->placement.bandwidth_clamped);
+    CHECK(status->placement.clamp_reason.empty());
+}
+
+TEST_CASE("a linear mode's clamp is reported without calling the demodulator broken",
+          "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // An AM receiver asking for more than a channel can carry gets a
+    // narrower filter and that is exactly what it gets: the envelope
+    // detector is linear in the passband, so less bandwidth is less audio
+    // bandwidth and nothing is broken. Saying otherwise would train an
+    // operator to ignore the sentence on the mode where it matters.
+    rpc::VrxParams wide_am;
+    wide_am.center = 0;
+    wide_am.demod = rpc::Demod::Am;
+    wide_am.passband_low = -90'000;
+    wide_am.passband_high = 90'000;
+
+    auto added = harness.client().add_vrx(wide_am);
+    REQUIRE(added.has_value());
+
+    auto status = harness.client().vrx_status(*added);
+    REQUIRE(status.has_value());
+    REQUIRE(status->placement.bandwidth_clamped);
+
+    const std::string& reason = status->placement.clamp_reason;
+    INFO(reason);
+    CHECK(reason.find("percent of what was asked for") != std::string::npos);
+    CHECK(reason.find("wrong audio") == std::string::npos);
+}

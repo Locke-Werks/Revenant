@@ -118,6 +118,15 @@ struct EngineConfig {
 
     // Coarse grid. channels must be a power of two and decimation must divide
     // it; the project uses 2x oversampling, so decimation is channels/2.
+    //
+    // ZERO CHOOSES IT FROM THE SOURCE, which is what a tool with an operator
+    // behind it should pass. See default_channel_count below: 64 is a good
+    // grid at 20 MS/s and an unusable one at 2.4 MS/s, and the difference is
+    // the whole of whether a broadcast FM receiver works.
+    //
+    // The default stays 64 rather than zero because this is a library knob
+    // and every existing caller, every test and every benchmark was written
+    // against a fixed grid. revenant-engine passes zero.
     std::uint32_t channels = 64;
     std::uint32_t taps_per_branch = 17;
 
@@ -191,6 +200,53 @@ struct EngineConfig {
     // because the fine stream is one stream rather than a bank.
     std::uint32_t passband_transform = 0;
 };
+
+// The widest receiver a grid is expected to be able to carry, anywhere on it.
+//
+// 200 kHz, which is dsp::default_passband(Demod::Wfm) and the channel the
+// broadcast FM band plan allocates. It is the widest entry in that table by
+// a factor of twelve, so a grid that carries it carries every other mode
+// with room to spare.
+inline constexpr dsp::Hertz kWidestReceiverHz = 200'000;
+
+// The channel count a source rate implies, which is what EngineConfig gets
+// when it is left at zero.
+//
+// WHY THE DEFAULT CANNOT BE A CONSTANT, WHICH IS WHAT IT WAS
+//
+// The grid is 2x oversampled, so one channel's stream is 2*rate/M wide and a
+// receiver sits up to half a spacing off its channel's centre.
+// dsp::max_channel_bandwidth turns that into a width of rate/M guaranteed
+// for a receiver landing anywhere, and twice that for one landing on a
+// centre. At 2.4 MS/s and 64 channels the guaranteed figure is 37.5 kHz, so
+// an operator clicking a broadcast FM station gets a 200 kHz receiver
+// clamped to a fraction of what it asked for: the audio is mush and the
+// waterfall shows full strength, because the signal is all there and the
+// receiver is not looking at it.
+//
+// So the rule is the constraint rather than a number: the largest power of
+// two whose guaranteed channel width still carries kWidestReceiverHz. At
+// 20 MS/s it answers 64, which is why nothing about a wideband capture
+// changes; at 2.4 MS/s it answers 8, which is what revenant-engine's own
+// --help example has been telling the reader to pass by hand.
+//
+// WHAT IT COSTS, BECAUSE IT IS NOT FREE. A full-span frame is
+// M * transform / 2 bins wide and a bin is 2*rate/(M*transform) hertz, so
+// eight times fewer channels is eight times fewer bins and eight times
+// coarser resolution on the waterfall. That is the trade: a receiver an
+// operator clicks on works, and the display is coarser. A caller that wants
+// the other side of it names a count and gets exactly that count.
+//
+// Two is the floor rather than one. A source too narrow to carry
+// kWidestReceiverHz in one channel cannot carry it at any M, and one channel
+// is a channelizer that channelizes nothing; two keeps the bank real and
+// keeps the oversampling that stops a signal on a boundary falling between
+// two channels.
+//
+// Pure, and exported so revenant-engine can say what the default would have
+// been when an operator pins something narrower. Two copies of this rule
+// would be two policies.
+[[nodiscard]] std::uint32_t default_channel_count(dsp::SampleRate rate);
 
 // The frequency axis of a spectrum frame, and how wide one is.
 //

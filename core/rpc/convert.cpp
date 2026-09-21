@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "core/dsp/vrx_reference.h"
+
 namespace revenant::rpc {
 namespace {
 
@@ -161,6 +163,96 @@ Expected<engine::Demod> from_schema(schema::Demod mode) {
     return static_cast<engine::Demod>(ordinal);
 }
 
+namespace {
+
+// Whether cutting this mode's passband short makes the demodulator wrong or
+// merely narrow. The distinction is the whole reason the clamp sentence is
+// prose rather than two numbers.
+//
+// A discriminator recovers the instantaneous frequency of whatever reaches
+// it, so truncating the sidebands of an FM signal does not produce quieter
+// audio in less bandwidth: it produces different audio. The envelope
+// detector and the four product detectors are linear in the passband, so a
+// narrower filter in front of one of those is exactly a narrower filter.
+//
+// The raw tap is neither, because nothing demodulates it. A caller reading
+// complex baseband out of a channel gets less band than it asked for and
+// knows what to do about that, so it is grouped with the honest ones.
+//
+// No default case. A ninth demodulator has to answer this question here
+// rather than inherit an answer, which is the same rule
+// dsp::default_passband states for its own table.
+[[nodiscard]] bool clamp_breaks_demodulator(engine::Demod mode) {
+    switch (mode) {
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm: return true;
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw: return false;
+    }
+    return false;
+}
+
+// The sentence VrxPlacement::clampReason carries, or nothing.
+//
+// Built from the request and the grant together, which is why this is here
+// and not in core/engine: the engine struct holds the grant, VrxParams holds
+// the request, and neither alone can say by how much. It is composed once
+// per vrxStatus call, which is a poll rather than the sample path.
+[[nodiscard]] std::string clamp_sentence(const engine::VrxPlacement& placement,
+                                         const engine::VrxParams& request) {
+    if (!placement.bandwidth_clamped) {
+        return {};
+    }
+
+    const std::int64_t got = placement.granted_high - placement.granted_low;
+    const dsp::Hertz room = dsp::max_channel_bandwidth(placement);
+
+    // The same expansion engine::place ran, so the numbers compared here are
+    // the ones it compared. It resolved for this same request a moment ago,
+    // so a failure is not reachable through vrxStatus; saying what is known
+    // is still better than saying nothing.
+    auto asked = dsp::resolve_passband(request);
+    if (!asked) {
+        return std::format(
+            "this receiver's passband was fitted to one grid channel and came back as {} to "
+            "{} Hz from its centre, {} Hz wide",
+            placement.granted_low, placement.granted_high, got);
+    }
+
+    const std::int64_t wanted = asked->width();
+    std::string out = std::format(
+        "this receiver asked for {} Hz of passband, {} to {} Hz from its centre, and one "
+        "channel of this grid could carry {} Hz of it, {} to {}",
+        wanted, asked->low, asked->high, got, placement.granted_low, placement.granted_high);
+
+    if (wanted > 0 && got < wanted) {
+        out += std::format(", which is {} percent of what was asked for",
+                           (100 * got) / wanted);
+        if (clamp_breaks_demodulator(request.demod)) {
+            out += std::format(
+                ". A {} receiver on a truncated passband is not a narrower version of the "
+                "same receiver: the discriminator recovers the instantaneous frequency of "
+                "whatever reaches it, so what comes out is the wrong audio rather than less "
+                "of the right audio",
+                engine::demod_name(request.demod));
+        }
+    }
+
+    out += std::format(
+        ". The widest a receiver placed here can be is {} Hz, which is a property of the "
+        "channel grid rather than of this receiver: the grid is sized when the source is "
+        "opened, so widening it is revenant-engine's --channels and nothing this session "
+        "can set",
+        room);
+    return out;
+}
+
+}  // namespace
+
 void write_rational(schema::Rational::Builder out, std::int64_t numerator,
                     std::int64_t denominator) {
     out.setNumerator(numerator);
@@ -242,7 +334,8 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     out.setPassbandHigh(in.passband_high);
 }
 
-void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in) {
+void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
+                         const engine::VrxParams& request) {
     out.setChannel(in.channel);
     write_rational(out.initChannelCentre(), in.channel_centre.numerator,
                    in.channel_centre.denominator);
@@ -251,12 +344,17 @@ void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPla
     out.setBandwidthClamped(in.bandwidth_clamped);
     out.setGrantedLow(in.granted_low);
     out.setGrantedHigh(in.granted_high);
+    out.setClampReason(clamp_sentence(in, request));
 }
 
 void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& in) {
     out.setId(in.id.value);
     write_vrx_params(out.initParams(), in.params);
-    write_vrx_placement(out.initPlacement(), in.placement);
+
+    // The params as given, which is what the clamp sentence has to compare
+    // the grant against. VrxStatus hands back the request verbatim, so this
+    // is the request and not a reading of the result.
+    write_vrx_placement(out.initPlacement(), in.placement, in.params);
     out.setDemodRate(to_wire_rate(in.demod_rate));
     out.setLevelDbfs(in.level_dbfs);
     out.setSquelchOpen(in.squelch_open);

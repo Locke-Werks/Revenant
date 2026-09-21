@@ -142,7 +142,15 @@ public:
         grid.channels = config_.channels;
         grid.taps_per_branch = config_.taps_per_branch;
 
-        if (grid.channels == 0 || !std::has_single_bit(grid.channels)) {
+        // Zero is "work it out from the source", which is the only answer
+        // that can be right on both a 2.4 MS/s dongle and a 20 MS/s capture.
+        // See default_channel_count. A caller that names a count gets
+        // exactly that count, clamped only by the device.
+        if (grid.channels == 0) {
+            grid.channels = default_channel_count(rate);
+        }
+
+        if (!std::has_single_bit(grid.channels)) {
             return fail(std::format("channels is {} and the channelizer needs a power of two",
                                     grid.channels));
         }
@@ -686,6 +694,18 @@ private:
 };
 
 }  // namespace
+
+std::uint32_t default_channel_count(dsp::SampleRate rate) {
+    if (rate <= 0) {
+        return 2;
+    }
+    const auto guaranteed_at_one =
+        static_cast<std::uint64_t>(rate) / static_cast<std::uint64_t>(kWidestReceiverHz);
+    if (guaranteed_at_one < 2) {
+        return 2;
+    }
+    return static_cast<std::uint32_t>(std::bit_floor(guaranteed_at_one));
+}
 
 Expected<std::unique_ptr<Engine>> Engine::create(const EngineConfig& config) {
     // The graph ships the raw tap and asks a factory for every other

@@ -197,6 +197,15 @@ struct VrxPlacement {
     bool bandwidth_clamped = false;
     std::int64_t granted_low = 0;
     std::int64_t granted_high = 0;
+
+    // Empty when nothing was clamped. Otherwise the sentence to put in front
+    // of the operator: what was asked for, what one grid channel could
+    // carry, whether that makes the demodulator wrong rather than merely
+    // narrow, and that the fix is the engine's channel count.
+    //
+    // Prose, never parsed. bandwidth_clamped and the granted pair are the
+    // machine-readable half.
+    std::string clamp_reason;
 };
 
 struct VrxStatus {

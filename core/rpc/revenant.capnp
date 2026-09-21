@@ -444,6 +444,39 @@ struct VrxPlacement {
     # the top.
     grantedLow @5 :Int64;
     grantedHigh @6 :Int64;
+
+    # Empty when nothing was clamped. Otherwise the sentence an operator
+    # needs, naming what was asked for, what one grid channel could carry,
+    # and what to do about it.
+    #
+    # WHY A SENTENCE WHEN THE NUMBERS ARE ALREADY HERE. They are, and
+    # nothing drew them. An operator clicking a broadcast FM station on a
+    # 2.4 MS/s dongle with the default 64-channel grid asks for 200 kHz and
+    # is given about 71, and every surface reported that correctly:
+    # bandwidthClamped went true, grantedLow and grantedHigh came back
+    # narrow, and what the operator got was mush out of the loudspeaker
+    # while the waterfall showed a strong signal. The engine knew the ratio
+    # and no client said it, because saying it means knowing that a
+    # three-to-one clamp on an FM mode is not a narrower filter.
+    #
+    # IT IS NOT A NARROWER VERSION OF WHAT WAS ASKED FOR, ON THE FM MODES.
+    # A discriminator recovers the instantaneous frequency of what reaches
+    # it, so truncating the passband of a signal deviating 75 kHz does not
+    # produce quieter audio at less bandwidth: it produces the wrong audio.
+    # The linear modes are different and the sentence says so, because an
+    # AM or SSB receiver given a narrower filter is exactly a receiver with
+    # a narrower filter.
+    #
+    # WHAT TO DO ABOUT IT IS IN THE SENTENCE TOO, because it is not
+    # something a client can work out. The fix is a coarser grid, which is
+    # engine-wide and set before the source is opened, so it is the
+    # engine's command line rather than anything this session can change.
+    #
+    # Prose for a human, and never parsed. A client displays it beside the
+    # receiver and decides whether to draw anything from bandwidthClamped
+    # and the granted pair, which are the machine-readable half and are not
+    # going anywhere.
+    clampReason @7 :Text;
 }
 
 struct VrxStatus {

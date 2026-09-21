@@ -138,7 +138,17 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
 
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in);
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in);
-void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in);
+
+// The placement, plus the sentence VrxPlacement::clampReason carries.
+//
+// It takes the request as well because the sentence is a comparison: the
+// engine struct holds what was granted and VrxParams holds what was asked
+// for, and neither on its own can say by how much. Composed here rather
+// than in the engine because there is nowhere in core/engine/vrx.h to put a
+// string, and because it is a rendering of two facts rather than a third
+// fact.
+void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
+                         const engine::VrxParams& request);
 
 void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& in);
 
