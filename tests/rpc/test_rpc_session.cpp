@@ -923,6 +923,15 @@ TEST_CASE("running and the source counters report what the engine reports", "[gp
     CHECK(stats->blocks_delivered >= 8);
     CHECK(stats->samples_delivered >= stats->blocks_delivered);
 
+    // The front end's verdict rides on this struct and is Unmeasured until
+    // something asks for detections, because it is computed from the
+    // detector's own arrays and the server builds a detector on demand. An
+    // implementation that defaulted it to Steady would report a clean front
+    // end on every engine that has never run one, which is a confident
+    // answer to a question nobody has measured.
+    CHECK(stats->front_end == rpc::FrontEndState::Unmeasured);
+    CHECK(stats->front_end_slope == 0.0);
+
     // Live, and monotone. Read again after the engine has moved on rather
     // than compared against the engine's own numbers at a different instant,
     // which would race.

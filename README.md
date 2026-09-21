@@ -66,10 +66,10 @@ M1 is done and M2 is under way. There are two things to run: a command line,
 and a Qt client that reaches a running engine over a socket.
 
 ```
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto" \
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
     --vrx 98.1M:wfm:200k --play --record fm.wav
 
-revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=auto" \
+revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
     --spectrum --detect
 ```
 
@@ -81,8 +81,26 @@ broadcast FM through it recorded with every drop counter at zero, checked by
 measuring the 19 kHz stereo pilot against its own neighbourhood rather than by
 listening: 1037x on the station against 2.86x on an empty channel.
 
+`gain=20` is written out because it matters and because it is the default
+rather than in spite of it. The default used to be `gain=auto`, the tuner's
+own AGC, which maximises the level at its output and is therefore set by the
+loudest thing anywhere in 2.4 MHz. Measured on air on 2026-09-20 at 95.1 MHz
+in an ordinary suburban FM environment, that put three intermodulation
+products in the detector's track list at confidence 1.00; `gain=20` improved
+the measured SNR of KKFM at 98.1 MHz by 5.7 dB and removed all three. Twenty
+is the one figure that has been measured, in one place on one band, so it is
+a starting point and not a right answer: a quiet band wants more and a
+stronger environment wants less. What tells you it has become wrong is the
+front end line described below. `gain=auto` is still there if you ask for it.
+
 The second command draws the whole 2.4 MHz as a waterfall in the terminal and
-lists what it finds in it. Both ends of the colour map track the band on their own,
+lists what it finds in it. Under the track list it says when the noise floor
+across the whole span is following the strongest signal on it, and how fast:
+about one decibel per decibel is a gain control moving, and faster than that
+is a front end being driven past its linear range, at which point some of the
+tracks in the list are products of the others. `core/detect/front_end.h` is
+the measurement and is explicit about what it cannot tell apart. The Qt client
+carries the same line under its tuning controls. Both ends of the colour map track the band on their own,
 from percentiles measured on the device rather than from extremes, expanding
 in a frame or two and contracting over thirty seconds. `--spectrum-floor` and
 `--spectrum-ceiling` hold either end still, which is what comparing two

@@ -148,6 +148,7 @@
 #include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/front_end_note.h"
 #include "models/source_pacing.h"
 
 namespace revenant::ui {
@@ -630,6 +631,33 @@ class EngineLink : public QObject {
     // neither is coloured like a shortfall.
     Q_PROPERTY(bool sourceBehind READ sourceBehind NOTIFY pacingChanged)
 
+    // What the full-span spectrum says about the front end.
+    //
+    // THE SECOND DIAGNOSIS NOBODY COULD MAKE, and the same shape as the
+    // pacing pair above. Measured on air 2026-09-20 with an RTL-SDR v3 at
+    // 95.1 MHz: with gain=auto the detector reported three intermodulation
+    // products as real tracks at confidence 1.00, and setting gain to 20
+    // improved KKFM's measured SNR by 5.7 dB and removed all three. What
+    // this window showed was three confident rows in the detection list,
+    // which is also what a real band looks like.
+    //
+    // POLLED ON THE SAME PASS, off SourceStats rather than EngineInfo,
+    // because it is a live measurement and EngineInfo is what the engine
+    // settled on at open. models/front_end_note.h turns it into a
+    // sentence; core/detect/front_end.h is the measurement and is the
+    // authority on what it cannot tell apart.
+    //
+    // UNMEASURED UNTIL SOMETHING ASKS FOR DETECTIONS, because it is
+    // computed from the detector's own arrays and the engine builds a
+    // detector on demand. This window asks on every detection pass, so it
+    // is measured a few seconds after a connection that is drawing.
+    Q_PROPERTY(QString frontEndText READ frontEndText NOTIFY pacingChanged)
+
+    // Whether that sentence is bad news. A gain control moving the whole
+    // span is a statement; a floor outrunning the signal is what costs
+    // detections, and the two must not be the same colour.
+    Q_PROPERTY(bool frontEndFault READ frontEndFault NOTIFY pacingChanged)
+
     // The two detection knobs, which are different things and must not read
     // as one control.
     //
@@ -1092,6 +1120,9 @@ public:
     [[nodiscard]] bool pacingCarried() const { return pacing_.carried; }
     [[nodiscard]] QString pacingText() const { return pacing_text_; }
     [[nodiscard]] bool sourceBehind() const { return pacing_is_fault(pacing_verdict_); }
+
+    [[nodiscard]] QString frontEndText() const { return front_end_text_; }
+    [[nodiscard]] bool frontEndFault() const { return front_end_is_fault(front_end_); }
 
     [[nodiscard]] double sourceCenterHz() const {
         return static_cast<double>(info_.source_center);
@@ -1912,9 +1943,21 @@ private:
     // need four samples a second.
     void poll_source_pacing(bool engine_running);
 
+    // Supervisor thread, probe pass only. Reads SourceStats for the front
+    // end's verdict and hands it over when it has moved.
+    //
+    // A SECOND ROUND TRIP ON THE SAME PASS, because the verdict rides on
+    // SourceStats and the pacing pair rides on EngineInfo. Folding them
+    // would mean moving one field to the other struct, and neither move is
+    // right: EngineInfo is what the engine settled on at open and this
+    // moves every decision, while the counters are the source's own and
+    // the pacing pair is the graph's.
+    void poll_front_end(bool engine_running);
+
     // Qt thread, queued from the supervisor.
     void adopt_source_tuning();
     void adopt_pacing();
+    void adopt_front_end();
 
     // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
     // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per
@@ -1983,6 +2026,26 @@ private:
     PacingSample pacing_;
     PacingVerdict pacing_verdict_ = PacingVerdict::NotCarried;
     QString pacing_text_;
+
+    // The front end's verdict, carried on the same three-step path: the
+    // supervisor reads it, hands it over under source_mutex_ and posts one
+    // metacall, and the Qt thread renders the sentence.
+    //
+    // NO PREVIOUS-VERDICT STATE, unlike the pacing pair above, because
+    // core/detect/front_end.h already carries its own hysteresis over a ten
+    // second window. A second filter here would be smoothing an answer that
+    // is already smoothed and would make the rule ui/tests drives not the
+    // rule the window runs.
+    bool handover_has_front_end_ = false;  // guarded by source_mutex_
+    FrontEndSample handover_front_end_;    // guarded by source_mutex_
+
+    // Supervisor thread only, for the comparison that suppresses a repeated
+    // post.
+    FrontEndSample posted_front_end_;
+
+    // Qt thread only.
+    FrontEndSample front_end_;
+    QString front_end_text_;
 
     // ------------------------------------------------------------------
     // RDS. Implemented in ui/models/rds_link.cpp.

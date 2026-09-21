@@ -1109,7 +1109,7 @@ TEST_CASE("a passband over a real radio shows the filter's own edges",
     REQUIRE(created.has_value());
     auto& eng = **created;
 
-    if (auto opened = eng.open_source("rtlsdr://0?freq=98.1M&rate=2400000&gain=auto");
+    if (auto opened = eng.open_source("rtlsdr://0?freq=98.1M&rate=2400000&gain=20");
         !opened) {
         SKIP("the dongle could not be opened: " + opened.error().message);
     }

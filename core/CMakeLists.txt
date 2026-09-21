@@ -54,6 +54,7 @@ add_library(revenant_core STATIC
     decode/vocoder.cpp
     decode/vocoder_plugin.cpp
     detect/detector.cpp
+    detect/front_end.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
     dsp/denormal_mode.cpp

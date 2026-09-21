@@ -165,6 +165,33 @@ TEST_CASE("an rtlsdr URI needs a device and names both forms", "[source][rtlsdr]
     CHECK(opened.error().message.find("rtlsdr://0") != std::string::npos);
 }
 
+TEST_CASE("a URI that says nothing about gain gets a number and not the AGC",
+          "[source][rtlsdr]") {
+    // The default was gain=auto until 2026-09-21. Measured on air the day
+    // before, an RTL-SDR v3 at 95.1 MHz in a suburban FM environment: with
+    // auto the wideband detector reported three intermodulation products as
+    // real tracks at confidence 1.00, and gain=20 improved KKFM's measured
+    // SNR by 5.7 dB and removed all three. Every example in the tree used
+    // auto, so the default path was the one that manufactured signals.
+    //
+    // Asserted on the config struct and not through a URI, because parsing
+    // one means opening a device. registry.cpp leaves the struct's own
+    // defaults alone when the key is absent, deliberately, so this is the
+    // value a URI without the key produces and it is also what a caller
+    // building the config by hand gets.
+    const source::RtlSdrSourceConfig fresh;
+    CHECK_FALSE(fresh.gain_auto);
+    CHECK(fresh.gain_db == source::kRtlSdrDefaultGainDb);
+
+    // A starting point rather than a right answer, and the refusal says so
+    // rather than leaving an operator to find the number in a header.
+    auto opened = source::open_source("rtlsdr://0?gain=loud");
+    REQUIRE_FALSE(opened.has_value());
+    INFO(opened.error().message);
+    CHECK(opened.error().message.find("gain='loud'") != std::string::npos);
+    CHECK(opened.error().message.find("20") != std::string::npos);
+}
+
 TEST_CASE("a bad direct sampling mode is refused", "[source][rtlsdr]") {
     auto opened = source::open_source("rtlsdr://0?direct=yes");
     REQUIRE_FALSE(opened.has_value());
@@ -369,7 +396,7 @@ TEST_CASE("a dongle streams, stops cleanly and its counters add up",
     constexpr dsp::SampleRate kRate = 2'400'000;
     constexpr std::uint64_t kWanted = 300'000;
 
-    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=auto");
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20");
     if (!opened) {
         SKIP("the dongle could not be opened: " + opened.error().message);
     }
@@ -485,7 +512,7 @@ TEST_CASE("a consumer that cannot keep up loses samples and is told exactly whic
         SKIP(kNoDongle);
     }
 
-    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=auto");
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20");
     if (!opened) {
         SKIP("the dongle could not be opened: " + opened.error().message);
     }
@@ -541,7 +568,7 @@ TEST_CASE("a dongle delivers signal rather than a stream of nothing",
         SKIP(kNoDongle);
     }
 
-    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=auto");
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20");
     if (!opened) {
         SKIP("the dongle could not be opened: " + opened.error().message);
     }

@@ -860,7 +860,7 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     if (!freq) {
         return std::unexpected(freq.error());
     }
-    auto gain = query->text("gain", "auto");
+    auto gain = query->text("gain", "");
     if (!gain) {
         return std::unexpected(gain.error());
     }
@@ -914,10 +914,19 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     config.center_given = freq_given;
     config.center_hz = *freq;
 
+    // A URI that says nothing gets kRtlSdrDefaultGainDb, which is a stated
+    // number and not the tuner's own AGC. It was "auto" until 2026-09-21;
+    // the header carries the on-air measurement that changed it, and the
+    // short version is that auto put three intermodulation products in the
+    // detector's track list at confidence 1.00.
+    //
+    // The whole struct default is left alone rather than reassigned here, so
+    // that a caller building an RtlSdrSourceConfig without going through a
+    // URI gets the same gain this does.
     const std::string gain_text = lowercased(*gain);
     if (gain_text == "auto") {
         config.gain_auto = true;
-    } else {
+    } else if (!gain_text.empty()) {
         double db = 0.0;
         const char* first = gain_text.data();
         const char* last = first + gain_text.size();
@@ -926,8 +935,9 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
             return fail(std::format(
                 "gain='{}' is neither 'auto' nor a number of decibels. The tuner's gain is a "
                 "table of fixed steps, so a number lands on the nearest one and the achieved "
-                "value is reported back.",
-                *gain));
+                "value is reported back. Leaving gain off the URI asks for {} dB, which is "
+                "the documented starting point rather than a right answer.",
+                *gain, kRtlSdrDefaultGainDb));
         }
         config.gain_auto = false;
         config.gain_db = db;

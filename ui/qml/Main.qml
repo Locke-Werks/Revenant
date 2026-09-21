@@ -473,6 +473,45 @@ ApplicationWindow {
             }
         }
 
+        // What the front end is doing, under the controls that point it.
+        //
+        // HERE AND NOT BESIDE A GAIN CONTROL, because this window has no
+        // gain control: gain is set in the source URI the engine was
+        // started with and nothing in the client can change it. So the line
+        // sits at the bottom of the front-end block, under the tune box,
+        // which is the only part of this window that is about the radio
+        // rather than about the graph, and its own text names gain as the
+        // thing to change. When a gain control lands, this row moves to sit
+        // under it.
+        //
+        // The wording is in models/front_end_note.h with its own cases in
+        // ui/tests, and the measurement is core/detect/front_end.h. This
+        // file chooses the colour and nothing else.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.connected && engineLink.frontEndText.length > 0
+
+            Label {
+                Layout.alignment: Qt.AlignTop
+                text: "front end:"
+                color: engineLink.frontEndFault ? window.inkBad : window.inkDim
+                font.pixelSize: 12
+                font.bold: engineLink.frontEndFault
+            }
+
+            Label {
+                Layout.fillWidth: true
+                text: engineLink.frontEndText
+                color: engineLink.frontEndFault ? window.ink : window.inkDim
+                font.pixelSize: 12
+                font.bold: engineLink.frontEndFault
+                wrapMode: Text.WordWrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+            }
+        }
+
         // ------------------------------------------------------------------
         // Why there is no engine
         // ------------------------------------------------------------------

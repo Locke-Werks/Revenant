@@ -272,10 +272,17 @@ void EngineLink::supervise()
             poll_detections();
             poll_rds();
 
-            // Last, and on the probe pass only. It is a second info()
-            // call and it exists for the two measured fields alone; see
-            // poll_source_pacing.
+            // Last, and on the probe pass only. Two more calls that exist
+            // for measured fields alone; see poll_source_pacing and
+            // poll_front_end.
+            //
+            // poll_front_end comes after poll_detections on purpose: the
+            // engine builds its detector on the first request for
+            // detections and the front end's verdict is computed from that
+            // detector's own arrays, so asking first on a fresh connection
+            // would always read Unmeasured.
             poll_source_pacing(*alive);
+            poll_front_end(*alive);
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);

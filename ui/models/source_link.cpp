@@ -274,6 +274,81 @@ void EngineLink::adopt_pacing()
     emit pacingChanged();
 }
 
+void EngineLink::poll_front_end(bool engine_running)
+{
+    if (client_ == nullptr) {
+        return;
+    }
+
+    auto stats = client_->source_stats();
+    if (!stats) {
+        // NOT REPORTED HERE, on the argument poll_source_pacing makes: a
+        // stats call failing on a live connection is the connection going,
+        // and the probe above this is what says so.
+        return;
+    }
+
+    FrontEndSample sample;
+    sample.engine_running = engine_running;
+
+    // Ordinal for ordinal with rpc::FrontEndState, and asserted here rather
+    // than trusted. core/rpc/convert.h holds the schema against the engine
+    // and core/rpc/client.cpp holds it against rpc::FrontEndState; this is
+    // the third pair, and it is the one a display would get wrong silently
+    // by drawing a gain change as a front end in trouble.
+    static_assert(static_cast<std::uint8_t>(rpc::FrontEndState::Unmeasured) ==
+                  static_cast<std::uint8_t>(FrontEndSample::State::Unmeasured));
+    static_assert(static_cast<std::uint8_t>(rpc::FrontEndState::Steady) ==
+                  static_cast<std::uint8_t>(FrontEndSample::State::Steady));
+    static_assert(static_cast<std::uint8_t>(rpc::FrontEndState::SpanScales) ==
+                  static_cast<std::uint8_t>(FrontEndSample::State::SpanScales));
+    static_assert(static_cast<std::uint8_t>(rpc::FrontEndState::FloorFollowsSignal) ==
+                  static_cast<std::uint8_t>(FrontEndSample::State::FloorFollowsSignal));
+    sample.state = static_cast<FrontEndSample::State>(stats->front_end);
+    sample.slope = stats->front_end_slope;
+    sample.floor_lift_db = stats->front_end_floor_lift_db;
+
+    // Posted only on a change, the same as the pacing sample and for the
+    // same reason. The comparison is exact: both numbers move continuously
+    // while the verdict holds, so a tolerance here would freeze the figures
+    // inside the sentence while the sentence itself stayed true.
+    if (sample.state == posted_front_end_.state &&
+        sample.slope == posted_front_end_.slope &&
+        sample.floor_lift_db == posted_front_end_.floor_lift_db &&
+        sample.engine_running == posted_front_end_.engine_running) {
+        return;
+    }
+    posted_front_end_ = sample;
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        handover_has_front_end_ = true;
+        handover_front_end_ = sample;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_front_end(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_front_end()
+{
+    FrontEndSample sample;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        if (!handover_has_front_end_) {
+            return;
+        }
+        handover_has_front_end_ = false;
+        sample = handover_front_end_;
+    }
+
+    front_end_ = sample;
+    front_end_text_ = QString::fromStdString(front_end_sentence(sample));
+
+    // pacingChanged and not a signal of its own. One status strip reads
+    // both, neither repaints a display, and a second signal fired off the
+    // same probe pass would wake the GUI thread twice to redraw one line.
+    emit pacingChanged();
+}
+
 void EngineLink::adopt_source_tuning()
 {
     bool geometry_moved = false;

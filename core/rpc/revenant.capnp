@@ -301,6 +301,39 @@ struct SourceDescriptor {
     unavailable @3 :Text;
 }
 
+enum FrontEndState {
+    # Matching revenant::detect::FrontEndVerdict, ordinal for ordinal.
+    #
+    # WHAT THESE ARE NAMED AFTER, WHICH IS THE POINT OF THEM. They say what
+    # was OBSERVED about the full-span spectrum, not what is wrong with the
+    # radio. core/detect/front_end.h is the measurement and its long note on
+    # what it cannot tell apart is what stops a client turning
+    # floorFollowsSignal into the word "overload": a broadband interferer
+    # coming on at the same time as a strong signal rises reads identically,
+    # and compression that was present from the first decision and never
+    # lifted reads as steady.
+
+    # No detector running, not enough decisions yet, or the strongest signal
+    # on the span has not moved enough to measure against. A third state and
+    # not a clean bill of health, the same way EngineInfo::realtimeFactor of
+    # zero is not a stalled source.
+    unmeasured @0;
+
+    # The floor is not following the strongest signal on the span.
+    steady @1;
+
+    # Every part of the span's floor is following it at about one decibel per
+    # decibel, which is what a gain change looks like. With gain=auto that is
+    # the tuner's own AGC, and it is worth saying because it explains a
+    # display that breathes.
+    spanScales @2;
+
+    # Every part of the span's floor is following it FASTER than one for one,
+    # so the floor is outrunning the signal driving it. That is what a
+    # nonlinearity ahead of the measurement does.
+    floorFollowsSignal @3;
+}
+
 struct SourceStats {
     blocksDelivered @0 :UInt64;
     samplesDelivered @1 :UInt64;
@@ -313,6 +346,38 @@ struct SourceStats {
     samplesLost @3 :UInt64;
     lastLossIndex @4 :UInt64;
     writeIndex @5 :UInt64;
+
+    # What the full-span spectrum says about the front end.
+    #
+    # THE DIAGNOSIS NOBODY COULD MAKE, the same shape as realtimeFactor
+    # above. Measured on air 2026-09-20, an RTL-SDR v3 at 95.1 MHz in an
+    # ordinary suburban FM environment: with gain=auto the detector reported
+    # three intermodulation products as real tracks at confidence 1.00, and
+    # setting gain to 20 improved the measured SNR of KKFM at 98.1 MHz by
+    # 5.7 dB and removed every phantom. What a client could see was three
+    # confident detections, which is true about the tracks and says nothing
+    # about the radio.
+    #
+    # ON SourceStats AND NOT ON EngineInfo, because EngineInfo is what the
+    # engine settled on at open and this moves every decision. It rides with
+    # the counters a client already polls.
+    #
+    # MEASURED ONLY WHILE A DETECTOR IS RUNNING. It is computed from
+    # core/detect/detector.h's own averaged spectrum and noise floor, which
+    # is what makes it nearly free, and the server builds a detector on the
+    # first request for detections. Until then this is unmeasured.
+    frontEnd @6 :FrontEndState;
+
+    # Decibels of floor movement per decibel the strongest signal on the span
+    # moved, from the least-following part of the span. One is a gain change.
+    # Above one the floor is outrunning the signal. Zero when unmeasured.
+    frontEndSlope @7 :Float64;
+
+    # How far the span's mean noise floor sits above the quietest this
+    # engine's monitor has seen, in dB. A session low-water mark, descriptive
+    # only, and no verdict rests on it. It is here because it is the number
+    # that makes the sentence concrete.
+    frontEndFloorLiftDb @8 :Float64;
 }
 
 struct VrxParams {

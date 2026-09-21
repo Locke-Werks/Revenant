@@ -302,6 +302,7 @@
 #include <kj/string.h>
 
 #include "core/detect/detector.h"
+#include "core/detect/front_end.h"
 #include "core/rpc/convert.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
@@ -936,6 +937,14 @@ public:
     [[nodiscard]] Expected<DetectionSnapshot> detections(double min_confidence);
     [[nodiscard]] Status set_detection_threshold(double threshold_db);
 
+    // Completion thread, with detect_lock_ already held and a detector that
+    // has just taken a frame. Does nothing until the detector decides.
+    void observe_front_end();
+
+    // Event loop thread. What the monitor last said, or an Unmeasured
+    // reading when nothing has asked for detections.
+    [[nodiscard]] detect::FrontEndObservation front_end();
+
     // Event loop thread, all five.
     //
     // rds_station and set_rds_region both build the decoder if there is not
@@ -1071,6 +1080,23 @@ private:
     std::mutex detect_lock_;
     std::atomic<bool> detecting_{false};
     std::optional<detect::Detector> detector_;
+
+    // The front end's verdict, and the decision it was last taken at.
+    //
+    // Under detect_lock_ with the detector because it reads the detector's
+    // own arrays and has no state of its own that is worth a second lock. It
+    // lives for the same span the detector does and is reset with it: after
+    // a retune every segment is looking at a different piece of spectrum, so
+    // the window's history is a measurement of somewhere else.
+    //
+    // last_front_end_decision_ is what keeps the monitor on the DECISION
+    // rate rather than the frame rate. noise_floor() only moves when the
+    // detector decides, so observing per frame would feed the regression
+    // thirty copies of the same point and make its window a thirtieth as
+    // long as it reads.
+    detect::FrontEndMonitor front_end_;                    // detect_lock_
+    dsp::SampleIndex last_front_end_decision_ = 0;         // detect_lock_
+    bool have_front_end_decision_ = false;                 // detect_lock_
 
     // Why detection stopped, empty while it has not. See the note at the top:
     // a detector that refuses a frame must not fail the sink, so the reason
@@ -1329,7 +1355,8 @@ public:
     }
 
     kj::Promise<void> sourceStats(SourceStatsContext context) override {
-        write_source_stats(context.getResults().initStats(), owner_.engine().source_stats());
+        write_source_stats(context.getResults().initStats(), owner_.engine().source_stats(),
+                           owner_.front_end());
         return kj::READY_NOW;
     }
 
@@ -1942,6 +1969,52 @@ Status ServerImpl::ensure_detector() {
     return {};
 }
 
+void ServerImpl::observe_front_end() {
+    // detect_lock_ is held by the caller and detector_ has a value.
+    const dsp::SampleIndex decided = detector_->last_decision();
+    if (have_front_end_decision_ && decided == last_front_end_decision_) {
+        return;
+    }
+
+    const dsp::SampleRate rate = detector_->config().source_rate;
+    if (!have_front_end_decision_ || rate == 0 || decided <= last_front_end_decision_) {
+        // The first decision has no interval behind it, and an index that
+        // did not advance is the detector before it has decided at all.
+        // Recording the position without observing is what makes the next
+        // decision's interval the real one rather than a span reaching back
+        // to sample zero.
+        last_front_end_decision_ = decided;
+        have_front_end_decision_ = true;
+        return;
+    }
+
+    const double elapsed = static_cast<double>(decided - last_front_end_decision_) /
+                           static_cast<double>(rate);
+    last_front_end_decision_ = decided;
+
+    // Source seconds and not wall seconds, so a capture replayed at forty
+    // times realtime produces the slope it did live. Same rule detector.h
+    // states for every interval on this path.
+    //
+    // A refusal is dropped rather than recorded. The monitor rejects a
+    // geometry the detector cannot produce, so there is no reachable fault
+    // here that is not already a detector fault, and this must not be the
+    // thing that switches detection off.
+    (void)front_end_.observe(detector_->averaged_power(), detector_->noise_floor(), elapsed);
+}
+
+detect::FrontEndObservation ServerImpl::front_end() {
+    std::scoped_lock held(detect_lock_);
+
+    // An Unmeasured reading and not the last one the monitor took, because
+    // without a detector there is nothing feeding it and a stale verdict
+    // would keep answering for a band nobody is watching any more.
+    if (!detector_.has_value()) {
+        return {};
+    }
+    return front_end_.observation();
+}
+
 Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence) {
     if (auto ready = ensure_detector(); !ready) {
         return std::unexpected(ready.error());
@@ -2497,6 +2570,13 @@ void ServerImpl::forget_across_retune() {
         // reaching the old detector between here and the reset below.
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+
+        // Every segment now looks at a different piece of spectrum, so the
+        // window's history is a measurement of somewhere else and a slope
+        // fitted across the retune is a slope through two bands.
+        front_end_.reset();
+        have_front_end_decision_ = false;
+        last_front_end_decision_ = 0;
     }
 
     // detector_fault_ is deliberately left alone. A detector that faulted
@@ -2590,6 +2670,8 @@ Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
                 // it here would end the run over a track list.
                 detecting_.store(false, std::memory_order_relaxed);
                 detector_fault_ = fed.error().message;
+            } else {
+                observe_front_end();
             }
         }
     }
@@ -3562,6 +3644,9 @@ void ServerImpl::stop() {
         std::scoped_lock held(detect_lock_);
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+        front_end_.reset();
+        have_front_end_decision_ = false;
+        last_front_end_decision_ = 0;
     }
 
     release_engine(engine_);

@@ -26,6 +26,7 @@
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
 #include "core/detect/detector.h"
+#include "core/detect/front_end.h"
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
 #include "core/rpc/revenant.capnp.h"
@@ -66,6 +67,19 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
 static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
               static_cast<std::uint16_t>(detect::TrackState::Merged));
 
+// The front end's verdict, on the same terms. This one is read out only, and
+// a renumbering turns "the floor is following the strongest signal" into "the
+// whole span is scaling", which is the one distinction the measurement exists
+// to make. See core/detect/front_end.h.
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::UNMEASURED) ==
+              static_cast<std::uint16_t>(detect::FrontEndVerdict::Unmeasured));
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::STEADY) ==
+              static_cast<std::uint16_t>(detect::FrontEndVerdict::Steady));
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::SPAN_SCALES) ==
+              static_cast<std::uint16_t>(detect::FrontEndVerdict::SpanScales));
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::FLOOR_FOLLOWS_SIGNAL) ==
+              static_cast<std::uint16_t>(detect::FrontEndVerdict::FloorFollowsSignal));
+
 // And the three RDS enums, which is the assert core/rpc/types.h and
 // core/rpc/client.cpp both said would land here: they hold the schema
 // against the client's mirror, this file holds it against the decoder, and
@@ -97,6 +111,7 @@ static_assert(static_cast<std::uint16_t>(schema::RdsSync::SYNCED) ==
 
 [[nodiscard]] schema::Demod to_schema(engine::Demod mode);
 [[nodiscard]] schema::TrackState to_schema(detect::TrackState state);
+[[nodiscard]] schema::FrontEndState to_schema(detect::FrontEndVerdict verdict);
 [[nodiscard]] schema::RdsRegion to_schema(decode::Region region);
 [[nodiscard]] schema::RdsLock to_schema(decode::RdsLock lock);
 [[nodiscard]] schema::RdsSync to_schema(decode::SyncState sync);
@@ -136,7 +151,12 @@ void write_spectrum_geometry(schema::SpectrumGeometry::Builder out,
 void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo& in,
                        const engine::SourcePacing& pacing);
 
-void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in);
+// Two structs again, for the reason write_engine_info gives. The counters
+// belong to the source and the observation belongs to the detector watching
+// its spectrum, and a caller that set the three front-end fields afterwards
+// would be the second place a wire struct is filled.
+void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,
+                        const detect::FrontEndObservation& front_end);
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in);
 
 // The placement, plus the sentence VrxPlacement::clampReason carries.

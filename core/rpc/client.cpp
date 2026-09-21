@@ -134,6 +134,16 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
 static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
               static_cast<std::uint16_t>(TrackState::Merged));
 
+// And for the front end's verdict, used by read_source_stats.
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::UNMEASURED) ==
+              static_cast<std::uint16_t>(FrontEndState::Unmeasured));
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::STEADY) ==
+              static_cast<std::uint16_t>(FrontEndState::Steady));
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::SPAN_SCALES) ==
+              static_cast<std::uint16_t>(FrontEndState::SpanScales));
+static_assert(static_cast<std::uint16_t>(schema::FrontEndState::FLOOR_FOLLOWS_SIGNAL) ==
+              static_cast<std::uint16_t>(FrontEndState::FloorFollowsSignal));
+
 // Sets a field for the length of a scope and puts it back on the way out,
 // including out of an exception. Both uses are loop-thread-only fields whose
 // stale value would be read by code running after the scope: a dangling
@@ -305,6 +315,18 @@ struct PromiseValue<kj::Promise<T>> {
     out.samples_lost = in.getSamplesLost();
     out.last_loss_index = in.getLastLossIndex();
     out.write_index = in.getWriteIndex();
+
+    // An ordinal from a newer engine becomes Unmeasured rather than an
+    // error. This whole call is a counter poll that a client makes several
+    // times a second, and failing it over one field would take the overrun
+    // count with it; Unmeasured already means "this cannot be said", which
+    // is exactly true of a state the client has never heard of.
+    const auto front_end = static_cast<std::uint16_t>(in.getFrontEnd());
+    out.front_end = front_end <= static_cast<std::uint16_t>(FrontEndState::FloorFollowsSignal)
+                        ? static_cast<FrontEndState>(front_end)
+                        : FrontEndState::Unmeasured;
+    out.front_end_slope = in.getFrontEndSlope();
+    out.front_end_floor_lift_db = in.getFrontEndFloorLiftDb();
     return out;
 }
 

@@ -80,6 +80,67 @@ struct SceneGeometry {
     [[nodiscard]] engine::SpectrumGeometry spectrum() const;
 };
 
+// A memoryless front end between the scene and the channelizer.
+//
+// WHY A FIXTURE NEEDS ONE. core/detect/front_end.h measures whether the noise
+// floor is following the strongest signal on the span, and the thing it is
+// looking for is a receiver being driven past its linear range. A scene is
+// linear by construction: siggen adds emitters and noise and nothing in the
+// path multiplies them together. So without this there is no way to produce
+// the failure the monitor exists to catch, and the only evidence would stay
+// what it is today, one afternoon on air with a dongle.
+//
+// THE MODEL, AND WHY IT IS THIS ONE. A memoryless power series truncated at
+// the third term, on the complex envelope:
+//
+//     y = g x - a3 |g x|^2 (g x)
+//
+// That is the standard bandpass representation and it is where third-order
+// intercept comes from: see ITU-R SM.332 on intermodulation in receivers, or
+// any treatment of the two-tone test. Two strong tones through it produce
+// products at 2*f1 - f2 and 2*f2 - f1, which is the phantom detection the
+// on-air measurement of 2026-09-20 recorded three of.
+//
+// The products the MONITOR sees are not those two. Expanding |x|^2 x with
+// x = s + w, strong signals plus noise, leaves terms in 2|s|^2 w and s^2 w*.
+// Both are noise shaped and land across the whole span, and both scale with
+// the strong signals' power, which is exactly "the floor rises faster than
+// the signal driving it". The discrete products and the broadband lift are
+// the same nonlinearity seen twice.
+//
+// THE GAIN SWING IS NOT DECORATION EITHER. The monitor fits a slope, so it
+// needs the strongest signal to move; a front end held in steady compression
+// produces a high floor and a flat one and reads as Steady, which that file
+// says out loud. A slow sinusoidal gain is what a tuner AGC does in the
+// field, it is deterministic, and with a3 at zero it is also the control
+// case: a pure multiplication moves the floor and the signal by the same
+// number of decibels, which is a slope of exactly one.
+struct FrontEndModel {
+    // Voltage gain at the middle of the swing.
+    double gain = 1.0;
+
+    // Peak-to-peak swing of that gain, in dB, over one period. Zero holds
+    // the gain still.
+    double swing_db = 0.0;
+    double swing_period_seconds = 1.0;
+
+    // Third-order coefficient, in the same voltage units, so a3 = 0 is a
+    // perfectly linear front end and the whole model collapses to the gain.
+    double third_order = 0.0;
+
+    [[nodiscard]] bool active() const {
+        return gain != 1.0 || swing_db != 0.0 || third_order != 0.0;
+    }
+
+    // The gain at an absolute sample index, as a voltage multiplier. A pure
+    // function of the index, which is what keeps SceneFrames reproducible
+    // from any starting point the way siggen::Scene::render is.
+    [[nodiscard]] double gain_at(dsp::SampleIndex index, dsp::SampleRate rate) const;
+
+    // Applies the model in place over [start, start + out.size()).
+    void apply(dsp::SampleIndex start, dsp::SampleRate rate, dsp::ComplexSpan out) const;
+};
+
 // Renders a scene and hands out its frames one at a time.
 //
 // Frames are produced in batches, because the branch filter amortises over a
@@ -87,8 +148,11 @@ struct SceneGeometry {
 // caller sees one frame per next() either way.
 class SceneFrames {
 public:
+    // The front end defaults to a perfectly linear unity gain, so every
+    // case written before it existed is unchanged and does not mention it.
     [[nodiscard]] static Expected<SceneFrames> create(const SceneGeometry& geometry,
-                                                      const siggen::SceneSpec& spec);
+                                                      const siggen::SceneSpec& spec,
+                                                      const FrontEndModel& front_end = {});
 
     SceneFrames(SceneFrames&&) noexcept = default;
     SceneFrames& operator=(SceneFrames&&) noexcept = default;
@@ -114,6 +178,7 @@ private:
 
     SceneGeometry geometry_{};
     engine::SpectrumGeometry spectrum_{};
+    FrontEndModel front_end_{};
 
     // Held by pointer because siggen::Scene has no move assignment and this
     // class needs one to come back out of Expected.

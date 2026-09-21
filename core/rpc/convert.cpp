@@ -111,6 +111,21 @@ schema::TrackState to_schema(detect::TrackState state) {
     return schema::TrackState::PENDING;
 }
 
+schema::FrontEndState to_schema(detect::FrontEndVerdict verdict) {
+    // Exhaustive with no default, for the reason the switch above gives.
+    switch (verdict) {
+        case detect::FrontEndVerdict::Unmeasured: return schema::FrontEndState::UNMEASURED;
+        case detect::FrontEndVerdict::Steady:     return schema::FrontEndState::STEADY;
+        case detect::FrontEndVerdict::SpanScales: return schema::FrontEndState::SPAN_SCALES;
+        case detect::FrontEndVerdict::FloorFollowsSignal:
+            return schema::FrontEndState::FLOOR_FOLLOWS_SIGNAL;
+    }
+    // Unreachable, and present for the C4715 reason to_schema(TrackState)
+    // states. Unmeasured rather than any of the others: a value nobody
+    // enumerated is not a measurement.
+    return schema::FrontEndState::UNMEASURED;
+}
+
 schema::RdsRegion to_schema(decode::Region region) {
     // Exhaustive with no default, for the reason the two switches above
     // give. A third region added to decode::Region alone would otherwise
@@ -311,13 +326,17 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
     out.setSourcePacedBy(pacing.paced_by);
 }
 
-void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in) {
+void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,
+                        const detect::FrontEndObservation& front_end) {
     out.setBlocksDelivered(in.blocks_delivered);
     out.setSamplesDelivered(in.samples_delivered);
     out.setOverrunEvents(in.overrun_events);
     out.setSamplesLost(in.samples_lost);
     out.setLastLossIndex(in.last_loss_index);
     out.setWriteIndex(in.write_index);
+    out.setFrontEnd(to_schema(front_end.verdict));
+    out.setFrontEndSlope(front_end.slope);
+    out.setFrontEndFloorLiftDb(front_end.floor_lift_db);
 }
 
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in) {

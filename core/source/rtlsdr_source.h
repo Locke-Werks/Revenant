@@ -57,6 +57,38 @@ namespace revenant::source {
 // table that can be got backwards.
 enum class DirectSampling : std::uint8_t { Off = 0, IBranch = 1, QBranch = 2 };
 
+// The tuner gain a URI that does not say gets, in decibels.
+//
+// IT WAS gain=auto UNTIL 2026-09-21, AND auto WAS THE WRONG DEFAULT. Measured
+// on air 2026-09-20, an RTL-SDR v3 centred at 95.1 MHz in an ordinary
+// suburban FM environment: with gain=auto the wideband detector reported
+// three intermodulation products as real tracks at confidence 1.00. Setting
+// gain to 20 improved the measured SNR of KKFM at 98.1 MHz by 5.7 dB and
+// every phantom disappeared. Every example in the tree used auto, so the
+// default path was the one that manufactured signals.
+//
+// WHY A NUMBER AND NOT A BETTER AUTO. The tuner's AGC maximises the level at
+// its own output, which is the right objective for a receiver listening to
+// one channel and the wrong one for a wideband capture: it is driven by the
+// loudest thing anywhere in 2.4 MHz, so a local broadcast transmitter sets
+// the gain for the whole span and everything else is measured through
+// whatever compression that leaves. Nothing reachable from software changes
+// that objective. Turning the loop off and stating a number is the only way
+// to put the decision where it belongs.
+//
+// WHY 20 AND WHAT IT IS NOT. It is the one figure that has been measured on
+// air, in one place, on one band, on one dongle. It is not a right answer and
+// there is no right answer: a quiet band or a weak signal wants more gain and
+// a stronger environment wants less, and the R820T2's table runs 0 to about
+// 49.6 dB. It is a starting point, written down so the reader knows it is
+// theirs to change, and core/detect/front_end.h is what tells them when it
+// has become wrong. auto is still reachable by asking for it.
+//
+// A request lands on the nearest step in the tuner's own gain table and the
+// achieved value is read back, so this is what is asked for and not
+// necessarily what is set.
+inline constexpr double kRtlSdrDefaultGainDb = 20.0;
+
 // Everything the backend needs, already parsed. The URI grammar and the
 // spelling of every key live in registry.cpp, which owns the text layer.
 struct RtlSdrSourceConfig {
@@ -81,8 +113,12 @@ struct RtlSdrSourceConfig {
 
     // Hardware AGC in the tuner. A number instead snaps to the nearest step
     // rtlsdr_get_tuner_gains reports and the achieved value is read back.
-    bool gain_auto = true;
-    double gain_db = 0.0;
+    //
+    // OFF BY DEFAULT SINCE 2026-09-21, and kRtlSdrDefaultGainDb carries the
+    // measurement that changed it. A URI that says nothing about gain now
+    // gets a stated number rather than the tuner's own loop.
+    bool gain_auto = false;
+    double gain_db = kRtlSdrDefaultGainDb;
 
     // Frequency correction, parts per million. librtlsdr applies this to the
     // resampler as well as to the tuner, so it moves the timebase too, which
@@ -154,6 +190,7 @@ inline constexpr dsp::SampleRate kRtlSdrHighRateMax = 3'200'000;
 inline constexpr dsp::SampleRate kRtlSdrReliableRateMax = 2'560'000;
 
 inline constexpr dsp::SampleRate kRtlSdrDefaultRate = 2'400'000;
+
 
 [[nodiscard]] constexpr bool rtlsdr_rate_supported(dsp::SampleRate rate)
 {

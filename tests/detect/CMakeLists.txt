@@ -27,6 +27,7 @@ add_executable(revenant_detect_tests
     scene_frames.cpp
     test_detector.cpp
     test_detector_scene.cpp
+    test_front_end.cpp
 )
 
 target_link_libraries(revenant_detect_tests PRIVATE

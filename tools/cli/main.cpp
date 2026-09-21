@@ -64,6 +64,7 @@
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
 #include "core/detect/detector.h"
+#include "core/detect/front_end.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
 #include "core/dsp/vrx_reference.h"
@@ -590,7 +591,7 @@ void print_usage()
         "      --vrx 150k:nfm:16k --record out.wav --duration 5\n"
         "  revenant-cli \"file:///C:/captures/hf.cf32?rate=2400000&format=cf32\" \\\n"
         "      --vrx 7.1M:lsb --vrx 7.074M:usb --record C:/out --play 2\n"
-        "  revenant-cli \"rtlsdr://0?freq=98.5M&rate=2400000&gain=auto\" \\\n"
+        "  revenant-cli \"rtlsdr://0?freq=98.5M&rate=2400000&gain=20\" \\\n"
         "      --channels 8 --rds 98.5M --vrx 98.5M:wfm --play\n");
 }
 
@@ -1454,6 +1455,19 @@ public:
         // slot rather than sent beside the block, so the count and the rows
         // it describes are the same write and cannot disagree.
         std::uint32_t over_bar;
+
+        // What core/detect/front_end.h said about the front end at that same
+        // decision, carried the same way and for the same reason.
+        //
+        // IN THIS TABLE BECAUSE THIS IS WHERE THE PHANTOMS WERE SEEN.
+        // Measured on air 2026-09-20 with revenant-cli --detect at 95.1 MHz:
+        // three intermodulation products in this list at confidence 1.00,
+        // indistinguishable from stations. The verdict is the only thing on
+        // screen that can tell an operator the list is describing their own
+        // receiver.
+        std::uint32_t front_end;
+        double front_end_slope;
+        double front_end_lift_db;
     };
 
     [[nodiscard]] static Expected<std::unique_ptr<DetectView>> create(
@@ -1505,8 +1519,23 @@ public:
         if (decided == published_) {
             return {};
         }
+
+        // Before published_ moves, because the interval is what the slope is
+        // fitted against. The first decision has nothing behind it, so it
+        // only sets the mark. A refusal is dropped: the monitor rejects
+        // geometries the detector cannot produce, so there is no reachable
+        // fault here that is not already a detector fault, and this must not
+        // be what ends a run.
+        if (published_ != 0 && rate_ > 0) {
+            const double elapsed =
+                static_cast<double>(decided - published_) / static_cast<double>(rate_);
+            static_cast<void>(front_end_.observe(detector_->averaged_power(),
+                                                 detector_->noise_floor(), elapsed));
+        }
+
         published_ = decided;
         decisions_.fetch_add(1, std::memory_order_relaxed);
+        const detect::FrontEndObservation front_end = front_end_.observation();
 
         // The bar is counted past the point the block fills up. A full block
         // is the common case on a broadcast band: the RTL-SDR at 98.1 MHz put
@@ -1547,6 +1576,9 @@ public:
         // are no rows to hang it off.
         for (std::size_t i = 0; i < kRows; ++i) {
             produced_[i].over_bar = over_bar;
+            produced_[i].front_end = static_cast<std::uint32_t>(front_end.verdict);
+            produced_[i].front_end_slope = front_end.slope;
+            produced_[i].front_end_lift_db = front_end.floor_lift_db;
         }
 
         if (ring_->writable() < kRows) {
@@ -1584,6 +1616,18 @@ public:
     // from a truncated one.
     [[nodiscard]] std::uint32_t over_bar() const { return held_[0].over_bar; }
 
+    // What the front end monitor said at the decision the held snapshot came
+    // from. Reconstructed from the block rather than read off the monitor,
+    // because the monitor lives on the completion thread.
+    [[nodiscard]] detect::FrontEndObservation front_end() const
+    {
+        detect::FrontEndObservation out;
+        out.verdict = static_cast<detect::FrontEndVerdict>(held_[0].front_end);
+        out.slope = held_[0].front_end_slope;
+        out.floor_lift_db = held_[0].front_end_lift_db;
+        return out;
+    }
+
     [[nodiscard]] const detect::DetectorStats& stats() const { return detector_->stats(); }
 
     [[nodiscard]] std::uint64_t frames() const
@@ -1619,6 +1663,9 @@ private:
     }
 
     std::optional<detect::Detector> detector_;
+
+    // Completion thread only, beside the detector whose arrays it reads.
+    detect::FrontEndMonitor front_end_;
     std::unique_ptr<engine::SpscRing<Row>> ring_;
     SampleRate rate_ = 0;
 
@@ -2848,6 +2895,26 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                              options.detect_threshold_db, options.detect_confidence, capped);
                 for (const DetectView::Row& row : rows) {
                     std::println("{}", track_line(row));
+                }
+
+                // Under the table, because it is about the list rather than
+                // about any row in it. Printed only when there is something
+                // to say, on the argument ui/models/source_pacing.h makes: a
+                // line that is always there is a line nobody reads.
+                const detect::FrontEndObservation front_end = detector->front_end();
+                if (front_end.verdict == detect::FrontEndVerdict::SpanScales) {
+                    std::println(
+                        "          front end: the whole span is moving with the strongest "
+                        "signal at {:.1f} dB per dB, which is a gain control changing. Set "
+                        "gain to a number if it is on auto.",
+                        front_end.slope);
+                } else if (front_end.verdict == detect::FrontEndVerdict::FloorFollowsSignal) {
+                    std::println(
+                        "          front end: the noise floor is rising {:.1f} dB for every "
+                        "dB the strongest signal rises and sits {:.1f} dB above its quietest. "
+                        "Being driven too hard does that, and so does a broadband interferer. "
+                        "Tracks in this list may be products.",
+                        front_end.slope, front_end.floor_lift_db);
                 }
                 pending_tracks = false;
             }

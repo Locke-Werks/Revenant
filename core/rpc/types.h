@@ -136,6 +136,27 @@ struct SourceDescriptor {
     [[nodiscard]] bool available() const { return unavailable.empty(); }
 };
 
+// Mirrors revenant::detect::FrontEndVerdict ordinal for ordinal, and the
+// schema's FrontEndState with it, on the same arrangement TrackState below
+// has: convert.h holds the schema-to-engine asserts and client.cpp holds the
+// schema-to-here ones.
+//
+// core/detect/front_end.h is the authority on what each of these means and,
+// more to the point, on what it does not mean. Read its note on what the
+// measurement cannot tell apart before turning FloorFollowsSignal into the
+// word "overload" in front of an operator.
+enum class FrontEndState : std::uint8_t { Unmeasured, Steady, SpanScales, FloorFollowsSignal };
+
+[[nodiscard]] constexpr const char* front_end_state_name(FrontEndState state) {
+    switch (state) {
+        case FrontEndState::Unmeasured: return "unmeasured";
+        case FrontEndState::Steady: return "steady";
+        case FrontEndState::SpanScales: return "span-scales";
+        case FrontEndState::FloorFollowsSignal: return "floor-follows-signal";
+    }
+    return "unknown";
+}
+
 struct SourceStats {
     std::uint64_t blocks_delivered = 0;
     std::uint64_t samples_delivered = 0;
@@ -143,6 +164,21 @@ struct SourceStats {
     std::uint64_t samples_lost = 0;
     std::uint64_t last_loss_index = 0;
     std::uint64_t write_index = 0;
+
+    // What the full-span spectrum says about the front end. Computed from
+    // the detector's own averaged spectrum and noise floor, so it stays
+    // Unmeasured until something asks the engine for detections.
+    FrontEndState front_end = FrontEndState::Unmeasured;
+
+    // Decibels of floor movement per decibel the strongest signal on the
+    // span moved, from the least-following part of the span. One is a gain
+    // change; above one the floor is outrunning the signal driving it.
+    double front_end_slope = 0.0;
+
+    // How far the span's mean floor sits above the quietest this engine's
+    // monitor has seen. Descriptive, a session low-water mark, and no
+    // verdict rests on it.
+    double front_end_floor_lift_db = 0.0;
 };
 
 struct VrxParams {

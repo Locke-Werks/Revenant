@@ -5,6 +5,7 @@
 #include <cmath>
 #include <format>
 #include <memory>
+#include <numbers>
 #include <span>
 #include <utility>
 
@@ -28,6 +29,46 @@ constexpr std::uint32_t kFramesPerBatch = 16;
 }
 
 }  // namespace
+
+double FrontEndModel::gain_at(dsp::SampleIndex index, dsp::SampleRate rate) const {
+    if (swing_db == 0.0 || swing_period_seconds <= 0.0 || rate == 0) {
+        return gain;
+    }
+
+    // Reduced into one period before the multiply, so a long scene does not
+    // lose the phase into the exponent of a double. The index is absolute,
+    // which is what keeps a batch boundary invisible.
+    const double period_samples = swing_period_seconds * static_cast<double>(rate);
+    const double phase = std::fmod(static_cast<double>(index), period_samples);
+    const double turns = phase / period_samples;
+
+    // Half the swing either side of the stated gain, so the mean of the
+    // sweep in decibels is the stated gain rather than something above it.
+    const double db = 0.5 * swing_db * std::sin(2.0 * std::numbers::pi * turns);
+    return gain * std::pow(10.0, db / 20.0);
+}
+
+void FrontEndModel::apply(dsp::SampleIndex start, dsp::SampleRate rate,
+                          dsp::ComplexSpan out) const {
+    if (!active()) {
+        return;
+    }
+
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const double g = gain_at(start + i, rate);
+        const double re = static_cast<double>(out[i].real()) * g;
+        const double im = static_cast<double>(out[i].imag()) * g;
+
+        // y = x' - a3 |x'|^2 x', x' being the gained input. Compressive for
+        // a positive a3, which is the sign every real amplifier has: the
+        // third-order term opposes the linear one, which is what makes the
+        // transfer curve bend over rather than run away.
+        const double squared = re * re + im * im;
+        const double scale = 1.0 - third_order * squared;
+        out[i] = dsp::Complex32(static_cast<float>(re * scale),
+                                static_cast<float>(im * scale));
+    }
+}
 
 dsp::GridParams SceneGeometry::grid() const {
     dsp::GridParams params;
@@ -68,7 +109,8 @@ engine::SpectrumGeometry SceneGeometry::spectrum() const {
 }
 
 Expected<SceneFrames> SceneFrames::create(const SceneGeometry& geometry,
-                                          const siggen::SceneSpec& spec) {
+                                          const siggen::SceneSpec& spec,
+                                          const FrontEndModel& front_end) {
     if (spec.rate != geometry.rate) {
         return fail(std::format("SceneFrames: the scene runs at {} S/s and the grid was asked "
                                 "for {} S/s. The two have to agree or every frequency in the "
@@ -106,6 +148,7 @@ Expected<SceneFrames> SceneFrames::create(const SceneGeometry& geometry,
     SceneFrames frames;
     frames.geometry_ = geometry;
     frames.spectrum_ = geometry.spectrum();
+    frames.front_end_ = front_end;
     frames.scene_ = std::make_shared<siggen::Scene>(std::move(*scene));
     frames.prototype_ = std::move(prototype->taps);
     frames.coarse_twiddles_ = std::move(*coarse);
@@ -157,11 +200,22 @@ Status SceneFrames::fill_batch() {
     // edge lands where the truth record says it does.
     const std::uint32_t offset = static_cast<std::uint32_t>(next_sample_ & mask);
     const std::uint64_t first = std::min<std::uint64_t>(batch_samples, iq_.size() - offset);
-    scene_->render(next_sample_, dsp::ComplexSpan(iq_.data() + offset,
-                                                  static_cast<std::size_t>(first)));
+    const dsp::ComplexSpan head(iq_.data() + offset, static_cast<std::size_t>(first));
+    scene_->render(next_sample_, head);
+
+    // The front end sits between the scene and the channelizer, which is
+    // where it sits in a radio: everything below this line, the branch
+    // filter and the transform and the detector, is the same code the engine
+    // runs and does not know the samples came through one. Applied piecewise
+    // over the ring's two halves because the model is memoryless, so a split
+    // costs nothing and needs no state carried across it.
+    front_end_.apply(next_sample_, geometry_.rate, head);
+
     if (first < batch_samples) {
-        scene_->render(next_sample_ + first,
-                       dsp::ComplexSpan(iq_.data(), static_cast<std::size_t>(batch_samples - first)));
+        const dsp::ComplexSpan tail(iq_.data(),
+                                    static_cast<std::size_t>(batch_samples - first));
+        scene_->render(next_sample_ + first, tail);
+        front_end_.apply(next_sample_ + first, geometry_.rate, tail);
     }
 
     const dsp::PfbBranchParams branch_params{

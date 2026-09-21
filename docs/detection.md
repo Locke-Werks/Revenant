@@ -542,7 +542,7 @@ through a working day.
 
 One 2.4 MS/s tuning does not cover it. 461 MHz and 463 MHz between them do:
 
-    revenant-cli "rtlsdr://0?freq=461M&rate=2400000&gain=auto" \
+    revenant-cli "rtlsdr://0?freq=461M&rate=2400000&gain=20" \
         --spectrum --detect
 
 At 64 channels and a 2048-point second stage that is 65536 bins at 36.6 Hz. A
@@ -570,6 +570,21 @@ several tracks at once. A centre or a bandwidth that keeps changing after the
 carrier drops, which is geometry published from an average with no signal left
 in it. A track that never drops at all. Tracks on channels nobody transmitted
 on, which is the threshold rather than the tracker.
+
+And one that is not the detector at all. On 2026-09-20, at 95.1 MHz with
+`gain=auto`, three intermodulation products were listed as tracks at
+confidence 1.00. The detector was right about the energy: the products were
+there, in the samples, put there by the dongle's own front end. `gain=20`
+improved the measured SNR of KKFM at 98.1 MHz by 5.7 dB and every phantom
+disappeared. That is why the shipped default is a stated number rather than
+the tuner's AGC, and why `core/detect/front_end.h` exists: it watches whether
+the noise floor across the whole span is following the strongest signal on it,
+and at what rate, so a track list taken through a compressed front end says so
+on screen. About one decibel per decibel is a gain control moving; faster is a
+nonlinearity. Read that header's note on what the measurement cannot tell
+apart before quoting the flag at anyone: it is a correlated floor lift and not
+a measurement of compression, and it cannot see an overload that was there
+from the first decision and never lifted.
 
 This is a confirmation and not a measurement. What is on the air cannot be
 replayed and carries no truth record, so nothing here scores: the referee
