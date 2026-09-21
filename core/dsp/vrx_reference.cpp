@@ -638,6 +638,37 @@ Status validate(const VrxDemodConfig& config, const VrxDemodParams& params) {
         return fail("vrx demod: the raw tap hands out complex baseband unchanged, so it "
                     "cannot carry an audio decimation filter");
     }
+    if (config.channels != 1U && config.channels != 2U) {
+        return fail(std::format(
+            "vrx demod: {} channels is neither a mono detector nor an interleaved pair",
+            config.channels));
+    }
+    if (config.mode == kDemodRaw && config.channels != 2U) {
+        return fail("vrx demod: the raw tap hands out a complex pair, so it is two channels "
+                    "and never one");
+    }
+    if (config.pilot_taps > kMaxPilotTaps) {
+        return fail(std::format("vrx demod: {} pilot taps is above the {} the kernel holds",
+                                config.pilot_taps, kMaxPilotTaps));
+    }
+    if (config.pilot_taps != 0 && config.mode != kDemodWfm) {
+        return fail(std::format(
+            "vrx demod: a pilot bandpass belongs to FM stereo and mode {} is not wideband FM. "
+            "The 19 kHz pilot and the 38 kHz difference channel exist only in a broadcast FM "
+            "multiplex",
+            config.mode));
+    }
+    if (config.pilot_taps != 0 && config.channels != 2U) {
+        return fail("vrx demod: a pilot bandpass with one output channel decodes a stereo "
+                    "difference channel and then throws it away");
+    }
+    if (config.channels == 2U && config.mode != kDemodRaw && config.pilot_taps == 0) {
+        return fail(std::format(
+            "vrx demod: mode {} was asked for two channels with no pilot bandpass, so both "
+            "would carry the same sum channel and the receiver would report stereo it never "
+            "decoded",
+            config.mode));
+    }
 
     const std::uint64_t capacity = static_cast<std::uint64_t>(params.in_mask) + 1U;
     if ((capacity & static_cast<std::uint64_t>(params.in_mask)) != 0U) {
@@ -646,20 +677,21 @@ Status validate(const VrxDemodConfig& config, const VrxDemodParams& params) {
     }
 
     // The span of fine samples one dispatch reads: the decimation stride over
-    // the block, plus the decimation filter's support, plus the detector's own
-    // history. A ring shorter than that aliases two different samples onto one
-    // slot, and the kernel would do the same thing bit for bit, so a diff
-    // would pass while both sides read the wrong history.
-    const std::uint64_t detector_history =
-        (config.mode == kDemodAm) ? static_cast<std::uint64_t>(config.dc_taps) - 1U
-        : (config.mode == kDemodNfm || config.mode == kDemodWfm) ? 1U
-                                                                 : 0U;
+    // the block, plus how far below its newest input one output reaches. A
+    // ring shorter than that aliases two different samples onto one slot, and
+    // the kernel would do the same thing bit for bit, so a diff would pass
+    // while both sides read the wrong history.
+    //
+    // demod_fine_history is the whole of that reach and core/engine/
+    // vrx_stage.cpp sizes the ring from the same function, so the refusal
+    // here and the allocation there cannot disagree.
+    const auto reach = static_cast<std::uint64_t>(demod_fine_history(config));
     const std::uint64_t span =
         (params.count == 0)
             ? 0U
             : (static_cast<std::uint64_t>(params.count - 1U) *
                    static_cast<std::uint64_t>(config.decimation) +
-               static_cast<std::uint64_t>(config.audio_taps - 1U) + detector_history + 1U);
+               reach + 1U);
     if (span > capacity) {
         return fail(std::format(
             "vrx demod: {} audio samples need {} fine samples of history, and the input ring "
@@ -676,13 +708,20 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
         return std::unexpected(with_context(valid.error(), "reference_vrx_demod"));
     }
 
-    const std::size_t wanted_weights =
+    const std::size_t pilot_base =
         static_cast<std::size_t>(config.audio_taps) + static_cast<std::size_t>(config.dc_taps);
+    const std::size_t rotation_base =
+        pilot_base + 2U * static_cast<std::size_t>(config.pilot_taps);
+    const std::size_t wanted_weights =
+        (config.pilot_taps == 0)
+            ? pilot_base
+            : rotation_base + 2U * static_cast<std::size_t>(config.audio_taps);
     if (weights.size() != wanted_weights) {
-        return fail(std::format("reference_vrx_demod wants {} weights ({} audio then {} DC), "
-                                "got {}",
-                                wanted_weights, config.audio_taps, config.dc_taps,
-                                weights.size()));
+        return fail(std::format(
+            "reference_vrx_demod wants {} weights ({} audio, {} DC, {} pilot pairs, {} "
+            "rotation pairs), got {}",
+            wanted_weights, config.audio_taps, config.dc_taps, config.pilot_taps,
+            (config.pilot_taps == 0) ? 0U : config.audio_taps, weights.size()));
     }
 
     const std::size_t capacity = static_cast<std::size_t>(params.in_mask) + 1U;
@@ -692,8 +731,8 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
                                 fine_ring.size(), params.in_mask, capacity));
     }
 
-    const std::size_t components = (config.mode == kDemodRaw) ? 2U : 1U;
-    const std::size_t wanted_audio = static_cast<std::size_t>(params.count) * components;
+    const std::size_t wanted_audio =
+        static_cast<std::size_t>(params.count) * static_cast<std::size_t>(config.channels);
     if (audio.size() != wanted_audio) {
         return fail(std::format("reference_vrx_demod wants {} audio values, got {}",
                                 wanted_audio, audio.size()));
@@ -755,6 +794,12 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
         return sample_at(index).real();
     };
 
+    // The same figure the kernel holds, from the same decimal. See the
+    // comment beside kPilotLockPower in core/shaders/vrx_demod.comp for
+    // where the number comes from and for what a consumer sees when the
+    // gate closes.
+    constexpr float kPilotLockPower = 2.0e-5F;
+
     for (std::uint32_t i = 0; i < params.count; ++i) {
         const std::uint32_t index = params.in_offset + i * config.decimation;
 
@@ -762,6 +807,53 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
             const Complex32 z = sample_at(index);
             audio[static_cast<std::size_t>(2U * i)] = z.real() * params.gain;
             audio[static_cast<std::size_t>(2U * i) + 1U] = z.imag() * params.gain;
+            continue;
+        }
+
+        if (config.channels == 2U) {
+            // FM stereo. Transcribes the kernel's branch operation for
+            // operation: the same pilot accumulation order, the same
+            // squaring rather than an arctangent, the same single detect()
+            // feeding both paths, the same matrix at the end.
+            const std::uint32_t pilot_at = index - (config.audio_taps / 2U);
+            float pilot_real = 0.0F;
+            float pilot_imag = 0.0F;
+            for (std::uint32_t k = 0; k < config.pilot_taps; ++k) {
+                const float composite = detect(pilot_at - k);
+                const float term_real = composite * weights[pilot_base + 2U * k];
+                const float term_imag = composite * weights[pilot_base + 2U * k + 1U];
+                pilot_real = pilot_real + term_real;
+                pilot_imag = pilot_imag + term_imag;
+            }
+
+            const float scaled_real = pilot_real * params.gain;
+            const float scaled_imag = pilot_imag * params.gain;
+            const float real_square = scaled_real * scaled_real;
+            const float imag_square = scaled_imag * scaled_imag;
+            const float pilot_power = real_square + imag_square;
+
+            const float inverse = det_recip(std::max(pilot_power, kPilotLockPower));
+            const float cross = scaled_real * scaled_imag;
+            const float cos_two = (imag_square - real_square) * inverse;
+            const float sin_two = (-2.0F * cross) * inverse;
+
+            const float locked = (pilot_power >= kPilotLockPower) ? 1.0F : 0.0F;
+
+            float sum = 0.0F;
+            float difference = 0.0F;
+            for (std::uint32_t t = 0; t < config.audio_taps; ++t) {
+                const float weighted = detect(index - t) * weights[t];
+                sum = sum + weighted;
+
+                const float reference = sin_two * weights[rotation_base + 2U * t] -
+                                        cos_two * weights[rotation_base + 2U * t + 1U];
+                const float term = weighted * reference;
+                difference = difference + term;
+            }
+
+            const float gated = difference * locked;
+            audio[static_cast<std::size_t>(2U * i)] = (sum + gated) * params.gain;
+            audio[static_cast<std::size_t>(2U * i) + 1U] = (sum - gated) * params.gain;
             continue;
         }
 
@@ -1544,6 +1636,106 @@ Expected<std::vector<float>> fold_deemphasis(ConstRealSpan decimation_taps,
     return result;
 }
 
+std::uint32_t stereo_pilot_taps(SampleRate demod_rate) {
+    if (demod_rate <= 0) {
+        return 0;
+    }
+    const double transition = kStereoPilotTransitionHz / static_cast<double>(demod_rate);
+    std::uint32_t taps =
+        std::clamp(kaiser_taps_for(kStereoPilotAttenuationDb, transition), 16U, kMaxPilotTaps);
+    // Odd, so the prototype is symmetric about a whole sample. Nothing in
+    // the kernel corrects a group delay, for the reason design_stereo_tables
+    // gives, but an even-length window has no centre tap and its two halves
+    // are not mirror images, which costs the prototype its linear phase in
+    // the bands it is there to reject.
+    if ((taps % 2U) == 0U) {
+        ++taps;
+    }
+    return std::min(taps, kMaxPilotTaps);
+}
+
+Expected<StereoDesign> design_stereo_tables(SampleRate demod_rate, std::uint32_t audio_taps,
+                                            std::uint32_t pilot_taps) {
+    if (demod_rate <= 0) {
+        return fail(std::format("design_stereo_tables: demodulation rate must be positive, "
+                                "got {}",
+                                demod_rate));
+    }
+    if (pilot_taps == 0 || pilot_taps > kMaxPilotTaps) {
+        return fail(std::format("design_stereo_tables: {} pilot taps is outside [1, {}]",
+                                pilot_taps, kMaxPilotTaps));
+    }
+    if (audio_taps == 0 || audio_taps > kMaxAudioTaps) {
+        return fail(std::format("design_stereo_tables: {} audio taps is outside [1, {}]",
+                                audio_taps, kMaxAudioTaps));
+    }
+    if (2 * kStereoPilotHz >= demod_rate) {
+        return fail(std::format(
+            "design_stereo_tables: a {} S/s demodulation rate cannot represent the {} Hz "
+            "stereo subcarrier, which is twice the {} Hz pilot",
+            demod_rate, 2 * kStereoPilotHz, kStereoPilotHz));
+    }
+
+    StereoDesign design;
+
+    const double rate = static_cast<double>(demod_rate);
+    const double cutoff = kStereoPilotHalfWidthHz / rate;
+    const double centre = (static_cast<double>(pilot_taps) - 1.0) / 2.0;
+    const double beta = kaiser_beta(kStereoPilotAttenuationDb);
+    const double i0_beta = bessel_i0(beta);
+
+    std::vector<double> prototype(pilot_taps, 0.0);
+    double sum = 0.0;
+    for (std::uint32_t k = 0; k < pilot_taps; ++k) {
+        const double position = static_cast<double>(k) - centre;
+        const double window = kaiser_window(k, pilot_taps, beta, i0_beta);
+        prototype[k] = 2.0 * cutoff * sinc_pi(2.0 * cutoff * position) * window;
+        sum += prototype[k];
+    }
+    const double scale = (std::abs(sum) < 1e-12) ? 1.0 : 1.0 / sum;
+
+    // Modulated by exp(+j*omega*k) against the SAME k the convolution
+    // indexes with, which is what makes the filter delayless at its own
+    // centre frequency: the tone's advance over the tap and the tap's own
+    // modulation cancel term by term, leaving the prototype's DC gain and a
+    // quarter turn. That is why nothing in the kernel corrects a group
+    // delay and why the pilot phase it measures is the phase at the instant
+    // it asked about rather than half a window earlier.
+    const double pilot_turns = static_cast<double>(kStereoPilotHz) / rate;
+    design.pilot.resize(2U * static_cast<std::size_t>(pilot_taps));
+    for (std::uint32_t k = 0; k < pilot_taps; ++k) {
+        const double turns = std::fmod(pilot_turns * static_cast<double>(k), 1.0);
+        const double angle = kTwoPi * turns;
+        const double weight = prototype[k] * scale;
+        design.pilot[2U * k] = static_cast<float>(weight * std::cos(angle));
+        design.pilot[2U * k + 1U] = static_cast<float>(weight * std::sin(angle));
+    }
+
+    // The reference is measured once, at the audio filter's centre tap, and
+    // carried to every other tap by this table: entry t is twice the cosine
+    // and twice the sine of the subcarrier's advance from that centre. The
+    // factor of two is the difference channel's own, since recovering a
+    // double-sideband suppressed-carrier signal is a product with twice the
+    // reference, folded in here so the kernel's inner loop is one
+    // multiply-add rather than two.
+    const double subcarrier_turns = 2.0 * pilot_turns;
+    const auto pivot = static_cast<std::int64_t>(audio_taps / 2U);
+    design.rotation.resize(2U * static_cast<std::size_t>(audio_taps));
+    for (std::uint32_t t = 0; t < audio_taps; ++t) {
+        const auto offset = static_cast<double>(static_cast<std::int64_t>(t) - pivot);
+        const double turns = std::fmod(subcarrier_turns * offset, 1.0);
+        const double angle = kTwoPi * turns;
+        design.rotation[2U * t] = static_cast<float>(2.0 * std::cos(angle));
+        design.rotation[2U * t + 1U] = static_cast<float>(2.0 * std::sin(angle));
+    }
+
+    design.pilot_transition_hz = (kStereoPilotAttenuationDb - 8.0) * rate /
+                                 (2.285 * kTwoPi * static_cast<double>(pilot_taps - 1U));
+    design.pilot_stopband_db =
+        -attenuation_reachable(pilot_taps, kStereoPilotTransitionHz / rate);
+    return design;
+}
+
 namespace {
 
 // Everything plan_vrx derives that is not one of the three filter tables.
@@ -1819,6 +2011,30 @@ namespace {
         (static_cast<double>(plan.audio_decimation_taps) - 1.0) / 2.0 +
         static_cast<double>(plan.demod.decimation) * curve->group_delay_audio_samples;
 
+    // Stereo, and the channel count, which is the one number every consumer
+    // sizing a buffer reads.
+    //
+    // The raw tap is two channels for a different reason and has always
+    // written two floats per frame; saying so here rather than at four
+    // call sites is what stopped stereo being a fifth place to remember.
+    plan.stereo = engine::resolve_stereo(params.demod, params.stereo, plan.audio_rate);
+    if (plan.mode == kDemodRaw) {
+        plan.demod.channels = 2U;
+        plan.demod.pilot_taps = 0U;
+    } else if (plan.stereo) {
+        plan.demod.channels = 2U;
+        plan.demod.pilot_taps = stereo_pilot_taps(plan.demod_rate);
+        if (plan.demod.pilot_taps == 0) {
+            return fail(std::format(
+                "plan_vrx: a stereo receiver needs a 19 kHz pilot filter and none can be "
+                "designed at {} S/s",
+                plan.demod_rate));
+        }
+    } else {
+        plan.demod.channels = 1U;
+        plan.demod.pilot_taps = 0U;
+    }
+
     if (plan.mode == kDemodAm) {
         const auto window = static_cast<std::uint32_t>(
             std::clamp<std::int64_t>(plan.demod_rate / kAmDcCornerHz, 16, kMaxDcTaps));
@@ -1897,10 +2113,27 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
     }
     const std::vector<float> dc_weights = design_dc_weights(plan.demod.dc_taps);
 
-    plan.demod_weights.reserve(audio_taps_table->size() + dc_weights.size());
+    StereoDesign stereo;
+    if (plan.demod.pilot_taps != 0) {
+        auto tables = design_stereo_tables(plan.demod_rate, plan.demod.audio_taps,
+                                           plan.demod.pilot_taps);
+        if (!tables) {
+            return std::unexpected(with_context(tables.error(), "plan_vrx stereo tables"));
+        }
+        stereo = std::move(*tables);
+        plan.pilot_transition_hz = stereo.pilot_transition_hz;
+        plan.pilot_stopband_db = stereo.pilot_stopband_db;
+    }
+
+    plan.demod_weights.reserve(audio_taps_table->size() + dc_weights.size() +
+                               stereo.pilot.size() + stereo.rotation.size());
     plan.demod_weights.insert(plan.demod_weights.end(), audio_taps_table->begin(),
                               audio_taps_table->end());
     plan.demod_weights.insert(plan.demod_weights.end(), dc_weights.begin(), dc_weights.end());
+    plan.demod_weights.insert(plan.demod_weights.end(), stereo.pilot.begin(),
+                              stereo.pilot.end());
+    plan.demod_weights.insert(plan.demod_weights.end(), stereo.rotation.begin(),
+                              stereo.rotation.end());
 
     return plan;
 }
@@ -1983,6 +2216,17 @@ std::string describe_audio_chain(const VrxPlan& plan) {
                 "audio band is lifted slightly",
                 plan.deemphasis_taps, plan.deemphasis_truncation_db);
         }
+    }
+
+    if (plan.stereo) {
+        text += std::format(
+            ", stereo from a {} tap pilot filter {:.0f} dB down at 15 and 23 kHz. L and R "
+            "come back bit-identical on any sample where the 19 kHz pilot is absent, which "
+            "is how a mono station reads here rather than as a guess about the sound",
+            plan.demod.pilot_taps, -plan.pilot_stopband_db);
+    } else if (plan.mode == kDemodWfm && plan.audio_rate < engine::kCompositeAudioRateHz) {
+        text += ", MONO: the stereo decoder was turned off on this receiver, so the "
+                "difference channel is left in the composite unused";
     }
 
     if (plan.bandwidth_clamped) {

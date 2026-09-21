@@ -99,13 +99,14 @@ constexpr std::uint32_t kFineMask = kFineCapacity - 1U;
 dsp::VrxPlan make_plan(engine::Demod mode, dsp::Hertz centre, dsp::Hertz bandwidth,
                        const dsp::GridParams& grid,
                        engine::Deemphasis curve = engine::Deemphasis::Default,
-                       dsp::SampleRate audio_rate = 0) {
+                       dsp::SampleRate audio_rate = 0, bool stereo = true) {
     engine::VrxParams params;
     params.center = centre;
     params.bandwidth = bandwidth;
     params.demod = mode;
     params.deemphasis = curve;
     params.audio_rate = audio_rate;
+    params.stereo = stereo;
 
     auto placed = engine::place(grid, kSourceRate, params);
     INFO(test::message_of(placed));
@@ -179,11 +180,11 @@ std::vector<float> run_demod_on_gpu(const dsp::VrxDemodConfig& config,
                                     std::uint32_t local_size) {
     auto& context = test::shared_context();
 
-    const std::size_t components = (config.mode == dsp::kDemodRaw) ? 2U : 1U;
-    std::vector<float> out(static_cast<std::size_t>(params.count) * components, 0.0F);
+    std::vector<float> out(static_cast<std::size_t>(params.count) * config.channels, 0.0F);
 
-    const std::uint32_t grid_constants[] = {config.mode, config.decimation, config.audio_taps,
-                                            config.dc_taps};
+    const std::uint32_t grid_constants[] = {config.mode,     config.decimation,
+                                            config.audio_taps, config.dc_taps,
+                                            config.channels,  config.pilot_taps};
 
     gpu::KernelInvocation invocation;
     invocation.spirv = gpu::shaders::vrx_demod();
@@ -237,11 +238,11 @@ dsp::VrxFineParams fine_params(const dsp::VrxPlan& plan, std::uint32_t in_offset
 // and a product detector, which reaches back not at all.
 std::uint32_t demod_count(const dsp::VrxDemodConfig& config, std::uint32_t capacity,
                           std::uint32_t desired) {
-    const std::uint32_t detector_history =
-        (config.mode == dsp::kDemodAm) ? config.dc_taps - 1U
-        : (config.mode == dsp::kDemodNfm || config.mode == dsp::kDemodWfm) ? 1U
-                                                                           : 0U;
-    const std::uint32_t overhead = (config.audio_taps - 1U) + detector_history + 1U;
+    // Through dsp::demod_fine_history rather than reproduced here. This
+    // used to be a third copy of the reach, beside the one in
+    // dsp::validate and the one in core/engine/vrx_stage.cpp, and a stereo
+    // receiver's pilot filter would have been missing from all three.
+    const std::uint32_t overhead = dsp::demod_fine_history(config) + 1U;
     REQUIRE(capacity > overhead);
     const std::uint32_t bound = (capacity - overhead) / config.decimation + 1U;
     return std::min(desired, bound);
@@ -1139,16 +1140,27 @@ TEST_CASE("every demodulator matches its CPU twin bit-exactly", "[gpu][vrx][m1]"
         // not a corner case for that mode: it is every sample.
         const auto params = demod_params(plan, 7, count);
 
+        // WFM arrives here in its default shape, which from 2026-09-20 is
+        // 75 us de-emphasis folded into the audio filter and a stereo
+        // decoder with a pilot bandpass in front of it. Asserted rather
+        // than assumed, because if the default ever moved back to mono this
+        // case would go on passing while covering half the kernel.
+        if (item.mode == engine::Demod::Wfm) {
+            REQUIRE(plan.demod.channels == 2U);
+            REQUIRE(plan.demod.pilot_taps > 0);
+        }
+
         INFO("mode " << engine::demod_name(item.mode) << ", decimation "
                      << plan.demod.decimation << ", audio taps " << plan.demod.audio_taps
-                     << ", dc taps " << plan.demod.dc_taps << ", gain " << plan.demod_gain
-                     << ", " << count << " audio samples");
+                     << ", dc taps " << plan.demod.dc_taps << ", pilot taps "
+                     << plan.demod.pilot_taps << ", channels " << plan.demod.channels
+                     << ", gain " << plan.demod_gain << ", " << count << " audio samples");
 
         const auto gpu_result =
             run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
 
-        const std::size_t components = (plan.demod.mode == dsp::kDemodRaw) ? 2U : 1U;
-        std::vector<float> cpu_result(static_cast<std::size_t>(count) * components, 0.0F);
+        std::vector<float> cpu_result(
+            static_cast<std::size_t>(count) * plan.demod.channels, 0.0F);
         const auto computed = dsp::reference_vrx_demod(plan.demod, params, fine_ring,
                                                        plan.demod_weights, cpu_result);
         INFO(test::message_of(computed));
@@ -1231,8 +1243,8 @@ TEST_CASE("the product detectors are bit-exact on values chosen to provoke round
         const auto gpu_result =
             run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
 
-        const std::size_t components = (plan.demod.mode == dsp::kDemodRaw) ? 2U : 1U;
-        std::vector<float> cpu_result(static_cast<std::size_t>(count) * components, 0.0F);
+        std::vector<float> cpu_result(
+            static_cast<std::size_t>(count) * plan.demod.channels, 0.0F);
         REQUIRE(dsp::reference_vrx_demod(plan.demod, params, fine_ring, plan.demod_weights,
                                          cpu_result)
                     .has_value());
@@ -1554,8 +1566,13 @@ TEST_CASE("each demodulator recovers its own modulation at the stated level",
         // that is a property of the audio frequency the case happened to
         // pick. The curve has its own case below, which asserts the shape
         // of the response rather than one point on it.
+        //
+        // Mono for the same reason: this measures one detector's output
+        // level, and a stereo receiver writes two interleaved channels,
+        // which is a different shape and has its own cases.
         const auto plan = make_plan(item.mode, item.centre, item.bandwidth, *item.grid,
-                                    engine::Deemphasis::None);
+                                    engine::Deemphasis::None, 0, false);
+        REQUIRE(plan.demod.channels == ((item.mode == engine::Demod::Raw) ? 2U : 1U));
         const std::uint32_t count = demod_count(plan.demod, kFineCapacity, item.count);
 
         const auto demod_rate = static_cast<double>(plan.demod_rate);
@@ -1733,6 +1750,7 @@ constexpr std::uint32_t kCurveFineMask = kCurveFineCapacity - 1U;
 // The recovered audio amplitude at one modulation frequency, through the
 // GPU kernel, for a plan whose ring is kCurveFineCapacity wide.
 [[nodiscard]] test::AudioFit curve_response(const dsp::VrxPlan& plan, double modulation_hz) {
+    REQUIRE(plan.demod.channels == 1U);
     const auto ring = fm_ring_at(plan, kCurveFineCapacity, modulation_hz);
 
     const std::uint32_t count =
@@ -1896,12 +1914,17 @@ TEST_CASE("a de-emphasised receiver follows the one-pole across the audio band",
 
     for (const engine::Deemphasis curve :
          {engine::Deemphasis::Us75, engine::Deemphasis::Eu50}) {
+        // Mono, so the recovered amplitude is one number and not an
+        // interleaved pair. The curve is applied to L and R after the
+        // matrix, which for a linear matrix is the same filter on the sum
+        // and the difference, so measuring it on the sum channel alone
+        // measures all of it.
         const auto plan =
-            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid, curve);
+            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid, curve, 0, false);
         REQUIRE(plan.deemphasis == curve);
 
         const auto flat = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid,
-                                    engine::Deemphasis::None);
+                                    engine::Deemphasis::None, 0, false);
 
         for (const double target : wanted) {
             const double modulation_hz = seamless_hz(plan, kCurveFineCapacity, target);
@@ -1989,9 +2012,10 @@ TEST_CASE("a pre-emphasised station comes back at the level it had before pre-em
         CHECK_FALSE(station->over_deviated);
 
         const auto plan =
-            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid, item.curve);
+            make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid, item.curve, 0, false);
         REQUIRE(plan.demod_rate == kStationRate);
         REQUIRE(plan.deemphasis == item.curve);
+        REQUIRE(plan.demod.channels == 1U);
 
         // Straight into the fine ring: the station is already at the
         // demodulation rate and on the receiver's own centre, so nothing
@@ -2048,5 +2072,265 @@ TEST_CASE("a pre-emphasised station comes back at the level it had before pre-em
         // and neither belongs in the audio. The old 0.45-of-the-audio-rate
         // filter passed the pilot at 19.2 kHz; this is what notices.
         CHECK(fit.purity > 0.98);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FM stereo
+// ---------------------------------------------------------------------------
+//
+// Every one of these renders a real station through
+// core/dsp/synth/wfm_mod.cpp and reads the two channels back out. Nothing
+// here asserts that the decoder is "good": separation is stated in decibels
+// and the mono fallback is asserted as bit equality, both of which a reader
+// can argue with.
+
+namespace {
+
+constexpr dsp::SampleRate kStereoStationRate = 336'000;
+constexpr std::size_t kStereoStationSamples = 40'000;
+constexpr std::uint32_t kStereoRingCapacity = 1U << 16;
+constexpr std::uint32_t kStereoRingMask = kStereoRingCapacity - 1U;
+constexpr std::uint32_t kStereoRingOrigin = 1024;
+
+struct StereoAudio {
+    std::vector<float> left;
+    std::vector<float> right;
+    std::size_t identical_frames = 0;
+};
+
+// Renders the station, runs it through the demodulator on the GPU and splits
+// the interleaved result.
+//
+// The station goes straight into the fine ring: it is already at the
+// receiver's demodulation rate and on its centre, so nothing here runs the
+// channelizer. What is under test is the detector, the pilot recovery and
+// the matrix.
+[[nodiscard]] StereoAudio receive_station(const siggen::WfmSpec& spec,
+                                          const dsp::VrxPlan& plan) {
+    auto station = siggen::generate_wfm(spec, kStereoStationSamples);
+    INFO(test::message_of(station));
+    REQUIRE(station.has_value());
+    REQUIRE_FALSE(station->over_deviated);
+    REQUIRE(plan.demod_rate == spec.rate);
+    REQUIRE(plan.demod.channels == 2U);
+
+    std::vector<dsp::Complex32> ring(kStereoRingCapacity, dsp::Complex32{});
+    std::copy(station->samples.begin(), station->samples.end(),
+              ring.begin() + kStereoRingOrigin);
+
+    const std::uint32_t history = dsp::demod_fine_history(plan.demod) + 1U;
+    const auto count = static_cast<std::uint32_t>(
+        (kStereoStationSamples - history - 8U) / plan.demod.decimation);
+    REQUIRE(count > 1024);
+
+    dsp::VrxDemodParams params;
+    params.in_mask = kStereoRingMask;
+    params.in_offset = kStereoRingOrigin + history;
+    params.count = count;
+    params.gain = plan.demod_gain;
+
+    const auto audio = run_demod_on_gpu(plan.demod, params, ring, plan.demod_weights, 64);
+    REQUIRE(audio.size() == 2U * static_cast<std::size_t>(count));
+
+    StereoAudio out;
+    out.left.resize(count);
+    out.right.resize(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        out.left[i] = audio[2U * i];
+        out.right[i] = audio[2U * i + 1U];
+        if (out.left[i] == out.right[i]) {
+            ++out.identical_frames;
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] siggen::WfmSpec stereo_station(dsp::Hertz left_hz, dsp::Hertz right_hz,
+                                             std::uint64_t seed) {
+    siggen::WfmSpec spec;
+    spec.rate = kStereoStationRate;
+    spec.programme.stereo = true;
+    spec.programme.left_tone_hz = left_hz;
+    spec.programme.right_tone_hz = right_hz;
+    // 0.4 of full scale before pre-emphasis. The highest tone below takes a
+    // 75 us gain of 1.73, so the audio peaks at 0.69 and the pilot and the
+    // data fit above it without the station over deviating.
+    spec.programme.audio_deviation_hz = 30'000;
+    spec.programme.preemphasis = siggen::Preemphasis::Us75;
+    spec.rds.bits = siggen::random_bits(256, seed);
+    spec.rds.rds_deviation_hz = 2'000;
+    return spec;
+}
+
+}  // namespace
+
+TEST_CASE("a stereo station separates into two channels, in decibels",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Two different tones, one per channel, which is the only arrangement
+    // that can tell a working matrix from a receiver that wrote the sum
+    // channel into both outputs. Equal tones cannot: (L-R)/2 is zero, the
+    // difference channel carries nothing, and a decoder that did nothing at
+    // all would look right.
+    constexpr std::uint64_t kSeed = 0x565258000000000DULL;
+    constexpr dsp::Hertz kLeftHz = 1'000;
+    constexpr dsp::Hertz kRightHz = 3'000;
+
+    // What the operator gets back is the programme level before
+    // pre-emphasis, because the receiver's curve undoes the transmitter's.
+    const double expected = 30'000.0 / static_cast<double>(siggen::kCompositePeakDeviationHz);
+
+    const auto spec = stereo_station(kLeftHz, kRightHz, kSeed);
+    const auto plan = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid);
+    REQUIRE(plan.stereo);
+    REQUIRE(plan.deemphasis == engine::Deemphasis::Us75);
+
+    const auto audio = receive_station(spec, plan);
+    const auto rate = static_cast<double>(plan.output_rate);
+
+    const auto left_wanted = test::measure_audio_tone(audio.left, rate, kLeftHz);
+    const auto left_leaked = test::measure_audio_tone(audio.left, rate, kRightHz);
+    const auto right_wanted = test::measure_audio_tone(audio.right, rate, kRightHz);
+    const auto right_leaked = test::measure_audio_tone(audio.right, rate, kLeftHz);
+
+    const double left_separation_db = to_db(left_wanted.amplitude / left_leaked.amplitude);
+    const double right_separation_db = to_db(right_wanted.amplitude / right_leaked.amplitude);
+
+    INFO("left channel: " << kLeftHz << " Hz at " << left_wanted.amplitude << ", " << kRightHz
+                          << " Hz leaked at " << left_leaked.amplitude << ", separation "
+                          << left_separation_db << " dB");
+    INFO("right channel: " << kRightHz << " Hz at " << right_wanted.amplitude << ", "
+                           << kLeftHz << " Hz leaked at " << right_leaked.amplitude
+                           << ", separation " << right_separation_db << " dB");
+    INFO("the programme level before pre-emphasis is " << expected << " in both channels");
+
+    // Each channel carries its own tone at the level it was transmitted at.
+    // A receiver that handed out the sum channel twice would read half of
+    // this in each, which is what mono sounded like.
+    CHECK(left_wanted.amplitude == Approx(expected).epsilon(0.05));
+    CHECK(right_wanted.amplitude == Approx(expected).epsilon(0.05));
+
+    // MEASURED 40.5 dB in both channels on an RTX 4090 at 1 and 3 kHz.
+    // 30 is the bar, and the measurement is printed above, so a change that
+    // halves the separation moves a number a reader can see rather than
+    // passing at the same threshold. The ceiling is not the matrix: it is
+    // the pilot filter's 70 dB rejection of the sum channel and the
+    // transmitter's clock offset acting over half the audio filter's
+    // window, both stated at core/dsp/vrx_reference.h's stereo constants.
+    CHECK(left_separation_db > 30.0);
+    CHECK(right_separation_db > 30.0);
+
+    // A stereo programme never produces two identical channels for long. A
+    // receiver whose pilot gate was stuck shut would produce nothing else,
+    // and would still pass an amplitude check on a mono programme.
+    INFO(audio.identical_frames << " of " << audio.left.size()
+                                << " frames came back with L equal to R");
+    CHECK(audio.identical_frames * 20 < audio.left.size());
+}
+
+TEST_CASE("a station with no pilot comes back as two identical channels",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The fallback, and how an operator is told about it.
+    //
+    // A kernel cannot report anything, so the difference channel is
+    // multiplied by zero rather than faded, and L and R come back BIT
+    // IDENTICAL. That is a fact a consumer tests for exactly. Fading it
+    // instead would leave a consumer thresholding a level to guess at
+    // something the receiver already knows, which is the shape of defect
+    // this whole round is about.
+    constexpr std::uint64_t kSeed = 0x565258000000000EULL;
+
+    auto spec = stereo_station(1'000, 1'000, kSeed);
+    spec.programme.stereo = false;
+    spec.rds.pilot_enabled = false;
+
+    const auto plan = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid);
+    REQUIRE(plan.stereo);
+
+    const auto audio = receive_station(spec, plan);
+
+    INFO(audio.identical_frames << " of " << audio.left.size()
+                                << " frames came back with L equal to R");
+    CHECK(audio.identical_frames == audio.left.size());
+
+    // And the sum channel is still there at the right level, so the
+    // fallback is mono and not silence.
+    const auto fit = test::measure_audio_tone(audio.left, static_cast<double>(plan.output_rate),
+                                              1'000.0);
+    const double expected = 30'000.0 / static_cast<double>(siggen::kCompositePeakDeviationHz);
+    INFO("recovered " << fit.amplitude << " against " << expected << ", purity "
+                      << fit.purity);
+    CHECK(fit.amplitude == Approx(expected).epsilon(0.05));
+}
+
+TEST_CASE("the stereo decoder is off where two channels would destroy the signal",
+          "[vrx][m1]") {
+    // No GPU. The plan-level rule, which is the same predicate the
+    // de-emphasis curve uses and is stated once in engine::resolve_stereo.
+
+    SECTION("a broadcast receiver at an ordinary audio rate decodes stereo") {
+        const auto plan = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid);
+        CHECK(plan.stereo);
+        CHECK(plan.demod.channels == 2U);
+        CHECK(plan.demod.pilot_taps > 16);
+
+        const std::string words = dsp::describe_audio_chain(plan);
+        INFO(words);
+        CHECK(words.find("stereo from a") != std::string::npos);
+    }
+
+    SECTION("the composite tap stays mono however it is asked") {
+        const auto plan = make_plan(engine::Demod::Wfm, 160'000, 200'000, kWideGrid,
+                                    engine::Deemphasis::Default, 171'000, true);
+        CHECK_FALSE(plan.stereo);
+        CHECK(plan.demod.channels == 1U);
+        CHECK(plan.demod.pilot_taps == 0);
+    }
+
+    SECTION("no other mode carries a pilot-tone multiplex") {
+        for (const engine::Demod mode :
+             {engine::Demod::Am, engine::Demod::Nfm, engine::Demod::Usb, engine::Demod::Lsb,
+              engine::Demod::Dsb, engine::Demod::Cw}) {
+            INFO("mode " << engine::demod_name(mode));
+            CHECK_FALSE(engine::resolve_stereo(mode, true, 48'000));
+        }
+
+        // The raw tap is two channels for a different reason and has always
+        // been: it writes I then Q, not L then R.
+        const auto raw = make_plan(engine::Demod::Raw, 196'500, 12'000, kGrid);
+        CHECK_FALSE(raw.stereo);
+        CHECK(raw.demod.channels == 2U);
+        CHECK(raw.demod.pilot_taps == 0);
+    }
+
+    SECTION("a config that claims stereo without a pilot filter is refused") {
+        // The pair that must not drift: two channels on a detector mode
+        // with no pilot bandpass would hand the sum channel out twice and
+        // report stereo the receiver never decoded.
+        dsp::VrxDemodConfig config;
+        config.mode = dsp::kDemodWfm;
+        config.channels = 2;
+        config.pilot_taps = 0;
+        dsp::VrxDemodParams params;
+        params.in_mask = kFineMask;
+        params.count = 16;
+        const auto refused = dsp::validate(config, params);
+        INFO(test::message_of(refused));
+        CHECK_FALSE(refused.has_value());
+
+        // And the converse: a pilot filter on a mode that has no pilot.
+        dsp::VrxDemodConfig wrong_mode;
+        wrong_mode.mode = dsp::kDemodNfm;
+        wrong_mode.channels = 2;
+        wrong_mode.pilot_taps = 129;
+        const auto also_refused = dsp::validate(wrong_mode, params);
+        INFO(test::message_of(also_refused));
+        CHECK_FALSE(also_refused.has_value());
     }
 }

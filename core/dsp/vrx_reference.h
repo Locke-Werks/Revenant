@@ -353,8 +353,39 @@ inline constexpr std::uint32_t kMaxDcTaps = 4096;
 // reports what it spent and what the truncation floor came out at.
 inline constexpr std::uint32_t kMaxDeemphasisTaps = 1024;
 
-// The four specialization constants of core/shaders/vrx_demod.comp, at ids 1
-// to 4.
+// The longest complex pilot bandpass. 19 kHz with a 3 kHz transition at
+// 336 kS/s wants about 490 taps; this is four times that, so a receiver
+// demodulating at over a megahertz still gets the filter it asked for.
+inline constexpr std::uint32_t kMaxPilotTaps = 2048;
+
+// FM stereo's own three frequencies and the filter that separates them.
+//
+// The pilot is at 19 kHz and the difference channel is double-sideband
+// suppressed carrier on its second harmonic at 38 kHz. Those two are the
+// pilot-tone stereo system, which is stated here rather than transcribed:
+// NOT OPENED FOR THIS WORK, on the same terms as core/dsp/synth/wfm_mod.h's
+// pre-emphasis constants, and core/dsp/synth/wfm_mod.cpp is the transmitter
+// this receiver was scored against.
+//
+// The bandpass has to pass the pilot and reject two things close to it: the
+// sum channel, which stops at 15 kHz, and the difference channel's lower
+// sideband, which starts at 23 kHz. A 1 kHz half-width with a 3 kHz
+// transition on each side lands exactly between them and is symmetric, which
+// is not a coincidence: the plan put the pilot in the middle of that gap.
+inline constexpr Hertz kStereoPilotHz = 19'000;
+inline constexpr double kStereoPilotHalfWidthHz = 1'000.0;
+inline constexpr double kStereoPilotTransitionHz = 3'000.0;
+
+// 70 dB rather than the 80 the other filters get. What leaks through is the
+// sum channel at 15 kHz, which at full modulation sits 21 dB above a
+// 9 percent pilot, so 70 dB of rejection leaves it 49 dB under the pilot and
+// the phase error it causes bounds separation near 49 dB. Buying 80 costs
+// 140 more taps for 10 dB nobody can hear past the clock-offset limit
+// described on the kernel's stereo branch.
+inline constexpr double kStereoPilotAttenuationDb = 70.0;
+
+// The six specialization constants of core/shaders/vrx_demod.comp, at ids 1
+// to 6.
 struct VrxDemodConfig {
     std::uint32_t mode = kDemodNfm;
 
@@ -370,9 +401,50 @@ struct VrxDemodConfig {
     // is always at least one so the weights buffer is never empty.
     std::uint32_t dc_taps = 1;
 
+    // Floats per output FRAME, which is one for a mono detector and two for
+    // an interleaved pair.
+    //
+    // Two means different things in the two modes that use it and the
+    // difference is in the mode, not here: the raw tap writes I then Q, a
+    // stereo WFM receiver writes L then R. A consumer that only needs to
+    // size a buffer reads this and does not have to know which.
+    //
+    // WHAT THIS FIELD REPLACES. Until 2026-09-20 the raw tap's second
+    // component was a special case spelled out at four sites, each of them
+    // some form of "two if the mode is raw and one otherwise", and stereo
+    // would have made that five places to change and five places to forget.
+    // core/engine/vrx_stage.cpp sized its readback from one of them.
+    std::uint32_t channels = 1;
+
+    // Length of the complex pilot bandpass, and zero unless this is a
+    // stereo receiver. Not folded into audio_taps like the de-emphasis
+    // curve, because it runs on the detector output before the audio filter
+    // rather than after it, and because its output is complex.
+    std::uint32_t pilot_taps = 0;
+
     // Memberwise, for the same reason VrxFineConfig's is. See VrxShape.
     friend constexpr bool operator==(const VrxDemodConfig&, const VrxDemodConfig&) = default;
 };
+
+// How many fine samples below its newest input one output reads: the audio
+// filter's own reach, or the pilot filter's from the centre of that window,
+// whichever is deeper, plus the detector's history under both.
+//
+// ONE FUNCTION, BECAUSE TWO COPIES IS HOW THIS GOES WRONG. validate() below
+// uses it to refuse a dispatch the ring cannot hold, and
+// core/engine/vrx_stage.cpp uses it to size the ring in the first place.
+// Those two answering differently is a kernel reading a slot a later
+// dispatch has already written, which is silent and sounds like a click.
+[[nodiscard]] constexpr std::uint32_t demod_fine_history(const VrxDemodConfig& config) {
+    const std::uint32_t detector = (config.mode == kDemodAm) ? config.dc_taps - 1U
+                                   : (config.mode == kDemodNfm || config.mode == kDemodWfm)
+                                       ? 1U
+                                       : 0U;
+    const std::uint32_t audio_reach = config.audio_taps - 1U;
+    const std::uint32_t pilot_reach =
+        (config.pilot_taps == 0) ? 0U : (config.audio_taps / 2U) + config.pilot_taps - 1U;
+    return (audio_reach > pilot_reach ? audio_reach : pilot_reach) + detector;
+}
 
 // The four values core/shaders/vrx_demod.comp takes as push constants, in the
 // order it declares them.
@@ -397,10 +469,14 @@ static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
 
 // Twin of core/shaders/vrx_demod.comp.
 //
-// weights holds the audio decimation taps first, config.audio_taps of them,
-// then the AM DC-removal weights, config.dc_taps of them, which is the one
-// buffer the kernel binds. audio receives count samples, or 2*count for the
-// raw tap, which is the only mode that writes a complex pair.
+// weights is the one buffer the kernel binds and holds four tables end to
+// end: the audio filter, config.audio_taps of them, with any de-emphasis
+// already folded in; the AM DC-removal window, config.dc_taps; the complex
+// pilot bandpass, 2*config.pilot_taps interleaved real then imaginary; and
+// the stereo rotation table, 2*config.audio_taps interleaved. The last two
+// are empty unless config.pilot_taps is non-zero.
+//
+// audio receives count * config.channels values.
 [[nodiscard]] Status reference_vrx_demod(const VrxDemodConfig& config,
                                          const VrxDemodParams& params,
                                          ConstComplexSpan fine_ring,
@@ -823,6 +899,43 @@ struct DeemphasisDesign {
                                                            ConstRealSpan deemphasis_taps,
                                                            std::uint32_t decimation);
 
+// How long a pilot bandpass this demodulation rate needs. Cheap: one order
+// estimate, no filter designed, so vrx_shape_for can ask it on every retune.
+[[nodiscard]] std::uint32_t stereo_pilot_taps(SampleRate demod_rate);
+
+// The two tables FM stereo adds to the weights buffer.
+//
+// The pilot bandpass is a real Kaiser-windowed sinc lowpass of half-width
+// kStereoPilotHalfWidthHz, normalised to unit gain at DC, then modulated to
+// +kStereoPilotHz. Applied to a real signal it is the analytic pilot, and
+// for a tone at exactly kStereoPilotHz the modulation cancels the window's
+// own delay term by term, so the output carries the pilot's phase at the
+// instant asked about rather than at the instant half a window ago. That
+// property is what removes every group-delay correction from the kernel and
+// it is the same one design_fine_taps relies on.
+//
+// The rotation table carries the reference from the one instant it was
+// measured to every tap of the audio filter: entry t is 2*cos and 2*sin of
+// 2*omega*(t - audio_taps/2), where omega is the pilot's advance per sample.
+// The factor of two is the difference channel's own, folded in here so the
+// kernel's inner loop is one multiply-add.
+struct StereoDesign {
+    // 2*pilot_taps values, interleaved real then imaginary.
+    std::vector<float> pilot;
+
+    // 2*audio_taps values, interleaved cosine then sine.
+    std::vector<float> rotation;
+
+    // What the pilot filter's length bought, reported rather than assumed,
+    // on the same terms as VrxPlan::fine_stopband_db.
+    double pilot_transition_hz = 0.0;
+    double pilot_stopband_db = 0.0;
+};
+
+[[nodiscard]] Expected<StereoDesign> design_stereo_tables(SampleRate demod_rate,
+                                                          std::uint32_t audio_taps,
+                                                          std::uint32_t pilot_taps);
+
 // The AM DC-removal window: a Hann window normalised to sum to one, so that
 // subtracting it from the direct term nulls DC exactly. Hann rather than a
 // boxcar because a boxcar's -13 dB first sidelobe leaves up to 1.9 dB of
@@ -927,6 +1040,22 @@ struct VrxPlan {
     std::uint32_t audio_decimation_taps = 1;
     double audio_pass_hz = 0.0;
     double audio_stop_hz = 0.0;
+
+    // Whether the stereo decoder is built, RESOLVED. True implies
+    // demod.channels of 2 and a non-zero demod.pilot_taps, which
+    // dsp::validate refuses to let drift apart.
+    //
+    // It says the receiver is DECODING stereo and not that the station is
+    // transmitting it. The pilot decides that per sample, in the kernel, and
+    // a consumer reads the answer off two channels that come back
+    // bit-identical when the gate is shut.
+    bool stereo = false;
+
+    // What the pilot bandpass's length bought, on the same terms as
+    // fine_transition_hz and fine_stopband_db. Zero when there is no pilot
+    // filter.
+    double pilot_transition_hz = 0.0;
+    double pilot_stopband_db = 0.0;
 
     // What the design achieved, reported rather than assumed.
     //

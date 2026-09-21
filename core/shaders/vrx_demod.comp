@@ -106,6 +106,34 @@
 //         is not a demodulator kernel's business; it belongs above this
 //         layer, and M1 does not have one.
 //
+// WFM STEREO, WHICH IS WHY THIS KERNEL CAN WRITE TWO CHANNELS.
+//
+// Until 2026-09-20 the WFM branch took the discriminator's output, lowpassed
+// it and stopped, so every broadcast FM reception this program produced was
+// the L+R sum channel and nothing else: mono, with the 19 kHz pilot and the
+// 38 kHz difference channel sitting in the composite unused. An operator
+// found that on air in ten minutes and no test had.
+//
+// kChannels of 2 turns on the decoder. The three steps are pilot recovery,
+// coherent detection at twice the pilot frequency, and the matrix, and they
+// are written out at the branch in main(). What is worth reading here is
+// what they are NOT: there is no phase-locked loop and no arctangent in the
+// reference path. A PLL carries state between blocks, which would end this
+// kernel's one structural promise, that an output is a pure function of the
+// absolute sample index and of the ring. The pilot's phase is measured
+// instead, by one complex bandpass whose modulation cancels its own group
+// delay at its centre frequency, and doubled by squaring a normalised
+// vector rather than by taking an angle and adding it to itself.
+//
+// The audio filter does a second job for stereo and has to be built for it.
+// Everything the difference channel picks up besides the programme lands at
+// 19 kHz or above: the pilot itself, the RDS subcarrier folded down from 57,
+// and the sum channel folded up around 38. A filter cutting at 0.45 of a
+// 48 kHz audio rate has its passband edge at 19.2 kHz and passes all of
+// them. core/dsp/vrx_reference.cpp builds a WFM receiver's audio filter flat
+// to 15 kHz and into its stopband by 19 instead, which is the channel plan's
+// own geometry.
+//
 // The CPU twin is reference_vrx_demod in core/dsp/vrx_reference.cpp, and it is
 // bit-identical rather than close: the same Newton iterations, the same Horner
 // order, the same ascending tap index.
@@ -133,6 +161,16 @@ layout(constant_id = 3) const uint kAudioTaps = 1;
 
 // Length of the AM DC-removal window. Only the AM branch reads it.
 layout(constant_id = 4) const uint kDcTaps = 256;
+
+// Floats per output frame: 1 for a mono detector, 2 for an interleaved pair.
+// Two means I and Q for the raw tap and L and R for a stereo WFM receiver,
+// which are different things carried the same way; the host decides which by
+// the mode, and nothing here has to ask.
+layout(constant_id = 5) const uint kChannels = 1;
+
+// Length of the complex pilot bandpass. Zero unless this is a stereo WFM
+// receiver, and the loop folds away when it is.
+layout(constant_id = 6) const uint kPilotTaps = 0;
 
 const uint kModeRaw = 0u;
 const uint kModeAm = 1u;
@@ -162,22 +200,59 @@ const float kAtanC9 = -0.0021090222;
 const float kHalfPi = 1.57079632679489661923;
 const float kPi = 3.14159265358979323846;
 
+// Where the stereo tables sit in the one weights buffer. Derived from the
+// specialization constants rather than passed, so there is no second copy of
+// the layout to get out of step with core/dsp/vrx_reference.cpp's.
+const uint kPilotBase = kAudioTaps + kDcTaps;
+const uint kRotationBase = kPilotBase + 2u * kPilotTaps;
+
+// The pilot power, in composite units, below which this receiver stops
+// claiming to hear a pilot and hands out mono.
+//
+// EN 50067 clause 1.4 puts the pilot between 8 and 10 percent of peak
+// deviation, which after the pilot filter's unit DC gain is an analytic
+// amplitude of half that: 0.045, or 2.0e-3 of power. This floor is 0.0045 of
+// amplitude and so 2.0e-5 of power, twenty decibels under the weakest pilot
+// the standard permits. The composite's scale is what makes an absolute
+// number meaningful at all: the discriminator's gain is defined so that peak
+// deviation is 1.0, and params.gain is applied to the pilot's own accumulator
+// before this comparison for exactly that reason.
+//
+// WHAT AN OPERATOR CAN SEE WHEN IT CLOSES, since a kernel has no way to say
+// anything. The difference channel is multiplied by zero rather than
+// attenuated, so L and R come out BIT-IDENTICAL, on every sample, which is a
+// fact a consumer can test rather than a level it has to threshold. A stereo
+// programme never produces that for more than an instant.
+const float kPilotLockPower = 2.0e-5;
+
 layout(std430, binding = 0) readonly buffer FineRing {
     vec2 values[];
 } fine;
 
-// The audio decimation taps first, kAudioTaps of them, then the AM DC-removal
-// weights, kDcTaps of them. One buffer rather than two so a pipeline that
-// needs neither still binds something valid; the host supplies a single unit
-// tap and a single dummy weight in that case.
+// Four tables, end to end, in one buffer rather than four so a pipeline that
+// needs only the first still binds something valid.
+//
+//   [0, kAudioTaps)                    the audio filter, with any
+//                                      de-emphasis already folded in
+//   [kAudioTaps, +kDcTaps)             the AM DC-removal window
+//   [kPilotBase, +2*kPilotTaps)        the complex pilot bandpass,
+//                                      interleaved real then imaginary
+//   [kRotationBase, +2*kAudioTaps)     2*cos and 2*sin of twice the pilot's
+//                                      advance from the filter's centre,
+//                                      interleaved, stereo only
+//
+// The host supplies a single unit tap and a single dummy weight for the
+// first two when a mode reads neither, and nothing at all for the last two
+// when kChannels is 1.
 layout(std430, binding = 1) readonly buffer Weights {
     float values[];
 } weights;
 
-// Real audio, one float per sample, except for the raw tap which writes an
-// interleaved complex pair. Linear rather than a ring: this is the buffer that
-// leaves the device, and audio PCM crossing the bus is one of the three things
-// core/engine/engine.h permits to come back.
+// Audio, kChannels floats per frame. One for a mono detector; an interleaved
+// pair for the raw tap, which writes I then Q, and for a stereo WFM
+// receiver, which writes L then R. Linear rather than a ring: this is the
+// buffer that leaves the device, and audio PCM crossing the bus is one of
+// the three things core/engine/engine.h permits to come back.
 layout(std430, binding = 2) writeonly buffer AudioOut {
     float values[];
 } audio;
@@ -405,6 +480,100 @@ void main() {
         precise float raw_imag = z.y * params.gain;
         audio.values[2u * i] = raw_real;
         audio.values[2u * i + 1u] = raw_imag;
+        return;
+    }
+
+    if (kChannels == 2u) {
+        // FM STEREO. The composite carries (L+R)/2 at baseband and (L-R)/2
+        // on a suppressed 38 kHz subcarrier, with a 19 kHz pilot to
+        // regenerate that subcarrier from. See the header.
+        //
+        // A receiver normally recovers the subcarrier with a phase-locked
+        // loop, and a PLL is carried state, which this kernel has nowhere to
+        // put: every invocation computes its output from the ring alone, so
+        // a block can be recomputed and the audio is a pure function of the
+        // absolute sample index. What replaces it is a measurement and a
+        // rotation.
+        //
+        // The measurement: a linear-phase complex bandpass at +19 kHz,
+        // applied to the discriminator output. For a tone at exactly the
+        // filter's centre the modulation and the delay cancel term by term,
+        // so the output is the pilot at THIS instant times the prototype's
+        // DC gain and turned a quarter turn: y = (P/2)*exp(j*(theta -
+        // pi/2)). That is the same property the fine stage's tap
+        // normalisation rests on and it is why no group-delay correction
+        // appears anywhere below.
+        //
+        // Squaring a unit vector doubles its angle, so y*y/|y|^2 is
+        // exp(j*2*theta) turned by exp(-j*pi), hence the two negations. No
+        // atan2 is needed and no arctangent error enters the reference.
+        //
+        // The rotation: the reference is wanted at every tap of the audio
+        // filter, not only at the instant it was measured, and the pilot's
+        // frequency is known to a few parts per million. So it is measured
+        // once at the filter's centre and carried across the window by a
+        // host-built table of 2*cos and 2*sin of twice the pilot's advance.
+        // A recurrence would accumulate; a table is exact, is the same
+        // floats on both sides, and costs one multiply-add per tap. The
+        // error left is the transmitter's own clock offset acting over half
+        // the window, which at 19 parts per million and 880 taps of 336 kS/s
+        // is a third of a degree and bounds separation near 45 dB.
+        const uint pilot_at = index - (kAudioTaps / 2u);
+        precise float pilot_real = 0.0;
+        precise float pilot_imag = 0.0;
+        for (uint k = 0u; k < kPilotTaps; ++k) {
+            precise float composite = detect(pilot_at - k);
+            precise float term_real = composite * weights.values[kPilotBase + 2u * k];
+            precise float term_imag = composite * weights.values[kPilotBase + 2u * k + 1u];
+            pilot_real = pilot_real + term_real;
+            pilot_imag = pilot_imag + term_imag;
+        }
+
+        // Into composite units before the lock test, because the floor is
+        // stated as a fraction of peak deviation and the detector's output
+        // is radians of phase advance until the gain is applied.
+        precise float scaled_real = pilot_real * params.gain;
+        precise float scaled_imag = pilot_imag * params.gain;
+        precise float real_square = scaled_real * scaled_real;
+        precise float imag_square = scaled_imag * scaled_imag;
+        precise float pilot_power = real_square + imag_square;
+
+        // Clamped at the floor so the reciprocal always has a positive
+        // argument. Below the floor the difference channel is multiplied by
+        // zero anyway, so what this produces there does not reach the audio.
+        precise float inverse = det_recip(max(pilot_power, kPilotLockPower));
+        precise float cross = scaled_real * scaled_imag;
+        precise float cos_two = (imag_square - real_square) * inverse;
+        precise float sin_two = (-2.0 * cross) * inverse;
+
+        const float locked = (pilot_power >= kPilotLockPower) ? 1.0 : 0.0;
+
+        precise float sum = 0.0;
+        precise float difference = 0.0;
+        for (uint t = 0u; t < kAudioTaps; ++t) {
+            // One detect() feeding both paths. The difference channel is the
+            // same filter applied to the same samples multiplied by the
+            // reference, so evaluating the detector twice would double the
+            // cost of the expensive part for nothing.
+            precise float weighted = detect(index - t) * weights.values[t];
+            sum = sum + weighted;
+
+            precise float reference = sin_two * weights.values[kRotationBase + 2u * t] -
+                                      cos_two * weights.values[kRotationBase + 2u * t + 1u];
+            precise float term = weighted * reference;
+            difference = difference + term;
+        }
+
+        // The matrix. sum is (L+R)/2 and difference is (L-R)/2, so the two
+        // add and subtract to L and R with no further scaling, and the
+        // de-emphasis the caller folded into weights has already been
+        // applied to both: the matrix is linear, so a curve on the sum and
+        // the difference is a curve on L and R.
+        precise float gated = difference * locked;
+        precise float left = (sum + gated) * params.gain;
+        precise float right = (sum - gated) * params.gain;
+        audio.values[2u * i] = left;
+        audio.values[2u * i + 1u] = right;
         return;
     }
 

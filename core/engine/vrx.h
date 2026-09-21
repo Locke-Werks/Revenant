@@ -233,6 +233,49 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
     return Deemphasis::None;
 }
 
+// Whether this receiver decodes FM stereo.
+//
+// WHAT WAS THERE BEFORE. Nothing. Until 2026-09-20 the WFM branch took the
+// discriminator's sum channel and stopped, so every broadcast FM reception
+// was mono while the 19 kHz pilot and the 38 kHz difference channel sat in
+// the composite untouched. core/dsp/synth/wfm_mod.cpp had been generating
+// both since earlier the same day, which is to say the transmitter for the
+// test existed before the receiver did.
+//
+// True only for a WFM receiver delivering programme audio, on the same
+// predicate as the de-emphasis curve above, and for the same reason: a
+// composite tap's whole job is to hand the multiplex out intact, and
+// matrixing it into two channels would take the pilot and the data with it.
+//
+// It is a REQUEST and not a promise, because the transmitter decides. A
+// station with no pilot cannot be decoded in stereo by anything, so the
+// kernel gates the difference channel on the pilot's own level and hands out
+// the sum channel in both. What it does NOT do is hide that: the gate
+// multiplies by zero rather than fading, so L and R come back bit-identical
+// on every sample, which a consumer can test for exactly rather than
+// threshold. core/shaders/vrx_demod.comp states the floor and the figures.
+[[nodiscard]] constexpr bool resolve_stereo(Demod mode, bool requested,
+                                            dsp::SampleRate audio_rate) {
+    if (!requested) {
+        return false;
+    }
+    switch (mode) {
+        case Demod::Wfm: return audio_rate < kCompositeAudioRateHz;
+
+        // Not a refusal for the other seven. Nothing else in the tree
+        // carries a pilot-tone multiplex, and a client that sets this once
+        // and sweeps modes should not get an error on the other seven.
+        case Demod::Raw:
+        case Demod::Am:
+        case Demod::Nfm:
+        case Demod::Usb:
+        case Demod::Lsb:
+        case Demod::Dsb:
+        case Demod::Cw: return false;
+    }
+    return false;
+}
+
 // The curve's time constant in seconds, and zero for None and Default.
 //
 // Default is zero rather than 75 microseconds on purpose: everything that
@@ -380,6 +423,18 @@ struct VrxParams {
     // measured against it was optimistic by that much.
     Deemphasis deemphasis = Deemphasis::Default;
 
+    // Decode FM stereo when the mode and the rate allow it, which
+    // engine::resolve_stereo decides. On by default, because a broadcast
+    // station in mono is the defect and not the safe option; a receiver
+    // that wants one channel says so, and gets the sum channel, which is
+    // what mono has always meant on this band.
+    //
+    // The output is then TWO interleaved floats per frame and
+    // AudioChunk::channels says so. A consumer that assumes one channel
+    // reads a stereo stream as mono at double speed, which is why this is
+    // stated on the chunk rather than inferred from the mode.
+    bool stereo = true;
+
     // Audio output rate. 0 takes the engine's default.
     dsp::SampleRate audio_rate = 0;
 
@@ -504,6 +559,15 @@ struct VrxStatus {
     // forget and nothing to get stale.
     [[nodiscard]] constexpr Deemphasis applied_deemphasis() const {
         return resolve_deemphasis(params.demod, params.deemphasis, params.audio_rate);
+    }
+
+    // Whether the stereo decoder is running, on the same terms and for the
+    // same reason it is a function rather than a field. It answers whether
+    // the receiver is DECODING stereo and not whether the station is
+    // transmitting it: the pilot decides that, per sample, and a consumer
+    // reads it off two channels that are bit-identical.
+    [[nodiscard]] constexpr bool decoding_stereo() const {
+        return resolve_stereo(params.demod, params.stereo, params.audio_rate);
     }
 
     // Signal level in the passband, dBFS, updated per block. This is what

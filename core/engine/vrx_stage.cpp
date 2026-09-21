@@ -131,19 +131,14 @@ constexpr std::uint32_t kMinFineCapacity = 1U << 10;
         plan.fine_taps.size(), plan.fine.phases, plan.fine.taps, wanted));
 }
 
-// How far below its own sample the detector reads. Named rather than folded
-// into one worst case because AM's DC-removal window is hundreds of samples
-// and everything else is one or none, and sizing every receiver for AM would
-// multiply every fine ring in the machine.
-[[nodiscard]] std::uint32_t detector_history(std::uint32_t mode, std::uint32_t dc_taps) {
-    if (mode == dsp::kDemodAm) {
-        return dc_taps - 1U;
-    }
-    if (mode == dsp::kDemodNfm || mode == dsp::kDemodWfm) {
-        return 1U;
-    }
-    return 0U;
-}
+// WHERE detector_history WENT. It used to live here and answer how far below
+// its own sample the detector reads, and this file added the audio filter's
+// reach to it by hand. dsp::demod_fine_history in core/dsp/vrx_reference.h
+// is that sum, and dsp::validate refuses a dispatch against the same
+// function, so the ring sized here and the span refused there can no longer
+// come out different. They could before, and FM stereo is what would have
+// separated them: its pilot filter reaches below the audio window's centre
+// and neither expression here knew about it.
 
 // The largest fine output whose integer input instant is at or below `newest`,
 // which is floor((newest + 1) * Fd / Fc) - 1 rounded the way the resampler
@@ -273,7 +268,12 @@ public:
     }
 
     [[nodiscard]] VkDeviceSize audio_bytes_for(std::uint32_t blocks) const override {
-        return static_cast<VkDeviceSize>(audio_for(outputs_for(blocks))) * sizeof(float);
+        // Frames times floats per frame. The second factor was 1 until FM
+        // stereo, which is a channel count and not a mode: a stereo WFM
+        // receiver writes L and R where a mono one wrote one sample, and a
+        // buffer sized without it is one the kernel writes past.
+        return static_cast<VkDeviceSize>(audio_for(outputs_for(blocks))) *
+               plan_.demod.channels * sizeof(float);
     }
 
     [[nodiscard]] Expected<StageOutput> record(const StageRecord& record) override;
@@ -419,8 +419,7 @@ Status DemodStage::build(const VrxStageRequest& request) {
 
     max_outputs_ = static_cast<std::uint32_t>(outputs_for(blocks));
     max_audio_ = static_cast<std::uint32_t>(audio_for(max_outputs_));
-    fine_history_ =
-        (plan_.demod.audio_taps - 1U) + detector_history(plan_.demod.mode, plan_.demod.dc_taps);
+    fine_history_ = dsp::demod_fine_history(plan_.demod);
 
     // Room for every dispatch that can be in flight at once, plus the
     // detector's history, plus the one the recording thread is filling. A
@@ -541,8 +540,9 @@ Status DemodStage::build_pipelines() {
         fine_pipeline_ = std::move(*pipeline);
     }
     {
-        const std::uint32_t constants[] = {plan_.demod.mode, plan_.demod.decimation,
-                                           plan_.demod.audio_taps, plan_.demod.dc_taps};
+        const std::uint32_t constants[] = {plan_.demod.mode,      plan_.demod.decimation,
+                                           plan_.demod.audio_taps, plan_.demod.dc_taps,
+                                           plan_.demod.channels,   plan_.demod.pilot_taps};
         gpu::ComputePipeline::Options options;
         options.spirv = gpu::shaders::vrx_demod();
         options.storage_buffer_count = 3;
@@ -584,7 +584,8 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
     taps_bytes_ = dsp::fine_tap_table_size(plan_.fine) * sizeof(dsp::Complex32);
     const VkDeviceSize weight_bytes = plan_.demod_weights.size() * sizeof(float);
     const VkDeviceSize fine_bytes = static_cast<VkDeviceSize>(fine_capacity_) * kComplexBytes;
-    const VkDeviceSize audio_bytes = static_cast<VkDeviceSize>(max_audio_) * sizeof(float);
+    const VkDeviceSize audio_bytes =
+        static_cast<VkDeviceSize>(max_audio_) * plan_.demod.channels * sizeof(float);
 
     auto make_device = [&](VkDeviceSize bytes, const char* what) -> Expected<gpu::Buffer> {
         auto buffer =
@@ -754,7 +755,7 @@ Status DemodStage::build_descriptors(VkBuffer channel_ring) {
 
 Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     StageOutput out;
-    out.channels = 1;
+    out.channels = plan_.demod.channels;
     out.rate = plan_.output_rate;
 
     if (record.block_count == 0) {
@@ -887,11 +888,13 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
             block->oldest_fine, newest_fine, fine_capacity_));
     }
 
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(audio_count) * sizeof(float);
+    const VkDeviceSize bytes =
+        static_cast<VkDeviceSize>(audio_count) * plan_.demod.channels * sizeof(float);
     if (bytes > record.audio_bytes) {
         return fail(std::format(
-            "this receiver produced {} audio samples and the graph sized its readback for {}",
-            audio_count, record.audio_bytes / sizeof(float)));
+            "this receiver produced {} audio frames of {} channels and the graph sized its "
+            "readback for {} values",
+            audio_count, plan_.demod.channels, record.audio_bytes / sizeof(float)));
     }
 
     record_dispatch(record.commands, demod_pipeline_, demod_sets_[frame],
