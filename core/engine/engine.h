@@ -84,6 +84,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <format>
 #include <functional>
 #include <map>
@@ -513,6 +514,52 @@ using AudioSinkId = std::uint64_t;
 // What would change the answer is a per-sample or per-frame fan-out rather
 // than a per-chunk one. It is not that, and AudioChunk is the only thing
 // this class carries.
+// The message for a sink that threw, built where a second failure cannot
+// escape.
+//
+// std::format and the string inside Error both allocate, and this runs in a
+// catch block on a thread where an escaping exception is std::terminate. An
+// Error with no message is a poor report and an enormous improvement on the
+// process ending without one.
+[[nodiscard]] inline Status sink_threw(const char* detail) noexcept {
+    try {
+        return fail(detail != nullptr
+                        ? std::format("the sink threw an exception: {}", detail)
+                        : "the sink threw an exception that is not a std::exception");
+    } catch (...) {
+    }
+    return std::unexpected(Error{});
+}
+
+// Calls one caller-supplied sink and turns a throw into an ordinary error.
+//
+// EVERY SINK CALL ON THE COMPLETION THREAD GOES THROUGH HERE, for two
+// reasons. That thread is created with std::thread in
+// core/engine/scheduler.cpp, so an exception leaving a sink is
+// std::terminate and the process is gone with no error of its own;
+// core/engine/scheduler.h says in as many words that one bad frame does not
+// wedge the engine and that the error surfaces through Scheduler::error,
+// which was true of a sink that returned a failure and false of one that
+// threw. core/engine/audio_wasapi.cpp has had this catch since it was
+// written, on a thread that runs nothing a caller supplied.
+//
+// The second reason is the one a catch further up would not cover. The work
+// after a sink call is not optional: in core/engine/graph.cpp the receiver's
+// stream index moves, the ring retires and the frame slot goes back to the
+// recording thread. Catching at the call keeps all of it, where catching in
+// the completion thread's loop would leave the frame half finished and the
+// recording thread parked on a slot that never comes back.
+template <class Sink, class Payload>
+[[nodiscard]] Status call_sink(const Sink& sink, const Payload& payload) noexcept {
+    try {
+        return sink(payload);
+    } catch (const std::exception& thrown) {
+        return sink_threw(thrown.what());
+    } catch (...) {
+        return sink_threw(nullptr);
+    }
+}
+
 class AudioFanout {
 public:
     AudioFanout() = default;
@@ -576,7 +623,17 @@ public:
             if (!entry.sink) {
                 continue;
             }
-            if (auto handed = entry.sink(chunk); !handed && outcome) {
+
+            // A THROW FROM ONE CONSUMER IS THAT CONSUMER'S ERROR, not the end
+            // of the process and not the end of the pass. This runs on the
+            // completion thread, which core/engine/scheduler.cpp created with
+            // std::thread, so an exception leaving here is std::terminate;
+            // and the promise above is that every sink is called, which a
+            // throw out of the first one breaks for all the rest. Caught per
+            // entry, so the consumers behind a broken one still get their
+            // samples and the failure arrives as the ordinary error this
+            // method already returns.
+            if (auto handed = call_sink(entry.sink, chunk); !handed && outcome) {
                 // The first failure, kept and returned after the pass. Later
                 // ones are lost on purpose: the run is ending either way and
                 // the first message names the consumer that started it.

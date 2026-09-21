@@ -195,6 +195,15 @@ public:
     // The first error a handler or a semaphore wait produced, if any. The
     // completion thread carries on after one so that a single bad frame does
     // not wedge the ring's retirement, and the error surfaces here.
+    //
+    // A handler that THROWS is caught and reported the same way, which it
+    // was not until 2026-09-20. The handler ends up calling every audio,
+    // passband and spectrum sink an integrator attached, this thread is a
+    // std::thread, and an exception leaving its callable is std::terminate:
+    // the sentence above was a promise the code could not keep for the one
+    // failure mode a caller's code is most likely to produce.
+    // core/engine/audio_wasapi.cpp has always caught on its own render
+    // thread, which runs nothing a caller supplied, and this one did not.
     [[nodiscard]] bool failed() const;
     [[nodiscard]] Error error() const;
 

@@ -20,6 +20,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,46 @@ TEST_CASE("a sink that refuses does not rob the sinks behind it",
     // way and the first message names the consumer that started it.
     REQUIRE_FALSE(outcome.has_value());
     CHECK(outcome.error().message.find("first consumer") != std::string::npos);
+}
+
+TEST_CASE("a sink that throws is that sink's failure and not the process's",
+          "[engine][audio][fanout]") {
+    // Without the catch this case does not fail, it ends the test binary:
+    // deliver runs on the completion thread, which core/engine/scheduler.cpp
+    // creates with std::thread, and an exception leaving a std::thread's
+    // callable is std::terminate. The sinks behind the thrower would also
+    // never be called, which contradicts the ordering promise on AudioFanout.
+    engine::AudioFanout fanout;
+    int before = 0;
+    int after = 0;
+
+    const engine::AudioSinkId first =
+        fanout.attach([&before](const engine::AudioChunk&) -> Status {
+            before += 1;
+            return {};
+        });
+    const engine::AudioSinkId thrower =
+        fanout.attach([](const engine::AudioChunk&) -> Status {
+            throw std::runtime_error("the consumer's own bug");
+        });
+    const engine::AudioSinkId last =
+        fanout.attach([&after](const engine::AudioChunk&) -> Status {
+            after += 1;
+            return {};
+        });
+    CHECK(first != thrower);
+    CHECK(thrower != last);
+
+    const Status outcome = fanout.deliver(empty_chunk());
+    REQUIRE_FALSE(outcome.has_value());
+
+    // The throw is reported as what it was, with the consumer's own text.
+    CHECK(outcome.error().message.find("threw") != std::string::npos);
+    CHECK(outcome.error().message.find("the consumer's own bug") != std::string::npos);
+
+    // And it took nobody with it.
+    CHECK(before == 1);
+    CHECK(after == 1);
 }
 
 TEST_CASE("detaching one consumer leaves the others attached",

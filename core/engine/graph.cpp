@@ -1689,7 +1689,7 @@ struct Graph::Impl {
             chunk.tuning_epoch = entry.tuning_epoch;
 
             if (entry.sink != nullptr && *entry.sink) {
-                if (auto delivered = (*entry.sink)(chunk); !delivered) {
+                if (auto delivered = call_sink(*entry.sink, chunk); !delivered) {
                     // Frames this receiver produced that reached nothing,
                     // which is what audio_dropped counts now that a squelch
                     // mute does not. See the note on VrxStatus::audio_dropped:
@@ -1835,7 +1835,7 @@ struct Graph::Impl {
         out.percentile_low_db = measured[0];
         out.percentile_high_db = measured[1];
 
-        if (auto delivered = (*frame.spectrum_sink)(out); !delivered) {
+        if (auto delivered = call_sink(*frame.spectrum_sink, out); !delivered) {
             return std::unexpected(with_context(delivered.error(), "spectrum sink"));
         }
         return {};
@@ -1922,7 +1922,7 @@ struct Graph::Impl {
         out.percentile_low_db = measured[0];
         out.percentile_high_db = measured[1];
 
-        if (auto delivered = (*entry.passband_sink)(out); !delivered) {
+        if (auto delivered = call_sink(*entry.passband_sink, out); !delivered) {
             return std::unexpected(with_context(
                 delivered.error(), std::format("receiver {} passband sink", slot.id.value)));
         }

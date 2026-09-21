@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <exception>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -432,6 +433,24 @@ struct Scheduler::Impl {
     mutable std::mutex error_lock;
     Error first_error;
 
+    // Formats where a second failure cannot escape. Everything here
+    // allocates and this runs inside a catch block on a thread that
+    // terminates the process if an exception leaves it, so an Error with no
+    // message is the floor rather than the aim.
+    [[nodiscard]] static Status handler_threw(std::uint32_t ticket, const char* detail) noexcept {
+        try {
+            return fail(detail != nullptr
+                            ? std::format("the completion handler for frame {} threw an "
+                                          "exception: {}",
+                                          ticket, detail)
+                            : std::format("the completion handler for frame {} threw an "
+                                          "exception that is not a std::exception",
+                                          ticket));
+        } catch (...) {
+        }
+        return std::unexpected(Error{});
+    }
+
     void record_error(Error error) {
         std::scoped_lock lock(error_lock);
         if (!has_error.load(std::memory_order_relaxed)) {
@@ -509,8 +528,30 @@ struct Scheduler::Impl {
             // never wakes and the process cannot be stopped. A hung GPU should
             // end with the error below reported, not with a hang in the
             // shutdown path as well.
+            //
+            // THE CATCH IS THE BACKSTOP AND NOT THE MECHANISM. This thread
+            // was created with std::thread, so an exception leaving the
+            // handler is std::terminate: the process ends with whatever the
+            // runtime prints and nothing of the promise on Scheduler::error
+            // is kept. The handler reaches every sink an integrator
+            // attached, none of them declared noexcept and none of them in
+            // this tree's control.
+            //
+            // The sinks are caught one level down, in
+            // core/engine/graph.cpp's call_sink, because a throw caught only
+            // here leaves that frame's bookkeeping half done. This exists
+            // for everything else a handler can do, so that the worst case
+            // is a recorded error rather than no error and no process.
             if (handler) {
-                if (auto status = handler(item.timeline_value, item.ticket); !status) {
+                Status status;
+                try {
+                    status = handler(item.timeline_value, item.ticket);
+                } catch (const std::exception& thrown) {
+                    status = handler_threw(item.ticket, thrown.what());
+                } catch (...) {
+                    status = handler_threw(item.ticket, nullptr);
+                }
+                if (!status) {
                     record_error(status.error());
                 }
             }
