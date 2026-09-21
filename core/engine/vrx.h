@@ -433,6 +433,20 @@ struct VrxParams {
     // AudioChunk::channels says so. A consumer that assumes one channel
     // reads a stereo stream as mono at double speed, which is why this is
     // stated on the chunk rather than inferred from the mode.
+    //
+    // ONE DOCUMENT IS NOW FALSE BECAUSE OF THIS FIELD, and it is not in this
+    // lane's file list, so the correction is recorded here instead of made
+    // there. core/rpc/revenant.capnp's AudioChunk says "channelCount reads 1
+    // on every engine built from this tree. Every demodulator in
+    // core/engine/vrx_stage.cpp sets StageOutput::channels to 1, and the one
+    // stage that sets 2 is the raw complex tap, which cannot be subscribed
+    // to. It is on the wire for WFM stereo, which is the next thing that
+    // will change it". WFM stereo is what changed it, on 2026-09-20: a
+    // broadcast receiver at an ordinary audio rate sets StageOutput::channels
+    // to 2 and a subscriber gets an interleaved pair. The paragraph's own
+    // last clause is the reason the field was put on the wire, so nothing
+    // about the wire needs to move; only the sentence claiming nobody sends
+    // two.
     bool stereo = true;
 
     // Audio output rate. 0 takes the engine's default.

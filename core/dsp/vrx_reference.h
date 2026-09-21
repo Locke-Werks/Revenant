@@ -16,12 +16,13 @@
 //
 // This file carries two jobs and says so rather than pretending otherwise.
 // The twins are one. The other is the design that produces what both sides
-// read: the polyphase tap table, the NCO circle, the audio decimation filter,
-// the AM DC-removal window and the per-mode gain. That code is not a twin and
-// has no operation order to match, exactly as core/dsp/pfb_design.cpp is not
-// a twin of the channelizer kernels. It is here because the design and the
-// twin have to agree about every index, and splitting them across two files
-// is how they stop agreeing.
+// read: the polyphase tap table, the NCO circle, the audio filter with any
+// de-emphasis curve folded into it, the AM DC-removal window, FM stereo's
+// pilot bandpass and rotation table, and the per-mode gain. That code is not
+// a twin and has no operation order to match, exactly as
+// core/dsp/pfb_design.cpp is not a twin of the channelizer kernels. It is
+// here because the design and the twin have to agree about every index, and
+// splitting them across two files is how they stop agreeing.
 //
 // Written from published mathematics and published channel plans only, per
 // docs/clean-room.md. Crochiere and Rabiner, "Multirate Digital Signal
@@ -30,8 +31,11 @@
 // Processing", section 7.5.3 for the Kaiser window and its order estimate and
 // chapter 2 for the modulation theorem; Abramowitz and Stegun eq. 9.6.12 for
 // the modified Bessel function; Carlson, "Communication Systems", chapters 4
-// and 5 for the detectors. No GPL implementation was read, fetched or
-// consulted.
+// and 5 for the detectors. The FM broadcast figures, the pre-emphasis time
+// constants and the pilot-tone stereo system are channel plans this project
+// states rather than documents it read, and each says so where it is
+// declared, per docs/clean-room.md. No GPL implementation was read, fetched
+// or consulted.
 
 #pragma once
 
