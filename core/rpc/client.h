@@ -162,15 +162,24 @@ public:
     // same terms as the two above.
     using AudioCallback = std::function<void(const AudioChunk&)>;
 
-    // No further chunk is coming, with the engine's own words for why. Never
-    // called for an unsubscribe_audio this client asked for. Optional: pass
-    // an empty one and the stream simply stops, which is what a client that
-    // is tearing down anyway wants.
+    // No further chunk is coming, with the reason for why. Never called for
+    // an unsubscribe_audio this client asked for. Optional: pass an empty
+    // one and the stream simply stops, which is what a client that is
+    // tearing down anyway wants.
     //
     // It exists because audio has no visible failure. A receiver removed out
     // from under a spectrum subscription freezes a picture and a frozen
     // picture is obvious; the same event here produces silence, and silence
     // is what a quiet channel with the squelch shut sounds like.
+    //
+    // THE REASON IS NOT ALWAYS THE ENGINE'S WORDS, and this line used to say
+    // it was. Two things end a stream this client did not end: the receiver
+    // being removed, which is the engine's sentence, and a chunk call THIS
+    // PROCESS failed, which since 2026-09-20 comes back as the failure's own
+    // description. The second was silent before then, so a callback that has
+    // only ever seen removals is about to start seeing something else. A
+    // client that matches on the text rather than treating it as prose was
+    // already wrong and is now visibly so.
     using AudioEndedCallback = std::function<void(const std::string& reason)>;
 
     // Answers with the buffer depth actually granted, in milliseconds. Zero

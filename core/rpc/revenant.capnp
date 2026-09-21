@@ -864,6 +864,17 @@ interface AudioReceiver {
     # No further chunk will arrive. Called at most once, after the last chunk,
     # and never for a cancel this client asked for.
     #
+    # TWO THINGS END A STREAM THE CLIENT DID NOT ASK TO END, and both are
+    # answered here. The receiver being removed is one. The other is a
+    # chunk() call on THIS capability coming back failed, which the server
+    # takes as final and does not retry, and which until 2026-09-20 ended
+    # the subscription in silence on the reasoning that a failed capability
+    # cannot be spoken to. That reasoning covers a dropped connection and
+    # nothing else: a receiver that threw is a client still holding a
+    # working capability and a stream that has stopped, which is the exact
+    # pair this method exists for. A connection that has genuinely gone is
+    # still silent, because nothing can cross it.
+    #
     # WHY AUDIO HAS THIS AND THE TWO DISPLAY STREAMS DO NOT
     #
     # A receiver removed out from under a spectrum or passband subscription
@@ -874,7 +885,9 @@ interface AudioReceiver {
     #
     # BEST EFFORT, stated rather than promised. A server whose event loop has
     # already stopped cannot make this call, and a dropped connection is the
-    # other signal. reason carries the engine's own words when there are any.
+    # other signal. reason carries the engine's own words when there are any,
+    # and the failed call's own description when it was the receiver that
+    # ended the stream.
     ended @1 (reason :Text) -> ();
 }
 
@@ -892,10 +905,18 @@ interface AudioReceiver {
 interface AudioSubscription {
     cancel @0 () -> ();
 
-    # Refused once the subscription is over, whether it was cancelled or
-    # ended by the engine, and the two refusals say which. Answering an ended
-    # subscription's counters reports a healthy stream on a receiver that no
-    # longer exists, and the numbers never move again.
+    # Refused once the subscription is over, whether this client cancelled it
+    # or the server ended it, and the two refusals say which. Answering an
+    # ended subscription's counters reports a healthy stream on one that has
+    # stopped, and the numbers never move again.
+    #
+    # THE SERVER-ENDED REFUSAL USED TO SAY "ended by the engine" AND TO
+    # PROMISE ended() HAD CARRIED THE REASON. Neither was reliably true. The
+    # engine has no part in the second of the two ways a stream ends, a
+    # chunk call this receiver failed, and that path sent no ended() at all
+    # until 2026-09-20. Both are fixed on the server; the wording here no
+    # longer attributes the cause to a component that may not have been
+    # involved.
     stats @1 () -> (stats :AudioStats);
 }
 
@@ -1313,6 +1334,25 @@ struct RdsStation {
     # character index received plus one until then. Carried because the
     # terminator is inside the payload and a client scanning for it cannot
     # tell an unreceived NUL from a short message.
+    #
+    # ONCE A TERMINATOR HAS ARRIVED THIS DOES NOT GROW PAST IT. rt[0,
+    # rtLength) is the message and rt[rtLength] is the 0x0D itself, so a
+    # client renders exactly that span and never scans for the terminator
+    # again. Whatever lands at a higher index afterwards is beyond the end
+    # of the message: clause 3.1.5.3 gives 0x0D as where the message stops,
+    # and a segment carrying bytes past it is padding, a repeat, or a
+    # transmitter that has stopped following the clause. None of the three
+    # lengthens what the station said.
+    #
+    # It returns to zero only at the start of a NEW message, which is a
+    # toggle of rtAb or a change of rtVersionB, and that clears rt and
+    # rtReceived in the same step.
+    #
+    # Stated because it is an invariant of the WIRE and not an implementation
+    # note. A client that trusts it reads a fixed span out of a 64-byte
+    # field; a value that had crept past the terminator would render the tail
+    # of a longer earlier message as though this station had just sent it,
+    # and nothing in the struct would say otherwise.
     rtLength @25 :UInt32;
 
     # The A/B flag. A TOGGLE OF THIS IS THE ONLY SIGNAL THAT THE MESSAGE

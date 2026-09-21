@@ -174,6 +174,19 @@ public:
     // sink on it and removes that sink on destruction, so constructing two
     // servers on one engine is not supported and is rejected rather than
     // silently letting the second replace the first's sink.
+    //
+    // EVERY SINK COMES OFF, not only the engine-wide one this paragraph
+    // names. A server also installs a per-receiver passband sink for each
+    // receiver something is watching and a per-receiver audio sink for each
+    // one something is listening to or decoding RDS from, and stop() takes
+    // all of them off whether the subscriptions were still open or had
+    // already gone. Said here because until 2026-09-20 it was not true: a
+    // subscription torn down after stop() had set its flag but before the
+    // event loop was joined erased its own map entry and then skipped the
+    // detach, so the sink outlived the server and only the engine's own
+    // destruction took it off. A second server on the same engine then saw
+    // frames being produced for nobody. core/rpc/server.cpp's sink_closed_
+    // has the mechanism.
     [[nodiscard]] static Expected<std::unique_ptr<Server>> create(engine::Engine& engine,
                                                                    const ServerOptions& options);
 
