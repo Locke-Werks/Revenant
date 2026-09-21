@@ -131,14 +131,26 @@ gain, and the two are not even the same length.
 
 The correction rides in the window's buffer instead of one of its own, because
 the spectrum kernel has four bindings and `core/engine/graph.cpp` declares
-four. One open end goes with that. The table inverts the prototype, so it
-depends on the prototype length: measured against the canonical 17 taps per
-branch, 9 taps differ by 0.93 dB and 33 taps by 1.75 dB. The channel count does
-not matter at all, measured at 0.0000 dB from M = 8 to M = 1024.
-`build_spectrum_window` takes the length as an argument and defaults it to 17,
-and `graph.cpp` calls it without one, so `revenant-engine --taps` away from 17
-leaves up to about 1.8 dB of droop near the seams. Closing that is one argument
-at the call site.
+four. The table inverts the prototype, so it depends on the prototype length:
+measured against the canonical 17 taps per branch, 9 taps differ by 0.93 dB and
+33 taps by 1.75 dB. The channel count does not matter at all, measured at
+0.0000 dB from M = 8 to M = 1024. `build_spectrum_window` takes the length as
+an argument and defaults it to `GridParams{}.taps_per_branch`, which is 17, and
+the full-span stage in `graph.cpp` passes `impl.grid.taps_per_branch`, so
+`revenant-engine --taps` away from 17 is corrected for the prototype the grid
+actually built.
+
+One caller still defaults it deliberately. `passband_window` in `graph.cpp`
+overwrites the correction half of the buffer with unity, because a passband
+frame has no seam to hide, so the parameters that built that half do not
+matter there.
+
+WHAT THIS PARAGRAPH USED TO SAY: "`graph.cpp` calls it without one, so
+`revenant-engine --taps` away from 17 leaves up to about 1.8 dB of droop near
+the seams. Closing that is one argument at the call site." The argument was
+added at that call site and `core/dsp/spectrum_reference.h` was corrected then;
+this copy was not. Left standing it tells anyone chasing a seam-edge level that
+1.8 dB of known droop is still in the data and that the cause is elsewhere.
 
 **What the correction does at the edges.** It amplifies, so the question is how
 far. Not far: the kept band ends at the cutoff and never reaches the stopband,

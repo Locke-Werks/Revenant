@@ -25,13 +25,19 @@ Three things decide whether this feels right or feels like a fault.
 bin and a spur. One stuck bin at the bottom of the range pins the floor there
 forever, and a single carrier pins the ceiling, and between them the noise
 floor and the signals all end up compressed into the middle of the colour map.
-Track a low and a high percentile instead, something like the fifth and the
-ninety-ninth, so the scale follows the body of the distribution.
+Track a low and a high percentile instead, so the scale follows the body of the
+distribution. This was written as "something like the fifth and the
+ninety-ninth" before either end had a number; both now do, in
+`core/dsp/spectrum_levels_reference.h`, as `kSpectrumLowPermille` 50 and
+`kSpectrumHighPermille` 990, which is the fifth and the ninety-ninth. That
+header is the source of truth and carries why the high end is not higher.
 
 **Asymmetric attack and decay.** Thirty seconds is the decay. Expansion has to
 be much faster or a signal that appears suddenly is clipped flat for half a
 minute, which on a waterfall reads as a solid bar with no structure in it.
 Expand within a frame or two, contract over the thirty.
+`core/engine/spectrum_scale.h` holds both as `decay_seconds` 30.0 and
+`attack_seconds` 0.025.
 
 **On the device.** The spectrum frame is produced on the GPU and the
 percentiles are computed from it there. Reading a frame back to the host to
