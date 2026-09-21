@@ -33,8 +33,29 @@ struct GridParams {
     // M. A power of two. Channel spacing is rate/M.
     std::uint32_t channels = 64;
 
-    // L + 1, including the one zero tap that makes the group delay an integer
-    // number of channel samples. See prototype_group_delay below.
+    // L + 1. The design is M*L + 1 taps long and is then zero-padded to
+    // M*(L + 1) so every branch runs the same number of taps and the kernel
+    // needs no ragged last iteration. See PrototypeFilter::group_delay_samples
+    // below for what the odd design length buys.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "L + 1, including the one zero tap that
+    // makes the group delay an integer number of channel samples. See
+    // prototype_group_delay below." Three things wrong with one sentence.
+    //
+    // There is no prototype_group_delay anywhere in the tree. The nearest
+    // thing is a member of an implementation struct in core/engine/graph.cpp,
+    // which this header cannot see and a reader of this header cannot find.
+    //
+    // The extra tap is not a zero tap. Branch 0's last tap is h[M*L], the
+    // final tap of the odd-length design, and it is zero only when L is even,
+    // because the ideal response there is sinc(L/2). At M = 64 it measures
+    // -1.36e-3 at four taps per branch, -3.44e-5 at eight, -4.28e-8 at
+    // sixteen, and 2.49e-23 at the canonical seventeen, where L = 16 is even
+    // and the sinc has a zero. Only the OTHER branches' last taps are zero,
+    // and they are zero because they are past the end of the filter.
+    //
+    // And the extra tap is not what makes the group delay integral. The ODD
+    // DESIGN LENGTH does that, and it would do it with no padding at all.
     std::uint32_t taps_per_branch = 17;
 
     // D, which must divide M. D == M is critically sampled; D == M/2 is the
@@ -105,10 +126,26 @@ struct PrototypeFilter {
     // can assert the design met its target rather than trusting the estimate.
     double stopband_db = 0.0;
 
-    // Delay through the filter, in input samples, exact. The extra zero tap in
-    // taps_per_branch exists to make this an integer, so that a channel sample
-    // maps to an input sample index with no fractional bookkeeping and the
-    // sample-accurate-timestamp guarantee survives channelization.
+    // Delay through the filter, in input samples, exact: M*L/2.
+    //
+    // The design length is M*L + 1 and not M*L for this. A linear-phase
+    // filter of even length M*L has group delay (M*L - 1)/2, a half-integer,
+    // and a half-integer input delay is where the sample-accurate timestamp
+    // quietly stops being accurate. The odd length puts it at exactly M*L/2,
+    // an integer, so a channel sample maps to an input sample index with no
+    // fractional bookkeeping.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "The extra zero tap in taps_per_branch
+    // exists to make this an integer." The padding to M*(L + 1) is for the
+    // kernel's uniform branch length and does nothing to the delay; see
+    // taps_per_branch above.
+    //
+    // In CHANNEL samples the delay is M*L/(2D), which is an integer at the
+    // D = M/2 this project runs, where it equals L. At D = M, which validate()
+    // permits, it is L/2 and a half-integer for every odd L: 1.5 channel
+    // samples at four taps per branch, 7.5 at sixteen. Nothing in the tree
+    // configures D = M today, and a caller that does has to reckon with that
+    // rather than assume this divides.
     SampleIndex group_delay_samples = 0;
 };
 

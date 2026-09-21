@@ -381,14 +381,30 @@ Expected<PrototypeFilter> design_prototype(const GridParams& grid, double attenu
     // D = M/2 the delay in channel samples is (M*L - 1)/M, which is neither
     // integer nor half-integer. That is where a sample-accurate timestamp
     // quietly stops being accurate. The odd length puts the group delay at
-    // exactly M*L/2 input samples, which divides by any D that divides M.
+    // exactly M*L/2 input samples.
+    //
+    // WHAT THIS PARAGRAPH USED TO END WITH: "which divides by any D that
+    // divides M." It does not. M*L/2 over D is L at the D = M/2 this project
+    // runs and L/2 at D = M, which validate() permits and which is a
+    // half-integer for every odd L. The integer the odd length guarantees is
+    // the INPUT-sample delay; the channel-sample delay is integral at D = M/2
+    // and has to be checked at any other D.
     //
     // The array is then zero-padded to M*(L + 1) so every branch runs L + 1
-    // taps uniformly and the kernel needs no ragged last iteration. Measured
-    // cost of the extra tap at M = 64, L = 16: 0.075 dB of stopband
-    // (-119.013 dB padded against -119.088 dB at length M*L). Only branch 0's
-    // last tap is nonzero, because every padded entry is past the end of the
-    // filter.
+    // taps uniformly and the kernel needs no ragged last iteration. Only
+    // branch 0's last tap comes from the filter at all; every other padded
+    // entry is past its end and is exactly zero.
+    //
+    // WHAT THIS PARAGRAPH USED TO CLAIM: "Measured cost of the extra tap at
+    // M = 64, L = 16: 0.075 dB of stopband (-119.013 dB padded against
+    // -119.088 dB at length M*L)." The padding is zeros and zeros cost
+    // nothing, and at L = 16 the one tap that is not padding, h[M*L], is
+    // 2.5e-23, seventeen orders of magnitude below a -119 dB stopband. The
+    // two figures were measured on different grids: measure_stopband_db
+    // sizes its transform from bit_ceil of the tap count, so 1088 taps get
+    // 32768 points and 1024 taps get 16384, and that alone understates the
+    // shorter one by the 0.04 dB its own comment quotes. What was reported
+    // as the cost of a tap was the cost of changing the ruler.
     const auto design_length = static_cast<std::size_t>(channels) * branch_order;  // M*L
     const std::size_t taps_used = design_length + 1;
     const std::size_t taps_total = static_cast<std::size_t>(grid.prototype_length());
