@@ -20,6 +20,10 @@ find_package(rtlsdr CONFIG REQUIRED)
 # The decoders. rds_bits.cpp is the RDS physical layer, subcarrier to bits;
 # rds_groups.cpp is the block and group layer above it.
 #
+# vocoder.cpp is the voice-codec seam every implementation writes against. It
+# carries no codec and not one frame size; core/decode/vocoder.h says why a
+# constant here would have no citation to give.
+#
 # Both were behind an EXISTS guard while they landed on separate branches in
 # the same session. Both have landed, and the guard is gone rather than left
 # in place: it was configure-time only, so a file that went missing or got
@@ -30,6 +34,7 @@ find_package(rtlsdr CONFIG REQUIRED)
 add_library(revenant_core STATIC
     decode/rds_bits.cpp
     decode/rds_groups.cpp
+    decode/vocoder.cpp
     detect/detector.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
