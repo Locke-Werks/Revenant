@@ -22,7 +22,9 @@ find_package(rtlsdr CONFIG REQUIRED)
 #
 # vocoder.cpp is the voice-codec seam every implementation writes against. It
 # carries no codec and not one frame size; core/decode/vocoder.h says why a
-# constant here would have no citation to give.
+# constant here would have no citation to give. vocoder_plugin.cpp is the
+# loader that turns a third-party DLL into one of those implementations, and
+# decode/vocoder_abi.h is the C contract such a DLL implements.
 #
 # Both were behind an EXISTS guard while they landed on separate branches in
 # the same session. Both have landed, and the guard is gone rather than left
@@ -35,6 +37,7 @@ add_library(revenant_core STATIC
     decode/rds_bits.cpp
     decode/rds_groups.cpp
     decode/vocoder.cpp
+    decode/vocoder_plugin.cpp
     detect/detector.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
