@@ -285,3 +285,34 @@ commit: 09e998f
 instead: WFM decodes the pilot-tone stereo system on the device and applies 75
     microsecond de-emphasis, both with a CPU twin the conformance suite diffs
     bit-exactly. f3c0544 is the stereo half and 09e998f the de-emphasis half.
+
+phrase: NOTHING READS THIS YET, AND THIS IS THE HALF THAT CANNOT DECIDE IT
+phrase: It is left unwired deliberately rather than being wired from here
+retired: 2026-09-21
+commit: 5f6cd06
+instead: Engine::open_source reads SourceCapabilities::resolution and doubles
+    EngineConfig::spectrum_transform until the request is met or the device's
+    ceiling stops it, reporting either outcome through the clamp sentence a
+    reduced channel count already uses. Raised and never lowered. The decision
+    still sits in the engine rather than in the source, which is the half of
+    that paragraph that stayed true.
+
+phrase: Five conditions the engine knows about and this wire does not carry
+phrase: GraphStats reaches nothing on the wire
+retired: 2026-09-21
+commit: 96ea300
+instead: Two of the five are on SourceStats as vrxRetuneRefusals and frameStalls,
+    read through Engine::graph_conditions. Two are absent with a reason rather
+    than a plan: AudioEgressStats needs a recording surface to exist on the wire
+    first, and the RTL-SDR's open-time substitution is the asker's to compute
+    because the client composed the request and EngineInfo carries what the
+    device took.
+
+phrase: A slow client's drops appear on a fast client's status line
+retired: 2026-09-21
+commit: 96ea300
+instead: It cannot happen. Server::frames_dropped never crosses this wire:
+    revenant-engine's status line and one test are its only readers. A client's
+    own drops are exact and always were, counted from SpectrumFrame::sequence
+    jumping by more than the everyNth it asked for. The host-side counter
+    over-counts only when two subscriptions ask for different rates.

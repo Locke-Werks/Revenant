@@ -1250,7 +1250,7 @@ where the next thing to move is `overrunEvents`. A client that draws it without
 the flow control reports the healthy case as a fault on every file and every
 synthetic scene.
 
-**Was never true, and the fix is what found it.** The entry used to end
+**Was never true, and the fix is what found it.** The entry used to read
 **"`Server::frames_dropped` is one server-wide counter charged for every spectrum
 subscriber at once, and `core/rpc/server.cpp` admits it over-counts. A slow
 client's drops appear on a fast client's status line. Audio has the
