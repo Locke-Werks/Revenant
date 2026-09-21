@@ -1002,6 +1002,16 @@ private:
     // subscribeSpectrum waiting on that lock would otherwise install a sink
     // on the engine after stop() had taken one off, and stop() is past that
     // section by then, so nothing would ever remove the replacement.
+    //
+    // IT GATES AN INSTALL AND NEVER A REMOVAL, and reading it as one flag
+    // for both is how three separate sinks came to be left on the engine
+    // for the rest of its life. stop() sets it while the loop thread is
+    // still running and walks its sink maps only after joining that thread,
+    // so a teardown in between erases its own entry and then finds itself
+    // forbidden to detach, leaving stop()'s walk nothing to find.
+    // end_rds_for_vrx, detach_passband_sink and end_audio each retract that
+    // in place. A removal after the flag is set is always allowed: stop()
+    // itself detaches after setting it.
     bool sink_closed_ = false;
 
     // The listing worker. Started on the first listSources rather than at
@@ -2815,17 +2825,38 @@ void ServerImpl::end_passband(const std::shared_ptr<PassbandNode>& node) {
 }
 
 void ServerImpl::detach_passband_sink(engine::VrxId vrx) {
-    {
-        std::scoped_lock held(sink_lock_);
-        if (sink_closed_) {
-            // stop() has already taken every sink off.
-            return;
-        }
-        // Asynchronous, so a frame recorded before this can still arrive.
-        // The pending slot below is dropped for that reason rather than
-        // left to be fanned out to a subscription nobody holds.
-        static_cast<void>(engine_.set_passband_sink(vrx, {}));
-    }
+    // UNCONDITIONALLY, AND sink_lock_ IS NOT TAKEN FOR IT.
+    //
+    // WHAT THIS FUNCTION USED TO DO. It took sink_lock_, and when
+    // sink_closed_ was set it returned without detaching and without
+    // releasing the pending slot below, under a comment reading "stop() has
+    // already taken every sink off". That is the one case in which stop()
+    // has not. stop() sets sink_closed_ under sink_lock_ while the loop
+    // thread is STILL RUNNING, and only walks passband_sinks_ after joining
+    // it. end_passband is loop-thread only and erases this receiver's count
+    // from that map BEFORE calling here. So a cancel, a dropped capability
+    // or a removeVrx handled in the window between the flag and the join
+    // erased the count, skipped the detach, and left stop()'s walk nothing
+    // to find. The engine kept the sink for the rest of its own life with
+    // no subscriber behind it, and a second server on the same engine saw
+    // passband_frames climbing with nothing anywhere explaining it. An
+    // ordinary shutdown with the Qt client's VFO pane open is that window.
+    //
+    // The identical defect was diagnosed and retracted in end_rds_for_vrx
+    // four hundred lines above, in this file, and end_audio below carried
+    // the third copy of it. All three detach unconditionally now.
+    //
+    // sink_closed_ answers a different question. It exists to stop a sink
+    // being INSTALLED after stop() has decided which ones it will take off,
+    // which is why add_passband checks it across the install. Taking one
+    // off is always allowed and always right: stop() itself detaches after
+    // setting the flag, and clearing a sink that is already clear is the
+    // engine's own no-op.
+    //
+    // Asynchronous, so a frame recorded before this can still arrive. The
+    // pending slot below is dropped for that reason rather than left to be
+    // fanned out to a subscription nobody holds.
+    static_cast<void>(engine_.set_passband_sink(vrx, {}));
 
     std::scoped_lock held(frame_lock_);
     auto slot = passband_pending_.find(vrx.value);
@@ -3113,15 +3144,24 @@ void ServerImpl::end_audio(const std::shared_ptr<AudioNode>& node) {
     auto route = found->second;
     audio_routes_.erase(found);
 
-    {
-        const std::scoped_lock held(sink_lock_);
-        if (!sink_closed_) {
-            // Discarded: the only failures are a receiver the graph no
-            // longer knows, which is the ordinary teardown order, and a
-            // token already detached, which stop() would have done.
-            static_cast<void>(engine_.detach_audio_sink(node->vrx, route->sink));
-        }
-    }
+    // UNCONDITIONALLY, AND sink_lock_ IS NOT TAKEN FOR IT. The third copy of
+    // the shape end_rds_for_vrx retracts at length and detach_passband_sink
+    // retracts again: the route is erased from audio_routes_ on the line
+    // above, this is loop-thread only, and stop() sets sink_closed_ while
+    // the loop is still running and walks audio_routes_ only after joining
+    // it. A cancel in that window erased the route, skipped the detach and
+    // left stop()'s walk nothing to find, so the engine carried a decoderless
+    // audio sink for the rest of its life.
+    //
+    // WHAT THE COMMENT INSIDE THE BRANCH USED TO SAY: "the only failures are
+    // a receiver the graph no longer knows, which is the ordinary teardown
+    // order, and a token already detached, which stop() would have done."
+    // The second half was false of the one window the branch covered. Inside
+    // `!sink_closed_` stop() has not run, so it cannot have detached
+    // anything, and the discard was being justified by a case the guard had
+    // just excluded. Both halves are true now that the call is unconditional,
+    // which is the reason the return value is still discarded.
+    static_cast<void>(engine_.detach_audio_sink(node->vrx, route->sink));
 
     // Closed last, and it waits for a sink call that is already running. The
     // detach above is asynchronous, so a dispatch recorded before it can
