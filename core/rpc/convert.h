@@ -127,10 +127,19 @@ void write_source_descriptor(schema::SourceDescriptor::Builder out,
 void write_grid(schema::GridParams::Builder out, const dsp::GridParams& in);
 void write_spectrum_geometry(schema::SpectrumGeometry::Builder out,
                              const engine::SpectrumGeometry& in);
-void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo& in);
+// Two engine structs and not one, because two of the wire's fields are a
+// live measurement rather than what the engine settled on when it opened the
+// source. Engine::info() hands back a reference that is fixed for the run;
+// Engine::source_pacing() is read fresh per call. Taking both here rather
+// than letting the caller set two fields afterwards keeps the rule at the
+// top of this file: one place to review a wire struct against its sources.
+void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo& in,
+                       const engine::SourcePacing& pacing);
+
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in);
 void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& in);
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in);
+
 void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& in);
 
 // Copies the whole frame, including its power_db span, so the result

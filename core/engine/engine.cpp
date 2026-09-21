@@ -278,11 +278,16 @@ public:
         info_.spectrum = graph_->geometry().spectrum;
         info_.passband_transform = graph_->geometry().passband_transform;
 
-        // Read once here rather than forwarded live, because this engine has
-        // no tune call: the centre is fixed by the URI the source was opened
-        // with, so a snapshot is the whole truth for the life of the engine.
-        // When a retunable device arrives this becomes stale and has to
-        // follow the tune, which is the change to make then and not now.
+        // The starting point, and set_source_center keeps it current from
+        // here on.
+        //
+        // WHAT THIS COMMENT USED TO SAY: "read once here rather than
+        // forwarded live, because this engine has no tune call: the centre
+        // is fixed by the URI the source was opened with, so a snapshot is
+        // the whole truth for the life of the engine. When a retunable
+        // device arrives this becomes stale and has to follow the tune,
+        // which is the change to make then and not now." The change is made:
+        // the engine has a tune call, and this field follows it.
         info_.source_center = source_->center();
 
         // Truncating division, deliberately and only for display. See the note
@@ -318,6 +323,121 @@ public:
     }
 
     [[nodiscard]] const EngineInfo& info() const override { return info_; }
+
+    [[nodiscard]] SourceTuning source_tuning() const override {
+        SourceTuning out;
+        for (const source::TuneRange& range : capabilities_.tune_ranges) {
+            // A backend that could not describe its tuner leaves the list
+            // empty rather than guessing, which reads here as a source that
+            // cannot be retuned. That is the right answer: librtlsdr has no
+            // driver for a tuner it did not recognise, so nothing on such a
+            // dongle can be tuned at all.
+            if (range.high < range.low) {
+                continue;
+            }
+            if (!out.can_retune) {
+                out.can_retune = true;
+                out.low = range.low;
+                out.high = range.high;
+                continue;
+            }
+            out.low = std::min(out.low, range.low);
+            out.high = std::max(out.high, range.high);
+        }
+        return out;
+    }
+
+    [[nodiscard]] Expected<dsp::Hertz> set_source_center(dsp::Hertz center) override {
+        if (source_ == nullptr) {
+            return fail("Engine::set_source_center before a source is open: there is no front "
+                        "end to point anywhere");
+        }
+
+        // The source's own refusal, not one composed here. A file says a
+        // recording's centre is a property of the samples already on disk
+        // and tells the caller to reopen the URI; a synthetic scene says to
+        // move the emitters instead; a dongle says which ranges it reaches.
+        // Three different things to do about it, and a message of this
+        // layer's own would replace all three with a category.
+        auto landed = source_->tune(center);
+        if (!landed) {
+            return std::unexpected(with_context(landed.error(), "Engine::set_source_center"));
+        }
+
+        // The one piece of engine state a retune moves. Everything else in
+        // the chain works in the source's baseband frame, which has not
+        // changed; see the note on Engine::set_source_center.
+        info_.source_center = *landed;
+
+        // And the marker on every receiver's stream, so a consumer that
+        // accumulates state about the transmitter it is hearing has the same
+        // boundary a per-receiver retune gives it. The argument for
+        // re-queueing rather than inventing a second epoch is on the
+        // declaration.
+        //
+        // A failure here is not the caller's business and is deliberately
+        // discarded. The device has already moved: reporting a failed epoch
+        // bump as a failed retune would tell a client the front end is where
+        // it was, which is the one thing that is certainly untrue. A
+        // receiver that went away between the tune and this pass is the
+        // ordinary case and is exactly what fails.
+        if (graph_ != nullptr) {
+            for (const VrxId id : graph_->vrx_ids()) {
+                auto status = graph_->vrx_status(id);
+                if (!status) {
+                    continue;
+                }
+                auto placement = place(info_.grid, info_.source_rate, status->params);
+                if (!placement) {
+                    continue;
+                }
+                static_cast<void>(graph_->set_vrx_params(id, status->params, *placement));
+            }
+        }
+
+        return *landed;
+    }
+
+    [[nodiscard]] SourcePacing source_pacing() const override {
+        SourcePacing out;
+        out.paced_by = config_.pace;
+        out.demand = capabilities_.flow == source::FlowControl::Demand;
+        if (source_ == nullptr) {
+            return out;
+        }
+
+        out.samples_delivered = source_->stats().samples_delivered;
+
+        const std::int64_t started = stream_start_ns_.load(std::memory_order_acquire);
+        if (started == 0) {
+            // Nothing has been measured, which SourcePacing::realtime_factor
+            // documents as a third state rather than as a stalled source.
+            return out;
+        }
+
+        // Frozen at the end of the run rather than left to decay against a
+        // clock that keeps going. A finished replay's factor is what it
+        // achieved, and letting it fall towards zero afterwards would make
+        // a completed file look like a source that died.
+        const std::int64_t ended = stream_stop_ns_.load(std::memory_order_acquire);
+        const std::int64_t now =
+            ended != 0 ? ended
+                       : std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+        if (now <= started) {
+            return out;
+        }
+
+        out.elapsed_seconds = static_cast<double>(now - started) / 1e9;
+        if (info_.source_rate <= 0 || out.elapsed_seconds <= 0.0) {
+            return out;
+        }
+        const double capture_seconds = static_cast<double>(out.samples_delivered) /
+                                       static_cast<double>(info_.source_rate);
+        out.realtime_factor = capture_seconds / out.elapsed_seconds;
+        return out;
+    }
 
     [[nodiscard]] Expected<VrxId> add_vrx(const VrxParams& params) override {
         if (graph_ == nullptr) {
@@ -418,6 +538,15 @@ public:
         stop_requested_.store(false, std::memory_order_release);
         running_.store(true, std::memory_order_release);
 
+        // Before the source starts, so the elapsed time includes whatever
+        // the first block cost to produce. Measuring from the first block
+        // instead would hide exactly the startup a slow source spends.
+        stream_stop_ns_.store(0, std::memory_order_release);
+        stream_start_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now().time_since_epoch())
+                                   .count(),
+                               std::memory_order_release);
+
         source::StreamOptions options;
         options.block_samples = block_samples_;
 
@@ -450,6 +579,10 @@ public:
         // way.
         Status ended = source_->stop();
         Status flushed = graph_->flush();
+        stream_stop_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count(),
+                              std::memory_order_release);
         running_.store(false, std::memory_order_release);
 
         if (!ended) {
@@ -533,6 +666,18 @@ private:
 
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
+
+    // steady_clock nanoseconds, so the pair can be read from any thread
+    // without a lock. Zero in stream_start_ns_ means the stream has not
+    // begun; zero in stream_stop_ns_ means it has not ended, and a non-zero
+    // one freezes the realtime factor at what the run achieved.
+    //
+    // A wall clock is deliberately not used and neither is the source's own
+    // timestamp. The question is how long the host took, which is a
+    // steady_clock question, and docs/conventions.md keeps the DSP path off
+    // any clock at all.
+    std::atomic<std::int64_t> stream_start_ns_{0};
+    std::atomic<std::int64_t> stream_stop_ns_{0};
 
     // Control plane only. run() parks on it and stop() wakes it; the sample
     // path never touches either.

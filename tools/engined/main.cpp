@@ -774,6 +774,36 @@ void print_engine_block(const engine::Engine& eng)
 
     print_engine_block(eng);
 
+    // A DEMAND SOURCE WITH NO PACE AND A SOURCE THAT CANNOT KEEP UP LOOK
+    // IDENTICAL FROM OUTSIDE, AND THIS IS THE ONLY PLACE THAT KNOWS WHICH
+    // WAS ASKED FOR.
+    //
+    // Unthrottled is the right default for a recorder and for every test:
+    // there is no throttle anywhere, only the graph's blocking reserve, and
+    // a capture retired as fast as the GPU manages is what an offline run
+    // wants. It is the wrong default the moment somebody is listening,
+    // because the source then delivers at whatever rate it can reach and a
+    // listener hears that rate. On this host a synthetic scene at 20 MS/s
+    // reaches about a fifth of realtime, and what a client sees is an audio
+    // queue that keeps running dry: true about the queue and pointing at
+    // the wrong component.
+    //
+    // Said here rather than refused, because a headless recording is a real
+    // and common use of this program and it wants exactly this setting.
+    // EngineInfo::realtimeFactor and sourcePacedBy are the same fact on the
+    // wire, for the operator who is looking at a GUI rather than at this.
+    if (eng.source_capabilities().flow == source::FlowControl::Demand && options.pace == 0.0) {
+        std::println(stderr,
+                     "warning: '{}' is a demand source and --pace is 0, so it is asked to "
+                     "deliver as fast as the machine retires it rather than on a clock. "
+                     "Nothing downstream paces it, so a client listening to this hears "
+                     "whatever rate the source reaches, and a source that cannot reach "
+                     "realtime is indistinguishable from one deliberately running flat out. "
+                     "Pass --pace 1 to serve a live display; EngineInfo.realtimeFactor is "
+                     "what a client reads to tell the two apart.",
+                     eng.source_capabilities().uri);
+    }
+
     rpc::ServerOptions server_options;
     server_options.bind_address = options.bind;
     server_options.port = options.port;
@@ -829,6 +859,19 @@ void print_engine_block(const engine::Engine& eng)
         auto last_line = std::chrono::steady_clock::now();
         const auto interval = std::chrono::milliseconds(options.status_ms);
 
+        // The measured half of the warning above, said once. The config
+        // warning fires on a setting and this one fires on the outcome, so
+        // a source that was expected to keep up and does not gets a line
+        // even when nobody thought --pace was worth passing.
+        //
+        // Not before five seconds of wall clock: the factor is a lifetime
+        // mean and the first second of any run includes opening a device,
+        // designing a prototype and filling a ring, so an early reading is
+        // low on a source that is fine.
+        bool behind_reported = false;
+        constexpr double kBehind = 0.9;
+        constexpr double kSettleSeconds = 5.0;
+
         while (!finished.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(kPoll);
 
@@ -842,6 +885,22 @@ void print_engine_block(const engine::Engine& eng)
             if (options.duration > 0.0 && source_seconds >= options.duration &&
                 !g_stop_requested.exchange(true, std::memory_order_acq_rel)) {
                 static_cast<void>(eng.stop());
+            }
+
+            const engine::SourcePacing pacing = eng.source_pacing();
+            if (!behind_reported && pacing.demand && pacing.paced_by == 0.0 &&
+                pacing.elapsed_seconds >= kSettleSeconds &&
+                pacing.realtime_factor > 0.0 && pacing.realtime_factor < kBehind) {
+                behind_reported = true;
+                std::println(
+                    stderr,
+                    "warning: this source is delivering {:.2f}x realtime unthrottled, so it "
+                    "cannot keep up and is not being held back. Audio to a listening client "
+                    "arrives in fragments and the client sees that as a starving queue, which "
+                    "is the wrong component. Lower the rate, or accept that this is an "
+                    "offline run. EngineInfo.realtimeFactor carries the same number.",
+                    pacing.realtime_factor);
+                std::fflush(stderr);
             }
 
             const auto now = std::chrono::steady_clock::now();

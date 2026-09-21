@@ -962,6 +962,27 @@ public:
     // function could only guess at.
     void reset_rds_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target);
 
+    // Event loop thread. Throws away everything this server holds that was
+    // measured against the front end's old centre, after a retune the
+    // engine has already applied.
+    //
+    // TWO THINGS, AND NEITHER OF THEM IS SAMPLES. The wideband detector is
+    // dropped, so the next detections call rebuilds it with the new
+    // sourceCenter and no tracks: every track it held was a measurement of
+    // a band that is not there any more, and its absolute centre was
+    // computed by adding a constant that has changed. Every RDS decoder is
+    // cleared and fenced, on exactly the terms setVrxParams clears one,
+    // because each receiver is now pointed at a different transmitter.
+    //
+    // The decoders are fenced against the epoch the ENGINE moved.
+    // Engine::set_source_center re-queues every receiver's own params so
+    // the graph advances its tuning epoch, which is what makes the existing
+    // per-receiver fence work for a change that is not per receiver. Read
+    // here and after the tune, for the reason setVrxParams reads it after
+    // its own: the target is the epoch this receiver's chunks will carry
+    // once everything queued has been applied.
+    void forget_across_retune();
+
     // Builds one, attaches its sink and records it. Split out because both
     // entry points above reach it and both have already asked the engine
     // for the receiver's status, which this needs and must not ask twice:
@@ -1274,7 +1295,12 @@ public:
     explicit SessionImpl(ServerImpl& owner) : owner_(owner) {}
 
     kj::Promise<void> info(InfoContext context) override {
-        write_engine_info(context.getResults().initInfo(), owner_.engine().info());
+        // Two reads and not one. info() is what the engine settled on when
+        // it opened the source and is fixed for the run; source_pacing() is
+        // measured now, and realtimeFactor is the whole reason this call is
+        // worth polling more than once.
+        write_engine_info(context.getResults().initInfo(), owner_.engine().info(),
+                          owner_.engine().source_pacing());
         return kj::READY_NOW;
     }
 
@@ -1613,6 +1639,37 @@ public:
         health.setBlocksDropped(taken->blocks_dropped);
         health.setSyncAcquisitions(taken->sync_acquisitions);
         health.setSyncLosses(taken->sync_losses);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setSourceCenter(SetSourceCenterContext context) override {
+        const std::int64_t wanted = context.getParams().getCenterHz();
+
+        // The engine's call refuses in the SOURCE's own words on a source
+        // that cannot retune, and each of the three backends says something
+        // different about what to do instead. Nothing is composed here.
+        auto landed = owner_.engine().set_source_center(wanted);
+        if (!landed) {
+            return to_exception(landed.error());
+        }
+
+        // After the tune and only if it took, exactly as setVrxParams
+        // clears the decoders after its own. The engine has already moved
+        // every receiver's tuning epoch; this is the half above the engine,
+        // which is the detector's tracks and the decoders' accumulated
+        // stations.
+        owner_.forget_across_retune();
+
+        context.getResults().setGrantedHz(*landed);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> sourceCanRetune(SourceCanRetuneContext context) override {
+        const engine::SourceTuning tuning = owner_.engine().source_tuning();
+        auto results = context.getResults();
+        results.setCanRetune(tuning.can_retune);
+        results.setLowHz(tuning.low);
+        results.setHighHz(tuning.high);
         return kj::READY_NOW;
     }
 
@@ -2429,6 +2486,34 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
     // decode reaches nothing but itself, so a late call is harmless once
     // this has returned.
     const std::scoped_lock owned(route->lock);
+}
+
+void ServerImpl::forget_across_retune() {
+    {
+        std::scoped_lock held(detect_lock_);
+
+        // The completion thread checks this before it takes the lock, so
+        // clearing it first is what stops a frame from the new centre
+        // reaching the old detector between here and the reset below.
+        detecting_.store(false, std::memory_order_relaxed);
+        detector_.reset();
+    }
+
+    // detector_fault_ is deliberately left alone. A detector that faulted
+    // did so for a reason that has nothing to do with where the front end
+    // is pointed, and clearing it here would rebuild the same fault on the
+    // next poll while making it look like the retune had fixed something.
+
+    for (const engine::VrxId id : engine_.vrx_ids()) {
+        auto status = engine_.vrx_status(id);
+        if (!status) {
+            // Removed between the tune and this pass. reset_rds_for_vrx
+            // would have nothing to fence against, and the next poll drops
+            // the route anyway.
+            continue;
+        }
+        reset_rds_for_vrx(id, status->tuning_epoch);
+    }
 }
 
 void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target) {

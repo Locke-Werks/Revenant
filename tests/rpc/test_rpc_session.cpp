@@ -1040,3 +1040,135 @@ TEST_CASE("connect reports a refused connection rather than a call that fails la
     CHECK(refused.error().message.find(std::format("127.0.0.1:{}", port)) !=
           std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Retuning the front end
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a source that cannot retune says so before it is asked", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    auto tuning = harness.client().source_can_retune();
+    REQUIRE(tuning.has_value());
+
+    // A synthetic scene declares no tune range, because its centre is a
+    // label on emitters generated around it rather than an oscillator. A
+    // client greys the control out on this rather than offering one that
+    // always refuses, which is the whole reason the question is separate
+    // from the answer.
+    CHECK_FALSE(tuning->can_retune);
+    CHECK(tuning->low_hz == 0);
+    CHECK(tuning->high_hz == 0);
+}
+
+TEST_CASE("a refused retune comes back in the source's own words", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    auto refused = harness.client().set_source_center(462'000'000);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+
+    // Not a category. The synthetic source's sentence names what to do
+    // instead, which is to place the emitters where they are wanted, and
+    // that instruction is different from the file source's and from a
+    // dongle's. A refusal composed in the RPC layer would have replaced all
+    // three with "this source cannot retune".
+    CHECK(refused.error().message.find("synthetic source cannot tune") != std::string::npos);
+    CHECK(refused.error().message.find("span_low") != std::string::npos);
+}
+
+TEST_CASE("a refused retune leaves the engine exactly where it was", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{.center_hz = 462'000'000});
+
+    auto before = harness.client().info();
+    REQUIRE(before.has_value());
+    REQUIRE(before->source_center == 462'000'000);
+
+    const std::uint64_t id = [&] {
+        auto added = harness.client().add_vrx(distinctive_params());
+        REQUIRE(added.has_value());
+        return *added;
+    }();
+
+    REQUIRE_FALSE(harness.client().set_source_center(88'500'000).has_value());
+
+    // The centre is the one piece of engine state a successful retune moves,
+    // so a refused one must not move it. A client that redrew its axis from
+    // a centre the device never took would be labelling the right spectrum
+    // with the wrong frequencies.
+    auto after = harness.client().info();
+    REQUIRE(after.has_value());
+    CHECK(after->source_center == before->source_center);
+
+    // And the receiver is still there. Nothing about a retune tears one
+    // down even when it succeeds, and a refusal must not either.
+    auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(std::ranges::find(*ids, id) != ids->end());
+}
+
+// ---------------------------------------------------------------------------
+// The realtime factor, which is the diagnosis nobody could make
+// ---------------------------------------------------------------------------
+
+TEST_CASE("the pace a source was asked for crosses beside what it achieved",
+          "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{.pace = 0.0});
+
+    auto idle = harness.client().info();
+    REQUIRE(idle.has_value());
+
+    // Zero is NOT MEASURED and is a third state. Between opening the source
+    // and running it there is no elapsed time to divide by, and a client
+    // that read this as a stalled source would raise an alarm on every
+    // engine that has not started yet.
+    CHECK(idle->realtime_factor == 0.0);
+    CHECK(idle->source_paced_by == 0.0);
+
+    REQUIRE(harness.start_engine().has_value());
+    REQUIRE(harness.wait_for_blocks(8, 5'000) >= 8);
+
+    auto running = harness.client().info();
+    REQUIRE(running.has_value());
+    INFO("realtime factor " << running->realtime_factor);
+
+    // Unthrottled against a synthetic scene on a GPU: faster than realtime
+    // is the ordinary outcome and the exact figure is the host's business.
+    // What the case pins is that the number is being measured at all, which
+    // is what was missing.
+    CHECK(running->realtime_factor > 0.0);
+
+    // And that the setting travels beside it. This pair is the whole point:
+    // 0.5 is a fault at a pace of zero and is the setting at a pace of 0.5,
+    // and neither number answers that on its own.
+    CHECK(running->source_paced_by == 0.0);
+
+    REQUIRE(harness.stop_engine().has_value());
+}
+
+TEST_CASE("a deliberately paced source reports the pace it was given", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{.pace = 0.5});
+
+    auto info = harness.client().info();
+    REQUIRE(info.has_value());
+
+    // Read before the run and still correct, because this is configuration
+    // rather than measurement. A client can therefore grey out its own
+    // "source is behind" indicator before a single block has arrived.
+    CHECK(info->source_paced_by == 0.5);
+}

@@ -323,8 +323,7 @@ struct EngineInfo {
     // geometry arrives on each frame rather than here.
     std::uint32_t passband_transform = 0;
 
-    // What the source's baseband DC corresponds to in real radio frequency,
-    // read once when the source was opened.
+    // What the source's baseband DC corresponds to in real radio frequency.
     //
     // Every frequency in VrxParams is an offset from baseband DC, because
     // that is the only frame the grid has. A person tunes in absolute hertz,
@@ -333,7 +332,89 @@ struct EngineInfo {
     // reimplementing each backend's grammar to do it. Zero for a source whose
     // baseband is not a translation of anything, which is what a synthetic
     // scene with no declared centre is.
+    //
+    // IT MOVES. Engine::set_source_center writes what the device landed on
+    // back here, so a caller that cached this across a retune is holding a
+    // constant that no longer relates the two frames. Read it beside the
+    // frequency it is being added to rather than once at startup.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "read once when the source was opened",
+    // with core/engine/engine.cpp adding that a snapshot was "the whole
+    // truth for the life of the engine" because the engine had no tune call.
+    // It has one as of 2026-09-20 and both have been corrected. Anything
+    // written against the old reading is a client that draws every label and
+    // every detection a retune's worth of hertz out, on a display where
+    // nothing else looks wrong.
     dsp::Hertz source_center = 0;
+};
+
+// Whether the front end can be pointed somewhere else, and where.
+//
+// ONE RANGE AND NOT THE DEVICE'S LIST, WHICH IS AN ENVELOPE AND NOT A
+// PROMISE. An E4000 reaches 52 to 2200 MHz with a gap in the middle, and
+// this reports the outer pair. A frequency inside a gap is still refused, by
+// the source and in the source's own words, so the honest reading of this
+// struct is "outside this, do not bother asking" rather than "inside this,
+// it will work". It exists so a client can grey out a control it could never
+// use, which is the case where a refusal is not good enough because the
+// operator has to discover it by trying.
+struct SourceTuning {
+    // False for every file and every synthetic scene. Their centre is a
+    // property of bytes already written rather than a setting, and
+    // Engine::set_source_center answers with the source's own sentence
+    // saying so.
+    bool can_retune = false;
+
+    dsp::Hertz low = 0;
+    dsp::Hertz high = 0;
+};
+
+// How fast capture is arriving, against the wall clock.
+//
+// THE DIAGNOSIS NOBODY COULD MAKE FROM OUTSIDE THE PROCESS. A synthetic
+// source asked for 20 MS/s on this host generates about 0.20 of realtime, so
+// every stage downstream starves and a listener hears audio in fragments.
+// What a client could see was an audio queue that kept running dry, which is
+// true about the queue and points at the wrong component: the ring is not
+// starving because the wire is slow, it is starving because the source never
+// produced the samples.
+//
+// The number existed before this struct did, in revenant-engine's own status
+// line as "x 0.20", printed to a terminal a GUI operator never sees.
+struct SourcePacing {
+    // Capture seconds delivered per wall second. 1.0 is realtime, above 1.0
+    // is a recording being replayed faster than it was made, and below 1.0
+    // is the source falling behind.
+    //
+    // ZERO MEANS NOT MEASURED, which is a third state and not a stalled
+    // source. Nothing has been measured until the stream has started and at
+    // least one block has been delivered, so zero is what info() answers
+    // between open_source and run(). A source that has genuinely stopped
+    // producing reports a factor that decays towards zero without reaching
+    // it, because the elapsed time keeps growing while the sample count does
+    // not.
+    double realtime_factor = 0.0;
+
+    // EngineConfig::pace, echoed. Zero is unthrottled.
+    //
+    // CARRIED BESIDE THE MEASUREMENT BECAUSE THE MEASUREMENT ALONE CANNOT
+    // TELL A FAULT FROM A SETTING. A factor of 0.5 is a source that cannot
+    // keep up when this is zero and is exactly what was asked for when this
+    // is 0.5. Reporting one without the other invites a client to raise an
+    // alarm about a deliberate half-speed replay.
+    double paced_by = 0.0;
+
+    // True for a source whose consumer sets the rate, which is every file
+    // and every synthetic scene. A Paced source runs on the device's own
+    // clock and ignores paced_by entirely, so a factor below one there is
+    // the ring refusing samples rather than the source being slow.
+    bool demand = false;
+
+    // What the factor was computed from, so a client can say how long it has
+    // been averaging over rather than presenting a lifetime mean as an
+    // instantaneous reading. Both are since run() started.
+    double elapsed_seconds = 0.0;
+    dsp::SampleIndex samples_delivered = 0;
 };
 
 // One receiver's audio, handed to the caller on the host.
@@ -844,6 +925,79 @@ public:
     [[nodiscard]] virtual const source::SourceCapabilities& source_capabilities() const = 0;
 
     [[nodiscard]] virtual const EngineInfo& info() const = 0;
+
+    // Where the front end can be pointed, and whether it can be pointed at
+    // all. Everything false and zero before a source is open.
+    [[nodiscard]] virtual SourceTuning source_tuning() const = 0;
+
+    // Points the front end somewhere else, and answers with the centre the
+    // device actually took, which a synthesiser with a tuning step will
+    // round.
+    //
+    // WHY THIS IS A SMALL CHANGE, WHICH IS THE PART THAT IS NOT OBVIOUS
+    //
+    // The channelizer, every receiver and the whole of the spectrum stage
+    // work in the source's baseband frame and are never told where the front
+    // end is pointed. engine::place is handed the grid, the rate and the
+    // request; core/engine/vrx.h says in as many words that no build of this
+    // engine has ever rebased a receiver's centre. So a retune moves two
+    // things and no more: the device's own oscillator, and the constant in
+    // EngineInfo::source_center that relates baseband to real radio
+    // frequency.
+    //
+    // WHAT IS DELIBERATELY NOT RESET, AND WHY THE RING IS THE EASY ONE
+    //
+    // The ring holds samples captured at the old centre and nothing is done
+    // about them. It is a streaming window and not a cache: the only thing
+    // that reads behind the write cursor is the channelizer's own filter
+    // support, so the stale samples are bounded by the prototype length plus
+    // one block and are gone within a dispatch. Discarding them instead
+    // would mean moving the write cursor, and the absolute sample index is
+    // what every chunk, frame, recording and counter in this engine is
+    // correlated against, so a retune that renumbered the stream would break
+    // a correlation to avoid a transient of tens of milliseconds.
+    //
+    // The spectrum's colour map is not reset either. It tracks percentiles
+    // over about thirty seconds, expands in a frame or two and contracts
+    // over the thirty, so a retune from a busy band to a quiet one leaves
+    // the ceiling high for a while. That is visible, self-correcting, and
+    // the same behaviour docs/ui-spectrum.md already describes for a signal
+    // that stops; a reset here would instead make the two ends jump on a
+    // band that had not changed, whenever a retune was small.
+    //
+    // WHAT IS RESET, AND IT IS NOT THE SAMPLES
+    //
+    // Every receiver's tuning epoch. Nothing about a receiver's placement
+    // moves, but every sample it produces after the boundary came from a
+    // different front-end centre, and AudioChunk::tuning_epoch is exactly
+    // the marker a consumer that accumulates state about the transmitter it
+    // is hearing waits for. So this re-queues each receiver's own params,
+    // unchanged, which moves that receiver's epoch through the one path the
+    // graph already applies at a block boundary. The alternative was a
+    // second, source-level epoch beside it, which would leave a consumer
+    // having to watch two numbers to answer one question.
+    //
+    // Re-applying identical params is not a no-op and is not a refusal:
+    // set_vrx_params refuses a change of SHAPE, and identical params are not
+    // one, so the op is applied in place and GraphStats::vrx_retune_refusals
+    // stays at zero. A receiver added between the tune and this pass is
+    // already on the new centre and misses the epoch bump, which is correct.
+    //
+    // What this does NOT reset is anything above the engine. The wideband
+    // detector holds tracks measured against the old centre and the RDS
+    // decoders hold one station's text each; both live in
+    // core/rpc/server.cpp, which drops them when this call returns.
+    //
+    // Refused, in the SOURCE's own words, on a source that cannot retune,
+    // which is every file and every synthetic scene. Their sentence says
+    // what to do instead, which is to reopen the URI, and a generic refusal
+    // here would replace advice with a category.
+    [[nodiscard]] virtual Expected<dsp::Hertz> set_source_center(dsp::Hertz center) = 0;
+
+    // How fast capture is arriving against the wall clock, and what was
+    // asked for. See SourcePacing: the pair is what separates a source that
+    // cannot keep up from one that was deliberately throttled.
+    [[nodiscard]] virtual SourcePacing source_pacing() const = 0;
 
     // Adding a receiver must not rebuild the coarse stage, and nothing in
     // VrxParams appears in GridParams, so it cannot.

@@ -278,6 +278,13 @@ struct PromiseValue<kj::Promise<T>> {
     // something other than what was asked for and no way to find out.
     out.ring_clamped = in.getRingClamped();
     out.ring_clamp_reason = read_text(in.getRingClampReason());
+
+    // Read together and shown together. A factor of 0.5 is a source that
+    // cannot keep up when the pace is zero and is exactly what was asked
+    // for when the pace is 0.5, so a client that draws one without the
+    // other raises an alarm on every deliberate half-speed replay.
+    out.realtime_factor = in.getRealtimeFactor();
+    out.source_paced_by = in.getSourcePacedBy();
     return out;
 }
 
@@ -807,6 +814,9 @@ public:
     [[nodiscard]] Expected<std::vector<SourceDescriptor>> list_sources() override;
     [[nodiscard]] Expected<SourceStats> source_stats() override;
 
+    [[nodiscard]] Expected<std::int64_t> set_source_center(std::int64_t center_hz) override;
+    [[nodiscard]] Expected<SourceTuning> source_can_retune() override;
+
     [[nodiscard]] Expected<std::uint64_t> add_vrx(const VrxParams& params) override;
     [[nodiscard]] Status remove_vrx(std::uint64_t id) override;
     [[nodiscard]] Status set_vrx_params(std::uint64_t id, const VrxParams& params) override;
@@ -1184,6 +1194,27 @@ Expected<SourceStats> ClientImpl::source_stats() {
     return on_loop("source_stats", [](LoopState& state) {
         return state.session.sourceStatsRequest().send().then(
             [](auto&& response) { return read_source_stats(response.getStats()); });
+    });
+}
+
+Expected<std::int64_t> ClientImpl::set_source_center(std::int64_t center_hz) {
+    return on_loop("set_source_center", [center_hz](LoopState& state) {
+        auto request = state.session.setSourceCenterRequest();
+        request.setCenterHz(center_hz);
+        return request.send().then(
+            [](auto&& response) { return response.getGrantedHz(); });
+    });
+}
+
+Expected<SourceTuning> ClientImpl::source_can_retune() {
+    return on_loop("source_can_retune", [](LoopState& state) {
+        return state.session.sourceCanRetuneRequest().send().then([](auto&& response) {
+            SourceTuning out;
+            out.can_retune = response.getCanRetune();
+            out.low_hz = response.getLowHz();
+            out.high_hz = response.getHighHz();
+            return out;
+        });
     });
 }
 

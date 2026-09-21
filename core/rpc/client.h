@@ -92,6 +92,45 @@ public:
     [[nodiscard]] virtual Expected<std::vector<SourceDescriptor>> list_sources() = 0;
     [[nodiscard]] virtual Expected<SourceStats> source_stats() = 0;
 
+    // Points the front end somewhere else, and answers with the centre the
+    // device actually took, which a synthesiser with a tuning step will
+    // round.
+    //
+    // THE RECEIVERS SURVIVE, AND SO DOES EVERYTHING ELSE. Until this
+    // existed, changing band meant restarting the engine process, which
+    // took the operator's receivers, the waterfall's history and the audio
+    // with it. Nothing here is torn down: a receiver's centre is a baseband
+    // offset, the grid does not know where the front end is pointed, and
+    // every subscription keeps running.
+    //
+    // WHICH IS ALSO THE TRAP. A receiver stays where it is in baseband and
+    // is therefore now hearing a different piece of spectrum. A client with
+    // receivers open across a retune has to decide what it meant by each
+    // one and move it, and this call will not do that for it: there is no
+    // reading of "keep this receiver on 145.1 MHz" that is right for every
+    // client, and one imposed here would be wrong for a scanner.
+    //
+    // EVERY ABSOLUTE FREQUENCY THIS CLIENT IS HOLDING IS STALE WHEN THIS
+    // RETURNS. Call info() again and use the new source_center rather than
+    // adding the delta: the answer here is where the device landed, which
+    // is not always what was asked for. A Detection's center_hz is
+    // absolute and belongs to the band that was left; the detector is
+    // rebuilt server-side, so poll detections again rather than diffing.
+    // RDS decoders are cleared for the same reason.
+    //
+    // Refused, in the SOURCE's own words, on a source that cannot retune,
+    // which is every file and every synthetic scene. The three backends say
+    // three different things to do instead. Ask source_can_retune first and
+    // grey the control out rather than offering one that always refuses.
+    [[nodiscard]] virtual Expected<std::int64_t> set_source_center(std::int64_t center_hz) = 0;
+
+    // Whether the call above will work, and over what range.
+    //
+    // The range is an ENVELOPE and not a promise: a device with a gap in
+    // its coverage reports the outer bounds and still refuses a frequency
+    // inside the gap. Outside it, do not bother asking.
+    [[nodiscard]] virtual Expected<SourceTuning> source_can_retune() = 0;
+
     [[nodiscard]] virtual Expected<std::uint64_t> add_vrx(const VrxParams& params) = 0;
     [[nodiscard]] virtual Status remove_vrx(std::uint64_t id) = 0;
     [[nodiscard]] virtual Status set_vrx_params(std::uint64_t id, const VrxParams& params) = 0;

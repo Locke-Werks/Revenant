@@ -78,7 +78,14 @@ struct EngineInfo {
     std::uint32_t channel_rate = 0;
     std::int64_t channel_spacing = 0;
     SpectrumGeometry spectrum;
+
+    // Baseband DC in real radio frequency. IT MOVES: set_source_center
+    // retunes the front end and this follows, so a client that cached it at
+    // connect draws every absolute frequency a retune's worth of hertz out.
+    // Read it again after a retune rather than adding the delta, because
+    // the delta asked for is not always the one the device took.
     std::int64_t source_center = 0;
+
     std::uint64_t ring_samples = 0;
     double ring_seconds = 0.0;
 
@@ -87,6 +94,37 @@ struct EngineInfo {
     // because it is the only field in EngineInfo that can carry a sentence.
     bool ring_clamped = false;
     std::string ring_clamp_reason;
+
+    // Capture seconds delivered per wall second, over the whole run. 1.0 is
+    // realtime, above is a replay running faster than the recording was
+    // made, below is the source falling behind. ZERO IS NOT MEASURED,
+    // which is what info() answers before the run starts, and is not a
+    // stalled source.
+    //
+    // Read it with source_paced_by: a factor of 0.5 is a fault when the
+    // pace is zero and is the setting when the pace is 0.5. A client saying
+    // "the audio is starving" from an empty queue is describing the queue
+    // and naming the wrong component; this is what names the right one.
+    double realtime_factor = 0.0;
+
+    // The engine's --pace, as a multiple of realtime. Zero is unthrottled,
+    // and means nothing at all on a live radio, which runs on its own clock.
+    double source_paced_by = 0.0;
+};
+
+// Whether the front end can be pointed somewhere else, and where.
+//
+// The pair is an ENVELOPE rather than a promise: a device with a gap in its
+// coverage reports the outer bounds and still refuses a frequency inside the
+// gap, in its own words. It exists so a client can grey out a control it
+// could never use, rather than making the operator discover that by trying.
+struct SourceTuning {
+    // False for every file and every synthetic scene, whose centre is a
+    // property of samples already written rather than a setting.
+    bool can_retune = false;
+
+    std::int64_t low_hz = 0;
+    std::int64_t high_hz = 0;
 };
 
 struct SourceDescriptor {

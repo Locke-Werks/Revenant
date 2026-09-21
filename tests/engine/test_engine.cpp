@@ -19,12 +19,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/engine/engine.h"
@@ -758,4 +760,91 @@ TEST_CASE("receivers on several modes run together", "[gpu][engine][m1]") {
     const auto stats = eng.source_stats();
     CHECK(stats.overrun_events == 0);
     CHECK(stats.samples_lost == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Retuning the front end, and the pacing measurement
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a source that cannot retune refuses in its own words", "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    engine::EngineConfig config = default_config();
+
+    auto created = engine::Engine::create(config);
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    // Before a source, there is no front end to point anywhere and the
+    // engine says that rather than dereferencing nothing.
+    auto early = eng.set_source_center(100'000'000);
+    REQUIRE_FALSE(early.has_value());
+    CHECK(early.error().message.find("before a source is open") != std::string::npos);
+    CHECK_FALSE(eng.source_tuning().can_retune);
+
+    REQUIRE(eng.open_source(tone_uri(300'000, 200'000)).has_value());
+
+    const engine::SourceTuning tuning = eng.source_tuning();
+    CHECK_FALSE(tuning.can_retune);
+    CHECK(tuning.low == 0);
+    CHECK(tuning.high == 0);
+
+    auto refused = eng.set_source_center(100'000'000);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+
+    // The synthetic source's own sentence, carried through rather than
+    // replaced. It names what to do instead, and that instruction differs
+    // from the file source's.
+    CHECK(refused.error().message.find("synthetic source cannot tune") != std::string::npos);
+
+    // And nothing moved.
+    CHECK(eng.info().source_center == 0);
+}
+
+TEST_CASE("the realtime factor is measured over the run and frozen when it ends",
+          "[gpu][engine][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    engine::EngineConfig config = default_config();
+    config.pace = 0.0;
+
+    auto created = engine::Engine::create(config);
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+    REQUIRE(eng.open_source(tone_uri(300'000, 240'000)).has_value());
+
+    {
+        const engine::SourcePacing idle = eng.source_pacing();
+
+        // NOT MEASURED, which is a third state. There is no elapsed time to
+        // divide by before run() and a client reading zero as a stalled
+        // source would fault every engine that has not started.
+        CHECK(idle.realtime_factor == 0.0);
+        CHECK(idle.elapsed_seconds == 0.0);
+        CHECK(idle.paced_by == 0.0);
+
+        // A synthetic scene is a demand source, which is what makes an
+        // unthrottled run legitimate rather than a fault. A client needs
+        // this to tell "nobody is holding a stopwatch" from "the radio's
+        // own clock", where a factor below one means something else
+        // entirely.
+        CHECK(idle.demand);
+    }
+
+    REQUIRE(eng.run().has_value());
+
+    const engine::SourcePacing done = eng.source_pacing();
+    INFO("factor " << done.realtime_factor << " over " << done.elapsed_seconds << " s");
+    CHECK(done.realtime_factor > 0.0);
+    CHECK(done.elapsed_seconds > 0.0);
+    CHECK(done.samples_delivered >= 240'000);
+
+    // Frozen at what the run achieved rather than decaying against a clock
+    // that keeps going. A finished replay reading as a dying source is the
+    // failure this pins.
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    const engine::SourcePacing later = eng.source_pacing();
+    CHECK(later.realtime_factor == done.realtime_factor);
+    CHECK(later.elapsed_seconds == done.elapsed_seconds);
 }

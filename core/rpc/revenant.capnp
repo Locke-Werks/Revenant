@@ -225,6 +225,50 @@ struct EngineInfo {
     # that, which is why they are here.
     ringClamped @9 :Bool;
     ringClampReason @10 :Text;
+
+    # Capture seconds delivered per wall second, measured over the whole run.
+    #
+    # THE DIAGNOSIS NOBODY COULD MAKE. A synthetic source asked for 20 MS/s
+    # generates about 0.20 of realtime on the host this was written on, so
+    # every stage downstream starves and audio arrives in fragments. The only
+    # client-visible symptom was an audio queue that kept running dry, which
+    # is true about the queue and names the wrong component: the wire is not
+    # slow, the samples were never produced. The number existed, in the
+    # engine's own status line as "x 0.20", in a terminal a GUI operator
+    # never sees.
+    #
+    # 1.0 is realtime. Above 1.0 is a recording being replayed faster than it
+    # was made, which is the ordinary offline case and not a fault. Below 1.0
+    # is the source falling behind, and sourcePacedBy below is what says
+    # whether that was asked for.
+    #
+    # ZERO MEANS NOT MEASURED, which is a third state and not a stalled
+    # source. It is what info() answers between opening the source and
+    # starting the run. A source that has genuinely stopped producing reports
+    # a factor decaying towards zero without arriving, because the elapsed
+    # time keeps growing while the sample count does not.
+    #
+    # A LIFETIME MEAN AND NOT AN INSTANTANEOUS READING, for the reason
+    # RdsHealth gives for carrying no blockErrorRate: it is computed from the
+    # whole run, so a source that struggled for the first ten seconds and has
+    # been fine since reads low forever. A client that wants the rate now
+    # differences two polls against sourceStats' sample count.
+    realtimeFactor @11 :Float64;
+
+    # The --pace setting the engine was started with, as a multiple of
+    # realtime. Zero is unthrottled.
+    #
+    # CARRIED BESIDE THE MEASUREMENT BECAUSE THE MEASUREMENT ALONE CANNOT
+    # TELL A FAULT FROM A SETTING. A realtimeFactor of 0.5 is a source that
+    # cannot keep up when this is zero, and is exactly what was asked for
+    # when this is 0.5. A client that raised an alarm on the factor alone
+    # would raise it on every deliberate half-speed replay.
+    #
+    # Zero on a live radio too, and it means nothing there: a Paced source
+    # runs on its own hardware clock and ignores the setting entirely. On one
+    # of those a factor below 1.0 is the ring refusing samples, which
+    # SourceStats::overrunEvents counts.
+    sourcePacedBy @12 :Float64;
 }
 
 struct SourceDescriptor {
@@ -1961,4 +2005,75 @@ interface Session {
     # It is already creating a dedicated one to reach 171000, so this asks
     # for nothing it was not already doing.
     setRdsRegion @15 (vrx :UInt64, region :RdsRegion) -> ();
+
+    # Points the front end somewhere else, and answers with the centre the
+    # source actually took, which a synthesiser with a tuning step will
+    # round.
+    #
+    # THE BIGGEST USABILITY GAP THIS SURFACE HAD. Until 2026-09-20 the
+    # source's centre was fixed by the engine's command line at launch, so
+    # every change of band was a process restart: the operator's receivers,
+    # the waterfall's history and the audio all went with it. That was
+    # tolerable while the only source was a file, whose centre genuinely is
+    # a property of bytes on disk, and stopped being tolerable the first
+    # time a real radio was on the other end.
+    #
+    # WHAT MOVES, AND IT IS A SHORT LIST. The channelizer, every receiver
+    # and the whole spectrum stage work in the source's baseband frame and
+    # are never told where the front end is pointed, so nothing about a
+    # receiver's placement, filter, audio stream or subscription changes. A
+    # receiver sitting at baseband +300 kHz is still at +300 kHz and is now
+    # hearing a different piece of spectrum. What moves is the device's own
+    # oscillator and EngineInfo::sourceCenter.
+    #
+    # WHICH MEANS EVERY ABSOLUTE FREQUENCY A CLIENT IS HOLDING IS STALE, and
+    # that is the trap. VrxParams::center is baseband and survives; a
+    # Detection's centerHz is absolute and does not; a label a client
+    # computed by adding sourceCenter to a bin is wrong by the retune. Read
+    # info() again after this returns rather than adding the delta, because
+    # the delta is not what was asked for: the answer here is where the
+    # device landed.
+    #
+    # WHAT THE ENGINE DOES NOT DO. The device ring still holds samples
+    # captured at the old centre, and they are left alone: it is a streaming
+    # window rather than a cache, nothing reads behind the write cursor but
+    # the channelizer's own filter support, and renumbering the stream to
+    # discard them would break the absolute sample index every chunk, frame
+    # and recording is correlated against, to avoid a transient of tens of
+    # milliseconds. The spectrum's colour map is not reset either: it tracks
+    # percentiles over about thirty seconds and recovers on its own, where a
+    # reset would make both ends jump after every small retune.
+    #
+    # WHAT THE SERVER DOES DO, BECAUSE IT WOULD OTHERWISE PUBLISH ONE BAND'S
+    # MEASUREMENTS UNDER ANOTHER'S NAME. The wideband detector is dropped,
+    # so the next detections call rebuilds it at the new centre with no
+    # tracks; every track it held was measured against the old constant and
+    # describes a band that is no longer there. Every RDS decoder is cleared
+    # and fenced exactly as setVrxParams clears it, because each receiver is
+    # now pointed at a different transmitter and PS, RadioText and the AF
+    # list belong to the one it left.
+    #
+    # REFUSED, IN THE SOURCE'S OWN WORDS, on a source that cannot retune,
+    # which is every file and every synthetic scene. Each of them says what
+    # to do instead and the three answers differ: reopen the URI with
+    # another center=, or move the emitters with span_low and span_high, or
+    # pick a frequency the dongle reaches. A refusal composed here would
+    # replace all three with a category. Call sourceCanRetune first and grey
+    # the control out rather than offering one that always refuses.
+    setSourceCenter @16 (centerHz :Int64) -> (grantedHz :Int64);
+
+    # Whether the surface above will work, and the range it will work over.
+    #
+    # ONE RANGE AND NOT THE DEVICE'S LIST, WHICH MAKES IT AN ENVELOPE AND
+    # NOT A PROMISE. An E4000 reaches 52 to 2200 MHz with a gap in the
+    # middle, and this reports the outer pair. A frequency inside the gap is
+    # still refused, by the source and in the source's own words. The honest
+    # reading is "outside this, do not bother asking".
+    #
+    # canRetune false comes with lowHz and highHz at zero, and a client
+    # greys the control out rather than discovering the refusal by making
+    # the operator try. That is the whole reason this exists beside a call
+    # that already refuses cleanly: a refusal is the right answer to a
+    # request, and a control that can never work should not be offered.
+    sourceCanRetune @17 () -> (canRetune :Bool, lowHz :Int64, highHz :Int64);
 }

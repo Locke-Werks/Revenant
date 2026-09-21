@@ -202,7 +202,8 @@ void write_spectrum_geometry(schema::SpectrumGeometry::Builder out,
     write_rational(out.initBinZero(), in.bin_zero_numerator, in.bin_zero_denominator);
 }
 
-void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo& in) {
+void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo& in,
+                       const engine::SourcePacing& pacing) {
     write_device(out.initDevice(), in.device);
     write_grid(out.initGrid(), in.grid);
     out.setSourceRate(to_wire_rate(in.source_rate));
@@ -214,6 +215,8 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
     out.setRingSeconds(in.ring.seconds_retained);
     out.setRingClamped(in.ring.clamped);
     out.setRingClampReason(in.ring.clamp_reason);
+    out.setRealtimeFactor(pacing.realtime_factor);
+    out.setSourcePacedBy(pacing.paced_by);
 }
 
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in) {
