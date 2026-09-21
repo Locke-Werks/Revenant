@@ -670,10 +670,25 @@ TEST_CASE("subscribing again replaces the first subscription", "[gpu][rpc][spect
 
     // A window with frames in it, so nothing below passes because the engine
     // had already finished.
+    //
+    // SIXTEEN, AND IT USED TO BE THIRTY-TWO, WHICH NO DEBUG BUILD REACHES. The
+    // 73 frames in the kReadSlack note above were measured in RelWithDebInfo.
+    // The dev preset is Debug and the same window holds 30 on the same 4090, so
+    // a floor of 32 failed every Debug run of this case by two frames while CI
+    // reported it green.
+    //
+    // Sixteen rather than a second number under NDEBUG, because unlike the cost
+    // ceiling in test_rpc_rds.cpp this floor is not a budget and does not have
+    // to track the build. What it guards is that the window was not empty and
+    // the engine was still producing, and the assertion it protects bites from
+    // three frames upward: a second live subscription roughly doubles `sent`,
+    // so `sent <= engine_frames + 2` fails for any engine_frames above two.
+    // Sixteen is clear of that by five times and clear of both builds'
+    // measurements by a wide margin in the other direction.
     INFO(std::format("{} engine frames over {} ms, {} deliveries, {} records",
                      engine_frames, kWindow.count(), sent,
                      closing.size() - opening.size()));
-    REQUIRE(engine_frames >= 32);
+    REQUIRE(engine_frames >= 16);
     REQUIRE(sent > 0);
 
     CHECK(sent <= engine_frames + kReadSlack);

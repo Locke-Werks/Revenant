@@ -117,6 +117,7 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <optional>
 #include <random>
 #include <span>
 #include <string>
@@ -455,7 +456,33 @@ public:
         }
 
         std::mt19937_64 generator(kNoiseSeed);
-        std::normal_distribution<double> gaussian(0.0, noise_sigma);
+
+        // OPTIONAL BECAUSE A SIGMA OF ZERO IS INVALID AT CONSTRUCTION AND NOT
+        // AT USE, AND EVERY CASE HERE BUT ONE ASKS FOR ZERO
+        //
+        // [rand.dist.norm.normal] requires 0 < stddev. The guard below reads as
+        // though it were enough, and it is not: the distribution was built
+        // before it, so a sigma of zero tripped MSVC's Debug <random>
+        // assertion, "invalid sigma argument for normal_distribution", and
+        // __fastfail took the process with 0xc0000409 before a single
+        // expectation ran. Eleven of this fixture's twelve callers pass 0.0, so
+        // that was eleven of the twelve RDS cases in this file crashing rather
+        // than failing.
+        //
+        // IT WAS INVISIBLE IN CI, WHICH IS THE PART WORTH REMEMBERING. Those
+        // assertions are a Debug build's, CI builds the ci preset, and
+        // RelWithDebInfo constructs the same invalid distribution in silence
+        // and never uses it. So the suite reported 0 failures while a Debug run
+        // could not get through the file at all.
+        //
+        // Hoisted out of the loop rather than constructed inside the guard,
+        // because normal_distribution caches its second Box-Muller value:
+        // rebuilding it per block would discard that cache at every boundary
+        // and change the noise the one noisy case renders.
+        std::optional<std::normal_distribution<double>> gaussian;
+        if (noise_sigma > 0.0) {
+            gaussian.emplace(0.0, noise_sigma);
+        }
 
         constexpr std::size_t kBlock = 65'536;
         std::vector<dsp::Complex32> block(kBlock);
@@ -465,10 +492,10 @@ public:
             const std::span<dsp::Complex32> piece(block.data(), count);
             modulator->render(at, piece);
 
-            if (noise_sigma > 0.0) {
+            if (gaussian.has_value()) {
                 for (dsp::Complex32& sample : piece) {
-                    sample += dsp::Complex32(static_cast<float>(gaussian(generator)),
-                                             static_cast<float>(gaussian(generator)));
+                    sample += dsp::Complex32(static_cast<float>((*gaussian)(generator)),
+                                             static_cast<float>((*gaussian)(generator)));
                 }
             }
 
@@ -1835,5 +1862,24 @@ TEST_CASE("one RDS decoder's cost per second of composite is measured", "[rds][c
     // that: far enough above to survive a busy machine or a slower one, and
     // far enough below a whole core that crossing it means the arithmetic
     // changed rather than that the run was unlucky.
+    //
+    // TWO CEILINGS, BECAUSE ONE NUMBER CANNOT SERVE TWO BUILDS. The 12.07 ms
+    // above was measured in RelWithDebInfo, which is what CI builds and what
+    // ships. The dev preset is Debug: no inlining, checked iterators, and the
+    // same decode measures 78.5 ms on the 4090 machine, so the forty here
+    // failed every Debug run while CI reported the suite green. That is the
+    // worse way round, because the preset a person runs all day was the one
+    // that cried wolf.
+    //
+    // The ceiling this case exists to enforce is an order of magnitude and its
+    // own header says so: a decoder costing a whole core per receiver, which is
+    // 1000 ms per second of composite, would change where this code can run.
+    // Three hundred keeps that guard intact in a Debug build while leaving the
+    // same roughly fourfold headroom over the measurement that forty leaves
+    // over 12.07. A regression that matters clears either.
+#ifdef NDEBUG
     CHECK(per_second < 40.0);
+#else
+    CHECK(per_second < 300.0);
+#endif
 }
