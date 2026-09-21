@@ -52,6 +52,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -62,6 +63,11 @@
 #include "core/error.h"
 
 namespace revenant::decode {
+
+// StationState::rt_terminator when no 0x0D has been received in the message
+// being assembled. Not std::string_view::npos spelled out at each use, so the
+// "has one arrived" question reads the same everywhere it is asked.
+inline constexpr std::size_t kNoRtTerminator = static_cast<std::size_t>(-1);
 
 // ---------------------------------------------------------------------------
 // Region
@@ -527,9 +533,18 @@ struct StationState {
     // 32 characters over 16 two-character segments in type 2B. rt_length is
     // the position of the 0x0D terminator when one has arrived, or the highest
     // character index received plus one when it has not.
+    //
+    // The terminator and the high-water mark are both properties of the
+    // MESSAGE, and a message arrives over as many as sixteen groups, so
+    // neither can be worked out from the group in hand. rt_terminator is
+    // kNoRtTerminator until a 0x0D has been received; rt_high_water is the
+    // highest index written plus one, which rt_length falls back to and which
+    // survives a terminator arriving in front of it.
     std::array<char, 64> rt{};
     std::uint32_t rt_received = 0;  // one bit per segment address 0..15
     std::size_t rt_length = 0;
+    std::size_t rt_terminator = kNoRtTerminator;
+    std::size_t rt_high_water = 0;
     bool rt_ab = false;
     bool rt_ab_valid = false;
     bool rt_version_b = false;  // which of 2A and 2B is carrying it

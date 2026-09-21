@@ -1268,6 +1268,8 @@ void RdsDecoder::apply_type2(const Group& group) {
         state_.rt.fill('\0');
         state_.rt_received = 0;
         state_.rt_length = 0;
+        state_.rt_terminator = kNoRtTerminator;
+        state_.rt_high_water = 0;
     }
     state_.rt_ab = ab;
     state_.rt_ab_valid = true;
@@ -1276,22 +1278,12 @@ void RdsDecoder::apply_type2(const Group& group) {
     const std::size_t chars = group.version_b ? 2u : 4u;
     const std::size_t base = address * chars;
 
-    std::size_t written_end = 0;
-    std::size_t terminator = std::string_view::npos;
     auto put = [&](std::size_t index, char c) {
         if (index >= state_.rt.size()) {
             return;
         }
         state_.rt[index] = c;
-        // 0x0D terminates a message shorter than the full 16 segments. 0x0A is
-        // a preferred line break and 0x0B and 0x1F are an end-of-headline and
-        // a soft hyphen that NRSC-4-B section 6.1.5.3 adds with a note that at
-        // least one RDS IC vendor does not support them. None of the three
-        // ends the message, so only 0x0D is treated as a terminator.
-        if (c == '\r' && terminator == std::string_view::npos) {
-            terminator = index;
-        }
-        written_end = std::max(written_end, index + 1);
+        state_.rt_high_water = std::max(state_.rt_high_water, index + 1);
     };
 
     bool segment_complete = false;
@@ -1317,11 +1309,39 @@ void RdsDecoder::apply_type2(const Group& group) {
         state_.rt_received |= 1u << address;
     }
 
-    if (terminator != std::string_view::npos) {
-        state_.rt_length = terminator;
-    } else {
-        state_.rt_length = std::max(state_.rt_length, written_end);
+    // THE TERMINATOR BELONGS TO THE MESSAGE, NOT TO THE GROUP.
+    //
+    // 0x0D ends a message shorter than the full sixteen segments. 0x0A is a
+    // preferred line break and 0x0B and 0x1F are an end-of-headline and a
+    // soft hyphen that NRSC-4-B section 6.1.5.3 adds with a note that at
+    // least one RDS IC vendor does not support them. None of the three ends
+    // the message, so only 0x0D is looked for.
+    //
+    // WHAT THIS USED TO DO: look for 0x0D among the two or four characters
+    // THIS group carried, and fall back to max(rt_length, this group's
+    // highest index plus one) when it found none. A terminator that arrived
+    // in an earlier group was then forgotten the moment any later segment
+    // landed behind it, and rt_length grew past it. That publishes the 0x0D
+    // and whatever follows it as message text, and it breaks the invariant
+    // core/rpc/revenant.capnp states for rtLength on the wire, which clients
+    // are told they can rely on because the terminator is inside the payload
+    // and they cannot tell an unreceived NUL from a short message.
+    //
+    // Found by scanning the buffer rather than kept incrementally, because a
+    // segment can be overwritten: same A/B flag, a shorter message, and the
+    // group carrying the 0x0D is rewritten with ordinary characters. An
+    // incremental terminator would then have to be invalidated and the
+    // buffer rescanned anyway, and there can be a second 0x0D behind the
+    // first. Sixty-four bytes at most every 87.6 ms.
+    state_.rt_terminator = kNoRtTerminator;
+    for (std::size_t i = 0; i < state_.rt_high_water; ++i) {
+        if (state_.rt[i] == '\r') {
+            state_.rt_terminator = i;
+            break;
+        }
     }
+    state_.rt_length =
+        state_.rt_terminator == kNoRtTerminator ? state_.rt_high_water : state_.rt_terminator;
 }
 
 void RdsDecoder::apply_type3a(const Group& group) {

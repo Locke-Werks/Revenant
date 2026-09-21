@@ -1966,6 +1966,53 @@ TEST_CASE("only 0x0D ends a RadioText message", "[rds]") {
     CHECK(decoder.state().rt_text() == std::string_view("AB\x0A" "CD\x0B" "E\x1F" "FG", 10));
 }
 
+// A message is assembled from up to sixteen groups, so its terminator arrives
+// in whichever one carries it and every group after that is a separate call.
+// The decoder used to look for 0x0D among the two or four characters the
+// group in hand carried and fall back to the highest index written otherwise,
+// which forgot a terminator the moment any later segment landed behind it.
+//
+// The wire schema is the reason this is more than untidy. rtLength in
+// core/rpc/revenant.capnp is documented as the position of the terminator
+// once one has arrived, and clients are told to rely on it because the
+// terminator is inside the payload and they cannot tell an unreceived NUL
+// from a short message. A length past the terminator publishes the 0x0D and
+// whatever is behind it as message text.
+TEST_CASE("a segment arriving behind the 0x0D does not lengthen the message", "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+
+    auto send_2a = [&](std::uint8_t address, const char* four) {
+        const std::uint16_t b2 = static_cast<std::uint16_t>((2u << 12) | (address & 0x0Fu));
+        feed_group(decoder, GroupWords{0x2345, b2, chars_to_word(four[0], four[1]),
+                                       chars_to_word(four[2], four[3]), false});
+    };
+
+    send_2a(0, "SHOR");
+    send_2a(1, "T\r  ");
+    CHECK(decoder.state().rt_terminator == 5);
+    CHECK(decoder.state().rt_length == 5);
+    CHECK(decoder.state().rt_text() == "SHORT");
+
+    // Segment 5, characters 20 to 23, with the A/B flag unchanged, so clause
+    // 3.1.5.3 says it overwrites in place rather than clearing. It lands
+    // behind the terminator, so it is not part of this message and cannot
+    // make it longer.
+    send_2a(5, "LATE");
+    CHECK(decoder.state().rt_terminator == 5);
+    CHECK(decoder.state().rt_length == 5);
+    CHECK(decoder.state().rt_text() == "SHORT");
+
+    // And the terminator is held no harder than the character that carries
+    // it. Rewriting the segment it arrived in with ordinary characters ends
+    // the message at the highest index received instead, which is the
+    // segment above and not this group's own end.
+    send_2a(1, "TER!");
+    CHECK(decoder.state().rt_terminator == revenant::decode::kNoRtTerminator);
+    CHECK(decoder.state().rt_length == 24);
+    CHECK(decoder.state().rt_text().substr(0, 8) == "SHORTER!");
+}
+
 TEST_CASE("the AF and EON tables are bounded against a stuck transmitter", "[rds]") {
     SECTION("the alternative frequency list stops at 128") {
         RdsDecoder decoder;
