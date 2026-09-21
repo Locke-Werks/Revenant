@@ -1603,6 +1603,221 @@ TEST_CASE("a transmitter beside one that stopped is not withheld with it", "[det
     // decision, and it is not this rule withholding anything.
 }
 
+// THE BOTTOM OF THE SPAN, which the part test above could not reach at all.
+//
+// The part test splits a run's support into kResidualParts equal parts and
+// asks whether each of them fell. A support narrower than the part count
+// gives one-bin parts, several of them naming the same bin, and that is
+// documented and intended. What was not intended is what the arithmetic did
+// at bin 0: the high edge of a part was computed as
+// first + span*(p+1)/kResidualParts - 1 in uint32, which is first - 1 when
+// the quotient is zero, and at first == 0 that is 0xFFFFFFFF rather than
+// something std::max could pull back up. level_of clamps it to the last bin,
+// so part zero of a narrow candidate at the bottom of the span was the mean
+// over the WHOLE spectrum.
+//
+// That reads as a part that never falls, because a mean over a thousand bins
+// of noise does not move when six of them empty out, so the uniformity test
+// could never pass and the residual rule could never fire. The bug is a rule
+// switched off at one edge of the span and nowhere else, which is the
+// hardest kind to see: the detector goes on publishing a station that
+// stopped, at full confidence, and everything about the output looks like a
+// station that is still transmitting.
+//
+// The case is written as a pair, same emitter at two positions, because a
+// single position measures the rule and not the edge. The bottom one has to
+// behave like the middle one; asserting an absolute suppression time instead
+// would pass the day someone broke the rule in both places.
+//
+// Measured 2026-09-20 with the underflow in place: the emitter at bin 0 kept
+// producing a candidate for 2.68 s after it stopped and kept a published row
+// for 5.59 s, against 0.29 s and 3.20 s for the same emitter mid-span. Two
+// and a half seconds of a station that had stopped, past a 3.0 s hold, at
+// one end of the span only. With it fixed, 0.39 s and 3.30 s.
+TEST_CASE("a narrow candidate at bin zero is measured in parts of itself", "[detect]") {
+    constexpr std::uint64_t kSeed = 7719;
+    INFO("seed " << kSeed);
+
+    // Six bins, under the eight kResidualParts wants, which is what puts
+    // part zero's quotient at zero and reaches the underflow. Centred so the
+    // emitter occupies bins 0..5 at the edge and 497..502 in the middle.
+    constexpr std::size_t kWidth = 6;
+    constexpr std::size_t kEdgeCentre = 3;
+    constexpr std::size_t kMiddleCentre = 500;
+    constexpr double kSnrDb = 18.0;
+
+    // A wide station at the top of the span that never stops, and the reason
+    // it is here is the arithmetic rather than realism.
+    //
+    // The band the underflow reaches is bin 0 to the last bin, so what the
+    // broken part measures is the mean excess over the WHOLE span. On an
+    // otherwise empty span that mean is mostly the test emitter's own power,
+    // it falls with it, and the broken part passes the uniformity test for
+    // the wrong reason: measured at 30 dB on an empty span, the left and
+    // right columns agreed to within one decision with the underflow still
+    // in place. The bug needs a span whose total excess is not the emitter
+    // under test, which is every real span an operator points a radio at.
+    //
+    // Far enough from both positions that neither the splitter nor growth
+    // can join them: 128 bins of seed at bin 850 reaches 128 bins each way,
+    // which stops at 658 against the middle emitter's 502.
+    constexpr std::size_t kBallastCentre = 850;
+    constexpr std::size_t kBallastWidth = 128;
+    constexpr double kBallastSnrDb = 35.0;
+
+    constexpr double kOnSeconds = 3.0;
+    constexpr double kAfterSeconds = 8.0;
+    constexpr double kDecisionSeconds = 0.1;
+
+    struct Outcome {
+        std::uint32_t narrowest_first_bin = 0xFFFF'FFFFU;
+        std::uint32_t widest_span = 0;
+        std::uint64_t degenerate = 0;
+        double candidate_seconds = 0.0;
+        double published_seconds = 0.0;
+        bool saw_candidate = false;
+    };
+
+    const auto measure = [](std::size_t centre_bin) {
+        Outcome outcome;
+
+        Scene scene(-90.0, kSeed);
+        detect::DetectorConfig config = base_config();
+        config.average_seconds = 1.0;
+        config.decision_interval_seconds = kDecisionSeconds;
+
+        auto made = detect::Detector::create(config, scene.geometry());
+        REQUIRE(made);
+        detect::Detector detector = std::move(*made);
+
+        constexpr Emitter kBallast{.centre_bin = kBallastCentre,
+                                   .width_bins = kBallastWidth,
+                                   .snr_2500_db = kBallastSnrDb};
+        const Emitter emitter{
+            .centre_bin = centre_bin, .width_bins = kWidth, .snr_2500_db = kSnrDb};
+        scene.set({kBallast, emitter});
+        run_for(detector, scene, kOnSeconds);
+
+        const auto first_bin = static_cast<std::uint32_t>(centre_bin - kWidth / 2);
+        const auto last_bin = static_cast<std::uint32_t>(first_bin + kWidth - 1);
+
+        // The geometry the rule will run on, read while the emitter is still
+        // transmitting. This is the half of the case that says the shape is
+        // reachable rather than hypothetical.
+        for (const detect::Candidate& candidate : detector.candidates()) {
+            if (candidate.last_bin < first_bin || candidate.first_bin > last_bin) {
+                continue;
+            }
+            outcome.saw_candidate = true;
+            outcome.narrowest_first_bin =
+                std::min(outcome.narrowest_first_bin, candidate.first_bin);
+            outcome.widest_span =
+                std::max(outcome.widest_span, candidate.last_bin - candidate.first_bin + 1U);
+        }
+
+        const std::uint64_t degenerate_before = detector.stats().residual_parts_degenerate;
+
+        // Only the narrow one stops. The ballast carries on, which is what
+        // keeps the whole-span mean the broken part reads from following the
+        // emitter under test down.
+        scene.set({kBallast});
+
+        std::uint64_t seen_decisions = detector.stats().decisions;
+        const auto frames = static_cast<std::size_t>(std::llround(kAfterSeconds / kFrameSeconds));
+        const double low_hz = static_cast<double>(scene.frequency_of(first_bin));
+        const double high_hz = static_cast<double>(scene.frequency_of(last_bin));
+
+        for (std::size_t i = 0; i < frames; ++i) {
+            auto fed = detector.consume(scene.next());
+            if (!fed) {
+                FAIL("consume refused a frame: " << fed.error().message);
+            }
+            if (detector.stats().decisions == seen_decisions) {
+                continue;
+            }
+            seen_decisions = detector.stats().decisions;
+
+            const double now = static_cast<double>(i + 1) * kFrameSeconds;
+
+            // candidates() is what survived reject_residual, so the last
+            // decision one covers the band is the decision the rule caught
+            // up with the residual. That is the mechanism, measured on this
+            // band and not on the global counter, which a noise crossing
+            // anywhere in the span also increments.
+            for (const detect::Candidate& candidate : detector.candidates()) {
+                if (candidate.last_bin >= first_bin && candidate.first_bin <= last_bin) {
+                    outcome.candidate_seconds = now;
+                    break;
+                }
+            }
+
+            for (const detect::Track& track : detector.tracks()) {
+                const double half = 0.5 * static_cast<double>(track.bandwidth);
+                if (static_cast<double>(track.center) + half >= low_hz &&
+                    static_cast<double>(track.center) - half <= high_hz) {
+                    outcome.published_seconds = now;
+                    break;
+                }
+            }
+        }
+
+        outcome.degenerate = detector.stats().residual_parts_degenerate - degenerate_before;
+        return outcome;
+    };
+
+    const Outcome edge = measure(kEdgeCentre);
+    const Outcome middle = measure(kMiddleCentre);
+
+    std::println("");
+    std::println("a {} bin emitter at {:.0f} dB, stopped, at two positions in the span", kWidth,
+                 kSnrDb);
+    std::println("  at bin 0:  first_bin {}, span {}, {} one-bin part tests, last candidate "
+                 "{:.2f} s after the stop, last published row {:.2f} s",
+                 edge.narrowest_first_bin, edge.widest_span, edge.degenerate,
+                 edge.candidate_seconds, edge.published_seconds);
+    std::println("  mid-span:  first_bin {}, span {}, {} one-bin part tests, last candidate "
+                 "{:.2f} s after the stop, last published row {:.2f} s",
+                 middle.narrowest_first_bin, middle.widest_span, middle.degenerate,
+                 middle.candidate_seconds, middle.published_seconds);
+
+    INFO("edge first_bin " << edge.narrowest_first_bin << " span " << edge.widest_span
+                           << " last candidate " << edge.candidate_seconds << " s published "
+                           << edge.published_seconds << " s");
+    INFO("middle first_bin " << middle.narrowest_first_bin << " span " << middle.widest_span
+                             << " last candidate " << middle.candidate_seconds << " s published "
+                             << middle.published_seconds << " s");
+
+    // The shape exists. A candidate that starts at bin 0 and is narrower than
+    // kResidualParts is what the search hands back for an emitter at the
+    // bottom of the span, so the arithmetic above runs on real input.
+    REQUIRE(edge.saw_candidate);
+    REQUIRE(middle.saw_candidate);
+    CHECK(edge.narrowest_first_bin == 0);
+    CHECK(edge.widest_span < detect::kResidualParts);
+    CHECK(middle.widest_span < detect::kResidualParts);
+
+    // Both are narrower than the part count, so both run the degenerate
+    // one-bin part test and both say so. A count of zero on either side would
+    // mean the case stopped exercising the arithmetic it was written for.
+    CHECK(edge.degenerate > 0);
+    CHECK(middle.degenerate > 0);
+
+    // And the rule reaches the edge. Both columns are compared against each
+    // other rather than against a constant, so the assertion is about the
+    // edge and not about how long the rule takes: a constant would also pass
+    // the day somebody switched the rule off in both places.
+    //
+    // Two decisions of slack on each, because the two positions sit under
+    // different noise and a run can start one decision apart.
+    CHECK(edge.candidate_seconds <= middle.candidate_seconds + 2.0 * kDecisionSeconds);
+    CHECK(edge.published_seconds <= middle.published_seconds + 2.0 * kDecisionSeconds);
+
+    // Neither may still be there when the window closes, or the figures above
+    // are lower bounds and the comparison between them means nothing.
+    CHECK(edge.published_seconds < kAfterSeconds);
+    CHECK(middle.published_seconds < kAfterSeconds);
+}
+
 TEST_CASE("two signals merge into one track and split back into two", "[detect]") {
     constexpr std::uint64_t kSeed = 86420;
     INFO("seed " << kSeed);

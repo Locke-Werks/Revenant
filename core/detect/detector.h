@@ -882,6 +882,25 @@ struct DetectorStats {
     // station that stops once contributes one per decision for the rest of
     // its decay.
     std::uint64_t candidates_residual = 0;
+
+    // Times the residual rule's part test was consulted on a support
+    // narrower than kResidualParts, so its parts are one bin each and
+    // several of them name the same bin.
+    //
+    // Not a fault and not a refusal: the test still runs and still answers.
+    // It is here because the answer is weaker than the one the rule was
+    // measured with and nothing else says so. A part's measured level
+    // carries the averaged spectrum's ripple, which is 0.27 dB on one bin
+    // against 0.10 dB on eight at the shipped second of averaging, and the
+    // shortest run the rule acts on falls about 1.7 dB, so a one-bin part
+    // decides a 0.85 dB question with a third of that in noise on it. A run
+    // of these against a band the operator expected to be suppressed, or
+    // suppressed a band they expected to keep, says the candidate was too
+    // narrow for the test rather than that the rule disagreed with them.
+    //
+    // Counted per candidate per decision, the same as candidates_residual,
+    // so the two are comparable.
+    std::uint64_t residual_parts_degenerate = 0;
 };
 
 class Detector {

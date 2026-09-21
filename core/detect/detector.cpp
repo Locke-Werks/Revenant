@@ -988,11 +988,36 @@ void Detector::reject_residual(double elapsed_seconds) {
     // narrower than the part count gives overlapping one-bin parts rather
     // than empty ones, which measures the same band several times and is
     // harmless; an empty one would divide by zero.
+    //
+    // WHAT THIS PARAGRAPH USED TO LEAVE OUT, and it was the whole of the
+    // edge case. The old form computed the high edge as
+    // first + span*(p+1)/kResidualParts - 1 in uint32 and leaned on
+    // std::max(low, high) to pull a high edge below the low one back up. At
+    // first > 0 that works, because first - 1 is a smaller unsigned than
+    // first. At first == 0 with a span under kResidualParts the subtraction
+    // underflows to 0xFFFFFFFF, std::max KEEPS it, and level_of clamps it to
+    // bins_ - 1: the "part" is then bin 0 to the top of the spectrum, which
+    // is a mean over the whole span and not over any part of this candidate.
+    //
+    // The consequence is the opposite of a missed band. Every decision reads
+    // the same whole-span mean, which barely moves because it is dominated
+    // by thousands of bins of noise, so that part records no fall, the
+    // uniformity test never passes, and a candidate starting at bin 0 and
+    // narrower than kResidualParts can never be withheld as residual. Such a
+    // candidate is reachable: growth runs down to bin 0 and the occupied-band
+    // trim only moves the low edge inwards when the tail carries power, so a
+    // narrow emitter at the bottom of the span produces exactly it.
+    //
+    // Differencing the two offsets before either is added to first keeps
+    // every intermediate at or above the span's own start, so the bound is a
+    // property of the arithmetic rather than of a max() downstream.
     const auto part_of = [&level_of](std::uint32_t first, std::uint32_t last, std::size_t p) {
         const auto span = static_cast<std::uint64_t>(last - first + 1U);
-        const auto low = first + static_cast<std::uint32_t>(span * p / kResidualParts);
-        const auto high = first + static_cast<std::uint32_t>(span * (p + 1) / kResidualParts) - 1U;
-        return level_of(low, std::max(low, high));
+        const auto low_offset = static_cast<std::uint32_t>(span * p / kResidualParts);
+        const auto high_offset = static_cast<std::uint32_t>(span * (p + 1) / kResidualParts);
+        const std::uint32_t last_offset =
+            high_offset > low_offset ? high_offset - 1U : low_offset;
+        return level_of(first + low_offset, first + last_offset);
     };
 
     decaying_next_.clear();
@@ -1115,6 +1140,11 @@ void Detector::reject_residual(double elapsed_seconds) {
                 // hold. The part holding the quiet emitter sees it at once,
                 // because that part never falls at all. See
                 // DetectorConfig::residual_rate_tolerance.
+                if (static_cast<std::size_t>(matched->run_last_bin - matched->run_first_bin) + 1U <
+                    kResidualParts) {
+                    ++stats_.residual_parts_degenerate;
+                }
+
                 bool uniform = true;
                 for (std::size_t p = 0; uniform && p < kResidualParts; ++p) {
                     const double part_fall =
