@@ -591,7 +591,43 @@ Expected<Token> load_or_mint_token(const std::string& path) {
         minted.error().code != ERROR_ALREADY_EXISTS) {
         return minted;
     }
-    return load_token(path);
+
+    // AND UNTIL 2026-09-20 THE LOSER OF THAT RACE COULD NOT READ IT, WHICH
+    // IS THE ONE INTERLEAVING THIS FALL-THROUGH EXISTS FOR.
+    //
+    // write_new_token_file opens with CREATE_NEW and a share mode of zero,
+    // so from engine A's CreateFileW until its CloseHandle the file exists
+    // and nothing else may open it at all. Engine B arriving inside that
+    // window is told ERROR_FILE_EXISTS by its own CREATE_NEW, falls through
+    // to load_token, and load_token's open fails ERROR_SHARING_VIOLATION. B
+    // then refused to start, on exactly the race the comment above says it
+    // handles. The window is one WriteFile of sixty-five bytes wide, narrow
+    // enough that every case in tests/rpc/test_rpc_token.cpp minted
+    // sequentially and never reached it, and wide enough that two services
+    // set to start at logon will.
+    //
+    // THE FIX IS NOT FILE_SHARE_READ ON THE MINT HANDLE. That lets B open
+    // the file in the same window and read what is in it, which between
+    // CreateFileW and WriteFile is nothing: B comes up refusing "the token
+    // is empty" on a file that was a millisecond from being correct, and
+    // the failure moves from loud to silent. The exclusive handle is what
+    // makes the sharing violation the honest answer, so the answer is to
+    // wait for it.
+    //
+    // Bounded, because a sharing violation that is not this race is a real
+    // failure that has to be reported: a backup agent, an antivirus, or an
+    // operator with the file open. Eight attempts with the wait doubling
+    // from a millisecond is 255 ms of waiting in total, hundreds of times
+    // the window and still inside a startup a person is watching.
+    constexpr unsigned kSharingAttempts = 8;
+    auto loaded = load_token(path);
+    for (unsigned attempt = 0; attempt < kSharingAttempts && !loaded &&
+                               loaded.error().code == ERROR_SHARING_VIOLATION;
+         ++attempt) {
+        Sleep(1U << attempt);
+        loaded = load_token(path);
+    }
+    return loaded;
 }
 
 Expected<Token> rotate_token(const std::string& path) {

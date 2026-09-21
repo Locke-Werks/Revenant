@@ -16,7 +16,8 @@
 //       and a second start loads the same bytes.
 //   T2  Two engines racing the same path. CREATE_NEW loses on the second,
 //       which then loads the winner's file. Both serve the same token and
-//       neither fails.
+//       neither fails. Sequential, so it reaches the disposition and not
+//       the interleaving; T13 is the interleaving.
 //   T3  mint over a file that already exists. Refused, and refused
 //       distinguishably from every other failure, because that is the one
 //       refusal load_or_mint_token turns into a load.
@@ -40,6 +41,11 @@
 //   T10 The parent directory does not exist.
 //   T11 Uppercase hex loads. Writing is lowercase.
 //   T12 rotate replaces the bytes, and the file is still private afterwards.
+//   T13 The winner's exclusive handle is STILL OPEN when the loser looks.
+//       The loser waits it out instead of failing the sharing violation,
+//       which is the real shape of T2 and the one that was broken.
+//   T14 A holder that never lets go. The wait is bounded and the sharing
+//       violation arrives as itself.
 //
 // The comparison itself is not a file shape and is tested separately at the
 // bottom: equal, one bit different in the first byte, one bit different in
@@ -58,11 +64,13 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -324,6 +332,13 @@ TEST_CASE("a missing token file is minted, and the next start loads the same byt
 TEST_CASE("two engines racing one token path both serve the winner's token", "[rpc][token]") {
     // T2 and T3. mint is CREATE_NEW, so the loser is told the file exists
     // rather than clobbering a token the winner has already handed out.
+    //
+    // THIS CASE IS NAMED FOR A RACE AND CONTAINS NONE. Both mints here run
+    // to completion before the next call starts, so the winner's handle is
+    // shut by the time the loser looks, and what is certified is the
+    // disposition of CREATE_NEW: a shape that was never in doubt. The
+    // interleaving the name promises is T13 below, and load_or_mint_token
+    // failed it until 2026-09-20.
     const TempDir dir;
     const std::string path = dir.file("rpc-token");
 
@@ -342,6 +357,74 @@ TEST_CASE("two engines racing one token path both serve the winner's token", "[r
     INFO(test::message_of(through));
     REQUIRE(through.has_value());
     CHECK(*through == *winner);
+}
+
+TEST_CASE("a token file still held open by the engine minting it is waited for",
+          "[rpc][token]") {
+    // T13, THE RACE T2 IS NAMED FOR AND DOES NOT REACH.
+    //
+    // write_new_token_file opens CREATE_NEW with a share mode of zero, so
+    // between the winner's CreateFileW and its CloseHandle the file exists
+    // and nothing else may open it at all. The loser's CREATE_NEW is told
+    // ERROR_FILE_EXISTS, which is the invitation to load, and its load then
+    // failed ERROR_SHARING_VIOLATION. Every engine but the first refused to
+    // start, on exactly the interleaving load_or_mint_token exists for.
+    //
+    // Reproduced by minting properly and then RE-OPENING the finished file
+    // exclusively. That puts the loader in the state it is in mid-mint and
+    // leaves the ACL the one a real mint wrote, so the case tests the
+    // sharing window and not the permission check T4 covers.
+    const TempDir dir;
+    const std::string path = dir.file("rpc-token");
+
+    auto winner = rpc::mint_token(path);
+    INFO(test::message_of(winner));
+    REQUIRE(winner.has_value());
+
+    const std::wstring wide = std::filesystem::path(path).wstring();
+    const HANDLE held = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+
+    // Longer than the first three waits together, so the retry is what
+    // carries this rather than the first attempt getting lucky, and far
+    // inside the 255 ms the loop is bounded at.
+    std::thread releaser([held]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        CloseHandle(held);
+    });
+
+    auto loser = rpc::load_or_mint_token(path);
+    releaser.join();
+
+    INFO(test::message_of(loser));
+    REQUIRE(loser.has_value());
+    CHECK(*loser == *winner);
+}
+
+TEST_CASE("a token file held open for good is reported rather than retried forever",
+          "[rpc][token]") {
+    // T14, the control for T13. A sharing violation that is NOT the mint
+    // window is a real failure with a real cause, an operator or a backup
+    // agent holding the file, and it has to arrive as itself. Without this
+    // case an unbounded retry would satisfy T13 and hang a start-up instead
+    // of failing it.
+    const TempDir dir;
+    const std::string path = dir.file("rpc-token");
+    REQUIRE(rpc::mint_token(path).has_value());
+
+    const std::wstring wide = std::filesystem::path(path).wstring();
+    const HANDLE held = CreateFileW(wide.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(held != INVALID_HANDLE_VALUE);
+
+    auto blocked = rpc::load_or_mint_token(path);
+    CloseHandle(held);
+
+    REQUIRE_FALSE(blocked.has_value());
+    INFO(blocked.error().message);
+    CHECK(blocked.error().code == ERROR_SHARING_VIOLATION);
+    CHECK(blocked.error().message.find(path) != std::string::npos);
 }
 
 TEST_CASE("a token file this account cannot read is refused rather than replaced",
