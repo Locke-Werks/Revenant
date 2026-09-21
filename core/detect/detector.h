@@ -568,8 +568,24 @@ struct DetectorConfig {
     // per-decision figure and this is what turns it into a rate.
     std::uint32_t birth_hits = 3;
 
-    // Refuses a birth past this many live tracks, counted rather than
-    // silently ignored.
+    // Refuses a birth past this many tracks IN ANY STATE, counted as
+    // DetectorStats::births_refused rather than silently ignored.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "refuses a birth past this many LIVE
+    // tracks". It is not live ones, and the difference is not small.
+    // update_tracks tests the survivor list it is building, which carries
+    // Pending, Live, Held and Merged, so the bound is reached by a span
+    // whose tracks are all still pending or all being held through a silence
+    // exactly as it is by a span of live ones. tracks() leaves Pending out
+    // altogether, so the published list can be well under this number at the
+    // decision that refuses a birth.
+    //
+    // Counting every state is the right shape, because the bound is on the
+    // allocation and a track of any state costs the same. What was wrong was
+    // the description, which invites sizing this against how many signals
+    // are expected to be transmitting at once. Size it against how many
+    // bands can be in play, including the noise crossings that are born
+    // Pending and discarded a decision later.
     std::uint32_t max_tracks = 512;
 
     // How long a track survives with no evidence at all.

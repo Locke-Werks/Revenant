@@ -1003,11 +1003,26 @@ void Detector::reject_residual(double elapsed_seconds) {
         const Candidate candidate = candidates_[c];
 
         // Matched by bin overlap rather than by identity, because this runs
-        // before anything has one. Largest overlap wins, so when a band comes
-        // apart the run goes to the piece that inherits most of it rather
-        // than to whichever piece the sweep reached first. That is only about
-        // WHICH piece continues the run; what keeps the split itself from
-        // reading as a fall is the fixed measurement band below.
+        // before anything has one.
+        //
+        // WHAT THIS PARAGRAPH USED TO SAY: "Largest overlap wins, so when a
+        // band comes apart the run goes to the piece that inherits most of it
+        // rather than to whichever piece the sweep reached first. That is
+        // only about WHICH piece continues the run."
+        //
+        // It describes the opposite of what the loop does, which matters
+        // because it is the paragraph anyone reads first when a split
+        // residual behaves unexpectedly. The sweep is per CANDIDATE and
+        // nothing marks an entry as taken, so matching is many to one: a band
+        // that comes apart puts all of its pieces on the same entry and all
+        // of them continue the same run, and a split residual is therefore
+        // withheld whole rather than in its largest piece only. Largest
+        // overlap decides the other direction, which entry a candidate takes
+        // when several previous bands overlap it, and that is two bands
+        // merging rather than one coming apart.
+        //
+        // What keeps a split from reading as a fall is the fixed measurement
+        // band below, and that part was right.
         const Decaying* matched = nullptr;
         std::uint32_t best_overlap = 0;
         for (const Decaying& held : decaying_) {
