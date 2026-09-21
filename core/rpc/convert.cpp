@@ -262,12 +262,99 @@ void write_device(schema::DeviceInfo::Builder out, const gpu::DeviceInfo& in) {
     out.setDriverVersion(in.driver_version);
 }
 
+// An enum written by name rather than by cast, on the same ground convert.h
+// gives for every other ordinal in this file: a static_assert pins the two
+// enumerations together and a switch means a value added to one of them without
+// the other fails to compile rather than crossing the wire as a number the far
+// side reads as something else.
+[[nodiscard]] schema::SampleFormat to_schema(source::SampleFormat in) {
+    switch (in) {
+        case source::SampleFormat::Cu8:
+            return schema::SampleFormat::CU8;
+        case source::SampleFormat::Cs8:
+            return schema::SampleFormat::CS8;
+        case source::SampleFormat::Cs16:
+            return schema::SampleFormat::CS16;
+        case source::SampleFormat::Cf32:
+            return schema::SampleFormat::CF32;
+    }
+    return schema::SampleFormat::CF32;
+}
+
+[[nodiscard]] schema::FlowControl to_schema(source::FlowControl in) {
+    switch (in) {
+        case source::FlowControl::Paced:
+            return schema::FlowControl::PACED;
+        case source::FlowControl::Demand:
+            return schema::FlowControl::DEMAND;
+    }
+    return schema::FlowControl::DEMAND;
+}
+
 void write_source_descriptor(schema::SourceDescriptor::Builder out,
                              const source::SourceCapabilities& in) {
     out.setUri(in.uri);
     out.setBackend(in.backend);
     out.setDisplayName(in.display_name);
     out.setUnavailable(in.unavailable);
+
+    auto notes = out.initNotes(static_cast<std::uint32_t>(in.notes.size()));
+    for (std::uint32_t i = 0; i < notes.size(); ++i) {
+        notes.set(i, in.notes[i]);
+    }
+
+    // A RANGE WHOSE HIGH IS BELOW ITS LOW IS DROPPED RATHER THAN CARRIED, which
+    // is the same filter Engine::source_tuning applies for the same reason: a
+    // backend that could not describe its tuner leaves an empty or inverted
+    // entry rather than guessing, and librtlsdr has no driver for a tuner it did
+    // not recognise, so nothing on such a dongle can be tuned at all. Carrying
+    // the inverted pair would offer a client a control that refuses everything.
+    std::uint32_t usable = 0;
+    for (const source::TuneRange& range : in.tune_ranges) {
+        if (range.high >= range.low) {
+            ++usable;
+        }
+    }
+    auto ranges = out.initTuneRanges(usable);
+    std::uint32_t at = 0;
+    for (const source::TuneRange& range : in.tune_ranges) {
+        if (range.high < range.low) {
+            continue;
+        }
+        auto one = ranges[at++];
+        one.setLowHz(range.low);
+        one.setHighHz(range.high);
+        one.setStepHz(range.step);
+    }
+
+    auto rates = out.initSampleRates(static_cast<std::uint32_t>(in.sample_rates.size()));
+    for (std::uint32_t i = 0; i < rates.size(); ++i) {
+        rates.set(i, to_wire_rate(in.sample_rates[i]));
+    }
+    out.setMinRate(to_wire_rate(in.min_rate));
+    out.setMaxRate(to_wire_rate(in.max_rate));
+
+    out.setNativeFormat(to_schema(in.native_format));
+    out.setBitsPerComponent(in.bits_per_component);
+
+    auto stages = out.initGainStages(static_cast<std::uint32_t>(in.gain_stages.size()));
+    for (std::uint32_t i = 0; i < stages.size(); ++i) {
+        const source::GainStage& stage = in.gain_stages[i];
+        auto one = stages[i];
+        one.setName(stage.name);
+        one.setMinDb(stage.min_db);
+        one.setMaxDb(stage.max_db);
+        one.setHasAuto(stage.has_auto);
+
+        auto steps = one.initStepsDb(static_cast<std::uint32_t>(stage.steps_db.size()));
+        for (std::uint32_t step = 0; step < steps.size(); ++step) {
+            steps.set(step, stage.steps_db[step]);
+        }
+    }
+
+    out.setFlow(to_schema(in.flow));
+    out.setSeekable(in.seekable);
+    out.setLengthSamples(in.length_samples);
 }
 
 void write_grid(schema::GridParams::Builder out, const dsp::GridParams& in) {

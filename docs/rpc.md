@@ -1163,10 +1163,54 @@ libusb timeout per absent dongle.
 See "The front end can be pointed somewhere else" above for what a retune
 does and does not move.
 
-**`SourceDescriptor` is four fields of `source::SourceCapabilities`.** The tune
-ranges, the gain stages and the sample format are not on the wire. A picker
+**`SourceDescriptor` carries what a picker configures with.** This entry used to
+read **"`SourceDescriptor` is four fields of `source::SourceCapabilities`. The
+tune ranges, the gain stages and the sample format are not on the wire. A picker
 needs to list what exists before it needs to configure one, and adding fields
-to a schema is the cheap direction.
+to a schema is the cheap direction."** The cheap direction was taken. Listing
+what exists was enough while the source URI was a command-line argument;
+`openSource` made the configuring half reachable, and a client that can open a
+device but cannot be told what the device accepts has to guess or ask the
+operator to type a URI.
+
+On the wire now: the notes, the tune ranges, the discrete rates with the min and
+max, the native format and its bit width, the gain stages with their discrete
+steps and whether each has an auto mode, the flow control, and a recording's
+seekability and length.
+
+Three of those are worth reading the schema's notes on before using them.
+
+**`gainStages` is a list and not a number.** An R820T has one tuner gain with 29
+discrete steps, an Airspy has three separate stages, a file has none. Flattening
+those to a percentage is how a client comes to offer a control the device does
+not have. `stepsDb` empty means continuous and populated means the stage takes
+nothing else, so a client that ignores it shows the operator numbers the device
+never took.
+
+**`sampleRates` empty means continuous between `minRate` and `maxRate`,** and the
+RTL-SDR is neither shape: its rate is a 28.8 MHz clock over an integer, so it is
+discrete and far too dense to list. The backend reports bounds, the device
+rounds, and `configure()` reads back what it landed on.
+
+**`flow` decides how `realtimeFactor` is read,** which is why it is here rather
+than left to a client to infer from the backend name. On a Demand source
+`sourcePacedBy` is the setting that matters and a zero means the source runs as
+fast as the machine retires it; on a Paced source that setting is ignored and a
+factor below 1.0 is the ring refusing samples. Reading the factor without knowing
+which of the two this is names the wrong component, which is the failure the
+field exists to prevent.
+
+Left off deliberately, because nothing reads them: `preferredBlockSamples`, since
+block size is an `EngineConfig` field fixed before this wire exists;
+`clockSources`, since no backend's URI grammar takes one; `timestampAccuracyNs`,
+since nothing displays it; and `ResolutionRequest`, which is real and belongs to
+whichever change teaches the engine to size a transform from it.
+
+An inverted range, high below low, is dropped on the way out rather than carried.
+That is `Engine::source_tuning`'s filter for its reason: a backend that could not
+describe its tuner leaves an inverted entry rather than guessing, librtlsdr has
+no driver for a tuner it did not recognise, and carrying the pair would offer a
+client a control that refuses everything.
 
 **No shared GPU texture handle.** Frames cross by copy, at the cost measured
 above. This is the deferred optimisation, not a gap in correctness.

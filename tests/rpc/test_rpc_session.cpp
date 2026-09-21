@@ -855,7 +855,123 @@ TEST_CASE("the source listing crosses whole, backend for backend", "[gpu][rpc][m
         CHECK((*remote)[i].display_name == (*local)[i].display_name);
         CHECK((*remote)[i].unavailable == (*local)[i].unavailable);
         CHECK((*remote)[i].available() == (*local)[i].available());
+
+        // Everything openSource made worth carrying. A client that can open a
+        // device but cannot be told what the device accepts has to guess, or
+        // ask the operator to type a URI.
+        //
+        // The notes are the ones that would go missing quietly: each is the
+        // answer to "why is this at the wrong frequency" an hour later, and a
+        // listing that dropped them would look complete.
+        CHECK((*remote)[i].notes == (*local)[i].notes);
+
+        CHECK((*remote)[i].min_rate == static_cast<std::uint32_t>((*local)[i].min_rate));
+        CHECK((*remote)[i].max_rate == static_cast<std::uint32_t>((*local)[i].max_rate));
+        REQUIRE((*remote)[i].sample_rates.size() == (*local)[i].sample_rates.size());
+        for (std::size_t rate = 0; rate < (*local)[i].sample_rates.size(); ++rate) {
+            CHECK((*remote)[i].sample_rates[rate] ==
+                  static_cast<std::uint32_t>((*local)[i].sample_rates[rate]));
+        }
+
+        // Ordinal for ordinal, which client.cpp static_asserts in both
+        // directions. Comparing the two casts rather than naming an enumerator
+        // is what makes this a test of the mapping rather than of one value.
+        CHECK(static_cast<std::uint8_t>((*remote)[i].native_format) ==
+              static_cast<std::uint8_t>((*local)[i].native_format));
+        CHECK(static_cast<std::uint8_t>((*remote)[i].flow) ==
+              static_cast<std::uint8_t>((*local)[i].flow));
+        CHECK((*remote)[i].bits_per_component == (*local)[i].bits_per_component);
+        CHECK((*remote)[i].seekable == (*local)[i].seekable);
+        CHECK((*remote)[i].length_samples == (*local)[i].length_samples);
+
+        // AN INVERTED RANGE IS DROPPED ON THE WAY OUT, so the two lists are the
+        // same length only when every local range is usable. That filter is
+        // Engine::source_tuning's, for its reason: a backend that could not
+        // describe its tuner leaves an inverted entry rather than guessing, and
+        // carrying it would offer a client a control that refuses everything.
+        std::size_t usable = 0;
+        for (const source::TuneRange& range : (*local)[i].tune_ranges) {
+            if (range.high >= range.low) {
+                ++usable;
+            }
+        }
+        REQUIRE((*remote)[i].tune_ranges.size() == usable);
+
+        std::size_t at = 0;
+        for (const source::TuneRange& range : (*local)[i].tune_ranges) {
+            if (range.high < range.low) {
+                continue;
+            }
+            CHECK((*remote)[i].tune_ranges[at].low_hz == range.low);
+            CHECK((*remote)[i].tune_ranges[at].high_hz == range.high);
+            CHECK((*remote)[i].tune_ranges[at].step_hz == range.step);
+            ++at;
+        }
+
+        REQUIRE((*remote)[i].gain_stages.size() == (*local)[i].gain_stages.size());
+        for (std::size_t stage = 0; stage < (*local)[i].gain_stages.size(); ++stage) {
+            const source::GainStage& mine = (*local)[i].gain_stages[stage];
+            const rpc::GainStage& theirs = (*remote)[i].gain_stages[stage];
+            INFO("gain stage " << mine.name);
+            CHECK(theirs.name == mine.name);
+            CHECK(theirs.min_db == mine.min_db);
+            CHECK(theirs.max_db == mine.max_db);
+            CHECK(theirs.has_auto == mine.has_auto);
+
+            // The steps are the field a picker cannot do without and the one a
+            // naive mirror drops: an empty list means continuous and a
+            // populated one means the stage takes nothing else, so losing it
+            // turns 29 discrete tuner gains into a slider showing values the
+            // device never took.
+            CHECK(theirs.steps_db == mine.steps_db);
+        }
     }
+
+    // AND AT LEAST ONE ENTRY CARRIES SOMETHING, or the loop above proves
+    // nothing. Every assertion in it compares two structs, so two empty ones
+    // agree: a writer that forgot the tune ranges and a reader that forgot to
+    // read them cancel out, and the case reports as coverage.
+    //
+    // Every backend on every machine says at least this much. The synthetic
+    // scene and the file backend have no tuner and no gain stages, which is
+    // correct and is why neither of those is what this checks, but both state a
+    // rate range and a native format.
+    const bool any_rate = std::ranges::any_of(
+        *remote, [](const rpc::SourceDescriptor& one) { return one.max_rate > 0; });
+    CHECK(any_rate);
+    const bool any_width = std::ranges::any_of(
+        *remote, [](const rpc::SourceDescriptor& one) { return one.bits_per_component > 0; });
+    CHECK(any_width);
+
+    // The two that only a real radio produces, so they are asserted only when
+    // one is present rather than skipping the whole case: with no dongle
+    // attached this machine has nothing tunable and nothing with a gain stage,
+    // and that is a true description of the machine rather than a gap.
+    const auto dongle = std::ranges::find_if(
+        *remote, [](const rpc::SourceDescriptor& one) { return one.backend == "rtlsdr"; });
+    if (dongle == remote->end()) {
+        WARN("no RTL-SDR is attached, so the tune-range and gain-stage fields crossed empty "
+             "in both directions and this case did not exercise them");
+        return;
+    }
+    if (!dongle->available()) {
+        WARN("the attached RTL-SDR could not be described: " + dongle->unavailable);
+        return;
+    }
+
+    INFO("dongle " << dongle->display_name);
+    CHECK_FALSE(dongle->tune_ranges.empty());
+    CHECK_FALSE(dongle->gain_stages.empty());
+    CHECK(dongle->max_rate > dongle->min_rate);
+
+    // An R820T's tuner gain is 29 discrete steps, so the steps list is what a
+    // picker reads and an empty one would send it to the continuous path.
+    // Asserted as "some stage is stepped" rather than by name, because the
+    // stage naming is librtlsdr's and the count is the tuner's.
+    const bool any_stepped =
+        std::ranges::any_of(dongle->gain_stages,
+                            [](const rpc::GainStage& stage) { return !stage.steps_db.empty(); });
+    CHECK(any_stepped);
 }
 
 TEST_CASE("an unavailable backend arrives with its reason rather than omitted",

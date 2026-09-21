@@ -157,6 +157,72 @@ struct SourceTuning {
     std::int64_t high_hz = 0;
 };
 
+// What a source can be pointed at. An ENVELOPE and not a promise: a device with
+// a gap in its coverage reports the ranges it knows about and still refuses a
+// frequency inside a gap, in its own words.
+struct TuneRange {
+    std::int64_t low_hz = 0;
+    std::int64_t high_hz = 0;
+
+    // Zero is continuous. A non-zero step is what set_source_center rounds to,
+    // which is why it answers with the centre the device took.
+    std::int64_t step_hz = 0;
+};
+
+// One gain control, named the way the device names it. A LIST AND NOT A NUMBER:
+// an R820T has one tuner gain with 29 discrete steps, an Airspy has three
+// stages, a file has none, and flattening those into a percentage is how a
+// client comes to offer a control the device does not have.
+struct GainStage {
+    std::string name;
+    double min_db = 0.0;
+    double max_db = 0.0;
+
+    // Empty is continuous. Populated means the stage only takes these values
+    // and a request lands on the nearest, so a continuous slider over a stepped
+    // stage shows the operator a number the device never took.
+    std::vector<double> steps_db;
+
+    // Whether the device will set this stage itself. A choice to offer, not the
+    // sensible setting: see the schema's note and README.md's measurement of
+    // what the RTL-SDR's own AGC did to the detector's track list.
+    bool has_auto = false;
+};
+
+// Who sets the pace, which decides how realtime_factor is read.
+enum class FlowControl : std::uint8_t { Paced, Demand };
+
+// What the device puts on the bus. The first four mirror
+// revenant::source::SampleFormat and the schema's SampleFormat, ordinal for
+// ordinal, and client.cpp static_asserts each one.
+//
+// Unknown IS THIS SIDE'S ONLY AND HAS NO ORDINAL ON THE WIRE. A Cap'n Proto
+// enum field may legally hold a value the reader's schema has never heard of,
+// which is how a client reaches an engine built against a newer one, and a
+// descriptor read cannot refuse the way read_demod does: describing a list of
+// sources is not all or nothing, and one dongle reporting a format this build
+// does not know must not hide the backends that cannot fail. So an ordinal past
+// Cf32 lands here rather than being clamped onto one of the four, because the
+// label is what a picker prints and "cf32" about an unknown format is a lie a
+// reader would act on.
+enum class SampleFormat : std::uint8_t { Cu8, Cs8, Cs16, Cf32, Unknown };
+
+[[nodiscard]] constexpr const char* sample_format_name(SampleFormat format) {
+    switch (format) {
+        case SampleFormat::Cu8:
+            return "cu8";
+        case SampleFormat::Cs8:
+            return "cs8";
+        case SampleFormat::Cs16:
+            return "cs16";
+        case SampleFormat::Cf32:
+            return "cf32";
+        case SampleFormat::Unknown:
+            break;
+    }
+    return "unknown";
+}
+
 struct SourceDescriptor {
     std::string uri;
     std::string backend;
@@ -164,6 +230,40 @@ struct SourceDescriptor {
     std::string unavailable;
 
     [[nodiscard]] bool available() const { return unavailable.empty(); }
+
+    // Conditions worth an operator's attention that did not stop the source
+    // opening. Show them; they are not folded into unavailable, which is about
+    // a source that cannot be used at all.
+    std::vector<std::string> notes;
+
+    // Empty for a source that cannot be tuned, and a client greys the frequency
+    // control out rather than making the operator discover the refusal.
+    std::vector<TuneRange> tune_ranges;
+
+    // EMPTY MEANS CONTINUOUS between min_rate and max_rate. The RTL-SDR is
+    // neither shape: its rate is a 28.8 MHz clock over an integer, discrete but
+    // far too dense to list, so it reports the bounds and rounds.
+    std::vector<std::uint32_t> sample_rates;
+    std::uint32_t min_rate = 0;
+    std::uint32_t max_rate = 0;
+
+    SampleFormat native_format = SampleFormat::Cf32;
+
+    // Bits per I or Q component, which is not eight times the byte width
+    // everywhere: an Airspy in packed mode puts 12 bits in 16.
+    std::uint8_t bits_per_component = 0;
+
+    std::vector<GainStage> gain_stages;
+
+    FlowControl flow = FlowControl::Demand;
+
+    // True for a recording and false for every live device. Nothing seeks on
+    // this wire; it is here so a picker can show a recording as a recording.
+    bool seekable = false;
+
+    // ZERO IS UNBOUNDED, which is every live device, and not a recording of no
+    // length.
+    std::uint64_t length_samples = 0;
 };
 
 // Mirrors revenant::detect::FrontEndVerdict ordinal for ordinal, and the

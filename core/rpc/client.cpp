@@ -150,6 +150,26 @@ static_assert(static_cast<std::uint16_t>(schema::FrontEndState::SPAN_SCALES) ==
 static_assert(static_cast<std::uint16_t>(schema::FrontEndState::FLOOR_FOLLOWS_SIGNAL) ==
               static_cast<std::uint16_t>(FrontEndState::FloorFollowsSignal));
 
+// And for the two on SourceDescriptor, used by read_source_descriptor.
+//
+// PINNED RATHER THAN CAST IN THE READER, so a value added to one enumeration
+// and not the other fails here instead of arriving as a number the far side
+// reads as something else. convert.cpp writes both by name through a switch for
+// the same reason and the reader casts, which these make safe.
+static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CU8) ==
+              static_cast<std::uint16_t>(SampleFormat::Cu8));
+static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CS8) ==
+              static_cast<std::uint16_t>(SampleFormat::Cs8));
+static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CS16) ==
+              static_cast<std::uint16_t>(SampleFormat::Cs16));
+static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CF32) ==
+              static_cast<std::uint16_t>(SampleFormat::Cf32));
+
+static_assert(static_cast<std::uint16_t>(schema::FlowControl::PACED) ==
+              static_cast<std::uint16_t>(FlowControl::Paced));
+static_assert(static_cast<std::uint16_t>(schema::FlowControl::DEMAND) ==
+              static_cast<std::uint16_t>(FlowControl::Demand));
+
 // Sets a field for the length of a scope and puts it back on the way out,
 // including out of an exception. Both uses are loop-thread-only fields whose
 // stale value would be read by code running after the scope: a dangling
@@ -329,6 +349,68 @@ struct PromiseValue<kj::Promise<T>> {
     out.backend = read_text(in.getBackend());
     out.display_name = read_text(in.getDisplayName());
     out.unavailable = read_text(in.getUnavailable());
+
+    for (const capnp::Text::Reader note : in.getNotes()) {
+        out.notes.push_back(read_text(note));
+    }
+
+    out.tune_ranges.reserve(in.getTuneRanges().size());
+    for (const schema::TuneRange::Reader range : in.getTuneRanges()) {
+        TuneRange one;
+        one.low_hz = range.getLowHz();
+        one.high_hz = range.getHighHz();
+        one.step_hz = range.getStepHz();
+        out.tune_ranges.push_back(one);
+    }
+
+    out.sample_rates.reserve(in.getSampleRates().size());
+    for (const std::uint32_t rate : in.getSampleRates()) {
+        out.sample_rates.push_back(rate);
+    }
+    out.min_rate = in.getMinRate();
+    out.max_rate = in.getMaxRate();
+
+    // Clamped to Unknown rather than onto one of the four, and to Demand rather
+    // than refused, on the precedent read_source_stats sets for FrontEndState: a
+    // struct read has nowhere to put a refusal, and a descriptor read
+    // specifically must not fail, because one dongle reporting an ordinal this
+    // build does not know would otherwise hide the synthetic and file backends
+    // that cannot fail and are what somebody reaches for when the radio is busy.
+    //
+    // The two clamps land in different places for different reasons.
+    // SampleFormat has an Unknown of its own on this side, because the label is
+    // printed and naming the wrong format is a lie a reader acts on. FlowControl
+    // has only two values and lands on Demand, which is the conservative one:
+    // sourcePacedBy is meaningful on a Demand source and meaningless on a Paced
+    // one, so a client that guesses Demand shows a number that may mean nothing
+    // and one that guessed Paced would hide a number that means everything.
+    const auto format = static_cast<std::uint16_t>(in.getNativeFormat());
+    out.native_format = format <= static_cast<std::uint16_t>(SampleFormat::Cf32)
+                            ? static_cast<SampleFormat>(format)
+                            : SampleFormat::Unknown;
+    out.bits_per_component = in.getBitsPerComponent();
+
+    out.gain_stages.reserve(in.getGainStages().size());
+    for (const schema::GainStage::Reader stage : in.getGainStages()) {
+        GainStage one;
+        one.name = read_text(stage.getName());
+        one.min_db = stage.getMinDb();
+        one.max_db = stage.getMaxDb();
+        one.has_auto = stage.getHasAuto();
+        one.steps_db.reserve(stage.getStepsDb().size());
+        for (const double step : stage.getStepsDb()) {
+            one.steps_db.push_back(step);
+        }
+        out.gain_stages.push_back(std::move(one));
+    }
+
+    const auto flow = static_cast<std::uint16_t>(in.getFlow());
+    out.flow = flow <= static_cast<std::uint16_t>(FlowControl::Demand)
+                   ? static_cast<FlowControl>(flow)
+                   : FlowControl::Demand;
+
+    out.seekable = in.getSeekable();
+    out.length_samples = in.getLengthSamples();
     return out;
 }
 

@@ -329,12 +329,101 @@ struct EngineInfo {
     sourceEpoch @13 :UInt64;
 }
 
+# What a source can be pointed at. An ENVELOPE and not a promise, on exactly
+# the terms Session::sourceCanRetune states: a device with a gap in its coverage
+# reports the ranges it knows about and still refuses a frequency inside a gap,
+# in its own words.
+struct TuneRange {
+    lowHz @0 :Int64;
+    highHz @1 :Int64;
+
+    # Zero means continuous within whatever the synthesiser can resolve. A
+    # non-zero step is what setSourceCenter rounds to, which is why it answers
+    # with the centre the device took rather than the one asked for.
+    stepHz @2 :Int64;
+}
+
+# One gain control on the device, named the way the device names it.
+#
+# A LIST AND NOT A NUMBER, WHICH IS THE WHOLE POINT. Users judge an SDR
+# application in the first five minutes on whether their radio works properly,
+# and the way that goes wrong is an abstraction that flattens every device into
+# one gain slider. An R820T has a tuner gain with 29 discrete steps; an Airspy
+# has three separate stages; a file has none. Reducing those to a percentage is
+# how a client comes to offer a control the device does not have.
+struct GainStage {
+    # The device's own name for it, lowercase: "lna", "mixer", "vga", "if",
+    # "tuner".
+    name @0 :Text;
+
+    minDb @1 :Float64;
+    maxDb @2 :Float64;
+
+    # Empty means continuous between the two above. Populated means the stage
+    # only takes these values and a request lands on the nearest one, so a
+    # client offering a continuous slider over a stepped stage shows the
+    # operator a number the device never took.
+    stepsDb @3 :List(Float64);
+
+    # Whether the device will set this stage itself. Offered rather than
+    # assumed: the RTL-SDR's own AGC maximises the level at its output and is
+    # therefore set by the loudest thing anywhere in the span, which put three
+    # intermodulation products in the detector's track list at confidence 1.00
+    # when it was the default. README.md has that measurement. A client that
+    # offers this offers it as a choice, not as the sensible setting.
+    hasAuto @4 :Bool;
+}
+
+enum FlowControl {
+    # The device's own clock sets the pace and the sink must never block,
+    # because there is nowhere to put samples that keep arriving. A sink that
+    # cannot keep up causes an overrun, which SourceStats::overrunEvents
+    # counts as the correctness event it is.
+    paced @0;
+
+    # The consumer's clock sets the pace, and blocking IS the backpressure:
+    # the source advances at exactly the rate its consumer retires work. This
+    # is the whole mechanism behind faster than realtime and it is not a mode.
+    #
+    # WHAT A CLIENT DOES WITH IT. On a Demand source EngineInfo::sourcePacedBy
+    # is the setting that matters and a zero there means the source runs as
+    # fast as the machine retires it, which a listener hears as fragments. On a
+    # Paced source that setting is ignored entirely and a realtimeFactor below
+    # 1.0 is the ring refusing samples instead. Reading realtimeFactor without
+    # knowing which of the two this is names the wrong component.
+    demand @1;
+}
+
+enum SampleFormat {
+    # Matching revenant::source::SampleFormat, ordinal for ordinal. What the
+    # device puts on the bus; conversion to the engine's Complex32 happens on
+    # the GPU during upload, so native width crosses the bus exactly once.
+    cu8 @0;
+    cs8 @1;
+    cs16 @2;
+    cf32 @3;
+}
+
 struct SourceDescriptor {
-    # Mirrors the first four fields of revenant::source::SourceCapabilities.
-    # The rest of that struct, the tune ranges and gain stages and the
-    # format, is not here yet: a picker needs to list what exists before it
-    # needs to configure one, and adding fields to a schema is the cheap
-    # direction.
+    # WHAT THIS STRUCT USED TO SAY ABOUT ITSELF: "Mirrors the first four fields
+    # of revenant::source::SourceCapabilities. The rest of that struct, the tune
+    # ranges and gain stages and the format, is not here yet: a picker needs to
+    # list what exists before it needs to configure one, and adding fields to a
+    # schema is the cheap direction."
+    #
+    # The cheap direction was taken. Listing what exists was enough while the
+    # source URI was an engine command-line argument; openSource made the
+    # configuring half reachable, and a client that can open a device but cannot
+    # be told what the device accepts has to guess, or ask the operator to type
+    # a URI.
+    #
+    # EVERY FIELD BELOW HAS A READER IN THE PICKER, and the ones with no reader
+    # were left off rather than mirrored for symmetry. Not here:
+    # preferredBlockSamples, because block size is an EngineConfig field fixed
+    # before this wire exists; clockSources, because no backend's URI grammar
+    # takes one; timestampAccuracyNs, because nothing displays it; and the
+    # resolution request, which is real and belongs to whichever change teaches
+    # the engine to size a transform from it.
     uri @0 :Text;
     backend @1 :Text;
     displayName @2 :Text;
@@ -344,6 +433,65 @@ struct SourceDescriptor {
     # and an unplugged radio are different problems and a list that omits
     # both looks identical.
     unavailable @3 :Text;
+
+    # Conditions worth an operator's attention that did not stop the source
+    # opening: a WAV whose auxi chunk carries no centre frequency, a SigMF
+    # sidecar with an empty captures array, a recording playing across capture
+    # segments that happen to agree.
+    #
+    # Each of those is the answer to "why is this at the wrong frequency" an
+    # hour later, and a source reporting only its failures would say nothing
+    # about any of them. Show them; do not fold them into unavailable, which is
+    # about a source that cannot be used at all.
+    notes @4 :List(Text);
+
+    # Empty for a source that cannot be tuned, which is every file and every
+    # synthetic scene, and also for a dongle whose tuner librtlsdr did not
+    # recognise: there is no driver for such a tuner, so nothing on it can be
+    # tuned at all. A client greys the frequency control out rather than making
+    # the operator discover the refusal by trying.
+    tuneRanges @5 :List(TuneRange);
+
+    # Discrete rates the device supports. EMPTY MEANS CONTINUOUS between
+    # minRate and maxRate, and a client offering a free-text rate box over a
+    # device with a populated list here offers rates the device will round.
+    #
+    # The RTL-SDR's real constraint is neither of those shapes: its sample rate
+    # comes from a 28.8 MHz clock divided by an integer, so it is discrete but
+    # far too dense to list. The backend reports min and max and leaves this
+    # empty, the device rounds, and configure() reads back what it landed on.
+    sampleRates @6 :List(UInt32);
+    minRate @7 :UInt32;
+    maxRate @8 :UInt32;
+
+    nativeFormat @9 :SampleFormat;
+
+    # Bits per I or Q component, which is not eight times the byte width for
+    # every device: an Airspy in packed mode puts 12 bits in 16, and a client
+    # showing "16-bit" about one of those overstates what the ADC gave it.
+    bitsPerComponent @10 :UInt8;
+
+    # Empty for a file and for a synthetic scene. See GainStage: a list rather
+    # than a number, because a device's stages are its own.
+    gainStages @11 :List(GainStage);
+
+    # Who sets the pace. See FlowControl: it decides how a client reads
+    # EngineInfo::realtimeFactor, and reading that without this names the wrong
+    # component.
+    flow @12 :FlowControl;
+
+    # Whether a client could ask this source to replay from a chosen sample.
+    # True for files and false for every live device. NOTHING SEEKS YET: there
+    # is no seek on this wire and this field is here for a picker to show a
+    # recording as a recording, which is what decides whether it offers a
+    # position control at all.
+    seekable @13 :Bool;
+
+    # ZERO MEANS UNBOUNDED, which is every live device, and it is not a
+    # recording of no length. A file reports the samples it holds, which is how
+    # a picker turns a path into "4 minutes 12 seconds at 2.4 MS/s" instead of
+    # a filename.
+    lengthSamples @14 :UInt64;
 }
 
 enum FrontEndState {
