@@ -27,13 +27,21 @@
 // waterfall that is the right answer anyway, since the newest frame is the
 // one worth drawing.
 //
-// THE THREE THREADS
+// THE THREE THREADS THAT REACH THIS OBJECT'S OWN STATE, AND A FOURTH THAT
+// REACHES ONE MEMBER OF IT
 //
 // The Qt thread owns everything a property getter reads and everything an
 // item draws. The Cap'n Proto event loop thread, inside the Client, runs
 // on_frame. A third thread, the supervisor started by start(), owns the
 // Client itself: it connects, subscribes, and from then on asks the engine
 // once a second whether it is still there and whether it is running.
+//
+// The fourth is the sound card's, and it touches audio_ring_ and nothing
+// else here. It is out of this block's scope rather than absent from the
+// object, which is a distinction this header used to lose by heading the
+// block THE THREE THREADS full stop. See audioRing() below and
+// audio/audio_ring.h, which counts all four because every one of them takes
+// that object's lock.
 //
 // Those are two questions and Client::running answers both in one call. An
 // Expected that failed is a connection that has gone; an Expected holding
@@ -1088,8 +1096,14 @@ public:
     // destroyed while a callback could still be writing to it, on an
     // object-destruction order QML and main() both get to influence.
     //
-    // Both threads that touch it hold its own lock, so this accessor hands
-    // out a reference and not a copy. See audio/audio_ring.h.
+    // Every thread that touches it holds its own lock, so this accessor
+    // hands out a reference and not a copy. There are FOUR of them and
+    // audio/audio_ring.h names them: the event loop writes chunks, the
+    // sound card's pull thread reads, the Qt thread snapshots, and the
+    // supervisor resets and resizes. This comment said "both threads" until
+    // 2026-09-20, which undercounted the writers by one and is corrected
+    // rather than swapped, because the count is the whole of why the
+    // accessor is shaped this way.
     [[nodiscard]] AudioRing& audioRing() { return audio_ring_; }
 
 signals:

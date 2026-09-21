@@ -12,8 +12,23 @@
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
-// somebody makes on purpose. core/rpc/server.h binds 127.0.0.1 by default
-// for the same reason: there is no authentication on this interface yet.
+// somebody makes on purpose. core/rpc/server.h binds 127.0.0.1 by default,
+// for a reason that is close to this one and not the same.
+//
+// WHAT THIS PARAGRAPH USED TO SAY
+//
+// It ended "for the same reason: there is no authentication on this
+// interface yet". There is. Authenticator.login takes a pre-shared token
+// before a caller holds a Session at all, this process reads that token in
+// resolve_token below, and ServerOptions::token is a create() failure when
+// empty rather than an off switch. The sentence stopped being true on
+// 2026-09-20 and is recorded rather than swapped, because a reader deciding
+// whether to expose the port was being told the control was absence.
+//
+// What the loopback default is for NOW is narrower and still load-bearing:
+// the wire is plaintext, so a token crossing a routable interface is
+// readable and replayable by anything on the path. Off loopback still means
+// a tunnel. core/rpc/server.h carries the full record.
 
 #include <charconv>
 #include <cstdint>

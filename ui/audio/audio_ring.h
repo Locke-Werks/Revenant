@@ -6,7 +6,7 @@
 // that has a test behind it: everything above this is QAudioSink talking to
 // WASAPI, which cannot be asserted on from a test binary.
 //
-// THE THREE THREADS, AND WHICH TWO TOUCH THIS
+// THE FOUR THREADS THAT TOUCH THIS
 //
 // core/rpc/client.h is explicit that the audio callback is invoked ON the
 // event loop thread, must not call back into the same Client, and must
@@ -15,8 +15,27 @@
 // works out where the chunk belongs in the timeline and memcpys it in.
 //
 // read() is called from whatever thread QAudioSink pulls on, which on the
-// Windows backend is a thread Qt owns and runs at a raised priority. The Qt
-// GUI thread touches neither, and reads counts() for the display.
+// Windows backend is a thread Qt owns and runs at a raised priority.
+//
+// The Qt GUI thread calls snapshot() on AudioPlayer's timer and writes
+// nothing.
+//
+// The SUPERVISOR thread calls reset(), reset_counts() and
+// set_depth_millis(), from EngineLink's audio reconcile: at every
+// subscribe, at every stop, at an ended arrival and on a lost connection.
+// Those are writes, and they are the ones that move the format and the
+// capacity out from under the other three.
+//
+// WHAT THIS BLOCK USED TO SAY
+//
+// It was headed THE THREE THREADS, AND WHICH TWO TOUCH THIS, and it named
+// the event loop, the sink's pull thread and a GUI thread that only read.
+// The supervisor was missing, which put the count of writers at one when it
+// is two. The omission mattered in this file in particular: the permanent
+// silence recorded under snapshot() below was caused by trusting two
+// separately locked accessors, and a reader counting one writer would have
+// read the argument for the snapshot as being about the event loop alone.
+// Recorded rather than quietly renumbered.
 //
 // WHY A MUTEX AND NOT A LOCK-FREE RING, AND WHAT THAT COSTS
 //
@@ -47,8 +66,9 @@
 // machine.
 //
 // THE ONE RULE FOR CALLERS. Never hold this lock and then call QAudioSink,
-// the Client, or anything that can block. Both of the threads above are
-// threads something is waiting on.
+// the Client, or anything that can block. The event loop thread and the
+// sink's pull thread both have something waiting on them, and the
+// supervisor's writes land between their two.
 //
 // WHAT IS ALLOCATED, AND WHEN
 //
