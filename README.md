@@ -113,6 +113,14 @@ at the top, and the detector's tracks are drawn over both: a frequency marker
 that fades on the spectrum, a rectangle bounded by the rows the signal was
 actually in on the waterfall, and a click tunes a receiver to one.
 
+The client picks the radio too. It lists what the engine can see, says why an
+unavailable backend is unavailable rather than hiding it, offers only the
+controls the device describes, and opens it. Changing radio costs the receivers
+and the waterfall history and nothing else: the engine closes the source, builds
+a grid against the new one and serves the same session, and
+`EngineInfo::sourceEpoch` is what tells the client its sample indices have
+started again. The process does not restart, which is what it used to take.
+
 What exists: the Vulkan context and allocator, the shader build, the polyphase
 channelizer, seven demodulators and a raw complex tap, the per-receiver fine
 stage, audio egress to WAV and to the sound card, a synthetic wideband source,
@@ -121,10 +129,10 @@ the terminal, auto-scaling measured on the device, the per-receiver passband
 spectrum, the wideband detector, the RDS and RBDS decoder, the Cap'n Proto
 session that carries all of it to another process, the Qt client that draws it
 and plays its audio, and the conformance suite that diffs every GPU kernel
-against a scalar twin and demands identical bits. 361 tests on an RTX 4090,
-0 failures; 3 of them skip without an RTL-SDR plugged in. `ui/` is a separate
-CMake project with a suite of its own, 26 tests, and CI configures, builds and
-runs both trees.
+against a scalar twin and demands identical bits. 547 tests on an RTX 4090,
+0 failures; a few of them skip without an RTL-SDR plugged in. `ui/` is a
+separate CMake project with a suite of its own, 84 tests, and CI configures,
+builds and runs both trees.
 
 What does not: every decoder but RDS. `docs/modes.md` is the scoped list and
 none of the rest of it is written. Nothing saves a set of receivers across a
