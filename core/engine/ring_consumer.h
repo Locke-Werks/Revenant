@@ -566,7 +566,11 @@ public:
         }
 
         producer_.write_cursor.store(head + published, std::memory_order_release);
-        producer_.write_cursor.notify_all();
+
+        // The wake is on the epoch and not on the cursor, because stop() has
+        // to be able to wake the same sleepers and cannot move a published
+        // index. wait_for_data has the whole of that argument.
+        bump_wake_epoch();
         return published;
     }
 
@@ -616,26 +620,64 @@ public:
     // scheduler's tick: a counter and a wait on it, no mutex and no condition
     // variable. Returns the cursor it woke on, which may equal `known_end`
     // when the ring has been stopped.
+    //
+    // IT PARKS ON THE EPOCH AND NOT ON THE CURSOR, WHICH IS THE ONLY SHAPE
+    // THAT CANNOT LOSE A STOP
+    //
+    // This used to load write_cursor, test it against known_end and against
+    // stopped, and then call producer_.write_cursor.wait(head). stop() was
+    // read as waking it, on the grounds that it bumps the cursors. It does
+    // not: stop() cannot move write_cursor, because write_cursor is the count
+    // of published samples and inventing one would hand every consumer a
+    // window of samples that were never written. So stop() set the flag and
+    // called notify_all on a value that had not changed, and a waiter sitting
+    // between its own stopped test and its own wait() call got the notify
+    // before it parked, then parked on a value nothing would ever change
+    // again. std::atomic::wait compares before it sleeps, which closes the
+    // race only when the WAITED-ON value is what moves; here it was not.
+    //
+    // The epoch is the same device reserve_blocking already uses for the
+    // producer side, and the ordering is the same: read the epoch BEFORE
+    // testing the condition, so a publish or a stop that lands between the
+    // test and the park moves the epoch and the wait returns at once.
+    //
+    // The third site of this shape in the tree, and the first two were found
+    // by a sweep that cleared this one.
     [[nodiscard]] dsp::SampleIndex wait_for_data(dsp::SampleIndex known_end) const {
         for (;;) {
+            const auto epoch = shared_.wake_epoch.load(std::memory_order_acquire);
             const auto head = producer_.write_cursor.load(std::memory_order_acquire);
             if (head != known_end || shared_.stopped.load(std::memory_order_acquire)) {
                 return head;
             }
-            producer_.write_cursor.wait(head, std::memory_order_acquire);
+            shared_.wake_epoch.wait(epoch, std::memory_order_acquire);
         }
     }
 
     // Wakes everyone parked, once, permanently. A Blocking consumer that never
     // retires would otherwise hold the producer at teardown, and a process
     // that cannot exit is worse than one that exits having dropped samples.
+    //
+    // Both epochs, because the two waits park on two different addresses: a
+    // producer inside reserve_blocking is on retire_epoch and a consumer
+    // inside wait_for_data is on wake_epoch. Bumping one and notifying the
+    // other's address wakes nobody.
     void stop() {
         shared_.stopped.store(true, std::memory_order_release);
         bump_retire_epoch();
-        producer_.write_cursor.notify_all();
+        bump_wake_epoch();
     }
 
     [[nodiscard]] bool stopped() const { return shared_.stopped.load(std::memory_order_acquire); }
+
+    // The value wait_for_data parks on, exposed so a test can referee the one
+    // property that makes that wait safe: every event which could change the
+    // answer moves this, so a waiter that read it before the event and parked
+    // after it does not sleep through the event. The number itself means
+    // nothing and a consumer must not compute with it.
+    [[nodiscard]] std::uint64_t wake_epoch() const {
+        return shared_.wake_epoch.load(std::memory_order_acquire);
+    }
 
 private:
     static constexpr std::uint32_t kSlotFree = 0;
@@ -776,6 +818,12 @@ private:
         shared_.retire_epoch.notify_all();
     }
 
+    // The consumer side's equivalent, bumped by publish() and by stop().
+    void bump_wake_epoch() {
+        shared_.wake_epoch.fetch_add(1, std::memory_order_release);
+        shared_.wake_epoch.notify_all();
+    }
+
     // The hot state is grouped into 64-byte blocks rather than given member
     // alignas directives one at a time. Both forms keep the producer's cursor
     // off the consumers' line; only this one leaves the enclosing class with
@@ -800,10 +848,18 @@ private:
         // itself means nothing; it exists so a parked producer has an edge to
         // wait on that cannot be missed.
         std::atomic<std::uint64_t> retire_epoch{0};
+
+        // The same device on the consumer side: bumped by publish() and by
+        // stop(), and the address wait_for_data parks on. Separate from
+        // retire_epoch because the two waits are woken by different events and
+        // waking both on every publish would drag a parked producer out of
+        // WaitOnAddress hundreds of times a second for nothing.
+        std::atomic<std::uint64_t> wake_epoch{0};
+
         std::atomic<std::uint64_t> overrun_events{0};
         std::atomic<std::uint64_t> samples_lost{0};
         std::atomic<bool> stopped{false};
-        std::uint64_t pad_[4]{};
+        std::uint64_t pad_[3]{};
     };
 
     static_assert(sizeof(ProducerBlock) == 64);

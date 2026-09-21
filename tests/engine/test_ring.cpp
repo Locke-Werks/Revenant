@@ -597,3 +597,80 @@ TEST_CASE("a ring that no longer exists says so rather than reading full",
     CHECK_FALSE(ring.reserve_blocking(8).has_value());
     CHECK(moved.write_index() == 0);
 }
+
+// ---------------------------------------------------------------------------
+// The consumer-side wait, and the stop that has to be able to end it
+// ---------------------------------------------------------------------------
+//
+// These reach ConsumerTable directly, which the note above says the cursor
+// cases must not. The reason is different here and it is the reason the
+// defect survived a sweep: DeviceRing exposes no wait_for_data at all, so
+// there is no ring-level call that can be driven into the window. The
+// property under test is a property of the table's wake, and the table is
+// where it can be stated.
+
+TEST_CASE("every event that could end a consumer's wait moves the epoch it parks on",
+          "[engine][ring][m1]") {
+    engine::ConsumerTable table(1024);
+
+    // A waiter samples this, then tests the condition, then parks on it. So
+    // anything that changes the answer between the test and the park has to
+    // move this value, or the park sleeps through it and nothing will wake it
+    // again. std::atomic::wait re-compares before it sleeps, which closes the
+    // window only for the value being waited ON.
+    const std::uint64_t at_rest = table.wake_epoch();
+
+    REQUIRE(table.reserve(64) == 64);
+    REQUIRE(table.publish(64) == 64);
+    const std::uint64_t after_publish = table.wake_epoch();
+    CHECK(after_publish != at_rest);
+
+    // The one the previous sweep cleared, on the grounds that stop() bumps
+    // both cursors. It does not bump the write cursor and it cannot: that
+    // cursor is the count of published samples, so moving it would hand every
+    // consumer a window of samples nothing ever wrote. A stop that leaves
+    // this value where it was is a stop a waiter can sleep through.
+    table.stop();
+    CHECK(table.stopped());
+    CHECK(table.wake_epoch() != after_publish);
+}
+
+TEST_CASE("a stopped ring releases a consumer parked for data that will never come",
+          "[engine][ring][m1]") {
+    engine::ConsumerTable table(1024);
+
+    std::atomic<bool> parked{false};
+    std::atomic<bool> returned{false};
+
+    std::thread waiter([&] {
+        parked.store(true, std::memory_order_release);
+        const dsp::SampleIndex woke = table.wait_for_data(table.write_index());
+        returned.store(true, std::memory_order_release);
+
+        // Nothing was ever published, so the cursor it woke on is the one it
+        // went to sleep against. A caller tells this from real data by
+        // testing stopped(), which is why the return value is the cursor and
+        // not a flag of its own.
+        CHECK(woke == 0);
+    });
+
+    while (!parked.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+    table.stop();
+    waiter.join();
+    CHECK(returned.load(std::memory_order_acquire));
+}
+
+TEST_CASE("a stop already taken does not park a consumer that arrives after it",
+          "[engine][ring][m1]") {
+    engine::ConsumerTable table(1024);
+    table.stop();
+
+    // No thread and no timeout, because this must not block at all: a
+    // consumer joining a ring that is already shutting down is the ordinary
+    // teardown order rather than a race.
+    CHECK(table.wait_for_data(table.write_index()) == 0);
+}
