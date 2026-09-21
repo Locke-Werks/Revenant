@@ -327,6 +327,101 @@ jobs:
         # prove the Qt boundary holds, so it builds and stops.
         run: cmake --build --preset headless
 
+  # The Qt client, which until this job existed was the part of the tree CI
+  # did not configure at all. ui/ is a second CMake project, built against the
+  # dynamic vcpkg triplet because Qt 6.8.3 is, and the root CMakeLists.txt
+  # refuses REVENANT_BUILD_UI for that reason: one cache cannot hold both
+  # runtimes. So it needs a job of its own rather than a step in one above.
+  #
+  # What that bought while it was missing: ui/ carries a whole second
+  # application, its one test target had never been run by anybody who merges,
+  # and a client that did not compile could reach main without a single red
+  # tick. The engine tree's tests say nothing about it, because this project
+  # links no part of the engine and talks to it over a socket.
+  #
+  # Three things this job needs from the runner that the engine legs do not:
+  #
+  #   Qt 6.8.3 at C:/Qt/6.8.3/msvc2022_64, which ui/CMakePresets.json pins as
+  #   CMAKE_PREFIX_PATH. The step below checks for it by hand so a missing Qt
+  #   says so in one line rather than as a find_package failure fifty lines
+  #   into a configure log.
+  #
+  #   capnproto and catch2 in the x64-windows triplet, from ui/vcpkg.json.
+  #   The engine's legs build the static triplet, so these are a separate set
+  #   of packages in the same binary cache.
+  #
+  #   Nothing else. No GPU: this target links no Vulkan and opens no device.
+  #   It runs here because the only self-hosted Windows runner is the GPU
+  #   workstation, the same reason the headless job above carries the gpu
+  #   label.
+  #
+  # REVENANT_WERROR=ON to match the engine's ci preset. ui/CMakeLists.txt
+  # defaults it off so a developer's first build of the client is not a wall
+  # of errors from a Qt header; a merge gate is the other case.
+  ui:
+    needs: guards
+    runs-on: [self-hosted, windows, x64, gpu]
+
+    # The same gate as build-and-test, for the same reason. See the long note
+    # there; this job needs no GPU but runs on the same physical machine.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ui
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache\revenant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the vcpkg binary cache directory
+        shell: pwsh
+        working-directory: .
+        run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - name: Qt is where the preset expects it
+        shell: pwsh
+        run: |
+          # Fail here rather than let find_package do it. The preset pins one
+          # exact prefix, so a Qt upgrade on the runner breaks this job and
+          # the message should name the path and the file that holds it.
+          $prefix = 'C:/Qt/6.8.3/msvc2022_64'
+          if (-not (Test-Path "$prefix/lib/cmake/Qt6/Qt6Config.cmake")) {
+            Write-Output "Qt 6.8.3 is not at $prefix."
+            Write-Output "ui/CMakePresets.json pins CMAKE_PREFIX_PATH to that path."
+            Write-Output "Install it with the Qt online installer, or change the preset."
+            exit 1
+          }
+          "Qt found at $prefix"
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1, pinned: this one is not GitHub's and it runs on the workstation
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake --preset vs -DREVENANT_WERROR=ON
+
+      - name: Build
+        run: cmake --build --preset vs
+
+      # revenant_ui_tests only, and it is one file over AudioRing. That is
+      # thin, and saying so here is the point: this job proves the client
+      # compiles and that the audio timeline arithmetic holds. It proves
+      # nothing about the QML, the scene graph or the audio device, none of
+      # which a headless agent can open.
+      - name: Test
+        run: ctest --test-dir build/vs -C RelWithDebInfo --output-on-failure
+
+      - name: CTest output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-ctest
+          path: |
+            ui/build/vs/Testing/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
 # No signing job. There is no binary to ship until M3, and a signing job that
 # never fires is a job nobody notices has rotted. The scaffold it will use is
 # already in place: signing/signing.env holds the endpoint, account and

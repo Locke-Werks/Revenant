@@ -64,12 +64,38 @@ merging. A conformance result nobody can trust is worth less than one that is la
 | `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, and checks the version parses. Cheap, and it answers even when the workstation is off |
 | `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite. A matrix over the two GPUs, one leg per device |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
+| `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
 | `sweep` (nightly) | self-hosted | Runs the BER sweep and compares against `tests/baselines/ber-vs-snr.json`, failing on a regression |
 
 The matrix legs select their device with `REVENANT_GPU_INDEX`, which is the same
 mechanism a developer uses locally. There is one runner, so the legs execute in sequence
 rather than in parallel. That is fine at this scale and is the reason the long sweeps are
 nightly rather than per-commit.
+
+## The `ui` job, and why it is a job rather than a step
+
+`ui/` is a second CMake project. Qt 6.8.3 is built against the dynamic CRT and the
+engine is built `/MT`, so one cache cannot hold both: the root `CMakeLists.txt` refuses
+`REVENANT_BUILD_UI` outright and the client configures on its own against the
+`x64-windows` triplet. That is why it gets a job instead of a step in `build-and-test`.
+
+It needs three things from the runner that no other job does. Qt 6.8.3 at
+`C:/Qt/6.8.3/msvc2022_64`, which `ui/CMakePresets.json` pins as `CMAKE_PREFIX_PATH`; a
+step checks for it by hand so a Qt upgrade on the runner reports itself in one line
+rather than as a `find_package` failure deep in a configure log. `capnproto` and
+`catch2` in the `x64-windows` triplet, from `ui/vcpkg.json`, which are a different set of
+packages from the static ones the engine legs build. And nothing else: this target links
+no Vulkan and opens no device. It carries the `gpu` label only because that is the label
+on the one self-hosted Windows runner, the same reason `headless` does.
+
+The job passes `-DREVENANT_WERROR=ON` to match the engine's `ci` preset.
+`ui/CMakeLists.txt` defaults that off so a developer's first build of the client is not a
+wall of errors out of a Qt header; a merge gate is the other case.
+
+What it covers is thin and stating that is the point. `revenant_ui_tests` is one file over
+`AudioRing`. A green run says the client compiles and that the audio timeline arithmetic
+holds. It says nothing about the QML, the scene graph, or the audio device, none of which
+a headless agent can open.
 
 ## Coverage, stated honestly
 
