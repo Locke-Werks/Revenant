@@ -333,12 +333,28 @@ ApplicationWindow {
                 placeholderText: "95.1 or 95.1M"
                 selectByMouse: true
 
-                // Seeded once from where the radio is, not bound. A binding
+                // Seeded from where the radio is, not bound. A binding
                 // would rewrite the box under an operator who is halfway
                 // through typing, every time a retune landed.
-                Component.onCompleted:
-                    text = engineLink.sourceCenterHz > 0
-                           ? (engineLink.sourceCenterHz / 1.0e6).toFixed(6) : ""
+                //
+                // AND NOT ONLY AT Component.onCompleted, because the
+                // window comes up before the engine does: the ordinary
+                // case is a client started first, or started while the
+                // engine is restarting, and at that moment sourceCenterHz
+                // is zero. So the seed is retried on the tuning signal,
+                // and ONLY while the box is empty, which is what keeps it
+                // from overwriting anything typed.
+                Component.onCompleted: tuneField.seed()
+
+                function seed() {
+                    if (tuneField.text.length === 0 && engineLink.sourceCenterHz > 0)
+                        tuneField.text = (engineLink.sourceCenterHz / 1.0e6).toFixed(6)
+                }
+
+                Connections {
+                    target: engineLink
+                    function onSourceTuningChanged() { tuneField.seed() }
+                }
 
                 onAccepted: {
                     if (engineLink.tuneSource(tuneField.text))
@@ -1385,6 +1401,15 @@ ApplicationWindow {
                     from: 0.0
                     to: 1.0
                     enabled: !audioPlayer.muted
+
+                    // A step, and it is load-bearing rather than
+                    // cosmetic. The volume is persisted on every distinct
+                    // value and QSettings on Windows reaches the registry
+                    // per setValue, so a continuous slider would be one
+                    // registry write per frame of a drag. A hundredth is
+                    // below anything audible on a perceptual curve and
+                    // bounds a full-travel drag at a hundred writes.
+                    stepSize: 0.01
 
                     // Seeded once rather than bound, because a binding to
                     // audioPlayer.volume is broken by the first drag

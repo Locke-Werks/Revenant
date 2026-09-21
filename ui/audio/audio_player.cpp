@@ -321,11 +321,18 @@ void AudioPlayer::setVolume(qreal value)
     }
 
     // WRITTEN ON EVERY MOVE AND NOT ON EXIT. A window that saves at
-    // shutdown loses everything when it is killed or crashes, and the one
-    // setting an operator most wants kept is the one they changed just
-    // before something went wrong. QSettings batches writes itself and
-    // the drag is already filtered by the fuzzy compare above, so this
-    // costs a registry write per distinct value rather than per pixel.
+    // shutdown loses everything when it is killed, and the setting an
+    // operator most wants kept is the one they changed just before
+    // something went wrong. The geometry in ui/main.cpp goes the other
+    // way and says why.
+    //
+    // THIS REACHES THE REGISTRY IMMEDIATELY. QSettings on Windows is
+    // RegSetValueEx per setValue, not a batch flushed at sync, so a
+    // temporary here is a registry write and not a buffered one. What
+    // bounds it is the slider: ui/qml/Main.qml gives the volume control
+    // a step, so a full-travel drag is at most a hundred distinct values
+    // and the fuzzy compare above drops the rest. Without that step a
+    // drag would be one write per frame of pointer motion.
     QSettings().setValue(settings::kAudioVolume, volume_);
 
     emit volumeChanged();

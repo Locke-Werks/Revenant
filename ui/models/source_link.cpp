@@ -138,13 +138,24 @@ void EngineLink::probe_source_tuning()
 
 void EngineLink::apply_source_tune()
 {
-    if (client_ == nullptr || !tune_pending_.exchange(false)) {
+    if (client_ == nullptr) {
         return;
     }
 
+    // THE FLAG IS CLEARED BEFORE THE REQUEST IS TAKEN, which is the order
+    // apply_receiver_request already uses and for the same reason. The
+    // other way round, a tune posted between the take and the clear sets
+    // both, and then this clears the flag the wake depended on: the
+    // request is still there, but the supervisor sleeps out the poll
+    // interval before it notices. Clearing first can only cost a spurious
+    // wake, which costs one pass that finds nothing to do.
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
         tune_work_pending_ = false;
+    }
+
+    if (!tune_pending_.exchange(false)) {
+        return;
     }
 
     const std::int64_t target = requested_center_hz_.load();
