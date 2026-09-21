@@ -232,3 +232,24 @@ instead: The client loads multimedia/ffmpegmediaplugin.dll and the five FFmpeg
     is the default Qt Multimedia backend in Qt 6.8 and nothing sets
     QT_MEDIA_BACKEND. Measured from the process module list; docs/packaging.md
     has the run and what those 18.3 MB cost the installer.
+
+phrase: carries a message and an originating API code with no category
+phrase: cannot tell a refused token from a server that is not up yet
+phrase: retries every failure identically and will spin against a wrong token
+phrase: Widening Error with a category is the right fix and touches every user
+retired: 2026-09-21
+commit: c3546a0
+instead: Error carries an ErrorCategory. Unauthenticated for a credential this
+    process cannot present, Unreachable for nothing answering at the address,
+    plus the three kj types a Cap'n Proto round trip carries. It did not touch
+    every user of Expected: the field sits on Error and defaults to
+    Unclassified, so the roughly eleven hundred fail() sites whose sentence is
+    already the whole answer were left alone.
+
+phrase: how often it retries when there is nothing to connect to. One interval serves both
+retired: 2026-09-21
+commit: c3546a0
+instead: It serves both now. supervise() skipped a pass early only when there
+    WAS a client, so with none the reconnect ran at kDetectionPollInterval,
+    four attempts a second rather than one, which is where adopt()'s own 240
+    passes a minute came from. The guard requires a probe pass.

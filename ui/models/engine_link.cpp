@@ -22,20 +22,24 @@
 namespace revenant::ui {
 namespace {
 
-// How often the supervisor asks the engine whether it is still there, and
-// how often it retries when there is nothing to connect to. One interval
-// serves both because they are the same question asked from either side of
-// the connection, and because an operator restarting an engine should see
-// the window come back inside a breath rather than wonder whether it will.
+// The liveness probe, and the reconnect. Both run on this, because they are the
+// same question asked from either side of the connection, and because an
+// operator restarting an engine should see the window come back inside a breath
+// rather than wonder whether it will.
 //
-// WHAT THIS COMMENT USED TO CLAIM WITHOUT SAYING SO, AND WHAT THE LOOP
-// ACTUALLY DID. The sentence above was true of the liveness probe and false of
-// the reconnect. supervise() skips a pass early only when `!probe && client_
-// != nullptr`, so with no client every pass fell through to attempt_connect
-// and the retry ran at kDetectionPollInterval: four connections a second, not
-// one. adopt() runs on each failure, which is where the 240 passes a minute in
-// its own comment came from. The guard below now requires a probe pass, so one
-// interval serves both as this paragraph always said it did.
+// WHAT THIS COMMENT USED TO SAY, WHICH WAS TRUE OF ONE OF THEM:
+//
+//   "How often the supervisor asks the engine whether it is still there, and
+//   how often it retries when there is nothing to connect to. One interval
+//   serves both because they are the same question asked from either side of
+//   the connection [...]"
+//
+// It served the probe. supervise() skips a pass early only when `!probe &&
+// client_ != nullptr`, so with no client every pass fell through to
+// attempt_connect and the retry ran at kDetectionPollInterval instead: four
+// connections a second. adopt() runs on each failure, which is where the 240
+// passes a minute in its own comment came from. The guard below now tests
+// `probe` as well, so the sentence describes the loop.
 constexpr std::chrono::milliseconds kSuperviseInterval{1000};
 
 // How long to wait before offering a credential that was just refused.
