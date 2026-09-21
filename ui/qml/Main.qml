@@ -1107,6 +1107,178 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // RDS
+        // ------------------------------------------------------------------
+        //
+        // THE HEALTH IS NOT AN EXTRA, IT IS HALF THE PANE. A decoder that
+        // never locked and a station that carries no RDS produce the same
+        // empty struct and want different actions, and so do a decoder
+        // that faulted and one that is being fed nothing across a retune.
+        // models/rds_view.h decides which of the four it is, in the order
+        // core/rpc/types.h asks for, and rdsStatus is always populated
+        // while the switch is on. There is no state in which this pane is
+        // blank and says nothing.
+        //
+        // The switch exists because the first poll BUILDS the decoder on
+        // that receiver. See the block above the RDS surface in
+        // ui/models/engine_link.h, including what this deliberately does
+        // not do about the audio rate.
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 2
+            visible: engineLink.receiverId > 0 || engineLink.rdsWanted
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Label {
+                    text: "rds"
+                    color: engineLink.rdsWanted ? window.inkTune : window.inkDim
+                    font.pixelSize: 13
+                    font.bold: true
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: engineLink.rdsWanted = !engineLink.rdsWanted
+                    }
+                }
+
+                // A SETTING AND NEVER AN INFERENCE. core/rpc/types.h and
+                // core/decode/rds_groups.h both say it: the PI cannot
+                // decide the region, because the US call sign range
+                // collides with European country codes, and getting it
+                // wrong is silent. So it is two words the operator picks,
+                // and the one in force is the bold one.
+                Repeater {
+                    model: ["rds", "rbds"]
+
+                    Label {
+                        required property string modelData
+
+                        visible: engineLink.rdsWanted
+                        text: modelData
+                        color: engineLink.rdsRegion === modelData
+                               ? window.inkTune : window.inkDim
+                        font.pixelSize: 12
+                        font.bold: engineLink.rdsRegion === modelData
+
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: engineLink.rdsRegion = parent.modelData
+                        }
+                    }
+                }
+
+                // The station, which is the whole point and is only shown
+                // once groups are actually arriving.
+                Label {
+                    visible: engineLink.rdsDecoding
+                             && engineLink.rdsIdentity.length > 0
+                    text: engineLink.rdsIdentity
+                    color: window.ink
+                    font.pixelSize: 13
+                    font.bold: true
+                }
+
+                Label {
+                    visible: engineLink.rdsDecoding && engineLink.rdsPs.length > 0
+                    text: "“" + engineLink.rdsPs + "”"
+                          + (engineLink.rdsPsSegments < engineLink.rdsPsSegmentsTotal
+                             ? "  " + engineLink.rdsPsSegments + "/"
+                               + engineLink.rdsPsSegmentsTotal + " segments"
+                             : "")
+                    color: window.ink
+                    font.pixelSize: 13
+                }
+
+                Label {
+                    visible: engineLink.rdsDecoding
+                             && engineLink.rdsProgrammeType.length > 0
+                    text: engineLink.rdsProgrammeType
+                    color: window.inkDim
+                    font.pixelSize: 12
+                }
+
+                // TP and TA, each behind its own validity flag, because
+                // core/rpc/types.h is explicit that "no traffic
+                // announcement" and "no 0A group has arrived" are
+                // different claims and the struct's default is the second
+                // one.
+                Label {
+                    visible: engineLink.rdsDecoding && engineLink.rdsTpValid
+                             && engineLink.rdsTp
+                    text: "TP"
+                    color: window.inkDim
+                    font.pixelSize: 12
+                    font.bold: true
+                }
+
+                Label {
+                    visible: engineLink.rdsDecoding && engineLink.rdsTaValid
+                             && engineLink.rdsTa
+                    text: "TA"
+                    color: window.inkWarn
+                    font.pixelSize: 12
+                    font.bold: true
+                }
+
+                Item { Layout.fillWidth: true }
+
+                // The physical layer, which is what says whether to
+                // believe any of the above. The bit rate is nominally
+                // 1187.5 and the offset is the transmitter's drift within
+                // the six hertz clause 1.1 allows, so both are printed to
+                // the precision the measurement has.
+                Label {
+                    visible: engineLink.rdsDecoding
+                    text: engineLink.rdsGroups + " groups  ·  "
+                          + engineLink.rdsBitRateHz.toFixed(2) + " bit/s  ·  "
+                          + engineLink.rdsCarrierOffsetHz.toFixed(1) + " Hz offset"
+                    color: window.inkDim
+                    font.pixelSize: 11
+                }
+            }
+
+            // RadioText on its own row, because it is up to 64 characters
+            // and sharing a row with the call sign would elide one of
+            // them away.
+            Label {
+                Layout.fillWidth: true
+                visible: engineLink.rdsDecoding
+                         && engineLink.rdsRadioText.length > 0
+                text: engineLink.rdsRadioText
+                      + (engineLink.rdsRtSegments < engineLink.rdsRtSegmentsTotal
+                         ? "   (" + engineLink.rdsRtSegments + "/"
+                           + engineLink.rdsRtSegmentsTotal + " segments)"
+                         : "")
+                color: window.ink
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
+            // ALWAYS PRESENT WHILE THE SWITCH IS ON. This is the sentence
+            // that tells a decoder that never locked from a station with
+            // no RDS, and a refused poll from either. An empty pane cannot
+            // tell you which, which is the whole reason this row is not
+            // gated on there being something to show.
+            Label {
+                Layout.fillWidth: true
+                visible: engineLink.rdsWanted && engineLink.rdsStatus.length > 0
+                text: engineLink.rdsStatus
+                color: engineLink.rdsIsFault ? window.inkWarn : window.inkDim
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Audio
         // ------------------------------------------------------------------
         //

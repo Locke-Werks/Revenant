@@ -149,6 +149,7 @@ qt_add_executable(revenant_ui
     models/audio_link.cpp
     models/engine_link.cpp
     models/engine_link.h
+    models/rds_link.cpp
     models/receiver_link.cpp
     models/source_link.cpp
     render/passband_item.cpp
@@ -327,6 +328,13 @@ endif()
 # "16 kHz receiver on a 145 kHz detection" and behind the decision not to
 # say anything about the far more common case where the filter fits.
 #
+# It covers the EN 50067 Annex E mapping, its segment placeholders and the
+# four states an empty RDS pane can be in. The mapping is the difference
+# between a letter and a different letter that renders just as plausibly,
+# and the placeholders are the difference between a call sign and half of
+# one. models/rds_view.h includes core/rpc/types.h, which is three standard
+# headers and no Cap'n Proto, so this target stays a test binary.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -367,6 +375,7 @@ if(REVENANT_UI_TESTS)
             tests/test_audio_ring.cpp
             tests/test_history_resize.cpp
             tests/test_frequency_entry.cpp
+            tests/test_rds_text.cpp
             tests/test_receiver_match.cpp
             tests/test_source_pacing.cpp
         )

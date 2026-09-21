@@ -125,17 +125,17 @@ void EngineLink::supervise()
             // second ago and a failed detections call will find out for us
             // anyway, so this does not need its own liveness question.
             //
-            // The receiver work goes first. A drag posts a request and wakes
-            // this loop immediately rather than waiting out the poll
-            // interval, so this is the path a moving filter edge takes and
-            // the status poll behind it is what reads the grant back.
-            // Before the receiver work, because a retune moves the source
-            // centre and the receiver's absolute frequency with it. A
-            // receiver applied first would be placed against the previous
-            // centre and moved a pass later, which on a drag is a filter
-            // that jumps after the radio has already landed.
+            // The front end goes first, because a retune moves the source
+            // centre and every receiver's absolute frequency with it. A
+            // receiver applied before it would be placed against the
+            // previous centre and moved a pass later, which on a drag is a
+            // filter that jumps after the radio has already landed.
             apply_source_tune();
 
+            // Then the receiver work. A drag posts a request and wakes this
+            // loop immediately rather than waiting out the poll interval,
+            // so this is the path a moving filter edge takes and the status
+            // poll below is what reads the grant back.
             apply_receiver_request();
 
             // After the receiver work and before the status poll. A
@@ -145,10 +145,25 @@ void EngineLink::supervise()
             apply_audio_request();
             poll_receiver_status();
             poll_detections();
+
+            // Only when the switch or the region has just moved. The
+            // ordinary RDS poll is on the probe pass once a second, for
+            // the reason poll_rds gives, but the first answer after a
+            // click has to arrive now: a second of nothing reads as the
+            // switch not working.
+            bool rds_due = false;
+            {
+                const std::lock_guard<std::mutex> flag(supervisor_mutex_);
+                rds_due = rds_work_pending_;
+            }
+            if (rds_due) {
+                poll_rds();
+            }
+
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
             supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
                 return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
-                                      tune_work_pending_) &&
+                                      tune_work_pending_ || rds_work_pending_) &&
                                      client_ != nullptr);
             });
             if (stopping_) {
@@ -183,6 +198,13 @@ void EngineLink::supervise()
             audio_ring_.reset();
             work_audio_stats_ = {};
 
+            // The decoder went with the engine, and the station on screen
+            // was one engine's reading of one receiver. Nothing has to be
+            // torn down on an engine that is gone; what this clears is the
+            // claim in the window, which would otherwise sit there naming
+            // a call sign as though it were still being received.
+            clear_rds();
+
             client_->unsubscribe_spectrum();
             client_.reset();
 
@@ -215,6 +237,7 @@ void EngineLink::supervise()
             // second and no information.
             poll_audio_stats();
             poll_detections();
+            poll_rds();
 
             // Last, and on the probe pass only. It is a second info()
             // call and it exists for the two measured fields alone; see
@@ -233,7 +256,7 @@ void EngineLink::supervise()
         // thread.
         supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
             return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
-                                  tune_work_pending_) &&
+                                  tune_work_pending_ || rds_work_pending_) &&
                                  client_ != nullptr);
         });
         if (stopping_) {

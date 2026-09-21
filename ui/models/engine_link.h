@@ -844,6 +844,112 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool receiverPending READ receiverPending NOTIFY receiverChanged)
 
     // ------------------------------------------------------------------
+    // RDS on the receiver the detail pane is on
+    // ------------------------------------------------------------------
+    //
+    // THE WIRE HAS CARRIED THIS SINCE THE DECODER LANDED AND NOTHING READ
+    // IT. On 2026-09-20 a real station answered with PI 0x2AF6, call sign
+    // KKFM, PS "KKFM", RadioText "98.1 KKFM Weekends" and PTY 6, and the
+    // window showed none of it.
+    //
+    // A SWITCH AND NOT AN ALWAYS-ON POLL, because core/rpc/client.h is
+    // explicit that the FIRST rds_station call is what builds the decoder,
+    // the same way the first detections call builds the detector. Polling
+    // it on every receiver would build a composite decoder behind every
+    // receiver an operator ever tuned.
+    //
+    // WHAT THIS DOES NOT DO, SAID HERE SO IT IS NOT REDISCOVERED. It does
+    // not raise the receiver's audio rate to reach the subcarrier.
+    // core/rpc/client.h names four conditions a receiver must clear, and
+    // the binding one is that the audio rate has to carry 57 kHz, which in
+    // practice means 171000. On the shipped 64-channel grid the channel
+    // rate is a fraction of that, so asking for it would be refused and
+    // the pane's receiver would be lost to a failed rebuild. So the switch
+    // polls, and the engine's own refusal is the answer: it names which of
+    // the four conditions failed, which is the information an operator
+    // needs and is exactly what this round is about. Making that refusal
+    // unnecessary is a change to how the grid is sized and is not here.
+
+    // The operator asked for RDS on the pane's receiver. Sticky across a
+    // retune and a reconnect, on the same terms audioWanted is: it is a
+    // switch and not a state.
+    Q_PROPERTY(bool rdsWanted READ rdsWanted WRITE setRdsWanted NOTIFY rdsChanged)
+
+    // "rds" or "rbds", which is a SETTING and never an inference. The PI
+    // code cannot decide it, because the US call sign range collides with
+    // European country codes, and getting it wrong is silent: PTY 26 is
+    // National Music in one region and Hip-Hop in the other. Written
+    // through Session.setRdsRegion, which REBUILDS the decoder and clears
+    // everything accumulated, so this window writes it only on a change.
+    Q_PROPERTY(QString rdsRegion READ rdsRegion WRITE setRdsRegion NOTIFY rdsChanged)
+
+    // The sentence about the DECODER, which is always present while the
+    // switch is on. Four different situations produce a station struct
+    // with nothing in it and they need four different actions; see
+    // models/rds_view.h.
+    Q_PROPERTY(QString rdsStatus READ rdsStatus NOTIFY rdsChanged)
+
+    // Whether that sentence is bad news. A decoder that never locked on a
+    // band with no RDS is the ordinary answer and is not.
+    Q_PROPERTY(bool rdsIsFault READ rdsIsFault NOTIFY rdsChanged)
+
+    // Groups are arriving, so the fields below mean something. A pane
+    // that drew them without this shows a struct's defaults as a station.
+    Q_PROPERTY(bool rdsDecoding READ rdsDecoding NOTIFY rdsChanged)
+
+    // The station. Call sign when the region derives one, the PI in hex
+    // when it does not, empty before a PI has arrived.
+    Q_PROPERTY(QString rdsIdentity READ rdsIdentity NOTIFY rdsChanged)
+
+    // Programme Service and RadioText, as UTF-8 through QString::
+    // fromStdString and never as Latin-1. models/rds_text.h has the
+    // mapping and the reason: these are EN 50067 Annex E code points, and
+    // the upper half is a different alphabet at the same byte values, so
+    // the accident renders a plausible wrong letter and never faults.
+    Q_PROPERTY(QString rdsPs READ rdsPs NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsRadioText READ rdsRadioText NOTIFY rdsChanged)
+
+    // How much of each has arrived. Shown when the two differ, because
+    // "KKFM" and a half-received name are different claims and the
+    // placeholders alone are easy to read past on a narrow strip.
+    Q_PROPERTY(int rdsPsSegments READ rdsPsSegments NOTIFY rdsChanged)
+    Q_PROPERTY(int rdsPsSegmentsTotal READ rdsPsSegmentsTotal NOTIFY rdsChanged)
+    Q_PROPERTY(int rdsRtSegments READ rdsRtSegments NOTIFY rdsChanged)
+    Q_PROPERTY(int rdsRtSegmentsTotal READ rdsRtSegmentsTotal NOTIFY rdsChanged)
+
+    // "6 Classic Rock", from the wire rather than a table here, because
+    // half the table differs between the two regions.
+    Q_PROPERTY(QString rdsProgrammeType READ rdsProgrammeType NOTIFY rdsChanged)
+
+    // Traffic Programme and Traffic Announcement, each with the validity
+    // flag core/rpc/types.h insists on: TA false is a real state and so is
+    // "no 0A group has arrived", and they are not the same.
+    Q_PROPERTY(bool rdsTp READ rdsTp NOTIFY rdsChanged)
+    Q_PROPERTY(bool rdsTpValid READ rdsTpValid NOTIFY rdsChanged)
+    Q_PROPERTY(bool rdsTa READ rdsTa NOTIFY rdsChanged)
+    Q_PROPERTY(bool rdsTaValid READ rdsTaValid NOTIFY rdsChanged)
+
+    // THE HEALTH, WHICH IS THE HALF THAT SAYS WHETHER TO BELIEVE THE REST.
+    // A decoder that is not locked has to look different from a station
+    // with no RDS, and an empty pane cannot tell you which.
+    //
+    // The error rate counts corrected blocks as errors, because a
+    // corrected block had a burst repaired rather than arriving clean.
+    // Negative before any block has been looked at, which is not a rate of
+    // zero.
+    Q_PROPERTY(double rdsBlockErrorRate READ rdsBlockErrorRate NOTIFY rdsChanged)
+    Q_PROPERTY(double rdsBitRateHz READ rdsBitRateHz NOTIFY rdsChanged)
+    Q_PROPERTY(double rdsCarrierOffsetHz READ rdsCarrierOffsetHz NOTIFY rdsChanged)
+    Q_PROPERTY(double rdsQuality READ rdsQuality NOTIFY rdsChanged)
+    Q_PROPERTY(qulonglong rdsGroups READ rdsGroups NOTIFY rdsChanged)
+
+    // The engine refused the poll, in its own words, which on a receiver
+    // that cannot carry a composite names which of the four conditions
+    // failed. Kept apart from rdsStatus, which is about a decoder that
+    // exists.
+    Q_PROPERTY(QString rdsFault READ rdsFault NOTIFY rdsChanged)
+
+    // ------------------------------------------------------------------
     // Listening to the receiver the detail pane is on
     // ------------------------------------------------------------------
     //
@@ -1249,6 +1355,42 @@ public:
     [[nodiscard]] const rpc::PassbandFrame& passbandFrame() const { return passband_display_; }
 
     // ------------------------------------------------------------------
+    // The RDS surface. Implemented in ui/models/rds_link.cpp.
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] bool rdsWanted() const { return rds_wanted_.load(); }
+    void setRdsWanted(bool wanted);
+
+    [[nodiscard]] QString rdsRegion() const;
+    void setRdsRegion(const QString& region);
+
+    [[nodiscard]] QString rdsStatus() const { return rds_status_; }
+    [[nodiscard]] bool rdsIsFault() const { return rds_is_fault_; }
+    [[nodiscard]] bool rdsDecoding() const { return rds_decoding_; }
+    [[nodiscard]] QString rdsIdentity() const { return rds_identity_; }
+    [[nodiscard]] QString rdsPs() const { return rds_ps_; }
+    [[nodiscard]] QString rdsRadioText() const { return rds_radio_text_; }
+    [[nodiscard]] int rdsPsSegments() const { return rds_ps_segments_; }
+    [[nodiscard]] int rdsPsSegmentsTotal() const { return rds_ps_segments_total_; }
+    [[nodiscard]] int rdsRtSegments() const { return rds_rt_segments_; }
+    [[nodiscard]] int rdsRtSegmentsTotal() const { return rds_rt_segments_total_; }
+    [[nodiscard]] QString rdsProgrammeType() const { return rds_programme_type_; }
+    [[nodiscard]] bool rdsTp() const { return rds_station_.tp; }
+    [[nodiscard]] bool rdsTpValid() const { return rds_station_.tp_valid; }
+    [[nodiscard]] bool rdsTa() const { return rds_station_.ta; }
+    [[nodiscard]] bool rdsTaValid() const { return rds_station_.ta_valid; }
+    [[nodiscard]] double rdsBlockErrorRate() const { return rds_block_error_rate_; }
+    [[nodiscard]] double rdsBitRateHz() const { return rds_station_.health.bit_rate_hz; }
+    [[nodiscard]] double rdsCarrierOffsetHz() const {
+        return rds_station_.health.carrier_offset_hz;
+    }
+    [[nodiscard]] double rdsQuality() const { return rds_station_.health.quality; }
+    [[nodiscard]] qulonglong rdsGroups() const {
+        return static_cast<qulonglong>(rds_station_.health.groups_decoded);
+    }
+    [[nodiscard]] QString rdsFault() const { return rds_fault_; }
+
+    // ------------------------------------------------------------------
     // The audio surface
     // ------------------------------------------------------------------
 
@@ -1370,6 +1512,11 @@ signals:
     // change, because it is polled once a second for the life of the
     // window and the answer is the same almost every time.
     void pacingChanged();
+
+    // The RDS switch moved, the decoder's state changed, or a new station
+    // snapshot arrived. One signal for all of it, because one pane reads
+    // all of it and none of it repaints a display.
+    void rdsChanged();
 
     // The audio subscription changed: it started, it stopped, the engine
     // refused it, the receiver went away, or the engine's counters moved.
@@ -1836,6 +1983,76 @@ private:
     PacingSample pacing_;
     PacingVerdict pacing_verdict_ = PacingVerdict::NotCarried;
     QString pacing_text_;
+
+    // ------------------------------------------------------------------
+    // RDS. Implemented in ui/models/rds_link.cpp.
+    // ------------------------------------------------------------------
+
+    // Supervisor thread, probe pass only. Polls the station on the pane's
+    // receiver when the switch is on, applies a region change first, and
+    // hands whatever came back over.
+    //
+    // ONCE A SECOND AND NOT FOUR TIMES. A group completes at most every
+    // 87.6 ms and the whole surface is a state that accumulates, so the
+    // faster rate buys round trips and nothing else. core/rpc/client.h
+    // makes the same argument for why this is a poll rather than a
+    // subscription.
+    void poll_rds();
+
+    // Supervisor thread. Drops the decoder's state from this window's
+    // side when there is nothing to poll: the switch went off, the
+    // receiver went away, the connection went. The engine keeps its
+    // decoder; what this clears is the claim on screen.
+    void clear_rds();
+
+    // Qt thread, queued from poll_rds.
+    void adopt_rds();
+
+    // Written by the Qt thread, read by the supervisor.
+    std::atomic<bool> rds_wanted_{false};
+    std::atomic<bool> rds_region_rbds_{false};
+
+    // Supervisor thread only: the receiver the decoder was asked for and
+    // the region last written, so a repeated write is not made. A
+    // set_rds_region call REBUILDS the decoder and clears everything
+    // accumulated, so writing the region it already has costs the
+    // operator the station they were reading.
+    qulonglong rds_polled_vrx_ = 0;
+    bool rds_posted_region_rbds_ = false;
+    bool rds_region_written_ = false;
+
+    std::mutex rds_mutex_;
+    bool has_rds_handover_ = false;     // guarded by rds_mutex_
+    bool handover_rds_answered_ = false;  // guarded by rds_mutex_
+    rpc::RdsStation handover_rds_station_;  // guarded by rds_mutex_
+    QString handover_rds_fault_;            // guarded by rds_mutex_
+
+    // Qt thread only: what the properties above hand out. The station is
+    // kept whole rather than flattened, because the flags on it are read
+    // straight through and a second copy of each would be a second thing
+    // to keep in step.
+    rpc::RdsStation rds_station_;
+    bool rds_answered_ = false;
+    bool rds_is_fault_ = false;
+    bool rds_decoding_ = false;
+    QString rds_status_;
+    QString rds_identity_;
+    QString rds_ps_;
+    QString rds_radio_text_;
+    QString rds_programme_type_;
+    QString rds_fault_;
+    int rds_ps_segments_ = 0;
+    int rds_ps_segments_total_ = 0;
+    int rds_rt_segments_ = 0;
+    int rds_rt_segments_total_ = 0;
+    double rds_block_error_rate_ = -1.0;
+
+    // Set by setRdsWanted and setRdsRegion, cleared by the supervisor
+    // when it has polled. In the wait predicate, so the first answer
+    // arrives on the next tick rather than at the next probe: a second
+    // between clicking the switch and anything appearing reads as the
+    // switch not working.
+    bool rds_work_pending_ = false;  // guarded by supervisor_mutex_
 
     // ------------------------------------------------------------------
     // Audio. Implemented in ui/models/audio_link.cpp.
