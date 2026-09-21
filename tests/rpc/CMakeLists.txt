@@ -73,6 +73,22 @@ endif()
 # %LOCALAPPDATA%\Revenant\rpc-token and a test suite has no business minting a
 # token into a real user profile and leaving it there. It also keeps this
 # entry from sharing a file with an engine the operator is actually running.
+#
+# BOTH REGEXES, AND THE SECOND ONE IS WHY THIS ENTRY MEANS ANYTHING.
+#
+# Setting PASS_REGULAR_EXPRESSION tells CTest to decide the verdict from the
+# output alone: the exit code stops being consulted at all. The port line is
+# printed within the first few milliseconds, so with only a pass regex this
+# entry passes on any run that gets as far as binding, whatever the engine
+# does afterwards. Everything this program exists to exercise past that
+# point, the serve loop, the shutdown path and every error main.cpp
+# classifies, would return 1 to a runner that had already made up its mind.
+#
+# FAIL_REGULAR_EXPRESSION is honoured alongside it and wins, so the failure
+# prefix main.cpp prints to stderr before returning 1 is what closes the gap.
+# Matching the message rather than the exit code is not a workaround here: the
+# exit code is unavailable by construction once a pass regex is set, and the
+# prefix is the one string every one of those paths shares.
 if(TARGET revenant-engine)
     add_test(
         NAME engined_serves_and_reports_its_port
@@ -89,6 +105,7 @@ if(TARGET revenant-engine)
         LABELS "rpc"
         TIMEOUT 300
         PASS_REGULAR_EXPRESSION "listening on 127\\.0\\.0\\.1:[0-9]+"
+        FAIL_REGULAR_EXPRESSION "revenant-engine: "
     )
 else()
     message(STATUS "revenant-engine is not present yet, skipping its service test")
