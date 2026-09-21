@@ -143,13 +143,31 @@ at the call site.
 **What the correction does at the edges.** It amplifies, so the question is how
 far. Not far: the kept band ends at the cutoff and never reaches the stopband,
 which starts at `0.75/M` while the band ends at `0.5/M`. The deepest point is
-6.02 dB, the largest gain is a factor of four in power, and nothing is divided
-by anything near zero. Measured at a 120 dB target at 4, 5, 8, 12, 16, 17, 24,
-33, 48, 64 and 129 taps per branch, the deepest point in the kept band is
--6.0206 dB every time; the one outlier is a three-tap branch at -8.0045 dB.
-`kMaxSpectrumCorrectionDb` clamps at 12 dB, and it is a guard against putting a
-non-finite number in a table that gets uploaded to a device rather than a
-working part of the design.
+about 6.02 dB, the largest gain is a factor of four in power, and nothing is
+divided by anything near zero.
+
+Measured at a 120 dB target and a 2048-point transform, the deepest point in the
+kept band is its outer edge in every case, and its depth settles on the
+half-power crossover as the prototype lengthens. -6.0206 dB, which is
+20·log10(0.5), at 16 taps per branch and upward: 16, 17, 24, 33, 48, 64 and 129
+all agree to four decimals. Below that the transition has not finished by the
+band edge and the figure drifts either way: -6.0208 dB at 12, -6.0279 at 8,
+-5.9909 at 5, -6.0627 at 4 and -8.0045 at 3. `kMaxSpectrumCorrectionDb` clamps
+at 12 dB, which clears the deepest of them by four decibels, so the clamp never
+fires; it exists because a response of zero would put an infinity in a table
+that gets uploaded to a device, and an infinity there poisons a whole frame
+rather than one bin.
+
+WHAT THIS PARAGRAPH USED TO SAY: "Measured at a 120 dB target at 4, 5, 8, 12,
+16, 17, 24, 33, 48, 64 and 129 taps per branch, the deepest point in the kept
+band is -6.0206 dB every time; the one outlier is a three-tap branch at -8.0045
+dB." Four of those eleven do not measure -6.0206 and one of them, five taps per
+branch, is not even below it. The list read as eleven independent confirmations
+of one number and was one number plus four that had been rounded into it.
+`core/dsp/spectrum_reference.h` is the source of truth for these figures and
+was corrected at the time; this copy was not, so the withdrawn list stayed in
+front of every reader of this document while the correction sat in a header
+they had no reason to open.
 
 **What it costs.** The noise at a seam is lifted by the same factor as the
 signal, so the correction buys no sensitivity: a signal at a channel edge is
