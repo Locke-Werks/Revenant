@@ -68,15 +68,36 @@ public:
     // pipelined on the login result, so a good token costs no extra round
     // trip afterwards.
     //
-    // A WRONG TOKEN IS PERMANENT AND THIS INTERFACE CANNOT SAY SO
+    // A WRONG TOKEN IS PERMANENT AND THE FAILURE SAYS SO
     //
-    // core/error.h carries a message and an originating API code with no
-    // category, so a caller reconnecting in a loop cannot tell this refusal
-    // from a connection refused by a server that is not up yet, except by
-    // matching on the message text. ui/models/engine_link.cpp retries every
-    // failure identically and will spin against a wrong token. Widening
-    // Error with a category touches every user of Expected in the tree and
-    // is the right fix rather than this one; it is not on this branch.
+    // Error::category is ErrorCategory::Unauthenticated for a token this
+    // engine will not take, for a token of the wrong length, and for a token
+    // file that cannot be read or holds something that is not hexadecimal.
+    // It is ErrorCategory::Unreachable when nothing answered at the address,
+    // which includes the token file not existing yet, because the engine
+    // mints that file on its first run and a client started first finds no
+    // engine and no token for the same reason.
+    //
+    // The two are distinguished by HOW FAR THE HANDSHAKE GOT rather than by
+    // the message, which is core/rpc/client.cpp's Phase, and that is what
+    // makes the distinction survive a rewording.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY, UNDER THE HEADING "A WRONG TOKEN IS
+    // PERMANENT AND THIS INTERFACE CANNOT SAY SO":
+    //
+    //   "core/error.h carries a message and an originating API code with no
+    //   category, so a caller reconnecting in a loop cannot tell this refusal
+    //   from a connection refused by a server that is not up yet, except by
+    //   matching on the message text. ui/models/engine_link.cpp retries every
+    //   failure identically and will spin against a wrong token. Widening
+    //   Error with a category touches every user of Expected in the tree and
+    //   is the right fix rather than this one; it is not on this branch."
+    //
+    // It was on the next branch. The one clause of it that stayed true is the
+    // reach: a category is on Error itself, so it is on the error type every
+    // Expected in the tree returns, and it defaults to Unclassified so that
+    // the eleven hundred fail() sites that say enough already did not have to
+    // be visited.
     [[nodiscard]] static Expected<std::unique_ptr<Client>> connect(
         std::string_view address, std::uint16_t port, std::span<const std::uint8_t> token);
 

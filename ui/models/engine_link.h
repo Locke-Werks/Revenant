@@ -128,6 +128,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -1569,6 +1570,12 @@ private:
     [[nodiscard]] bool attempt_connect();
     void publish(bool connected, QString error);
 
+    // Supervisor thread. Reads Error::category and decides when the next
+    // connection attempt is worth making. See kRefusedCredentialInterval in
+    // engine_link.cpp for why a refused credential is backed off rather than
+    // stopped, and why every other failure is retried at the ordinary rate.
+    void hold_off(const Error& failure);
+
     // Supervisor thread. The engine answered the probe, so the connection is
     // good and this is what it said. Posts nothing when the answer has not
     // changed, because it is asked once a second for the life of the window
@@ -1647,6 +1654,14 @@ private:
     std::mutex supervisor_mutex_;
     std::condition_variable supervisor_wake_;
     bool stopping_ = false;  // guarded by supervisor_mutex_
+
+    // When the next connection attempt is worth making. Supervisor thread
+    // only, written and read in supervise() and hold_off() and nowhere else,
+    // so unlike stopping_ above it needs no lock.
+    //
+    // The epoch is always in the past, which is what makes the first attempt
+    // immediate and what a successful connection resets it to.
+    std::chrono::steady_clock::time_point retry_after_{};
 
     // Qt thread only.
     rpc::SpectrumFrame display_;

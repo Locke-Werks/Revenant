@@ -456,15 +456,23 @@ Expected<Token> token_from_hex(std::string_view text) {
                              text.back() == '\t')) {
         text.remove_suffix(1);
     }
+    // EVERY REFUSAL IN THIS FUNCTION IS Unauthenticated, and the category is
+    // about what a caller can do rather than about what is wrong. A token file
+    // holding the wrong thing does not start holding the right thing because
+    // somebody read it again: a supervisor that retries writes one line a
+    // second until an operator happens to look at the window. What a client
+    // does with that is ui/models/engine_link.cpp's business and it now has
+    // something to branch on.
     if (text.empty()) {
         return fail(std::format("the token is empty, and it has to be {} hexadecimal characters",
-                                kTokenBytes * 2));
+                                kTokenBytes * 2),
+                    ErrorCategory::Unauthenticated);
     }
     if (text.size() != kTokenBytes * 2) {
-        return fail(std::format(
-            "the token is {} characters and it has to be exactly {}, which is {} bytes written "
-            "in hexadecimal",
-            text.size(), kTokenBytes * 2, kTokenBytes));
+        return fail(std::format("the token is {} characters and it has to be exactly {}, which is "
+                                "{} bytes written in hexadecimal",
+                                text.size(), kTokenBytes * 2, kTokenBytes),
+                    ErrorCategory::Unauthenticated);
     }
 
     Token out{};
@@ -472,10 +480,10 @@ Expected<Token> token_from_hex(std::string_view text) {
         const int high = hex_value(text[2 * i]);
         const int low = hex_value(text[(2 * i) + 1]);
         if (high < 0 || low < 0) {
-            return fail(std::format(
-                "the token has a character that is not hexadecimal at position {}. It has to be "
-                "{} characters from 0-9 and a-f",
-                high < 0 ? 2 * i : (2 * i) + 1, kTokenBytes * 2));
+            return fail(std::format("the token has a character that is not hexadecimal at "
+                                    "position {}. It has to be {} characters from 0-9 and a-f",
+                                    high < 0 ? 2 * i : (2 * i) + 1, kTokenBytes * 2),
+                        ErrorCategory::Unauthenticated);
         }
         out[i] = static_cast<std::uint8_t>((high << 4) | low);
     }
@@ -532,16 +540,36 @@ Expected<Token> load_token(const std::string& path) {
                                     FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         const DWORD code = GetLastError();
+
+        // A MISSING FILE IS THE ORDINARY STATE OF A CLIENT STARTED FIRST, and
+        // it is the one failure here that is not about a credential. The engine
+        // mints this file on its first run, so on a machine where no engine has
+        // ever run there is nothing to read and nothing wrong. Unreachable says
+        // wait; Unauthenticated would tell a supervisor to stop, which would
+        // leave the window refusing to connect to an engine that then started.
+        //
+        // Anything else is a file that exists and cannot be read, which is a
+        // permission an operator has to change.
+        const bool absent = code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND;
         return fail(std::format("could not open the token file {}: {}", path,
                                 win32_message(code)),
+                    absent ? ErrorCategory::Unreachable : ErrorCategory::Unauthenticated,
                     code);
     }
 
     // Before the bytes, not after: a file anything can read has already leaked
     // whatever is in it, and reading it first would be this process agreeing.
+    //
+    // The category is set here rather than inside check_token_file_acl, which
+    // fails for two different reasons: a permission that is wrong, and a Win32
+    // call that would not answer. Both leave this process unable to present a
+    // credential and neither is fixed by asking again, so one category covers
+    // them and the message says which happened.
     if (auto permitted = check_token_file_acl(file, path); !permitted) {
         CloseHandle(file);
-        return std::unexpected(permitted.error());
+        Error refused = permitted.error();
+        refused.category = ErrorCategory::Unauthenticated;
+        return std::unexpected(std::move(refused));
     }
 
     // Larger than any file this should accept, so one carrying more than a
@@ -569,7 +597,7 @@ Expected<Token> load_token(const std::string& path) {
     if (ok == 0) {
         return fail(std::format("could not read the token file {}: {}", path,
                                 win32_message(code)),
-                    code);
+                    ErrorCategory::Unauthenticated, code);
     }
 
     auto parsed = token_from_hex(std::string_view(buffer.data(), read));
@@ -668,7 +696,8 @@ namespace {
 [[nodiscard]] Error not_supported() {
     return Error{"the RPC token store is implemented for Windows only so far. It needs a "
                  "platform source of random bytes and a file mode that keeps the token to one "
-                 "account, and neither has been written for this platform"};
+                 "account, and neither has been written for this platform",
+                 ErrorCategory::Unimplemented};
 }
 }  // namespace
 

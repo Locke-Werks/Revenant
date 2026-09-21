@@ -543,7 +543,42 @@ TEST_CASE("a readable token file that is not a token says which way it is wrong"
         // The path is in every one of them, because the operator has to know
         // which file to fix and may have named it with --token-file.
         CHECK(loaded.error().message.find(path) != std::string::npos);
+
+        // AND THE CATEGORY SURVIVES with_context, which is what puts the path
+        // into the message above. token_from_hex sets Unauthenticated, load_token
+        // wraps it with the filename, and a with_context that rebuilt the Error
+        // without copying the category would leave every one of these reading as
+        // Unclassified. That failure would look exactly like the category never
+        // having been set at the source, which is the harder thing to find.
+        CHECK(loaded.error().category == ErrorCategory::Unauthenticated);
     }
+}
+
+TEST_CASE("a token file that is not there yet is waited for, not refused",
+          "[rpc][token]") {
+    // THE ONE FAILURE IN THIS FILE THAT IS NOT ABOUT A CREDENTIAL
+    //
+    // The engine mints the token file on its first run, so on a machine where
+    // no engine has ever run there is no file and nothing is wrong. A client
+    // started before its engine has to keep asking, and that is the whole
+    // difference between this case and the one above it: everything else here
+    // is a file an operator must go and fix.
+    //
+    // Unreachable rather than Unclassified, because Unclassified is retried at
+    // the ordinary rate by accident rather than on purpose, and this one is
+    // retried at the ordinary rate deliberately.
+    const TempDir dir;
+    const std::string missing = dir.file("rpc-token-that-was-never-minted");
+
+    auto loaded = rpc::load_token(missing);
+    REQUIRE_FALSE(loaded.has_value());
+    INFO(loaded.error().message);
+    CHECK(loaded.error().category == ErrorCategory::Unreachable);
+    CHECK(loaded.error().category != ErrorCategory::Unauthenticated);
+
+    // The Win32 code is reported as well, because error.h reserves that field
+    // for the originating API's own number and this failure has one.
+    CHECK(loaded.error().code == static_cast<long long>(ERROR_FILE_NOT_FOUND));
 }
 
 TEST_CASE("a token file saved by Notepad loads", "[rpc][token]") {

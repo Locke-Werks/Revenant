@@ -186,6 +186,15 @@ struct PromiseValue<kj::Promise<T>> {
 // originating API's own number, and kj has a four-value Type rather than an
 // errno, so putting the ordinal there would read in a log as though a driver
 // had returned it.
+//
+// IT CARRIES A CATEGORY, AND THE TYPE IS THE WHOLE OF WHERE ONE COMES FROM.
+// Three of the four kj types are a verdict a caller can act on and the fourth,
+// FAILED, is rpc.capnp's own "this would fail again unchanged", which is
+// Unclassified rather than a fifth meaning. core/rpc/server.cpp's
+// to_exception_type is the other half of this mapping and error.h says what the
+// round trip loses. A caller that knows more than the type does, because of
+// WHERE it caught this, narrows the category afterwards; ClientImpl::run is the
+// one place that does.
 [[nodiscard]] Error translate(std::string_view what, const kj::Exception& failure) {
     const kj::StringPtr description = failure.getDescription();
     std::string detail(description.begin(), description.end());
@@ -195,14 +204,17 @@ struct PromiseValue<kj::Promise<T>> {
 
     switch (failure.getType()) {
         case kj::Exception::Type::DISCONNECTED:
-            return Error{
-                std::format("{}: the connection to the engine is gone: {}", what, detail)};
+            return Error{std::format("{}: the connection to the engine is gone: {}", what, detail),
+                         ErrorCategory::Disconnected};
         case kj::Exception::Type::OVERLOADED:
-            return Error{std::format("{}: the engine is out of resources: {}", what, detail)};
+            return Error{std::format("{}: the engine is out of resources: {}", what, detail),
+                         ErrorCategory::Overloaded};
         case kj::Exception::Type::UNIMPLEMENTED:
-            return Error{std::format(
-                "{}: the engine does not implement this call, so it is older than this client: {}",
-                what, detail)};
+            return Error{
+                std::format("{}: the engine does not implement this call, so it is older than "
+                            "this client: {}",
+                            what, detail),
+                ErrorCategory::Unimplemented};
         case kj::Exception::Type::FAILED:
         default:
             return Error{std::format("{}: {}", what, detail)};
@@ -1114,6 +1126,33 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         }
     };
 
+    // HOW FAR THE HANDSHAKE GOT, WHICH IS WHAT SEPARATES TWO FAILURES THAT
+    // ARRIVE IDENTICAL
+    //
+    // Both of these land in the one catch below, and until 2026-09-21 both came
+    // out of it as an Error carrying a sentence and nothing else:
+    //
+    //   Nothing is listening on that port yet, which is the ordinary state of a
+    //   client started before its engine.
+    //
+    //   The engine is listening and refused the token, which no amount of
+    //   asking again will change.
+    //
+    // ui/models/engine_link.cpp retried both once a second, because the only
+    // thing distinguishing them was the wording of a message. The phase is
+    // recorded as the handshake walks it, so the distinction is made by WHERE
+    // the throw came from rather than by reading what it said.
+    //
+    // The phase wins over the kj type for Connecting, and the type wins inside
+    // LoggingIn. Nothing answering at an address is Unreachable whether kj
+    // called it a refused connection or a disconnection, because either way
+    // there is no engine there. A throw during login is the token being refused
+    // when kj calls it FAILED, which is login's only documented refusal, and is
+    // NOT an authentication verdict when kj calls it DISCONNECTED: that is an
+    // engine that died mid-handshake and is worth asking again.
+    enum class Phase : std::uint8_t { Connecting, LoggingIn, Serving };
+    Phase phase = Phase::Connecting;
+
     try {
         kj::AsyncIoContext io = kj::setupAsyncIo();
 
@@ -1140,6 +1179,13 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         // exception and every call on it fails with that exception WITHOUT
         // the engine's Session implementation being entered, which is the
         // property the whole single-check design rests on.
+        //
+        // The phase moves here rather than after send(), because send() itself
+        // can throw on a connection the peer closed between connect and this
+        // line, and that is already the token's round trip failing rather than
+        // the socket's.
+        phase = Phase::LoggingIn;
+
         auto login = rpc.bootstrap().castAs<schema::Authenticator>().loginRequest();
         login.setToken(capnp::Data::Reader(
             reinterpret_cast<const kj::byte*>(token_.data()), token_.size()));
@@ -1173,6 +1219,7 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         // sentence in it.
         pending.wait(io.waitScope);
 
+        phase = Phase::Serving;
         announce(Status{});
 
         // Runs until the destructor fulfills this from inside an executeSync.
@@ -1180,7 +1227,24 @@ void ClientImpl::run(const std::string& address, std::uint16_t port,
         // calls, and it is the owner who decides when to stop.
         shutdown.promise.wait(io.waitScope);
     } catch (const kj::Exception& failure) {
-        announce(std::unexpected(translate(context, failure)));
+        Error translated = translate(context, failure);
+        switch (phase) {
+            case Phase::Connecting:
+                translated.category = ErrorCategory::Unreachable;
+                break;
+            case Phase::LoggingIn:
+                // Only where kj called it FAILED, which translate left
+                // Unclassified. A DISCONNECTED or an OVERLOADED during login is
+                // the engine's state and not a verdict on the token, and it
+                // already carries the category that says so.
+                if (translated.category == ErrorCategory::Unclassified) {
+                    translated.category = ErrorCategory::Unauthenticated;
+                }
+                break;
+            case Phase::Serving:
+                break;
+        }
+        announce(std::unexpected(std::move(translated)));
     } catch (const std::exception& failure) {
         announce(fail(std::format("{}: {}", context, failure.what())));
     } catch (...) {
@@ -1734,11 +1798,17 @@ Expected<std::unique_ptr<Client>> Client::connect(std::string_view address, std:
     }
     // Before the socket, so a caller that forgot the token does not get a
     // refusal from the far end that reads like the engine's fault.
+    //
+    // Unauthenticated and not Unclassified, on the same ground the far end's
+    // refusal sits on: a credential of the wrong shape cannot become the right
+    // one by being offered again, so a supervisor that retries this writes one
+    // line a second until somebody reads it.
     if (token.size() != kTokenBytes) {
         return fail(std::format(
-            "cannot connect: the token is {} bytes and it has to be exactly {}. "
-            "core/rpc/token.h reads the engine's token file into that shape",
-            token.size(), kTokenBytes));
+                        "cannot connect: the token is {} bytes and it has to be exactly {}. "
+                        "core/rpc/token.h reads the engine's token file into that shape",
+                        token.size(), kTokenBytes),
+                    ErrorCategory::Unauthenticated);
     }
     if (port == 0) {
         // ServerOptions::port defaults to zero meaning "bind whatever is

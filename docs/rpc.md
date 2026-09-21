@@ -1036,12 +1036,48 @@ is lazy, so until this landed `connect` returned the moment the TCP connect did
 and nothing was exchanged. It waits for the login answer, so a wrong token is a
 connect failure carrying the engine's refusal.
 
-**A wrong token is permanent and `core/error.h` cannot say so.** `Error` has a
-message and an originating API code and no category, so
+**A wrong token is permanent and the failure says so.** `Error` carries an
+`ErrorCategory` as of 2026-09-21. A token this engine will not take, a token of
+the wrong length, and a token file that cannot be read or holds something that
+is not hexadecimal are all `Unauthenticated`; nothing answering at the address
+is `Unreachable`, and that includes the token file not existing yet, because the
+engine mints it on its first run and a client started first finds no engine and
+no token for one reason. `ui/models/engine_link.cpp` backs a refused credential
+off to ten seconds and presents an absent engine as "waiting for an engine at
+127.0.0.1:17690" rather than as a syscall.
+
+The two are separated by how far the handshake got and not by what the message
+said. `ClientImpl::run` records a phase as it walks the handshake, and the phase
+decides: a throw before the stream connected is `Unreachable` whatever kj called
+it, and a `FAILED` during login is the token, which is login's only documented
+refusal. A `DISCONNECTED` during login is an engine that died mid-handshake and
+stays `Disconnected`, because that is worth asking about again.
+
+**This entry used to read "A wrong token is permanent and `core/error.h` cannot
+say so. `Error` has a message and an originating API code and no category, so
 `ui/models/engine_link.cpp`'s reconnect supervisor cannot tell a refused token
 from a server that is not up yet except by matching on message text, and it
 retries both. Widening `Error` with a category is the right fix and touches
-every user of `Expected` in the tree.
+every user of `Expected` in the tree."** It did not touch every user. The
+category sits on `Error`, so it reaches every `Expected` in the tree by
+construction, and it defaults to `Unclassified` so the roughly eleven hundred
+`fail()` sites whose sentence is already the whole answer did not have to be
+visited and guessed at.
+
+**What a category survives is narrower than what it carries, and the narrowing
+is the protocol's.** `capnp::rpc::Exception` is a reason, a four-value type and a
+trace, with no detail blob, so nothing can be carried beside the type.
+`server.cpp`'s `to_exception_type` maps `Disconnected`, `Overloaded` and
+`Unimplemented` onto kj's three and everything else onto `FAILED`;
+`client.cpp`'s `translate` maps them back, and `FAILED` becomes `Unclassified`
+because that is what `rpc.capnp` says it means. `Unreachable` and
+`Unauthenticated` never cross: a client generates both locally, at the point
+where it failed to reach or failed to log in.
+
+So a refusal a client has to **act** on is a result field in the schema and not
+an exception. `rpc.capnp` argues this under its own `Exception` struct:
+exceptions should not be used to flag conditions a client is expected to handle
+in an application-specific way.
 
 ## Not done yet
 

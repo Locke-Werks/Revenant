@@ -343,16 +343,55 @@ void release_engine(const engine::Engine& engine) {
     std::erase(claimed_engines(), &engine);
 }
 
+// The four-value type Cap'n Proto carries, from the category we hold.
+//
+// THREE OF OUR SIX MAP AND THREE DO NOT, and the reason is the protocol rather
+// than this function. capnp::rpc::Exception is a reason, a type and a trace;
+// there is no detail blob on the wire, so nothing can be smuggled beside the
+// type. Unreachable and Unauthenticated never arise on this side of a
+// connection that exists, so their absence costs nothing: a client generates
+// both locally, at the point where it failed to reach or failed to log in.
+// Unclassified is the honest answer for everything else, which is what FAILED
+// already means in rpc.capnp's own words: repeating the operation without a
+// change in the state of the world would fail again.
+//
+// So a refusal a client has to ACT on does not belong here. rpc.capnp says it
+// under its own Exception struct: exceptions should not be used to flag
+// conditions a client is expected to handle in an application-specific way.
+// Those are result fields in revenant.capnp.
+[[nodiscard]] kj::Exception::Type to_exception_type(ErrorCategory category) {
+    switch (category) {
+        case ErrorCategory::Disconnected:
+            return kj::Exception::Type::DISCONNECTED;
+        case ErrorCategory::Overloaded:
+            return kj::Exception::Type::OVERLOADED;
+        case ErrorCategory::Unimplemented:
+            return kj::Exception::Type::UNIMPLEMENTED;
+        case ErrorCategory::Unreachable:
+        case ErrorCategory::Unauthenticated:
+        case ErrorCategory::Unclassified:
+            break;
+    }
+    return kj::Exception::Type::FAILED;
+}
+
 // An engine failure becomes a Cap'n Proto exception carrying the engine's own
 // message. Defaulting the result instead would hand a client a zeroed struct
 // and no way to tell it from a real answer.
+//
+// WHAT THIS FUNCTION USED TO DO: every error became
+// kj::Exception::Type::FAILED, whatever it was. An engine that was out of
+// device memory and an engine that had been handed a frequency out of range
+// were the same verdict to a client, so a client could not schedule a retry
+// differently from a correction it would never make. The type now comes from
+// Error::category, and error.h says what that carries and what it does not.
 [[nodiscard]] kj::Exception to_exception(const Error& error) {
     // error.h: a zero code means the failure was ours rather than a call's, so
     // printing it would attribute our own message to a driver.
     const std::string text = error.code == 0
                                  ? error.message
                                  : std::format("{} (code {})", error.message, error.code);
-    return {kj::Exception::Type::FAILED, __FILE__, __LINE__,
+    return {to_exception_type(error.category), __FILE__, __LINE__,
             kj::heapString(text.data(), text.size())};
 }
 

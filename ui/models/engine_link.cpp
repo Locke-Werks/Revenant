@@ -27,7 +27,32 @@ namespace {
 // serves both because they are the same question asked from either side of
 // the connection, and because an operator restarting an engine should see
 // the window come back inside a breath rather than wonder whether it will.
+//
+// WHAT THIS COMMENT USED TO CLAIM WITHOUT SAYING SO, AND WHAT THE LOOP
+// ACTUALLY DID. The sentence above was true of the liveness probe and false of
+// the reconnect. supervise() skips a pass early only when `!probe && client_
+// != nullptr`, so with no client every pass fell through to attempt_connect
+// and the retry ran at kDetectionPollInterval: four connections a second, not
+// one. adopt() runs on each failure, which is where the 240 passes a minute in
+// its own comment came from. The guard below now requires a probe pass, so one
+// interval serves both as this paragraph always said it did.
 constexpr std::chrono::milliseconds kSuperviseInterval{1000};
+
+// How long to wait before offering a credential that was just refused.
+//
+// A refused token is not retried at the interval above, because nothing about
+// asking again changes the answer: the engine holds one token and this client
+// is offering a different one. Four connections a second against a server that
+// will refuse every one is a cost with no return and reads in a log like
+// somebody guessing.
+//
+// IT IS A BACKOFF AND NOT A STOP, which is the whole of why this constant
+// exists rather than a flag. attempt_connect resolves the token per attempt on
+// purpose, so an operator who runs --new-token, or points --token-file
+// somewhere else, gets picked up without restarting the window. Stopping would
+// take that away, and ten seconds is short enough that fixing the file feels
+// like it worked and long enough that the window is not hammering the port.
+constexpr std::chrono::milliseconds kRefusedCredentialInterval{10000};
 
 // The supervisor loop actually wakes on this, and does the liveness and
 // reconnect work on every fourth pass so that side keeps its one second.
@@ -203,8 +228,20 @@ void EngineLink::supervise()
             continue;
         }
 
+        // A probe pass, so the retry runs at kSuperviseInterval as that
+        // constant's own comment says. See the retraction there: without the
+        // probe test this ran at kDetectionPollInterval, four times a second,
+        // for as long as there was nothing to connect to.
+        //
+        // retry_after_ is the credential backoff and is the supervisor
+        // thread's own, written and read here and in attempt_connect and
+        // nowhere else, so it needs no lock. A default-constructed time_point
+        // is the epoch, which is always in the past, so the first attempt is
+        // not delayed.
         if (client_ == nullptr) {
-            static_cast<void>(attempt_connect());
+            if (probe && std::chrono::steady_clock::now() >= retry_after_) {
+                static_cast<void>(attempt_connect());
+            }
         } else if (auto alive = client_->running(); !alive) {
             // The engine went away. core/rpc/client.cpp keeps the event loop
             // running through a lost connection and fails every later call,
@@ -341,7 +378,60 @@ namespace {
     return rpc::load_token(*path);
 }
 
+// The line the window shows for a connection that did not happen.
+//
+// AN ABSENT ENGINE IS NOT AN ERROR AND SHOULD NOT READ AS ONE. It is the
+// ordinary state at both ends of an engine's life, and EngineLink::start's own
+// header says the window's job is to come up, say so and keep trying. What it
+// said instead was whatever kj put in the exception: "connecting to
+// 127.0.0.1:17690: the connection to the engine is gone: connect(): connection
+// refused", which describes a connection that never existed as one that was
+// lost, and hands an operator a syscall name to worry about.
+//
+// Every other category keeps the engine's own words, because for those the
+// detail is the actionable part. A refused credential in particular names the
+// file to fix, and shortening it would take that away.
+[[nodiscard]] QString describe_failure(const Error& failure, const QString& endpoint)
+{
+    if (failure.category == ErrorCategory::Unreachable) {
+        return QStringLiteral("waiting for an engine at %1").arg(endpoint);
+    }
+    return QString::fromStdString(failure.message);
+}
+
 }  // namespace
+
+// WHAT THIS FUNCTION USED TO SAY ABOUT ITSELF, UNDER THE HEADING "A REFUSED
+// TOKEN IS PERMANENT AND THIS LOOP RETRIES IT ANYWAY":
+//
+//   "The supervisor above treats every failure as transient, so a wrong token
+//   writes the same line once a second forever rather than stopping.
+//   core/error.h carries a message and an originating API code with no
+//   category, so there is nothing to branch on here except the message text,
+//   which would break the first time the wording improved. Widening Error is
+//   the right fix and it touches every user of Expected in the tree; it is not
+//   on this branch, and this comment is here so the next person to see the loop
+//   spin knows it is known."
+//
+// Error carries a category as of 2026-09-21 and this is what branches on it.
+// Two clauses of that paragraph were also wrong about the loop rather than
+// about the fix: the retry ran four times a second and not once, for the reason
+// kSuperviseInterval now records, and the failure it describes is not only a
+// wrong token but any credential this process cannot present, a token file with
+// a stray character in it among them.
+//
+// THE BACKOFF IS THE WHOLE OF THE RESPONSE AND IT IS NOT A STOP. See
+// kRefusedCredentialInterval: the token is resolved per attempt so that fixing
+// it is picked up, and that property is worth more than the few sockets a ten
+// second retry costs.
+void EngineLink::hold_off(const Error& failure)
+{
+    if (failure.category == ErrorCategory::Unauthenticated) {
+        retry_after_ = std::chrono::steady_clock::now() + kRefusedCredentialInterval;
+        return;
+    }
+    retry_after_ = {};
+}
 
 bool EngineLink::attempt_connect()
 {
@@ -350,26 +440,19 @@ bool EngineLink::attempt_connect()
     // supervisor loop instead of having to restart it.
     auto token = resolve_token();
     if (!token) {
-        publish(false, QString::fromStdString(token.error().message));
+        hold_off(token.error());
+        publish(false, describe_failure(token.error(), endpoint_));
         return false;
     }
 
-    // A REFUSED TOKEN IS PERMANENT AND THIS LOOP RETRIES IT ANYWAY
-    //
-    // The supervisor above treats every failure as transient, so a wrong
-    // token writes the same line once a second forever rather than stopping.
-    // core/error.h carries a message and an originating API code with no
-    // category, so there is nothing to branch on here except the message
-    // text, which would break the first time the wording improved. Widening
-    // Error is the right fix and it touches every user of Expected in the
-    // tree; it is not on this branch, and this comment is here so the next
-    // person to see the loop spin knows it is known.
     auto client = rpc::Client::connect(address_.toStdString(), port_, *token);
     if (!client) {
-        publish(false, QString::fromStdString(client.error().message));
+        hold_off(client.error());
+        publish(false, describe_failure(client.error(), endpoint_));
         return false;
     }
     client_ = std::move(*client);
+    retry_after_ = {};
 
     auto info = client_->info();
     if (!info) {

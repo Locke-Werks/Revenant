@@ -170,6 +170,60 @@ TEST_CASE("the right token gets a session and the wrong one gets a refusal",
     CHECK(refused.error().message.substr(first) == also_refused.error().message.substr(second));
 }
 
+TEST_CASE("a refused token and an absent engine are different categories",
+          "[gpu][rpc][auth]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE ONE PROPERTY THE CATEGORY EXISTS FOR, ASSERTED AS A DIFFERENCE
+    //
+    // Not that either value is the right enumerator, which a future rename
+    // would break for no reason, but that a supervisor reconnecting in a loop
+    // can tell these two apart at all. ui/models/engine_link.cpp could not:
+    // core/error.h carried a message and a code, both failures arrived as an
+    // Error carrying a sentence, and it retried a refused token four times a
+    // second for as long as the window was open.
+    //
+    // Both enumerators are named as well, because the loop does not just need
+    // them to differ. It needs to know WHICH is the permanent one, and getting
+    // that backwards would stop retrying an engine that is about to start.
+    std::uint16_t released = 0;
+    {
+        Harness harness;
+        bring_up(harness, HarnessOptions{});
+
+        auto refused = harness.connect_with(wrong_test_token());
+        REQUIRE_FALSE(refused.has_value());
+        INFO(refused.error().message);
+        CHECK(refused.error().category == ErrorCategory::Unauthenticated);
+
+        // Taken here and used after the harness is destroyed, which is what
+        // makes the second half of this case exact rather than a guess about
+        // which ports are quiet on the machine running it. The server bound an
+        // ephemeral port, this process is the only thing that ever held it, and
+        // a LISTENING socket closing does not enter TIME_WAIT, so the port is
+        // free the moment the harness goes out of scope.
+        released = harness.port();
+        REQUIRE(released != 0);
+    }
+
+    auto absent = rpc::Client::connect("127.0.0.1", released, test_token());
+    REQUIRE_FALSE(absent.has_value());
+    INFO(absent.error().message);
+    CHECK(absent.error().category == ErrorCategory::Unreachable);
+
+    // THE PHASE DECIDES AND NOT THE MESSAGE, WHICH IS THE WHOLE POINT
+    //
+    // kj reports a refused connection to loopback as a DISCONNECTED
+    // exception, so translate() alone would have called this
+    // ErrorCategory::Disconnected and said "the connection to the engine is
+    // gone" about a connection that never existed. ClientImpl::run overrides
+    // it because the throw came out of the connect phase, where there is no
+    // connection to have lost. Asserting the negative pins that override: this
+    // line fails if the phase override is removed and translate's type mapping
+    // is left to answer on its own.
+    CHECK(absent.error().category != ErrorCategory::Disconnected);
+}
+
 TEST_CASE("a token of the wrong length is refused before a socket is opened",
           "[rpc][auth]") {
     // A4, client side. No GPU and no server: these are argument errors
@@ -182,6 +236,13 @@ TEST_CASE("a token of the wrong length is refused before a socket is opened",
     REQUIRE_FALSE(too_short.has_value());
     INFO(too_short.error().message);
     CHECK(too_short.error().message.find("31 bytes") != std::string::npos);
+
+    // Unauthenticated and not Unclassified, on the same ground the engine's own
+    // refusal sits on: a credential of the wrong shape does not become the
+    // right one by being offered again. A supervisor that backs off a refused
+    // token has to back this off too, or the one case that reaches the far end
+    // is quiet and the one this process can see for itself spins.
+    CHECK(too_short.error().category == ErrorCategory::Unauthenticated);
 
     std::vector<std::uint8_t> long_one(full.begin(), full.end());
     long_one.push_back(0);
