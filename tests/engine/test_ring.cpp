@@ -11,10 +11,19 @@
 // a half minutes at 20 MS/s if the index arithmetic is done in 32 bits by
 // mistake." Reducing the index to 32 bits before masking is not a mistake and
 // never was; with a power-of-two capacity it is exact forever, which is the
-// whole reason the kernels take a 32-bit offset. The case near the bottom of
-// this file says what the hazard actually is. The same sentence sits in
-// core/shaders/pfb_branch.comp and core/shaders/convert_cu8_cf32.comp, which
-// this lane does not own.
+// whole reason the kernels take a 32-bit offset. The addressing case below
+// says what the hazard actually is.
+//
+// The same sentence appears three more times and is wrong in only one of
+// them, so here is which. core/shaders/pfb_branch.comp's copy is
+// wrong for the reason above: base_offset reaches nothing but a power-of-two
+// mask, so a truncated absolute index there is exact forever. That file is
+// not this lane's. core/dsp/vrx_reference.h and tests/reference/test_vrx.cpp
+// are RIGHT: the fine stage reduces the output index modulo out_rate, which
+// is not a power of two, so truncating it does break at 2^32 and three hours
+// into a stream is a case that file actually runs.
+// core/shaders/convert_cu8_cf32.comp states the exact rule rather than the
+// trap, and is right.
 //
 // The sizing and the wrap need no GPU at all. The retirement floor is
 // exercised through DeviceRing, because that is the API a producer and a
