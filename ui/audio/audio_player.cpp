@@ -602,13 +602,18 @@ void AudioPlayer::tick()
     const bool mismatch = moved_pulls != moved_pulls_;
     moved_pulls_ = moved_pulls;
 
-    const bool want = link_.audioActive();
+    // TWO DIFFERENT QUESTIONS, READ FROM TWO DIFFERENT PROPERTIES.
+    //
+    // A stream exists, which is what decides whether a sink should be open
+    // at all. It goes false on its own: the pane's receiver is cleared, the
+    // engine tears the subscription down, the link reconnects.
+    const bool streaming = link_.audioActive();
 
-    if (!want) {
-        if (sink_ != nullptr) {
-            close_sink();
-        }
+    // The operator turned listening off, which is a deliberate act and is
+    // the only one of the two that clears the latch below.
+    const bool listening = link_.audioWanted();
 
+    if (!listening) {
         // THE THIRD THING THAT CLEARS THE LATCH, AND THE ONE AN OPERATOR
         // REACHES FOR FIRST.
         //
@@ -618,13 +623,29 @@ void AudioPlayer::tick()
         // nothing. That is the first thing anyone tries and it looked like
         // the switch was broken rather than the output.
         //
-        // Cleared on !want rather than on !format.valid(), which is why the
-        // two are no longer one branch. The operator turning listening off
-        // is a deliberate act and the next attempt is worth making; a
-        // stream that has momentarily no format is not an act at all, and
-        // clearing there would turn the latch back into the retry loop it
-        // exists to stop, at twenty attempts a second.
+        // WHAT THIS BRANCH USED TO TEST. Until 2026-09-20 it was one arm of
+        // the chain below, on `!want`, and want was link_.audioActive().
+        // That is the presence of a STREAM and not the listen switch, and
+        // the comment beside it already said "the operator turning listening
+        // off is a deliberate act", which was the other property. The gap is
+        // not cosmetic: audioActive goes false with the switch still on
+        // every time the pane's receiver is cleared, a mode change rebuilds
+        // the receiver, or the link reconnects, and EngineLink's own header
+        // says the switch is sticky across all three. So a failed device was
+        // re-attempted on every one of those, twenty times a second for as
+        // long as the gap lasted, which is the retry loop the latch exists
+        // to stop.
+        //
+        // It is its own `if` and no longer an arm of the chain below,
+        // because the two conditions are now different: the sink still has
+        // to be closed the moment the stream goes, whatever the switch says.
         sink_failed_ = false;
+    }
+
+    if (!streaming) {
+        if (sink_ != nullptr) {
+            close_sink();
+        }
     } else if (!format.valid()) {
         if (sink_ != nullptr) {
             close_sink();

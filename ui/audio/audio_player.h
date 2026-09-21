@@ -373,6 +373,16 @@ private:
     // The first and the third were missing until 2026-09-20 and the fault
     // message asked for the first of them in as many words. With both
     // absent there was no way back to audio short of restarting the window.
+    //
+    // THE THIRD ONE READ THE WRONG PROPERTY FOR THE REST OF THAT DAY. The
+    // branch tested EngineLink::audioActive, which is whether a STREAM
+    // exists, while this paragraph said the listen switch. Those part
+    // company on every receiver clear, every mode change that rebuilds the
+    // receiver and every reconnect, because EngineLink states the switch is
+    // sticky across all three, so the latch was being cleared by events the
+    // operator did not perform and the retry loop came back. tick() now
+    // reads audioWanted for the clear and audioActive for the sink, and the
+    // two are named apart there.
     bool sink_failed_ = false;
 
     QTimer tick_;
