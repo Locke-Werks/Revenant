@@ -61,6 +61,8 @@
 #include <vector>
 
 #include "core/dsp/spectrum_levels_reference.h"
+#include "core/decode/rds_bits.h"
+#include "core/decode/rds_groups.h"
 #include "core/detect/detector.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
@@ -84,6 +86,7 @@ using revenant::Status;
 using revenant::fail;
 using revenant::with_context;
 
+namespace decode = revenant::decode;
 namespace detect = revenant::detect;
 namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
@@ -321,6 +324,76 @@ struct VrxSpec {
 }
 
 // ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+// The top of the FM composite: the 57 kHz subcarrier plus the 2375 Hz of
+// shaping EN 50067 clause 1.7 puts either side of it. A receiver whose
+// granted passband does not reach this far has the data band outside its
+// filter and will never decode a bit, however strong the station is.
+constexpr Hertz kCompositeTopHz = 59'375;
+
+// WHY AN RDS RECEIVER IS A SECOND RECEIVER AND NOT THE ONE YOU ARE LISTENING
+// TO.
+//
+// RDS lives at 57 kHz on the FM composite, which exists only on the far side
+// of the discriminator. core/dsp/vrx_reference.h puts the audio decimation
+// filter's passband edge at 0.4 of the audio rate, so at the 48 kHz a
+// loudspeaker wants the edge is 19.2 kHz and the subcarrier is buried in the
+// stopband before any sink sees it. At 171000 the edge is 68.4 kHz, the whole
+// composite up to 59375 Hz survives, and the ordinary AudioSink is carrying
+// the multiplex rather than audio.
+//
+// 171000 is not a round number picked for headroom. It is 3 x 57000 and
+// 144 x 1187.5, both exact, so the subcarrier and the bit clock both land on
+// a whole number of samples and neither loop starts with a rate error to
+// absorb. It is also decode::RdsBitsConfig::rate's default, which is where
+// this takes it from rather than repeating the literal.
+//
+// One consequence for the operator: this receiver's audio is a 171 kHz
+// multiplex, not sound. It is not offered to --record or --play, because
+// what would come out of either is a screech.
+struct RdsSpec {
+    // As typed, and the same rule --vrx follows: absolute radio frequency
+    // unless a leading sign made it an offset from the source's centre.
+    Hertz center = 0;
+    bool relative = false;
+
+    // center resolved against the source's centre, filled once it is known.
+    Hertz baseband = 0;
+};
+
+[[nodiscard]] Expected<RdsSpec> parse_rds_spec(std::string_view text)
+{
+    if (text.empty()) {
+        return fail("--rds needs a broadcast FM frequency, such as --rds 98.5M");
+    }
+    if (text.find(':') != std::string_view::npos) {
+        return fail(std::format(
+            "--rds '{}' takes a frequency and nothing else. The mode, the passband and the "
+            "audio rate are all fixed by what an RDS decode needs; --rds-region chooses "
+            "between the RDS and RBDS group tables",
+            text));
+    }
+
+    RdsSpec spec;
+    spec.relative = text.starts_with('+') || text.starts_with('-');
+
+    auto center = parse_frequency(text, "--rds frequency");
+    if (!center) {
+        return std::unexpected(center.error());
+    }
+    spec.center = *center;
+    if (!spec.relative && spec.center < 0) {
+        return fail(std::format(
+            "--rds '{}' is a negative absolute frequency. Write an offset from the source's "
+            "centre as -150k with the sign attached to the number",
+            text));
+    }
+    return spec;
+}
+
+// ---------------------------------------------------------------------------
 // The command line
 // ---------------------------------------------------------------------------
 
@@ -373,6 +446,17 @@ struct Options {
     double detect_threshold_db = 6.0;
     double detect_confidence = 0.5;
 
+    // Broadcast FM stations to decode RDS from, repeatable. Each one gets a
+    // receiver of its own; see RdsSpec for why it cannot share one with a
+    // receiver somebody is listening to.
+    std::vector<RdsSpec> rds;
+
+    // RBDS by default because this radio is in the United States and the two
+    // tables disagree about almost every programme type. Reading a US
+    // station with the European table is not a near miss: PTY 15 is "Other
+    // Music" there and "Classic Rock" here.
+    decode::Region rds_region = decode::Region::kRbds;
+
     bool list = false;
     bool list_audio = false;
     bool quiet = false;
@@ -417,6 +501,25 @@ void print_usage()
         "                      directory, and each receiver gets\n"
         "                      <dir>/vrx<N>-<freq>-<mode>.wav. Created if missing.\n"
         "  --record-format <f> float32 (default) or pcm16.\n"
+        "\n"
+        "Decoding:\n"
+        "  --rds <freq>        Decode RDS from the broadcast FM station at freq,\n"
+        "                      repeatable. Adds a receiver of its own: wfm, +/-100k,\n"
+        "                      and 171000 S/s of audio, which is what carries the FM\n"
+        "                      composite the 57 kHz subcarrier lives on. That receiver\n"
+        "                      is not offered to --record or --play, because what comes\n"
+        "                      out of it is a multiplex rather than sound. Listen to\n"
+        "                      the same station at the same time by adding an ordinary\n"
+        "                      --vrx <freq>:wfm --play beside it.\n"
+        "                      The composite reaches 59375 Hz either side, so the grid\n"
+        "                      has to have channels wide enough to grant that: at a\n"
+        "                      2.4 MS/s source --channels 8 does and the default 64\n"
+        "                      does not. The refusal names the numbers.\n"
+        "  --rds-region <r>    rbds (default, North America) or rds (Europe and the\n"
+        "                      rest of ITU regions 1 and 3). It chooses the programme\n"
+        "                      type table and whether a PI code is read back as a call\n"
+        "                      sign. The two PTY tables agree on four of thirty-two\n"
+        "                      entries, so the wrong one mislabels almost everything.\n"
         "\n"
         "Watching:\n"
         "  --spectrum[=<n>]    Draw an ASCII waterfall of the whole span, one row per\n"
@@ -486,7 +589,9 @@ void print_usage()
         "  revenant-cli \"synthetic:wideband?rate=2400000&emitters=8&seed=4242\" \\\n"
         "      --vrx 150k:nfm:16k --record out.wav --duration 5\n"
         "  revenant-cli \"file:///C:/captures/hf.cf32?rate=2400000&format=cf32\" \\\n"
-        "      --vrx 7.1M:lsb --vrx 7.074M:usb --record C:/out --play 2\n");
+        "      --vrx 7.1M:lsb --vrx 7.074M:usb --record C:/out --play 2\n"
+        "  revenant-cli \"rtlsdr://0?freq=98.5M&rate=2400000&gain=auto\" \\\n"
+        "      --channels 8 --rds 98.5M --vrx 98.5M:wfm --play\n");
 }
 
 [[nodiscard]] Expected<Options> parse_options(int argc, char** argv)
@@ -663,6 +768,37 @@ void print_usage()
                 return std::unexpected(spec.error());
             }
             options.receivers.push_back(*spec);
+            continue;
+        }
+
+        if (arg == "--rds") {
+            auto text = value_of(i, "--rds", inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto spec = parse_rds_spec(*text);
+            if (!spec) {
+                return std::unexpected(spec.error());
+            }
+            options.rds.push_back(*spec);
+            continue;
+        }
+
+        if (arg == "--rds-region") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (*text == "rds") {
+                options.rds_region = decode::Region::kRds;
+            } else if (*text == "rbds") {
+                options.rds_region = decode::Region::kRbds;
+            } else {
+                return fail(std::format(
+                    "--rds-region '{}' is neither rds nor rbds. rbds is North America and "
+                    "is the default; rds is everywhere else",
+                    *text));
+            }
             continue;
         }
 
@@ -1552,6 +1688,277 @@ struct Receiver {
 // that simply has no receiver behind it.
 constexpr std::uint32_t kMonitorIdBase = 0x4000'0000U;
 
+// ---------------------------------------------------------------------------
+// One station's RDS decode
+// ---------------------------------------------------------------------------
+
+// PS, RadioText and PTYN are EN 50067 Annex E bytes. That repertoire is ASCII
+// only over 0x20 to 0x7E; above that it is a set of accented, Greek and
+// symbol characters whose numbering is the standard's own and matches neither
+// Latin-1 nor UTF-8. Writing one of those bytes to the console prints
+// whatever the active code page makes of it, which is a different character
+// on a different machine, so every byte outside the shared subset is escaped
+// here rather than passed through.
+//
+// 0x00 is not in Annex E at all. It is what StationState leaves where a
+// RadioText segment has not arrived yet, so it is rendered as a tilde to keep
+// the shape of the line, and a genuine tilde escapes as \x7e so the two can
+// never be confused.
+struct RdsText {
+    std::string text;
+    std::size_t escaped = 0;  // bytes outside printable ASCII, shown as \xNN
+    std::size_t missing = 0;  // 0x00, a character no segment has delivered
+};
+
+[[nodiscard]] RdsText render_rds_text(std::string_view raw)
+{
+    RdsText out;
+    out.text.reserve(raw.size());
+    for (const char c : raw) {
+        const auto byte = static_cast<std::uint8_t>(c);
+        if (byte == 0x00) {
+            out.text.push_back('~');
+            ++out.missing;
+        } else if (byte >= 0x20 && byte < 0x7E) {
+            out.text.push_back(static_cast<char>(byte));
+        } else {
+            out.text += std::format("\\x{:02x}", byte);
+            ++out.escaped;
+        }
+    }
+    return out;
+}
+
+// Which segments of a segmented field have landed, one character each. PS is
+// four two-character segments and RadioText is sixteen of four, and both
+// arrive in whatever order the transmitter cycles them, so "which of them do
+// I have" is the thing to show while a name is still filling in.
+[[nodiscard]] std::string segment_mask(std::uint32_t received, int segments)
+{
+    std::string mask(static_cast<std::size_t>(segments), '.');
+    for (int i = 0; i < segments; ++i) {
+        if (((received >> i) & 1U) != 0U) {
+            mask[static_cast<std::size_t>(i)] = '#';
+        }
+    }
+    return mask;
+}
+
+[[nodiscard]] std::string_view sync_state_name(decode::SyncState state)
+{
+    switch (state) {
+        case decode::SyncState::kHunting:
+            return "hunting";
+        case decode::SyncState::kPreSync:
+            return "confirming";
+        case decode::SyncState::kSynced:
+            return "synced";
+    }
+    return "unknown";
+}
+
+// Everything the run needs to decode one station, kept together because the
+// sink callable co-owns it.
+//
+// TWO THREADS. The engine's completion thread runs the sink and pushes
+// samples in; the status thread reads the state out. Both decoders are
+// ordinary mutable objects with no locking of their own, so everything below
+// the mutex is taken under it. The fields above it are written before the
+// engine runs and never again, so the sink and the printer read them free.
+struct RdsStation {
+    RdsStation(engine::VrxId which, SampleRate rate, decode::Region what,
+               decode::RdsBitSync sync)
+        : vrx(which), composite_rate(rate), region(what), bits(std::move(sync)), groups(what)
+    {
+    }
+
+    engine::VrxId vrx;
+    SampleRate composite_rate = 0;
+    decode::Region region = decode::Region::kRbds;
+    Hertz center = 0;
+
+    // The receiver number the placement block printed, so "rds 3" and
+    // "vrx 3" name the same receiver rather than each counting its own kind.
+    std::size_t number = 0;
+
+    std::mutex lock;
+    decode::RdsBitSync bits;
+    decode::RdsDecoder groups;
+
+    // Set once and never cleared. A chunk that is not the shape the decoder
+    // was built for stops the decode rather than failing the sink: a
+    // refusing sink fails the dispatch and ends the run, and losing the
+    // radio over a decoder is the wrong trade.
+    std::string fault;
+};
+
+// What one print takes off a station, under its lock. Copied rather than
+// referenced because the completion thread may be back inside the decoder
+// the instant the lock is released, and StationState carries three vectors
+// that would be reallocated under the reader.
+struct RdsSnapshot {
+    decode::StationState state;
+    decode::RdsBitsStatus bits;
+    decode::SyncState sync = decode::SyncState::kHunting;
+    std::uint64_t groups_decoded = 0;
+    std::uint64_t blocks_good = 0;
+    std::uint64_t blocks_corrected = 0;
+    std::uint64_t blocks_dropped = 0;
+    std::uint64_t sync_losses = 0;
+    std::string fault;
+};
+
+[[nodiscard]] RdsSnapshot snapshot_rds(RdsStation& station)
+{
+    const std::lock_guard<std::mutex> held(station.lock);
+    RdsSnapshot snap;
+    snap.state = station.groups.state();
+    snap.bits = station.bits.status();
+    snap.sync = station.groups.sync_state();
+    snap.groups_decoded = station.groups.groups_decoded();
+    snap.blocks_good = station.groups.blocks_good();
+    snap.blocks_corrected = station.groups.blocks_corrected();
+    snap.blocks_dropped = station.groups.blocks_dropped();
+    snap.sync_losses = station.groups.sync_losses();
+    snap.fault = station.fault;
+    return snap;
+}
+
+// The engine's completion thread, with the station's lock already held.
+void decode_rds_chunk(RdsStation& station, const engine::AudioChunk& chunk)
+{
+    if (!station.fault.empty()) {
+        return;
+    }
+
+    // The two things a chunk can be that this decoder was not built for.
+    // Neither is reachable from the command line as it stands, because --rds
+    // builds its own receiver at a rate it chose and wfm is mono. They are
+    // checked anyway: reading an interleaved pair as consecutive samples
+    // decodes a signal that does not exist, and loops sized for one rate
+    // running at another report a subcarrier offset that is an artefact of
+    // the mismatch. Both would look like a weak station.
+    if (chunk.channels != 1) {
+        station.fault = std::format(
+            "the receiver delivered {} interleaved channels and the decoder was built for a "
+            "real mono composite",
+            chunk.channels);
+        return;
+    }
+    if (chunk.rate != station.composite_rate) {
+        station.fault = std::format(
+            "the receiver delivered audio at {} S/s and the decoder was built for {}",
+            chunk.rate, station.composite_rate);
+        return;
+    }
+
+    // A muted chunk is fed like any other. core/engine/graph.cpp writes zeros
+    // into the readback buffer when the squelch is shut, and those zeros are
+    // what the receiver produced: skipping them would take the composite
+    // timeline out of step with the decoder's own sample count. A gated
+    // receiver simply loses lock, which is the truth about what reached it.
+    //
+    // One std::function built per chunk and not per sample. It captures one
+    // pointer, which MSVC's small-object buffer holds inline, so the
+    // per-chunk cost is a construction and no allocation.
+    station.bits.process(chunk.samples,
+                         [&station](bool bit) { station.groups.feed(bit); });
+}
+
+// The block the status cadence prints, one per station.
+//
+// PS AND RADIOTEXT ARE PRINTED BEFORE THEY ARE COMPLETE, WHICH IS THE POINT.
+// PS is eight characters in four segments and RadioText is up to 64 in
+// sixteen, both cycled in whatever order the transmitter likes. Waiting for a
+// complete field shows nothing at all for several seconds on PS and often
+// tens of seconds on RadioText, which reads as a dead decoder. The blanks and
+// the segment mask beside them say exactly how much has landed.
+void print_rds(double source_seconds, const RdsStation& station, const RdsSnapshot& snap)
+{
+    const decode::StationState& state = snap.state;
+
+    std::println("{:8.2f}s  rds {}  {}  {}", source_seconds, station.number,
+                 format_hz(station.center),
+                 station.region == decode::Region::kRbds ? "RBDS" : "RDS");
+
+    if (!snap.fault.empty()) {
+        std::println("  FAULTED         {}", snap.fault);
+    }
+
+    if (state.pi_valid) {
+        const auto call = decode::callsign_from_pi(station.region, state.pi);
+        std::println("  pi              0x{:04X}{}", state.pi,
+                     call ? std::format("  {}", *call) : std::string{});
+    } else {
+        std::println("  pi              not yet received");
+    }
+
+    const RdsText ps = render_rds_text(state.ps_text());
+    std::println("  ps              [{}]  segments {}", ps.text,
+                 segment_mask(state.ps_received, 4));
+
+    const RdsText rt = render_rds_text(state.rt_text());
+    if (state.rt_length == 0) {
+        std::println("  radiotext       not yet received");
+    } else {
+        std::println("  radiotext       [{}]", rt.text);
+        std::println("                  {} of 64 characters, {}, segments {}",
+                     state.rt_length, state.rt_version_b ? "type 2B" : "type 2A",
+                     segment_mask(state.rt_received, 16));
+    }
+
+    const std::size_t escaped = ps.escaped + rt.escaped;
+    if (escaped != 0) {
+        std::println("                  {} byte{} above 0x7F shown as \\xNN: EN 50067 Annex E "
+                     "is not ASCII above that and is not UTF-8 at all",
+                     escaped, escaped == 1 ? "" : "s");
+    }
+    if (rt.missing != 0) {
+        std::println("                  ~ is a character no RadioText segment has delivered "
+                     "yet");
+    }
+
+    if (state.pty_valid) {
+        // The prose name and not either display form. The 8- and
+        // 16-character forms are padded with the standard's own underscores
+        // for a fixed-width receiver display, which on a terminal line reads
+        // as a typo: RBDS code 6 is "Classic_Rock" long and "Classic Rock" in
+        // prose.
+        std::println("  pty             {}  {}", state.pty,
+                     decode::pty_entry(station.region, state.pty).name);
+    } else {
+        std::println("  pty             not yet received");
+    }
+
+    std::println("  flags           TP {}  TA {}  {}",
+                 state.tp_valid ? (state.tp ? "yes" : "no") : "?",
+                 state.ta_valid ? (state.ta ? "YES" : "no") : "?",
+                 state.music_valid ? (state.music ? "music" : "speech") : "music/speech ?");
+
+    // The physical layer, then the block layer. Two different failures look
+    // the same from a distance: no carrier lock is the wrong frequency or a
+    // passband that does not reach the subcarrier, and carrier lock with no
+    // block sync is a station that carries no RDS.
+    std::println("  carrier         {}, quality {:.2f}, coherence {:.2f}, offset {:+.1f} Hz, "
+                 "{:.2f} bit/s, pilot {}",
+                 decode::lock_name(snap.bits.lock), snap.bits.quality,
+                 snap.bits.carrier_coherence, snap.bits.carrier_offset_hz,
+                 snap.bits.bit_rate_hz, snap.bits.pilot_locked ? "locked" : "absent");
+
+    const std::uint64_t blocks =
+        snap.blocks_good + snap.blocks_corrected + snap.blocks_dropped;
+    const double bler =
+        blocks == 0 ? 0.0
+                    : 100.0 * static_cast<double>(snap.blocks_dropped) /
+                          static_cast<double>(blocks);
+    std::println("  blocks          {}, {} group{}, {} block{}: {} clean, {} corrected, "
+                 "{} dropped ({:.1f}% BLER), {} resync{}",
+                 sync_state_name(snap.sync), snap.groups_decoded,
+                 snap.groups_decoded == 1 ? "" : "s", blocks, blocks == 1 ? "" : "s",
+                 snap.blocks_good, snap.blocks_corrected, snap.blocks_dropped, bler,
+                 snap.sync_losses, snap.sync_losses == 1 ? "" : "s");
+}
+
 [[nodiscard]] std::string iso8601_now()
 {
     const auto now = std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
@@ -1966,6 +2373,155 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         receivers.push_back(receiver);
     }
 
+    // The RDS receivers, after the ordinary ones so every placement is in one
+    // block, and each with a decoder attached before a sample moves.
+    //
+    // The rate is decode::RdsBitsConfig's default rather than a literal, so a
+    // change on that side cannot leave this receiver at a rate the decoder
+    // would then refuse. The bound it has to clear is not the decoder's own
+    // 125000 but the receiver's: core/dsp/vrx_reference.h puts the audio
+    // decimation filter's passband edge at 0.4 of the audio rate, so the top
+    // of the composite is inside the passband only from 148438 S/s up.
+    constexpr SampleRate kCompositeRate = decode::RdsBitsConfig{}.rate;
+    static_assert((kCompositeRate * 2) / 5 >= kCompositeTopHz,
+                  "the RDS composite rate has to put the audio decimation filter's passband "
+                  "edge, which is 0.4 of it, above the top of the FM composite");
+
+    std::vector<std::shared_ptr<RdsStation>> stations;
+    stations.reserve(options.rds.size());
+    for (std::size_t i = 0; i < options.rds.size(); ++i) {
+        RdsSpec spec = options.rds[i];
+
+        const Hertz source_center = eng.info().source_center;
+        if (spec.relative) {
+            spec.baseband = spec.center;
+            spec.center = source_center + spec.baseband;
+        } else {
+            spec.baseband = spec.center - source_center;
+        }
+
+        const Hertz reach = eng.info().source_rate / 2;
+        if (spec.baseband > reach || spec.baseband < -reach) {
+            return fail(std::format(
+                "--rds {} is {} from the source's centre of {}, and the source only carries "
+                "+/-{}. Either retune the source or name an offset with a leading sign",
+                format_hz(spec.center), format_hz(spec.baseband), format_hz(source_center),
+                format_hz(reach)));
+        }
+
+        // THE GRID, BEFORE THE RECEIVER, because add_vrx refuses first and
+        // refuses about the wrong thing. A receiver cannot be given more than
+        // half a grid channel either side of where it sits, so a channel
+        // narrower than the composite is a grid problem and not a passband
+        // problem, and the engine's own refusal says "no transition band
+        // between its own edge and the fold" rather than "lower --channels".
+        // An operator reading that goes looking at the receiver, which is
+        // the one place the answer is not.
+        const SampleRate channel_rate = eng.info().channel_rate;
+        if (channel_rate / 2 < kCompositeTopHz) {
+            return fail(std::format(
+                "--rds {} needs a receiver reaching {} Hz either side of the station, "
+                "because that is where the top of the FM composite is and the 57 kHz "
+                "subcarrier is under it. One grid channel is {} S/s here and a receiver "
+                "cannot be given more than half of that either side of where it sits, so "
+                "the widest receiver this grid can carry is +/-{} Hz. The grid decimates by "
+                "half the channel count, so each halving of --channels doubles the channel "
+                "rate: --channels {} on this source would grant +/-{} Hz",
+                format_hz(spec.center), kCompositeTopHz, channel_rate, channel_rate / 2,
+                eng.info().grid.channels / 2, channel_rate));
+        }
+
+        engine::VrxParams params;
+        params.center = spec.baseband;
+        // The wfm default, 200 kHz wide. The composite only needs +/-59375,
+        // and a receiver at that bare minimum decodes worse rather than not
+        // at all: Carson for a multiplex deviating 75 kHz and reaching
+        // 59375 Hz is about 269 kHz, so even 200 kHz is already truncating
+        // the sidebands.
+        const dsp::Passband passband = dsp::default_passband(Demod::Wfm);
+        params.passband_low = passband.low;
+        params.passband_high = passband.high;
+        params.bandwidth = passband.width();
+        params.demod = Demod::Wfm;
+        params.audio_rate = kCompositeRate;
+
+        auto added = eng.add_vrx(params);
+        if (!added) {
+            return std::unexpected(with_context(
+                added.error(),
+                std::format("adding the RDS receiver for {}", format_hz(spec.center))));
+        }
+
+        auto status = eng.vrx_status(*added);
+        if (!status) {
+            return std::unexpected(with_context(
+                status.error(),
+                std::format("reading back the RDS receiver for {}", format_hz(spec.center))));
+        }
+        print_placement(receivers.size() + i + 1, *status, eng.info().grid.channels,
+                        spec.center);
+
+        // And again against what was actually GRANTED, because the grid
+        // check above is necessary and not sufficient: each edge is fitted
+        // on its own against the fold, so a wide enough channel can still
+        // hand back a narrow passband. Without this the symptom is a decoder
+        // that simply never locks on a station that is plainly there.
+        const engine::VrxPlacement& placement = status->placement;
+        if (placement.granted_low > -kCompositeTopHz ||
+            placement.granted_high < kCompositeTopHz) {
+            return fail(std::format(
+                "the RDS receiver for {} was granted {:+} to {:+} Hz about its centre and "
+                "the FM composite reaches {} Hz either side, so the 57 kHz subcarrier is "
+                "outside the filter and no amount of signal will decode. {}The channel it "
+                "landed on runs at {} S/s",
+                format_hz(spec.center), placement.granted_low, placement.granted_high,
+                kCompositeTopHz,
+                placement.bandwidth_clamped
+                    ? "The request was clamped to what one grid channel can carry. "
+                    : "",
+                placement.channel_rate));
+        }
+
+        decode::RdsBitsConfig bits_config;
+        bits_config.rate = kCompositeRate;
+        auto sync = decode::RdsBitSync::create(bits_config);
+        if (!sync) {
+            return std::unexpected(with_context(
+                sync.error(),
+                std::format("building the RDS decoder for {}", format_hz(spec.center))));
+        }
+
+        auto station = std::make_shared<RdsStation>(*added, kCompositeRate,
+                                                    options.rds_region, std::move(*sync));
+        station->center = spec.center;
+        station->number = receivers.size() + i + 1;
+
+        // attach_audio_sink and not set_audio_sink. Nothing else is on this
+        // receiver today, so the two would behave identically, and that is
+        // exactly the reason to use the one that stays correct: the slot
+        // set_audio_sink writes holds one sink, so the first person to give
+        // this receiver a second consumer would silently take the decoder's
+        // samples away. Nothing detaches, because these live for the run.
+        if (auto wired = eng.attach_audio_sink(
+                *added,
+                [station](const engine::AudioChunk& chunk) -> Status {
+                    const std::lock_guard<std::mutex> held(station->lock);
+                    decode_rds_chunk(*station, chunk);
+                    return {};
+                });
+            !wired) {
+            return std::unexpected(with_context(
+                wired.error(),
+                std::format("wiring the RDS decoder for {}", format_hz(spec.center))));
+        }
+
+        std::println("  rds             {} decode at {} S/s of composite, bit rate 1187.5, "
+                     "first groups after carrier and block sync",
+                     options.rds_region == decode::Region::kRbds ? "RBDS" : "RDS",
+                     kCompositeRate);
+        stations.push_back(std::move(station));
+    }
+
     if (!options.record.empty()) {
         for (std::size_t i = 0; i < receivers.size(); ++i) {
             auto path = record_path_for(options, i + 1, receivers[i].spec);
@@ -2296,6 +2852,20 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 pending_tracks = false;
             }
 
+            // The stations, under the same rule as the track list: the
+            // thread holding the terminal prints them. Printed on every
+            // interval rather than on a change, because the point of the
+            // display is watching a name and a RadioText fill in character
+            // by character, and a diff of that is unreadable.
+            //
+            // Printed even under --quiet, which suppresses the one-line
+            // status and not a decode that was explicitly asked for, the
+            // same way --detect's table is.
+            for (const std::shared_ptr<RdsStation>& station : stations) {
+                status_line.erase();
+                print_rds(source_seconds, *station, snapshot_rds(*station));
+            }
+
             if (options.quiet) {
                 continue;
             }
@@ -2557,6 +3127,19 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         }
     }
 
+    // The stations last, because the final state of one is the answer the
+    // run was for and it belongs where somebody scrolling back will find it.
+    // The engine has stopped by now, so no lock is contended and the
+    // snapshot is the whole decode rather than a moment in it.
+    for (const std::shared_ptr<RdsStation>& station : stations) {
+        const RdsSnapshot snap = snapshot_rds(*station);
+        std::println("");
+        print_rds(source_seconds, *station, snap);
+        if (!snap.fault.empty()) {
+            any_counter = true;
+        }
+    }
+
     std::println("");
     if (any_counter) {
         std::println("Counters above in capitals are not zero. Audio was lost, filled or "
@@ -2609,13 +3192,15 @@ int main(int argc, char** argv)
         std::println(stderr, "revenant-cli: no source URI. Run --list to see what is available.");
         return 2;
     }
-    // --spectrum and --detect are each a destination of their own: they watch
-    // the whole span and need no receiver at all, which is the point of both.
-    if (options->receivers.empty() && !options->spectrum && !options->detect) {
+    // --spectrum, --detect and --rds are each a destination of their own:
+    // the first two watch the whole span and need no receiver at all, and
+    // the third brings its own.
+    if (options->receivers.empty() && options->rds.empty() && !options->spectrum &&
+        !options->detect) {
         std::println(stderr,
                      "revenant-cli: nothing to do. Add a receiver with --vrx, such as "
-                     "--vrx 162.550M:nfm:16k, watch the span with --spectrum, or look for "
-                     "signals with --detect.");
+                     "--vrx 162.550M:nfm:16k, watch the span with --spectrum, look for "
+                     "signals with --detect, or decode a station with --rds 98.5M.");
         return 2;
     }
     if (!options->spectrum &&
