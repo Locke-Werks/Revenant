@@ -319,6 +319,8 @@ will comfortably outlast them.
   why the detection spectrum is built per channel rather than across the span
 - [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U
   datasheet does and does not specify, and why that settled the licence
+- [docs/rds-first-decode.md](docs/rds-first-decode.md), the first decode of a
+  signal nobody here generated, what it establishes and why it is not yet a test
 - [CONTRIBUTING.md](CONTRIBUTING.md), how to contribute and the provenance rules
 - [CLA.md](CLA.md), the contributor agreement and why it exists
 
