@@ -66,6 +66,20 @@ struct SourceDescriptor {
 // Query parameters are backend-specific and an unknown one is an error rather
 // than being ignored, because a typo in a rate silently producing the default
 // is a capture whose metadata is wrong.
+//
+// The file backend reads containers as well as raw bytes, so rate=, format=
+// and center= are no longer required when the recording carries them:
+//
+//   file:///C:/captures/20m.sigmf-data
+//   file:///C:/captures/20m.sigmf-data?segment=2
+//   file:///D:/hf/HDSDR_20260921_140307Z_7100kHz_RF.wav
+//
+// container= forces raw, sigmf or wav instead of sniffing. meta= names a
+// SigMF sidecar that is not beside its dataset. segment= picks one capture
+// segment out of a recording that retunes, which is refused without it
+// rather than played at one frequency. A value stated in both the URI and
+// the container has to agree, and the backend says which two numbers
+// disagreed rather than preferring one.
 [[nodiscard]] Expected<std::unique_ptr<Source>> open_source(std::string_view uri);
 
 }  // namespace revenant::source

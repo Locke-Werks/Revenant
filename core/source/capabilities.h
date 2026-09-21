@@ -143,6 +143,20 @@ struct SourceCapabilities {
 
     [[nodiscard]] bool available() const { return unavailable.empty(); }
 
+    // Conditions an operator would want to know about that did not stop the
+    // source opening.
+    //
+    // A WAV whose auxi chunk carries no centre frequency, a SigMF sidecar
+    // with an empty captures array, a recording playing across capture
+    // segments that happen to agree. Each of those is the answer to "why is
+    // this at the wrong frequency" an hour later, and a source that reported
+    // only its failures would have said nothing about any of them. A decoder
+    // that is not locked has to look different from a signal that is not
+    // there, and the same holds one layer down: a recording whose centre
+    // frequency nobody supplied has to look different from one recorded at
+    // DC.
+    std::vector<std::string> notes;
+
     std::vector<TuneRange> tune_ranges;
 
     // Discrete rates the device supports. Empty means continuous between

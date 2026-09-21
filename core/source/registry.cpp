@@ -77,7 +77,8 @@ constexpr std::array<Backend, 3> kBackends{
     Backend{"synthetic", "a synthesised wideband scene", Listing::Constant, "synthetic:wideband",
             "Synthetic wideband scene"},
     Backend{"rtlsdr", "an RTL-SDR dongle on USB", Listing::Probed, "", ""},
-    Backend{"file", "a recorded raw IQ file", Listing::Named, "", ""},
+    Backend{"file", "a recorded IQ file: raw, SigMF, or WAV with an auxi chunk", Listing::Named,
+            "", ""},
 };
 
 [[nodiscard]] std::string known_schemes()
@@ -532,6 +533,18 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     if (!center) {
         return std::unexpected(center.error());
     }
+    auto container = query->text("container", "auto");
+    if (!container) {
+        return std::unexpected(container.error());
+    }
+    auto meta = query->text("meta", "");
+    if (!meta) {
+        return std::unexpected(meta.error());
+    }
+    auto segment = query->integer("segment", 0);
+    if (!segment) {
+        return std::unexpected(segment.error());
+    }
     auto anchor = query->integer("anchor_ns", 0);
     if (!anchor) {
         return std::unexpected(anchor.error());
@@ -551,25 +564,32 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
 
     const bool anchor_given = query->present("anchor_ns");
     const bool accuracy_given = query->present("anchor_accuracy_ns");
+    const bool rate_given = query->present("rate");
+    const bool format_given = query->present("format");
+    const bool center_given = query->present("center");
+    const bool segment_given = query->present("segment");
 
     if (auto clean = query->reject_unknown("file"); !clean) {
         return std::unexpected(clean.error());
     }
 
-    if (*rate <= 0) {
-        return fail("a file URI needs rate= with a positive integer number of samples per "
-                    "second: a raw IQ file has no header, so nothing in the bytes says what "
-                    "rate they were taken at");
+    if (rate_given && *rate <= 0) {
+        return fail("a file URI's rate= is a positive integer number of samples per second");
     }
 
+    auto container_kind = container_from_name(*container);
+    if (!container_kind) {
+        return std::unexpected(container_kind.error());
+    }
+
+    // The format is NOT inferred from the extension here any more. A .wav or
+    // a .sigmf-data carries its format inside it, and inferring from the
+    // extension first would fail on both before the container was ever
+    // opened. The inference moved into the backend, which runs it only after
+    // the container has had its say, so a raw file with no format= still gets
+    // exactly the message it used to.
     SampleFormat format = SampleFormat::Cf32;
-    if (format_name->empty()) {
-        auto inferred = sample_format_from_extension(uri.body);
-        if (!inferred) {
-            return std::unexpected(inferred.error());
-        }
-        format = *inferred;
-    } else {
+    if (format_given) {
         auto named = sample_format_from_name(*format_name);
         if (!named) {
             return std::unexpected(named.error());
@@ -577,12 +597,26 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
         format = *named;
     }
 
+    if (segment_given && (*segment < 0 || *segment > 0xFFFF)) {
+        return fail(std::format(
+            "segment= names a SigMF capture segment by index, counting from zero; {} is not "
+            "one",
+            *segment));
+    }
+
     FileSourceConfig config;
     config.uri = uri.original;
     config.path = uri.body;
     config.display_name = std::move(*name);
+    config.container = *container_kind;
+    config.meta_path = std::move(*meta);
+    config.segment_given = segment_given;
+    config.segment = static_cast<std::uint32_t>(*segment);
+    config.rate_given = rate_given;
     config.rate = *rate;
+    config.format_given = format_given;
     config.format = format;
+    config.center_given = center_given;
     config.center_hz = *center;
     config.anchor_given = anchor_given;
     config.anchor_ns = *anchor;
