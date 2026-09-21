@@ -727,7 +727,17 @@ TEST_CASE("a passband frame's window and sequence place it in the stream",
         // an unsigned type, so a window allowed to begin below the delay
         // would report a start near 2^64.
         CHECK(frame.start < scene.samples);
-        CHECK(frame.start + frame.count < scene.samples + expected_count);
+
+        // And the window ENDS inside the stream, which is the half that says
+        // anything: the frame covers samples the source produced rather than
+        // reaching past the last one.
+        //
+        // WHAT THIS LINE USED TO BE: `frame.start + frame.count <
+        // scene.samples + expected_count`. Take the two assertions above it,
+        // start < scene.samples and count == expected_count, and that is
+        // their sum. It could not fail while they passed, so it certified the
+        // two lines above it and nothing about the frame.
+        CHECK(frame.start + frame.count <= scene.samples);
 
         // Monotonic. Each dispatch transforms the newest window, so the
         // windows overlap and advance rather than repeating.
