@@ -595,13 +595,18 @@ struct SceneRun {
     std::vector<detect::Candidate> candidates;
 };
 
+// transform overrides the second stage, and only the shape surveys pass it.
+// Everything else in this file is measured against the SHIPPED bin width and
+// has to stay there: a case that quietly ran on a finer grid would be
+// reporting numbers no operator will ever see.
 [[nodiscard]] SceneRun run_scene(const siggen::SceneSpec& spec,
-                                 const test::FrontEndModel& front_end)
+                                 const test::FrontEndModel& front_end,
+                                 std::uint32_t transform = kSceneTransform)
 {
     test::SceneGeometry geometry;
     geometry.rate = kSceneRate;
     geometry.channels = kSceneChannels;
-    geometry.transform = kSceneTransform;
+    geometry.transform = transform;
 
     auto frames = test::SceneFrames::create(geometry, spec, front_end);
     if (!frames) {
@@ -1339,6 +1344,123 @@ TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
     // rows. Nothing else is asserted: this case is a measurement.
     CHECK(!run.candidates.empty());
 }
+// ---- the same families on a grid that resolves them ----------------------
+
+// THE MEASUREMENT THE TABLE ABOVE COULD NOT MAKE.
+//
+// At the shipped 36.6 Hz, cw, am, nfm, usb and lsb all read concentration
+// 0.946 to 0.947, identical to three decimal places. That is not a result
+// about those families, it is the window: each of their lines is reported as
+// its own five-bin band and three bins of five is most of five whatever put
+// the power there. The number only starts saying something about a band once
+// the band is wide enough to have an inside.
+//
+// So this runs the same scene with a 2048 point second stage instead of 512,
+// which is 9.16 Hz a bin, and asks whether the five that could not be told
+// apart can be told apart when they are resolved. It is a survey and asserts
+// only that the scene it read is the one it thinks it is.
+//
+// 2048 AND NOT MORE: the channelizer's twiddle builder caps the second stage
+// at 2048, and asking for 4096 is refused in those words rather than run.
+//
+// FOUR TIMES THE BINS IS FOUR TIMES THE WORK and this is why the case is
+// hidden behind a tag. It is also why run_scene takes the transform rather
+// than this file changing kSceneTransform: every other case here is measured
+// against the shipped bin width and has to stay there.
+//
+// WHAT A FINER GRID DOES TO THE DETECTOR'S OWN CONSTANTS is part of what this
+// shows. split_gap_bins is eight bins, which is 293 Hz at the shipped width
+// and 73 Hz here, so a carrier and its sidebands can fall either side of it:
+// docs/detection.md already carries that constant as knowingly wrong on a
+// finer grid, and the widths in this table are where it shows.
+//
+// WHAT IT MEASURED, 2026-09-22, AND IT IS A NEGATIVE RESULT ABOUT THE WHOLE
+// APPROACH FOR FIVE OF THESE EIGHT.
+//
+//   family  conc    width      bins    (against 36.6 Hz: conc, width)
+//   cw      0.860   55.0 Hz     6.0    0.946   ~180 Hz
+//   am      0.942   43.0 Hz     4.7    0.947   ~180 Hz
+//   nfm     0.946   43.5 Hz     4.7    0.947   ~175 Hz
+//   usb     0.927   37.0 Hz     4.0    0.946   ~165 Hz
+//   lsb     0.927   37.0 Hz     4.0    0.946   ~165 Hz
+//   fsk2    0.277  712.5 Hz    77.8    0.519   ~862 Hz
+//   bpsk    0.056 1420.8 Hz   155.2    0.117  ~1465 Hz
+//   qpsk    0.056 1409.3 Hz   153.9    0.121  ~1430 Hz
+//
+// THE FIVE NARROW FAMILIES ARE STILL FIVE BINS WIDE. They were about five bins
+// at 36.6 Hz and they are about five bins at 9.16, which means their measured
+// width fell by four when the grid did: 180 Hz to 43. That width was never the
+// signal. Each of these detections is ONE SPECTRAL LINE, and a line is as wide
+// as the analysis window makes it whatever the window is.
+//
+// So no amount of resolution turns a per-detection shape into an answer about
+// these families. The information that separates AM from SSB from CW is in the
+// RELATIONSHIP BETWEEN the lines, which is to say between detections, and
+// nothing that measures one band can reach it. That is a statement about the
+// detector's decomposition rather than about concentration, and it bounds
+// every per-band number in core/detect/shape.h the same way.
+//
+// THE THREE THAT ARE RESOLVED SEPARATE, AND MORE SHARPLY THAN BEFORE. fsk2 at
+// 0.277 against bpsk and qpsk at 0.056 is five to one, where the shipped grid
+// gave 0.519 against 0.117 and 0.121, which is four to one. A finer grid helps
+// exactly the bands it resolves, which is the ones already wide enough for the
+// number to mean anything.
+TEST_CASE("shape survey: the same families, resolved", "[.shape-survey]")
+{
+    constexpr std::uint32_t kFineTransform = 2048;
+    const SceneRun run =
+        run_scene(family_scene(), test::FrontEndModel{}, kFineTransform);
+    REQUIRE(run.decisions > 0);
+
+    const double bin_hz = static_cast<double>(kSceneRate) /
+                          static_cast<double>(kSceneChannels * kFineTransform / 2);
+    WARN("bin width " << bin_hz << " Hz against 36.6 shipped");
+
+    for (std::size_t i = 0; i < std::size(kFamilies); ++i) {
+        const dsp::Hertz at = kFamilyFirst + static_cast<dsp::Hertz>(i) * kFamilySpacing;
+        const dsp::Hertz window = kFamilySpacing / 2;
+
+        std::size_t count = 0;
+        double peak_to_mean = 0.0;
+        double concentration = 0.0;
+        double lower = 0.0;
+        double snr = 0.0;
+        double width = 0.0;
+
+        for (const detect::Candidate& candidate : run.candidates) {
+            if (!candidate.shape.measured) {
+                continue;
+            }
+            if (std::abs(candidate.center - 98'100'000 - at) > window) {
+                continue;
+            }
+            ++count;
+            peak_to_mean += candidate.shape.peak_to_mean;
+            concentration += candidate.shape.concentration;
+            lower += candidate.shape.lower_fraction;
+            snr += candidate.snr_2500_db;
+            width += static_cast<double>(candidate.bandwidth);
+        }
+
+        if (count == 0) {
+            WARN(kFamilies[i].name << ": nothing detected at " << at << " Hz");
+            continue;
+        }
+
+        const auto n = static_cast<double>(count);
+        std::ostringstream out;
+        out.setf(std::ios::fixed);
+        out.precision(3);
+        out << kFamilies[i].name << ": " << count << " candidates, conc "
+            << concentration / n << ", peak/mean " << peak_to_mean / n << ", lower "
+            << lower / n << ", snr " << snr / n << " dB, width " << width / n
+            << " Hz, " << (width / n) / bin_hz << " bins";
+        WARN(out.str());
+    }
+
+    CHECK(!run.candidates.empty());
+}
+
 // Does the skirt rise with the drive, or only with the switch being on?
 //
 // THE QUESTION THAT DECIDES WHETHER A DISTORTION FLAG IS WORTH BUILDING. The

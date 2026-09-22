@@ -101,6 +101,15 @@ struct BandShape {
     // between 0.946 and 0.947, identical to three places, because at 36.6 Hz
     // the detector reports each of their lines as its own five-bin band.
     //
+    // AND RESOLUTION DOES NOT LIFT THEM OUT OF IT, which is the part worth
+    // knowing before anyone reaches for a finer transform. The same scene on a
+    // grid four times finer puts those five at 4.0 to 6.0 bins, exactly where
+    // they were, with their measured widths fallen by four from about 180 Hz
+    // to about 43. The width was never the signal: each detection is one
+    // spectral line, and a line is as wide as the window makes it. What
+    // separates those families lives BETWEEN their lines, which is to say
+    // between detections, and no field in this header can reach it.
+    //
     // ABOVE THAT IT SEPARATES A LINE SPECTRUM FROM A FILLED ONE, which is the
     // first thing in this tree that has separated anything at the family
     // level. In the same survey fsk2 reads 0.519, being two tones with half

@@ -1248,6 +1248,39 @@ scale.
 It still is not an interference test, for the reason two sections up. A line
 spectrum can be an intermod product and a filled band can be a station.
 
+#### And a finer grid does not rescue the five that cannot be told apart
+
+The obvious next move is more resolution, so the same scene ran with a 2048
+point second stage instead of 512: 9.16 Hz a bin against the shipped 36.6, four
+times finer. The channelizer's twiddle builder caps the second stage at 2048,
+so this is as far as it goes.
+
+| family | concentration | width | bins | at 36.6 Hz |
+| --- | --- | --- | --- | --- |
+| cw | 0.860 | 55 Hz | **6.0** | 0.946, ~180 Hz |
+| am | 0.942 | 43 Hz | **4.7** | 0.947, ~180 Hz |
+| nfm | 0.946 | 43 Hz | **4.7** | 0.947, ~175 Hz |
+| usb | 0.927 | 37 Hz | **4.0** | 0.946, ~165 Hz |
+| lsb | 0.927 | 37 Hz | **4.0** | 0.946, ~165 Hz |
+| fsk2 | **0.277** | 712 Hz | 77.8 | 0.519, ~862 Hz |
+| bpsk | **0.056** | 1421 Hz | 155.2 | 0.117, ~1465 Hz |
+| qpsk | **0.056** | 1409 Hz | 153.9 | 0.121, ~1430 Hz |
+
+**The five narrow families are still five bins wide.** Their measured width
+fell by four when the grid did, 180 Hz to 43, which means it was never the
+signal's width at all. Each of those detections is one spectral line, and a
+line is as wide as the analysis window makes it whatever the window is.
+
+So resolution is not what is missing. **What separates AM from SSB from CW
+lives in the relationship between the lines**, which is to say between
+detections, and no number that measures a single band can reach it. That bounds
+every per-band field in `core/detect/shape.h` the same way, not just this one.
+
+**The three that are resolved separate more sharply than before**: fsk2 at
+0.277 against 0.056 is five to one, where the shipped grid gave four to one. A
+finer grid helps exactly the bands that were already wide enough for the number
+to mean anything, and does nothing for the rest.
+
 #### So what a modulation-driven detector can stand on today
 
 - **`spectral_concentration` can carry a decision.** It is scale-free, it is
