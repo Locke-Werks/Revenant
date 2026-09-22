@@ -1083,6 +1083,34 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // A receiver the engine let go
+        // ------------------------------------------------------------------
+        //
+        // OUTSIDE THE VFO PANE ON PURPOSE. The pane is visible only while a
+        // receiver exists, so a line inside it explaining that the receiver
+        // has gone is a line that goes with it. This sits above, beside the
+        // tuning row that caused it, and clears when the operator tunes
+        // somewhere rather than when the pane comes back.
+        //
+        // The wheel is what makes this worth a row of its own: a long sweep
+        // walks the front end several spans, and the receiver is dropped
+        // somewhere in the middle of a gesture that is still going.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.receiverGoneText.length > 0
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: window.width * 0.9
+                text: engineLink.receiverGoneText
+                color: window.inkWarn
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+        }
+
+        // ------------------------------------------------------------------
         // Bookmarks
         // ------------------------------------------------------------------
         //

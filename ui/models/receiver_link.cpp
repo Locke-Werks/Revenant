@@ -307,11 +307,29 @@ void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
     // offset from the source's own centre and nothing between here and
     // there rebases it, so the subtraction is this caller's job and is done
     // here because this is the object holding EngineInfo::sourceCenter.
-    const std::int64_t center =
-        static_cast<std::int64_t>(std::llround(absolute_hz)) - info_.source_center;
+    const std::int64_t absolute = static_cast<std::int64_t>(std::llround(absolute_hz));
+    const std::int64_t center = absolute - info_.source_center;
     moved = moved || center != wanted_.center;
     wanted_.center = center;
     wanted_.bandwidth = 0;
+
+    // KEPT BECAUSE IT CANNOT BE RECOVERED LATER. wanted_.center is an offset
+    // from the source centre this tune was made against, so once the front end
+    // moves, adding the new centre back gives a frequency this receiver never
+    // had. That is exactly the moment the gone-sentence needs it: the receiver
+    // is removed BECAUSE the centre moved. receiverCenterHz stays derived,
+    // because while the receiver exists the two agree and one of them has to
+    // follow the engine's own rebasing.
+    receiver_absolute_hz_ = absolute;
+
+    // A receiver exists again, so whatever was said about the last one going
+    // is stale. Cleared on the tune rather than on the removal, which is the
+    // lifetime receiver_gone.h argues for: the sentence has to outlive the
+    // pane it describes or nobody reads it.
+    if (!receiver_gone_text_.isEmpty()) {
+        receiver_gone_text_.clear();
+        emit receiverGoneChanged();
+    }
 
     // The held frame was measured around the old centre in the old mode, so
     // the moment either moves it is describing a receiver that no longer
@@ -943,6 +961,16 @@ void EngineLink::forget_removed_receiver(const Error& failure)
             if (receiver_id_ != gone) {
                 return;
             }
+
+            // Said BEFORE the teardown, because removeReceiver clears the
+            // frequency this names. Its own property rather than
+            // receiverFault, for the reason the comment above gives: the pane
+            // is about to empty and a fault line inside it goes with it, so
+            // the one sentence explaining why would be the one nobody sees.
+            receiver_gone_text_ = QString::fromStdString(receiver_gone_sentence(
+                receiver_absolute_hz_, spanLowHz(), spanHighHz()));
+            emit receiverGoneChanged();
+
             removeReceiver();
         },
         Qt::QueuedConnection);

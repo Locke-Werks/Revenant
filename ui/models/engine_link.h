@@ -155,6 +155,7 @@
 #include "core/rpc/types.h"
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
+#include "models/receiver_gone.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
 #include "models/source_pacing.h"
@@ -990,6 +991,23 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool receiverBookmarked READ receiverBookmarked NOTIFY bookmarksChanged)
 
     // ------------------------------------------------------------------
+    // A receiver the engine let go
+    // ------------------------------------------------------------------
+    //
+    // Empty unless the engine removed the pane's receiver behind this
+    // window's back, which since 2026-09-21 it does on purpose: a receiver is
+    // pinned to the absolute frequency it was tuned to, and a retune that
+    // leaves its centre outside the new span drops it rather than dragging it
+    // somewhere nobody chose.
+    //
+    // NOT receiverFault, AND THE DIFFERENCE IS THE LIFETIME. That line lives
+    // in the detail pane and the pane is about to be empty, so the one
+    // sentence explaining the disappearance would vanish with the thing it
+    // explains. This one outlives it and is cleared when the operator tunes
+    // somewhere, not when the pane goes.
+    Q_PROPERTY(QString receiverGoneText READ receiverGoneText NOTIFY receiverGoneChanged)
+
+    // ------------------------------------------------------------------
     // RDS on the receiver the detail pane is on
     // ------------------------------------------------------------------
     //
@@ -1746,6 +1764,8 @@ public:
     // box and the mode buttons already make, so the supervisor learns about
     // it the way it learns about those.
 
+    [[nodiscard]] QString receiverGoneText() const { return receiver_gone_text_; }
+
     [[nodiscard]] QStringList bookmarkLabels() const;
     [[nodiscard]] QString bookmarkFault() const { return bookmark_fault_; }
     [[nodiscard]] bool receiverBookmarked() const;
@@ -1932,6 +1952,10 @@ signals:
     void bookmarksChanged();
 
     void bookmarkFaultChanged();
+
+    // The engine let the pane's receiver go, or the operator has tuned since
+    // and the sentence about it has been cleared.
+    void receiverGoneChanged();
 
     // The source's tuning surface changed: the range came back on a new
     // connection, a retune was granted, or one was refused. Separate from
@@ -2280,6 +2304,16 @@ private:
     // the source's centre back for the label.
     rpc::VrxParams wanted_;
     qulonglong receiver_id_ = 0;
+
+    // The absolute frequency the pane was last tuned to, kept because it
+    // cannot be rebuilt once the front end moves: wanted_.center is an offset
+    // against the source centre of the moment it was set, and the receiver is
+    // removed precisely because that centre changed. Qt thread only.
+    std::int64_t receiver_absolute_hz_ = 0;
+
+    // Why the pane is empty when the engine emptied it. Qt thread only, and
+    // deliberately outliving the pane; see the property.
+    QString receiver_gone_text_;
 
     // Qt thread only. The pane held a receiver when the link went away, so
     // the next connection puts one back from wanted_.
