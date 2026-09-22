@@ -1289,6 +1289,40 @@ lives in the relationship between the lines**, which is to say between
 detections, and no number that measures a single band can reach it. That bounds
 every per-band field in `core/detect/shape.h` the same way, not just this one.
 
+#### And the lines as a set do separate them
+
+That is worth nothing as a suggestion, so it was measured. Grouping the same
+scene's detections by emitter and printing their offsets from each emitter's
+own carrier, on the 9.16 Hz grid:
+
+| family | lines | offsets in hertz, width beside |
+| --- | --- | --- |
+| cw | 1 | +0 (55) |
+| bpsk | 1 | -2 (1410) |
+| qpsk | 1 | -14 (1382) |
+| usb | 2 | **+700** (37), **+1899** (37) |
+| lsb | 2 | **-1899** (37), **-700** (37) |
+| am | 3 | -1001 (46), **-3** (46), +999 (37) |
+| nfm | 15 | -7001, -5999, -5001, -4003, -3000, -1998, a comb |
+
+**Every row is the textbook answer.** AM is a carrier with a matched pair at
+plus and minus its 1000 Hz tone. USB is the two modulating tones, 700 and 1900,
+both above the carrier; LSB is the same two mirrored below. NFM is a comb at
+the modulation frequency, which is what an FM sideband set is. CW is one line.
+BPSK and QPSK are each a single filled band about 1.4 kHz wide.
+
+**The count and the sign separate all five analogue families**, and neither is
+a property of any single band. USB and LSB differ by nothing whatever except
+which side their lines sit on, which is exactly the sideband test
+`lower_fraction` was meant to give and has never been shown to give.
+
+So tier one's promise is reachable from the spectrum alone. What it needs is a
+surface that does not exist: the detector publishes a flat list of tracks and
+nothing groups them, and the one thing this survey cannot do, following a line
+that wanders, is the tracker's job rather than a measurement's. FSK2 is where
+that shows: its tones move, so folding one line seen across forty decisions
+into one entry by position overcounts it at fifty.
+
 **The three that are resolved separate more sharply than before**: fsk2 at
 0.277 against 0.056 is five to one, where the shipped grid gave four to one. A
 finer grid helps exactly the bands that were already wide enough for the number

@@ -1477,6 +1477,111 @@ TEST_CASE("shape survey: the same families, resolved", "[.shape-survey]")
     CHECK(!run.candidates.empty());
 }
 
+// ---- what the lines look like as a SET ------------------------------------
+
+// THE EVIDENCE THAT THE NEXT TIER HAS SOMETHING TO WORK WITH.
+//
+// The two surveys above land on the same wall from different directions: five
+// of the eight families are reported as separate spectral lines, each about
+// five bins wide at any grid, so no number measuring ONE band distinguishes
+// them. What is left is the set: how many lines an emitter produces, where
+// they sit relative to each other, and how the power divides between them.
+//
+// This measures that, because "look between the detections" is worth nothing
+// as a suggestion and something as a table. It groups the candidates of one
+// decision by emitter and prints their offsets from the emitter's own carrier.
+// It asserts nothing about what a classifier should do with them.
+//
+// WHAT IT MEASURED, 2026-09-22, on the 9.16 Hz grid, offsets in hertz from
+// each emitter's own carrier with the reported width beside:
+//
+//   cw     1 line    +0(55)
+//   bpsk   1 line    -2(1410)
+//   qpsk   1 line    -14(1382)
+//   usb    2 lines   +700(37) +1899(37)
+//   lsb    2 lines   -1899(37) -700(37)
+//   am     3 lines   -1001(46) -3(46) +999(37)
+//   nfm   15 lines   -7001 -5999 -5001 -4003 -3000 -1998 ... a comb
+//   fsk2  50 lines   a wandering group; see the caveat below
+//
+// EVERY ONE OF THESE IS THE TEXTBOOK ANSWER AND NONE OF IT IS VISIBLE IN ONE
+// BAND. am is a carrier with a matched pair at plus and minus the 1000 Hz
+// tone. usb is the two modulating tones, 700 and 1900, both ABOVE the carrier,
+// and lsb is the same two mirrored below. nfm is a comb at the modulation
+// frequency, which is what an FM sideband set is. cw is one line. bpsk and
+// qpsk are each a single filled band about 1.4 kHz wide.
+//
+// THE COUNT AND THE SIGN SEPARATE ALL FIVE ANALOGUE FAMILIES, and neither is a
+// property of any single band. usb and lsb differ by nothing whatever except
+// which side their lines sit on, which is exactly the sideband test
+// lower_fraction was supposed to give and has never been shown to give.
+//
+// THE fsk2 ROW IS THIS CASE'S OWN LIMIT AND NOT A MEASUREMENT. Its tones move,
+// so the twenty hertz used to fold one line seen across forty decisions into
+// one entry does not fold a line that wandered further than that, and fifty is
+// an overcount of a group. Anything built on this needs to track a line over
+// time rather than dedup by position, which is the tracker's job and is
+// another reason this belongs on a surface rather than in a survey.
+//
+// That is tier one's promise reachable from the spectrum alone, and it needs a
+// surface that does not exist: the detector publishes a flat list of tracks
+// and nothing groups them. See docs/detection.md.
+TEST_CASE("shape survey: the lines as a set", "[.shape-survey]")
+{
+    constexpr std::uint32_t kFineTransform = 2048;
+    const SceneRun run =
+        run_scene(family_scene(), test::FrontEndModel{}, kFineTransform);
+    REQUIRE(run.decisions > 0);
+
+    for (std::size_t i = 0; i < std::size(kFamilies); ++i) {
+        const dsp::Hertz at = kFamilyFirst + static_cast<dsp::Hertz>(i) * kFamilySpacing;
+        const dsp::Hertz window = kFamilySpacing / 2;
+
+        // One decision's worth, so the offsets are a SET and not an average of
+        // sets. The last decision rather than the first: every emitter runs
+        // for the whole scene, so by then each is established.
+        std::vector<std::pair<double, double>> lines;
+        for (const detect::Candidate& candidate : run.candidates) {
+            if (!candidate.shape.measured) {
+                continue;
+            }
+            if (std::abs(candidate.center - 98'100'000 - at) > window) {
+                continue;
+            }
+            lines.emplace_back(
+                static_cast<double>(candidate.center - 98'100'000 - at),
+                static_cast<double>(candidate.bandwidth));
+        }
+        if (lines.empty()) {
+            WARN(kFamilies[i].name << ": nothing detected at " << at << " Hz");
+            continue;
+        }
+
+        // Distinct positions, to a tenth of the emitter spacing, so the same
+        // line seen in forty decisions counts once and a line that wandered a
+        // bin between them is not counted twice.
+        std::sort(lines.begin(), lines.end());
+        std::vector<std::pair<double, double>> distinct;
+        for (const auto& line : lines) {
+            if (distinct.empty() || line.first - distinct.back().first > 20.0) {
+                distinct.push_back(line);
+            }
+        }
+
+        std::ostringstream out;
+        out.setf(std::ios::fixed);
+        out.precision(0);
+        out << kFamilies[i].name << ": " << distinct.size() << " lines at";
+        for (const auto& line : distinct) {
+            out << " " << std::showpos << line.first << std::noshowpos
+                << "(" << line.second << ")";
+        }
+        WARN(out.str());
+    }
+
+    CHECK(!run.candidates.empty());
+}
+
 // Does the skirt rise with the drive, or only with the switch being on?
 //
 // THE QUESTION THAT DECIDES WHETHER A DISTORTION FLAG IS WORTH BUILDING. The
