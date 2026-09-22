@@ -88,12 +88,12 @@ Measured on 2026-09-22 with `revenant-cli`:
 the subformat to PCM and then declines the width. The refusal names this exact
 case, so this is a known gap rather than a surprise.
 
-Three ways out, and none of them has been chosen:
+Three ways out. The first is taken, for excerpts, and the section below is it:
 
-- **Convert once, offline.** Turn each file into 32-bit float, which the
-  backend already reads. It costs 4/3 of the size, about 2.9 GB a file and
-  17 GB in total, and the conversion is somebody else's tool rather than code
-  in this tree.
+- **Convert once, offline.** Turn the file into 32-bit float, which the backend
+  already reads. `scripts/wav24_to_float32.py` does that and takes an excerpt
+  while it is there. Whole files cost 4/3 of the size, about 2.9 GB each and
+  17 GB in total, and nothing has needed that yet.
 - **Read 24-bit on the host.** The smallest change in this repository and the
   one the comment argues against: the host pass it needs is the one the upload
   kernels exist to avoid.
@@ -101,9 +101,69 @@ Three ways out, and none of them has been chosen:
   24-bit is three bytes a sample and does not divide into a 32-bit lane
   cleanly, which is why it is not already there.
 
-Until one of those happens, the recordings are on disk and unreadable by this
-engine, which is worth saying plainly because they look like they should just
-work.
+So the files as delivered are unreadable by this engine and an excerpt of one
+is not, which is worth saying plainly because they look like they should just
+open.
+
+## Making one readable, and the first real HF run
+
+`scripts/wav24_to_float32.py` converts 24-bit PCM to 32-bit float and takes an
+excerpt while it is there. It is offline, is not part of the engine and is on
+no sample path, which is the only reason a host conversion pass is acceptable
+at all. A minute is 46 MB and takes four seconds.
+
+    python scripts/wav24_to_float32.py \
+      "C:/Users/vexam/projects/SDR Recordings/KF4FIC_wideband_7000_7300kHz_20170821_1359UT.wav" \
+      "C:/Users/vexam/projects/SDR Recordings/excerpts/kf4fic_7mhz_1359ut_60s.wav" \
+      --seconds 60 --start 600
+
+The engine opens that: `cf32`, 96000 S/s, 5760000 samples, seekable. The grid
+it builds is the interesting part.
+
+    grid      M 64  D 32  17 taps per branch
+      channel rate    3000 S/s
+      channel spacing 1.500 kHz
+
+64 channels of a 96 kS/s stream with a 2048-point second stage is 65536 bins at
+**1.465 Hz**, against 36.6 Hz on the shipped VHF geometry. Nothing was
+reconfigured to get that: the default grid divided into a slow band gives HF
+resolution for free.
+
+**What it found**, 55 seconds of 40 m at 1359 UT, default thresholds:
+
+    #id  state            centre    bandwidth         snr   conf  margin    age
+    #13   live             193 Hz        10 Hz     12.2 dB   1.00    0.82   42.3s
+    #69   live          7.186 kHz         3 Hz      9.7 dB   0.73    0.73    1.4s
+    #7    live          7.192 kHz        14 Hz     19.3 dB   0.93    0.95   49.8s
+    #60   live         11.132 kHz         9 Hz     14.7 dB   0.98    0.88    5.5s
+    #66   live         13.250 kHz        64 Hz     24.8 dB   0.82    0.98    2.0s
+
+    31 tracks born, 26 dropped, 15 merges, 1 split
+    7.9 ms per frame across 65536 bins, 1.1 percent of one core
+
+Three things to take from it.
+
+**The bandwidths are real and they are tiny.** Three, nine, ten and fourteen
+hertz. At 36.6 Hz per bin not one of those is a bin wide and the detector could
+report nothing about any of them; at 1.465 Hz they are two to ten bins and the
+widths are measurements. That is the argument for a per-band grid, demonstrated
+rather than asserted.
+
+**The margin column does the work the stopwatch cannot.** It runs 0.73 to 0.98
+and orders the list by how far each signal stood up, while confidence runs 0.58
+to 1.00 and is mostly about age: #13 is the weakest signal in the list at
+12.2 dB and carries the highest confidence in it, because it had been there for
+42 seconds.
+
+**And `split_gap_bins` is visible in the first minute.** #69 at 7.186 kHz and
+#7 at 7.192 kHz are six hertz apart, which at this grid is four bins, under the
+eight-bin gap, so #69 was merged into #7. Two CW signals six hertz apart on
+40 m are two stations. `docs/detection.md` says that constant cannot be settled
+without real HF; this is the case it needs, and it took one excerpt to find.
+
+What is still missing is what that document also says: nothing here knows which
+of those five are stations and which are artefacts, so this is an observation
+and not a score.
 
 ## What they are not
 
