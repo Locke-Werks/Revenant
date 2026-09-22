@@ -153,6 +153,7 @@
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
 #include "models/front_end_note.h"
+#include "models/gain_control.h"
 #include "models/source_pacing.h"
 
 namespace revenant::ui {
@@ -570,6 +571,63 @@ class EngineLink : public QObject {
     // replaced whole on every pass that finds the engine there.
     Q_PROPERTY(bool sourceOpen READ sourceOpen NOTIFY connectionChanged)
     Q_PROPERTY(qulonglong sourceEpoch READ sourceEpoch NOTIFY connectionChanged)
+
+    // THE OPEN SOURCE'S GAIN STAGE, and whether there is one to draw.
+    //
+    // Off Session.sourceDescriptor, which describes the source that is already
+    // open and touches no device, rather than off listSources, which describes
+    // candidates and opens every device index to do it. That distinction is the
+    // whole reason the call exists: an operator who started revenant-engine
+    // with a URI on the command line, which is how it is normally run, had
+    // never listed anything, so this window knew no stage and could offer no
+    // control at all.
+    //
+    // ONE STAGE AND NOT ALL OF THEM, deliberately, and sourceGainStages says
+    // how many the device reported so the window can say when it is showing
+    // fewer controls than the device has. An R820T has exactly one stage
+    // driving its LNA, mixer and VGA together, which is the device this was
+    // written against; an Airspy has three and would want a control each. A
+    // single slider labelled with the stage's own name is honest about what it
+    // drives, where one slider labelled "gain" over three stages would not be.
+    //
+    // Empty name means no stage, which is every file and every synthetic scene:
+    // their levels are a property of samples already written or of emitters
+    // generated at the levels the URI asked for, so there is no amplifier to
+    // turn up and the window draws nothing rather than a control that always
+    // refuses.
+    Q_PROPERTY(QString sourceGainStage READ sourceGainStage NOTIFY sourceGainChanged)
+    Q_PROPERTY(int sourceGainStages READ sourceGainStages NOTIFY sourceGainChanged)
+    Q_PROPERTY(bool sourceGainHasAuto READ sourceGainHasAuto NOTIFY sourceGainChanged)
+
+    // Where the handle goes, as a fraction of the stage's decibel range, and
+    // the step one arrow key moves. models/gain_control.h has the arithmetic
+    // and why both are fractions rather than decibels.
+    Q_PROPERTY(double sourceGainFraction READ sourceGainFraction NOTIFY sourceGainChanged)
+    Q_PROPERTY(double sourceGainStep READ sourceGainStep NOTIFY sourceGainChanged)
+
+    // The gain the DEVICE TOOK, in decibels, and whether that number means
+    // anything yet.
+    //
+    // PLACED FROM THE ANSWER AND NOT FROM THE REQUEST. set_source_gain returns
+    // the step the tuner landed on, which on a stepped stage is rarely what was
+    // asked: a slider left where the pointer was would show a gain the device
+    // is not on. sourceGainKnown is false until a gain has been granted on this
+    // connection, because nothing on the wire reports a source's CURRENT gain
+    // and a handle parked at a plausible-looking default would be a guess
+    // presented as a reading. A window showing "not set from here" is telling
+    // the truth about what it knows.
+    Q_PROPERTY(double sourceGainDb READ sourceGainDb NOTIFY sourceGainChanged)
+    Q_PROPERTY(bool sourceGainKnown READ sourceGainKnown NOTIFY sourceGainChanged)
+
+    // Whether the stage has been handed to the device's own AGC from here.
+    // Same caveat as sourceGainKnown: this is what this window last asked for,
+    // not a reading, because the wire does not report the mode either.
+    Q_PROPERTY(bool sourceGainAuto READ sourceGainAuto NOTIFY sourceGainChanged)
+
+    // A refusal from the last gain change, empty when the last one took. The
+    // source's own words: a synthetic scene says its emitter levels are set
+    // against the noise, which tells an operator what to do instead.
+    Q_PROPERTY(QString sourceGainFault READ sourceGainFault NOTIFY sourceGainChanged)
 
     // What was asked for and what the source took. A device with a tuning
     // step rounds, and the two differ by up to that step. Both zero until
@@ -1265,6 +1323,45 @@ public:
         return static_cast<qulonglong>(info_.source_epoch);
     }
 
+    // The gain stage, all off the one descriptor. Qt thread only, like every
+    // getter here; gain_stage_ is replaced whole on the pass that reads the
+    // descriptor.
+    [[nodiscard]] QString sourceGainStage() const {
+        return QString::fromStdString(gain_stage_.name);
+    }
+    [[nodiscard]] int sourceGainStages() const { return gain_stage_count_; }
+    [[nodiscard]] bool sourceGainHasAuto() const { return gain_stage_.has_auto; }
+    [[nodiscard]] double sourceGainFraction() const {
+        return fraction_for_gain(gain_stage_, gain_db_);
+    }
+    [[nodiscard]] double sourceGainStep() const { return gain_fraction_step(gain_stage_); }
+    [[nodiscard]] double sourceGainDb() const { return gain_db_; }
+    [[nodiscard]] bool sourceGainKnown() const { return gain_known_; }
+    [[nodiscard]] bool sourceGainAuto() const { return gain_auto_; }
+    [[nodiscard]] QString sourceGainFault() const { return gain_fault_; }
+
+    // Asks the device for the gain a slider at this fraction means.
+    //
+    // A FRACTION AND NOT DECIBELS, so the caller cannot skip the settle: the
+    // request goes out on a step the stage actually has, which is what makes
+    // the answer comparable to what was asked. models/gain_control.h has the
+    // mapping and why it is not decibels all the way through.
+    //
+    // Posted to the supervisor like every other write here, because the call
+    // blocks for a round trip and on an RTL-SDR it also stops the transfers
+    // for about a third of a second. A slider dragged on the Qt thread would
+    // freeze the window for that long per notch, which is the freeze an
+    // operator hit when the gain calls went straight at a streaming dongle.
+    Q_INVOKABLE void setSourceGainFraction(double fraction);
+
+    // Hands the stage to the device's own AGC, or takes it back.
+    //
+    // Offered only where sourceGainHasAuto says the device will do it, and it
+    // is a choice rather than the sensible setting: README.md has the
+    // measurement of what the RTL-SDR's own AGC did to the detector's track
+    // list, and whether it is right depends on the antenna.
+    Q_INVOKABLE void setSourceGainAuto(bool on);
+
     // Opens what the picker composed, closing whatever is open first.
     //
     // TWO CALLS ON THE WIRE AND ONE HERE, deliberately. openSource is refused
@@ -1699,6 +1796,10 @@ signals:
     // frequency axis that no longer applies, which is exactly the case
     // that signal exists for.
     void sourceTuningChanged();
+
+    // The stage, the handle, the readout and the refusal. One signal because
+    // one panel reads all of them and none of them repaints a display.
+    void sourceGainChanged();
 
     // The device list, the refresh's busy flag, or the last open or close
     // refusal moved.
@@ -2195,6 +2296,22 @@ private:
     // Qt thread, queued from apply_source_request.
     void adopt_sources();
 
+    // Supervisor thread. The gain a slider asked for, and the stage to draw
+    // one over. Separate from apply_source_request because they are posted by
+    // different gestures and a gain change must not wait behind a listing,
+    // which opens every device index and takes a libusb timeout per absent
+    // one.
+    void apply_source_gain();
+    void poll_source_gain_stage();
+
+    // Qt thread, queued from the two above. adopt_gain takes whether the
+    // device actually answered with a gain, which auto-on does not: handing
+    // the stage to the AGC means this window stops knowing what the tuner is
+    // on, and a readout left standing would be the last manual value presented
+    // as current.
+    void adopt_gain_stage();
+    void adopt_gain(bool granted_known);
+
     // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
     // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per
     // connection; the tune answer arrives per write. A single struct would
@@ -2282,6 +2399,50 @@ private:
     // Reset to zero by a failed re-subscribe, so the difference stays and the
     // next pass tries again rather than leaving the display unfed forever.
     std::uint64_t seen_source_epoch_ = 0;
+
+    // --- the gain control -------------------------------------------------
+    //
+    // Qt thread only, all five. The stage is replaced whole when a descriptor
+    // arrives, and the three below it are what this window last asked for and
+    // was granted.
+    rpc::GainStage gain_stage_{};
+    int gain_stage_count_ = 0;
+    double gain_db_ = 0.0;
+    bool gain_known_ = false;
+    bool gain_auto_ = false;
+    QString gain_fault_;
+
+    // Supervisor thread only. The epoch the gain stage was read for, so the
+    // descriptor is fetched once per source rather than once per pass: it
+    // touches no device, but it is still a round trip and the stage cannot
+    // change under a source that has not been reopened.
+    //
+    // A DIFFERENT COUNTER FROM seen_source_epoch_, which is the one the
+    // spectrum re-subscribe uses and is reset to zero by a failed re-subscribe
+    // so that pass tries again. Sharing it would make a failed re-subscribe
+    // re-read the descriptor too, and a descriptor read failing would rewind
+    // the re-subscribe.
+    std::uint64_t gain_stage_epoch_ = 0;
+    bool gain_stage_read_ = false;
+
+    // Guarded by source_mutex_, handed from the supervisor to the Qt thread
+    // the way every other source fact is.
+    bool handover_has_gain_stage_ = false;
+    rpc::GainStage handover_gain_stage_{};
+    int handover_gain_stage_count_ = 0;
+
+    // Guarded by source_mutex_. What the Qt thread wants the gain to be, and
+    // what the supervisor has not applied yet.
+    bool want_gain_ = false;
+    double want_gain_db_ = 0.0;
+    bool want_gain_auto_ = false;
+    bool want_gain_auto_set_ = false;
+
+    // Guarded by source_mutex_. The answer, for the handle and the readout.
+    bool handover_has_gain_ = false;
+    double handover_gain_db_ = 0.0;
+    bool handover_gain_auto_ = false;
+    QString handover_gain_fault_;
 
     // Set by refreshSources, openSource and closeSource, and by
     // note_source_epoch when the stream underneath a live connection has been

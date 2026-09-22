@@ -304,6 +304,13 @@ void EngineLink::supervise()
             note_running(*alive);
             apply_source_request();
             apply_source_tune();
+
+            // After the source requests and before the receiver's, because a
+            // gain change is a front-end setting: an open posted in the same
+            // gesture has to land first or the gain goes at the source that is
+            // about to be closed.
+            apply_source_gain();
+
             apply_receiver_request();
             apply_audio_request();
             poll_receiver_status();
@@ -327,6 +334,13 @@ void EngineLink::supervise()
             // would always read Unmeasured.
             poll_source_pacing(*alive);
             poll_front_end(*alive);
+
+            // Once per source rather than once per pass; the function keeps
+            // its own epoch and returns immediately when the stage it holds is
+            // still the open source's. On the probe pass like the rest of
+            // these, so a fresh connection has its gain control within about a
+            // second.
+            poll_source_gain_stage();
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);

@@ -916,4 +916,241 @@ void EngineLink::adopt_sources()
     }
 }
 
+// ---------------------------------------------------------------------------
+// The front end's gain
+// ---------------------------------------------------------------------------
+
+void EngineLink::setSourceGainFraction(double fraction)
+{
+    // Settled here, on the Qt thread, so the number posted is one the stage
+    // actually has and the readout below can be compared against the answer.
+    // The alternative is posting a fraction and settling on the supervisor,
+    // which would leave the Qt thread unable to say what it asked for.
+    const double asked = gain_request_for_fraction(gain_stage_, fraction);
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        want_gain_ = true;
+        want_gain_db_ = asked;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
+    // THE HANDLE MOVES NOW AND THE READOUT WAITS. A slider that only moved
+    // when the engine answered would move at the round-trip rate, and on an
+    // RTL-SDR that round trip includes about a third of a second with the
+    // transfers stopped, so the control would feel broken. What must not move
+    // early is gain_known_: until the device has answered, this window does
+    // not know what gain the tuner is on, and showing the request as a reading
+    // is the lie this whole pair of properties exists to avoid.
+    gain_db_ = asked;
+    gain_auto_ = false;
+    emit sourceGainChanged();
+}
+
+void EngineLink::setSourceGainAuto(bool on)
+{
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        want_gain_auto_ = on;
+        want_gain_auto_set_ = true;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
+    gain_auto_ = on;
+
+    // The device is choosing now, so whatever number this window last had is
+    // not what the tuner is on. Saying nothing is the honest state until the
+    // operator takes manual control back and gets an answer.
+    if (on) {
+        gain_known_ = false;
+    }
+    emit sourceGainChanged();
+}
+
+void EngineLink::apply_source_gain()
+{
+    if (client_ == nullptr) {
+        return;
+    }
+
+    bool wanted = false;
+    double db = 0.0;
+    bool auto_set = false;
+    bool automatic = false;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        wanted = std::exchange(want_gain_, false);
+        db = want_gain_db_;
+        auto_set = std::exchange(want_gain_auto_set_, false);
+        automatic = want_gain_auto_;
+    }
+
+    if (!wanted && !auto_set) {
+        return;
+    }
+
+    // The stage's own name, which the device chose. An empty name means no
+    // descriptor has arrived yet, and there is nothing to name in a request.
+    const std::string stage = gain_stage_.name;
+    if (stage.empty()) {
+        return;
+    }
+
+    QString fault;
+    double granted = db;
+    bool granted_known = false;
+
+    // AUTO FIRST WHEN BOTH ARE PENDING, because taking manual control back is
+    // expressed as a gain change: set_gain puts the tuner into manual mode on
+    // the way to setting a value, so a gain applied after an auto request
+    // would undo it, and an operator who dragged the slider while auto was on
+    // means to take control.
+    if (auto_set) {
+        if (auto applied = client_->set_source_gain_auto(stage, automatic); !applied) {
+            fault = QString::fromStdString(applied.error().message);
+        } else if (automatic) {
+            granted_known = false;
+        }
+    }
+
+    if (wanted && fault.isEmpty()) {
+        auto answer = client_->set_source_gain(stage, db);
+        if (!answer) {
+            fault = QString::fromStdString(answer.error().message);
+        } else {
+            granted = *answer;
+            granted_known = true;
+        }
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        handover_has_gain_ = true;
+        handover_gain_db_ = granted;
+        handover_gain_auto_ = auto_set ? automatic : false;
+        handover_gain_fault_ = fault;
+    }
+    QMetaObject::invokeMethod(this, [this, granted_known] { adopt_gain(granted_known); },
+                              Qt::QueuedConnection);
+}
+
+void EngineLink::poll_source_gain_stage()
+{
+    if (client_ == nullptr) {
+        return;
+    }
+
+    // ONCE PER SOURCE AND NOT ONCE PER PASS. sourceDescriptor touches no
+    // device, which is the whole difference between it and listSources, but it
+    // is still a round trip and a stage cannot change under a source that has
+    // not been reopened. The epoch is what says a source was.
+    const std::uint64_t epoch = info_.source_epoch;
+    if (gain_stage_read_ && epoch == gain_stage_epoch_) {
+        return;
+    }
+
+    auto described = client_->source_descriptor();
+    if (!described) {
+        // Left to the next pass. The liveness probe owns a lost engine, and a
+        // missing gain control is not worth a fault of its own.
+        return;
+    }
+
+    gain_stage_epoch_ = epoch;
+    gain_stage_read_ = true;
+
+    rpc::GainStage stage;
+    int count = 0;
+    if (described->has_value()) {
+        const rpc::SourceDescriptor& open = **described;
+        count = static_cast<int>(open.gain_stages.size());
+        if (count > 0) {
+            // The first stage and not a search by name. A device reports its
+            // stages in its own order and an R820T reports exactly one; naming
+            // "tuner" here would be this client deciding what a device calls
+            // its own control, which is what GainStage::name exists to avoid.
+            stage = open.gain_stages.front();
+        }
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        handover_has_gain_stage_ = true;
+        handover_gain_stage_ = stage;
+        handover_gain_stage_count_ = count;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_gain_stage(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_gain_stage()
+{
+    rpc::GainStage stage;
+    int count = 0;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        if (!handover_has_gain_stage_) {
+            return;
+        }
+        handover_has_gain_stage_ = false;
+        stage = handover_gain_stage_;
+        count = handover_gain_stage_count_;
+    }
+
+    const bool same = stage.name == gain_stage_.name && stage.min_db == gain_stage_.min_db &&
+                      stage.max_db == gain_stage_.max_db && count == gain_stage_count_;
+    gain_stage_ = std::move(stage);
+    gain_stage_count_ = count;
+
+    // A NEW SOURCE HAS NOT BEEN ASKED FOR A GAIN FROM HERE. Carrying the last
+    // source's number over would put a reading on the handle for a device that
+    // has never been told anything, which is the one thing sourceGainKnown is
+    // for.
+    if (!same) {
+        gain_known_ = false;
+        gain_auto_ = false;
+        gain_db_ = gain_stage_.min_db;
+        gain_fault_.clear();
+    }
+
+    emit sourceGainChanged();
+}
+
+void EngineLink::adopt_gain(bool granted_known)
+{
+    double db = 0.0;
+    bool automatic = false;
+    QString fault;
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        if (!handover_has_gain_) {
+            return;
+        }
+        handover_has_gain_ = false;
+        db = handover_gain_db_;
+        automatic = handover_gain_auto_;
+        fault = handover_gain_fault_;
+    }
+
+    gain_fault_ = fault;
+    if (fault.isEmpty()) {
+        gain_auto_ = automatic;
+        if (granted_known) {
+            // THE HANDLE GOES WHERE THE DEVICE LANDED. On a stepped stage this
+            // is rarely what was asked, so this is the assignment that stops
+            // the slider showing a gain the tuner is not on.
+            gain_db_ = db;
+            gain_known_ = true;
+        }
+    }
+    emit sourceGainChanged();
+}
+
 }  // namespace revenant::ui

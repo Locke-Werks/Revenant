@@ -376,7 +376,102 @@ ApplicationWindow {
                 }
             }
 
+            // THE FRONT END'S GAIN, drawn only where the device says it has a
+            // stage to drive. Every file and every synthetic scene reports
+            // none, and a slider over those would be a control that always
+            // refuses.
+            //
+            // Labelled with the stage's OWN name rather than "gain", because
+            // that is what it drives: on an R820T the one stage moves the LNA,
+            // the mixer and the VGA together, and a device with three separate
+            // stages would want three controls rather than one lying label.
+            // engineLink.sourceGainStages says how many the device reported so
+            // the row can admit when it is showing fewer than there are.
+            RowLayout {
+                spacing: 6
+                visible: engineLink.sourceGainStage !== ""
+
+                Label {
+                    text: engineLink.sourceGainStage + " gain"
+                    color: window.inkTune
+                    font.pixelSize: 12
+                    font.bold: true
+                }
+
+                Slider {
+                    id: gainSlider
+                    Layout.preferredWidth: 140
+                    from: 0.0
+                    to: 1.0
+
+                    // Zero on a continuous stage, which Slider reads as no
+                    // stepping. See gain_fraction_step for why the size comes
+                    // off the count of steps and not off the distance between
+                    // two of them.
+                    stepSize: engineLink.sourceGainStep
+                    snapMode: Slider.SnapAlways
+                    enabled: !engineLink.sourceGainAuto
+
+                    // THE HANDLE FOLLOWS THE DEVICE, NOT THE POINTER. The
+                    // binding is restored whenever the link answers, so a step
+                    // the tuner rounded to shows up as the handle settling onto
+                    // it rather than staying where it was let go.
+                    value: engineLink.sourceGainFraction
+
+                    onMoved: engineLink.setSourceGainFraction(value)
+                }
+
+                // What the device took, and nothing at all before it has said.
+                // A number here that was only ever a request is the lie
+                // sourceGainKnown exists to prevent.
+                Label {
+                    text: engineLink.sourceGainAuto
+                          ? "device choosing"
+                          : (engineLink.sourceGainKnown
+                             ? engineLink.sourceGainDb.toFixed(1) + " dB"
+                             : "not set from here")
+                    color: engineLink.sourceGainKnown || engineLink.sourceGainAuto
+                           ? window.ink
+                           : window.inkDim
+                    font.pixelSize: 12
+                }
+
+                // Offered only where the device will do it. Whether it should
+                // is the operator's call: README.md has the measurement of what
+                // this dongle's own AGC did to the detector's track list.
+                Label {
+                    visible: engineLink.sourceGainHasAuto
+                    text: engineLink.sourceGainAuto ? "manual" : "auto"
+                    color: window.inkDim
+                    font.pixelSize: 12
+
+                    MouseArea {
+                        anchors.fill: parent
+                        anchors.margins: -3
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: engineLink.setSourceGainAuto(!engineLink.sourceGainAuto)
+                    }
+                }
+
+                Label {
+                    visible: engineLink.sourceGainStages > 1
+                    text: "+" + (engineLink.sourceGainStages - 1) + " more"
+                    color: window.inkDim
+                    font.pixelSize: 11
+                }
+            }
+
             Item { Layout.fillWidth: true }
+
+            Label {
+                Layout.minimumWidth: 0
+                visible: engineLink.sourceGainFault !== ""
+                text: engineLink.sourceGainFault
+                color: window.inkWarn
+                font.pixelSize: 12
+                elide: Text.ElideRight
+                Layout.maximumWidth: 420
+            }
 
             Label {
                 Layout.minimumWidth: 0

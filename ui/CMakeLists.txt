@@ -399,6 +399,7 @@ if(REVENANT_UI_TESTS)
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_frequency_entry.cpp
+            tests/test_gain_control.cpp
             tests/test_rds_text.cpp
             tests/test_receiver_marker.cpp
             tests/test_receiver_match.cpp
