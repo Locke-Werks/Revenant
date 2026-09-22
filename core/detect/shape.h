@@ -32,6 +32,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -310,7 +311,14 @@ inline constexpr double kSkirtEndFraction = 0.1;
                 best = running;
             }
         }
-        shape.concentration = best / total;
+        // CLAMPED BECAUSE THE SLIDING SUM CAN DRIFT ABOVE THE TRUE ONE.
+        // running carries the window forward by adding the bin entering and
+        // subtracting the one leaving, so over a band of thousands of bins it
+        // accumulates a few ulps that a fresh sum would not. Every term is
+        // non-negative, so best cannot really exceed total; a ratio a shade
+        // over one would be arithmetic noise escaping as a value no reader or
+        // assertion should have to allow for.
+        shape.concentration = std::min(1.0, best / total);
     }
 
     // Split on the band's own centre. An odd width has a middle bin, and it is
