@@ -111,6 +111,17 @@ struct BandShape {
     // separates those families lives BETWEEN their lines, which is to say
     // between detections, and no field in this header can reach it.
     //
+    // AND A GAP AGAINST THE CHARACTERISER'S OWN NUMBER MEANS STRUCTURE, which
+    // neither of them says alone. The two measure the same quantity over
+    // different windows, this one over the detected band and
+    // characterise::spectral_concentration over the whole coarse channel, so
+    // where they agree the band is the thing and where they part the band is
+    // not all of it. Measured on 40 m: three detections agree within seven
+    // hundredths and the fourth reads 0.41 here against 0.700 there, because
+    // its 29 Hz band holds two lines and this window catches one of them while
+    // the channel is dominated by the carrier. That band is exactly the one
+    // with a five-hertz neighbour eleven hertz away.
+    //
     // ABOVE THAT IT SEPARATES A LINE SPECTRUM FROM A FILLED ONE, which is the
     // first thing in this tree that has separated anything at the family
     // level. In the same survey fsk2 reads 0.519, being two tones with half
