@@ -2053,10 +2053,30 @@ void print_rds(double source_seconds, const RdsStation& station, const RdsSnapsh
 
     const std::uint64_t blocks =
         snap.blocks_good + snap.blocks_corrected + snap.blocks_dropped;
-    const double bler =
-        blocks == 0 ? 0.0
-                    : 100.0 * static_cast<double>(snap.blocks_dropped) /
-                          static_cast<double>(blocks);
+    // CORRECTED BLOCKS COUNT AS ERRORS, which is the window's definition in
+    // ui/models/rds_view.h and is now the only one in the tree.
+    //
+    // WHAT THIS USED TO COMPUTE. It was blocks_dropped over blocks, so a
+    // corrected block counted as a clean one. That made two numbers with one
+    // name: an operator comparing this line against the window's percentage
+    // saw them disagree, with nothing anywhere saying which was which, and on
+    // the 2026-09-20 KKFM capture the gap was 3.7 against 12.7.
+    //
+    // The window's is the one that survives, on the argument it already wrote
+    // down and that core/rpc/types.h backs at blocks_corrected: a corrected
+    // block had a burst repaired rather than being received clean and is
+    // trusted less than a good one. What an operator wants from "block error
+    // rate" is how much of the bitstream needed help, and counting only
+    // dropped blocks reports a fading station with a working error corrector
+    // as perfect.
+    //
+    // The three counts are printed beside it either way, so nothing is lost:
+    // a reader who wants the drop-only figure can still see it.
+    const double bler = blocks == 0 ? 0.0
+                                    : 100.0 *
+                                          static_cast<double>(snap.blocks_corrected +
+                                                              snap.blocks_dropped) /
+                                          static_cast<double>(blocks);
     std::println("  blocks          {}, {} group{}, {} block{}: {} clean, {} corrected, "
                  "{} dropped ({:.1f}% BLER), {} resync{}",
                  sync_state_name(snap.sync), snap.groups_decoded,

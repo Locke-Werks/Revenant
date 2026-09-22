@@ -290,8 +290,20 @@ TEST_CASE("the station the operator saw", "[rds]")
     CHECK(view.radio_text.text == "98.1 KKFM Weekends");
     CHECK(view.programme_type == "6 Classic Rock");
 
-    // 90 corrected plus 37 dropped out of 1000 looked at is 12.7 percent,
-    // which is the figure that came back off the air.
+    // 90 corrected plus 37 dropped out of 1000 looked at is 12.7 percent.
+    //
+    // WHAT THIS COMMENT USED TO CLAIM. It ended "which is the figure that came
+    // back off the air", and the number did: docs/rds-first-decode.md records
+    // 12.7 percent from the 2026-09-20 KKFM run. These counts are not how it
+    // got there. That figure was revenant-cli's, which at the time computed
+    // dropped over total, and the same capture CORRECTED TWO BLOCKS. This
+    // fixture reaches the same 12.7 under the window's formula by carrying
+    // ninety corrections the capture never had.
+    //
+    // So the arithmetic below is right and the provenance was not. The counts
+    // are a constructed case that exercises the formula, which is what a unit
+    // test wants; the on-air run is in the document, where the antenna and the
+    // hour are recorded beside it.
     CHECK(view.block_error_rate > 0.126);
     CHECK(view.block_error_rate < 0.128);
     CHECK(view.status == "decoding.  12.7% of blocks needed correcting or were dropped.");

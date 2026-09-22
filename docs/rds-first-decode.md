@@ -97,8 +97,9 @@ those seven weight-3 codewords arrive with a zero syndrome, so no correction
 runs, nothing is marked, and the block is delivered as clean with the wrong
 contents. `core/decode/rds_groups.h` carries the full table.
 
-**And the 12.7 percent is not that.** It is a DROP rate, from
-`tools/cli/main.cpp`, which counts `dropped / (good + corrected + dropped)`.
+**And the 12.7 percent is not that.** It is a DROP rate: `tools/cli/main.cpp`
+counted `dropped / (good + corrected + dropped)` when this run was made, and
+counts `(corrected + dropped) / total` now. See below for the change.
 The same capture corrected two blocks. Mis-correction is therefore at most two
 of roughly 650 charged blocks and cannot be what 12.7 percent measures. The
 bulk is blocks refused, and about 250 of them are the cost of the five resyncs
@@ -107,11 +108,30 @@ recorded below: a single slipped bit costs exactly fifty charged drops, because
 framing is charged for every block until the bucket fills and the decoder
 reacquires.
 
-Note also that `ui/models/rds_view.h` computes a DIFFERENT figure under the
-same name, `(corrected + dropped) / total`, on the argument that a corrected
-block is an error. Two definitions of "block error rate" in one tree is a trap;
-whichever survives, a number quoted without saying which one it is means
-nothing.
+**WHAT THIS PARAGRAPH USED TO SAY, and the trap it named has been closed.** It
+read: "Note also that `ui/models/rds_view.h` computes a DIFFERENT figure under
+the same name, `(corrected + dropped) / total`, on the argument that a
+corrected block is an error. Two definitions of 'block error rate' in one tree
+is a trap; whichever survives, a number quoted without saying which one it is
+means nothing."
+
+The window's definition survived, and `tools/cli/main.cpp` adopted it on
+2026-09-22. A corrected block had a burst repaired rather than being received
+clean and is trusted less than a good one, which `core/rpc/types.h` says at
+`blocks_corrected`, so what an operator wants from "block error rate" is how
+much of the bitstream needed help. Counting only dropped blocks reports a
+fading station with a working error corrector as perfect.
+
+The 12.7 percent above is what the tool printed on the day and stays in this
+document as that. Recomputed under the definition both tools now use it is
+about 13.0, because the two corrected blocks in roughly 650 charged add about
+three tenths of a point. The difference is small here only because this capture
+barely used its error corrector; on a station where the corrector is working
+hard the two definitions are far apart, which is the whole reason one of them
+had to go.
+
+The three counts are printed beside the percentage either way, so the drop-only
+rate is still readable off the same line.
 
 So on-air BLER is not a property of this decoder. Nothing in the run
 controlled the antenna, the multipath, or the hour. Quoting a BLER figure from
