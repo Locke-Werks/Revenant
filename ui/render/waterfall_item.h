@@ -163,6 +163,11 @@ private:
 
     void takeFrame();
     void takeDetections();
+
+    // The receiver moved, or the engine answered about it. See the same slot
+    // on SpectrumItem for why both signals land in one place.
+    void takeReceiver();
+
     void onConnectionChanged();
     void rebuild(int columns, int rows, std::size_t bins);
 
@@ -171,7 +176,12 @@ private:
     // for why the width case cannot do this. render/history_resize.h holds
     // the index arithmetic, and ui/tests covers it.
     void resizeRows(int rows);
-    void rebuildDetections();
+
+    // Everything drawn over the history: the detection rectangles and their
+    // labels, and the receiver's passband over the top of those. See the same
+    // function on SpectrumItem.
+    void rebuildOverlay();
+
     void placeLabels();
     void setHovered(std::uint64_t id);
 

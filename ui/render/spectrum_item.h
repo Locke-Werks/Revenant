@@ -55,6 +55,17 @@
 // end, drawn as the bottom edge of its rectangle, so it is drawn solid;
 // fading belongs to the spectrum marker alone, where it means the tracker has
 // not dropped this track yet and the signal has stopped.
+//
+// THE RECEIVER MARKER IS THE SAME ARRANGEMENT AND IS DRAWN THE SAME ON BOTH
+//
+// build_receiver_marker and build_receiver_quads are below, beside the
+// detection overlay and for the same reason: one mapping from hertz to
+// pixels. Unlike a detection the receiver's mark is identical on the two
+// displays, because there is exactly one of it. The argument that made a
+// detection a bracket on one display and a rectangle on the other was that
+// twenty of them composite to something that hides the picture; one faint
+// band does not, and where the receiver is listening is worth saying in the
+// same place on both displays so the eye does not have to learn two marks.
 
 #pragma once
 
@@ -73,6 +84,7 @@
 
 #include "core/rpc/types.h"
 #include "models/engine_link.h"
+#include "models/receiver_marker.h"
 #include "render/spectrum_scale.h"
 
 class QMouseEvent;
@@ -232,6 +244,39 @@ void build_detection_labels(const std::vector<DetectionBox>& boxes,
 // Clear of the bracket and the centre notch, which are drawn from the top
 // edge down. A label overlapping its own mark reads as a rendering fault.
 inline constexpr double kLabelTopPx = 9.0;
+
+// ---------------------------------------------------------------------------
+// Where the receiver is listening
+// ---------------------------------------------------------------------------
+//
+// In this header for the same reason the detection overlay is: there is one
+// mapping from hertz to pixels and both displays have to use it. The marker
+// goes through EngineLink::spanLowHz and spanHighHz exactly as the boxes do.
+//
+// models/receiver_marker.h holds the arithmetic and the argument for the
+// passband being the marked thing rather than the tuned frequency. These two
+// are what turns it into quads: which of EngineLink's numbers the band comes
+// off, and what the mark looks like.
+
+// The receiver's granted passband against this display's geometry, or an
+// invisible marker when there is nothing to mark.
+//
+// THE GRANTED PAIR AND NOT THE REQUEST, with one fallback. VrxPlacement is
+// what the engine actually built and is the only pair that answers "does the
+// filter cover this signal". The fallback is the pane's own request, and it
+// covers the round trip between a tune and the first status: the client sends
+// an empty passband to ask for the mode's default, so during that window the
+// grant is a pair of zeros while the request may already hold edges the
+// operator dragged. Drawing nothing there would blink the marker off at every
+// mode change.
+[[nodiscard]] ReceiverMarker build_receiver_marker(const EngineLink& link, double width_px);
+
+// The marker's rectangles, APPENDED rather than assigned, so the receiver
+// draws over the detection overlay that is already in out. The receiver is
+// the one mark the operator put there on purpose; a detection bracket drawn
+// over it would hide the answer to the question the bracket raised.
+void build_receiver_quads(const ReceiverMarker& marker, double height_px,
+                          std::vector<OverlayQuad>& out);
 
 // The overlay's text, and the one thing in either display still rasterised by
 // QPainter.
@@ -490,8 +535,20 @@ protected:
 private:
     void takeFrame();
     void takeDetections();
+
+    // The receiver moved, or the engine answered about it. Both land here,
+    // because the marker is drawn from the grant and falls back to the
+    // request, so either piece of news can move it.
+    void takeReceiver();
+
     void onConnectionChanged();
-    void rebuildDetections();
+
+    // Everything drawn over the trace: the detection boxes and their labels,
+    // and the receiver's passband over the top of those. One function because
+    // they share a width, a height and one hertz-to-pixel mapping, and because
+    // every caller that invalidates one invalidates the other.
+    void rebuildOverlay();
+
     void setHovered(std::uint64_t id);
 
     // One column per physical pixel, not per logical one. The trace is drawn

@@ -338,6 +338,13 @@ endif()
 # "16 kHz receiver on a 145 kHz detection" and behind the decision not to
 # say anything about the far more common case where the filter fits.
 #
+# It covers plan_receiver_marker, which places the receiver's passband on
+# the span displays. Every wrong version of it draws something plausible:
+# a baseband placement marks a frequency, a stretched band marks a width,
+# and an off-span edge pinned to the display boundary marks a filter edge
+# that is not there. A picture that is wrong and looks right is exactly
+# what a test can catch and an operator cannot.
+#
 # It covers the EN 50067 Annex E mapping, its segment placeholders and the
 # four states an empty RDS pane can be in. The mapping is the difference
 # between a letter and a different letter that renders just as plausibly,
@@ -387,6 +394,7 @@ if(REVENANT_UI_TESTS)
             tests/test_history_resize.cpp
             tests/test_frequency_entry.cpp
             tests/test_rds_text.cpp
+            tests/test_receiver_marker.cpp
             tests/test_receiver_match.cpp
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp

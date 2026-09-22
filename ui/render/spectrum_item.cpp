@@ -65,6 +65,45 @@ namespace {
     return QColor(255, 88, 200);
 }
 
+// THE RECEIVER MARKER WEARS THE VFO PANE'S COLOURS, DELIBERATELY
+//
+// render/passband_item.cpp draws this same filter in a pale azure fill with
+// brighter rules at its edges and a white rule at the tuned frequency. These
+// are those colours, so the band highlighted on the span displays and the
+// band being dragged in the detail pane read as one object rather than as two
+// overlays that happen to be near the same frequency.
+//
+// It is also a hue the level map cannot make. render/spectrum_scale.cpp runs
+// dark blue through teal and yellow-green to cream, and nothing in it reaches
+// a saturated azure, so the mark is not read as a loud column. The same test
+// the detection magenta had to pass.
+const QColor kReceiverFill{96, 176, 255, 42};
+const QColor kReceiverEdge{128, 196, 255, 220};
+
+// The bar along the bottom edge of the band, which is what makes a narrow
+// filter findable. A 16 kHz receiver on a 2.4 MHz span is ten pixels wide and
+// a 500 Hz CW filter is a third of one, so the fill alone is invisible at the
+// widths that matter and the two edge rules collapse into one mark.
+//
+// The BOTTOM edge and not the top. The detection overlay owns the top strip:
+// its brackets are drawn from y = 0 and its labels are painted from
+// kLabelTopPx down. A receiver bar up there would sit under a plate naming
+// some other signal.
+const QColor kReceiverBar{150, 210, 255, 235};
+
+// The tuned frequency. White because it has to stay legible against the fill
+// and both rules, and faint because it is the extra rather than the point:
+// the band is what says whether the filter covers the signal.
+const QColor kReceiverCentre{255, 255, 255, 150};
+
+constexpr double kReceiverEdgeWidthPx = 2.0;
+constexpr double kReceiverBarHeightPx = 3.0;
+
+// How far the centre tick rises off the bottom bar. Short, so it says which
+// side of the carrier an asymmetric filter is on without drawing a third
+// full-height line inside a band ten pixels wide.
+constexpr double kReceiverCentreTickPx = 9.0;
+
 [[nodiscard]] int scaled_alpha(int full, double fade)
 {
     return std::clamp(static_cast<int>(std::lround(static_cast<double>(full) * fade)), 0, 255);
@@ -595,6 +634,87 @@ double overlay_label_height()
     return metrics.height() + 2.0;
 }
 
+ReceiverMarker build_receiver_marker(const EngineLink& link, double width_px)
+{
+    // No receiver is the ordinary state on a window that has not been clicked
+    // in yet, and receiver ids are issued from one, so zero is not a receiver.
+    // A highlight at 0 Hz would be a mark on the left edge of every display
+    // before anybody has tuned anything.
+    if (!link.connected() || link.receiverId() == 0) {
+        return {};
+    }
+
+    // See the note on the declaration for why the grant is preferred and why
+    // there is a fallback at all. The validity test is the same one
+    // classify_fit uses: a granted width of zero is a receiver the engine has
+    // not answered about, not a filter of no width.
+    double low_hz = static_cast<double>(link.receiverGrantedLow());
+    double high_hz = static_cast<double>(link.receiverGrantedHigh());
+    if (!(high_hz > low_hz)) {
+        low_hz = static_cast<double>(link.receiverPassbandLow());
+        high_hz = static_cast<double>(link.receiverPassbandHigh());
+    }
+
+    // receiverCenterHz is absolute, which is the frame spanLowHz and
+    // spanHighHz are in. The passband pair is signed hertz from it, per
+    // rpc::VrxParams, so the addition happens here and once.
+    const double centre = link.receiverCenterHz();
+    const ReceiverBand band{centre + low_hz, centre + high_hz, centre};
+
+    return plan_receiver_marker(band, link.spanLowHz(), link.spanHighHz(), width_px);
+}
+
+void build_receiver_quads(const ReceiverMarker& marker, double height_px,
+                          std::vector<OverlayQuad>& out)
+{
+    if (!marker.visible || height_px <= 0.0) {
+        return;
+    }
+
+    const double fill_wide = marker.fill_right_px - marker.fill_left_px;
+
+    // The band itself. Faint for the reason passband_item.cpp gives about its
+    // own fill: this sits over the measurement the operator is judging the
+    // filter against, and a fill dark enough to read on its own would hide
+    // the signal it is there to be lined up with. On the waterfall that
+    // matters more, because the history under it is the picture.
+    push_quad(out, QRectF(marker.fill_left_px, 0.0, fill_wide, height_px), kReceiverFill);
+
+    // The bar, along the clipped extent rather than the true one, because it
+    // is the "listening here" cue and has to be on screen to be one. It says
+    // nothing about where an edge is, so clipping it claims nothing.
+    const double bar_top = std::max(0.0, height_px - kReceiverBarHeightPx);
+    push_quad(out,
+              QRectF(marker.fill_left_px, bar_top, std::max(fill_wide, 1.0),
+                     std::min(kReceiverBarHeightPx, height_px)),
+              kReceiverBar);
+
+    // The tuned frequency, before the edges so an edge sitting on the carrier
+    // stays the readable one. That ordering is passband_item.cpp's and the
+    // same argument holds: a filter edge on the carrier is a real
+    // configuration and the edge is what the operator is placing.
+    if (marker.center_visible) {
+        const double tick = std::min(kReceiverCentreTickPx, height_px);
+        push_quad(out, QRectF(marker.center_px - 0.5, height_px - tick, 1.0, tick),
+                  kReceiverCentre);
+    }
+
+    // The edges, at the frequencies they actually name and only when those
+    // are on screen. An off-span edge is left undrawn rather than pinned to
+    // the boundary; models/receiver_marker.h has the argument.
+    const auto rule = [&out, height_px](double x_px) {
+        push_quad(out, QRectF(x_px - kReceiverEdgeWidthPx / 2.0, 0.0, kReceiverEdgeWidthPx,
+                              height_px),
+                  kReceiverEdge);
+    };
+    if (marker.low_edge_visible) {
+        rule(marker.low_edge_px);
+    }
+    if (marker.high_edge_visible) {
+        rule(marker.high_edge_px);
+    }
+}
+
 OverlayLabelItem::OverlayLabelItem(QQuickItem* parent) : QQuickPaintedItem(parent)
 {
     // Transparent everywhere the plates are not, and no mouse or hover, so
@@ -834,10 +954,20 @@ void SpectrumItem::setLink(EngineLink* link)
         connect(link_, &EngineLink::connectionChanged, this,
                 &SpectrumItem::onConnectionChanged);
         connect(link_, &EngineLink::detectionsChanged, this, &SpectrumItem::takeDetections);
+
+        // Both halves of the receiver's news. receiverChanged is emitted by
+        // the WRITE, so the marker follows a retune and a drag at the pointer's
+        // rate; receiverStatusChanged is the engine's answer, which is where
+        // the granted width the marker prefers comes from. Neither covers the
+        // other: a mode change moves the centre before the engine has said
+        // anything, and a clamp changes the width with the centre unmoved.
+        connect(link_, &EngineLink::receiverChanged, this, &SpectrumItem::takeReceiver);
+        connect(link_, &EngineLink::receiverStatusChanged, this,
+                &SpectrumItem::takeReceiver);
     }
     have_frame_ = false;
     boxes_.clear();
-    rebuildDetections();
+    rebuildOverlay();
     emit linkChanged();
     update();
 }
@@ -848,7 +978,7 @@ void SpectrumItem::setSelectedDetection(qulonglong id)
         return;
     }
     selected_detection_ = id;
-    rebuildDetections();
+    rebuildOverlay();
     emit selectedDetectionChanged();
     update();
 }
@@ -865,7 +995,7 @@ void SpectrumItem::onConnectionChanged()
         // stays true; a detection box is an invitation to click, and a stale
         // one would tune a receiver to a track the engine has forgotten.
         boxes_.clear();
-        rebuildDetections();
+        rebuildOverlay();
         update();
         return;
     }
@@ -884,7 +1014,7 @@ void SpectrumItem::onConnectionChanged()
     click_cycle_ = {};
     hovered_detection_ = 0;
 
-    rebuildDetections();
+    rebuildOverlay();
     update();
 }
 
@@ -917,7 +1047,7 @@ void SpectrumItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGe
         recomputeHeadroom(deviceColumns());
     }
     if (newGeometry.size() != oldGeometry.size()) {
-        rebuildDetections();
+        rebuildOverlay();
         update();
     }
 }
@@ -946,7 +1076,7 @@ void SpectrumItem::recomputeHeadroom(int columns)
     emit endsChanged();
 }
 
-void SpectrumItem::rebuildDetections()
+void SpectrumItem::rebuildOverlay()
 {
     if (link_ == nullptr) {
         boxes_.clear();
@@ -955,6 +1085,15 @@ void SpectrumItem::rebuildDetections()
     }
     build_detection_quads(boxes_, width(), height(), selected_detection_, hovered_detection_,
                           DetectionStyle::Band, quads_);
+
+    // After the boxes and into the same batch, so the receiver's band is
+    // composited over the brackets rather than under them. build_detection_
+    // quads assigns and this appends, which is the only ordering that works:
+    // one geometry node is one draw call at one depth, so what is drawn over
+    // what is decided by position in this vector.
+    if (link_ != nullptr) {
+        build_receiver_quads(build_receiver_marker(*link_, width()), height(), quads_);
+    }
 
     // The labels are a child item, so they are placed here on the Qt thread
     // and never from updatePaintNode, which runs on the render thread.
@@ -969,7 +1108,13 @@ void SpectrumItem::rebuildDetections()
 
 void SpectrumItem::takeDetections()
 {
-    rebuildDetections();
+    rebuildOverlay();
+    update();
+}
+
+void SpectrumItem::takeReceiver()
+{
+    rebuildOverlay();
     update();
 }
 
@@ -999,7 +1144,7 @@ void SpectrumItem::takeFrame()
     // against has: this frame carries a later sample index, so every held
     // track is that much further into its decay. Rebuilding here is what
     // makes the fade move at the frame rate instead of the poll rate.
-    rebuildDetections();
+    rebuildOverlay();
 
     emit endsChanged();
     update();
@@ -1012,7 +1157,7 @@ void SpectrumItem::setHovered(std::uint64_t id)
     }
     hovered_detection_ = id;
     setCursor(id == 0 ? Qt::ArrowCursor : Qt::PointingHandCursor);
-    rebuildDetections();
+    rebuildOverlay();
     update();
 }
 

@@ -95,6 +95,11 @@ void WaterfallItem::setLink(EngineLink* link)
         connect(link_, &EngineLink::connectionChanged, this,
                 &WaterfallItem::onConnectionChanged);
         connect(link_, &EngineLink::detectionsChanged, this, &WaterfallItem::takeDetections);
+
+        // The same pair SpectrumItem connects, for the reason given there.
+        connect(link_, &EngineLink::receiverChanged, this, &WaterfallItem::takeReceiver);
+        connect(link_, &EngineLink::receiverStatusChanged, this,
+                &WaterfallItem::takeReceiver);
     }
     // A different link is a different engine, so the pixels go with the
     // sample ranges. Leaving the pixels would show the previous engine's
@@ -108,7 +113,7 @@ void WaterfallItem::setLink(EngineLink* link)
     write_row_ = std::max(history_.height() - 1, 0);
     std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
     boxes_.clear();
-    rebuildDetections();
+    rebuildOverlay();
     emit linkChanged();
     update();
 }
@@ -119,7 +124,7 @@ void WaterfallItem::setSelectedDetection(qulonglong id)
         return;
     }
     selected_detection_ = id;
-    rebuildDetections();
+    rebuildOverlay();
     emit selectedDetectionChanged();
     update();
 }
@@ -136,7 +141,7 @@ void WaterfallItem::onConnectionChanged()
         // click, and clicking a track the engine has forgotten would tune a
         // receiver to nothing.
         boxes_.clear();
-        rebuildDetections();
+        rebuildOverlay();
         update();
         return;
     }
@@ -163,7 +168,7 @@ void WaterfallItem::onConnectionChanged()
     click_cycle_ = {};
     hovered_detection_ = 0;
 
-    rebuildDetections();
+    rebuildOverlay();
     update();
 }
 
@@ -198,7 +203,7 @@ void WaterfallItem::geometryChange(const QRectF& newGeometry, const QRectF& oldG
         rebuild(wanted.width(), wanted.height(), reduced_bins_);
     }
 
-    rebuildDetections();
+    rebuildOverlay();
     update();
 }
 
@@ -419,7 +424,7 @@ void WaterfallItem::resolveRows()
     }
 }
 
-void WaterfallItem::rebuildDetections()
+void WaterfallItem::rebuildOverlay()
 {
     if (link_ == nullptr) {
         boxes_.clear();
@@ -429,6 +434,18 @@ void WaterfallItem::rebuildDetections()
     resolveRows();
     build_detection_quads(boxes_, width(), height(), selected_detection_, hovered_detection_,
                           DetectionStyle::Rows, quads_);
+
+    // Appended after the rectangles so the receiver's band composites over
+    // them. The band is full height here, unlike a detection: it is a fact
+    // about right now and not about which rows a signal was in, and a mark
+    // that only covered the newest rows would scroll away from the receiver
+    // it names. Its fill is faint enough to read the history through, which
+    // is the constraint that made a detection a rectangle rather than a band
+    // in the first place.
+    if (link_ != nullptr) {
+        build_receiver_quads(build_receiver_marker(*link_, width()), height(), quads_);
+    }
+
     placeLabels();
 }
 
@@ -466,7 +483,13 @@ void WaterfallItem::placeLabels()
 
 void WaterfallItem::takeDetections()
 {
-    rebuildDetections();
+    rebuildOverlay();
+    update();
+}
+
+void WaterfallItem::takeReceiver()
+{
+    rebuildOverlay();
     update();
 }
 
@@ -521,7 +544,7 @@ void WaterfallItem::takeFrame()
     // After the row is in, because the newest row is the leading edge of
     // every live rectangle. This frame also carries a later sample index, so
     // every held track on the spectrum is that much further into its decay.
-    rebuildDetections();
+    rebuildOverlay();
 
     emit endsChanged();
     update();
@@ -534,7 +557,7 @@ void WaterfallItem::setHovered(std::uint64_t id)
     }
     hovered_detection_ = id;
     setCursor(id == 0 ? Qt::ArrowCursor : Qt::PointingHandCursor);
-    rebuildDetections();
+    rebuildOverlay();
     update();
 }
 
