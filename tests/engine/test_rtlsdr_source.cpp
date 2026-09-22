@@ -391,6 +391,111 @@ TEST_CASE("a manual gain snaps to a step the tuner has", "[source][rtlsdr][devic
     CHECK(missing.error().message.find("lna") != std::string::npos);
 }
 
+TEST_CASE("a streaming dongle takes a gain change and the automatic mode",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE CASE ABOVE SETS GAIN ON A DONGLE THAT IS NOT STREAMING, which is the
+    // same blind spot the retune had: rtlsdr_set_tuner_gain_mode and
+    // rtlsdr_set_tuner_gain are vendor control transfers through the same I2C
+    // repeater rtlsdr_set_center_freq uses, and the platform stalls all of them
+    // once rtlsdr_read_async has been running for about half a second.
+    //
+    // Reported by an operator on 2026-09-21: broadcast FM sounded bad, they
+    // reached for the dongle's automatic gain from the window, and the window
+    // locked up. Only tune paused the transfers at that point, so the gain call
+    // went straight at a streaming dongle and took the stall.
+    //
+    // Waits past the boundary for the reason the streaming retune case gives at
+    // length: a gain change in the first fraction of a second would go through
+    // on its own and prove nothing.
+    constexpr auto kPastTheBoundary = std::chrono::milliseconds(1500);
+
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+
+    const source::SourceCapabilities& caps = radio.capabilities();
+    if (caps.gain_stages.empty()) {
+        SKIP("this dongle reports no tuner gain table");
+    }
+    const source::GainStage& stage = caps.gain_stages.front();
+    REQUIRE_FALSE(stage.steps_db.empty());
+
+    Collected collected;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    const auto started = std::chrono::steady_clock::now();
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        std::uint64_t so_far = 0;
+        {
+            std::scoped_lock guard(collected.lock);
+            so_far = collected.samples;
+        }
+        if ((so_far >= 300'000 && now - started >= kPastTheBoundary) ||
+            now - started >= std::chrono::seconds(10)) {
+            REQUIRE(so_far >= 300'000);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(radio.running());
+
+    // A step the tuner has, and not the one it is already on, so a call that
+    // quietly did nothing would show up as the readback not moving.
+    const double wanted = stage.steps_db.size() > 1
+                              ? stage.steps_db[stage.steps_db.size() / 2]
+                              : stage.steps_db.front();
+    auto achieved = radio.set_gain(stage.name, wanted);
+    if (!achieved) {
+        INFO(achieved.error().message);
+    }
+    REQUIRE(achieved.has_value());
+    INFO("asked " << wanted << " dB while streaming, got " << *achieved << " dB");
+    CHECK(std::abs(*achieved - wanted) < 0.05);
+
+    // And the stream is still running, which is the half a successful gain
+    // change could still get wrong.
+    std::uint64_t at_change = 0;
+    {
+        std::scoped_lock guard(collected.lock);
+        at_change = collected.samples;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    {
+        std::scoped_lock guard(collected.lock);
+        INFO("samples at the gain change " << at_change << ", after " << collected.samples);
+        CHECK(collected.samples > at_change);
+    }
+
+    // The automatic mode, which is the call that froze. Whether the AGC is a
+    // good idea is a separate question and README.md has the measurement; this
+    // is only about the call completing against a live stream.
+    if (stage.has_auto) {
+        auto automatic = radio.set_gain_auto(stage.name, true);
+        if (!automatic) {
+            INFO(automatic.error().message);
+        }
+        REQUIRE(automatic.has_value());
+        CHECK(radio.running());
+
+        auto back = radio.set_gain_auto(stage.name, false);
+        if (!back) {
+            INFO(back.error().message);
+        }
+        REQUIRE(back.has_value());
+    }
+
+    REQUIRE(radio.stop().has_value());
+}
+
 TEST_CASE("a dongle streams, stops cleanly and its counters add up",
           "[source][rtlsdr][device]") {
     if (!a_dongle_is_attached()) {

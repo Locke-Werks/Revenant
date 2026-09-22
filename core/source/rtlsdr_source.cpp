@@ -569,7 +569,92 @@ private:
     void join_locked();
     void pause_producer_locked();
     [[nodiscard]] Status resume_producer_locked();
+
+    // EVERY CONTROL TRANSFER TO A STREAMING DONGLE GOES THROUGH HERE.
+    //
+    // Not just the retune. rtlsdr_set_center_freq, rtlsdr_set_tuner_gain_mode
+    // and rtlsdr_set_tuner_gain are all vendor control transfers through the
+    // same I2C repeater, and the platform stalls all of them once
+    // rtlsdr_read_async has been running for about half a second. Only tune
+    // paused the transfers at first, so switching the tuner to automatic gain
+    // from the window took the stall instead and the operator's window locked
+    // up waiting on it.
+    //
+    // `work` is called with the transfers stopped, the caller already holding
+    // control_, and the delivery thread still running. It should retry its own
+    // transfer, because the first one after a cancel fails every time; see
+    // kRetunePipeRetries.
+    //
+    // THE STREAM IS RESTARTED WHATEVER `work` DID, including throwing its hands
+    // up, because a source that was running when a control call arrived has to
+    // be running when it returns. A resume that itself fails is reported over
+    // whatever `work` said, since a source that cannot resume is the larger
+    // fact.
+    template <typename Work>
+    [[nodiscard]] auto with_transfers_paused(Work&& work) -> decltype(work())
+    {
+        using Result = decltype(work());
+
+        retuning_.store(true, std::memory_order_release);
+        struct ClearOnExit {
+            std::atomic<bool>& flag;
+            ~ClearOnExit() { flag.store(false, std::memory_order_release); }
+        } clear_retuning{retuning_};
+
+        const auto paused_at = std::chrono::steady_clock::now();
+        const dsp::SampleIndex before_join = produced_index_;
+
+        pause_producer_locked();
+
+        // produced_index_ and pending_gap_ are the callback thread's, and the
+        // gap accounting below reads and writes both. Safe because the callback
+        // thread is the one just joined: the delivery thread still running
+        // beside this touches neither, it reads the slots and their gap_before.
+        const dsp::SampleIndex during_join = produced_index_ - before_join;
+
+        Result result = work();
+
+        // Flushed whether or not `work` succeeded. The device's buffer has been
+        // sitting unread for the length of the pause either way, so what is in
+        // it is stale, and on a retune it was digitised at the old centre.
+        std::optional<Error> flush_failed;
+        if (const int rc = rtlsdr_reset_buffer(device_.get()); rc != 0) {
+            flush_failed = Error{
+                std::format("the device's sample buffer could not be flushed after a control "
+                            "change, so the stream resumes with up to a buffer of samples "
+                            "digitised before it: librtlsdr returned {}",
+                            rc),
+                rc};
+        }
+
+        const double paused_seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - paused_at).count();
+        const auto produced_while_down =
+            static_cast<std::uint64_t>(paused_seconds * static_cast<double>(rate_));
+        if (produced_while_down > during_join) {
+            note_dropped(static_cast<std::size_t>(produced_while_down - during_join));
+        }
+
+        if (auto resumed = resume_producer_locked(); !resumed) {
+            return std::unexpected(with_context(
+                resumed.error(), "the stream could not be restarted after a control change"));
+        }
+        if (!result) {
+            return result;
+        }
+        if (flush_failed) {
+            return std::unexpected(*flush_failed);
+        }
+        return result;
+    }
+    // The device half of each control call, split out so the same body serves a
+    // stopped dongle and a streaming one. `attempts` is one when the dongle is
+    // not streaming, so a genuine refusal is reported once rather than four
+    // times over, and kRetunePipeRetries when it is, because the first transfer
+    // after a cancel fails every time.
     [[nodiscard]] Expected<dsp::Hertz> tune_locked(dsp::Hertz center, int attempts);
+    [[nodiscard]] Expected<double> set_gain_locked(double db, int attempts);
+    [[nodiscard]] Status set_gain_auto_locked(bool on, int attempts);
     [[nodiscard]] Expected<dsp::Hertz> retune_streaming_locked(dsp::Hertz center);
     [[nodiscard]] Expected<ClockModel> make_clock_model() const;
 
@@ -785,77 +870,7 @@ Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
     // radio they were already listening to. An early return anywhere in the
     // middle would do exactly that, and it would do it silently, because
     // running() is held true across the pause.
-    retuning_.store(true, std::memory_order_release);
-    struct ClearOnExit {
-        std::atomic<bool>& flag;
-        ~ClearOnExit() { flag.store(false, std::memory_order_release); }
-    } clear_retuning{retuning_};
-
-    const auto paused_at = std::chrono::steady_clock::now();
-    const dsp::SampleIndex before_join = produced_index_;
-
-    pause_producer_locked();
-
-    // Whatever arrived between the cancel being asked for and read_async
-    // returning is already counted the ordinary way, so the gap is the time
-    // that passed less the samples that made it through. Without this
-    // subtraction the stream would be told it lost the drain twice.
-    //
-    // produced_index_ and pending_gap_ are the callback thread's, and this
-    // reads and writes both. Safe because the callback thread is the one just
-    // joined: the delivery thread still running beside this touches neither,
-    // it reads the slots and their gap_before.
-    const dsp::SampleIndex during_join = produced_index_ - before_join;
-
-    auto landed = tune_locked(center, kRetunePipeRetries);
-
-    // Flushed whether or not the tuner moved. On the way to a new centre it is
-    // what stops the stream resuming with samples digitised at the old one; on
-    // a refusal the buffer has still been sitting unread for the length of the
-    // pause, so those samples are stale either way.
-    std::optional<Error> flush_failed;
-    if (const int rc = rtlsdr_reset_buffer(device_.get()); rc != 0) {
-        flush_failed = Error{
-            std::format("the device's sample buffer could not be flushed after the tuner was "
-                        "moved, so the stream resumes with up to a buffer of samples digitised "
-                        "before the retune: librtlsdr returned {}",
-                        rc),
-            rc};
-    }
-
-    const double paused_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - paused_at).count();
-    const auto produced_while_down =
-        static_cast<std::uint64_t>(paused_seconds * static_cast<double>(rate_));
-    if (produced_while_down > during_join) {
-        note_dropped(static_cast<std::size_t>(produced_while_down - during_join));
-    }
-
-    auto resumed = resume_producer_locked();
-
-    // Reported worst first, because they are not equally bad. A source that
-    // cannot resume has ended and every receiver on it is finished, which is
-    // a larger fact than where the tuner is pointing; a tuner that refused is
-    // a request that did not happen against a stream that is still running;
-    // and a buffer that would not flush costs a fraction of a second of stale
-    // samples on a stream that is otherwise fine.
-    if (!resumed) {
-        return std::unexpected(with_context(
-            resumed.error(),
-            landed ? std::format("the tuner moved to {} Hz but the stream could not be restarted",
-                                 *landed)
-                   : std::format("the tuner refused {} Hz and the stream could not be restarted "
-                                 "after the attempt",
-                                 center)));
-    }
-    if (!landed) {
-        return std::unexpected(landed.error());
-    }
-    if (flush_failed) {
-        return std::unexpected(
-            with_context(*flush_failed, std::format("the tuner moved to {} Hz", *landed)));
-    }
-    return landed;
+    return with_transfers_paused([this, center] { return tune_locked(center, kRetunePipeRetries); });
 }
 
 // THE TRANSFERS STOP AND THE DELIVERY THREAD DOES NOT.
@@ -963,19 +978,46 @@ Expected<double> RtlSdrSource::set_gain(std::string_view stage, double db)
 
     std::scoped_lock lock(control_);
 
+    // Paused around it while streaming, for the reason with_transfers_paused
+    // gives: these are the same I2C-repeater transfers a retune uses and the
+    // platform stalls them the same way.
+    if (running_.load(std::memory_order_acquire)) {
+        return with_transfers_paused(
+            [this, db] { return set_gain_locked(db, kRetunePipeRetries); });
+    }
+    return set_gain_locked(db, 1);
+}
+
+Expected<double> RtlSdrSource::set_gain_locked(double db, int attempts)
+{
     const auto wanted = static_cast<int>(std::llround(db * 10.0));
     const int landed = nearest_step(gain_steps_, wanted);
 
-    if (const int rc = rtlsdr_set_tuner_gain_mode(device_.get(), 1); rc != 0) {
+    int mode_rc = 0;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        mode_rc = rtlsdr_set_tuner_gain_mode(device_.get(), 1);
+        if (mode_rc == 0) {
+            break;
+        }
+    }
+    if (mode_rc != 0) {
         return fail(std::format("could not put the tuner into manual gain mode: librtlsdr "
                                 "returned {}",
-                                rc),
-                    rc);
+                                mode_rc),
+                    mode_rc);
     }
-    if (const int rc = rtlsdr_set_tuner_gain(device_.get(), landed); rc != 0) {
+
+    int gain_rc = 0;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        gain_rc = rtlsdr_set_tuner_gain(device_.get(), landed);
+        if (gain_rc == 0) {
+            break;
+        }
+    }
+    if (gain_rc != 0) {
         return fail(std::format("the tuner refused a gain of {} dB: librtlsdr returned {}",
-                                static_cast<double>(landed) / 10.0, rc),
-                    rc);
+                                static_cast<double>(landed) / 10.0, gain_rc),
+                    gain_rc);
     }
 
     // Zero is both a valid gain in the R820T's table and the documented error
@@ -999,9 +1041,28 @@ Status RtlSdrSource::set_gain_auto(std::string_view stage, bool on)
 
     std::scoped_lock lock(control_);
 
+    // THE CALL THAT FROZE THE WINDOW. Switching the tuner's gain mode is the
+    // same class of transfer as a retune, and it was going straight at a
+    // streaming dongle: see with_transfers_paused.
+    if (running_.load(std::memory_order_acquire)) {
+        return with_transfers_paused(
+            [this, on] { return set_gain_auto_locked(on, kRetunePipeRetries); });
+    }
+    return set_gain_auto_locked(on, 1);
+}
+
+Status RtlSdrSource::set_gain_auto_locked(bool on, int attempts)
+{
     // rtlsdr_set_tuner_gain_mode takes "manual", so the sense is inverted
     // here rather than at every call site.
-    if (const int rc = rtlsdr_set_tuner_gain_mode(device_.get(), on ? 0 : 1); rc != 0) {
+    int rc = 0;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        rc = rtlsdr_set_tuner_gain_mode(device_.get(), on ? 0 : 1);
+        if (rc == 0) {
+            break;
+        }
+    }
+    if (rc != 0) {
         return fail(std::format("could not switch the tuner to {} gain: librtlsdr returned {}",
                                 on ? "automatic" : "manual", rc),
                     rc);
