@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <format>
 #include <map>
@@ -390,6 +391,346 @@ TEST_CASE("the corrector fixes every burst it claims and refuses every one it do
         }
         REQUIRE(decoder.last_group().has_value());
         CHECK_FALSE(decoder.last_group()->blocks[0].valid);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Miscorrection, counted by error weight
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Every pattern of exactly `weight` wrong bits in a 26-bit block, handed to
+// the visitor one at a time. C(26,5) is 65780, so the widest sweep below is
+// five figures of work and not the 2^26 a blind enumeration would cost.
+template <typename Visit>
+void for_each_pattern_of_weight(int weight, const Visit& visit) {
+    REQUIRE(weight >= 1);
+    REQUIRE(weight <= 5);
+    std::array<int, 5> chosen_bit{};
+    const auto recurse = [&](auto& self, int chosen, int start) -> void {
+        if (chosen == weight) {
+            std::uint32_t pattern = 0;
+            for (int i = 0; i < weight; ++i) {
+                pattern |= 1u << chosen_bit[static_cast<std::size_t>(i)];
+            }
+            visit(pattern);
+            return;
+        }
+        for (int bit = start; bit < 26; ++bit) {
+            chosen_bit[static_cast<std::size_t>(chosen)] = bit;
+            self(self, chosen + 1, bit + 1);
+        }
+    };
+    recurse(recurse, 0, 0);
+}
+
+}  // namespace
+
+// THE CODE'S OWN PARAMETERS, measured from the 65536 codewords rather than
+// quoted, because two statements about this code were in the tree and only one
+// of them was the standard's.
+//
+// EN 50067 clause 2.3 states the detection capability as: all single and
+// double bit errors, any single burst spanning 10 bits or less, and about
+// 99.8 percent of bursts spanning 11 bits. Every one of those is a statement
+// about the minimum weight and the minimum span of a nonzero codeword, so
+// both are computed here and both agree with the clause. The 11 in the clause
+// is exactly where the first codeword-shaped burst appears, which is what
+// makes the agreement evidence rather than coincidence.
+TEST_CASE("the block code's minimum weight is 3 and its minimum span is 11", "[rds]") {
+    int min_weight = 27;
+    int min_span = 27;
+    int weight3 = 0;
+    int weight4 = 0;
+    for (std::uint32_t info = 0; info < 0x10000u; ++info) {
+        const std::uint32_t word = (info << 10) | poly_mod(info << 10);
+        if (word == 0) {
+            continue;
+        }
+        REQUIRE(poly_mod(word) == 0);
+        const int weight = std::popcount(word);
+        min_weight = std::min(min_weight, weight);
+        weight3 += weight == 3 ? 1 : 0;
+        weight4 += weight == 4 ? 1 : 0;
+
+        const int low = std::countr_zero(word);
+        const int high = 31 - std::countl_zero(word);
+        min_span = std::min(min_span, high - low + 1);
+    }
+
+    // MINIMUM DISTANCE 3, AND THE TREE USED TO SAY 5. The 5 in EN 50067
+    // clause 2.3 is the burst-correcting length, which the Rieger bound puts
+    // at exactly (n-k)/2 for this code, and somebody read a burst length as a
+    // Hamming distance. They are different numbers about different things and
+    // this code has both: it corrects any burst of span 5, and it has seven
+    // codewords of weight 3.
+    //
+    // x^19 + x^10 + 1 is one of them, and its six shifts inside 26 bits are
+    // the rest. g(x) divides it, which is checkable by hand in a minute and
+    // was never checked.
+    CHECK(min_weight == 3);
+    CHECK(weight3 == 7);
+    CHECK(weight4 == 3);
+    CHECK(poly_mod((1u << 19) | (1u << 10) | 1u) == 0);
+
+    // And the detection claim the standard does make. No nonzero codeword is a
+    // burst of span 10 or less, so every such burst is detected, and the first
+    // that is not detected spans 11. Both weight-3 codewords and weight-4 ones
+    // are wide: the 7 above span 20 and the 3 span 22.
+    CHECK(min_span == 11);
+}
+
+// WHY WEIGHT AND NOT SPAN. Every case above asks about bursts, because a burst
+// is what the corrector's table is indexed by and what EN 50067 clause 2.3
+// states the capability in. A channel does not deliver bursts on request: it
+// delivers some number of wrong bits wherever it likes, and what matters is
+// whether the block comes back right, absent, or wrong. So this enumerates by
+// Hamming weight, every pattern of weight 1 through 5, and sorts each one into
+// those three outcomes at three correction limits.
+//
+// WHAT THE CODE'S DISTANCE SETTLES BEFORE ANY COUNTING, because the numbers
+// only mean something read against it. Let e be the error the channel applied
+// and p the pattern the corrector answered with. If they differ then e XOR p
+// is a nonzero codeword, so weight(e) + weight(p) is at least the minimum
+// distance, which the case above measures as 3 and not 5. The default limit
+// answers with bursts of span at most 2, which are weight 1 or weight 2, so a
+// rewrite needs weight(e) of at least 2, and weight 2 is where miscorrection
+// starts rather than weight 3. Only weight 1 is safe: two distinct weight-1
+// patterns differ by a weight-2 word and there is no codeword that light.
+//
+// rds_groups.h used to say weight 3 was the first weight the default could
+// rewrite. It is not, and the count below is 21 weight-2 patterns out of 325.
+// This is an enumeration and not a sample, so there is no seed and no
+// confidence interval: it is every pattern at each weight.
+TEST_CASE("the corrector's miscorrection rate is counted at every error weight", "[rds]") {
+    struct Tally {
+        int repaired = 0;    // the answer was the error, so the block is right
+        int refused = 0;     // no answer within this limit, so the block is dropped
+        int rewritten = 0;   // an answer that was not the error: a wrong block accepted
+        int info_intact = 0; // of the rewritten, the ones whose 16 information bits survived
+        std::uint32_t first_rewritten = 0;
+        std::uint32_t first_answer = 0;
+    };
+
+    constexpr std::array<std::uint8_t, 3> kSpans{1, revenant::decode::kDefaultCorrectableBurstSpan,
+                                                 revenant::decode::kMaxCorrectableBurstSpan};
+
+    std::array<std::array<Tally, 3>, 5> tally{};
+    std::array<int, 5> population{};
+    std::array<int, 5> undetected{};
+
+    for (int weight = 1; weight <= 5; ++weight) {
+        const auto w = static_cast<std::size_t>(weight - 1);
+        for_each_pattern_of_weight(weight, [&](std::uint32_t error) {
+            ++population[w];
+            const auto syndrome = static_cast<std::uint16_t>(poly_mod(error));
+            if (syndrome == 0) {
+                // The error is itself a codeword. No corrector sees it and no
+                // test the decoder can run detects it, so it belongs to the
+                // code and not to this setting.
+                ++undetected[w];
+            }
+            for (std::size_t s = 0; s < kSpans.size(); ++s) {
+                Tally& row = tally[w][s];
+                const auto answer = revenant::decode::burst_for_syndrome(syndrome, kSpans[s]);
+                if (!answer) {
+                    ++row.refused;
+                    continue;
+                }
+                if (answer->pattern == error) {
+                    ++row.repaired;
+                    continue;
+                }
+                ++row.rewritten;
+                // The residue a rewrite leaves is a nonzero codeword, and the
+                // only codeword with all sixteen information bits zero is the
+                // zero one, so a rewrite always corrupts the payload rather
+                // than spending itself on the checkword. Counted rather than
+                // argued, because if it is ever nonzero the argument is wrong.
+                // A rewrite is therefore always a wrong information word and
+                // never a harmless repair of the wrong bits.
+                if ((((error ^ answer->pattern) >> 10) & 0xFFFFu) == 0) {
+                    ++row.info_intact;
+                }
+                if (row.first_rewritten == 0) {
+                    row.first_rewritten = error;
+                    row.first_answer = answer->pattern;
+                }
+            }
+        });
+    }
+
+    std::println("");
+    std::println("RDS block corrector by error weight, every pattern in a 26-bit block");
+    std::println("  weight  patterns  zero syndrome    span  repaired  refused  rewritten  "
+                 "rewrite rate");
+    for (int weight = 1; weight <= 5; ++weight) {
+        const auto w = static_cast<std::size_t>(weight - 1);
+        for (std::size_t s = 0; s < kSpans.size(); ++s) {
+            const Tally& row = tally[w][s];
+            std::println("  {:>6}  {:>8}  {:>13}    {:>4}  {:>8}  {:>7}  {:>9}  {:>11.2f}%",
+                         weight, population[w], undetected[w], kSpans[s], row.repaired,
+                         row.refused, row.rewritten,
+                         100.0 * static_cast<double>(row.rewritten) /
+                             static_cast<double>(population[w]));
+        }
+    }
+    for (int weight = 1; weight <= 5; ++weight) {
+        const auto w = static_cast<std::size_t>(weight - 1);
+        for (std::size_t s = 0; s < kSpans.size(); ++s) {
+            const Tally& row = tally[w][s];
+            if (row.rewritten == 0) {
+                continue;
+            }
+            std::println("  weight {} at span {}: first rewrite is error {} answered with {}",
+                         weight, kSpans[s], bits_of(row.first_rewritten, 26),
+                         bits_of(row.first_answer, 26));
+        }
+    }
+
+    // The enumeration is the whole of each weight class and nothing else.
+    CHECK(population[0] == 26);
+    CHECK(population[1] == 325);
+    CHECK(population[2] == 2600);
+    CHECK(population[3] == 14950);
+    CHECK(population[4] == 65780);
+
+    // Minimum distance 3, from this end as well. No pattern of weight 1 or 2
+    // is a codeword, so every one of them is detected, which is the clause 2.3
+    // claim. Seven patterns of weight 3 ARE codewords, and those are the
+    // errors no syndrome test anywhere can see: not corrected, not dropped,
+    // accepted as clean with the wrong contents.
+    CHECK(undetected[0] == 0);
+    CHECK(undetected[1] == 0);
+    CHECK(undetected[2] == 7);
+    CHECK(undetected[3] == 3);
+    CHECK(undetected[4] == 45);
+
+    for (std::size_t s = 0; s < kSpans.size(); ++s) {
+        for (int weight = 1; weight <= 5; ++weight) {
+            const Tally& row = tally[static_cast<std::size_t>(weight - 1)][s];
+            INFO(std::format("weight {} at span {}", weight, kSpans[s]));
+            CHECK(row.info_intact == 0);
+        }
+    }
+
+    // Every single-bit error is repaired at every limit, and every adjacent
+    // pair at the default. Those two are the whole of what span 2 claims.
+    for (std::size_t s = 0; s < kSpans.size(); ++s) {
+        CHECK(tally[0][s].repaired == 26);
+        CHECK(tally[0][s].rewritten == 0);
+    }
+    CHECK(tally[1][1].repaired == 25);
+    CHECK(tally[1][1].refused == 279);
+
+    // THE DISTANCE ARGUMENT, MEASURED, AND IT DOES NOT SAY WHAT THE TREE SAID.
+    // Weight 1 is the only weight the default cannot rewrite. Weight 2 can be,
+    // 21 patterns of the 325, and every one of those 21 is a weight-3 codeword
+    // split into two error bits and the one bit the corrector answers with:
+    // seven codewords, three ways each to choose which bit the corrector gets,
+    // 21 exactly. A two-bit error is inside the code's stated DETECTION
+    // capability and outside its correction capability, and the corrector
+    // turns 21 of them into wrong blocks anyway.
+    CHECK(tally[0][0].rewritten == 0);
+    CHECK(tally[0][1].rewritten == 0);
+    CHECK(tally[1][0].rewritten == 21);
+    CHECK(tally[1][1].rewritten == 21);
+
+    // Weight 3 at the shipped default. 12 of the 98 are a weight-4 codeword
+    // answered with one bit, three codewords and four choices each, and the
+    // other 86 are a weight-5 codeword answered with an adjacent pair.
+    const Tally& weight3_default = tally[2][1];
+    CHECK(weight3_default.rewritten == 98);
+    CHECK(weight3_default.refused == 2502);
+    CHECK(weight3_default.repaired == 0);  // three wrong bits are never a burst of span 2
+    INFO(std::format("weight 3 at span {}: {} of {} rewritten",
+                     revenant::decode::kDefaultCorrectableBurstSpan, weight3_default.rewritten,
+                     population[2]));
+
+    // A wider limit answers with a wider pattern, so it rewrites more at every
+    // weight. At span 5 it rewrites 738 of the 2600 weight-3 patterns against
+    // the default's 98, and repairs 136 of them, which is the same trade the
+    // channel case measures from the other direction.
+    CHECK(tally[2][2].rewritten == 738);
+    CHECK(tally[2][2].repaired == 136);
+    CHECK(tally[1][2].rewritten == 43);
+
+    // The table is indexed by syndrome and the span only gates the answer, so
+    // a pattern rewritten at one limit is rewritten by the same answer at
+    // every wider one. The rewrite count is therefore monotone in the limit
+    // and the default's rewrites are a subset of the widest's, which is the
+    // claim rds_groups.h makes about its own trade table.
+    for (int weight = 1; weight <= 5; ++weight) {
+        const auto w = static_cast<std::size_t>(weight - 1);
+        INFO(std::format("weight {}", weight));
+        CHECK(tally[w][0].rewritten <= tally[w][1].rewritten);
+        CHECK(tally[w][1].rewritten <= tally[w][2].rewritten);
+    }
+
+    // AND THROUGH THE DECODER, because everything above is arithmetic on the
+    // table and the question is what a receiver hands up. One rewritten error
+    // at each of the two lightest weights that have any, applied to block 1 of
+    // a group whose PI is known: the decoder must report the block valid,
+    // marked corrected, and holding a PI the transmitter never sent.
+    //
+    // The weight-2 case is the one that was not supposed to exist.
+    for (const int weight : {2, 3}) {
+        const Tally& row = tally[static_cast<std::size_t>(weight - 1)][1];
+        const std::uint32_t error = row.first_rewritten;
+        REQUIRE(error != 0);
+        REQUIRE(std::popcount(error) == weight);
+
+        RdsDecoder decoder;
+        prime(decoder);
+
+        constexpr std::uint16_t kPi = 0xC0FF;
+        auto blocks = encode_group(GroupWords{kPi, 0x0000, 0x0000, 0x0000, false});
+        blocks[0] ^= error;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        INFO(std::format("weight {} error {} answered with {}", weight, bits_of(error, 26),
+                         bits_of(row.first_answer, 26)));
+        REQUIRE(decoder.last_group().has_value());
+        const auto& group = *decoder.last_group();
+        CHECK(group.blocks[0].valid);
+        CHECK(group.blocks[0].corrected);
+        CHECK(group.blocks[0].value != kPi);
+        CHECK(decoder.state().pi_valid);
+        CHECK(decoder.state().pi != kPi);
+        CHECK(decoder.blocks_corrected() == 1);
+        CHECK(decoder.blocks_dropped() == 0);
+    }
+
+    // AND THE ONE NOTHING CAN CATCH. A weight-3 codeword applied as an error
+    // has a zero syndrome, so no correction runs, nothing is marked, and the
+    // block is delivered as clean with a different PI in it. This is the floor
+    // that rds_groups.h attributes to the code rather than to the corrector,
+    // and at weight 3 rather than the weight 5 it used to name.
+    {
+        constexpr std::uint32_t kWeight3Codeword = (1u << 19) | (1u << 10) | 1u;
+        REQUIRE(poly_mod(kWeight3Codeword) == 0);
+
+        RdsDecoder decoder;
+        prime(decoder);
+
+        constexpr std::uint16_t kPi = 0xC0FF;
+        auto blocks = encode_group(GroupWords{kPi, 0x0000, 0x0000, 0x0000, false});
+        blocks[0] ^= kWeight3Codeword;
+        for (const std::uint32_t block : blocks) {
+            feed_word(decoder, block);
+        }
+
+        REQUIRE(decoder.last_group().has_value());
+        const auto& group = *decoder.last_group();
+        CHECK(group.blocks[0].valid);
+        CHECK_FALSE(group.blocks[0].corrected);  // nothing to correct, and nothing to mark
+        CHECK(group.blocks[0].value != kPi);
+        CHECK(decoder.blocks_good() == 4);  // the damaged one among them
+        CHECK(decoder.blocks_corrected() == 0);
+        CHECK(decoder.blocks_dropped() == 0);
     }
 }
 
@@ -859,6 +1200,76 @@ TEST_CASE("sync holds through a short fade and is dropped by a long one", "[rds]
         CHECK(decoder.sync_acquisitions() == 2);
         CHECK(decoder.state().pi == 0xBEEF);
     }
+}
+
+// WHAT ONE SLIPPED BIT COSTS THE BLOCK ERROR RATE, which is a different
+// question from what a fade costs and the one nothing here asked.
+//
+// The case above corrupts blocks and leaves the framing alone, which is the
+// fade the leaky bucket was designed for. The physical layer produces the other
+// shape as a matter of course: core/decode/rds_bits.h stops emitting bits
+// entirely while the carrier coherence is under its threshold, re-runs the
+// timing scan, and resumes at a phase that has no relationship to the framing
+// the group layer was holding. What arrives here is not a corrupted block, it
+// is a bitstream with bits missing or added in the middle, and the framing is
+// then wrong for every block after it.
+//
+// The bucket is what pays for that, at one block per bad block and a threshold
+// of 50. So a single slipped bit charges the drop counter around fifty blocks
+// before the decoder gives up the framing and re-anchors, whatever the signal
+// is doing by then. At 11.4 groups a second that is about 1.1 seconds of air
+// and about one percent of a hundred-second run, per slip.
+//
+// That is the number the 2026-09-20 capture's 12.7 percent has to be read
+// against, because the same capture reported 5 resyncs. Five re-anchorings
+// account for something like 250 of the roughly 650 blocks it charged, and
+// those are the cost of recovering the framing rather than blocks the station
+// sent and the receiver could not read. Two runs an hour apart differing 0.0
+// and 12.7 is therefore not a 12.7-point difference in signal quality: it is
+// the difference between no dropouts and a handful, each one quantised to
+// about a percent by this threshold.
+TEST_CASE("a single slipped bit costs the drop counter fifty blocks", "[rds]") {
+    const GroupWords good{0xC0FF, 0x0000, 0x0000, 0x0000, false};
+
+    RdsDecoder decoder;
+    prime(decoder);
+    for (int group = 0; group < 5; ++group) {
+        feed_group(decoder, good);
+    }
+    REQUIRE(decoder.sync_losses() == 0);
+    REQUIRE(decoder.blocks_dropped() == 0);
+    const std::uint64_t clean_blocks = decoder.blocks_good();
+
+    // One bit that was never transmitted, which is a demodulator resuming half
+    // a bit out or a host losing a sample. Nothing after it is aligned.
+    decoder.feed(false);
+
+    // Enough clean groups afterwards that the recovery finishes inside the
+    // measurement rather than being cut off by the end of it.
+    for (int group = 0; group < 40; ++group) {
+        feed_group(decoder, good);
+    }
+
+    INFO(std::format("{} dropped, {} good, {} losses, {} acquisitions",
+                     decoder.blocks_dropped(), decoder.blocks_good() - clean_blocks,
+                     decoder.sync_losses(), decoder.sync_acquisitions()));
+
+    // One slip, one loss of framing, one re-acquisition on top of the first.
+    CHECK(decoder.sync_losses() == 1);
+    CHECK(decoder.sync_acquisitions() == 2);
+
+    // And the bill: exactly 50 on this stream, which is the threshold. A
+    // misaligned window passes the syndrome test about 5 times in 1024 and
+    // each of those refunds the bucket a block, so the bound is a range rather
+    // than an equality: on a stream whose content is not all zeros a slip
+    // costs a few more. It never costs fewer.
+    CHECK(decoder.blocks_dropped() >= 50);
+    CHECK(decoder.blocks_dropped() < 70);
+
+    // The framing is right again and the station is back, which is what makes
+    // the fifty a recovery cost rather than a failure.
+    CHECK(decoder.synced());
+    CHECK(decoder.state().pi == 0xC0FF);
 }
 
 TEST_CASE("no correction runs while acquiring sync", "[rds]") {

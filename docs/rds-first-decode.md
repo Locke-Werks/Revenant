@@ -75,12 +75,43 @@ settings, identical decoded content:
     Run 2    12.7 percent block error rate
 
 The flags were the same. The station did not change its name between runs. In
-run 2 a station whose PS never changes read `-FFM-FM` at one point, which is
-the mis-correction the CRC's minimum distance permits: the RDS checkword has
-minimum distance 5, so some weight-3 error patterns are a weight-2 pattern
-plus a valid codeword and get rewritten into a DIFFERENT valid block rather
-than refused. `core/decode/rds_groups.h` always said this; no test asserted
-the real trade until the same session measured it at 136 wrong characters.
+run 2 a station whose PS never changes read `-FFM-FM` at one point, which is a
+mis-correction: an error pattern is a correctable pattern plus a valid
+codeword, so it gets rewritten into a DIFFERENT valid block rather than
+refused.
+
+**WHAT THIS PARAGRAPH USED TO SAY, and it is now false.** It read "the RDS
+checkword has minimum distance 5, so some weight-3 error patterns are a
+weight-2 pattern plus a valid codeword". The code's minimum distance is 3, not
+5. Enumerated twice independently on 2026-09-21, over all 65535 non-zero
+codewords of g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1: seven codewords of
+weight 3, three of weight 4, forty-five of weight 5. The 5 was a burst length
+read as a Hamming distance, l = (n-k)/2 from the Rieger bound, and EN 50067
+never claims distance 5 anywhere.
+
+Two things the 5 was hiding. Rewriting starts at weight TWO, not three: at the
+shipped correctable span of 2, twenty-one of the 325 weight-2 patterns are
+rewritten into a different valid block, and a two-bit error is one the standard
+undertakes only to detect. And the undetectable floor starts at weight three:
+those seven weight-3 codewords arrive with a zero syndrome, so no correction
+runs, nothing is marked, and the block is delivered as clean with the wrong
+contents. `core/decode/rds_groups.h` carries the full table.
+
+**And the 12.7 percent is not that.** It is a DROP rate, from
+`tools/cli/main.cpp`, which counts `dropped / (good + corrected + dropped)`.
+The same capture corrected two blocks. Mis-correction is therefore at most two
+of roughly 650 charged blocks and cannot be what 12.7 percent measures. The
+bulk is blocks refused, and about 250 of them are the cost of the five resyncs
+recorded below: a single slipped bit costs exactly fifty charged drops, because
+`kSyncLossThreshold` is a leaky bucket over blocks and a fade that moves the
+framing is charged for every block until the bucket fills and the decoder
+reacquires.
+
+Note also that `ui/models/rds_view.h` computes a DIFFERENT figure under the
+same name, `(corrected + dropped) / total`, on the argument that a corrected
+block is an error. Two definitions of "block error rate" in one tree is a trap;
+whichever survives, a number quoted without saying which one it is means
+nothing.
 
 So on-air BLER is not a property of this decoder. Nothing in the run
 controlled the antenna, the multipath, or the hour. Quoting a BLER figure from

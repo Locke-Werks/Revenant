@@ -222,11 +222,42 @@ struct BurstCorrection {
 // and a caller decoding a clean recording offline has different arithmetic to
 // do than a caller chasing a mobile fade.
 //
-// The restriction reduces miscorrection and does not abolish it. The code has
-// minimum distance 5, so some weight-3 error is the sum of a weight-2 pattern
-// and a weight-5 codeword and will be "corrected" into the wrong block. That
-// is inherent in the code, not in this choice, and it is the reason the
-// default is 2 rather than 5.
+// The restriction reduces miscorrection and does not abolish it. An error the
+// corrector answers wrongly differs from its answer by a nonzero codeword, so
+// the lightest error that can be rewritten is the code's minimum distance
+// minus the weight of the answer. The minimum distance is 3, the default
+// answers with weight 1 or weight 2, and weight 2 is therefore where
+// miscorrection begins. test_rds_groups.cpp enumerates every pattern at every
+// weight and counts it: 21 of the 325 weight-2 patterns, 98 of the 2600
+// weight-3 patterns, 715 of the 14950 at weight 4. That is inherent in the
+// code, not in this choice, and it is the reason the default is 2 rather
+// than 5, where the same three counts are 43, 738 and 5269.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, AND IT IS THE ONE FIGURE IN THIS FILE THAT
+// WAS NEVER MEASURED: "The code has minimum distance 5, so some weight-3 error
+// is the sum of a weight-2 pattern and a weight-5 codeword and will be
+// corrected into the wrong block." The mechanism was right and the number was
+// not. 5 is the burst-correcting length from clause 2.3, l = (n-k)/2 by the
+// Rieger bound, and it was read as a Hamming distance. The two are different
+// properties and this code has both: it corrects any burst of span 5, and its
+// minimum distance is 3, because g(x) divides x^19 + x^10 + 1. Seven codewords
+// of weight 3 and three of weight 4 follow, which is one long division to
+// check and was checked for the first time on 2026-09-21.
+//
+// Two consequences that the 5 was hiding. A TWO-bit error, which clause 2.3
+// undertakes to DETECT, is rewritten rather than dropped 21 times out of 325.
+// And the undetectable floor starts at weight 3 rather than weight 5: those
+// seven codewords arrive with a zero syndrome, so no correction runs, nothing
+// is marked, and the block is delivered as clean.
+//
+// EN 50067 itself never claims distance 5 and is consistent throughout. Clause
+// 2.3's detection claims are that all single and double bit errors are caught,
+// that any burst spanning 10 bits or less is caught, and that about 99.8
+// percent of 11-bit bursts are. The narrowest nonzero codeword of this code
+// spans exactly 11 bits, which is where the clause's own 11 comes from. The
+// weight-3 codewords span 20 and the weight-4 ones span 22, so they are
+// invisible to a burst argument and visible only to a weight argument, which
+// is why nothing in the tree had tripped over them.
 //
 // HOW MUCH IT DOES NOT ABOLISH, measured rather than cited. The paragraph
 // above stood for months with a textbook behind it and no figure for this

@@ -336,3 +336,23 @@ instead: An open with no centre does not explain this refusal. The symptom
     pause-and-retune workaround. The six narrower cases passed because each
     retuned within about a quarter second of starting the stream. The
     refusal-to-open-at-DC guard is still correct and stays.
+
+phrase: minimum distance 5, so some weight-3 error patterns are a weight-2
+    pattern plus a valid codeword
+phrase: the RDS checkword has minimum distance 5
+retired: 2026-09-21
+commit: pending, the same change that carries the enumeration in
+    tests/decode/test_rds_groups.cpp
+instead: The code's minimum distance is 3. Enumerated twice independently over
+    all 65535 non-zero codewords of g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3
+    + 1: seven codewords of weight 3, three of weight 4, forty-five of weight
+    5, and the narrowest non-zero codeword spans eleven bits, which is where EN
+    50067 clause 2.3's "about 99.8 percent of bursts spanning 11 bits" comes
+    from. The 5 was the burst-correcting length l = (n-k)/2 from the Rieger
+    bound, read as a Hamming distance; EN 50067 never claims distance 5.
+    Rewriting into a different valid block therefore starts at weight TWO, not
+    three: 21 of the 325 weight-2 patterns at the shipped correctable span of
+    2, and a two-bit error is one the standard undertakes only to detect. The
+    undetectable floor starts at weight three, where those seven codewords
+    arrive with a zero syndrome and are delivered as clean with the wrong
+    contents. core/decode/rds_groups.h has the measured table.
