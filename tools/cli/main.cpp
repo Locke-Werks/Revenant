@@ -457,6 +457,15 @@ struct Options {
     // frequency on purpose; see the flag's help text.
     std::uint32_t detect_split_gap = 0;
 
+    // How far apart two detections can sit and still be shown as one group, or
+    // zero for not asked.
+    //
+    // A DISPLAY GROUPING AND NOT A CLASSIFICATION. Nothing on the engine knows
+    // about it and no field carries it; this arranges rows on a terminal, the
+    // way the confidence bar filters them, and the distance is the operator's
+    // for the same reason both thresholds are.
+    Hertz detect_groups = 0;
+
     // The ITU occupied-power fraction the reported bandwidth holds, or zero to
     // leave DetectorConfig's own default alone. Exposed for the same reason
     // split_gap_bins was: a constant nobody can sweep is a constant nobody can
@@ -664,6 +673,22 @@ void print_usage()
         "                      carriers were named correctly at every width in the same run,\n"
         "                      so this costs the answers about noise rather than the answers\n"
         "                      about signals.\n"
+        "  --detect-groups <hz>\n"
+        "                      Under the table, bracket tracks sitting within this of each\n"
+        "                      other and say where they sit relative to the strongest of\n"
+        "                      them, which is marked with an asterisk.\n"
+        "                      WHAT IT IS FOR. Five of the eight families measured in\n"
+        "                      tests/detect are reported as separate spectral lines, one\n"
+        "                      detection each: an AM station is three rows in this table\n"
+        "                      and a narrowband FM one is fifteen. The set of lines is what\n"
+        "                      tells them apart and no single row can. On the scene, cw is\n"
+        "                      one line, am is a carrier with a matched pair either side,\n"
+        "                      usb is two lines above its carrier and lsb the same two\n"
+        "                      below, and nfm is a comb at the modulation frequency.\n"
+        "                      IT DECIDES NOTHING and nothing on the engine knows about it.\n"
+        "                      The gap is an argument because no measurement has chosen one,\n"
+        "                      and a number chosen here would be a classification smuggled\n"
+        "                      in as a layout.\n"
         "  --detect-occupied <fraction>\n"
         "                      The share of a detection's excess power its reported\n"
         "                      bandwidth holds, default 0.99, which is the ITU occupied\n"
@@ -873,6 +898,23 @@ void print_usage()
                 return fail("--characterise-width takes a positive width, such as 500");
             }
             options.characterise_width = *hz;
+            continue;
+        }
+
+        if (arg == "--detect-groups") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto hz = parse_frequency(*text, arg);
+            if (!hz) {
+                return std::unexpected(hz.error());
+            }
+            if (*hz <= 0) {
+                return fail("--detect-groups takes a positive gap, such as 2k");
+            }
+            options.detect_groups = *hz;
+            options.detect = true;
             continue;
         }
 
@@ -2069,6 +2111,85 @@ struct CharacteriseCollector {
         format_hz(static_cast<Hertz>(std::llround(row.center_hz))),
         format_hz(static_cast<Hertz>(std::llround(row.bandwidth_hz))), row.snr_db, row.confidence,
         row.margin, concentration, balance, row.age_seconds, channel, held);
+}
+
+// The track list arranged into groups of neighbours, one line per group.
+//
+// WHY A GROUPING IS WORTH ANYTHING HERE. Five of the eight families in
+// tests/detect/test_front_end.cpp are reported as separate spectral lines, one
+// detection each, about five bins wide whatever the grid: an AM station is
+// three rows in this table and a narrowband FM one is fifteen. Measured on the
+// scene, the SET of lines is what tells them apart and no single row can:
+// cw is one line, am is a carrier with a matched pair either side, usb is two
+// lines above its carrier and lsb the same two below, nfm is a comb.
+//
+// docs/detection.md has the table. This puts the same view on real air, which
+// is the only place the question actually gets asked.
+//
+// IT DECIDES NOTHING. It draws a bracket around rows that sit within a stated
+// gap of each other and prints where they sit relative to the strongest of
+// them. The gap is an argument because no measurement has chosen one, and a
+// number chosen here would be a classification smuggled in as a layout.
+[[nodiscard]] std::vector<std::string> track_groups(
+    const std::span<const DetectView::Row> rows, Hertz gap)
+{
+    std::vector<std::string> out;
+    if (rows.empty() || gap <= 0) {
+        return out;
+    }
+
+    // Ascending in frequency, which the engine already guarantees, but this
+    // reads a snapshot and a sort it does not need is cheaper than a bug it
+    // would hide.
+    std::vector<const DetectView::Row*> sorted;
+    sorted.reserve(rows.size());
+    for (const DetectView::Row& row : rows) {
+        sorted.push_back(&row);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const DetectView::Row* a, const DetectView::Row* b) {
+                  return a->center_hz < b->center_hz;
+              });
+
+    std::size_t first = 0;
+    while (first < sorted.size()) {
+        std::size_t last = first;
+        while (last + 1 < sorted.size() &&
+               sorted[last + 1]->center_hz - sorted[last]->center_hz <=
+                   static_cast<double>(gap)) {
+            ++last;
+        }
+
+        const std::size_t count = last - first + 1;
+        if (count > 1) {
+            // Offsets are from the STRONGEST line and not from the group's
+            // centre, because that is the one a reader can find again: on a
+            // carrier-plus-sidebands group it is the carrier, and the pattern
+            // an operator is matching against is stated that way.
+            std::size_t strongest = first;
+            for (std::size_t i = first; i <= last; ++i) {
+                if (sorted[i]->snr_db > sorted[strongest]->snr_db) {
+                    strongest = i;
+                }
+            }
+            const double anchor = sorted[strongest]->center_hz;
+
+            std::string offsets;
+            for (std::size_t i = first; i <= last; ++i) {
+                const double delta = sorted[i]->center_hz - anchor;
+                offsets += std::format(
+                    " {}{}", delta == 0.0 ? "*" : "",
+                    format_hz(static_cast<Hertz>(std::llround(delta))));
+            }
+            out.push_back(std::format(
+                "  {} lines across {}, from {}:{}", count,
+                format_hz(static_cast<Hertz>(
+                    std::llround(sorted[last]->center_hz - sorted[first]->center_hz))),
+                format_hz(static_cast<Hertz>(std::llround(anchor))), offsets));
+        }
+        first = last + 1;
+    }
+    return out;
 }
 
 // The column names, on the same widths track_line uses.
@@ -3312,6 +3433,16 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 }
                 for (const DetectView::Row& row : rows) {
                     std::println("{}", track_line(row));
+                }
+                if (options.detect_groups > 0) {
+                    const auto groups = track_groups(rows, options.detect_groups);
+                    if (groups.empty()) {
+                        std::println("  no two tracks within {}",
+                                     format_hz(options.detect_groups));
+                    }
+                    for (const std::string& group : groups) {
+                        std::println("{}", group);
+                    }
                 }
 
                 // Under the table, because it is about the list rather than

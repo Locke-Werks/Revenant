@@ -1340,6 +1340,26 @@ that wanders, is the tracker's job rather than a measurement's. FSK2 is where
 that shows: its tones move, so folding one line seen across forty decisions
 into one entry by position overcounts it at fifty.
 
+#### The same view on real air, which is where the question gets asked
+
+`revenant-cli --detect-groups <hz>` brackets tracks sitting within a stated gap
+and prints where they sit relative to the strongest of them. It is a display
+arrangement: nothing on the engine knows about it, no field carries it, and the
+gap is an argument because no measurement has chosen one. A number chosen in
+the CLI would be a classification smuggled in as a layout.
+
+40 m at 1359 UT, grouping at 500 Hz:
+
+    #37   live         13.135 kHz       188 Hz      8.0 dB   0.80  0.64  0.28
+    #45   merged       13.238 kHz         5 Hz     11.7 dB   0.88  0.81  0.88
+    #1    live         13.249 kHz        29 Hz     22.3 dB   1.00  0.97  0.41
+      3 lines across 114 Hz, from 13.249 kHz: -114 Hz -11 Hz *0 Hz
+
+Three rows of a flat table that are one thing: a strong line at 13.249 kHz with
+a five-hertz neighbour eleven hertz below it and a 188 Hz band a hundred below
+that. Read one row at a time none of that is visible, and the grouped line is
+the shape the family survey says to look for.
+
 **The three that are resolved separate more sharply than before**: fsk2 at
 0.277 against 0.056 is five to one, where the shipped grid gave four to one. A
 finer grid helps exactly the bands that were already wide enough for the number

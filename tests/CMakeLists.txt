@@ -80,6 +80,19 @@ if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
                 --duration 0.1
     )
     set_tests_properties(cli_characterise_zero PROPERTIES LABELS "tools" TIMEOUT 120)
+
+    # REJECTS a grouping that crashes or refuses on an ordinary run. It is a
+    # display arrangement over the track table, so what it draws is checked by
+    # reading it; what a test can add is that asking for it does not take the
+    # run down, which is the failure an operator would meet first.
+    add_test(
+        NAME cli_detect_groups
+        COMMAND revenant-cli
+                "synthetic:wideband?rate=2400000&emitters=8&seed=4242"
+                --detect --detect-groups 50k
+                --duration 2
+    )
+    set_tests_properties(cli_detect_groups PROPERTIES LABELS "tools" TIMEOUT 180)
 endif()
 
 # The prose ratchet: no retired claim has come back anywhere in the tree.
