@@ -1737,8 +1737,11 @@ public:
         // column an operator can act on.
         //
         // balance is BandShape::lower_fraction: exactly 0.5 when the band is
-        // symmetric about its own centre, near zero or one for a sideband
-        // mode with a suppressed carrier.
+        // symmetric about its own centre. It was MEANT to read near zero or
+        // one for a sideband mode with a suppressed carrier and has never been
+        // shown to; core/detect/shape.h has why the one measurement of it
+        // looks like mirrored sub-bin placement rather than sideband
+        // structure. Read it as a symmetry number and nothing more.
         double concentration;
         double balance;
         bool shape_measured;

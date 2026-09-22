@@ -156,12 +156,30 @@ struct BandShape {
     // Power in the lower half of the band over power in the whole band, so
     // exactly 0.5 when the band is balanced about its own centre.
     //
-    // A DIRECT MEASURE OF THE SIDEBAND MODES. USB puts everything above a
-    // suppressed carrier and LSB everything below, and docs/detection.md
-    // names "a 2.8 kHz asymmetric block with no carrier is SSB" as the case
-    // tier one can finish by itself. It is also what a click-to-tune surface
-    // needs and does not have: revenant.capnp refuses a logicalCentreHz field
-    // today because deriving one needs a classification.
+    // INTENDED AS A DIRECT MEASURE OF THE SIDEBAND MODES. USB puts everything
+    // above a suppressed carrier and LSB everything below, and
+    // docs/detection.md names "a 2.8 kHz asymmetric block with no carrier is
+    // SSB" as the case tier one can finish by itself. It is also what a
+    // click-to-tune surface needs and does not have: revenant.capnp refuses a
+    // logicalCentreHz field today because deriving one needs a classification.
+    //
+    // IT HAS NOT BEEN SHOWN TO DO THAT, AND THE ONE MEASUREMENT OF IT LOOKS
+    // LIKE AN ARTEFACT. In the family survey usb reads 0.453 and lsb 0.547 at
+    // the shipped grid, and 0.465 and 0.535 four times finer. Those pairs
+    // MIRROR ABOUT A HALF TO THREE DECIMAL PLACES at both grids, which is not
+    // what two independent measurements of two different signals look like.
+    //
+    // What it is instead: the scene's SSB emitters are two-tone, 700 and
+    // 1900 Hz, so USB is two lines above the carrier and LSB the same two
+    // mirrored below, and the detector reports each line as its own four-bin
+    // band. This measures where a line sits inside its own band, and mirrored
+    // lines give mirrored answers. It never sees a 2.8 kHz block, because at
+    // no grid is one reported: see the note on concentration above.
+    //
+    // So the premise is untested rather than disproved. A signal whose
+    // asymmetry is a real block, detected as a block, would be the test, and
+    // nothing in this tree produces one. Do not build an SSB discriminator on
+    // this until something does.
     double lower_fraction = 0.0;
 
     // How far the band's edges reach beyond where its power is, as a fraction

@@ -1405,6 +1405,22 @@ TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
 // gave 0.519 against 0.117 and 0.121, which is four to one. A finer grid helps
 // exactly the bands it resolves, which is the ones already wide enough for the
 // number to mean anything.
+//
+// AND lower_fraction IS THE SAME STORY, WHICH IS WORTH SAYING BECAUSE IT LOOKS
+// LIKE A SUCCESS. usb reads 0.465 here and lsb 0.535, against 0.453 and 0.547
+// at the shipped grid, so the two separate and separate consistently. But the
+// pairs MIRROR ABOUT A HALF TO THREE DECIMAL PLACES at both grids, and two
+// independent measurements of two different signals do not do that.
+//
+// The scene's SSB emitters are two-tone at 700 and 1900 Hz, so USB is two
+// lines above the carrier and LSB the same two mirrored below, each reported
+// as its own four-bin band. What separates is where a line sits inside its own
+// band, and mirrored lines mirror. am moving from 0.464 to 0.372 between the
+// two grids is the same instability from the other side: a symmetric mode has
+// no business being the most asymmetric row in the table.
+//
+// Nothing here ever sees the 2.8 kHz asymmetric block that a sideband test is
+// supposed to read, so the premise is untested rather than refuted.
 TEST_CASE("shape survey: the same families, resolved", "[.shape-survey]")
 {
     constexpr std::uint32_t kFineTransform = 2048;
