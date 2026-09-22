@@ -405,6 +405,7 @@ if(REVENANT_UI_TESTS)
         add_executable(revenant_ui_tests
             audio/audio_ring.cpp
             tests/test_audio_ring.cpp
+            tests/test_bookmarks.cpp
             tests/test_composite_probe.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
