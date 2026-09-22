@@ -753,10 +753,28 @@ void EngineLink::poll_receiver_status()
 
     auto status = client_->vrx_status(live_receiver_id_);
     if (!status) {
-        // Not reported and not torn down. The liveness probe owns a lost
-        // engine, and a receiver that has gone will be recreated by the
-        // next request; a fault posted here would be overwritten a quarter
-        // of a second later by the poll that succeeded.
+        // A FAILED READ IS A QUESTION NOW RATHER THAN A SHRUG.
+        //
+        // What this used to say, kept because it was right when it was
+        // written and is half wrong now: "Not reported and not torn down.
+        // The liveness probe owns a lost engine, and a receiver that has
+        // gone will be recreated by the next request; a fault posted here
+        // would be overwritten a quarter of a second later by the poll that
+        // succeeded."
+        //
+        // The recreate clause held while the only way a receiver went
+        // missing was an engine going with it. The engine now removes one ON
+        // PURPOSE: a receiver is pinned to the absolute frequency it was
+        // tuned to, so a retune that leaves its centre outside the new span
+        // removes it rather than dragging it along to a frequency nobody
+        // chose. Recreating that receiver puts back the thing the engine just
+        // decided cannot exist, and the operator sees a flicker where they
+        // were promised a receiver disappearing.
+        //
+        // Still not reported, for the reason the old comment gives. Whether
+        // the pane keeps its receiver is forget_removed_receiver's decision,
+        // and it does nothing in every case but the one.
+        forget_removed_receiver(status.error());
         return;
     }
 
@@ -767,6 +785,128 @@ void EngineLink::poll_receiver_status()
     }
     QMetaObject::invokeMethod(
         this, [this] { adopt_receiver_status(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::forget_removed_receiver(const Error& failure)
+{
+    // WHAT THE DISTINCTION IS KEYED ON: the engine's own list of receivers,
+    // asked for on the failure path only. A receiver the engine removed and a
+    // status read that failed for any other reason arrive here as the same
+    // failed Expected, and the three cheaper signals do not separate them.
+    //
+    // NOT THE MESSAGE TEXT. core/rpc/server.cpp answers an id it does not
+    // hold with "no receiver N is registered", which would match today and
+    // makes a reworded sentence a silent change of behaviour. This file
+    // already carries one such match, in apply_receiver_request, and says
+    // there that it is done only because the wire has no code for the thing
+    // it needs. Tearing an operator's receiver down is not the place for a
+    // second one.
+    //
+    // NOT THE CATEGORY ALONE. ErrorCategory answers what a caller can do
+    // next, not what went wrong, and core/error.h says so: a removed receiver
+    // comes back Unclassified, which is what most of the tree carries.
+    // ClientImpl::vrx_status has a second Unclassified failure of its own,
+    // and it is the dangerous one: read_demod refuses a demodulator ordinal
+    // this build does not know, which is an engine newer than this client and
+    // a receiver running perfectly well behind it. Keyed on the category, that
+    // would delete a working receiver four times a second.
+    //
+    // NOT THE ID FAILING TO RESOLVE. There is no window on this thread where
+    // live_receiver_id_ names a receiver this side has already removed: a mode
+    // change is a remove and an add, both inside recreate_receiver on this
+    // thread, and an add that failed leaves the id zero and never reaches
+    // here. What the Qt thread can do is post a rebuild this thread has not
+    // applied yet, which is the second gate below.
+    //
+    // So ask the engine. Client::vrx_ids is its inventory, the answer is about
+    // the receiver rather than about the wording of a refusal, and it costs
+    // one round trip when a poll has already failed and none when it has not.
+    // poll_detections sets the precedent: it asks Client::running on exactly
+    // the same terms, to tell two unrelated failures apart rather than
+    // guessing which one it has.
+    if (failure.category == ErrorCategory::Unreachable ||
+        failure.category == ErrorCategory::Disconnected) {
+        // A short circuit and not the decision. These two are the connection
+        // rather than the receiver, they are what attempt_connect and the
+        // liveness probe branch on, and vrx_ids over a link that is gone or
+        // was never there fails as well, one round trip later.
+        return;
+    }
+
+    // A REBUILD THIS CLIENT HAS POSTED AND NOT APPLIED IS NOT A REMOVAL.
+    //
+    // setReceiverDemod posts a recreate and apply_receiver_request performs it
+    // a pass later, so between those two the pane's receiver is being replaced
+    // by this client and anything the engine says about the old id says
+    // nothing about what the operator will be holding a moment from now. The
+    // same goes for a clear already in flight. Skipping the pass costs a
+    // quarter of a second and no information: apply_receiver_request either
+    // rebuilds the receiver or reports the engine's refusal, and the poll
+    // behind it asks this question again.
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        if (has_receiver_request_ || receiver_request_removes_) {
+            return;
+        }
+    }
+
+    auto ids = client_->vrx_ids();
+    if (!ids) {
+        // The engine is not answering either, so the failed status read was
+        // the connection after all. That belongs to the liveness probe, which
+        // is where the Client is torn down, and nothing here touches the pane:
+        // adopt() records that the pane had a receiver and the next connection
+        // puts it back, which a teardown from here would throw away.
+        return;
+    }
+
+    const auto wire = static_cast<std::uint64_t>(live_receiver_id_);
+    if (std::find(ids->begin(), ids->end(), wire) != ids->end()) {
+        // The engine has the receiver and could not describe it to this
+        // client, which is the newer-schema case above. Nothing torn down and
+        // nothing said, on the terms a failed read has always had here.
+        return;
+    }
+
+    // The engine does not have it. Nothing is said about the receiver that is
+    // going: a sentence posted now would outlive the pane it describes,
+    // because removeReceiver empties the pane and does not clear receiverFault.
+    note_receiver_fault(QString{});
+
+    // THE TEARDOWN IS THE OPERATOR'S CLEAR, ASKED FOR FROM HERE.
+    //
+    // removeReceiver is the one teardown and it is the Qt thread's: that
+    // thread owns receiver_id_, the passband display, the touched flags and
+    // the detection measurement, and what it leaves behind is already what
+    // "the pane is on no receiver" looks like everywhere else. The engine side
+    // follows from it rather than being done here, because removeReceiver
+    // posts receiver_request_removes_ and apply_receiver_request answers that
+    // with drop_receiver, which stops the audio before it unsubscribes the
+    // passband and removes the receiver. That order is what drop_receiver's
+    // own comment insists on, and doing any of it here would be a second copy
+    // of it that can fall out of step.
+    //
+    // Clearing live_receiver_id_ here instead would also cost the retry: the
+    // early return at the top of poll_receiver_status would stop this question
+    // being asked again, so a pane whose Qt-thread id had not caught up would
+    // sit forever on a receiver nothing was left to remove.
+    //
+    // THE ID IS CHECKED AGAIN ON THE OTHER SIDE, because a queued call arrives
+    // whenever the Qt thread gets to it and the operator may have tuned
+    // somewhere else by then. A teardown aimed at the receiver that went would
+    // otherwise take the one that replaced it. receiver_id_ still being this
+    // id is what says the pane is still on the receiver the engine removed;
+    // when it is not, this pass does nothing, live_receiver_id_ is untouched,
+    // and the next poll asks again.
+    QMetaObject::invokeMethod(
+        this,
+        [this, gone = live_receiver_id_] {
+            if (receiver_id_ != gone) {
+                return;
+            }
+            removeReceiver();
+        },
+        Qt::QueuedConnection);
 }
 
 void EngineLink::note_receiver_fault(QString fault)

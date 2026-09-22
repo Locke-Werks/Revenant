@@ -811,6 +811,19 @@ class EngineLink : public QObject {
 
     // Zero when the pane is on no receiver, which is the state the window
     // comes up in and returns to when the engine goes away.
+    //
+    // A THIRD WAY IT REACHES ZERO, AND THE OPERATOR DID NOT ASK FOR IT. A
+    // receiver is pinned to the absolute frequency it was tuned to, so a
+    // retune of the front end that leaves that frequency outside the new span
+    // removes the receiver from the engine rather than carrying it along to
+    // whatever now lands at its old offset. The pane then empties exactly as
+    // it does for a clear, receiver and audio and passband together, with
+    // nothing left on screen naming what went. EngineLink::
+    // forget_removed_receiver is where that is noticed.
+    //
+    // So QML reads a receiver disappearing as an ordinary event rather than as
+    // a fault. Nothing is published to say it happened: the span moved under
+    // the operator's own hand, and the empty pane is the whole of the news.
     Q_PROPERTY(qulonglong receiverId READ receiverId NOTIFY receiverChanged)
 
     // Absolute radio frequency, which is params.center plus the source's
@@ -1920,6 +1933,24 @@ private:
     // then reads the receiver's status back.
     void apply_receiver_request();
     void poll_receiver_status();
+
+    // Supervisor thread, on a failed status read and nowhere else. Works out
+    // whether the ENGINE has removed the pane's receiver, which it does when a
+    // retune leaves the receiver's centre outside the new span, and asks the
+    // Qt thread to empty the pane when it has.
+    //
+    // WRITTEN TO DO NOTHING, because almost every failed read is something
+    // else: a connection that has gone, a rebuild this client posted and has
+    // not applied, or a receiver the engine still has and could not describe to
+    // a client older than its schema. All three return without touching
+    // anything, and tearing a receiver down on one of them would lose an
+    // operator's receiver for no reason, which is worse than the state this
+    // exists to end.
+    //
+    // The evidence it acts on is Client::vrx_ids, the engine's own list of
+    // receivers, rather than the refusal's wording or its category. The body
+    // says why neither of those will do.
+    void forget_removed_receiver(const Error& failure);
 
     // Supervisor thread. Adds a receiver for the pane, subscribes its
     // passband, and hands the id to the Qt thread. Removes the previous one
