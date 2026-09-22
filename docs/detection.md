@@ -1352,7 +1352,7 @@ the CLI would be a classification smuggled in as a layout.
 
     #45   merged       13.238 kHz         5 Hz     11.7 dB   0.88  0.81  0.88
     #1    live         13.249 kHz        29 Hz     22.3 dB   1.00  0.97  0.41
-      2 lines across 11 Hz, from 13.249 kHz: -11 Hz(8s) *0 Hz(42s)
+      2 lines across 11 Hz, from 13.249 kHz: -11 Hz(6.8s) *0 Hz(41.6s)
 
 Two rows of a flat table brought together: a strong line at 13.249 kHz with a
 five-hertz neighbour eleven hertz below it. Read one row at a time neither

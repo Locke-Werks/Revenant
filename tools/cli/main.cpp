@@ -2193,8 +2193,12 @@ struct CharacteriseCollector {
             std::string offsets;
             for (std::size_t i = first; i <= last; ++i) {
                 const double delta = sorted[i]->center_hz - anchor;
+                // One decimal, which is what the table above uses. Rounding
+                // to whole seconds here printed "0s" beside a row reading
+                // "0.4s", and two numbers for one quantity disagreeing on the
+                // same screen is the kind of thing a reader stops to check.
                 offsets += std::format(
-                    " {}{}({:.0f}s)", delta == 0.0 ? "*" : "",
+                    " {}{}({:.1f}s)", delta == 0.0 ? "*" : "",
                     format_hz(static_cast<Hertz>(std::llround(delta))),
                     sorted[i]->age_seconds);
             }
