@@ -1360,6 +1360,25 @@ a five-hertz neighbour eleven hertz below it and a 188 Hz band a hundred below
 that. Read one row at a time none of that is visible, and the grouped line is
 the shape the family survey says to look for.
 
+**No family pattern has come out of this corpus yet, and that is the result
+rather than a pending one.** All six excerpts at gaps of 300 Hz, 1 kHz and
+3 kHz produce four groups in total, none of them the carrier-with-a-matched-
+pair or the comb the scene shows. The cluster above is the only one that
+persists, and it is a strong line with close neighbours rather than anything
+symmetric.
+
+**And the groups move between runs of the same file**, which is a trap worth
+naming before somebody reads two of these tables side by side. On 40 m at 1359
+a gap of 300 Hz grouped three lines and a gap of 1 kHz grouped two, and a wider
+gap cannot group fewer. What changed was the track list: a file source runs as
+fast as the GPU retires it, so the instant the final table is sampled is not
+the same twice, and the population of a live HF band at that instant is not
+either.
+
+That is the same limit the survey hit from the other side. Reading a set of
+lines needs those lines to be there together, and following one that fades and
+returns is the tracker's job. A grouping over one snapshot is the cheap half.
+
 **The three that are resolved separate more sharply than before**: fsk2 at
 0.277 against 0.056 is five to one, where the shipped grid gave four to one. A
 finer grid helps exactly the bands that were already wide enough for the number
