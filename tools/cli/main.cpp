@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -469,6 +470,11 @@ struct Options {
     // constant; see the help text.
     double characterise_seconds = 0.0;
 
+    // How far a carrier may drift and still read as concentrated, in hertz.
+    // The analysis segment is derived from it so the answer stops depending on
+    // how much was collected.
+    double characterise_drift = 5.0;
+
     // Broadcast FM stations to decode RDS from, repeatable. Each one gets a
     // receiver of its own; see RdsSpec for why it cannot share one with a
     // receiver somebody is listening to.
@@ -577,6 +583,15 @@ void print_usage()
         "                      than anything being asked about.\n"
         "                      It needs 16384 samples, which is 5.5 s at a 3 kS/s channel\n"
         "                      rate, so give --duration enough to collect them.\n"
+        "  --characterise-drift <hz>\n"
+        "                      How far a carrier may drift and still read as concentrated,\n"
+        "                      default 5. The analysis segment is derived from it, three\n"
+        "                      bins wide, and handed to the stage so the answer stops\n"
+        "                      depending on how much was collected.\n"
+        "                      Without it the window is a sixteenth of whatever arrived:\n"
+        "                      4.4 Hz over eleven seconds of a 3 kS/s channel and 1.1 Hz\n"
+        "                      over sixty, and a real HF carrier crosses the threshold\n"
+        "                      between the two for no reason but the length.\n"
         "  --characterise-seconds <s>\n"
         "                      How much baseband to collect, default just over the 16384\n"
         "                      samples the stage needs.\n"
@@ -753,6 +768,22 @@ void print_usage()
                 return std::unexpected(hz.error());
             }
             options.characterise_hz = *hz;
+            continue;
+        }
+
+        if (arg == "--characterise-drift") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_real(*text, arg);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            if (!std::isfinite(*number) || *number <= 0.0) {
+                return fail("--characterise-drift takes a positive width in hertz");
+            }
+            options.characterise_drift = *number;
             continue;
         }
 
@@ -3569,6 +3600,27 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
 
             characterise::CharacteriseConfig how;
             how.rate = extract_rate;
+
+            // THE SEGMENT IS STATED RATHER THAN INHERITED. Three bins is what
+            // spectral_concentration measures over, so a segment of
+            // 3 * rate / drift makes that window the drift allowance asked
+            // for. Rounded to a power of two because the transform wants one,
+            // and floored at 512 which is where analysis_segment floors.
+            {
+                const double ideal =
+                    3.0 * static_cast<double>(extract_rate) / options.characterise_drift;
+                auto segment = static_cast<std::size_t>(std::llround(ideal));
+                segment = std::bit_floor(std::max<std::size_t>(segment, 512));
+                segment = std::min<std::size_t>(segment, extract.size() / 4);
+                segment = std::bit_floor(std::max<std::size_t>(segment, 512));
+                how.segment = segment;
+                std::println("  segment         {} points, so three bins span {:.2f} Hz at "
+                             "{} S/s",
+                             segment,
+                             3.0 * static_cast<double>(extract_rate) /
+                                 static_cast<double>(segment),
+                             extract_rate);
+            }
 
             auto answer = characterise::characterise(
                 dsp::ConstComplexSpan{extract.data(), extract.size()}, how);

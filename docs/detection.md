@@ -968,8 +968,54 @@ false positives are not only about filtering, and a single run at a single
 length cannot tell you which kind of answer you have.
 
 `--characterise-seconds` exists so the length is a stated parameter rather than
-an accident, and its help text carries the table above in miniature. Longer is
-not better.
+an accident. `--characterise-drift` fixes the other half: it states how far a
+carrier may drift and still read as concentrated, derives the transform length
+from that, and hands it over through `CharacteriseConfig::segment`, which is
+new and defaults to the old behaviour.
+
+With the segment stated from a 5 Hz allowance, the same sweep stops moving:
+
+| extract | 13.250 kHz, a carrier | 30 kHz, empty band |
+| --- | --- | --- |
+| 11 s | unmodulated carrier, 0.760 | unknown, 0.008 |
+| 20 s | unmodulated carrier, 0.713 | unknown, 0.008 |
+| 40 s | unmodulated carrier, 0.726 | **OFDM**, 0.008 |
+| 58 s | unmodulated carrier, 0.707 | unknown, 0.007 |
+
+The carrier is named at every length and its concentration holds near 0.72
+instead of collapsing from 0.53 to 0.18.
+
+### The OFDM branch still fires on noise, and why that one is not mine to fix
+
+The 40 second cell survives, and it is a different mechanism that the segment
+does not touch. What it reported:
+
+    OFDM: a 679.7 ms useful symbol, so 1.4713 Hz between subcarriers, with a
+    guard of about 44 samples read off a correlation of 0.021
+
+A correlation of 0.021 is not evidence of anything. `OfdmSearch` requires a
+peak above the larger of `min_prefix_ratio`, which is 0.01, and
+`floor_multiple` times the profile's own median, which is six times. On flat
+noise the median collapses, so the multiple stops binding and the absolute
+floor is all that is left.
+
+**The floor is not the thing to raise**, and its comment says why with a
+measurement: on a one-eighth-guard burst at 48 kS/s, 0.01 reaches 5 dB in the
+reference bandwidth and 0.02 stops at 10 dB. Doubling it costs five decibels of
+reach on real OFDM to reject this.
+
+**What actually fails is the multiple.** Six times the median is a fixed bar
+against a maximum taken over every lag in the search, and the expected maximum
+of a set grows with the size of the set. More lags, which is what a longer
+extract buys, means a higher maximum from the same noise. That is why the call
+appears at forty seconds and not at eleven, twenty or fifty-eight: it is the
+tail of a distribution being sampled more times, not a property of the band.
+
+A bar that held would have to grow with the lag count the way an extreme value
+does, rather than sit at a constant multiple of the middle of the distribution.
+That is a change to a tested library whose constants were each measured against
+a signal, and it wants the same treatment rather than an argument from theory,
+so it is written down here instead of made.
 
 **So none of this goes on the wire.** `core/rpc/revenant.capnp` already refuses
 `logicalCentreHz` on the grounds that a field nothing can fill is worse than no
