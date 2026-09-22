@@ -385,6 +385,12 @@ void EngineLink::adopt_source_tuning()
     bool geometry_moved = false;
     bool anything = false;
 
+    // A tune came back with an answer of either kind, which is when a bookmark
+    // waiting on one gets to stop waiting. Read out of the locked block below
+    // rather than off tune_answered_ afterwards, because that member is also true
+    // from an earlier tune nobody is waiting on.
+    bool answered_a_tune = false;
+
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
 
@@ -400,6 +406,7 @@ void EngineLink::adopt_source_tuning()
         if (handover_has_tune_) {
             handover_has_tune_ = false;
             anything = true;
+            answered_a_tune = true;
             tune_fault_ = handover_tune_fault_;
             tune_answered_ = handover_tune_answered_;
             if (handover_tune_answered_) {
@@ -419,6 +426,16 @@ void EngineLink::adopt_source_tuning()
     }
 
     emit sourceTuningChanged();
+
+    // A bookmark waiting on this retune, placed now that source_center holds the
+    // centre the radio actually landed on. THIS IS THE ONLY MOMENT IT IS RIGHT:
+    // recallBookmark could not do it, because tuneSourceHz had not been answered
+    // when it returned, and a receiver placed then would have been offset from
+    // the old centre. Before the geometry emits below, so the pane and the
+    // history move in one turn.
+    if (answered_a_tune) {
+        resolve_pending_recall(tune_answered_ && tune_fault_.isEmpty());
+    }
 
     if (geometry_moved) {
         // AND THE HISTORY GOES WITH IT. The span moved, so every row the

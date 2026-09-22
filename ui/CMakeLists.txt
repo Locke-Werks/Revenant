@@ -157,6 +157,7 @@ qt_add_executable(revenant_ui
     audio/audio_ring.cpp
     audio/audio_ring.h
     models/audio_link.cpp
+    models/bookmark_link.cpp
     models/engine_link.cpp
     models/engine_link.h
     models/rds_link.cpp

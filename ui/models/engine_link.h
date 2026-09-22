@@ -144,6 +144,7 @@
 #include <QElapsedTimer>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -152,6 +153,7 @@
 #include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
@@ -961,6 +963,33 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool receiverPending READ receiverPending NOTIFY receiverChanged)
 
     // ------------------------------------------------------------------
+    // Bookmarks: places the operator named
+    // ------------------------------------------------------------------
+    //
+    // WHY THIS IS NOT THE RECEIVER REMEMBERED ACROSS A RESTART, which
+    // models/settings.h refuses on the grounds that a window coming up
+    // already tuned would be claiming a band it had not looked at. Nothing
+    // here is recalled unless somebody picks it, so the claim is theirs.
+    // models/bookmarks.h holds the rule and the argument.
+
+    // One label per bookmark, in saved order, ready for a list. A bookmark
+    // the operator never named is labelled from its own frequency.
+    Q_PROPERTY(QStringList bookmarkLabels READ bookmarkLabels NOTIFY bookmarksChanged)
+
+    // Why the last recall or save did not happen, empty when it did.
+    //
+    // ITS OWN FAULT STRING AND NOT receiverFault, because the commonest
+    // refusal is not about the receiver at all: a bookmark outside the span
+    // of a file is a fact about the source, and reported on the receiver's
+    // line it would read as the receiver having failed.
+    Q_PROPERTY(QString bookmarkFault READ bookmarkFault NOTIFY bookmarkFaultChanged)
+
+    // The pane's receiver is already in the list, within its own passband.
+    // What a save affordance binds to so it can offer removing instead of
+    // saving a second entry on the same station.
+    Q_PROPERTY(bool receiverBookmarked READ receiverBookmarked NOTIFY bookmarksChanged)
+
+    // ------------------------------------------------------------------
     // RDS on the receiver the detail pane is on
     // ------------------------------------------------------------------
     //
@@ -1686,6 +1715,46 @@ public:
     [[nodiscard]] const rpc::PassbandFrame& passbandFrame() const { return passband_display_; }
 
     // ------------------------------------------------------------------
+    // The bookmark surface. Implemented in ui/models/bookmark_link.cpp.
+    // ------------------------------------------------------------------
+    //
+    // ALL OF IT IS QT THREAD ONLY AND NONE OF IT MAKES AN RPC CALL. A save
+    // is a registry write and a recall is the same two writes the frequency
+    // box and the mode buttons already make, so the supervisor learns about
+    // it the way it learns about those.
+
+    [[nodiscard]] QStringList bookmarkLabels() const;
+    [[nodiscard]] QString bookmarkFault() const { return bookmark_fault_; }
+    [[nodiscard]] bool receiverBookmarked() const;
+
+    // Saves the pane's current receiver under this name, which may be empty.
+    //
+    // THE RECEIVER AND NOT THE LAST DETECTION, because the receiver is what
+    // the operator is listening to and has possibly nudged since the click.
+    // Refuses when there is no receiver, because there is then nothing to
+    // describe, and saving the span centre instead would file a bookmark on
+    // a frequency nobody chose.
+    Q_INVOKABLE void saveBookmark(const QString& name);
+
+    // Forgets one, by its index in bookmarkLabels.
+    Q_INVOKABLE void removeBookmark(int index);
+
+    // Renames one in place. An empty name puts it back to being labelled
+    // from its own frequency.
+    Q_INVOKABLE void renameBookmark(int index, const QString& name);
+
+    // Puts the pane's receiver on this bookmark, retuning the front end
+    // first if the frequency is outside the span and the source can move.
+    //
+    // A RETUNE MEANS THIS RETURNS BEFORE THE RECEIVER EXISTS. tuneSourceHz
+    // posts to the supervisor and answers a round trip later, so the
+    // bookmark is held and placed when the granted centre arrives. Until
+    // then bookmarkFault says what is being waited for, because a click
+    // that appears to do nothing for a round trip is indistinguishable from
+    // one that was dropped.
+    Q_INVOKABLE void recallBookmark(int index);
+
+    // ------------------------------------------------------------------
     // The RDS surface. Implemented in ui/models/rds_link.cpp.
     // ------------------------------------------------------------------
 
@@ -1833,6 +1902,13 @@ signals:
     // BOTH the request and the grant, so neither receiverChanged nor
     // receiverStatusChanged covers it, and a property may name only one.
     void receiverFitChanged();
+
+    // The bookmark list changed: one was saved, removed or renamed. Also
+    // emitted when the pane moves to another receiver, because
+    // receiverBookmarked is about the receiver and not about the list.
+    void bookmarksChanged();
+
+    void bookmarkFaultChanged();
 
     // The source's tuning surface changed: the range came back on a new
     // connection, a retune was granted, or one was refused. Separate from
@@ -2195,6 +2271,44 @@ private:
     // The operator has moved an edge on this receiver, so a mode change
     // keeps their edges instead of taking the new mode's default.
     bool edges_touched_ = false;
+
+    // ------------------------------------------------------------------
+    // Bookmarks. Qt thread only, all of it.
+    // ------------------------------------------------------------------
+
+    // The list as held in memory. The registry is written from this rather
+    // than read back, so the order in bookmarkLabels is the order saved.
+    //
+    // READ ONCE IN THE CONSTRUCTOR rather than lazily on first access. A
+    // lazy load would have to happen inside a const getter, which means
+    // either mutable state or a const_cast to hide a write, and the thing
+    // being deferred is a single registry read of a string.
+    std::vector<Bookmark> bookmarks_;
+
+    QString bookmark_fault_;
+
+    // A bookmark waiting for the front end to arrive.
+    //
+    // WHY THERE IS A WAIT AT ALL. tuneSourceHz posts to the supervisor and
+    // returns, so source_center still holds the old value on the next line
+    // and a receiver placed immediately would go to the offset the OLD
+    // centre implies. The bookmark is held here and placed from the same
+    // Qt-thread adopt that moves the span, which is the first moment the
+    // subtraction in tune_receiver is against the right number.
+    std::optional<Bookmark> pending_recall_;
+
+    // Places pending_recall_ now that the front end has moved, or abandons
+    // it with a reason if the retune was refused. Called from the source
+    // half's adopt, which is where a granted centre reaches the Qt thread.
+    void resolve_pending_recall(bool granted);
+
+    // Puts the receiver on a bookmark, assuming it has already been found
+    // reachable. The one place the two writes happen, so a recall that
+    // needed a retune and one that did not cannot drift apart.
+    void place_recall(const Bookmark& mark);
+
+    void load_bookmarks();
+    void store_bookmarks() const;
 
     // The operator has named the mode on this receiver, so a click on a
     // detection keeps it instead of deriving one from the measured bandwidth.

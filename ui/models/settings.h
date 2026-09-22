@@ -22,6 +22,14 @@
 // even reach. The frequency box is seeded from where the radio actually
 // is, which is the honest version of the same convenience.
 //
+// A BOOKMARK IS NOT THAT, and kBookmarks below is not a hole in the
+// paragraph above. Both objections are to the window acting on its own: it
+// is the automatic restore that claims a band nobody looked at. A bookmark
+// is recalled when an operator picks it, which is them making the claim,
+// and models/bookmarks.h refuses one the open source cannot reach rather
+// than tuning past the end of the span. Nothing reads kBookmarks at
+// startup except to fill a list.
+//
 // The RDS switch is not remembered either, and for a sharper reason: the
 // first poll BUILDS a decoder on the engine, which is shared state on a
 // machine other clients may be using. A switch that turned itself on at
@@ -57,6 +65,22 @@ inline constexpr QLatin1StringView kConfidenceBar{"detections/confidenceBar"};
 // size it happened to be restored to last.
 inline constexpr QLatin1StringView kWindowGeometry{"window/geometry"};
 inline constexpr QLatin1StringView kWindowVisibility{"window/visibility"};
+
+// The bookmark list, as one JSON array in one value rather than a QSettings
+// array of groups.
+//
+// ONE VALUE BECAUSE EVERY setValue REACHES THE REGISTRY. QSettings on
+// Windows is RegSetValueEx per call rather than a batch flushed at sync, as
+// audio/audio_player.cpp records, so a group per bookmark would turn one
+// save into five writes times however many entries are held. The whole list
+// is rewritten as a single string each time it changes.
+//
+// JSON AND NOT A DELIMITED STRING, because a bookmark carries a name an
+// operator typed. Any separator worth reading is one somebody will
+// eventually put in a station name, and the failure mode of a delimited
+// format is not an error but a list that silently reads back one field
+// short. QJsonDocument owns the escaping.
+inline constexpr QLatin1StringView kBookmarks{"bookmarks/list"};
 
 // The last engine this client reached, used only when argv names none.
 // An address on the command line always wins: a shortcut or a script that

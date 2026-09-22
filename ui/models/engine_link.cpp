@@ -126,6 +126,12 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     // is an atomic and a flag the supervisor has not been started to
     // read yet, and because nothing plays until a receiver exists.
     audio_wanted_.store(store.value(settings::kAudioListen, false).toBool());
+
+    // The bookmark list, which is the one thing read here that is a list rather
+    // than a scalar. It reaches nothing and claims nothing at this point: a
+    // bookmark does something only when somebody picks it, which is what makes
+    // remembering it different from remembering the receiver.
+    load_bookmarks();
 }
 
 EngineLink::~EngineLink()
