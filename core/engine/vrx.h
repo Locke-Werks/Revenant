@@ -649,11 +649,25 @@ struct VrxPlacement {
 // narrower raw tap is a narrower raw tap, and whatever is reading it knows
 // what to do about that.
 //
-// The digital modes are grouped there for the same reason. Nothing in the
-// engine demodulates them; the fine stage hands complex baseband to
-// core/decode, so a clamped passband costs intersymbol interference rather
-// than a different signal, and the decoder reports that as a bit error rate
-// instead of hiding it.
+// The digital modes are grouped there for a different reason than the
+// sentence here used to give.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, and it described a path none of them take:
+// "Nothing in the engine demodulates them; the fine stage hands complex
+// baseband to core/decode, so a clamped passband costs intersymbol
+// interference rather than a different signal, and the decoder reports that as
+// a bit error rate instead of hiding it."
+//
+// There is no fine stage on any of them. is_complex_tap above is true for
+// P25p1, Dstar and Tetra as well as Raw, and the factory in
+// core/engine/vrx_stage.cpp declines every one of those, so they get the
+// graph's raw tap: one coarse channel, copied out of the channel ring,
+// unmixed and unfiltered. A clamped passband costs them nothing at all,
+// because the passband is not applied to a raw tap in the first place.
+//
+// What they are grouped with the false answers for is still right, and now
+// for the honest reason: clamping cannot break a demodulator that does not
+// exist.
 //
 // No default case. A twelfth demodulator has to answer this question here
 // rather than inherit an answer, which is the same rule

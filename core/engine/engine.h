@@ -538,9 +538,24 @@ struct AudioChunk {
     dsp::SampleIndex start = 0;
     dsp::SampleRate rate = 0;
 
-    // Interleaved if stereo, mono otherwise. Real, not complex: a demodulator
-    // that hands out complex baseband is the raw tap, and that goes to a
-    // decoder rather than here.
+    // Interleaved if stereo, mono otherwise.
+    //
+    // WHAT THIS COMMENT USED TO SAY, and the raw tap has never obeyed it:
+    // "Real, not complex: a demodulator that hands out complex baseband is the
+    // raw tap, and that goes to a decoder rather than here."
+    //
+    // It comes here. core/engine/graph.cpp builds one of these for a raw tap
+    // with channels set to 2 and the pair holding I and Q, and that is the
+    // only complex baseband anything on the host ever sees. Measured
+    // 2026-09-22 by revenant-cli --characterise, which collects an extract for
+    // core/characterise through exactly this path.
+    //
+    // NOTHING ON THIS STRUCT SAYS WHICH IT IS. StageOutput carries a
+    // complex_iq flag and it is dropped at this boundary, so a consumer tells
+    // the two apart by asking engine::produces_audio about the receiver's
+    // demodulator. core/rpc/server.cpp and tools/cli/main.cpp both do exactly
+    // that, and a third consumer that forgets will read an IQ pair as a stereo
+    // frame and hear nothing wrong.
     std::span<const float> samples;
     std::uint32_t channels = 1;
 
