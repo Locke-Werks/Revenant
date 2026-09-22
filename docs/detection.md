@@ -927,6 +927,50 @@ signal.
 0.52 to 0.55 through every width and unfiltered, because `spectral_concentration`
 is a power ratio over the whole extract and does not care where the noise went.
 
+### The extract's LENGTH changes the answer, and nothing says so
+
+Both results above were partly confounded, and finding out why is the most
+useful thing this exercise produced.
+
+`analysis_segment` picks a transform length from the sample count: a sixteenth
+of it, floored to a power of two, clamped to 512 and 32768. So a longer extract
+gets finer bins. And `spectral_concentration` is the power in the strongest
+THREE adjacent bins, which makes its window a frequency that shrinks as the
+extract grows. At a 3 kS/s channel rate that window is 4.4 Hz over eleven
+seconds and 1.1 Hz over sixty.
+
+A real 40 m carrier, swept over extract length with everything else fixed:
+
+| extract | 13.250 kHz, a carrier | 30 kHz, empty band |
+| --- | --- | --- |
+| 11 s | **unmodulated carrier**, concentration 0.531 | unknown, 0.005 |
+| 20 s | unknown, 0.467 | unknown, 0.004 |
+| 40 s | unknown, 0.288 | **OFDM**, 0.002 |
+| 58 s | unknown, 0.184 | unknown, 0.002 |
+
+**The carrier's concentration falls by a factor of three and crosses the 0.5
+threshold between eleven and twenty seconds.** Nothing about the signal
+changed. A carrier on HF drifts further than 1.1 Hz in a minute, between
+transmitter stability and propagation Doppler, so over sixty seconds its power
+is genuinely spread across more than three of those finer bins. The measure is
+doing exactly what it says; what it says is a function of how much was handed
+to it.
+
+That undercuts a claim `spectral_concentration` makes for itself. Its comment
+argues a power fraction is preferable to a frequency spread because "a power
+fraction is the same number at any sample rate". It is not the same number at
+any extract LENGTH, and on a drifting carrier that is the axis that matters.
+
+**And empty band reads OFDM at forty seconds.** One length out of four, on
+noise, with a confident family attached. Whatever `find_cyclic_prefix` locked
+onto is an artefact of that particular segmentation; the point is that the
+false positives are not only about filtering, and a single run at a single
+length cannot tell you which kind of answer you have.
+
+`--characterise-seconds` exists so the length is a stated parameter rather than
+an accident, and its help text carries the table above in miniature. Longer is
+not better.
+
 **So none of this goes on the wire.** `core/rpc/revenant.capnp` already refuses
 `logicalCentreHz` on the grounds that a field nothing can fill is worse than no
 field, and a family field filled from this would be worse still: it would be

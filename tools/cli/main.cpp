@@ -464,6 +464,11 @@ struct Options {
     // over the whole coarse channel.
     Hertz characterise_width = 0;
 
+    // Seconds of baseband to collect, or zero for just over the stage's own
+    // floor. THE ANSWER DEPENDS ON THIS, which is why it is a knob and not a
+    // constant; see the help text.
+    double characterise_seconds = 0.0;
+
     // Broadcast FM stations to decode RDS from, repeatable. Each one gets a
     // receiver of its own; see RdsSpec for why it cannot share one with a
     // receiver somebody is listening to.
@@ -572,6 +577,18 @@ void print_usage()
         "                      than anything being asked about.\n"
         "                      It needs 16384 samples, which is 5.5 s at a 3 kS/s channel\n"
         "                      rate, so give --duration enough to collect them.\n"
+        "  --characterise-seconds <s>\n"
+        "                      How much baseband to collect, default just over the 16384\n"
+        "                      samples the stage needs.\n"
+        "                      THE ANSWER DEPENDS ON THIS AND NOTHING WARNS YOU.\n"
+        "                      analysis_segment picks a transform length from the sample\n"
+        "                      count, so a longer extract gives finer bins, and\n"
+        "                      spectral_concentration is three of those bins: at a 3 kS/s\n"
+        "                      channel rate that window is 4.4 Hz over 11 seconds and\n"
+        "                      1.1 Hz over 60. Measured on a real 40 m carrier, the short\n"
+        "                      extract reads unmodulated carrier at 0.53 and the long one\n"
+        "                      reads unknown at 0.18, because the carrier drifts further\n"
+        "                      than 1.1 Hz in a minute. Longer is not better here.\n"
         "  --characterise-width <hz>\n"
         "                      Filter the extract to this width, centred on the frequency\n"
         "                      asked about, before characterising it. Without it the whole\n"
@@ -736,6 +753,22 @@ void print_usage()
                 return std::unexpected(hz.error());
             }
             options.characterise_hz = *hz;
+            continue;
+        }
+
+        if (arg == "--characterise-seconds") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_real(*text, arg);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            if (!std::isfinite(*number) || *number <= 0.0) {
+                return fail("--characterise-seconds takes a positive number of seconds");
+            }
+            options.characterise_seconds = *number;
             continue;
         }
 
@@ -1847,18 +1880,23 @@ struct CharacteriseCollector {
     dsp::SampleRate rate = 0;
     std::uint64_t seen = 0;
 
-    // Twice the minimum, so the extract is a whole number of the segments
-    // analysis_segment picks and there is room for the estimators that want
-    // overlap. More than that is thrown away: a longer extract is a slower
-    // answer about the same signal.
-    static constexpr std::size_t kWanted = 2 * characterise::kMinCharacteriseSamples;
+    // How many to keep. Set before the run from --characterise-seconds, or
+    // left at twice the stage's floor.
+    //
+    // A KNOB AND NOT A CONSTANT, because the answer depends on it.
+    // analysis_segment picks a transform length from the sample count, so a
+    // longer extract gives finer bins, and spectral_concentration is three of
+    // them. The same 40 m carrier reads 0.53 over eleven seconds and 0.18 over
+    // sixty, because three bins is 4.4 Hz in the first case and 1.1 Hz in the
+    // second and the carrier drifts further than that in a minute.
+    std::size_t wanted = 2 * characterise::kMinCharacteriseSamples;
 
     void take(const engine::AudioChunk& chunk)
     {
         const std::lock_guard<std::mutex> held(lock);
         rate = chunk.rate;
         seen += chunk.samples.size() / 2;
-        if (samples.size() >= kWanted || chunk.channels != 2) {
+        if (samples.size() >= wanted || chunk.channels != 2) {
             return;
         }
 
@@ -1868,7 +1906,7 @@ struct CharacteriseCollector {
         // consumer tells the two apart by the receiver's demodulator.
         for (std::size_t i = 0; i + 1 < chunk.samples.size(); i += 2) {
             samples.emplace_back(chunk.samples[i], chunk.samples[i + 1]);
-            if (samples.size() >= kWanted) {
+            if (samples.size() >= wanted) {
                 break;
             }
         }
@@ -3266,10 +3304,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                      format_hz(options.characterise_hz),
                      status ? status->placement.channel : 0, channel_rate);
         if (channel_rate > 0.0) {
-            std::println("  needs {} samples, which is {:.1f} s at this channel rate",
-                         characterise::kMinCharacteriseSamples,
-                         static_cast<double>(characterise::kMinCharacteriseSamples) /
-                             channel_rate);
+            if (options.characterise_seconds > 0.0) {
+                const auto asked = static_cast<std::size_t>(
+                    options.characterise_seconds * channel_rate);
+                const std::lock_guard<std::mutex> held(collector->lock);
+                collector->wanted =
+                    std::max(asked, characterise::kMinCharacteriseSamples);
+            }
+            std::size_t wanted = 0;
+            {
+                const std::lock_guard<std::mutex> held(collector->lock);
+                wanted = collector->wanted;
+            }
+            std::println("  collecting {} samples, {:.1f} s at this channel rate; the stage "
+                         "needs {}",
+                         wanted, static_cast<double>(wanted) / channel_rate,
+                         characterise::kMinCharacteriseSamples);
         }
     }
 
@@ -3423,7 +3473,38 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             // floor and refuse. Filtering without decimating removes the noise
             // power and keeps the samples, which is what this is for.
             if (options.characterise_width > 0 && extract_rate > 0) {
-                const double cutoff = static_cast<double>(options.characterise_width) / 2.0;
+                // DECIMATE AS WELL AS FILTER, AND THE FIRST ATTEMPT DID NOT.
+                //
+                // Filtering without decimating leaves the noise heavily
+                // oversampled, which is to say correlated, and a
+                // cyclostationary detector reads correlation as a symbol rate.
+                // Measured 2026-09-22: empty 40 m low passed to 800 Hz at the
+                // full 3 kS/s channel rate came back PSK at 0.98 confidence.
+                // Dropping the rate with the bandwidth is what keeps the noise
+                // white, and white noise is what every threshold in
+                // core/characterise was stated against.
+                //
+                // N is chosen so the surviving rate is about three times the
+                // requested width: enough margin that the filter's own
+                // transition is not folded back in, and low enough that the
+                // estimators are not looking for a symbol rate a thousandth of
+                // the way along their axis.
+                const auto width = static_cast<double>(options.characterise_width);
+                auto decimation = static_cast<std::size_t>(
+                    std::floor(static_cast<double>(extract_rate) / (3.0 * width)));
+                decimation = std::max<std::size_t>(decimation, 1);
+
+                // Not so far that what is left is under the floor.
+                while (decimation > 1 &&
+                       extract.size() / decimation < characterise::kMinCharacteriseSamples) {
+                    --decimation;
+                }
+
+                const double survives =
+                    static_cast<double>(extract_rate) / static_cast<double>(decimation);
+                // Cut just under the surviving Nyquist, which is what stops
+                // the decimation folding anything back on top of the signal.
+                const double cutoff = 0.45 * survives;
                 const double normalised = cutoff / static_cast<double>(extract_rate);
                 if (normalised >= 0.5) {
                     std::println("  filter          skipped, {} Hz is wider than the {} S/s "
@@ -3467,10 +3548,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                         filtered[i] = dsp::Complex32(static_cast<float>(re),
                                                      static_cast<float>(im));
                     }
+                    if (decimation > 1) {
+                        std::vector<dsp::Complex32> kept;
+                        kept.reserve(filtered.size() / decimation + 1);
+                        for (std::size_t i = 0; i < filtered.size(); i += decimation) {
+                            kept.push_back(filtered[i]);
+                        }
+                        filtered.swap(kept);
+                        extract_rate = static_cast<dsp::SampleRate>(
+                            std::llround(survives));
+                    }
+
                     extract.swap(filtered);
-                    std::println("  filtered        to {} Hz about DC, {} taps, rate "
-                                 "unchanged at {} S/s",
-                                 options.characterise_width, 2 * kHalf + 1, extract_rate);
+                    std::println("  filtered        {:.0f} Hz cutoff, {} taps, decimated by "
+                                 "{} to {} S/s, {} samples left",
+                                 cutoff, 2 * kHalf + 1, decimation, extract_rate,
+                                 extract.size());
                 }
             }
 
