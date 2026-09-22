@@ -1303,3 +1303,109 @@ TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
     // rows. Nothing else is asserted: this case is a measurement.
     CHECK(!run.candidates.empty());
 }
+// Does the skirt rise with the drive, or only with the switch being on?
+//
+// THE QUESTION THAT DECIDES WHETHER A DISTORTION FLAG IS WORTH BUILDING. The
+// family table above rules out any absolute skirt threshold: fsk2 reads 0.432
+// through a perfectly linear front end, four times what a QPSK signal reads
+// while it is being driven into a cubic. What separated there was the CHANGE,
+// 0.028 to 0.111 on the same emitters when the nonlinearity was switched on.
+//
+// A change between two points is one measurement, and a single pair can be a
+// coincidence. If the skirt is really reading spectral regrowth it has to
+// climb with the third-order coefficient rather than jump once, because
+// regrowth is a continuous function of how hard the stage is driven. If it
+// does not climb, whatever the pair measured was not this and nothing should
+// be built on it.
+//
+// A SWEEP OF THE COEFFICIENT AND NOT OF THE SIGNAL LEVEL, so the parents are
+// bit-identical at every rung and the only thing moving is the stage. Driving
+// them harder would change their own occupied bandwidth as well, and then a
+// skirt that grew would have two explanations.
+//
+// WHAT THIS MEASURED, 2026-09-22.
+//
+//   a3      skirt   peak/mean   width
+//   0.000   0.028     1.608     3538 Hz
+//   0.050   0.028     1.608     3537 Hz
+//   0.100   0.049     1.652     3057 Hz
+//   0.150   0.111     1.607     2844 Hz
+//
+// It climbs, and it climbs the way regrowth should rather than the way a
+// switch would: flat to three places at 0.05, roughly double the baseline at
+// 0.10, four times it at 0.15. The excess over the linear reading is 0.000,
+// 0.021 and 0.083, which is close to the square of the coefficient, and
+// third-order regrowth power goes as exactly that. So the pair measured
+// earlier was not a coincidence and the number is reading the stage.
+//
+// IT IS BLIND BELOW A DRIVE, which the 0.05 row says plainly and which is a
+// limit rather than a defect: at that coefficient the regrowth is under the
+// level the detector's own edge growth walks to, and no product crosses the
+// detection threshold either, so there is nothing to flag and nothing is
+// flagged.
+//
+// peak_to_mean sits between 1.607 and 1.652 across the whole sweep, which is
+// the control on the control: the parents' shape CLASS does not move when the
+// stage is driven, so that number reads the modulation and this one reads the
+// distortion, and neither is reading the other.
+//
+// The width shrinking from 3538 to 2844 Hz is the occupied-bandwidth trim
+// reacting to the pedestal the products lay down under the signal, not the
+// signal getting narrower.
+TEST_CASE("shape survey: skirt against drive", "[.shape-survey]")
+{
+    // Zero is the control. 0.15 is what every other nonlinear case in this
+    // file uses and is where the fold-over argument puts the ceiling.
+    const double drives[] = {0.0, 0.05, 0.10, 0.15};
+
+    for (const double third_order : drives) {
+        const SceneRun run = run_scene(product_scene(), test::FrontEndModel{
+                                                            .gain = 1.0,
+                                                            .swing_db = 0.0,
+                                                            .swing_period_seconds = 0.0,
+                                                            .third_order = third_order,
+                                                        });
+        REQUIRE(run.decisions > 0);
+
+        std::size_t count = 0;
+        double skirt = 0.0;
+        double peak_to_mean = 0.0;
+        double width = 0.0;
+        double snr = 0.0;
+
+        for (const detect::Candidate& candidate : run.candidates) {
+            if (!candidate.shape.measured) {
+                continue;
+            }
+            const dsp::Hertz offset = candidate.center - 98'100'000;
+            const bool parent =
+                std::abs(offset - kProductParentOne) <= kProductParentBandwidth ||
+                std::abs(offset - kProductParentTwo) <= kProductParentBandwidth ||
+                std::abs(offset - kProductParentThree) <= kProductParentBandwidth;
+            if (!parent) {
+                continue;
+            }
+            ++count;
+            skirt += candidate.shape.skirt_fraction;
+            peak_to_mean += candidate.shape.peak_to_mean;
+            width += static_cast<double>(candidate.bandwidth);
+            snr += candidate.snr_2500_db;
+        }
+
+        if (count == 0) {
+            WARN("a3 " << third_order << ": no parent candidates");
+            continue;
+        }
+
+        const auto n = static_cast<double>(count);
+        std::ostringstream out;
+        out.setf(std::ios::fixed);
+        out.precision(3);
+        out << "a3 " << third_order << ": " << count << " parent candidates, skirt "
+            << skirt / n << ", peak/mean " << peak_to_mean / n << ", width " << width / n
+            << " Hz, snr " << snr / n << " dB";
+        WARN(out.str());
+    }
+
+    CHECK(std::size(drives) == 4);
+}
