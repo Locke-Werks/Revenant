@@ -1523,6 +1523,29 @@ public:
         return shown_.detections;
     }
 
+    // How far the detection with this id stood above the detection threshold,
+    // zero to one, or a negative number when no such detection is in the list
+    // the window currently holds.
+    //
+    // BY ID RATHER THAN THROUGH THE CLICK SIGNAL, because a click carries what
+    // the item knew at the moment of the click and this is read whenever the
+    // row repaints. A track that has faded since is gone from the list and
+    // says so by being absent, which is the honest answer for a row asking how
+    // strong something is RIGHT NOW.
+    //
+    // NEGATIVE AND NOT ZERO FOR ABSENT. Zero is a real value of this measure,
+    // being what a detection exactly at the threshold would read if one could
+    // be published, so a caller has to be able to tell "nothing here" from
+    // "nothing above the bar".
+    [[nodiscard]] Q_INVOKABLE double detectionMargin(qulonglong id) const {
+        for (const rpc::Detection& detection : shown_.detections) {
+            if (detection.id == id) {
+                return detection.margin_confidence;
+            }
+        }
+        return -1.0;
+    }
+
     // ------------------------------------------------------------------
     // The receiver surface
     // ------------------------------------------------------------------

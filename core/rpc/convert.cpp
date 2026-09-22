@@ -510,6 +510,7 @@ void write_detection(schema::Detection::Builder out, const detect::Track& in) {
     out.setBandwidthHz(in.bandwidth);
     out.setSnr2500Db(in.snr_2500_db);
     out.setConfidence(in.confidence);
+    out.setMarginConfidence(in.margin_confidence);
     out.setState(to_schema(in.state));
     out.setFirstSeen(in.first_seen);
     out.setLastSeen(in.last_seen);

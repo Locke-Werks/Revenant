@@ -2093,3 +2093,130 @@ TEST_CASE("the source centre puts tracks on absolute frequency", "[detect]") {
     // number means.
     CHECK(std::abs(made->tracks()[0].center - (kSourceCentre + scene.frequency_of(600))) <= 1000);
 }
+
+// ---------------------------------------------------------------------------
+// The margin measure, which is the calibrated number confidence is not
+// ---------------------------------------------------------------------------
+
+// Rejects the property that made confidence useless to threshold on. A column
+// that reads the same for every detection is a bar with two positions, off and
+// everything, and tests/rpc/test_rpc_detect.cpp had to raise the DETECTION
+// threshold to manufacture any spread in it at all. This number has to order
+// two signals that differ only in strength.
+TEST_CASE("the margin measure orders two signals by how far they stood up",
+          "[detect][margin]") {
+    constexpr std::uint64_t kSeed = 5150;
+    INFO("seed " << kSeed);
+
+    Scene scene(-90.0, kSeed);
+    scene.set({Emitter{.centre_bin = 200, .width_bins = 21, .snr_2500_db = 10.0},
+               Emitter{.centre_bin = 600, .width_bins = 21, .snr_2500_db = 34.0}});
+
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    detect::Detector& detector = *made;
+    run_for(detector, scene, 4.0);
+
+    INFO(describe(detector));
+    const detect::Track* weak = find_near(detector, scene.frequency_of(200), 5000);
+    const detect::Track* strong = find_near(detector, scene.frequency_of(600), 5000);
+    REQUIRE(weak != nullptr);
+    REQUIRE(strong != nullptr);
+
+    // Both have been detected in every decision, so the stopwatch cannot tell
+    // them apart and says so here. That is not a defect in confidence, it is
+    // the whole reason a second number exists.
+    CHECK(weak->confidence == Approx(strong->confidence));
+
+    // The margin can, and by a wide enough gap to put a bar between them.
+    CHECK(weak->margin_confidence < strong->margin_confidence);
+    CHECK(strong->margin_confidence - weak->margin_confidence > 0.2);
+
+    // Both are above the threshold, so both are above a half.
+    CHECK(weak->margin_confidence > 0.5);
+    CHECK(strong->margin_confidence < 1.0);
+}
+
+// Rejects a margin taken against a constant rather than against the threshold
+// the operator actually set. Raising the bar to 20 dB does not make a 34 dB
+// signal weaker; it means what survived cleared a harder test, and the number
+// has to fall to say so.
+TEST_CASE("the margin is measured against the threshold in force",
+          "[detect][margin]") {
+    constexpr std::uint64_t kSeed = 60606;
+    INFO("seed " << kSeed);
+
+    Scene scene(-90.0, kSeed);
+    scene.set({Emitter{.centre_bin = 400, .width_bins = 21, .snr_2500_db = 34.0}});
+
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    detect::Detector& detector = *made;
+    run_for(detector, scene, 4.0);
+
+    const detect::Track* at_six = find_near(detector, scene.frequency_of(400), 5000);
+    REQUIRE(at_six != nullptr);
+    const double lenient = at_six->margin_confidence;
+
+    REQUIRE(detector.set_thresholds(20.0, base_config().confidence_threshold));
+    run_for(detector, scene, 4.0);
+
+    INFO(describe(detector));
+    const detect::Track* at_twenty = find_near(detector, scene.frequency_of(400), 5000);
+    REQUIRE(at_twenty != nullptr);
+
+    CHECK(at_twenty->margin_confidence < lenient);
+}
+
+// Rejects a margin that decays with the track. Confidence already answers "is
+// this still here"; if both numbers fell together there would be nothing left
+// answering "how strong was it when it was there".
+//
+// MEASURED BETWEEN TWO POINTS THAT ARE BOTH ALREADY HELD, which the first
+// draft of this case got wrong and is worth writing down. Taking the reading
+// the moment the signal stops compares a live track against a held one, and
+// the margin has moved by then for a correct reason: the averaged spectrum
+// drains over average_seconds, so for several decisions after the transmission
+// ends the band is still detected, at a falling SNR, and the margin follows it
+// down exactly as it should. What must not change is the margin of a track
+// that is no longer being detected at all.
+TEST_CASE("the margin does not decay while a track holds", "[detect][margin]") {
+    constexpr std::uint64_t kSeed = 24601;
+    INFO("seed " << kSeed);
+
+    Scene scene(-90.0, kSeed);
+    scene.set({Emitter{.centre_bin = 500, .width_bins = 21, .snr_2500_db = 30.0}});
+
+    auto made = detect::Detector::create(base_config(), scene.geometry());
+    REQUIRE(made);
+    detect::Detector& detector = *made;
+    run_for(detector, scene, 4.0);
+
+    const detect::Track* live = find_near(detector, scene.frequency_of(500), 5000);
+    REQUIRE(live != nullptr);
+    const double confidence_while_live = live->confidence;
+
+    // The signal stops, and the average is given long enough to drain that the
+    // band has stopped being detected.
+    scene.silence();
+    run_for(detector, scene, 1.2);
+
+    const detect::Track* first = find_near(detector, scene.frequency_of(500), 5000);
+    REQUIRE(first != nullptr);
+    INFO(describe(detector));
+    REQUIRE(first->state == detect::TrackState::Held);
+    const double held_margin = first->margin_confidence;
+    const double held_confidence = first->confidence;
+
+    // More silence, still inside the hold.
+    run_for(detector, scene, 0.4);
+
+    const detect::Track* later = find_near(detector, scene.frequency_of(500), 5000);
+    REQUIRE(later != nullptr);
+    REQUIRE(later->state == detect::TrackState::Held);
+
+    // The stopwatch has run down further and the margin has not moved at all.
+    CHECK(later->confidence < held_confidence);
+    CHECK(held_confidence < confidence_while_live);
+    CHECK(later->margin_confidence == Approx(held_margin));
+}

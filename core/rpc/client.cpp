@@ -549,6 +549,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.bandwidth_hz = in.getBandwidthHz();
     out.snr_2500_db = in.getSnr2500Db();
     out.confidence = in.getConfidence();
+    out.margin_confidence = in.getMarginConfidence();
     out.state = *state;
     out.first_seen = in.getFirstSeen();
     out.last_seen = in.getLastSeen();

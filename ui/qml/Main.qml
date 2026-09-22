@@ -1374,9 +1374,22 @@ ApplicationWindow {
                 elide: Text.ElideRight
             }
 
+            // NOT LABELLED "confidence", WHICH IS WHAT IT FILTERS ON AND NOT
+            // WHAT IT MEANS. The wire field is called confidence and this bar
+            // is passed to it, but core/detect/detector.h computes it from
+            // consecutive detections and nothing else: it is one minus
+            // (1 - rise) to the n, it reads no SNR and no shape, and it
+            // reaches 1.00 in about 1.3 seconds for anything that stays put.
+            // An operator read the old word as "how sure are we this is real",
+            // moved the bar to filter out interference, and filtered by how
+            // long each signal had been there instead. The bar is useful and
+            // the word was wrong, so the word changed.
+            //
+            // The margin beside a tuned track is the number that answers the
+            // question the old label implied. See detectionMargin.
             Label {
                 Layout.minimumWidth: 0
-                text: "confidence"
+                text: "held for"
                 color: window.inkDim
                 font.pixelSize: 12
                 elide: Text.ElideRight
@@ -2485,6 +2498,32 @@ ApplicationWindow {
                     visible: window.tunedBandwidthHz > 0
                     text: "·  " + window.bandwidthText(window.tunedBandwidthHz) + " wide"
                     color: window.ink
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                }
+
+                // How far this track stood above the detection threshold, on
+                // the same zero-to-one scale the bar above uses and measuring
+                // something completely different: that one is how long, this
+                // is how strong.
+                //
+                // Bound to a lookup rather than carried in from the click, so
+                // it follows the track while the row is up and disappears when
+                // the track does. A negative reading is the list no longer
+                // holding this id, which is why it is a visibility test rather
+                // than a zero.
+                //
+                // IT DOES NOT SAY THE SIGNAL IS REAL. A strong interferer
+                // stands well above the noise and reads high, correctly.
+                Label {
+                    Layout.minimumWidth: 0
+
+                    readonly property double margin:
+                        window.tunedId > 0 ? engineLink.detectionMargin(window.tunedId) : -1.0
+
+                    visible: margin >= 0.0
+                    text: "·  margin " + margin.toFixed(2)
+                    color: window.inkDim
                     font.pixelSize: 13
                     elide: Text.ElideRight
                 }

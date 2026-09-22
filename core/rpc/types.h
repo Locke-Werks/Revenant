@@ -482,7 +482,13 @@ struct Detection {
     std::int64_t bandwidth_hz = 0;
 
     double snr_2500_db = 0.0;
+
+    // Consecutive detections, not signal quality. See the schema.
     double confidence = 0.0;
+
+    // How far above the threshold in force, zero to one. The calibrated one.
+    double margin_confidence = 0.0;
+
     TrackState state = TrackState::Pending;
 
     // Absolute source sample indices. Seconds are a difference over

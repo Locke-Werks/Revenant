@@ -8,6 +8,12 @@
 #include <tuple>
 #include <utility>
 
+// For margin_confidence. The formula is written down and tested there, and
+// docs/detection.md names it as the calibrated shape a confidence has to have,
+// so restating it here would be a second copy to keep in step rather than a
+// saved dependency. core/engine/vrx.h already crosses into characterise for
+// its vocabulary; both are in revenant_core and neither pulls in an engine.
+#include "core/characterise/transform.h"
 #include "core/dsp/spectrum_reference.h"
 
 namespace revenant::detect {
@@ -984,6 +990,14 @@ bool Detector::emit_candidate(std::size_t first,
     candidate.first_bin = static_cast<std::uint32_t>(first);
     candidate.last_bin = static_cast<std::uint32_t>(last);
     candidate.snr_2500_db = 10.0 * std::log10(snr);
+
+    // Against the threshold IN FORCE rather than characterise's own default.
+    // The operator moves detection_threshold_db, and a margin measured against
+    // a constant would slide every reading whenever they did: raising the bar
+    // to 20 dB would make every surviving detection look weaker rather than
+    // reporting, correctly, that what is left cleared a harder test.
+    candidate.margin_confidence = characterise::margin_confidence(
+        candidate.snr_2500_db, config_.detection_threshold_db);
     candidate.noise_floor_dbfs = linear_to_db(noise);
     candidate.peak_dbfs = linear_to_db(peak);
     candidate.center =
@@ -1451,6 +1465,15 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
             track.bandwidth = std::max<dsp::Hertz>(1, static_cast<dsp::Hertz>(std::llround(width)));
             track.snr_2500_db += smoothing * (candidate.snr_2500_db - track.snr_2500_db);
 
+            // From the track's smoothed SNR rather than the candidate's own,
+            // so it follows the track instead of one decision's measurement
+            // noise. Recomputed rather than smoothed in its own right: the map
+            // is nonlinear, so smoothing the output would not be the map of
+            // the smoothed input and the number would stop matching its own
+            // definition.
+            track.margin_confidence = characterise::margin_confidence(
+                track.snr_2500_db, config_.detection_threshold_db);
+
             ++track.hits;
             track.misses = 0;
             track.last_detected = now;
@@ -1511,6 +1534,7 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
         track.center = candidate.center;
         track.bandwidth = std::max<dsp::Hertz>(1, candidate.bandwidth);
         track.snr_2500_db = candidate.snr_2500_db;
+        track.margin_confidence = candidate.margin_confidence;
         track.confidence = config_.confidence_rise;
         track.first_seen = now;
         track.last_seen = now;

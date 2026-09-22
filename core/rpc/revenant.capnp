@@ -1092,6 +1092,34 @@ struct Detection {
     # refuses a bar of one for that reason.
     confidence @4 :Float64;
 
+    # How far this stood above the detection threshold it had to clear, mapped
+    # to zero to one: a half exactly at the threshold, 0.82 six decibels above
+    # it, 0.93 at twelve, approaching one without arriving.
+    #
+    # THE CALIBRATED NUMBER confidence IS NOT. docs/detection.md asks for one
+    # on the grounds that a classifier reporting 0.9 for everything makes an
+    # operator's threshold a no-op, and confidence above is exactly that: it
+    # counts consecutive detections and reads no signal quality, so a column of
+    # it is constant and a bar on it filters by how long something has been
+    # there. This reads the measurement and nothing about time. The two are
+    # orthogonal on purpose and a client wanting either can have it: a strong
+    # station detected once has a high margin and a low confidence, and a weak
+    # bump present all afternoon has the reverse.
+    #
+    # WHAT IT IS NOT. It is not authenticity, and reading it as any would
+    # repeat the mistake confidence made. It orders detections by how far their
+    # evidence stood above the noise, which is all a margin can say. A strong
+    # interferer stands well above the noise and scores high, correctly.
+    # Telling a signal from an intermodulation product is a different question,
+    # no field here answers it, and core/detect/front_end.h explains why a
+    # frequency-coincidence test is worse than saying nothing.
+    #
+    # Taken against the threshold IN FORCE rather than a constant, so raising
+    # the bar does not make every surviving detection look weaker than it did.
+    # The map is characterise::margin_confidence, which is written down and
+    # tested rather than tuned until the numbers looked right.
+    marginConfidence @12 :Float64;
+
     state @5 :TrackState;
 
     # Absolute source sample indices, the way docs/conventions.md indexes

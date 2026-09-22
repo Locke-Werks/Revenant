@@ -221,6 +221,25 @@ struct Candidate {
     // In the 2500 Hz reference bandwidth. See kReferenceBandwidthHz.
     double snr_2500_db = 0.0;
 
+    // How far this stood above the threshold it had to clear, mapped to zero
+    // to one by characterise::margin_confidence: a half exactly at the
+    // threshold, 0.82 six decibels above it, 0.93 at twelve, approaching one
+    // without arriving.
+    //
+    // THE CALIBRATED NUMBER Track::confidence IS NOT, and the two are
+    // deliberately orthogonal. That one counts consecutive detections and
+    // reads no signal quality; this one reads the measurement and nothing
+    // about time. A strong station detected once has a high margin and a low
+    // confidence. A weak bump present all afternoon has the reverse.
+    //
+    // IT IS NOT AUTHENTICITY AND MUST NOT BE READ AS ANY. It orders detections
+    // by how far their evidence stood above the noise, which is what
+    // docs/detection.md asks a threshold to mean. A strong interferer stands
+    // well above the noise and scores high, correctly. Telling a signal from a
+    // product is a different question that this does not answer and that no
+    // field on this struct answers today.
+    double margin_confidence = 0.0;
+
     // The local noise floor this was measured against, per fine bin, and the
     // strongest fine bin in the band. Both dBFS, both diagnostics: neither is
     // comparable across bandwidths and neither is the threshold's unit.
@@ -256,6 +275,17 @@ struct Track {
     dsp::Hertz center = 0;
     dsp::Hertz bandwidth = 0;
     double snr_2500_db = 0.0;
+
+    // The same margin measure Candidate carries, taken from this track's
+    // SMOOTHED snr_2500_db so it moves with the track rather than with one
+    // decision's measurement noise.
+    //
+    // IT DOES NOT DECAY WHILE A TRACK HOLDS, which is the point of having two
+    // numbers. A track that has stopped being detected keeps the margin its
+    // last measurement had and loses confidence instead. Decaying both would
+    // make them the same number twice and leave nothing answering "how strong
+    // was it when it was there".
+    double margin_confidence = 0.0;
 
     // Zero to one, rising on each decision this track was detected in and
     // decaying on each one it was missed from. This is what

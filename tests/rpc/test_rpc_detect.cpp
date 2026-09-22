@@ -539,6 +539,30 @@ TEST_CASE("detections cross the wire and agree with the geometry the engine repo
         CHECK(detection.confidence > 0.0);
         CHECK(detection.confidence < 1.0);
 
+        // THE CALIBRATED NUMBER REACHES A CLIENT, which is the half of a new
+        // wire field that goes missing quietly: docs/rpc.md records a case
+        // where the schema carried a pair and read_engine_info dropped it, and
+        // says a field the schema carries and the client silently drops is
+        // exactly the shape of gap a reader assumes is still open.
+        //
+        // Every published detection cleared the detection threshold, and the
+        // margin map is a half AT the threshold and rises above it, so a
+        // client that never read the field would arrive here holding the
+        // default zero and fail this line rather than the next one.
+        CHECK(detection.margin_confidence >= 0.5);
+        CHECK(detection.margin_confidence < 1.0);
+
+        // And it is the margin it claims to be, which is checkable here
+        // because every term is on this same wire: the map is
+        // 1 - 0.5*exp(-(snr - threshold)/6) and both inputs arrived with it.
+        // A field written from the wrong source, or from the stopwatch, does
+        // not satisfy its own definition against two numbers it did not
+        // choose. The tolerance is the two decibel round trips and nothing
+        // else.
+        const double expected =
+            1.0 - 0.5 * std::exp(-(detection.snr_2500_db - list.detection_threshold_db) / 6.0);
+        CHECK(std::abs(detection.margin_confidence - expected) < 1.0e-6);
+
         // Sample indices, and their order is the tracker's invariant: a track
         // was first seen before it was last detected, and last detected no
         // later than it was last seen.
