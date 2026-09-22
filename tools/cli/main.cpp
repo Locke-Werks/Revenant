@@ -537,8 +537,11 @@ void print_usage()
         "                      summary prints the automatic ends, which is where the\n"
         "                      numbers to pin come from.\n"
         "  --detect            Run the wideband detector and print the live track list:\n"
-        "                      centre, bandwidth, SNR, confidence and age, one line per\n"
-        "                      track. Turns the spectrum stage on by itself, so it needs\n"
+        "                      centre, bandwidth, SNR, confidence, margin and age, one\n"
+        "                      line per track. Confidence is how long a track has been\n"
+        "                      there and margin is how far it stood above the threshold;\n"
+        "                      neither says a track is real.\n"
+        "                      Turns the spectrum stage on by itself, so it needs\n"
         "                      neither --vrx nor --spectrum.\n"
         "  --detect-threshold <db>\n"
         "                      Detection threshold, default 6. In dB of SNR in the\n"
@@ -1466,6 +1469,22 @@ public:
         double bandwidth_hz;
         double snr_db;
         double confidence;
+
+        // How far this stood above the detection threshold, zero to one.
+        //
+        // BESIDE confidence AND NOT INSTEAD OF IT. They answer different
+        // questions and the pair is the point: confidence counts consecutive
+        // detections and reads no signal quality, so a column of it is nearly
+        // constant and says how long each track has been there. This reads the
+        // measurement and nothing about time. On 2026-09-20 at 95.1 MHz three
+        // intermodulation products sat in this table at confidence 1.00 and
+        // the column could not be used to sort them from the stations.
+        //
+        // It does not say a track is real either. A strong product stands well
+        // above the noise and reads high, correctly. The front-end verdict
+        // below is what speaks to that.
+        double margin;
+
         double age_seconds;
         double silent_seconds;
         std::uint32_t state;
@@ -1583,6 +1602,7 @@ public:
                 .bandwidth_hz = static_cast<double>(track.bandwidth),
                 .snr_db = track.snr_2500_db,
                 .confidence = track.confidence,
+                .margin = track.margin_confidence,
                 .age_seconds = seconds_of(track.age_samples()),
                 .silent_seconds = seconds_of(track.silent_samples()),
                 .state = static_cast<std::uint32_t>(track.state),
@@ -1716,11 +1736,28 @@ private:
     if (row.silent_seconds > 0.0) {
         held = std::format(" +{:.1f}s", row.silent_seconds);
     }
-    return std::format("  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.1f}s  ch {}{}",
-                       row.id, detect::track_state_name(static_cast<detect::TrackState>(row.state)),
-                       format_hz(static_cast<Hertz>(std::llround(row.center_hz))),
-                       format_hz(static_cast<Hertz>(std::llround(row.bandwidth_hz))), row.snr_db,
-                       row.confidence, row.age_seconds, channel, held);
+    return std::format(
+        "  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.2f}  {:>6.1f}s  ch {}{}",
+        row.id, detect::track_state_name(static_cast<detect::TrackState>(row.state)),
+        format_hz(static_cast<Hertz>(std::llround(row.center_hz))),
+        format_hz(static_cast<Hertz>(std::llround(row.bandwidth_hz))), row.snr_db, row.confidence,
+        row.margin, row.age_seconds, channel, held);
+}
+
+// The column names, on the same widths track_line uses.
+//
+// A HEADER BECAUSE TWO OF THE COLUMNS ARE NOW BOTH A NUMBER BETWEEN ZERO AND
+// ONE, and they mean opposite things: confidence is how long a track has been
+// there and margin is how far it stood above the threshold. Unlabelled, the
+// pair is unreadable, and guessing wrong is worse than either alone.
+//
+// Printed with each table rather than once at startup, because the table
+// refreshes in place and a legend that scrolled away an hour ago is not a
+// legend.
+[[nodiscard]] std::string track_header()
+{
+    return std::format("  {:<5}{:<7}{:>16}  {:>11}  {:>10}  {:>5}  {:>6}  {:>7}  {}", "#id",
+                       "state", "centre", "bandwidth", "snr", "conf", "margin", "age", "ch");
 }
 
 [[nodiscard]] std::string level_bar(double dbfs)
@@ -2916,6 +2953,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 std::println("{:8.2f}s  {} track{} over {:.1f} dB and {:g} confidence{}",
                              source_seconds, over_bar, over_bar == 1 ? "" : "s",
                              options.detect_threshold_db, options.detect_confidence, capped);
+                if (!rows.empty()) {
+                    std::println("{}", track_header());
+                }
                 for (const DetectView::Row& row : rows) {
                     std::println("{}", track_line(row));
                 }
