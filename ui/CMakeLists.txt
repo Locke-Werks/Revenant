@@ -345,6 +345,12 @@ endif()
 # that is not there. A picture that is wrong and looks right is exactly
 # what a test can catch and an operator cannot.
 #
+# It covers plan_scroll_tune, which paces the mouse wheel against a front end
+# that goes deaf for about 330 ms per retune. The frequency it picks is
+# something an operator sees and corrects; how many retunes a flick of the
+# wheel issues is not, and a coalescer that lets a burst through leaves the
+# picture moving for seconds after the gesture stopped.
+#
 # It covers the EN 50067 Annex E mapping, its segment placeholders and the
 # four states an empty RDS pane can be in. The mapping is the difference
 # between a letter and a different letter that renders just as plausibly,
@@ -396,6 +402,7 @@ if(REVENANT_UI_TESTS)
             tests/test_rds_text.cpp
             tests/test_receiver_marker.cpp
             tests/test_receiver_match.cpp
+            tests/test_scroll_tune.cpp
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
         )

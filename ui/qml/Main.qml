@@ -888,6 +888,26 @@ ApplicationWindow {
                 elide: Text.ElideRight
             }
 
+            // THE WHEEL IS THE OTHER WAY TO TUNE AND NOTHING ON SCREEN SHOWS
+            // IT. A box and a row of band buttons look like the whole of the
+            // surface, so an operator who wants to sweep types a frequency,
+            // looks, types another. Scrolling over either span display walks
+            // the front end along instead, a twentieth of the span a notch,
+            // and a gesture with no mark anywhere in the window is a feature
+            // nobody finds. Beside the box it names rather than in a help
+            // pane, because this row is where somebody is already tuning.
+            //
+            // Only while the source will take it, so it is not offered over a
+            // recording, where the line below explains the dead box instead.
+            Label {
+                Layout.minimumWidth: 0
+                visible: engineLink.sourceCanRetune
+                text: "or scroll over the spectrum"
+                color: window.inkDim
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
             // Why the box is dead. Two causes and they are different news:
             // a recording cannot retune, and a client built against a wire
             // with no such call is this window's own limitation.

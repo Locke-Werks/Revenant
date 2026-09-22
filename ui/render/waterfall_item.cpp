@@ -16,6 +16,7 @@
 #include <QSGNode>
 #include <QSGRectangleNode>
 #include <QSGTexture>
+#include <QWheelEvent>
 
 namespace revenant::ui {
 namespace {
@@ -74,6 +75,10 @@ WaterfallItem::WaterfallItem(QQuickItem* parent) : QQuickItem(parent)
     setFlag(ItemHasContents, true);
     setAcceptedMouseButtons(Qt::LeftButton);
     setAcceptHoverEvents(true);
+
+    scroll_clock_.start();
+    scroll_flush_.setSingleShot(true);
+    connect(&scroll_flush_, &QTimer::timeout, this, &WaterfallItem::flushScrollTune);
 
     hovered_label_ = new OverlayLabelItem(this);
     hovered_label_->setVisible(false);
@@ -602,6 +607,42 @@ void WaterfallItem::mousePressEvent(QMouseEvent* event)
     const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
     emit tuneRequested(0, hz, 0.0, 0, 0, false);
     event->accept();
+}
+
+void WaterfallItem::wheelEvent(QWheelEvent* event)
+{
+    const double eighths = scroll_tune_eighths(event->angleDelta().x(), event->angleDelta().y());
+    if (eighths == 0.0) {
+        event->ignore();
+        return;
+    }
+
+    // Left for whatever is behind this item when the source refuses a retune,
+    // which is the recording case scrubbing is going to want. See the note on
+    // wheelEvent in the header.
+    if (link_ == nullptr || !link_->sourceCanRetune()) {
+        event->ignore();
+        return;
+    }
+
+    armScrollFlush(take_scroll_tune(link_, eighths,
+                                    static_cast<double>(scroll_clock_.elapsed()), scroll_tune_));
+    event->accept();
+}
+
+void WaterfallItem::flushScrollTune()
+{
+    armScrollFlush(
+        take_scroll_tune(link_, 0.0, static_cast<double>(scroll_clock_.elapsed()), scroll_tune_));
+}
+
+void WaterfallItem::armScrollFlush(double wait_ms)
+{
+    if (wait_ms > 0.0) {
+        scroll_flush_.start(static_cast<int>(std::ceil(wait_ms)));
+        return;
+    }
+    scroll_flush_.stop();
 }
 
 QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)

@@ -184,14 +184,32 @@ Over the wide display, it moves the radio. That is `Source::tune`, and it is
 a different kind of operation with three consequences the fine case does not
 have.
 
-**The Engine surface exists and the gesture does not.** `Engine` exposes
+**Both the surface and the gesture exist now.** `Engine` exposes
 `set_source_center`, which tunes the front end and writes the landed centre
 back into `EngineInfo::source_center`; `Session.setSourceCenter` carries it
 and `Session.sourceCanRetune` says whether the source will take it at all, so
 a client can grey the control out rather than discover the refusal by trying.
-`ui/models/source_link.cpp` already drives all three from the frequency
-entry. What is missing is only the wheel over the wide display, which is a
-gesture rather than a surface.
+`ui/models/source_link.cpp` drives all three from the frequency entry, and
+since 2026-09-21 the wheel over either span display drives them too.
+
+The shipped numbers, both one line each in `ui/models/scroll_tune.h`: one
+twentieth of the span per notch, and one tune per 400 ms. The step is a
+fraction of the span rather than a hertz count so that 2.4 MS/s and 20 MS/s
+feel the same to the same gesture. The interval is the measured 330 ms of dead
+stream plus room for the round trip, the supervisor noticing, and the up-to-four
+attempts the backend makes because the first `rtlsdr_set_center_freq` after a
+cancel fails every time. The first notch goes out immediately and coalescing
+starts behind it, so an isolated scroll has no lag.
+
+One compromise worth knowing: each display holds its own accumulator, so moving
+the pointer from the spectrum to the waterfall mid-sweep can put two tunes
+inside one interval. A shared coalescer belongs on `EngineLink`, because the
+settling interval is a property of the radio rather than of a display.
+
+WHAT THIS PARAGRAPH USED TO SAY, the second time. Until the gesture shipped it
+was headed "**The Engine surface exists and the gesture does not**" and ended
+"What is missing is only the wheel over the wide display, which is a gesture
+rather than a surface."
 
 WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-21 it read "**There is no
 Engine surface for it.** `Source::tune` exists; `Engine` does not expose it,
@@ -202,20 +220,38 @@ and the comment it quotes no longer exists to be read. Left standing it told
 anyone costing out this gesture that the engine work was still ahead of them,
 when the only thing left is the gesture itself.
 
-**Every receiver's absolute frequency changes meaning.** The grid is in
-baseband, so it survives a retune untouched. What moves is what baseband DC
-corresponds to. A receiver left at a fixed baseband offset drifts in absolute
-terms, which is not what anybody means by tuning the radio: the receivers
-should hold their absolute frequencies and have their offsets recomputed. Any
-that fall outside the new span have to be parked and said to be parked rather
-than silently producing noise from wherever they landed.
+**Every receiver's absolute frequency changes meaning, and the engine handles
+it.** The grid is in baseband, so it survives a retune untouched. What moves is
+what baseband DC corresponds to, and a receiver left at a fixed baseband offset
+drifts in absolute terms, which is not what anybody means by tuning the radio.
 
-The engine does not do that for you. `Engine::set_source_center` re-places
-every receiver with the params it already held, which keeps each one's
+`Engine::set_source_center` rebases every receiver's offset to hold the
+absolute frequency it was tuned to, and removes one whose centre falls outside
+the new span. So this gesture does not have to recompute anything, and must not
+try: a client adjusting offsets on top of the engine's would move every
+receiver twice.
+
+WHAT THESE TWO PARAGRAPHS USED TO SAY, and it is now false. They read that "the
+receivers should hold their absolute frequencies and have their offsets
+recomputed. Any that fall outside the new span have to be parked and said to be
+parked", and then "The engine does not do that for you. `Engine::set_source_center`
+re-places every receiver with the params it already held, which keeps each one's
 baseband offset and so drifts every one of them by the whole retune. That is
 the right default for an engine that is not told what the operator meant, and
 it makes recomputing the offsets this gesture's work rather than something to
-assume has happened.
+assume has happened."
+
+Two things changed. The engine does it, so it is not this gesture's work. And
+an out-of-span receiver is REMOVED rather than parked, which was the owner's
+call on 2026-09-21: parked-and-said-to-be-parked is a state an operator then
+has to tidy up, and what they asked for was a disappearing receiver.
+
+**A SWEEP WILL DROP RECEIVERS, AND NOTHING SAYS SO YET.** Scrolling far enough
+takes the front end past whatever a receiver was tuned to, and that receiver
+goes. The engine is right to remove it and the client empties its pane, but
+neither announces it, so an operator sweeping with a receiver open watches it
+vanish without being told why. A sentence on the pane naming the frequency that
+was dropped is the missing piece.
 
 **A device retune is not free and not instant.** An RTL-SDR takes time to
 settle and the sample stream is discontinuous across it. Measured on 2026-09-21
