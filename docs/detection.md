@@ -1167,6 +1167,39 @@ a band that is nearly all floor, which is the complaint it was built for.
 Telling a station from its own intermod product is a different question and no
 field here answers it.
 
+#### The same reading across the whole corpus
+
+One excerpt is an anecdote. All six, run identically, are four populated lists
+and two empty ones, which is twenty-five detections across two bands and three
+hours of a day when conditions moved hard:
+
+| band, hour | tracks born | live at the end | widths | concentration |
+| --- | --- | --- | --- | --- |
+| 40 m 1359 | 31 | 6 | 5 Hz to 188 Hz | 0.88 down to 0.28 |
+| 40 m 1501 | 3 | 0 | | |
+| 40 m 1603 | 0 | 0 | | |
+| 20 m 1359 | 10 | 3 | 16 Hz to 8.6 kHz | 0.61 down to 0.06 |
+| 20 m 1501 | 23 | 8 | 9 Hz to 11.4 kHz | 0.92 down to 0.06 |
+| 20 m 1603 | 51 | 8 | 10 Hz to 11.7 kHz | 0.92 down to 0.02 |
+
+**No band wider than 1.5 kHz read above 0.39, and no band narrower than 50 Hz
+read below 0.33.** Twenty-five detections, four independent lists, two bands
+and three hours. They overlap by six hundredths, which is why this is a
+consistent reading and not a bar: a separating threshold would need a gap, and
+there is not one.
+
+**Confidence and margin do not do this.** The wide bands run confidence 0.92 to
+1.00 and margin 0.55 to 0.65, so on those two columns they sit among the
+stations exactly as reported. The eleven-kilohertz patch on 20 m at 1603 holds
+confidence 1.00 for the whole minute.
+
+**Two more of the high-and-wide case turned up, which is the prediction
+working.** On 20 m at 1603 a 489 Hz band read 0.82 and a 2.37 kHz band read
+0.39, both far above what their widths would suggest and both out of order in a
+list sorted by width. That is a narrow thing inside a bandwidth that is an
+overestimate, which is what the field's own note says to expect and is a
+detection worth splitting rather than a signal worth doubting.
+
 #### So what a modulation-driven detector can stand on today
 
 - **`spectral_concentration` can carry a decision.** It is scale-free, it is
