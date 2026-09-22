@@ -799,8 +799,25 @@ at 36.6 Hz. A band that narrow cannot have a shape, and `peak_to_mean` is
 pinned near 2.3 by how the window spreads one line whatever produced it. The
 number says something only about bands wide compared with the window.
 
-`lower_fraction` does what it was meant to at the one thing it can see here:
-USB reads 0.453 and LSB 0.547, mirrored about a half in the right directions.
+**WHAT THIS PARAGRAPH USED TO CLAIM ABOUT `lower_fraction`.** It read:
+"`lower_fraction` does what it was meant to at the one thing it can see here:
+USB reads 0.453 and LSB 0.547, mirrored about a half in the right directions."
+
+The mirroring is the reason to doubt it rather than to believe it. Those two
+values mirror about a half to three decimal places, and so do 0.465 and 0.535
+when the same scene runs on a grid four times finer. Two independent
+measurements of two different signals do not agree to three places twice.
+
+What is actually being measured: the scene's SSB emitters are two-tone at 700
+and 1900 Hz, so USB is two lines above the carrier and LSB the same two
+mirrored below, each reported as its own four-bin band. The number reads where
+a line sits inside its own band, and mirrored lines mirror. AM moving from
+0.464 to 0.372 between the two grids is the same instability from the other
+side, a symmetric mode reading as the most asymmetric row in the table.
+
+Nothing in this tree produces the 2.8 kHz asymmetric block a sideband test is
+supposed to read, so the premise is untested rather than refuted.
+`core/detect/shape.h` says so where a reader will meet it.
 
 **`skirt_fraction` rules itself out as an absolute measure in the same table.**
 FSK2 reads 0.432 through a perfectly linear front end, four times what a QPSK
@@ -809,14 +826,14 @@ skirts. What separated was the change, 0.028 to 0.111 on the same emitters when
 the nonlinearity was switched on, so a distortion flag built on this has to
 compare a track with itself over time rather than against a constant.
 
-**`skirt_fraction` moves the other way and says something else.** It is flat
-across both populations and rises on the PARENTS when the front end is
-nonlinear, 0.028 to 0.111. That is spectral regrowth: the band driving the
-nonlinearity is the one that smears into its own neighbourhood. It is per-band
-evidence of distortion, which `core/detect/front_end.h` says the span-wide
-monitor cannot give and which it rejects frequency coincidence as a route to.
-Whether it is strong enough to carry a per-detection flag is the next
-measurement rather than a conclusion.
+**Back on the product scene, it says something the family table cannot.**
+There it is flat across the parents and their products alike and rises on the
+PARENTS when the front end is nonlinear, 0.028 to 0.111. That is spectral
+regrowth: the band driving the nonlinearity is the one that smears into its own
+neighbourhood. It is per-band evidence of distortion, which
+`core/detect/front_end.h` says the span-wide monitor cannot give and which it
+rejects frequency coincidence as a route to. Whether it is strong enough to
+carry a per-detection flag is the next measurement rather than a conclusion.
 
 **WHAT THE SECOND TIER USED TO READ AS WORK TO DO.** The line was: "**From a
 narrowband extract**, for what shape cannot settle: envelope variance, tone
@@ -1411,9 +1428,12 @@ theory-led edit to them is not an improvement.
 
 #### What that does and does not say about the probe receiver
 
-It does not say a probe receiver would fail. Its filter would be the
-channelizer's, which is a designed polyphase bank rather than a hundred taps of
-direct convolution, and a different filter puts the corner somewhere else.
+It does not say a probe receiver would fail. The design section below already
+concluded that tier two has to use a real `DemodStage` rather than the raw tap,
+precisely so the extract is mixed to DC and filtered near the signal's
+bandwidth, and that stage's fine filter is a planned polyphase one rather than
+a hundred taps of direct convolution. A different filter puts the corner
+somewhere else.
 
 It does say **the payoff cannot be assumed, because it was assumed here and the
 measurement refused it.** A narrower extract did not stabilise the family call;
