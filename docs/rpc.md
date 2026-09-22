@@ -682,6 +682,22 @@ is its anchor plus its index over the rate, so an index that did not skip the
 pause would put the rest of the stream a third of a second early and leave it
 there.
 
+**It is not only the retune, and that was found the hard way.** The tuner's gain
+registers sit behind the same I2C repeater, so `setSourceGain` and
+`setSourceGainAuto` stall exactly as `setSourceCenter` did and pay the same
+pause. Only the retune stopped the transfers at first, and an operator whose
+broadcast FM audio sounded overloaded reached for the dongle's own AGC from the
+window and locked it up. Any control transfer to a streaming RTL-SDR goes
+through the same stop now; `RtlSdrSource::with_transfers_paused` is the one
+place it is written.
+
+A receiver survives a retune, and what it hears changes. A receiver is placed in
+the source's BASEBAND frame, so moving the front end drags every receiver with
+it: one at an offset of +100 kHz was hearing 98.2 MHz at a centre of 98.1 and
+hears 435.1 MHz at a centre of 435. Nothing refuses and nothing is dropped.
+Whether that is right is an open question rather than a settled design; see "Not
+done yet".
+
 **WHAT THE TREE USED TO SAY ABOUT THIS REFUSAL, and it is now false.** The
 symptom was first diagnosed as a dongle opened with no centre frequency and left
 at DC. `core/source/rtlsdr_source.cpp` said of that open: **"The tuner is in a
@@ -1179,6 +1195,20 @@ in an application-specific way.
 A client reconnecting starts from whatever the engine currently holds, and an
 engine restarting starts empty. Saved sessions are a client-side or a
 schema-side feature and neither exists.
+
+**A retune drags every receiver with it, and nobody has decided whether it
+should.** Receivers are placed in the source's baseband frame, so a receiver at
+an offset keeps that offset when the front end moves and starts hearing whatever
+now lands there. An operator retuning from broadcast FM to 435 MHz found their
+receiver still making noise, at a frequency they had not chosen.
+
+The alternative is to pin a receiver to the absolute frequency it was tuned to
+and drop it when the front end can no longer reach it, which is what an operator
+expects from a VFO. It needs a decision on what "can no longer reach it" means:
+outside the span entirely, or outside the receiver's own passband, which are
+different by up to half a receiver's width at the edges. Whichever is chosen, the
+drop has to reach a client as something better than a receiver id that stops
+answering.
 
 **A receiver outlives the client that created it, and nothing reaps one whose
 client died.** Receivers belong to the engine rather than to a session, which is
