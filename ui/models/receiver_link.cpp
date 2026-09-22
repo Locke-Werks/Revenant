@@ -594,6 +594,13 @@ void EngineLink::removeReceiver()
     // declared, so dropping the rate above is invisible without this one.
     emit rdsChanged();
 
+    // receiverBookmarked is false the moment there is no receiver, and this
+    // method deliberately does not go through post_receiver_request, which is
+    // where the other half of that signal lives. Without this the row went on
+    // saying "already saved" after the engine dropped the receiver, which was
+    // seen on a real radio retuning from 98.1 to 145 MHz.
+    emit bookmarksChanged();
+
     update_receiver_fit();
 }
 
