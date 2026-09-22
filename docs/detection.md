@@ -1220,10 +1220,84 @@ detection worth splitting rather than a signal worth doubting.
   along.
 
 None of this is an argument against driving detection from modulation. It is
-the measurement of what the current extract supports, and it is the second
-argument for the probe receiver: sized to the signal rather than to the grid,
-the envelope test is being asked about the signal instead of about the channel
-around it.
+the measurement of what the current extract supports.
+
+**WHAT THIS PARAGRAPH USED TO CLAIM, AND THE TEST THAT REFUSED IT.** It ended:
+"and it is the second argument for the probe receiver: sized to the signal
+rather than to the grid, the envelope test is being asked about the signal
+instead of about the channel around it." That was written before it was tried
+and the section below is what happened when it was.
+
+### Narrowing the extract does not rescue the family call
+
+The probe receiver's whole payoff was supposed to be an extract sized to the
+signal. `--characterise-width` already narrows one, so the payoff could be
+measured before anything was built. Four widths, 55 seconds so the sample floor
+never caps the decimation, a stated drift allowance, on 20 m at 1603 UT:
+
+| target | unfiltered | 800 Hz | 300 Hz | 100 Hz |
+| --- | --- | --- | --- | --- |
+| a carrier, 10 Hz | carrier 0.68 | carrier 0.69 | carrier 0.61 | carrier 0.53 |
+| a carrier, 15 Hz | carrier 0.70 | carrier 0.70 | carrier 0.64 | carrier 0.51 |
+| **an empty channel** | **unknown** | **PSK 0.67** | **PSK 0.81** | unknown |
+| a channel reading PSK | PSK 0.86 | unknown | PSK 0.80 | unknown |
+| another reading PSK | PSK 0.86 | PSK 0.70 | PSK 0.77 | unknown |
+
+**The carriers survive it and nothing else does.** Both are named at every
+width, which is the good half. The empty channel is the bad half: it answers
+correctly unfiltered and, narrowed, manufactures a confident PSK call that was
+not there. The two channels that read PSK flip between PSK and unknown with no
+pattern.
+
+**The empty channel is the control and it is genuinely empty**, at
+concentration 0.007, which is as close to nothing as this corpus has.
+
+#### Where the false carrier comes from, and why a sharper filter is worse
+
+Both false calls report **no symbol rate at all**, and both name a carrier just
+past the filter's own cutoff:
+
+| width | cutoff | reported carrier | ratio |
+| --- | --- | --- | --- |
+| 800 Hz | 400 Hz | -422.6 Hz | 1.06 |
+| 300 Hz | 150 Hz | +172.1 Hz | 1.15 |
+
+That is where the transition band of a 101-tap windowed sinc sits, so the
+obvious move was a sharper filter. **It was tried and it made the artefact
+stronger**, which is the finding rather than the fix: at 233 and 621 taps, sized
+to put the transition inside a tenth of the cutoff, both channels went from
+0.67 and 0.81 to **0.94 and 0.94**, and the reported carrier moved from -422.6
+to -410.25, closer in as the transition narrowed.
+
+A sharper edge is a sharper spectral discontinuity. Squaring band-limited noise
+gives a broad triangular spectrum with a corner at the band edge and no line in
+it, and `estimate_modulation_order` compares a peak against a LOCAL baseline,
+which a corner defeats. The tap change was reverted, because the filter was
+made better at filtering and worse at the only job this flag has.
+
+**So the fault is a baseline estimate at a spectral discontinuity, and it lives
+in `core/characterise` rather than in the filter.** That is the same class as
+the OFDM branch below, and it gets the same treatment: written down rather than
+changed, because those constants were each measured against a signal and a
+theory-led edit to them is not an improvement.
+
+#### What that does and does not say about the probe receiver
+
+It does not say a probe receiver would fail. Its filter would be the
+channelizer's, which is a designed polyphase bank rather than a hundred taps of
+direct convolution, and a different filter puts the corner somewhere else.
+
+It does say **the payoff cannot be assumed, because it was assumed here and the
+measurement refused it.** A narrower extract did not stabilise the family call;
+on empty spectrum it made it confidently wrong. Anything built to feed
+`core/characterise` a tighter extract should be able to show, on a channel with
+nothing in it, that the answer stays "unknown". That is now a cheap test and it
+should be run before the seam is built, not after.
+
+And it sharpens the standing conclusion rather than softening it. Two carriers
+were named correctly at every width; everything that was not a carrier moved
+around. The family call is the wrong thing to hang detection on, and narrowing
+the extract is not what fixes it.
 
 ### The OFDM branch still fires on noise, and why that one is not mine to fix
 
