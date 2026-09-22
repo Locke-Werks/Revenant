@@ -985,6 +985,110 @@ With the segment stated from a 5 Hz allowance, the same sweep stops moving:
 The carrier is named at every length and its concentration holds near 0.72
 instead of collapsing from 0.53 to 0.18.
 
+### What the two measurements agree about, and what the family call is worth
+
+The standing direction is that detection should be driven by modulation rather
+than by power. That makes one question worth answering before any of it is
+built: **does the family core/characterise reports carry enough information to
+decide anything?** On real HF the answer is that one of its numbers does and
+the family name does not, and both halves were measured rather than argued.
+
+Everything below is 20 m at 1603 UT, the 1.5 kHz coarse channel as the extract,
+and a segment named from a 5 Hz drift allowance:
+
+    revenant-cli "file:///.../kf4fic_14000_14350_1603_60s.wav" \
+      --characterise <offset> --characterise-seconds 20 --duration 30
+
+#### Where the detector and the characteriser agree
+
+The detector measures a bandwidth from the spectrum and the characteriser
+measures a family from complex baseband. They share no arithmetic, so where
+they agree it is because they are both describing the same signal.
+
+| detector width | centre | characteriser | concentration |
+| --- | --- | --- | --- |
+| 11 Hz | -10.947 kHz | unmodulated carrier | 0.700 |
+| 15 Hz | 2.520 kHz | unmodulated carrier | 0.713 |
+| 11.725 kHz | -35.388 kHz | unknown | 0.039 |
+
+Two detections a few bins wide are called carriers, and the one that fills the
+channel is refused. Nothing told the characteriser what the detector had
+measured.
+
+**The agreement stops at the channel edge.** At 96 kS/s on a 64-channel grid a
+coarse channel is spaced 1.500 kHz and comes out at 3000 S/s, so anything the
+detector measures wider than that does not fit in the extract and the answer is
+about the fragment. The detector's own bandwidth is what says which case you
+are in, and it is already on the same screen.
+
+#### The family call fires on a third of the band
+
+Thirty-one channels at 3 kHz spacing across the whole span, the same settings:
+
+| family | channels | confidence | concentration |
+| --- | --- | --- | --- |
+| unknown | 16 | 0.00 | 0.008 to 0.272 |
+| PSK | 10 | 0.52 to 0.98 | **0.019 to 0.356** |
+| unmodulated carrier | 4 | 0.58 to 0.71 | 0.585 to 0.712 |
+
+**Ten channels called PSK is not ten PSK signals.** Only one of the ten sits
+near anything the detector found. Every one is order 2. Their symbol rates are
+0, 0, 11.11, 104.22, 298.97 and 738.30 baud, with four carrying none at all,
+which is not a population of modes in one band, it is a number with no signal
+under it. Their occupancy runs 1.26 to 1.68 kHz in every case, which is the
+extract's own width rather than any property of a signal.
+
+**Concentration separates on the same sweep.** Four carriers between 0.585 and
+0.712, everything else at 0.356 or below, and nothing at all in the gap
+between. One number orders the band and the other does not.
+
+#### Why, exactly, and it is not a bug
+
+`ModulationOrder`'s own comment has it: squaring a tone gives another tone. A
+carrier lights the M-th power line at exponent 2 the same way BPSK does. What
+separates them is the envelope, and the envelope is the first thing the noise
+takes. Once normalised power variance climbs past
+`constant_envelope_variance`, the unmodulated branch is unreachable and the PSK
+branch is the next one down.
+
+`tests/characterise/test_characterise.cpp` walks one carrier down through noise
+and catches it happening:
+
+| SNR | family | confidence | concentration | power variance |
+| --- | --- | --- | --- | --- |
+| clean | unmodulated carrier | 1.00 | 0.998 | 0.000 |
+| 13 dB | unmodulated carrier | 0.95 | 0.950 | 0.093 |
+| 3 dB | unmodulated carrier | 0.66 | 0.664 | 0.560 |
+| **-3 dB** | **PSK** | **0.98** | 0.333 | 0.885 |
+| -9 dB | PSK | 0.88 | 0.112 | 0.984 |
+
+The flip sits between +3 and -3 dB, and the wrong answer arrives at 0.98 while
+the right answer never got above 0.95. **An operator reading the confidence
+column would trust the wrong row harder**, which is the whole problem in one
+line. Concentration over the same rows is 0.998, 0.950, 0.664, 0.333, 0.112,
+against the 1/(1+N) that S/(S+N) predicts at each step: it is measuring the
+signal-to-noise ratio and it keeps measuring it after the family name has
+stopped meaning anything.
+
+#### So what a modulation-driven detector can stand on today
+
+- **`spectral_concentration` can carry a decision.** It is scale-free, it is
+  monotone in SNR, it degrades instead of flipping, and on this band it
+  separates carriers from everything else with a clear gap.
+- **`family` cannot, on its own.** A PSK call is what this stage says about a
+  weak carrier, and it says it confidently.
+- **`family_confidence` is not a quality measure** and ordering a list by it
+  puts the worst signals at the top.
+- A PSK call carrying no symbol rate, or one implausible for its band, is the
+  shape of the artefact and is the cheapest thing to gate on if a gate is
+  wanted before the probe receiver exists.
+
+None of this is an argument against driving detection from modulation. It is
+the measurement of what the current extract supports, and it is the second
+argument for the probe receiver: sized to the signal rather than to the grid,
+the envelope test is being asked about the signal instead of about the channel
+around it.
+
 ### The OFDM branch still fires on noise, and why that one is not mine to fix
 
 The 40 second cell survives, and it is a different mechanism that the segment

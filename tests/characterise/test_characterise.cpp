@@ -15,7 +15,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <format>
 #include <cstddef>
 #include <cstdint>
 #include <print>
@@ -397,6 +399,97 @@ TEST_CASE("a channel of noise is refused, and the refusal carries the numbers",
     REQUIRE(result->refusal.find("The squared envelope said") != std::string::npos);
     REQUIRE(result->refusal.find("The frequency transition said") != std::string::npos);
     REQUIRE(result->refusal.find("The cyclic prefix search said") != std::string::npos);
+}
+
+// REJECTS: a reader who takes a PSK call at face value, and a future change
+// that makes the family alone drive detection.
+//
+// This is the measured limit, not a bug being reported. Buried far enough in
+// noise an unmodulated carrier is called 2-PSK, with high confidence, and the
+// mechanism is written into ModulationOrder's own comment: squaring a tone
+// gives another tone. A carrier lights the M-th power line at exponent 2
+// exactly the way BPSK does. What separates them is the envelope, and the
+// envelope is what the noise takes away first: at enough noise the normalised
+// power variance climbs past constant_envelope_variance, the unmodulated
+// branch stops being reachable, and the PSK branch is the next one down.
+//
+// It is not theoretical. A 31-point sweep of 20 m at 1603 UT on 2026-09-22
+// called ten channels 2-PSK, at 0.52 to 0.98 confidence, with symbol rates of
+// 0, 11, 104, 298 and 738 baud or none at all, in channels the detector had
+// found nothing in. docs/detection.md has the table.
+//
+// So the case walks a carrier down through the noise and asserts the flip
+// happens, which fixes where it happens rather than leaving it to be
+// rediscovered. The last assertion is the useful half: spectral_concentration
+// falls monotonically across the same sweep, so the number that still carries
+// the answer is the one the family call has stopped carrying.
+TEST_CASE("a carrier buried in noise is called PSK, and concentration still is not",
+          "[characterise]")
+{
+    // Total noise power against a unit-amplitude carrier, so this is 1/SNR.
+    // Chosen to bracket the flip rather than to be round: the first is a
+    // clean carrier and the last is well under what an HF channel gives you.
+    constexpr std::array<double, 5> kNoise{0.0, 0.05, 0.5, 2.0, 8.0};
+
+    std::vector<ModulationFamily> families;
+    std::vector<double> concentrations;
+
+    for (std::size_t i = 0; i < kNoise.size(); ++i) {
+        const double variance = kNoise[i];
+        auto samples = characterise_test::pure_tone(kSamples, kRate, 1200, 1.0);
+        if (variance > 0.0) {
+            const auto noise =
+                characterise_test::gaussian_noise(kSamples, variance, kSeed + i);
+            for (std::size_t n = 0; n < samples.size(); ++n) {
+                samples[n] += noise[n];
+            }
+        }
+
+        const auto result =
+            characterise::characterise(dsp::ConstComplexSpan(samples), config(kRate));
+        REQUIRE(result.has_value());
+
+        std::println("  noise {:.2f} ({}): family {}, confidence {:.2f}, "
+                     "concentration {:.3f}, power variance {:.3f}",
+                     variance,
+                     variance > 0.0 ? std::format("{:.1f} dB SNR", -10.0 * std::log10(variance))
+                                    : std::string("no noise"),
+                     characterise::modulation_family_name(result->family),
+                     result->family_confidence, result->spectral_concentration,
+                     result->envelope.normalised_power_variance);
+
+        families.push_back(result->family);
+        concentrations.push_back(result->spectral_concentration);
+    }
+
+    // The clean carrier is named. Anything else and the rest of this case is
+    // measuring the wrong thing.
+    REQUIRE(families.front() == ModulationFamily::Unmodulated);
+
+    // And somewhere down the sweep it stops being named. THE POINT OF THE
+    // CASE: the same signal, called something else, because the noise took
+    // the envelope rather than because the signal changed.
+    REQUIRE(families.back() != ModulationFamily::Unmodulated);
+
+    // Once it leaves, it does not come back. A family that flickered between
+    // carrier and PSK with falling SNR would be a different defect and would
+    // want a different fix.
+    const auto first_other =
+        std::find_if(families.begin(), families.end(), [](ModulationFamily family) {
+            return family != ModulationFamily::Unmodulated;
+        });
+    REQUIRE(std::none_of(first_other, families.end(), [](ModulationFamily family) {
+        return family == ModulationFamily::Unmodulated;
+    }));
+
+    // The number that still means something. Concentration is S/(S+N) for a
+    // carrier, so it falls with the noise and keeps falling after the family
+    // call has given up: monotone across every step, which a discriminator
+    // needs and a family name does not have.
+    for (std::size_t i = 1; i < concentrations.size(); ++i) {
+        CAPTURE(i, concentrations[i - 1], concentrations[i]);
+        CHECK(concentrations[i] < concentrations[i - 1]);
+    }
 }
 
 // REJECTS: a stage that runs on a buffer too short for its own estimators
