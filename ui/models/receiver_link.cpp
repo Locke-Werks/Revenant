@@ -599,7 +599,7 @@ void EngineLink::removeReceiver()
     // where the other half of that signal lives. Without this the row went on
     // saying "already saved" after the engine dropped the receiver, which was
     // seen on a real radio retuning from 98.1 to 145 MHz.
-    emit bookmarksChanged();
+    note_receiver_bookmarked();
 
     update_receiver_fit();
 }
@@ -639,7 +639,7 @@ void EngineLink::post_receiver_request(bool recreate)
 
     emit receiverChanged();
 
-    // AND THE BOOKMARK LIST, because receiverBookmarked is about the RECEIVER
+    // AND THE BOOKMARK ROW, because receiverBookmarked is about the RECEIVER
     // and a Q_PROPERTY may name only one NOTIFY. It asks whether the pane's
     // receiver is already in the list, so it changes when the receiver moves
     // as well as when the list does, and this is the one place every receiver
@@ -650,7 +650,7 @@ void EngineLink::post_receiver_request(bool recreate)
     // saved", because nothing had told the binding to look again. The property
     // was documented as being emitted here from the day it was written and was
     // not.
-    emit bookmarksChanged();
+    note_receiver_bookmarked();
 
     // Rebuilt for the RECEIVER's sake rather than the request's: the fit
     // line reads both of its numbers off the last status, so a write does

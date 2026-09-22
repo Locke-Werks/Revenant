@@ -164,6 +164,16 @@ bool EngineLink::receiverBookmarked() const
 // Saving and forgetting
 // ---------------------------------------------------------------------------
 
+void EngineLink::note_receiver_bookmarked()
+{
+    const bool now = receiverBookmarked();
+    if (now == receiver_bookmarked_) {
+        return;
+    }
+    receiver_bookmarked_ = now;
+    emit bookmarksChanged();
+}
+
 void EngineLink::saveBookmark(const QString& name)
 {
     if (receiver_id_ == 0) {
@@ -194,6 +204,11 @@ void EngineLink::saveBookmark(const QString& name)
 
     bookmark_fault_.clear();
     emit bookmarkFaultChanged();
+
+    // The cached answer goes with it: saving the receiver's own frequency
+    // makes receiverBookmarked true without the receiver having moved, and a
+    // stale cache would then swallow the next real change.
+    receiver_bookmarked_ = receiverBookmarked();
     emit bookmarksChanged();
 }
 
@@ -204,6 +219,7 @@ void EngineLink::removeBookmark(int index)
     }
     bookmarks_.erase(bookmarks_.begin() + index);
     store_bookmarks();
+    receiver_bookmarked_ = receiverBookmarked();
     emit bookmarksChanged();
 }
 
@@ -214,6 +230,7 @@ void EngineLink::renameBookmark(int index, const QString& name)
     }
     bookmarks_[static_cast<std::size_t>(index)].name = name.trimmed().toStdString();
     store_bookmarks();
+    receiver_bookmarked_ = receiverBookmarked();
     emit bookmarksChanged();
 }
 
@@ -290,7 +307,7 @@ void EngineLink::place_recall(const Bookmark& mark)
         setReceiverPassband(mark.passband_low, mark.passband_high);
     }
 
-    emit bookmarksChanged();
+    note_receiver_bookmarked();
 }
 
 void EngineLink::resolve_pending_recall(bool granted)

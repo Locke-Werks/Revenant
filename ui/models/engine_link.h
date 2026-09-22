@@ -2389,6 +2389,20 @@ private:
     // deliberately outliving the pane; see the property.
     QString receiver_gone_text_;
 
+    // The last answer receiverBookmarked gave, so a receiver move that does
+    // not change it emits nothing. Qt thread only.
+    //
+    // WHY THIS IS NOT PREMATURE. post_receiver_request is reached on every
+    // mouse move of a passband PAN, which is sent immediately where a width
+    // change is held to the end of the gesture, and bookmarksChanged is also
+    // what bookmarkLabels is notified by. Emitting it unconditionally there
+    // would rebuild a QStringList at pointer rate to say nothing, which is the
+    // argument note_receiver_fault already makes about waking the Qt thread.
+    bool receiver_bookmarked_ = false;
+
+    // Recomputes receiverBookmarked and emits only when it moved.
+    void note_receiver_bookmarked();
+
     // What the engine says it is holding, and the sentence derived from it.
     // Qt thread only.
     std::vector<qulonglong> engine_receiver_ids_;
