@@ -358,7 +358,7 @@ instead: The code's minimum distance is 3. Enumerated twice independently over
 
 phrase: a track that has been up for five seconds has had five seconds of evidence
 retired: 2026-09-21
-commit: 0000000
+commit: e40d7b1
 instead: True of the identification that is still design, and read as a
     description of the shipped confidence field sitting beside it, which it is
     not. detector.cpp computes a stopwatch: birth sets confidence_rise and each
@@ -372,7 +372,7 @@ instead: True of the identification that is still design, and read as a
 phrase: From a narrowband extract, for what shape cannot settle: envelope
     variance, tone structure, symbol rate, cyclostationary features
 retired: 2026-09-21
-commit: 0000000
+commit: e40d7b1
 instead: Listed as tier-two work to be done, and all four are written and
     tested in core/characterise, which docs/detection.md never named.
     characterise() answers with a ModulationFamily plus symbol rate, tone
