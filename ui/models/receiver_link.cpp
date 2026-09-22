@@ -632,6 +632,19 @@ void EngineLink::post_receiver_request(bool recreate)
 
     emit receiverChanged();
 
+    // AND THE BOOKMARK LIST, because receiverBookmarked is about the RECEIVER
+    // and a Q_PROPERTY may name only one NOTIFY. It asks whether the pane's
+    // receiver is already in the list, so it changes when the receiver moves
+    // as well as when the list does, and this is the one place every receiver
+    // write funnels through.
+    //
+    // Found live on 2026-09-22 and not by reading: a receiver moved four
+    // hundred kilohertz off a saved mark and the row went on reading "already
+    // saved", because nothing had told the binding to look again. The property
+    // was documented as being emitted here from the day it was written and was
+    // not.
+    emit bookmarksChanged();
+
     // Rebuilt for the RECEIVER's sake rather than the request's: the fit
     // line reads both of its numbers off the last status, so a write does
     // not move it, but a write that creates a receiver moves whether there
