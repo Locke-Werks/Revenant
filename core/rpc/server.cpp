@@ -1765,6 +1765,37 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> setSourceGain(SetSourceGainContext context) override {
+        auto params = context.getParams();
+        const capnp::Text::Reader stage = params.getStage();
+
+        // NOT forget_across_retune, which setSourceCenter calls. Gain changes
+        // how loud the samples are and not what any frequency means, so the
+        // detector's tracks and the decoders' accumulated stations are still
+        // about the signals they were about. Dropping them here would throw
+        // away an operator's RDS text every time they nudged a slider.
+        auto landed = owner_.engine().set_source_gain(
+            std::string_view(stage.begin(), stage.size()), params.getDb());
+        if (!landed) {
+            return to_exception(landed.error());
+        }
+
+        context.getResults().setGrantedDb(*landed);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setSourceGainAuto(SetSourceGainAutoContext context) override {
+        auto params = context.getParams();
+        const capnp::Text::Reader stage = params.getStage();
+
+        if (auto applied = owner_.engine().set_source_gain_auto(
+                std::string_view(stage.begin(), stage.size()), params.getOn());
+            !applied) {
+            return to_exception(applied.error());
+        }
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> sourceCanRetune(SourceCanRetuneContext context) override {
         const engine::SourceTuning tuning = owner_.engine().source_tuning();
         auto results = context.getResults();

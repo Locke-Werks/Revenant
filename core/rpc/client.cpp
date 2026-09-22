@@ -955,6 +955,8 @@ public:
     [[nodiscard]] Expected<SourceStats> source_stats() override;
 
     [[nodiscard]] Expected<std::int64_t> set_source_center(std::int64_t center_hz) override;
+    [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override;
+    [[nodiscard]] Status set_source_gain_auto(std::string_view stage, bool on) override;
     [[nodiscard]] Expected<SourceTuning> source_can_retune() override;
     [[nodiscard]] Status open_source(std::string_view uri) override;
     [[nodiscard]] Status close_source() override;
@@ -1398,6 +1400,32 @@ Expected<std::int64_t> ClientImpl::set_source_center(std::int64_t center_hz) {
         return request.send().then(
             [](auto&& response) { return response.getGrantedHz(); });
     });
+}
+
+Expected<double> ClientImpl::set_source_gain(std::string_view stage, double db) {
+    // The stage is copied into a std::string before the lambda, not captured
+    // as a view. on_loop runs the body on the event loop thread and the
+    // caller's storage is not this call's to rely on by then.
+    return on_loop("set_source_gain", [stage = std::string(stage), db](LoopState& state) {
+        auto request = state.session.setSourceGainRequest();
+        request.setStage(stage);
+        request.setDb(db);
+        return request.send().then([](auto&& response) { return response.getGrantedDb(); });
+    });
+}
+
+Status ClientImpl::set_source_gain_auto(std::string_view stage, bool on) {
+    auto done = on_loop("set_source_gain_auto",
+                        [stage = std::string(stage), on](LoopState& state) {
+                            auto request = state.session.setSourceGainAutoRequest();
+                            request.setStage(stage);
+                            request.setOn(on);
+                            return request.send().then([](auto&&) { return 0; });
+                        });
+    if (!done) {
+        return std::unexpected(done.error());
+    }
+    return {};
 }
 
 Expected<SourceTuning> ClientImpl::source_can_retune() {

@@ -1232,6 +1232,39 @@ TEST_CASE("a refused retune comes back in the source's own words", "[gpu][rpc][m
     CHECK(refused.error().message.find("span_low") != std::string::npos);
 }
 
+TEST_CASE("a refused gain change comes back in the source's own words", "[gpu][rpc][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // A synthetic scene has no gain stage at all: its emitters are generated
+    // at the levels the URI asked for, so there is no amplifier to turn up.
+    // The refusal has to say that rather than "no such stage", which would
+    // read as a client that mistyped a name.
+    auto refused = harness.client().set_source_gain("tuner", 20.0);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find("tuner") != std::string::npos);
+
+    auto refused_auto = harness.client().set_source_gain_auto("tuner", true);
+    REQUIRE_FALSE(refused_auto.has_value());
+    INFO(refused_auto.error().message);
+
+    // AND IT IS NOT A SOURCE CHANGE, which is the claim the schema makes about
+    // this call and the one a client's correlations rest on. A gain change
+    // moves no frequency and starts no new stream, so the epoch every sample
+    // index and every audio chunk is numbered against must not move. The
+    // refusals above make this the weaker half of the case on a synthetic
+    // source; it is asserted anyway, because a wire that bumped the epoch on a
+    // refused call would be worse than one that bumped it on a granted one.
+    auto before = harness.client().info();
+    REQUIRE(before.has_value());
+    auto after = harness.client().info();
+    REQUIRE(after.has_value());
+    CHECK(after->source_epoch == before->source_epoch);
+}
+
 TEST_CASE("a refused retune leaves the engine exactly where it was", "[gpu][rpc][m1]") {
     REVENANT_NEEDS_GPU();
 

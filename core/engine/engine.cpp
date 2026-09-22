@@ -657,6 +657,41 @@ public:
         return *landed;
     }
 
+    [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override {
+        if (source_ == nullptr) {
+            return fail("Engine::set_source_gain before a source is open: there is no front end "
+                        "to set a gain on");
+        }
+
+        // The source's own refusal for the same reason set_source_center takes
+        // the source's: a file says its samples were digitised at whatever gain
+        // the recorder used, and a dongle names the stage it does have. A
+        // message composed here would replace both with a category.
+        //
+        // Nothing in EngineInfo moves. Gain changes what the samples look like
+        // and not what any index or frequency means, so unlike a retune there
+        // is no epoch to bump and no receiver to re-place: a consumer
+        // accumulating state about a transmitter is still hearing the same
+        // transmitter, louder or quieter.
+        auto landed = source_->set_gain(stage, db);
+        if (!landed) {
+            return std::unexpected(with_context(landed.error(), "Engine::set_source_gain"));
+        }
+        return *landed;
+    }
+
+    [[nodiscard]] Status set_source_gain_auto(std::string_view stage, bool on) override {
+        if (source_ == nullptr) {
+            return fail("Engine::set_source_gain_auto before a source is open: there is no front "
+                        "end to hand to an AGC");
+        }
+        auto applied = source_->set_gain_auto(stage, on);
+        if (!applied) {
+            return std::unexpected(with_context(applied.error(), "Engine::set_source_gain_auto"));
+        }
+        return {};
+    }
+
     [[nodiscard]] SourcePacing source_pacing() const override {
         SourcePacing out;
         out.paced_by = config_.pace;

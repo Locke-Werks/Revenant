@@ -2501,4 +2501,50 @@ interface Session {
     # an engine still streaming is a working engine, and a close that gave up
     # half way would leave one that is neither.
     closeSource @19 () -> ();
+
+    # The front end's gain, by the stage's own name, answering with the value
+    # the device took.
+    #
+    # THE STAGE NAMES AND THEIR STEPS COME FROM SourceDescriptor::gainStages,
+    # which listSources already carries. An R820T has one stage with 29
+    # discrete steps, an Airspy has three, and a file has none, so a client
+    # draws the controls the device says it has rather than one gain knob and a
+    # percentage. A request between two steps lands on the nearest, and the
+    # answer is what the tuner took: a slider showing the request rather than
+    # the grant is a slider showing a gain the device never held.
+    #
+    # WHY IT EXISTS AS A CALL RATHER THAN A URI PARAMETER. Gain was settled
+    # when the source was opened and could not be changed after, so an operator
+    # whose audio was overloading had to close the source and reopen it to try
+    # a different value, which costs every receiver and the waterfall history.
+    # Same argument setSourceCenter was added on.
+    #
+    # ON AN RTL-SDR THIS STOPS THE TRANSFERS BRIEFLY, for the reason the
+    # retune section of docs/rpc.md documents at length: the gain registers sit
+    # behind the same I2C repeater the tuner does, and the platform stalls a
+    # control transfer to a dongle that has been streaming for more than about
+    # half a second. So a gain change costs the same third of a second of
+    # samples a retune does, reported the same way, through
+    # SourceStats::samplesLost and the block's own gap. It is not a source
+    # change: sourceEpoch does not move and no receiver is disturbed.
+    #
+    # Refused in the SOURCE's own words on a source with no such stage and on
+    # a stage name the device does not carry, because their sentence names what
+    # the device does have.
+    setSourceGain @20 (stage :Text, db :Float64) -> (grantedDb :Float64);
+
+    # Hands the stage to the device's own AGC, or takes it back.
+    #
+    # A CHOICE TO OFFER AND NOT THE SENSIBLE SETTING.
+    # SourceDescriptor::gainStages says through hasAuto whether the device will
+    # do it at all; whether it should is the operator's and depends on their
+    # antenna. Measured on an RTL-SDR v3 at 95.1 MHz in a suburban FM
+    # environment, README.md has it: the tuner's AGC made the wideband detector
+    # report three intermodulation products as real tracks at confidence 1.00,
+    # and a fixed 20 dB removed all three and improved the station's measured
+    # SNR by 5.7 dB.
+    #
+    # Costs the same brief stop in the transfers setSourceGain does, on the
+    # same hardware and for the same reason.
+    setSourceGainAuto @21 (stage :Text, on :Bool) -> ();
 }

@@ -145,6 +145,26 @@ public:
     // grey the control out rather than offering one that always refuses.
     [[nodiscard]] virtual Expected<std::int64_t> set_source_center(std::int64_t center_hz) = 0;
 
+    // The front end's gain, by the stage's own name, answering with what the
+    // device took.
+    //
+    // The names, their ranges, their discrete steps and whether each one has
+    // an AGC all come from SourceDescriptor::gain_stages, which list_sources
+    // carries. Draw the controls the device says it has: an R820T reports one
+    // stage with 29 steps, and a slider that showed the request rather than
+    // this answer would show a gain the tuner never held.
+    //
+    // ON AN RTL-SDR THIS COSTS A THIRD OF A SECOND OF SAMPLES, because the
+    // gain registers sit behind the same I2C repeater the tuner does and the
+    // transfers have to stop for it. Reported the same way a retune's gap is,
+    // and it is not a source change: the epoch does not move.
+    [[nodiscard]] virtual Expected<double> set_source_gain(std::string_view stage,
+                                                           double db) = 0;
+
+    // Hands the stage to the device's own AGC, or takes it back. Only offer it
+    // where GainStage::has_auto says the device will do it.
+    [[nodiscard]] virtual Status set_source_gain_auto(std::string_view stage, bool on) = 0;
+
     // Whether the call above will work, and over what range.
     //
     // The range is an ENVELOPE and not a promise: a device with a gap in

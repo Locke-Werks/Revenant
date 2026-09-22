@@ -1193,6 +1193,42 @@ public:
     // here would replace advice with a category.
     [[nodiscard]] virtual Expected<dsp::Hertz> set_source_center(dsp::Hertz center) = 0;
 
+    // The front end's gain, by the stage's own name, answering with the value
+    // the device took.
+    //
+    // NOT A PERCENTAGE AND NOT ONE NUMBER, for the reason
+    // source::GainStage exists: an R820T has a single stage with 29 discrete
+    // steps, an Airspy has three, and a file has none. The stages are already
+    // readable through source_capabilities(), including each one's steps and
+    // whether the device will drive it itself, so this takes the name from
+    // there rather than offering a control the device does not have. A request
+    // between two steps lands on the nearest, which is why this answers with a
+    // number instead of a status: a slider over a stepped stage that showed the
+    // request would be showing a gain the tuner never held.
+    //
+    // NOTHING NEW CROSSES THE BUS, so the promise at the top of this file is
+    // untouched. This is control plane, shaped like set_source_center above,
+    // and it was added for the same reason: the gain was fixed at open time, so
+    // an operator whose audio was overloading had to close the source and
+    // reopen it to try a different one.
+    //
+    // Refused in the SOURCE's own words on a source with no such stage, which
+    // is every file and every synthetic scene, and on a stage name the device
+    // does not carry. Their sentence names what the device does have.
+    [[nodiscard]] virtual Expected<double> set_source_gain(std::string_view stage,
+                                                           double db) = 0;
+
+    // Hands the stage to the device's own AGC, or takes it back.
+    //
+    // A CHOICE TO OFFER RATHER THAN THE SENSIBLE SETTING. README.md carries
+    // the measurement: on an RTL-SDR v3 at 95.1 MHz in a suburban FM
+    // environment the tuner's AGC made the wideband detector report three
+    // intermodulation products as real tracks at confidence 1.00, and a fixed
+    // 20 dB removed all three and improved the measured SNR of the station by
+    // 5.7 dB. GainStage::has_auto says whether the device will do it at all;
+    // whether it should is the operator's call and depends on their antenna.
+    [[nodiscard]] virtual Status set_source_gain_auto(std::string_view stage, bool on) = 0;
+
     // How fast capture is arriving against the wall clock, and what was
     // asked for. See SourcePacing: the pair is what separates a source that
     // cannot keep up from one that was deliberately throttled.
