@@ -322,6 +322,173 @@ constexpr double kDenseSceneNoiseDbfs = -70.0;
     return spec;
 }
 
+// ---- the product scene, which is about DISCRETE products -----------------
+
+// Three narrow modulated parents whose third-order products land as separate
+// bumps in clear space, which is the case neither scene above can produce.
+//
+// WHY A THIRD SCENE. The two above fail this job in opposite directions, and
+// both failures were measured rather than predicted.
+//
+// The two-tone scene makes products that are themselves pure carriers, so no
+// measurement of SHAPE can tell them from a real signal and none should be
+// asked to; that scene separates on provenance.
+//
+// The dense scene makes products that are a pedestal. Measured 2026-09-22, its
+// eight 30 kHz stations through the cubic produced ZERO false detections at
+// every thermal floor from -70 to -115 dBFS, with the stations reading 504
+// candidates at 46.13 dB and 25610 Hz identically at all four. Forty-five
+// decibels of thermal noise moving nothing to the hertz is the finding: the
+// floor being measured against there is the products' own pedestal, which the
+// floor estimator tracks. Eight parents make 56 products of the form 2fi-fj
+// and 168 of fi+fj-fk, each three times a parent wide, on a 600 kHz span.
+// There is no gap left to detect into.
+//
+// Three parents make nine products. That is the whole design.
+//
+// WHY ROOT RAISED COSINE IS THE DECIDING PROPERTY, and not "QPSK is
+// noise-like". An RRC spectrum is exactly zero outside (1 + rolloff) times the
+// symbol rate, so the convolution of three of them is exactly zero outside
+// three times that. The products have hard edges and there is genuinely
+// nothing between them but thermal noise. An Nfm or Fsk2 parent has no such
+// guarantee: core/detect/detector.h records a 16 kHz NFM comb going from five
+// track ids to seven because growth crosses a Bessel comb's nulls, and tails
+// like that are what turn nine products back into a pedestal.
+constexpr double kProductSymbolRate = 3'000.0;
+constexpr double kProductRolloff = 0.35;
+
+// (1 + rolloff) * symbol_rate, which is what occupied_extent computes for a
+// PSK emitter. A product is three of these.
+constexpr dsp::Hertz kProductParentBandwidth = 4'050;
+constexpr dsp::Hertz kProductBandwidth = 3 * kProductParentBandwidth;
+
+// THE SPACING IS A RATIO AND NOT A ROUND NUMBER. With parents at f1, f1 + 2u
+// and f1 + 5u, the nine products land at f1 + {-5, -3, -2, 2, 3, 4, 7, 8, 10}u
+// and the three parents at {0, 2, 5}u: twelve distinct positions, minimum gap
+// one u. Equal spacing is the trap, because then 2*f2 - f1 lands exactly on
+// f3 and a product hides inside a parent.
+constexpr dsp::Hertz kProductUnit = 34'000;
+
+// Offset so the pattern is not mirror-symmetric about DC. A conjugation fault
+// anywhere in the fixture would be invisible in a spectrum that mirrors
+// itself, and this costs nothing to rule out.
+constexpr dsp::Hertz kProductParentOne = -88'000;
+constexpr dsp::Hertz kProductParentTwo = kProductParentOne + 2 * kProductUnit;   // -20'000
+constexpr dsp::Hertz kProductParentThree = kProductParentOne + 5 * kProductUnit; // +82'000
+
+// Every third-order product of three parents, in the order they sit on the
+// span. Six of the form 2fi - fj and three of fi + fj - fk.
+//
+// The three mixed products are 3 dB stronger than the six others, and that is
+// arithmetic rather than a measurement: expanding |x|^2 x, a term at 2f1 - f2
+// arises one way and a term at f1 + f2 - f3 arises two, so the amplitude is
+// doubled and the power quadrupled against twice.
+constexpr dsp::Hertz kProducts[] = {
+    2 * kProductParentOne - kProductParentThree,                        // -258'000
+    kProductParentOne + kProductParentTwo - kProductParentThree,        // -190'000
+    2 * kProductParentOne - kProductParentTwo,                          // -156'000
+    2 * kProductParentTwo - kProductParentThree,                        // -122'000
+    kProductParentOne + kProductParentThree - kProductParentTwo,        //  +14'000
+    2 * kProductParentTwo - kProductParentOne,                          //  +48'000
+    kProductParentTwo + kProductParentThree - kProductParentOne,        // +150'000
+    2 * kProductParentThree - kProductParentTwo,                        // +184'000
+    2 * kProductParentThree - kProductParentOne,                        // +252'000
+};
+
+// RMS per parent, the same number the tone scene uses, deliberately, so the
+// two sit in the same validated regime.
+//
+// BOUNDED BOTH WAYS AND NEITHER BOUND IS SLACK. Product power goes as the
+// sixth power of amplitude, so 0.20 costs seven decibels of product and puts
+// the weaker six under the detection threshold. Upward, three parents at this
+// level give a composite sigma of 0.433, near the 0.45 the fold-over argument
+// above was written against, and a3 |x|^2 reaches about 0.42 at the loudest
+// point in a five second record. The fold is at 0.389.
+constexpr double kProductAmplitude = 0.25;
+
+// Low enough that the products clear the threshold by eighteen decibels and
+// high enough that the parents' window leakage stays thirty-two decibels under
+// the floor.
+//
+// THE LEAKAGE WALL IS AT -82 dBFS HERE AND MUST NOT BE APPROACHED. The note on
+// the tone scene above has the mechanism: the analysis window's sidelobes are
+// 92 dB down, so a band whose strongest bin sits 92 dB over the per-bin floor
+// leaks across the whole span at the floor and the detector reports tracks
+// everywhere, including at every product frequency, which would make this
+// scene pass for entirely the wrong reason.
+//
+// A modulated parent spreads its power over its own bandwidth rather than one
+// bin, which buys 10*log10(4050 / 36.62) = 20.4 dB against that wall and is
+// why this scene can run 5 dB quieter than the tone scene. At -50 dBFS the
+// parents sit 59.7 dB over the per-bin floor with 32 dB of budget unspent.
+// Do not take this below -65.
+constexpr double kProductSceneNoiseDbfs = -50.0;
+
+// Long enough for the one second average to fill, for birth_hits consecutive
+// decisions, and for three passes of the 1.365 s payload cycle.
+constexpr double kProductSceneSeconds = 8.0;
+
+[[nodiscard]] siggen::ModulatorSpec product_parent_at(dsp::Hertz offset, std::uint64_t seed)
+{
+    siggen::ModulatorSpec spec;
+    spec.kind = siggen::Modulation::Qpsk;
+    spec.common.rate = kSceneRate;
+    spec.common.carrier_offset = offset;
+    spec.common.amplitude = kProductAmplitude;
+    spec.common.seed = seed;
+    spec.psk.symbol_rate = kProductSymbolRate;
+    spec.psk.rolloff = kProductRolloff;
+    spec.psk.symbol_count = 4096;
+    return spec;
+}
+
+[[nodiscard]] siggen::SceneSpec product_scene(double noise_dbfs = kProductSceneNoiseDbfs)
+{
+    siggen::SceneSpec spec;
+    spec.rate = kSceneRate;
+    spec.center_hz = 98'100'000;
+    spec.duration_samples = static_cast<dsp::SampleIndex>(
+        std::llround(kProductSceneSeconds * static_cast<double>(kSceneRate)));
+    spec.seed = 8080;
+    spec.noise_power_full_band_dbfs = noise_dbfs;
+
+    std::uint64_t seed = 400;
+    for (const dsp::Hertz offset :
+         {kProductParentOne, kProductParentTwo, kProductParentThree}) {
+        siggen::EmitterPlacement placement;
+        placement.modulator = product_parent_at(offset, seed++);
+
+        // By amplitude and not by SNR, because the fold-over bound is a
+        // statement about the composite envelope and an SNR-derived level
+        // would move with the noise floor and drag that margin with it.
+        placement.use_snr = false;
+        placement.start_sample = 0;
+        placement.end_sample = spec.duration_samples;
+        spec.emitters.push_back(placement);
+    }
+    return spec;
+}
+
+// The cubic alone, with NO gain swing, which is not an omission.
+//
+// A swing is what the monitor's cases need and is exactly wrong here. Eight
+// decibels of parent swing is twenty-four decibels of product swing under the
+// three-for-one law, whose peak rate at the five second period is about
+// 7.5 dB/s. detector.h's residual rule withholds a band falling faster than
+// 3.26 dB/s at the shipped average, and its own measured table has a 25 dB
+// depth at 6.0 dB/s starved for 5.72 s against a 3.0 s hold, which loses the
+// track. Every product would be withheld on every downswing and this scene
+// would report nothing at all.
+[[nodiscard]] test::FrontEndModel product_front_end()
+{
+    return test::FrontEndModel{
+        .gain = 1.0,
+        .swing_db = 0.0,
+        .swing_period_seconds = 0.0,
+        .third_order = kThirdOrder,
+    };
+}
+
 // The gain swing, which is the tuner AGC hunting.
 //
 // THE PERIOD IS SET BY THE DETECTOR AND NOT BY TASTE. The monitor reads the
@@ -684,6 +851,72 @@ TEST_CASE("a crowded but linear band does not raise the flag", "[frontend][scene
                       << run.observation.drive_spread_db << " dB");
     CHECK(run.observation.verdict != detect::FrontEndVerdict::FloorFollowsSignal);
     CHECK(run.observation.verdict != detect::FrontEndVerdict::SpanScales);
+}
+
+// ---- discrete products, which is the case shape work needs ---------------
+
+// THE SCENE THIS TREE DID NOT HAVE. Three narrow modulated parents through a
+// cubic put nine separate product bands on the span, each one a thing the
+// detector reports as a signal and each one not a signal.
+//
+// That is the on-air failure of 2026-09-20 reproduced without a radio: three
+// intermodulation products listed as real tracks at 95.1 MHz, at confidence
+// 1.00, indistinguishable from stations. Neither scene above reproduces it.
+// The two-tone products are carriers, and the dense scene's are a pedestal the
+// floor estimator absorbs.
+TEST_CASE("three modulated parents through a cubic put nine products on the span",
+          "[frontend][scene]")
+{
+    const SceneRun run = run_scene(product_scene(), product_front_end());
+    REQUIRE(run.decisions > 0);
+
+    std::size_t found = 0;
+    for (const dsp::Hertz product : kProducts) {
+        const dsp::Hertz absolute = 98'100'000 + product;
+        const bool here = covered(run, absolute);
+        INFO("product at " << product << " Hz offset");
+        CHECK(here);
+        found += here ? 1 : 0;
+    }
+    INFO(found << " of 9 products carried a track");
+
+    // The parents are still there too. A scene that lost them would be
+    // measuring something other than intermodulation.
+    CHECK(covered(run, 98'100'000 + kProductParentOne));
+    CHECK(covered(run, 98'100'000 + kProductParentTwo));
+    CHECK(covered(run, 98'100'000 + kProductParentThree));
+}
+
+// THE CONTROL THAT MAKES THE CASE ABOVE MEAN ANYTHING, and the one the tone
+// scene's history says is mandatory. The identical scene at the identical
+// noise floor with a linear front end has to be empty at every product
+// frequency.
+//
+// Without it the case above passes for a reason that has nothing to do with
+// the front end: if the parents are loud enough, the analysis window's own
+// sidelobes lift the whole span over the floor and the detector reports tracks
+// everywhere, including at all nine products. That is exactly what happened to
+// the two-tone scene at -70 dBFS, where the linear control published nineteen
+// tracks.
+TEST_CASE("a linear front end puts nothing where the nine products would be",
+          "[frontend][scene]")
+{
+    const SceneRun run = run_scene(product_scene(), test::FrontEndModel{});
+    REQUIRE(run.decisions > 0);
+
+    for (const dsp::Hertz product : kProducts) {
+        const dsp::Hertz absolute = 98'100'000 + product;
+        INFO("product at " << product << " Hz offset");
+        CHECK_FALSE(covered(run, absolute));
+    }
+
+    // And the parents are found, so the emptiness above is the absence of
+    // products rather than a detector that found nothing at all. That is the
+    // trap the stopped-emitter case in test_detector_scene.cpp names: every
+    // upper bound passes vacuously on a detector that is not working.
+    CHECK(covered(run, 98'100'000 + kProductParentOne));
+    CHECK(covered(run, 98'100'000 + kProductParentTwo));
+    CHECK(covered(run, 98'100'000 + kProductParentThree));
 }
 
 // ---- does shape separate a station from a product? ------------------------
