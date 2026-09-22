@@ -341,8 +341,7 @@ phrase: minimum distance 5, so some weight-3 error patterns are a weight-2
     pattern plus a valid codeword
 phrase: the RDS checkword has minimum distance 5
 retired: 2026-09-21
-commit: pending, the same change that carries the enumeration in
-    tests/decode/test_rds_groups.cpp
+commit: 30b2ded
 instead: The code's minimum distance is 3. Enumerated twice independently over
     all 65535 non-zero codewords of g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3
     + 1: seven codewords of weight 3, three of weight 4, forty-five of weight
