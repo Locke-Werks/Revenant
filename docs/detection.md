@@ -1348,7 +1348,7 @@ arrangement: nothing on the engine knows about it, no field carries it, and the
 gap is an argument because no measurement has chosen one. A number chosen in
 the CLI would be a classification smuggled in as a layout.
 
-40 m at 1359 UT, grouping at 500 Hz:
+40 m at 1359 UT, grouping at 300 Hz:
 
     #45   merged       13.238 kHz         5 Hz     11.7 dB   0.88  0.81  0.88
     #1    live         13.249 kHz        29 Hz     22.3 dB   1.00  0.97  0.41
@@ -1359,8 +1359,8 @@ five-hertz neighbour eleven hertz below it. Read one row at a time neither
 points at the other.
 
 **The ages are the first thing to read and they are why this one is not a
-structure.** The anchor has been there forty-two seconds and its neighbour
-eight, so what the group shows is a stable carrier with something transient
+structure.** The anchor has been there 41.6 seconds and its neighbour 6.8, so
+what the group shows is a stable carrier with something transient
 beside it rather than a carrier and a sideband. A real pair would have aged
 together. That reading is available in the line itself, which is the whole
 reason the age is in it.
