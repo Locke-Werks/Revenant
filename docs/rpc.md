@@ -1196,19 +1196,18 @@ A client reconnecting starts from whatever the engine currently holds, and an
 engine restarting starts empty. Saved sessions are a client-side or a
 schema-side feature and neither exists.
 
-**A retune drags every receiver with it, and nobody has decided whether it
-should.** Receivers are placed in the source's baseband frame, so a receiver at
-an offset keeps that offset when the front end moves and starts hearing whatever
-now lands there. An operator retuning from broadcast FM to 435 MHz found their
-receiver still making noise, at a frequency they had not chosen.
+**WHAT THIS ENTRY USED TO SAY, and it was answered the same day it was
+written.** It read "A retune drags every receiver with it, and nobody has
+decided whether it should", and set out the alternative and the decision it
+needed: whether "can no longer reach it" means outside the span or outside the
+receiver's own passband.
 
-The alternative is to pin a receiver to the absolute frequency it was tuned to
-and drop it when the front end can no longer reach it, which is what an operator
-expects from a VFO. It needs a decision on what "can no longer reach it" means:
-outside the span entirely, or outside the receiver's own passband, which are
-different by up to half a receiver's width at the edges. Whichever is chosen, the
-drop has to reach a client as something better than a receiver id that stops
-answering.
+Decided and shipped. A retune rebases every receiver to hold the absolute
+frequency it was tuned to, and one whose CENTRE falls outside the new span is
+removed. The centre and not the passband, because the centre is the frequency
+somebody typed or clicked. A client finds out the way it finds out about any
+receiver that has gone, so check `vrxIds` after a retune rather than assuming
+the set is unchanged.
 
 **A receiver outlives the client that created it, and nothing reaps one whose
 client died.** Receivers belong to the engine rather than to a session, which is
