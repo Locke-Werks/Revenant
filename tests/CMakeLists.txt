@@ -79,7 +79,14 @@ if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
                 --characterise 0
                 --duration 0.1
     )
-    set_tests_properties(cli_characterise_zero PROPERTIES LABELS "tools" TIMEOUT 120)
+    # The exit code alone would pass on a build that accepted the argument and
+    # then did nothing with it, so the assertion is that the stage was reached.
+    # A tenth of a second does not collect the 16384 samples it needs, and
+    # saying so IS reaching it.
+    set_tests_properties(cli_characterise_zero PROPERTIES
+        LABELS "tools"
+        TIMEOUT 120
+        PASS_REGULAR_EXPRESSION "characterise +[0-9]+ samples collected")
 
     # REJECTS a grouping that crashes or refuses on an ordinary run. It is a
     # display arrangement over the track table, so what it draws is checked by
@@ -92,7 +99,16 @@ if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
                 --detect --detect-groups 50k
                 --duration 2
     )
-    set_tests_properties(cli_detect_groups PROPERTIES LABELS "tools" TIMEOUT 180)
+    # Same argument: an exit code cannot tell an option that ran from one that
+    # was parsed and dropped, which is exactly the defect cli_characterise_zero
+    # above exists for. The grouping always says something, either a group or
+    # that there was no pair close enough, so either is the proof it ran. Which
+    # one appears depends on the track population at the instant the table is
+    # sampled and is not something to assert on.
+    set_tests_properties(cli_detect_groups PROPERTIES
+        LABELS "tools"
+        TIMEOUT 180
+        PASS_REGULAR_EXPRESSION "lines across|no two tracks within")
 endif()
 
 # The prose ratchet: no retired claim has come back anywhere in the tree.
