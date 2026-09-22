@@ -58,6 +58,30 @@ if(REVENANT_BUILD_TOOLS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists
     add_subdirectory(tools)
 endif()
 
+# REJECTS: a CLI that treats a frequency of zero as no frequency at all.
+#
+# --characterise carried its request in the value itself, so asking about DC
+# fell through the "nothing to do" gate and exited 2 as though the whole
+# command line were malformed. On a file source EngineInfo::source_center is
+# zero, which makes an offset of zero the middle of the span and exactly where
+# a strong carrier or an LO artefact sits, so this is the ordinary case rather
+# than a corner of one.
+#
+# It drives the built binary because the defect is in argument parsing that
+# lives in the executable and nothing links against it. A synthetic source and
+# a tenth of a second keep it to the parse and the first frame; it still wants
+# a GPU, like the rest of the suite around it.
+if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
+    add_test(
+        NAME cli_characterise_zero
+        COMMAND revenant-cli
+                "synthetic:wideband?rate=2400000&emitters=8&seed=4242"
+                --characterise 0
+                --duration 0.1
+    )
+    set_tests_properties(cli_characterise_zero PROPERTIES LABELS "tools" TIMEOUT 120)
+endif()
+
 # The prose ratchet: no retired claim has come back anywhere in the tree.
 #
 # It is registered here so an ordinary `ctest --preset ci` catches a stale

@@ -457,9 +457,17 @@ struct Options {
     // frequency on purpose; see the flag's help text.
     std::uint32_t detect_split_gap = 0;
 
-    // Absolute hertz to characterise, or zero for not asked. A raw receiver is
-    // placed there and its complex baseband is handed to core/characterise.
+    // Absolute hertz to characterise. A raw receiver is placed there and its
+    // complex baseband is handed to core/characterise.
+    //
+    // ZERO IS A FREQUENCY AND NOT A SENTINEL. On a file source
+    // EngineInfo::source_center is zero, so an offset of zero is the middle of
+    // the span, which is exactly where a strong carrier or an LO artefact
+    // sits. Asking about it used to reach "nothing to do" and exit 2, which
+    // reads as the whole invocation being malformed rather than as one
+    // argument being ignored. Whether it was asked lives in its own flag.
     Hertz characterise_hz = 0;
+    bool characterise_asked = false;
 
     // Width to filter the extract to before characterising, or zero to hand
     // over the whole coarse channel.
@@ -768,6 +776,7 @@ void print_usage()
                 return std::unexpected(hz.error());
             }
             options.characterise_hz = *hz;
+            options.characterise_asked = true;
             continue;
         }
 
@@ -3297,7 +3306,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // centre. The raw tap is not mixed, so this is what has to come off the
     // extract to put the signal at DC.
     double characterise_residual_hz = 0.0;
-    if (options.characterise_hz != 0) {
+    if (options.characterise_asked) {
         engine::VrxParams params;
         params.center = options.characterise_hz - eng.info().source_center;
         params.demod = engine::Demod::Raw;
@@ -3861,7 +3870,7 @@ int main(int argc, char** argv)
     // the first two watch the whole span and need no receiver at all, and
     // the third brings its own.
     if (options->receivers.empty() && options->rds.empty() && !options->spectrum &&
-        !options->detect && options->characterise_hz == 0) {
+        !options->detect && !options->characterise_asked) {
         std::println(stderr,
                      "revenant-cli: nothing to do. Add a receiver with --vrx, such as "
                      "--vrx 162.550M:nfm:16k, watch the span with --spectrum, look for "
