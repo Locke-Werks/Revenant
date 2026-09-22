@@ -688,6 +688,54 @@ over time. That separates the broad families, and often finishes the job: a
 2.8 kHz asymmetric block with no carrier is SSB, known from the same frames
 that found it.
 
+### What the first tier measures today, and what it turned out to separate
+
+`core/detect/shape.h` measures three of those on every candidate:
+`peak_to_mean`, `lower_fraction` and `skirt_fraction`. Nothing thresholds on
+any of them, and the reason is a measurement rather than caution.
+
+The scene it was measured against is new and had to be built first.
+`tests/detect/test_front_end.cpp` has three now. The two-tone scene's products
+are themselves carriers, so shape cannot tell them from a real signal. The
+dense scene's are a pedestal the floor estimator absorbs, which produced zero
+false detections at any thermal floor from -70 to -115 dBFS. The product scene
+is three narrow QPSK parents whose nine third-order products land discretely in
+clear space, which is the on-air failure of 2026-09-20 reproduced without a
+radio.
+
+Measured against it on 2026-09-22:
+
+| | candidates | peak/mean | skirt | SNR |
+| --- | --- | --- | --- | --- |
+| parent | 263 | 1.607 | 0.111 | 48.1 dB |
+| product | 567 | 2.473 | 0.009 | 24.3 dB |
+| elsewhere | 304 | 1.863 | 0.091 | 13.9 dB |
+| parent, linear front end | 189 | 1.608 | 0.028 | |
+
+**`peak_to_mean` separates a product from a parent, and it is measuring the
+signal rather than the radio.** A parent reads 1.607 through the cubic and
+1.608 without it, identical to three places, while a product reads 2.473. That
+is structural: a root raised cosine spectrum is flat topped and a third-order
+product is the convolution of three of them, which is domed. It is not an
+artefact of level, because the ordering is not monotone in SNR: the weakest
+population reads below the products.
+
+**It is not an interference test.** What it separates is flat topped from
+domed, which is spectral shape class, which is what this section promises tier
+one will give. An unmodulated carrier is the most domed thing on any span, so a
+rule calling domed bands products would call every carrier one. Three QPSK
+parents cannot settle a threshold that has to hold for AM, FM, SSB and CW, and
+the remaining work on this tier is scenes carrying those.
+
+**`skirt_fraction` moves the other way and says something else.** It is flat
+across both populations and rises on the PARENTS when the front end is
+nonlinear, 0.028 to 0.111. That is spectral regrowth: the band driving the
+nonlinearity is the one that smears into its own neighbourhood. It is per-band
+evidence of distortion, which `core/detect/front_end.h` says the span-wide
+monitor cannot give and which it rejects frequency coincidence as a route to.
+Whether it is strong enough to carry a per-detection flag is the next
+measurement rather than a conclusion.
+
 **WHAT THE SECOND TIER USED TO READ AS WORK TO DO.** The line was: "**From a
 narrowband extract**, for what shape cannot settle: envelope variance, tone
 structure, symbol rate, cyclostationary features."
