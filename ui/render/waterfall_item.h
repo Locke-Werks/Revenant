@@ -152,7 +152,7 @@ protected:
     void hoverLeaveEvent(QHoverEvent* event) override;
 
     // Scrolling walks the SOURCE's centre along, exactly as it does over the
-    // spectrum. See take_scroll_tune in render/spectrum_item.h.
+    // spectrum, and into the same accumulator: see EngineLink::takeScrollTune.
     //
     // Vertical scroll over this display has a second meaning waiting to be
     // written: docs/ui-spectrum.md wants it scrubbing through a recording. The
@@ -194,11 +194,6 @@ private:
 
     void placeLabels();
     void setHovered(std::uint64_t id);
-
-    // The coalescing interval came due, and arming it. The same pair as on
-    // SpectrumItem and for the same reason.
-    void flushScrollTune();
-    void armScrollFlush(double wait_ms);
 
     // The newest row, which is the top of the display. The cursor decrements,
     // so it points one past the newest.
@@ -251,13 +246,6 @@ private:
     std::uint64_t selected_detection_ = 0;
     std::uint64_t hovered_detection_ = 0;
     ClickCycle click_cycle_;
-
-    // Its own accumulator and clock, not the spectrum item's, for the reason
-    // ClickCycle is per item: each display has its own pointer. What the two
-    // cannot share is discussed on ScrollTuneState in models/scroll_tune.h.
-    ScrollTuneState scroll_tune_;
-    QElapsedTimer scroll_clock_;
-    QTimer scroll_flush_;
 
     // One strip per labelled box rather than one strip for the display,
     // because down here a label belongs to the top edge of its rectangle and

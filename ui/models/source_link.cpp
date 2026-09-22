@@ -126,6 +126,66 @@ void EngineLink::tuneSourceHz(double hertz)
     emit sourceTuningChanged();
 }
 
+// ---------------------------------------------------------------------------
+// The wheel, coalesced for the whole window
+// ---------------------------------------------------------------------------
+
+void EngineLink::takeScrollTune(double angle_delta_eighths)
+{
+    // GATED ON sourceCanRetune HERE, so neither item repeats it. A file and a
+    // synthetic scene refuse a retune in their own words and the property says
+    // so once per connection, so the wheel does nothing on those rather than
+    // posting a request that always fails and writing a fault line the
+    // operator did not ask a question to get.
+    //
+    // The accumulator is cleared at the same time: wheel banked against a
+    // recording must not fire at the first dongle opened after it.
+    if (!source_can_retune_) {
+        scroll_tune_ = ScrollTuneState{};
+        arm_scroll_flush(0.0);
+        return;
+    }
+
+    ScrollTuneRequest request;
+    request.angle_delta_eighths = angle_delta_eighths;
+
+    // The span the displays are actually drawing, which is the pair the axis
+    // and every overlay are placed from. The step per notch is a fraction of
+    // what is on screen, so it has to come off the same two numbers or a notch
+    // would mean something other than what it looks like it means.
+    request.span_hz = spanHighHz() - spanLowHz();
+
+    // Where the radio landed and not where it was last asked to go. A device
+    // with a tuning step rounds, so adding the step to the request would
+    // accumulate the rounding error over a sweep.
+    request.center_hz = sourceCenterHz();
+
+    request.tune_low_hz = static_cast<double>(source_tune_low_);
+    request.tune_high_hz = static_cast<double>(source_tune_high_);
+    request.now_ms = static_cast<double>(scroll_clock_.elapsed());
+
+    const ScrollTunePlan plan = plan_scroll_tune(scroll_tune_, request);
+    scroll_tune_ = plan.state;
+    if (plan.tune) {
+        tuneSourceHz(plan.center_hz);
+    }
+    arm_scroll_flush(plan.wait_ms);
+}
+
+void EngineLink::flush_scroll_tune() { takeScrollTune(0.0); }
+
+void EngineLink::arm_scroll_flush(double wait_ms)
+{
+    if (wait_ms > 0.0) {
+        // Rounded up, because a timer that fires a fraction of a millisecond
+        // early finds the interval not yet elapsed, does nothing, and re-arms
+        // for the remainder. One extra wakeup per burst rather than two.
+        scroll_flush_.start(static_cast<int>(std::ceil(wait_ms)));
+        return;
+    }
+    scroll_flush_.stop();
+}
+
 void EngineLink::probe_source_tuning()
 {
     if (client_ == nullptr) {

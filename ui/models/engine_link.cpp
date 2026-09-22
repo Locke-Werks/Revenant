@@ -132,6 +132,14 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     // bookmark does something only when somebody picks it, which is what makes
     // remembering it different from remembering the receiver.
     load_bookmarks();
+
+    // The wheel's clock and flush, one set for the window rather than one per
+    // display. Started here so the first reading is a small number rather than
+    // whatever the process had been up to, which plan_scroll_tune would read
+    // as a settling interval that had long since elapsed.
+    scroll_clock_.start();
+    scroll_flush_.setSingleShot(true);
+    connect(&scroll_flush_, &QTimer::timeout, this, &EngineLink::flush_scroll_tune);
 }
 
 EngineLink::~EngineLink()

@@ -156,6 +156,7 @@
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/receiver_gone.h"
+#include "models/scroll_tune.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
 #include "models/source_pacing.h"
@@ -1372,6 +1373,27 @@ public:
     // The same, from a number a band button holds.
     Q_INVOKABLE void tuneSourceHz(double hertz);
 
+    // One wheel event over either span display, accumulated and spent at most
+    // once per settling interval.
+    //
+    // ON THIS OBJECT AND NOT ON THE ITEM, which is the whole point of it being
+    // here. models/scroll_tune.h exists because a device retune costs about
+    // 330 ms with no samples at all, so "at most one tune goes out per
+    // settling interval" is the rule the coalescing is for. Two accumulators
+    // cannot enforce it: they are two displays and one radio, and a pointer
+    // crossing from the spectrum to the waterfall mid-sweep hands each of them
+    // a part of one gesture, each below its own interval and each firing.
+    //
+    // The items had one apiece until 2026-09-22, and waterfall_item.h said the
+    // reason was discussed on ScrollTuneState. It is not, and what that header
+    // does argue is the opposite: the settling interval is a property of the
+    // radio, so the accumulator belongs with the thing that owns the radio.
+    //
+    // The item keeps the gesture; this keeps the backlog. Nothing here reads a
+    // pointer position, and the flush timer is this object's, so a display
+    // being destroyed mid-sweep does not take the pending notches with it.
+    void takeScrollTune(double angle_delta_eighths);
+
     // ---- the device picker -------------------------------------------------
     //
     // WHY THIS IS A LIST OF MAPS AND NOT A QAbstractListModel. There are two
@@ -2314,6 +2336,25 @@ private:
     // Why the pane is empty when the engine emptied it. Qt thread only, and
     // deliberately outliving the pane; see the property.
     QString receiver_gone_text_;
+
+    // The wheel's accumulator, its clock and its flush, one set for the whole
+    // window. Qt thread only.
+    //
+    // A QElapsedTimer and not a wall clock, because what is measured is how
+    // long the radio has had to recover from the last retune, and a wall clock
+    // stepping backwards under a scrolling operator would release the whole
+    // backlog at once.
+    ScrollTuneState scroll_tune_;
+    QElapsedTimer scroll_clock_;
+    QTimer scroll_flush_;
+
+    // The timer came due with no wheel behind it: asks whether the accumulator
+    // can be spent now.
+    void flush_scroll_tune();
+
+    // Arms the single shot for what plan_scroll_tune said to wait, or stops it
+    // when nothing is held back.
+    void arm_scroll_flush(double wait_ms);
 
     // Qt thread only. The pane held a receiver when the link went away, so
     // the next connection puts one back from wanted_.

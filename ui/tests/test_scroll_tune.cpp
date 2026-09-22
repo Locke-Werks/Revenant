@@ -15,9 +15,9 @@
 // it certified the behaviour.
 //
 // WHAT IS NOT HERE. Whether the source will retune at all, which is
-// EngineLink::sourceCanRetune and is gated in take_scroll_tune, and the timer
-// that turns wait_ms into a later call, which is a QTimer in a QQuickItem.
-// Both need Qt and this target links none.
+// EngineLink::sourceCanRetune and is gated in EngineLink::takeScrollTune, and
+// the timer that turns wait_ms into a later call, which is a QTimer on the
+// same object. Both need Qt and this target links none.
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>

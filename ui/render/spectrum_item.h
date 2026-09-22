@@ -284,33 +284,24 @@ void build_receiver_quads(const ReceiverMarker& marker, double height_px,
                           std::vector<OverlayQuad>& out);
 
 // ---------------------------------------------------------------------------
-// The wheel walks the front end
+// The wheel walks the front end, and the backlog is not an item's
 // ---------------------------------------------------------------------------
 //
-// In this header for the third time the same reason applies: both displays do
-// it and there has to be one answer. What the step is measured against is the
-// span, so an item reading its own idea of the span off bin_zero and bin_width
-// would walk the radio by a different amount from the other display, and the
-// two would disagree about what a notch means.
+// WHAT THIS SECTION USED TO DECLARE. take_scroll_tune took an EngineLink and
+// one display's ScrollTuneState, accumulated a wheel event against it and
+// returned the milliseconds to wait, so each item armed its own flush timer
+// against its own accumulator.
 //
-// models/scroll_tune.h holds the arithmetic, the settling interval and the
-// argument for both. This is the half that knows which EngineLink numbers go
-// in and what to do with the answer.
-
-// Accumulates one wheel event against one display's state and retunes the
-// source when the settling interval allows it. Returns the milliseconds until
-// the accumulator can be spent, or zero for nothing held back, so the caller
-// arms a single-shot timer and calls again with a delta of zero.
+// That could not keep the promise the coalescing exists to make. A device
+// retune costs about 330 ms with no samples at all, so models/scroll_tune.h is
+// built around at most one tune going out per settling interval, and two
+// accumulators cannot enforce one rule: a pointer crossing from the spectrum
+// to the waterfall mid-sweep hands each of them a part of one gesture, each
+// below its own interval and each firing. Two displays, one radio.
 //
-// GATED ON EngineLink::sourceCanRetune HERE, so neither item repeats it. A
-// file and a synthetic scene refuse a retune in their own words and the
-// property says so once per connection, so the wheel does nothing on those
-// rather than posting a request that always fails and writing a fault line the
-// operator did not ask a question to get. The accumulator is cleared at the
-// same time: wheel banked against a recording must not fire at the first
-// dongle opened after it.
-[[nodiscard]] double take_scroll_tune(EngineLink* link, double angle_delta_eighths,
-                                      double now_ms, ScrollTuneState& state);
+// It lives on EngineLink now, which is the object that owns the radio and the
+// one both items already talk to. An item resolves the gesture and hands over
+// the eighths; see EngineLink::takeScrollTune.
 
 // The overlay's text, and the one thing in either display still rasterised by
 // QPainter.
@@ -567,20 +558,12 @@ protected:
     void hoverLeaveEvent(QHoverEvent* event) override;
 
     // Scrolling walks the SOURCE's centre, not the receiver's. See
-    // take_scroll_tune above and models/scroll_tune.h.
+    // EngineLink::takeScrollTune and models/scroll_tune.h.
     void wheelEvent(QWheelEvent* event) override;
 
 private:
     void takeFrame();
     void takeDetections();
-
-    // The coalescing interval came due. Spends whatever the wheel accumulated
-    // while the last tune was settling, which is what makes the last notch of
-    // a burst arrive instead of waiting for the next wheel event.
-    void flushScrollTune();
-
-    // Arms or disarms the flush timer from what take_scroll_tune returned.
-    void armScrollFlush(double wait_ms);
 
     // The receiver moved, or the engine answered about it. Both land here,
     // because the marker is drawn from the grant and falls back to the
@@ -634,15 +617,6 @@ private:
     std::uint64_t selected_detection_ = 0;
     std::uint64_t hovered_detection_ = 0;
     ClickCycle click_cycle_;
-
-    // The wheel's accumulator, its clock and its flush. The clock is this
-    // item's own QElapsedTimer rather than a wall clock, because what is being
-    // measured is how long the radio has had to recover from the last retune
-    // and a wall clock stepping backwards over a scrolling operator would
-    // release the whole backlog at once.
-    ScrollTuneState scroll_tune_;
-    QElapsedTimer scroll_clock_;
-    QTimer scroll_flush_;
 
     // Created in the constructor and positioned in updatePaintNode, so the
     // labels are a child item and not part of this item's own node.

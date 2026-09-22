@@ -928,51 +928,11 @@ ClickResult detection_clicked(const std::vector<DetectionBox>& boxes, double x_p
     return result;
 }
 
-double take_scroll_tune(EngineLink* link, double angle_delta_eighths, double now_ms,
-                        ScrollTuneState& state)
-{
-    if (link == nullptr || !link->sourceCanRetune()) {
-        state = ScrollTuneState{};
-        return 0.0;
-    }
-
-    ScrollTuneRequest request;
-    request.angle_delta_eighths = angle_delta_eighths;
-
-    // The span the display is actually drawing, which is the pair the axis and
-    // every overlay in this file are placed from. See the note at the top about
-    // there being one mapping from hertz to pixels: the step per notch is a
-    // fraction of what is on screen, so it has to come off the same two
-    // numbers or a notch would mean something different from what it looks
-    // like it means.
-    request.span_hz = link->spanHighHz() - link->spanLowHz();
-
-    // Where the radio landed and not where it was last asked to go. A device
-    // with a tuning step rounds, so adding the step to the request would
-    // accumulate the rounding error over a sweep.
-    request.center_hz = link->sourceCenterHz();
-
-    request.tune_low_hz = link->sourceTuneLowHz();
-    request.tune_high_hz = link->sourceTuneHighHz();
-    request.now_ms = now_ms;
-
-    const ScrollTunePlan plan = plan_scroll_tune(state, request);
-    state = plan.state;
-    if (plan.tune) {
-        link->tuneSourceHz(plan.center_hz);
-    }
-    return plan.wait_ms;
-}
-
 SpectrumItem::SpectrumItem(QQuickItem* parent) : QQuickItem(parent)
 {
     setFlag(ItemHasContents, true);
     setAcceptedMouseButtons(Qt::LeftButton);
     setAcceptHoverEvents(true);
-
-    scroll_clock_.start();
-    scroll_flush_.setSingleShot(true);
-    connect(&scroll_flush_, &QTimer::timeout, this, &SpectrumItem::flushScrollTune);
 
     labels_ = new OverlayLabelItem(this);
     labels_->setVisible(false);
@@ -1265,27 +1225,12 @@ void SpectrumItem::wheelEvent(QWheelEvent* event)
         return;
     }
 
-    armScrollFlush(take_scroll_tune(link_, eighths,
-                                    static_cast<double>(scroll_clock_.elapsed()), scroll_tune_));
+    // The gesture is this item's and the backlog is the window's. EngineLink
+    // holds the accumulator, the clock and the flush, because the settling
+    // interval is a property of the radio and there is one radio behind both
+    // displays. See EngineLink::takeScrollTune.
+    link_->takeScrollTune(eighths);
     event->accept();
-}
-
-void SpectrumItem::flushScrollTune()
-{
-    armScrollFlush(
-        take_scroll_tune(link_, 0.0, static_cast<double>(scroll_clock_.elapsed()), scroll_tune_));
-}
-
-void SpectrumItem::armScrollFlush(double wait_ms)
-{
-    if (wait_ms > 0.0) {
-        // Rounded up, because a timer that fires a fraction of a millisecond
-        // early finds the interval not yet elapsed, does nothing, and re-arms
-        // for the remainder. One extra wakeup per burst rather than two.
-        scroll_flush_.start(static_cast<int>(std::ceil(wait_ms)));
-        return;
-    }
-    scroll_flush_.stop();
 }
 
 QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)

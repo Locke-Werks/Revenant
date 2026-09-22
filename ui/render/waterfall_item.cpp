@@ -76,10 +76,6 @@ WaterfallItem::WaterfallItem(QQuickItem* parent) : QQuickItem(parent)
     setAcceptedMouseButtons(Qt::LeftButton);
     setAcceptHoverEvents(true);
 
-    scroll_clock_.start();
-    scroll_flush_.setSingleShot(true);
-    connect(&scroll_flush_, &QTimer::timeout, this, &WaterfallItem::flushScrollTune);
-
     hovered_label_ = new OverlayLabelItem(this);
     hovered_label_->setVisible(false);
     selected_label_ = new OverlayLabelItem(this);
@@ -625,24 +621,11 @@ void WaterfallItem::wheelEvent(QWheelEvent* event)
         return;
     }
 
-    armScrollFlush(take_scroll_tune(link_, eighths,
-                                    static_cast<double>(scroll_clock_.elapsed()), scroll_tune_));
+    // The gesture is this item's and the backlog is the window's, which is
+    // what stops a sweep that crosses from the spectrum to here putting two
+    // tunes inside one settling interval. See EngineLink::takeScrollTune.
+    link_->takeScrollTune(eighths);
     event->accept();
-}
-
-void WaterfallItem::flushScrollTune()
-{
-    armScrollFlush(
-        take_scroll_tune(link_, 0.0, static_cast<double>(scroll_clock_.elapsed()), scroll_tune_));
-}
-
-void WaterfallItem::armScrollFlush(double wait_ms)
-{
-    if (wait_ms > 0.0) {
-        scroll_flush_.start(static_cast<int>(std::ceil(wait_ms)));
-        return;
-    }
-    scroll_flush_.stop();
 }
 
 QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
