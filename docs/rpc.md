@@ -1180,6 +1180,24 @@ A client reconnecting starts from whatever the engine currently holds, and an
 engine restarting starts empty. Saved sessions are a client-side or a
 schema-side feature and neither exists.
 
+**A receiver outlives the client that created it, and nothing reaps one whose
+client died.** Receivers belong to the engine rather than to a session, which is
+what lets several clients each hold their own: measured 2026-09-21 with two
+`revenant-ui` processes on one engine, each clicked a signal and engined reported
+`2 vrx`, neither disturbing the other's audio or passband. Closing a window
+releases its receiver and the count went back to `1 vrx`. A client killed
+outright does not: the count stayed at `1 vrx` indefinitely after a
+`taskkill /F`, with the disconnect itself plainly noticed, since the spectrum
+publisher counted its dropped subscriber and then stopped sending.
+
+Whether that is a leak or a feature is an open decision rather than an oversight.
+A headless recorder wants receivers to survive a client restarting, and a desktop
+operator wants a crashed window to take its receiver with it. What is missing
+either way is any means of recovery: `vrxIds` is on this wire, so an orphan can
+be enumerated and removed by a later client, and no client does. Until one does,
+an engine accumulates a channelizer slot and its GPU work per crashed client,
+recoverable only by restarting the engine.
+
 **Only starting a source is still the host's, and that is `run()` being a
 blocking call rather than a gap in this wire.**
 
