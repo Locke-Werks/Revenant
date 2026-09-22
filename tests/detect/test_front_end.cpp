@@ -966,21 +966,58 @@ TEST_CASE("a linear front end puts nothing where the nine products would be",
 // with modulated parents whose products land DISCRETELY in clear space, and
 // building that is the next piece of work rather than choosing a threshold
 // against a population that does not exist.
-TEST_CASE("shape survey: stations against their own products", "[.shape-survey]")
+TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
 {
-    // SWEPT OVER THE SCENE'S NOISE FLOOR, because the first run of this survey
-    // at the shipped -70 dBFS found 1384 candidates and every single one of
-    // them was on a station. The cubic lifts the floor, which is what the
-    // monitor measures and what the three cases above assert, and at that
-    // level not one product crosses the detection threshold. A survey of two
-    // populations needs both populations to exist, so the floor comes down
-    // until the products are detectable and the question can be asked.
-    const double floors[] = {-70.0, -85.0, -100.0, -115.0};
-
-    // The eight offsets dense_scene placed, as absolute frequencies.
-    const dsp::Hertz offsets[] = {-260'000, -185'000, -110'000, -35'000,
-                                  40'000,   115'000,  190'000,  265'000};
-    constexpr dsp::Hertz kOnStation = 20'000;
+    // AGAINST THE PRODUCT SCENE, which is the one place in this tree where a
+    // band that IS a signal and a band that is NOT one appear in the same
+    // frames at the same moment with truth known by construction. The parents
+    // are where they were placed and the nine products are where the
+    // arithmetic says, and the model carries no fifth-order term, so anything
+    // found anywhere else is an artefact rather than a product.
+    //
+    // WHAT THIS REPLACED, and the negative result is worth keeping. The survey
+    // first ran against dense_scene swept from -70 to -115 dBFS and found 1384
+    // candidates, every one of them on a station and not one on a product,
+    // identical to the hertz at all four floors. That scene's products are a
+    // raised floor rather than phantom signals, so there was nothing to
+    // separate. This scene was built because of that reading.
+    // WHAT THIS MEASURED, 2026-09-22.
+    //
+    //   parent          263 candidates  peak/mean 1.607  skirt 0.111  48.1 dB
+    //   product         567 candidates  peak/mean 2.473  skirt 0.009  24.3 dB
+    //   elsewhere       304 candidates  peak/mean 1.863  skirt 0.091  13.9 dB
+    //   parent, linear  189 candidates  peak/mean 1.608  skirt 0.028
+    //
+    // TWO FINDINGS, AND THEY ARE ABOUT DIFFERENT THINGS.
+    //
+    // peak_to_mean separates a product from a parent and the control says it
+    // is measuring the signal and not the radio: 1.607 through the cubic
+    // against 1.608 linear, identical to three places, while a product reads
+    // 2.473. That is structural. A root raised cosine spectrum is flat topped,
+    // and a third-order product is the convolution of three of them, which is
+    // domed. It is not an artefact of level either: the ordering is not
+    // monotone in SNR, since "elsewhere" is the weakest population at 13.9 dB
+    // and reads BELOW the products at 24.3 dB.
+    //
+    // THIS IS NOT AN INTERFERENCE TEST AND MUST NOT BE SHIPPED AS ONE. What it
+    // separates is flat-topped from domed, which is spectral shape class and
+    // is exactly the "separates the broad families" tier one is promised to
+    // give. An unmodulated carrier is the most domed thing on any span, so a
+    // threshold that called domed bands products would call every carrier a
+    // product. The parents here are QPSK because the scene needed them to be;
+    // one scene with one modulation cannot settle a threshold that has to hold
+    // for AM, FM, SSB and CW.
+    //
+    // skirt_fraction is the other finding and it moves the other way. It is
+    // flat across the two populations and rises on the PARENTS when the front
+    // end is nonlinear, 0.028 linear to 0.111 through the cubic. That is
+    // spectral regrowth: the band driving the nonlinearity is the one that
+    // smears into its own neighbourhood. It is per-band evidence of
+    // distortion, which core/detect/front_end.h says the span-wide monitor
+    // cannot give and which it rejects frequency coincidence as a route to.
+    // Whether it is strong enough to carry a flag is a separate measurement.
+    const SceneRun cubic = run_scene(product_scene(), product_front_end());
+    REQUIRE(cubic.decisions > 0);
 
     struct Tally {
         std::size_t count = 0;
@@ -1012,7 +1049,7 @@ TEST_CASE("shape survey: stations against their own products", "[.shape-survey]"
             const auto n = static_cast<double>(count);
             std::ostringstream out;
             out.setf(std::ios::fixed);
-            out.precision(2);
+            out.precision(3);
             out << count << " candidates, peak/mean " << peak_to_mean / n << ", skirt "
                 << skirt / n << ", lower " << lower / n << ", snr " << snr / n << " dB, width "
                 << bandwidth / n << " Hz, " << no_room << " with no room to look";
@@ -1020,64 +1057,67 @@ TEST_CASE("shape survey: stations against their own products", "[.shape-survey]"
         }
     };
 
-    std::size_t levels_with_products = 0;
+    // Half a parent's own bandwidth, so a candidate is attributed to whatever
+    // it actually sits on rather than to whatever is nearest.
+    constexpr dsp::Hertz kNear = kProductParentBandwidth;
 
-    for (const double floor_dbfs : floors) {
-        // Eight seconds rather than twenty: this runs several scenes and the
-        // question is what the candidates look like, not how a track ages.
-        const SceneRun cubic =
-            run_scene(dense_scene(false, floor_dbfs, 8.0), test::FrontEndModel{
-                                                               .gain = 1.0,
-                                                               .swing_db = 0.0,
-                                                               .swing_period_seconds = 0.0,
-                                                               .third_order = kThirdOrder,
-                                                           });
-        REQUIRE(cubic.decisions > 0);
+    Tally parents;
+    Tally products;
+    Tally elsewhere;
 
-        // THE CONTROL THAT MAKES THE READING ABOVE MEAN ANYTHING. The same
-        // scene at the same thermal floor with a linear front end. If the
-        // stations' measured SNR rises here as the floor comes down and does
-        // not rise through the cubic, then what the detector is measuring the
-        // stations against in the cubic run is not thermal noise, it is the
-        // pedestal the products themselves laid down.
-        const SceneRun linear =
-            run_scene(dense_scene(false, floor_dbfs, 8.0), test::FrontEndModel{});
-        Tally control;
-        for (const detect::Candidate& candidate : linear.candidates) {
-            if (candidate.shape.measured) {
-                control.add(candidate);
-            }
+    for (const detect::Candidate& candidate : cubic.candidates) {
+        if (!candidate.shape.measured) {
+            continue;
         }
+        const dsp::Hertz offset = candidate.center - 98'100'000;
 
-        Tally on_station;
-        Tally elsewhere;
+        const bool parent =
+            std::abs(offset - kProductParentOne) <= kNear ||
+            std::abs(offset - kProductParentTwo) <= kNear ||
+            std::abs(offset - kProductParentThree) <= kNear;
 
-        for (const detect::Candidate& candidate : cubic.candidates) {
-            if (!candidate.shape.measured) {
-                continue;
-            }
-            const bool station = std::any_of(
-                std::begin(offsets), std::end(offsets), [&candidate](dsp::Hertz offset) {
-                    const dsp::Hertz absolute = 98'100'000 + offset;
-                    return std::abs(candidate.center - absolute) <= kOnStation;
-                });
-            (station ? on_station : elsewhere).add(candidate);
-        }
+        const bool product =
+            std::any_of(std::begin(kProducts), std::end(kProducts),
+                        [offset](dsp::Hertz at) { return std::abs(offset - at) <= 3 * kNear; });
 
-        WARN("floor " << floor_dbfs << " dBFS\n  on a station: " << on_station.line()
-                      << "\n  a product:    " << elsewhere.line()
-                      << "\n  linear:       " << control.line());
-
-        if (elsewhere.count > 0) {
-            ++levels_with_products;
+        if (parent) {
+            parents.add(candidate);
+        } else if (product) {
+            products.add(candidate);
+        } else {
+            elsewhere.add(candidate);
         }
     }
 
-    // Says whether the sweep found anything to compare at all. A zero here is
-    // the finding, not a broken case: it would mean this tree cannot produce a
-    // false detection from a modulated source, and that the only false
-    // detections it can produce are the tone scene's, which are carriers and
-    // are not separable by shape.
-    WARN("levels with products: " << levels_with_products << " of " << std::size(floors));
-    CHECK(levels_with_products <= std::size(floors));
+    // THE CONTROL THAT SAYS WHICH THING IS BEING MEASURED. The parents in the
+    // cubic run carry their own third-order regrowth, so a difference between
+    // them and the products could be the regrowth rather than the shape. The
+    // same parents through a linear front end have none of it, so a parent
+    // reading the same in both runs means the number is the signal's own
+    // shape and generalises past this scene.
+    const SceneRun linear = run_scene(product_scene(), test::FrontEndModel{});
+    Tally linear_parents;
+    for (const detect::Candidate& candidate : linear.candidates) {
+        if (!candidate.shape.measured) {
+            continue;
+        }
+        const dsp::Hertz offset = candidate.center - 98'100'000;
+        if (std::abs(offset - kProductParentOne) <= kNear ||
+            std::abs(offset - kProductParentTwo) <= kNear ||
+            std::abs(offset - kProductParentThree) <= kNear) {
+            linear_parents.add(candidate);
+        }
+    }
+
+    WARN("parent:        " << parents.line());
+    WARN("product:       " << products.line());
+    WARN("elsewhere:     " << elsewhere.line());
+    WARN("parent linear: " << linear_parents.line());
+
+    // Both populations have to exist or the comparison above is one thing read
+    // twice. Everything else is printed rather than asserted, because what a
+    // threshold on any of it should be is not settled; see the reading
+    // recorded on this case.
+    CHECK(parents.count > 0);
+    CHECK(products.count > 0);
 }
