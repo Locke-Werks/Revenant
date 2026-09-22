@@ -243,6 +243,12 @@ void EngineLink::poll_source_pacing(bool engine_running)
     // its own would cost a round trip a second forever.
     note_source_epoch(*info);
 
+    // On the back of the same round trip, and here rather than in the
+    // supervisor's own list, because this is where the epoch is in hand on
+    // THIS thread. info_ is the Qt thread's and reading it from the supervisor
+    // to get the same number was a data race.
+    poll_source_gain_stage(info->source_epoch);
+
     PacingSample sample;
     sample.carried = true;
     sample.realtime_factor = seam_realtime_factor(*info).value_or(0.0);
@@ -932,6 +938,7 @@ void EngineLink::setSourceGainFraction(double fraction)
         const std::lock_guard<std::mutex> lock(source_mutex_);
         want_gain_ = true;
         want_gain_db_ = asked;
+        want_gain_stage_ = gain_stage_.name;
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -957,6 +964,7 @@ void EngineLink::setSourceGainAuto(bool on)
         const std::lock_guard<std::mutex> lock(source_mutex_);
         want_gain_auto_ = on;
         want_gain_auto_set_ = true;
+        want_gain_stage_ = gain_stage_.name;
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -985,21 +993,30 @@ void EngineLink::apply_source_gain()
     double db = 0.0;
     bool auto_set = false;
     bool automatic = false;
+    std::string stage;
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
         wanted = std::exchange(want_gain_, false);
         db = want_gain_db_;
         auto_set = std::exchange(want_gain_auto_set_, false);
         automatic = want_gain_auto_;
+
+        // THE STAGE NAME TRAVELS WITH THE REQUEST, under this lock, and is not
+        // read off gain_stage_. gain_stage_ belongs to the Qt thread, which
+        // replaces it whole whenever a descriptor arrives, and reading its
+        // std::string from this thread was a use-after-free that crashed the
+        // window: the Qt thread reassigning the name frees the buffer this one
+        // is copying out of. The Qt thread knows the name when it posts, so it
+        // sends it.
+        stage = want_gain_stage_;
     }
 
     if (!wanted && !auto_set) {
         return;
     }
 
-    // The stage's own name, which the device chose. An empty name means no
-    // descriptor has arrived yet, and there is nothing to name in a request.
-    const std::string stage = gain_stage_.name;
+    // An empty name is a request posted before any descriptor arrived, which
+    // has nothing to name and nothing to set.
     if (stage.empty()) {
         return;
     }
@@ -1042,7 +1059,7 @@ void EngineLink::apply_source_gain()
                               Qt::QueuedConnection);
 }
 
-void EngineLink::poll_source_gain_stage()
+void EngineLink::poll_source_gain_stage(std::uint64_t epoch)
 {
     if (client_ == nullptr) {
         return;
@@ -1052,7 +1069,11 @@ void EngineLink::poll_source_gain_stage()
     // device, which is the whole difference between it and listSources, but it
     // is still a round trip and a stage cannot change under a source that has
     // not been reopened. The epoch is what says a source was.
-    const std::uint64_t epoch = info_.source_epoch;
+    //
+    // THE EPOCH IS HANDED IN AND NOT READ OFF info_. info_ is Qt thread only,
+    // this runs on the supervisor, and reading it here was a data race on a
+    // struct holding a std::string. poll_source_pacing already fetches an
+    // EngineInfo on this thread, so the number comes from there.
     if (gain_stage_read_ && epoch == gain_stage_epoch_) {
         return;
     }

@@ -2302,7 +2302,7 @@ private:
     // which opens every device index and takes a libusb timeout per absent
     // one.
     void apply_source_gain();
-    void poll_source_gain_stage();
+    void poll_source_gain_stage(std::uint64_t epoch);
 
     // Qt thread, queued from the two above. adopt_gain takes whether the
     // device actually answered with a gain, which auto-on does not: handing
@@ -2437,6 +2437,15 @@ private:
     double want_gain_db_ = 0.0;
     bool want_gain_auto_ = false;
     bool want_gain_auto_set_ = false;
+
+    // The stage's name, copied under source_mutex_ when the request is posted.
+    //
+    // gain_stage_ above is the Qt thread's and is replaced WHOLE whenever a
+    // descriptor arrives. The supervisor reading its std::string was a
+    // use-after-free: the Qt thread reassigning the name frees the buffer the
+    // supervisor is copying out of, and the window died of it on 2026-09-21.
+    // The Qt thread knows the name when it posts, so it sends it.
+    std::string want_gain_stage_;
 
     // Guarded by source_mutex_. The answer, for the handle and the readout.
     bool handover_has_gain_ = false;

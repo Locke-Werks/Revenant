@@ -334,13 +334,6 @@ void EngineLink::supervise()
             // would always read Unmeasured.
             poll_source_pacing(*alive);
             poll_front_end(*alive);
-
-            // Once per source rather than once per pass; the function keeps
-            // its own epoch and returns immediately when the stage it holds is
-            // still the open source's. On the probe pass like the rest of
-            // these, so a fresh connection has its gain control within about a
-            // second.
-            poll_source_gain_stage();
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);
