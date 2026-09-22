@@ -1221,11 +1221,23 @@ publisher counted its dropped subscriber and then stopped sending.
 
 Whether that is a leak or a feature is an open decision rather than an oversight.
 A headless recorder wants receivers to survive a client restarting, and a desktop
-operator wants a crashed window to take its receiver with it. What is missing
-either way is any means of recovery: `vrxIds` is on this wire, so an orphan can
-be enumerated and removed by a later client, and no client does. Until one does,
-an engine accumulates a channelizer slot and its GPU work per crashed client,
-recoverable only by restarting the engine.
+operator wants a crashed window to take its receiver with it. That decision is
+still open and nothing below forecloses it.
+
+**What used to be missing either way was any means of recovery,** and this
+paragraph used to end "`vrxIds` is on this wire, so an orphan can be enumerated
+and removed by a later client, and no client does. Until one does, an engine
+accumulates a channelizer slot and its GPU work per crashed client, recoverable
+only by restarting the engine."
+
+`revenant-ui` does, as of 2026-09-22. It polls `vrxIds` once a second and says
+when the engine is holding receivers the window is not on, with an action that
+removes them. It is deliberately not a reaper: from a client an orphan and
+another operator's working receiver are indistinguishable, because nothing here
+says who created one, so the window reports and a person decides. Measured end
+to end the same day: a receiver made by one window survived that window being
+killed, a second window reported it, and the release took the engine back to
+zero.
 
 **Only starting a source is still the host's, and that is `run()` being a
 blocking call rather than a gap in this wire.**
