@@ -328,6 +328,7 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
     detector.average_.assign(detector.bins_, 0.0);
     detector.floor_.assign(detector.bins_, static_cast<double>(dsp::kSpectrumPowerFloor));
     detector.sigma_.assign(detector.bins_, 0.0);
+    detector.excess_.assign(detector.bins_, 0.0);
     detector.excess_cumulative_.assign(detector.bins_ + 1, 0.0);
     detector.floor_cumulative_.assign(detector.bins_ + 1, 0.0);
     detector.sigma_cumulative_.assign(detector.bins_ + 1, 0.0);
@@ -559,7 +560,18 @@ void Detector::find_candidates() {
     floor_cumulative_[0] = 0.0;
     sigma_cumulative_[0] = 0.0;
     for (std::size_t i = 0; i < bins_; ++i) {
-        excess_cumulative_[i + 1] = excess_cumulative_[i] + (average_[i] - floor_[i]);
+        const double excess = average_[i] - floor_[i];
+
+        // CLAMPED HERE AND SIGNED IN THE PREFIX SUM, on purpose and not by
+        // oversight. The sums answer "how much power is in this band", where a
+        // bin below its own floor is the floor estimate running a little high
+        // and belongs in the total as the negative it is. excess_ answers
+        // "what does this band look like", where a negative bin is not a dip
+        // in the signal, it is noise, and letting it subtract would make a
+        // band's shape depend on which way its floor ripple happened to fall.
+        excess_[i] = excess > 0.0 ? excess : 0.0;
+
+        excess_cumulative_[i + 1] = excess_cumulative_[i] + excess;
         floor_cumulative_[i + 1] = floor_cumulative_[i] + floor_[i];
         sigma_cumulative_[i + 1] = sigma_cumulative_[i] + sigma_[i];
     }
@@ -830,9 +842,24 @@ void Detector::find_candidates() {
     // accepted_ is sorted by start and its entries are disjoint, so the
     // candidates come out ascending in frequency and the tracker's sweep can
     // stop early.
-    for (const Peak& peak : accepted_) {
+    for (std::size_t index = 0; index < accepted_.size(); ++index) {
+        const Peak& peak = accepted_[index];
         const std::size_t begin = peak.start;
         const std::size_t end = begin + peak.width;
+
+        // How far outside itself this band may look. accepted_ is sorted by
+        // start and its entries are disjoint, so the run between the previous
+        // peak's end and the next peak's start is the region this one owns.
+        //
+        // A BAND THAT STOPS BECAUSE ITS NEIGHBOUR STARTED HAS NOT MEASURED ITS
+        // OWN EDGE, and a skirt walk that ran on into the neighbour would
+        // report the neighbour's power as this band's tail. BandShape carries
+        // how many bins it was given so a reader can tell a sharp edge from no
+        // room to look.
+        const std::size_t own_low =
+            index == 0 ? 0 : accepted_[index - 1].start + accepted_[index - 1].width;
+        const std::size_t own_high =
+            index + 1 == accepted_.size() ? bins_ : accepted_[index + 1].start;
 
         // The occupied band: the ITU definition, the span holding
         // occupied_power_fraction of the excess with the rest split evenly
@@ -910,16 +937,19 @@ void Detector::find_candidates() {
             while (j < count && separator_[j] == 0) {
                 ++j;
             }
-            emitted = emit_candidate(low + i, low + j - 1) || emitted;
+            emitted = emit_candidate(low + i, low + j - 1, own_low, own_high) || emitted;
             i = j;
         }
         if (!emitted) {
-            static_cast<void>(emit_candidate(low, high));
+            static_cast<void>(emit_candidate(low, high, own_low, own_high));
         }
     }
 }
 
-bool Detector::emit_candidate(std::size_t first, std::size_t last) {
+bool Detector::emit_candidate(std::size_t first,
+                              std::size_t last,
+                              std::size_t own_low,
+                              std::size_t own_high) {
     if (last < first || last >= bins_) {
         return false;
     }
@@ -959,6 +989,15 @@ bool Detector::emit_candidate(std::size_t first, std::size_t last) {
     candidate.center =
         config_.source_center + static_cast<dsp::Hertz>(std::llround(0.5 * (low_edge + high_edge)));
     candidate.bandwidth = static_cast<dsp::Hertz>(std::llround(high_edge - low_edge));
+
+    // Measured last, after the band is known to be a candidate at all, so a
+    // band that fails the threshold costs nothing. The bounds are widened to
+    // contain the band before they are passed on: a split segment sits inside
+    // its parent's region rather than at its edge, and measure_band refuses
+    // bounds that do not contain what they bound.
+    candidate.shape = measure_band(excess_, first, last, std::min(own_low, first),
+                                   std::max(own_high, last + 1));
+
     candidates_.push_back(candidate);
     return true;
 }

@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <numbers>
 #include <span>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include "core/detect/detector.h"
@@ -284,15 +286,17 @@ constexpr double kDenseSceneNoiseDbfs = -70.0;
 // keyed_station doubles the first station and bursts it on and off, which is
 // what the busy-band case needs: something has to move the span's strongest
 // level when the gain is not moving it.
-[[nodiscard]] siggen::SceneSpec dense_scene(bool keyed_station)
+[[nodiscard]] siggen::SceneSpec dense_scene(bool keyed_station,
+                                            double noise_dbfs = kDenseSceneNoiseDbfs,
+                                            double seconds = kDenseSceneSeconds)
 {
     siggen::SceneSpec spec;
     spec.rate = kSceneRate;
     spec.center_hz = 98'100'000;
     spec.duration_samples = static_cast<dsp::SampleIndex>(
-        std::llround(kDenseSceneSeconds * static_cast<double>(kSceneRate)));
+        std::llround(seconds * static_cast<double>(kSceneRate)));
     spec.seed = 4242;
-    spec.noise_power_full_band_dbfs = kDenseSceneNoiseDbfs;
+    spec.noise_power_full_band_dbfs = noise_dbfs;
 
     const dsp::Hertz offsets[] = {-260'000, -185'000, -110'000, -35'000,
                                   40'000,   115'000,  190'000,  265'000};
@@ -340,6 +344,12 @@ struct SceneRun {
     detect::FrontEndObservation observation{};
     std::size_t decisions = 0;
     std::vector<detect::Track> tracks;
+
+    // Every decision's candidates, appended. The tracks above are the last
+    // decision's and are what a client sees; these are what the shape survey
+    // below reads, because BandShape is measured per candidate and each
+    // decision's arrays are overwritten by the next one.
+    std::vector<detect::Candidate> candidates;
 };
 
 [[nodiscard]] SceneRun run_scene(const siggen::SceneSpec& spec,
@@ -401,6 +411,9 @@ struct SceneRun {
         const Status watched =
             monitor.observe(detector->averaged_power(), detector->noise_floor(), elapsed);
         REQUIRE(watched.has_value());
+
+        run.candidates.insert(run.candidates.end(), detector->candidates().begin(),
+                              detector->candidates().end());
     }
 
     run.observation = monitor.observation();
@@ -671,4 +684,167 @@ TEST_CASE("a crowded but linear band does not raise the flag", "[frontend][scene
                       << run.observation.drive_spread_db << " dB");
     CHECK(run.observation.verdict != detect::FrontEndVerdict::FloorFollowsSignal);
     CHECK(run.observation.verdict != detect::FrontEndVerdict::SpanScales);
+}
+
+// ---- does shape separate a station from a product? ------------------------
+
+// THE MEASUREMENT THAT DECIDES WHETHER core/detect/shape.h IS WORTH ANYTHING,
+// and it is a survey rather than a bar. It prints; it asserts only that the
+// scene it is reading is the one it thinks it is.
+//
+// The dense scene through a cubic is the one case in this tree where a band
+// that IS a signal and a band that is NOT one appear in the same frames at the
+// same moment, with truth known by construction: eight QPSK stations at
+// offsets this file chose, and products of those stations everywhere else.
+// Anything the detector finds away from a station is a product, because
+// nothing else was transmitted.
+//
+// The tone scene deliberately is not used here. A third-order product of two
+// pure carriers is itself a pure carrier, so shape cannot tell it from a real
+// one and should not be asked to: that scene separates on provenance.
+//
+// WHAT THIS MEASURED, 2026-09-22, AND IT IS A NEGATIVE RESULT WORTH KEEPING.
+// The dense scene through the cubic produces NO false detections at all, at
+// any thermal floor from -70 to -115 dBFS:
+//
+//   floor      cubic, on a station                     cubic, elsewhere
+//   -70 dBFS   504 candidates, 46.13 dB, 25610 Hz      none
+//   -85 dBFS   504 candidates, 46.13 dB, 25610 Hz      none
+//   -100 dBFS  504 candidates, 46.13 dB, 25610 Hz      none
+//   -115 dBFS  504 candidates, 46.13 dB, 25610 Hz      none
+//
+// Identical to the hertz across forty-five decibels of thermal noise, which is
+// the finding rather than a coincidence: what the stations are being measured
+// against in the cubic run is not thermal noise, it is the pedestal the
+// products themselves laid down, and the floor estimator tracks that pedestal.
+// The linear control is what proves it, because there the numbers do move with
+// the floor: 1050 candidates at 35.91 dB and 14178 Hz at -70 dBFS, settling to
+// about 1546 at 26.6 dB and 10930 Hz once the stations' own skirts become the
+// floor.
+//
+// The products in this scene are therefore not phantom signals, they are a
+// raised floor, and the detector is right to report nothing there. It reports
+// FEWER candidates through the cubic than without it, not more.
+//
+// SO THE TREE HAS NO FIXTURE FOR THE FAILURE THIS WORK IS AIMED AT. The
+// on-air case behind it, three intermod products listed as tracks at 95.1 MHz,
+// is discrete products standing clear of the floor, which is the tone scene's
+// shape and not this one's. Validating a shape discriminator needs a scene
+// with modulated parents whose products land DISCRETELY in clear space, and
+// building that is the next piece of work rather than choosing a threshold
+// against a population that does not exist.
+TEST_CASE("shape survey: stations against their own products", "[.shape-survey]")
+{
+    // SWEPT OVER THE SCENE'S NOISE FLOOR, because the first run of this survey
+    // at the shipped -70 dBFS found 1384 candidates and every single one of
+    // them was on a station. The cubic lifts the floor, which is what the
+    // monitor measures and what the three cases above assert, and at that
+    // level not one product crosses the detection threshold. A survey of two
+    // populations needs both populations to exist, so the floor comes down
+    // until the products are detectable and the question can be asked.
+    const double floors[] = {-70.0, -85.0, -100.0, -115.0};
+
+    // The eight offsets dense_scene placed, as absolute frequencies.
+    const dsp::Hertz offsets[] = {-260'000, -185'000, -110'000, -35'000,
+                                  40'000,   115'000,  190'000,  265'000};
+    constexpr dsp::Hertz kOnStation = 20'000;
+
+    struct Tally {
+        std::size_t count = 0;
+        double peak_to_mean = 0.0;
+        double skirt = 0.0;
+        double lower = 0.0;
+        double snr = 0.0;
+        double bandwidth = 0.0;
+        std::size_t no_room = 0;
+
+        void add(const detect::Candidate& candidate)
+        {
+            ++count;
+            peak_to_mean += candidate.shape.peak_to_mean;
+            skirt += candidate.shape.skirt_fraction;
+            lower += candidate.shape.lower_fraction;
+            snr += candidate.snr_2500_db;
+            bandwidth += static_cast<double>(candidate.bandwidth);
+            if (candidate.shape.skirt_bins_available == 0) {
+                ++no_room;
+            }
+        }
+
+        [[nodiscard]] std::string line() const
+        {
+            if (count == 0) {
+                return "none";
+            }
+            const auto n = static_cast<double>(count);
+            std::ostringstream out;
+            out.setf(std::ios::fixed);
+            out.precision(2);
+            out << count << " candidates, peak/mean " << peak_to_mean / n << ", skirt "
+                << skirt / n << ", lower " << lower / n << ", snr " << snr / n << " dB, width "
+                << bandwidth / n << " Hz, " << no_room << " with no room to look";
+            return out.str();
+        }
+    };
+
+    std::size_t levels_with_products = 0;
+
+    for (const double floor_dbfs : floors) {
+        // Eight seconds rather than twenty: this runs several scenes and the
+        // question is what the candidates look like, not how a track ages.
+        const SceneRun cubic =
+            run_scene(dense_scene(false, floor_dbfs, 8.0), test::FrontEndModel{
+                                                               .gain = 1.0,
+                                                               .swing_db = 0.0,
+                                                               .swing_period_seconds = 0.0,
+                                                               .third_order = kThirdOrder,
+                                                           });
+        REQUIRE(cubic.decisions > 0);
+
+        // THE CONTROL THAT MAKES THE READING ABOVE MEAN ANYTHING. The same
+        // scene at the same thermal floor with a linear front end. If the
+        // stations' measured SNR rises here as the floor comes down and does
+        // not rise through the cubic, then what the detector is measuring the
+        // stations against in the cubic run is not thermal noise, it is the
+        // pedestal the products themselves laid down.
+        const SceneRun linear =
+            run_scene(dense_scene(false, floor_dbfs, 8.0), test::FrontEndModel{});
+        Tally control;
+        for (const detect::Candidate& candidate : linear.candidates) {
+            if (candidate.shape.measured) {
+                control.add(candidate);
+            }
+        }
+
+        Tally on_station;
+        Tally elsewhere;
+
+        for (const detect::Candidate& candidate : cubic.candidates) {
+            if (!candidate.shape.measured) {
+                continue;
+            }
+            const bool station = std::any_of(
+                std::begin(offsets), std::end(offsets), [&candidate](dsp::Hertz offset) {
+                    const dsp::Hertz absolute = 98'100'000 + offset;
+                    return std::abs(candidate.center - absolute) <= kOnStation;
+                });
+            (station ? on_station : elsewhere).add(candidate);
+        }
+
+        WARN("floor " << floor_dbfs << " dBFS\n  on a station: " << on_station.line()
+                      << "\n  a product:    " << elsewhere.line()
+                      << "\n  linear:       " << control.line());
+
+        if (elsewhere.count > 0) {
+            ++levels_with_products;
+        }
+    }
+
+    // Says whether the sweep found anything to compare at all. A zero here is
+    // the finding, not a broken case: it would mean this tree cannot produce a
+    // false detection from a modulated source, and that the only false
+    // detections it can produce are the tone scene's, which are carriers and
+    // are not separable by shape.
+    WARN("levels with products: " << levels_with_products << " of " << std::size(floors));
+    CHECK(levels_with_products <= std::size(floors));
 }

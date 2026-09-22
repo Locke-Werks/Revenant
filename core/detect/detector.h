@@ -93,6 +93,7 @@
 #include <span>
 #include <vector>
 
+#include "core/detect/shape.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
@@ -229,6 +230,15 @@ struct Candidate {
     // Inclusive fine-bin bounds in the frame.
     std::uint32_t first_bin = 0;
     std::uint32_t last_bin = 0;
+
+    // What the band looks like, from core/detect/shape.h. A MEASUREMENT AND
+    // NOT A VERDICT: nothing in this file thresholds on any of it, and no
+    // threshold has been chosen, because choosing one is a measurement against
+    // scenes with known truth rather than a constant somebody liked.
+    //
+    // Carried on the candidate rather than derived later because the arrays it
+    // is taken from are this decision's and are overwritten by the next one.
+    BandShape shape;
 };
 
 // A thing with an identity that persists across frames. This is what an
@@ -1010,7 +1020,15 @@ private:
     // Measures [first, last] and pushes it if it still clears the threshold.
     // Says whether it did, because the gap split has to know whether any of
     // its segments survived before it falls back to the whole band.
-    [[nodiscard]] bool emit_candidate(std::size_t first, std::size_t last);
+    //
+    // own_low and own_high bound the region this band may look at when it
+    // measures its skirts: the half-open run between the neighbouring accepted
+    // peaks. They are not the band, they are how far outside it the shape
+    // measurement is allowed to read before it would be reading somebody else.
+    [[nodiscard]] bool emit_candidate(std::size_t first,
+                                      std::size_t last,
+                                      std::size_t own_low,
+                                      std::size_t own_high);
 
     // Drops the candidates whose energy is the exponential average's own
     // residual. See residual_rate_tolerance.
@@ -1061,6 +1079,16 @@ private:
     std::vector<double> average_;
     std::vector<double> floor_;
     std::vector<double> sigma_;
+
+    // average_ minus floor_, clamped at zero, which is the frame every shape
+    // measurement is taken in. Materialised rather than subtracted on demand
+    // because measure_band walks OUTSIDE a band and a caller cannot hand it a
+    // sub-span of something that does not exist. Built in the same pass as the
+    // prefix sums below, so it costs one store per bin.
+    //
+    // CLAMPED WHERE excess_cumulative_ IS SIGNED, and find_candidates says why
+    // at the line that fills both.
+    std::vector<double> excess_;
 
     // Total weight the exponential average has accumulated, which is what
     // keeps the first frames from dominating it. Rises from alpha toward one.
