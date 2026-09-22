@@ -866,6 +866,55 @@ and Fsk branches that sit behind it. That is a property of real HF through a raw
 tap rather than a defect in the estimator, and it is the sort of thing only a
 recording was ever going to show.
 
+### Mixing and filtering the extract, and the answer that got worse
+
+The table above is an unmixed extract, so the signal sits wherever it sits
+inside the channel. `--characterise` mixes it to DC now, and
+`--characterise-width` will low pass it about DC first. Both are host arithmetic
+in a command line tool, which is why they are allowed to exist at all.
+
+**Mixing removed a confident wrong answer, which is the result it should have.**
+Unmixed, 7.192 kHz read `4-PSK at 10.456 baud` with 0.97 confidence. Mixed to
+DC it reads `unknown` at zero. `estimate_modulation_order` folds a carrier
+offset modulo the rate over the order, so an offset extract hands the M-th
+power law a line it did not earn; putting the signal at DC takes it away. The
+refusal that replaces it is better than the answer it replaces.
+
+**Filtering made it worse, and the prediction that it would help was wrong.**
+The reasoning was that the 7.192 kHz signal sits at 0.444 concentration against
+the 0.50 a carrier needs, with an envelope variance inflated by 1.5 kHz of
+noise around it, so narrowing the extract should push it over. Measured across
+three widths:
+
+| offset | unfiltered | 100 Hz | 300 Hz | 800 Hz |
+| --- | --- | --- | --- | --- |
+| 7.192 kHz | unknown 0.00 | **PSK 1.00** | unknown 0.00 | **PSK 0.99** |
+| 13.250 kHz | carrier 0.53 | carrier 0.55 | carrier 0.53 | carrier 0.53 |
+| 30 kHz, empty | unknown 0.00 | unknown 0.00 | unknown 0.00 | **PSK 0.98** |
+
+**The bottom right cell is the finding.** Empty band, filtered to 800 Hz, comes
+back PSK at 0.98 confidence. A low pass narrow against the extract's own rate
+colours the noise, and a cyclostationary detector reads the correlation that
+introduces as a symbol rate. The stage is not wrong about its own arithmetic;
+it is being handed something that is no longer noise and is answering about it.
+
+The 7.192 kHz row says the same thing more quietly: a family that appears,
+disappears and reappears as a filter width moves is not a property of the
+signal.
+
+**What was stable was the `Unmodulated` branch.** 13.250 kHz reads carrier at
+0.52 to 0.55 through every width and unfiltered, because `spectral_concentration`
+is a power ratio over the whole extract and does not care where the noise went.
+
+**So none of this goes on the wire.** `core/rpc/revenant.capnp` already refuses
+`logicalCentreHz` on the grounds that a field nothing can fill is worse than no
+field, and a family field filled from this would be worse still: it would be
+filled confidently and wrongly. What the exercise establishes is that the seam
+runs and what it would take to trust it, which is a narrower extract that came
+from a real receiver rather than a low pass over a coarse channel. That is the
+probe receiver below, and this is the measurement that says why it is worth
+building rather than a cheaper thing.
+
 ### What a probe receiver actually is, which the first draft got wrong
 
 The first draft said a detection becomes a `Demod::Raw` probe whose complex

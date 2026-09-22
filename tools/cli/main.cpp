@@ -50,7 +50,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <complex>
 #include <mutex>
+#include <numbers>
 #include <optional>
 #include <print>
 #include <utility>
@@ -458,6 +460,10 @@ struct Options {
     // placed there and its complex baseband is handed to core/characterise.
     Hertz characterise_hz = 0;
 
+    // Width to filter the extract to before characterising, or zero to hand
+    // over the whole coarse channel.
+    Hertz characterise_width = 0;
+
     // Broadcast FM stations to decode RDS from, repeatable. Each one gets a
     // receiver of its own; see RdsSpec for why it cannot share one with a
     // receiver somebody is listening to.
@@ -566,6 +572,21 @@ void print_usage()
         "                      than anything being asked about.\n"
         "                      It needs 16384 samples, which is 5.5 s at a 3 kS/s channel\n"
         "                      rate, so give --duration enough to collect them.\n"
+        "  --characterise-width <hz>\n"
+        "                      Filter the extract to this width, centred on the frequency\n"
+        "                      asked about, before characterising it. Without it the whole\n"
+        "                      coarse channel goes in, and everything else living in that\n"
+        "                      channel goes in with it.\n"
+        "                      It does not decimate: the sample count is what the stage\n"
+        "                      needs and throwing samples away to narrow the rate would\n"
+        "                      cost more than the noise does.\n"
+        "                      NARROWING THIS COLOURS THE NOISE AND THE STAGE WILL SAY SO\n"
+        "                      CONFIDENTLY. Measured on empty 40 m: unfiltered and at 100\n"
+        "                      and 300 Hz it answers unknown, and at 800 Hz it answers PSK\n"
+        "                      at 0.98. A low pass narrow against the extract's own rate\n"
+        "                      leaves correlated noise, and a cyclostationary detector\n"
+        "                      reads correlation as a symbol rate. Treat a family that\n"
+        "                      moves when this does as an artefact of this.\n"
         "  --detect-split-gap <bins>\n"
         "                      How many consecutive bins at the noise floor separate two\n"
         "                      detections rather than one, default 8. IN BINS AND NOT IN\n"
@@ -715,6 +736,22 @@ void print_usage()
                 return std::unexpected(hz.error());
             }
             options.characterise_hz = *hz;
+            continue;
+        }
+
+        if (arg == "--characterise-width") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto hz = parse_frequency(*text, arg);
+            if (!hz) {
+                return std::unexpected(hz.error());
+            }
+            if (*hz <= 0) {
+                return fail("--characterise-width takes a positive width, such as 500");
+            }
+            options.characterise_width = *hz;
             continue;
         }
 
@@ -3186,6 +3223,11 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // operator asked for and so a refusal here names itself.
     auto collector = std::make_shared<CharacteriseCollector>();
     engine::VrxId characterise_vrx{};
+
+    // How far the asked-for frequency sits from the coarse channel's own
+    // centre. The raw tap is not mixed, so this is what has to come off the
+    // extract to put the signal at DC.
+    double characterise_residual_hz = 0.0;
     if (options.characterise_hz != 0) {
         engine::VrxParams params;
         params.center = options.characterise_hz - eng.info().source_center;
@@ -3215,6 +3257,11 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         auto status = eng.vrx_status(characterise_vrx);
         const double channel_rate =
             status ? static_cast<double>(status->placement.channel_rate) : 0.0;
+        if (status && status->placement.residual_denominator != 0) {
+            characterise_residual_hz =
+                static_cast<double>(status->placement.residual_numerator) /
+                static_cast<double>(status->placement.residual_denominator);
+        }
         std::println("characterise  raw tap at {}, channel {} at {:g} S/s",
                      format_hz(options.characterise_hz),
                      status ? status->placement.channel : 0, channel_rate);
@@ -3332,6 +3379,101 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             std::println("  short of the {} the stage needs; run {:.1f} s longer",
                          characterise::kMinCharacteriseSamples, needed);
         } else {
+            // MIXED TO DC HERE, ON THE HOST, WHICH THE ENGINE WOULD NOT DO.
+            //
+            // The raw tap is one coarse channel straight out of the channel
+            // ring, so the signal sits wherever it sits inside that channel.
+            // Every geometric answer characterise() gives is relative to the
+            // extract's own DC, and the M-th power law folds a carrier offset
+            // modulo rate over the order, so an unmixed extract reports a
+            // carrier position that is ambiguous rather than wrong.
+            //
+            // A rotation is the whole of it: one complex multiply per sample
+            // over thirty-two thousand samples, in a command line tool that
+            // has already stopped the engine. It is NOT filtering, and the
+            // extract still carries everything else in the channel.
+            if (characterise_residual_hz != 0.0 && extract_rate > 0) {
+                const double step = -2.0 * std::numbers::pi * characterise_residual_hz /
+                                    static_cast<double>(extract_rate);
+                for (std::size_t i = 0; i < extract.size(); ++i) {
+                    const double phase = step * static_cast<double>(i);
+                    const auto rotation = std::complex<double>(std::cos(phase),
+                                                               std::sin(phase));
+                    const auto value = std::complex<double>(extract[i].real(),
+                                                            extract[i].imag()) * rotation;
+                    extract[i] = dsp::Complex32(static_cast<float>(value.real()),
+                                                static_cast<float>(value.imag()));
+                }
+                std::println("  mixed           {:+.1f} Hz to put the asked-for frequency at "
+                             "DC; still unfiltered",
+                             -characterise_residual_hz);
+            }
+
+            // FILTERED AFTER THE MIX, which is the only order that works: the
+            // low pass is about DC and the mix is what put the signal there.
+            //
+            // A windowed sinc applied by direct convolution. Thirty-two
+            // thousand samples against a hundred and one taps is three million
+            // multiplies in a tool that has already stopped the engine, and
+            // the alternative is a transform that would have to be written.
+            //
+            // IT DOES NOT DECIMATE. characterise() wants at least 16384
+            // samples and the extract is twice that, so throwing away seven
+            // of every eight to narrow the rate would take the count under the
+            // floor and refuse. Filtering without decimating removes the noise
+            // power and keeps the samples, which is what this is for.
+            if (options.characterise_width > 0 && extract_rate > 0) {
+                const double cutoff = static_cast<double>(options.characterise_width) / 2.0;
+                const double normalised = cutoff / static_cast<double>(extract_rate);
+                if (normalised >= 0.5) {
+                    std::println("  filter          skipped, {} Hz is wider than the {} S/s "
+                                 "extract can carry",
+                                 options.characterise_width, extract_rate);
+                } else {
+                    constexpr int kHalf = 50;
+                    std::vector<double> taps(2 * kHalf + 1, 0.0);
+                    double sum = 0.0;
+                    for (int n = -kHalf; n <= kHalf; ++n) {
+                        const double x = 2.0 * normalised * static_cast<double>(n);
+                        const double sinc =
+                            n == 0 ? 1.0 : std::sin(std::numbers::pi * x) /
+                                               (std::numbers::pi * x);
+                        // Hann, which is what core/dsp reaches for when it
+                        // wants a window with no argument about it.
+                        const double window =
+                            0.5 - 0.5 * std::cos(2.0 * std::numbers::pi *
+                                                 static_cast<double>(n + kHalf) /
+                                                 static_cast<double>(2 * kHalf));
+                        taps[static_cast<std::size_t>(n + kHalf)] = sinc * window;
+                        sum += sinc * window;
+                    }
+                    for (double& tap : taps) {
+                        tap /= sum;
+                    }
+
+                    std::vector<dsp::Complex32> filtered(extract.size());
+                    for (std::size_t i = 0; i < extract.size(); ++i) {
+                        double re = 0.0;
+                        double im = 0.0;
+                        for (int n = -kHalf; n <= kHalf; ++n) {
+                            const auto j = static_cast<std::ptrdiff_t>(i) + n;
+                            if (j < 0 || j >= static_cast<std::ptrdiff_t>(extract.size())) {
+                                continue;
+                            }
+                            const double tap = taps[static_cast<std::size_t>(n + kHalf)];
+                            re += tap * extract[static_cast<std::size_t>(j)].real();
+                            im += tap * extract[static_cast<std::size_t>(j)].imag();
+                        }
+                        filtered[i] = dsp::Complex32(static_cast<float>(re),
+                                                     static_cast<float>(im));
+                    }
+                    extract.swap(filtered);
+                    std::println("  filtered        to {} Hz about DC, {} taps, rate "
+                                 "unchanged at {} S/s",
+                                 options.characterise_width, 2 * kHalf + 1, extract_rate);
+                }
+            }
+
             characterise::CharacteriseConfig how;
             how.rate = extract_rate;
 
