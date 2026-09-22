@@ -947,7 +947,13 @@ void print_engine_block(const engine::Engine& eng)
         // mean and the first second of any run includes opening a device,
         // designing a prototype and filling a ring, so an early reading is
         // low on a source that is fine.
+        // Said once PER SOURCE and not once per process. An operator who
+        // changed radios because the first one could not keep up would
+        // otherwise get no warning about the second, which is the reading they
+        // changed radios to obtain. The epoch is the same counter the serve
+        // loop below uses to tell a client's close from a stream that ended.
         bool behind_reported = false;
+        std::uint64_t reported_for_epoch = eng.info().source_epoch;
         constexpr double kBehind = 0.9;
         constexpr double kSettleSeconds = 5.0;
 
@@ -956,6 +962,10 @@ void print_engine_block(const engine::Engine& eng)
 
             const source::SourceStats stats = eng.source_stats();
             const SampleRate rate = eng.info().source_rate;
+            if (const std::uint64_t epoch = eng.info().source_epoch; epoch != reported_for_epoch) {
+                reported_for_epoch = epoch;
+                behind_reported = false;
+            }
             const double source_seconds =
                 rate > 0 ? static_cast<double>(stats.samples_delivered) /
                                static_cast<double>(rate)
@@ -988,12 +998,21 @@ void print_engine_block(const engine::Engine& eng)
             }
             last_line = now;
 
-            const double wall_seconds =
-                std::chrono::duration<double>(now - wall_start).count();
+            // pacing.realtime_factor rather than source_seconds over this
+            // process's wall clock.
+            //
+            // Both counters this thread reads restart with the source, because
+            // Session.closeSource made a process outlive the thing it was
+            // serving: samples_delivered is per-source and so is the engine's
+            // pacing window, while wall_start is once per process. Dividing one
+            // by the other reported x0.38 on a dongle holding realtime
+            // perfectly, the ratio climbing towards 1 as the new source's
+            // seconds caught up with the old one's, which reads as a source
+            // that is behind and recovering. The engine already computes the
+            // honest number over the window it belongs to; this prints that.
             std::string line = std::format(
                 "{:8.2f}s  x{:6.2f} | frames {} sent, {} dropped | {} vrx", source_seconds,
-                wall_seconds > 0.0 ? source_seconds / wall_seconds : 0.0,
-                (*server)->frames_sent(), (*server)->frames_dropped(),
+                pacing.realtime_factor, (*server)->frames_sent(), (*server)->frames_dropped(),
                 eng.vrx_ids().size());
             if (stats.samples_lost != 0) {
                 line += std::format(" | lost {}", stats.samples_lost);
@@ -1078,9 +1097,17 @@ void print_engine_block(const engine::Engine& eng)
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wall_start).count();
     const source::SourceStats stats = eng.source_stats();
 
+    // The wall clock is this process's and the sample counts are the last
+    // source's, so the line says which is which rather than reading as one
+    // measurement. After a closeSource and an openSource they are genuinely
+    // different spans, and a run that served two radios for a minute each
+    // would otherwise report two minutes' worth of one of them. Nothing keeps
+    // a lifetime sample count across sources, and inventing one here to make
+    // the sentence tidier would be a number no other surface reports.
     std::println("");
-    std::println("served {:.2f} s of wall clock, {} blocks, {} samples", wall_seconds,
-                 stats.blocks_delivered, stats.samples_delivered);
+    std::println("served {:.2f} s of wall clock; the source open at the end delivered {} blocks, "
+                 "{} samples",
+                 wall_seconds, stats.blocks_delivered, stats.samples_delivered);
     std::println("spectrum   {} frames sent, {} dropped", (*server)->frames_sent(),
                  (*server)->frames_dropped());
     if (stats.overrun_events != 0) {
