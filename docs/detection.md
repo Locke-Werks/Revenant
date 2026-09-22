@@ -496,9 +496,25 @@ threshold until half the tracks stop being detected and start decaying.
 
 It answers "has this been here continuously, and for how long", which is worth
 knowing and is not what the name promises. A signal that is genuinely present
-and genuinely interference earns 1.00 honestly. The number to threshold
-belief on does not exist yet, and "Confidence, and unknown as a real answer"
-below sets the bar it would have to clear.
+and genuinely interference earns 1.00 honestly.
+
+**A calibrated number now rides beside it.** `Detection::marginConfidence` is
+how far a detection stood above the threshold it had to clear, through
+`characterise::margin_confidence`: a half exactly at the threshold, 0.82 six
+decibels above, 0.93 at twelve. It is the shape "Confidence, and unknown as a
+real answer" below asks for, a stated monotone function of a measured margin,
+so two detections can be ordered and a bar on it is a bar on how far the
+evidence stood above the noise.
+
+The two are orthogonal and stay that way. Confidence counts detections and
+reads no signal quality; the margin reads the measurement and nothing about
+time. A track that has stopped being detected loses confidence and keeps its
+margin, because decaying both would leave nothing answering how strong it was
+while it was there.
+
+What the margin is not is authenticity. A strong interferer stands well above
+the noise and scores high, correctly. Separating a signal from a product is
+the job of the identification below, and nothing on the wire does it yet.
 
 Five rules the first draft left out, each of which breaks something:
 

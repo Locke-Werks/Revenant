@@ -304,7 +304,9 @@ struct Track {
     // operator reported exactly that against intermod products. The answer it
     // gives, "this has been here continuously and for how long", is a true
     // and useful answer to a question nobody asked it. docs/detection.md has
-    // the retraction and what a calibrated number would have to be.
+    // the retraction. margin_confidence above is the calibrated number, and it
+    // is a separate field rather than a correction to this one because the two
+    // answer different questions and both are worth thresholding on.
     double confidence = 0.0;
 
     dsp::SampleIndex first_seen = 0;

@@ -1084,9 +1084,8 @@ struct Detection {
     # 2026-09-21.
     #
     # A client thresholding on this is filtering by "how long has this been
-    # here", which is worth doing and is not what the name promises. There is
-    # no calibrated number on this wire yet; docs/detection.md sets out what
-    # one would have to be.
+    # here", which is worth doing and is not what the name promises. The
+    # calibrated number is marginConfidence below.
     #
     # It approaches one without arriving. See Session::detections, which
     # refuses a bar of one for that reason.
