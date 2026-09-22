@@ -218,7 +218,12 @@ it makes recomputing the offsets this gesture's work rather than something to
 assume has happened.
 
 **A device retune is not free and not instant.** An RTL-SDR takes time to
-settle and the sample stream is discontinuous across it. A mouse wheel emits
+settle and the sample stream is discontinuous across it. Measured on 2026-09-21
+on an R820T: about 330 ms with no samples at all, roughly 790,000 of them at
+2.4 MS/s, because `rtlsdr_set_center_freq` fails on a dongle that has been
+streaming for more than about half a second and the backend has to stop the
+transfers around the tune. docs/rpc.md, under "The front end can be pointed
+somewhere else", has the measurement and the boundary. A mouse wheel emits
 events far faster than a tuner can follow, so the wide-scroll path has to
 coalesce: accumulate the wheel delta, issue one tune per settling interval,
 and let the waterfall smear while it happens rather than queueing a hundred

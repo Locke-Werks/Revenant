@@ -632,6 +632,100 @@ scene says to move the emitters with `span_low` and `span_high`; a dongle
 names the ranges it reaches. Three different things to do about it, and a
 refusal composed in this layer would have replaced all three with a category.
 
+**On an RTL-SDR the transfers stop while the tuner moves, and that is
+librtlsdr's limit rather than a choice this layer made.**
+`rtlsdr_set_center_freq` on a dongle that `rtlsdr_read_async` has been running
+on for more than about half a second fails with `LIBUSB_ERROR_PIPE`, and
+librtlsdr prints its own account of it:
+
+```
+rtlsdr_demod_write_reg failed with -9
+r82xx_write: i2c wr failed=-9 reg=1a len=1
+r82xx_set_freq: failed=-9
+```
+
+The first line is the transfer that failed: the DEMOD register write that opens
+the RTL2832U's I2C repeater, not a tuner register. Measured on 2026-09-21 on a
+Generic RTL2832U OEM with an R820T tuner, Windows 11, librtlsdr from vcpkg's
+static triplet.
+
+- One retune per process run, so no result is attributable to a previous failed
+  attempt. A retune at 252 ms lands. One at 522 ms, 836 ms, 1225 ms, 2026 ms and
+  5028 ms is refused.
+- The URB length does not move the boundary. 16 KiB, 64 KiB and 512 KiB
+  transfers all fail at around 330 ms.
+- It is not this tree's code. A probe calling librtlsdr directly, `rtlsdr_open`
+  then centre, rate, gain mode and agc, then `rtlsdr_reset_buffer`, then
+  `rtlsdr_read_async` on a bare thread with a counting callback, then
+  `rtlsdr_set_center_freq` from the calling thread, returns 0 at 310 ms and -9 at
+  1026 ms and 3024 ms. So this is librtlsdr, libusb or the WinUSB binding.
+- Issuing the call from inside the `read_async` callback returns
+  `LIBUSB_ERROR_BUSY` instead, because a synchronous control transfer submitted
+  from within libusb's own event handling cannot complete. That route is closed.
+
+What does work, six consecutive rounds out of six: cancel the async read, join,
+retune, reset the buffer, restart the async read.
+`RtlSdrSource::retune_streaming_locked` is that sequence. The first
+`rtlsdr_set_center_freq` after the cancel returned -9 every single time and the
+second returned 0 every single time, which is why the retune is attempted up to
+four times rather than once.
+
+What it costs a client is about 330 ms of stream, roughly 790,000 samples at
+2.4 MS/s. It is still a retune rather than a source change: the stream is not
+ended and `EngineInfo::sourceEpoch` does not move. The gap is reported through
+the path a consumer too slow to keep up already uses, `SourceStats::samplesLost`
+and `overrunEvents` on the wire and `SourceBlock::dropped_before` on the block
+boundary inside the engine. The sample index is advanced by the number of
+samples that went missing rather than carrying on from where it stopped, which
+is what keeps every timestamp after the retune right: a Paced source's timestamp
+is its anchor plus its index over the rate, so an index that did not skip the
+pause would put the rest of the stream a third of a second early and leave it
+there.
+
+**WHAT THE TREE USED TO SAY ABOUT THIS REFUSAL, and it is now false.** The
+symptom was first diagnosed as a dongle opened with no centre frequency and left
+at DC. `core/source/rtlsdr_source.cpp` said of that open: **"The tuner is in a
+failed state from that moment: every later rtlsdr_set_center_freq returns
+LIBUSB_ERROR_PIPE, which reaches an operator as `the tuner refused 435000000 Hz:
+librtlsdr returned -9` and points at the frequency they asked for rather than at
+the one nobody asked for."** And `tests/engine/test_rtlsdr_source.cpp` said **"The
+symptom reached the operator as `the tuner refused 435000000 Hz: librtlsdr
+returned -9`, naming the frequency they asked for rather than the one nobody
+asked for. Six narrower cases were written chasing it and all six passed, because
+every one of them supplied a centre."**
+
+The refusal-to-open-at-DC guard is still right and stays: asking an R820T to
+lock DC does fail and does leave the tuner unable to tune. What it does not do is
+explain the reported symptom, which happens on a dongle opened correctly at
+98.1 MHz. Confirmed by the frequency axis in the window reading 96.75 to
+99.15 MHz while every retune was still refused. The six narrower cases passed
+because each of them retuned within about a quarter second of starting the
+stream, not because each of them supplied a centre.
+
+**The measurements are reproducible, and a later librtlsdr or a dongle without
+this defect gets checked rather than assumed.**
+`tests/engine/test_rtlsdr_source.cpp` carries four `[.probe]` cases. They are
+hidden from the default run because each measures a threshold rather than
+answering yes or no, and a hidden Catch2 case runs when it is named:
+
+```powershell
+$exe = "build\dev\tests\engine\revenant_engine_tests.exe"
+$env:REVENANT_PROBE_DELAY_MS = "250"      # then 520, 1000, 3000
+& $exe "a dongle streaming for minutes can still be tuned"
+& $exe "librtlsdr on its own retunes a streaming dongle"
+& $exe "librtlsdr retunes from inside its own callback"
+& $exe "librtlsdr retunes a dongle whose stream is paused"
+```
+
+`REVENANT_PROBE_DELAY_MS` is milliseconds of streaming before the one retune the
+first two cases issue, defaulting to 2000. Walking it across 250, 520, 1000 and
+3000 is what pins the boundary, and one retune per run is what keeps a result
+from being attributable to a previous failed attempt. The first case also takes
+`REVENANT_PROBE_BLOCK`, in samples, which sizes the URB: 8192, 32768 and 262144
+are the three transfer lengths above. Each case reports its number through
+`WARN`, so it prints on a pass, and all four skip themselves with a reason when
+no dongle is attached.
+
 ### Whether the source is keeping up
 
 `EngineInfo` carries `realtimeFactor` and `sourcePacedBy`.

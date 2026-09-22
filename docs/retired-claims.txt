@@ -316,3 +316,23 @@ instead: It cannot happen. Server::frames_dropped never crosses this wire:
     own drops are exact and always were, counted from SpectrumFrame::sequence
     jumping by more than the everyNth it asked for. The host-side counter
     over-counts only when two subscriptions ask for different rates.
+
+phrase: The tuner is in a failed state from that moment: every later
+    rtlsdr_set_center_freq returns LIBUSB_ERROR_PIPE, which reaches an operator
+    as "the tuner refused 435000000 Hz: librtlsdr returned -9"
+phrase: The symptom reached the operator as "the tuner refused 435000000 Hz:
+    librtlsdr returned -9", naming the frequency they asked for rather than the
+    one nobody asked for
+phrase: Six narrower cases were written chasing it and all six passed, because
+    every one of them supplied a centre
+retired: 2026-09-21
+commit: 70d2ba4
+instead: An open with no centre does not explain this refusal. The symptom
+    happens on a dongle opened correctly at 98.1 MHz, with the window's
+    frequency axis reading 96.75 to 99.15 MHz while every retune is refused.
+    rtlsdr_set_center_freq fails LIBUSB_ERROR_PIPE on any dongle rtlsdr_read_async
+    has been running on for more than about half a second, inside librtlsdr and
+    not in this tree; docs/rpc.md has the measurement, the boundary and the
+    pause-and-retune workaround. The six narrower cases passed because each
+    retuned within about a quarter second of starting the stream. The
+    refusal-to-open-at-DC guard is still correct and stays.
