@@ -1297,6 +1297,7 @@ TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
 
         std::size_t count = 0;
         double peak_to_mean = 0.0;
+        double concentration = 0.0;
         double skirt = 0.0;
         double lower = 0.0;
         double snr = 0.0;
@@ -1311,6 +1312,7 @@ TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
             }
             ++count;
             peak_to_mean += candidate.shape.peak_to_mean;
+            concentration += candidate.shape.concentration;
             skirt += candidate.shape.skirt_fraction;
             lower += candidate.shape.lower_fraction;
             snr += candidate.snr_2500_db;
@@ -1327,8 +1329,9 @@ TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
         out.setf(std::ios::fixed);
         out.precision(3);
         out << kFamilies[i].name << ": " << count << " candidates, peak/mean "
-            << peak_to_mean / n << ", skirt " << skirt / n << ", lower " << lower / n
-            << ", snr " << snr / n << " dB, width " << width / n << " Hz";
+            << peak_to_mean / n << ", conc " << concentration / n << ", skirt "
+            << skirt / n << ", lower " << lower / n << ", snr " << snr / n
+            << " dB, width " << width / n << " Hz";
         WARN(out.str());
     }
 

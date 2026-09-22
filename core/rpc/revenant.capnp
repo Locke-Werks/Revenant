@@ -1162,11 +1162,19 @@ struct Detection {
     # an 11.7 kHz patch of noise floor sitting at confidence 1.00 reads 0.02
     # here, against 0.59 to 0.86 for the carriers in the same list.
     #
-    # READ IT WITH bandwidthHz. High and narrow is a carrier measured
-    # correctly. High and wide is a carrier inside a bandwidth that is an
-    # overestimate, which is a detection worth splitting and a band the
-    # characteriser cannot be asked about fairly. Low is a band filled with
-    # whatever it is.
+    # READ IT WITH bandwidthHz, and the bin width the frame reports.
+    #
+    # Under about five bins it says nothing: the analysis window spreads one
+    # line over that many, so a band that is one line reads near one whatever
+    # produced it. Measured across one emitter of each family, cw, am, nfm,
+    # usb and lsb all read 0.946 to 0.947.
+    #
+    # Above that it separates a LINE SPECTRUM from a FILLED one. In the same
+    # measurement fsk2 reads 0.519, two tones with half the power in one, and
+    # bpsk and qpsk read 0.117 and 0.121. A high reading on a wide band is a
+    # carrier with sidebands, not a width that was measured wrong: a 489 Hz
+    # band on 20 m reading 0.82 keeps 473 Hz of its power down to the 80th
+    # percentile and only collapses at the 50th.
     #
     # NOT A VERDICT. Nothing thresholds on it anywhere, and no threshold has
     # been chosen, because choosing one is a measurement against known truth

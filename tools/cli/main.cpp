@@ -457,6 +457,13 @@ struct Options {
     // frequency on purpose; see the flag's help text.
     std::uint32_t detect_split_gap = 0;
 
+    // The ITU occupied-power fraction the reported bandwidth holds, or zero to
+    // leave DetectorConfig's own default alone. Exposed for the same reason
+    // split_gap_bins was: a constant nobody can sweep is a constant nobody can
+    // check, and a claim about what sets a bandwidth is worth no more than the
+    // sweep that survives it.
+    double detect_occupied = 0.0;
+
     // Absolute hertz to characterise. A raw receiver is placed there and its
     // complex baseband is handed to core/characterise.
     //
@@ -657,6 +664,17 @@ void print_usage()
         "                      carriers were named correctly at every width in the same run,\n"
         "                      so this costs the answers about noise rather than the answers\n"
         "                      about signals.\n"
+        "  --detect-occupied <fraction>\n"
+        "                      The share of a detection's excess power its reported\n"
+        "                      bandwidth holds, default 0.99, which is the ITU occupied\n"
+        "                      bandwidth. Exposed so it can be swept.\n"
+        "                      WHAT A SWEEP OF IT ANSWERS. The excess is clamped at zero\n"
+        "                      before it is summed, so a noise bin can only push the\n"
+        "                      total up and never down, and the tail the trim is walking\n"
+        "                      in from is a half percent of a total that a wide ladder\n"
+        "                      rung has inflated. A band whose width is mostly that\n"
+        "                      pedestal moves a lot when this does; a band whose width is\n"
+        "                      its own signal barely moves at all.\n"
         "  --detect-split-gap <bins>\n"
         "                      How many consecutive bins at the noise floor separate two\n"
         "                      detections rather than one, default 8. IN BINS AND NOT IN\n"
@@ -855,6 +873,24 @@ void print_usage()
                 return fail("--characterise-width takes a positive width, such as 500");
             }
             options.characterise_width = *hz;
+            continue;
+        }
+
+        if (arg == "--detect-occupied") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_real(*text, arg);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            if (!(*number >= 0.01) || !(*number <= 1.0)) {
+                return fail("--detect-occupied takes a power fraction from 0.01 to 1.0, "
+                            "such as 0.99");
+            }
+            options.detect_occupied = *number;
+            options.detect = true;
             continue;
         }
 
@@ -2686,6 +2722,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         detect_config.confidence_threshold = options.detect_confidence;
         if (options.detect_split_gap != 0) {
             detect_config.split_gap_bins = options.detect_split_gap;
+        }
+        if (options.detect_occupied != 0.0) {
+            detect_config.occupied_power_fraction = options.detect_occupied;
         }
 
         auto view = DetectView::create(detect_config, geometry);

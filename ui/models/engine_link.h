@@ -1650,10 +1650,13 @@ public:
     // junk" by forgetting to check, which is the only way this field can do
     // harm.
     //
-    // IT HAS TO BE READ WITH THE BANDWIDTH. High and narrow is a carrier
-    // measured correctly; high and wide is a carrier inside a bandwidth that
-    // is an overestimate; low is a band filled with whatever it is. A band of
-    // three bins or fewer reads exactly one and means nothing by it.
+    // IT HAS TO BE READ WITH THE BANDWIDTH. Under about five bins it says
+    // nothing, because the analysis window spreads one line over that many.
+    // Above that it separates a line spectrum from a filled one: measured
+    // across one emitter of each family, fsk2 reads 0.519 against bpsk at
+    // 0.117 and qpsk at 0.121, while cw, am, nfm, usb and lsb are all too
+    // narrow to resolve and read 0.946 alike. A high reading on a wide band
+    // is a carrier with sidebands.
     [[nodiscard]] Q_INVOKABLE double detectionConcentration(qulonglong id) const {
         for (const rpc::Detection& detection : shown_.detections) {
             if (detection.id == id) {

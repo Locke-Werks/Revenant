@@ -92,10 +92,32 @@ struct BandShape {
     // already separated on the characteriser's side of the same data.
     //
     // READ IT WITH THE BANDWIDTH BESIDE IT, which is how it becomes an answer
-    // rather than a number. High and narrow is a carrier measured correctly.
-    // High and wide is a carrier inside a bandwidth that is an overestimate,
-    // which is a detection worth splitting and a band the second tier cannot
-    // be asked about fairly. Low is a band that is filled with whatever it is.
+    // rather than a number.
+    //
+    // BELOW ABOUT FIVE BINS IT SAYS NOTHING, for the reason it says nothing
+    // below three: the analysis window spreads one line over about that many,
+    // so a band that is one line reads near one whatever produced it. The
+    // family survey measures exactly that: cw, am, nfm, usb and lsb all read
+    // between 0.946 and 0.947, identical to three places, because at 36.6 Hz
+    // the detector reports each of their lines as its own five-bin band.
+    //
+    // ABOVE THAT IT SEPARATES A LINE SPECTRUM FROM A FILLED ONE, which is the
+    // first thing in this tree that has separated anything at the family
+    // level. In the same survey fsk2 reads 0.519, being two tones with half
+    // the power in one of them, against bpsk at 0.117 and qpsk at 0.121,
+    // which are genuinely filled. That is the "separates the broad families"
+    // tier one is promised to give.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. It read: "High and narrow is a carrier
+    // measured correctly. High and wide is a carrier inside a bandwidth that
+    // is an overestimate, which is a detection worth splitting and a band the
+    // second tier cannot be asked about fairly." The second sentence was a
+    // guess and a sweep of occupied_power_fraction refused it. A 489 Hz band
+    // on 20 m reading 0.82 holds about 473 Hz at every fraction from 0.99
+    // down to 0.80 and then collapses to 3 Hz at 0.50, so its power is
+    // genuinely bimodal: a narrow core and a distinct ring out to a couple of
+    // hundred hertz. The width is not an overestimate, the band is a line
+    // spectrum, and a carrier with sidebands is what that looks like.
     //
     // NOT A VERDICT AND NOT THRESHOLDED, per this header's own rule. What
     // counts as high is a measurement against known truth that has not been

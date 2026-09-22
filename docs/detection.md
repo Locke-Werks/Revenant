@@ -1130,11 +1130,10 @@ and 0.267 over the 1.5 kHz channel around it, which says it is concentrated
 within itself without dominating its neighbourhood, and only having both
 numbers says that.
 
-**Read it with the bandwidth, which is the one instruction it needs.** High and
-narrow is a carrier measured correctly. High and wide is a carrier inside a
-bandwidth that is an overestimate, which is the 4.3 kHz row from the cross-check
-above and a detection that wants splitting. Low is a band filled with whatever
-it is.
+**Read it with the bandwidth, which is the one instruction it needs.** Under
+about five bins it says nothing, because the analysis window spreads one line
+over that many. Above that it separates a line spectrum from a filled one, and
+the section after next is the measurement of that.
 
 Nothing thresholds on it. `core/detect/shape.h` says why: what counts as high
 is a measurement against known truth, and that has not been made.
@@ -1193,12 +1192,61 @@ there is not one.
 stations exactly as reported. The eleven-kilohertz patch on 20 m at 1603 holds
 confidence 1.00 for the whole minute.
 
-**Two more of the high-and-wide case turned up, which is the prediction
-working.** On 20 m at 1603 a 489 Hz band read 0.82 and a 2.37 kHz band read
-0.39, both far above what their widths would suggest and both out of order in a
-list sorted by width. That is a narrow thing inside a bandwidth that is an
-overestimate, which is what the field's own note says to expect and is a
-detection worth splitting rather than a signal worth doubting.
+**Two bands read far above what their widths would suggest.** On 20 m at 1603 a
+489 Hz band read 0.82 and a 2.37 kHz band read 0.39, both out of order in a list
+sorted by width. The next two sections are what those turned out to be.
+
+#### What a high reading on a wide band actually is
+
+The first guess was that the bandwidth was an overestimate and the detection
+wanted splitting. `--detect-occupied` exposes the ITU fraction the reported
+width holds, so the guess could be swept, and it does not survive:
+
+| band on 20 m | 0.99 | 0.95 | 0.90 | 0.80 | 0.50 |
+| --- | --- | --- | --- | --- | --- |
+| the 10 Hz carrier | 10 Hz | 10 Hz | 8 Hz | 7 Hz | 4 Hz |
+| the 15 Hz carrier | 15 Hz | 12 Hz | 10 Hz | 8 Hz | 3 Hz |
+| **the 489 Hz band** | 489 Hz | 788 Hz | 474 Hz | **473 Hz** | **3 Hz** |
+| the 11.7 kHz patch | 11.7 kHz | 10.4 kHz | 9.7 kHz | gone | gone |
+
+**A carrier shrinks gently and the 489 Hz band does not.** It holds about
+473 Hz all the way down to the eightieth percentile and then collapses to three
+hertz at the fiftieth. Its power is bimodal: a narrow core holding about half,
+and a distinct ring out to a couple of hundred hertz. A pedestal of noise would
+have shrunk smoothly, and the eleven-kilohertz patch, which is a genuinely
+filled band, does exactly that.
+
+So the width is not an overestimate. **The band is a line spectrum**, and a
+carrier with sidebands is what that looks like.
+
+#### Which makes it a family measurement, and the first one here that works
+
+The family survey runs one emitter of each modulation through a linear front
+end. With concentration added:
+
+| family | concentration | what it is |
+| --- | --- | --- |
+| cw, am, nfm, usb, lsb | **0.946 to 0.947** | all too narrow to resolve |
+| fsk2 | **0.519** | two tones, half the power in one |
+| bpsk | 0.117 | filled |
+| qpsk | 0.121 | filled |
+
+**The first five are identical to three decimal places** and that is not a
+result about them, it is the window: at 36.6 Hz the detector reports each of
+their lines as its own five-bin band, and three bins of five is most of five
+whatever produced it. Below about five bins this number says nothing, the same
+way it says nothing below three.
+
+**Above that it separates a line spectrum from a filled one.** 0.519 against
+0.117 is more than four to one between a two-tone signal and a linear one, on
+the same span in the same frames. That is the "separates the broad families"
+that tier one is promised to give, and it is the first thing measured in this
+tree that has done it: `peak_to_mean` reads 2.854, 1.793 and 1.703 over the
+same three, which is the same ordering with a fifth of the separation and no
+scale.
+
+It still is not an interference test, for the reason two sections up. A line
+spectrum can be an intermod product and a filled band can be a station.
 
 #### So what a modulation-driven detector can stand on today
 
