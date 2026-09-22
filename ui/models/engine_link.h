@@ -2180,6 +2180,11 @@ private:
     // Under source_mutex_ rather than atomics because a URI is a string, and
     // because a listing and an open posted together have to be applied in that
     // order rather than in whichever the supervisor noticed.
+    //
+    // want_listing_ is the one of the three the SUPERVISOR also sets, from
+    // note_source_epoch, because a replaced source makes every descriptor in
+    // the picker a description of the world before the switch. The lock is what
+    // makes that safe rather than the thread it is set on.
     bool want_listing_ = false;       // guarded by source_mutex_
     bool want_open_ = false;          // guarded by source_mutex_
     bool want_close_ = false;         // guarded by source_mutex_
@@ -2207,10 +2212,12 @@ private:
     // next pass tries again rather than leaving the display unfed forever.
     std::uint64_t seen_source_epoch_ = 0;
 
-    // Set by refreshSources, openSource and closeSource, cleared by the
-    // supervisor when it has applied them. In the wait predicate for the
-    // reason tune_work_pending_ is: a device list that arrives a quarter of a
-    // second after the button reads as the button not working.
+    // Set by refreshSources, openSource and closeSource, and by
+    // note_source_epoch when the stream underneath a live connection has been
+    // replaced. Cleared by the supervisor when it has applied them. In the wait
+    // predicate for the reason tune_work_pending_ is: a device list that
+    // arrives a quarter of a second after the button reads as the button not
+    // working.
     bool source_work_pending_ = false;  // guarded by supervisor_mutex_
 
     // The pacing measurement, handed over under source_mutex_ with the

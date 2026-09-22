@@ -758,6 +758,59 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
     // sentence about a band it was never pointed at.
     clear_detection_fault();
 
+    // AND THE DESCRIPTORS WENT WITH IT, WHICH IS THE ONE THING A REPLACED
+    // SOURCE USED TO LEAVE STANDING.
+    //
+    // Every row the picker holds was described against the world as it was
+    // before the switch, and source::describe_sources OPENS each device to
+    // answer: a dongle this engine is now streaming from lists as available,
+    // one the previous source held lists as busy, and the rate bounds, gain
+    // stages and tuning envelope compose_source_uri settles a request against
+    // are the ones that applied a source ago. Measured 2026-09-21: opening an
+    // RTL-SDR over a synthetic scene moved the frequency axis, enabled the tune
+    // box and resumed frames, and left every row in the panel describing the
+    // devices as they had been before the switch, for as long as the window
+    // stayed up. The panel is inline rather than modal on purpose, so it is
+    // still on screen and still under the operator's cursor at exactly the
+    // moment its rows stop being true.
+    //
+    // THAT LIST IS THE WHOLE OF WHERE A DESCRIPTOR REACHES THE SCREEN. Nothing
+    // in ui/qml/Main.qml names the source that is OPEN: the identity an
+    // operator reads after a switch is the row they picked in the panel, and it
+    // is a row from the stale listing. So the listing going stale is not a
+    // picker detail, it is the window's only statement about what it is
+    // receiving from.
+    //
+    // It looked like a signal that never fired and was not one. The adopt
+    // below emits sourcesChanged, so every binding on the list DID re-read; it
+    // re-read the same descriptors, because nothing between this function and
+    // adopt_sources asks the engine for another listing. probe_source_tuning
+    // covers the tuning half on the open path and there was no equivalent for
+    // this half anywhere.
+    //
+    // ASKED FOR RATHER THAN FETCHED HERE, on the flag refreshSources sets.
+    // listSources opens every device index to answer and pays a libusb timeout
+    // per absent dongle, and this function is in the middle of re-establishing
+    // the spectrum subscription: paying that inline would hold the display
+    // unfed for as long as the slowest absent device takes to refuse.
+    // apply_source_request already owns the call, and it runs first on the pass
+    // after this one. No wake is posted, because this IS the supervisor thread
+    // and the wait it is about to reach has source_work_pending_ in its
+    // predicate.
+    //
+    // A failed re-subscribe below rewinds seen_source_epoch_ so the next pass
+    // comes through here again, which asks for the listing again with it. That
+    // is one round trip per pass on a path that is already retrying, and it is
+    // cheaper than a second flag kept only to remember that the ask was made.
+    {
+        const std::lock_guard<std::mutex> lock(source_mutex_);
+        want_listing_ = true;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        source_work_pending_ = true;
+    }
+
     // THE OLD SUBSCRIPTION IS DROPPED AND NOT RE-USED. The server ended it
     // with the source, so the capability this client holds is dead; asking for
     // a new one without dropping the old leaves this side thinking it has two.
