@@ -1141,7 +1141,28 @@ the same three bands:
 | 15 Hz carrier | 0.59 | 0.713 |
 
 Two measurements that share no arithmetic, one from an averaged power spectrum
-and one from complex baseband, landing in the same place. Where they differ is
+and one from complex baseband, landing in the same place.
+
+The same check on 40 m at 1359 UT, which is a different band on a different
+hour:
+
+| detection | width | detector | characteriser | family |
+| --- | --- | --- | --- | --- |
+| 193 Hz | 11 Hz | 0.77 | 0.717 | unmodulated carrier |
+| 7.192 kHz | 19 Hz | 0.60 | 0.663 | unmodulated carrier |
+| 15.194 kHz | 41 Hz | 0.33 | 0.382 | PSK at 0.97 |
+| 13.249 kHz | 29 Hz | **0.41** | **0.700** | unmodulated carrier |
+
+Three of the four agree within seven hundredths. **The fourth is the one with a
+neighbour**, and it disagrees in the direction that says so: 13.249 kHz has a
+five-hertz line eleven hertz below it, so the detector's 29 Hz band holds two
+lines and its three-bin window catches one of them, while the characteriser
+over the whole 1.5 kHz channel sees the carrier dominate. A gap between the two
+numbers is a band with structure in it, which is the same reading the grouping
+below gives from a different direction.
+
+The 15.194 kHz row is the artefact again: a weak carrier at concentration 0.38
+called PSK at 0.97. Where they differ is
 informative rather than contradictory: #54 reads 0.86 over its own 809 Hz band
 and 0.267 over the 1.5 kHz channel around it, which says it is concentrated
 within itself without dominating its neighbourhood, and only having both
