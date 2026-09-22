@@ -1219,6 +1219,19 @@ filled band, does exactly that.
 So the width is not an overestimate. **The band is a line spectrum**, and a
 carrier with sidebands is what that looks like.
 
+Swept finely, it is not even ambiguous. A continuous skirt would grow smoothly
+between the core and the full width; this one steps:
+
+| occupied fraction | 0.50 | 0.55 | 0.60 | 0.65 | 0.70 | 0.80 |
+| --- | --- | --- | --- | --- | --- | --- |
+| width | 3 Hz | 3 Hz | 3 Hz | 5 Hz | 4 Hz | **473 Hz** |
+
+**Seventy percent of the band is in five hertz and there is nothing at all
+between five and four hundred and seventy.** The next tenth of the power sits
+in a pair about 235 Hz either side. That is a carrier and a discrete sideband
+pair, measured off real 20 m rather than inferred, and it is what the
+concentration of 0.82 was reporting.
+
 #### Which makes it a family measurement, and the first one here that works
 
 The family survey runs one emitter of each modulation through a linear front
