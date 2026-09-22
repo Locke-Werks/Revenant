@@ -678,13 +678,25 @@ changes what the detector does at the shipped VHF geometry, so it is left
 configurable and recorded rather than re-tuned: measuring a new rule needs real
 HF with ground truth, and a recording carries none.
 
-**Real HF arrived on 2026-09-22 and half of that sentence is now false.**
-`docs/recordings.md` has six hours of 40 m and 20 m at 96 kS/s. What it does
-not bring is the ground truth: nothing in those files says which signals are in
-them, and they were recorded across a total solar eclipse, so the population
-changes over the three hours rather than holding still. The measurement is
-possible now and is not cheap. The engine also cannot read them yet, for a
-reason that has nothing to do with HF.
+**Real HF arrived on 2026-09-22 and the entry is still open.**
+`docs/recordings.md` has six hours of 40 m and 20 m at 96 kS/s, and an excerpt
+of one runs at 1.465 Hz per bin. Swept over that excerpt from two bins to
+thirty-two, this constant changes nothing at all: 31 tracks born, 26 dropped,
+15 merges and 1 split at every value. It does not constrain the number.
+
+Two things that reading taught, both worth keeping. A merge is not a split:
+`stats_.merges` counts several tracks gated to one candidate, which is
+`association_overlap`, and this constant decides whether one candidate is cut
+into several. And two signals that OVERLAP cannot be separated by any gap,
+because there is no run of floor between them to measure.
+
+What would constrain it is the RTTY case this section predicts: two tones
+170 Hz apart is 116 bins at that grid, far over any value swept, so RTTY there
+should split into two detections and be visibly wrong. Nothing found in that
+minute obviously is RTTY.
+
+`revenant-cli --detect-split-gap` exists now so the next person can sweep it
+without rebuilding.
 
 ## Identification
 

@@ -155,15 +155,48 @@ to 1.00 and is mostly about age: #13 is the weakest signal in the list at
 12.2 dB and carries the highest confidence in it, because it had been there for
 42 seconds.
 
-**And `split_gap_bins` is visible in the first minute.** #69 at 7.186 kHz and
-#7 at 7.192 kHz are six hertz apart, which at this grid is four bins, under the
-eight-bin gap, so #69 was merged into #7. Two CW signals six hertz apart on
-40 m are two stations. `docs/detection.md` says that constant cannot be settled
-without real HF; this is the case it needs, and it took one excerpt to find.
+**WHAT THIS SECTION FIRST CLAIMED ABOUT `split_gap_bins`, AND THE SWEEP THAT
+REFUTED IT.** It read: "#69 at 7.186 kHz and #7 at 7.192 kHz are six hertz
+apart, which at this grid is four bins, under the eight-bin gap, so #69 was
+merged into #7 ... this is the case it needs, and it took one excerpt to find."
 
-What is still missing is what that document also says: nothing here knows which
-of those five are stations and which are artefacts, so this is an observation
-and not a score.
+That was a plausible reading of one observation and it is wrong. The constant
+was exposed on `revenant-cli` so it could be swept, and over the same
+fifty-five seconds it does almost nothing:
+
+    gap  2 bins (  2.9 Hz): 31 born, 26 dropped, 15 merges, 1 split
+    gap  4 bins (  5.9 Hz): 31 born, 26 dropped, 15 merges, 1 split
+    gap  8 bins ( 11.7 Hz): 31 born, 26 dropped, 15 merges, 1 split
+    gap 16 bins ( 23.4 Hz): 31 born, 26 dropped, 15 merges, 1 split
+    gap 32 bins ( 46.9 Hz): 31 born, 26 dropped, 15 merges, 1 split
+    gap 64 bins ( 93.8 Hz): 31 born, 26 dropped, 17 merges, 1 split
+
+Identical from two bins to thirty-two. Setting the gap to 2.9 Hz, well under
+the six hertz between those two signals, does not separate them.
+
+**Two mistakes, and they are different ones.** A merge is not a split.
+`stats_.merges` counts several TRACKS gated to one candidate, which
+`core/detect/detector.cpp` decides by frequency overlap against
+`association_overlap`, default 0.3. `split_gap_bins` decides whether one
+candidate band is cut into several, which happens earlier and elsewhere. The
+observed merge was the tracker associating, and the constant it answers to is
+the other one.
+
+And no value of the gap could have separated that pair anyway. They are six
+hertz apart with bandwidths of three and fourteen hertz, so they overlap: there
+is no run of floor between them to be eight bins wide or two. They are one blob
+in the spectrum and the detector is right that they are.
+
+**So this recording does not constrain `split_gap_bins`, and
+`docs/detection.md`'s entry stays open.** What would constrain it is a signal
+with interior nulls wide enough to matter, which is the RTTY case that document
+predicts: two tones 170 Hz apart is 116 bins at this grid, far over any gap in
+the sweep, so RTTY here should split into two detections and be visibly wrong.
+Nothing in this minute obviously is RTTY. Finding one is the next measurement.
+
+What is missing underneath all of it is what that document also says: nothing
+here knows which of those five detections are stations and which are artefacts,
+so this is an observation and not a score.
 
 ## What they are not
 

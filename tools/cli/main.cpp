@@ -447,6 +447,11 @@ struct Options {
     double detect_threshold_db = 6.0;
     double detect_confidence = 0.5;
 
+    // Zero means leave DetectorConfig's own default alone, which is what
+    // anybody not asking this question wants. It is a count of bins and not a
+    // frequency on purpose; see the flag's help text.
+    std::uint32_t detect_split_gap = 0;
+
     // Broadcast FM stations to decode RDS from, repeatable. Each one gets a
     // receiver of its own; see RdsSpec for why it cannot share one with a
     // receiver somebody is listening to.
@@ -543,6 +548,14 @@ void print_usage()
         "                      neither says a track is real.\n"
         "                      Turns the spectrum stage on by itself, so it needs\n"
         "                      neither --vrx nor --spectrum.\n"
+        "  --detect-split-gap <bins>\n"
+        "                      How many consecutive bins at the noise floor separate two\n"
+        "                      detections rather than one, default 8. IN BINS AND NOT IN\n"
+        "                      HERTZ, which matters because a bin is not the same width on\n"
+        "                      every grid: 8 bins is 293 Hz on a 2.4 MS/s VHF span and\n"
+        "                      11.7 Hz on a 96 kS/s HF one. Raise it to stop one signal with\n"
+        "                      interior nulls reading as several, lower it to tell two close\n"
+        "                      signals apart.\n"
         "  --detect-threshold <db>\n"
         "                      Detection threshold, default 6. In dB of SNR in the\n"
         "                      2500 Hz reference bandwidth, which is what makes one\n"
@@ -670,6 +683,23 @@ void print_usage()
         }
 
         if (arg == "--detect") {
+            options.detect = true;
+            continue;
+        }
+
+        if (arg == "--detect-split-gap") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto bins = parse_integer(*text, arg);
+            if (!bins) {
+                return std::unexpected(bins.error());
+            }
+            if (*bins < 1 || *bins > 65535) {
+                return fail("--detect-split-gap takes a whole number of bins from 1 to 65535");
+            }
+            options.detect_split_gap = static_cast<std::uint32_t>(*bins);
             options.detect = true;
             continue;
         }
@@ -2395,6 +2425,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         detect_config.grid_channels = eng.info().grid.channels;
         detect_config.detection_threshold_db = options.detect_threshold_db;
         detect_config.confidence_threshold = options.detect_confidence;
+        if (options.detect_split_gap != 0) {
+            detect_config.split_gap_bins = options.detect_split_gap;
+        }
 
         auto view = DetectView::create(detect_config, geometry);
         if (!view) {
