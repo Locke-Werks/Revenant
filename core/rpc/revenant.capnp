@@ -1148,6 +1148,43 @@ struct Detection {
     # The track this one was merged into, while state is merged. Zero
     # otherwise, and never a valid id, because ids are issued from one.
     mergedInto @11 :UInt64;
+
+    # This band's excess in its strongest three adjacent bins, over its excess
+    # in total. detect::BandShape::concentration, which is the same quantity
+    # characterise::spectral_concentration answers in, so a client holding both
+    # tiers can compare them directly.
+    #
+    # WHAT IT IS FOR. confidence says how long a track has been there and
+    # marginConfidence says how far it stood above the threshold; neither says
+    # the band is SHAPED like a transmission, and an operator reported exactly
+    # that gap on 2026-09-21 with intermod products and raised patches of floor
+    # listed beside stations at confidence 1.00. Measured on 20 m at 1603 UT,
+    # an 11.7 kHz patch of noise floor sitting at confidence 1.00 reads 0.02
+    # here, against 0.59 to 0.86 for the carriers in the same list.
+    #
+    # READ IT WITH bandwidthHz. High and narrow is a carrier measured
+    # correctly. High and wide is a carrier inside a bandwidth that is an
+    # overestimate, which is a detection worth splitting and a band the
+    # characteriser cannot be asked about fairly. Low is a band filled with
+    # whatever it is.
+    #
+    # NOT A VERDICT. Nothing thresholds on it anywhere, and no threshold has
+    # been chosen, because choosing one is a measurement against known truth
+    # rather than a number somebody liked. It is not authenticity either: a
+    # strong interferer can be perfectly concentrated.
+    #
+    # A BAND OF THREE BINS OR FEWER READS EXACTLY ONE and means nothing by it.
+    # Check bandwidthHz against the frame's bin width first.
+    concentration @13 :Float64;
+
+    # Whether the shape was measured at all. False for an empty band or one
+    # whose numbers could not be formed.
+    #
+    # CARRIED SO A CLIENT CAN REFUSE RATHER THAN BELIEVE A ZERO, which is the
+    # same argument BandShape::skirt_bins_available makes: unmeasured arrives
+    # as 0.0, and 0.0 is the most noise-like reading there is, so a client
+    # without this flag would draw "we could not tell" as "certainly junk".
+    shapeMeasured @14 :Bool;
 }
 
 # One answer to Session::detections.

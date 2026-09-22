@@ -504,6 +504,18 @@ struct Detection {
     // Non-zero only while state is Merged.
     std::uint64_t merged_into = 0;
 
+    // The band's excess in its strongest three adjacent bins over its excess
+    // in total, which is the unit characterise::spectral_concentration answers
+    // in. See the schema for what it is for; the short version is that
+    // confidence and margin_confidence both say nothing about the band being
+    // SHAPED like a transmission and this does.
+    //
+    // READ IT WITH bandwidth_hz, and check shape_measured before believing a
+    // zero: unmeasured arrives as 0.0 and 0.0 is the most noise-like reading
+    // there is.
+    double concentration = 0.0;
+    bool shape_measured = false;
+
     [[nodiscard]] constexpr std::uint64_t age_samples() const {
         return last_seen - first_seen;
     }

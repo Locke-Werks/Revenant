@@ -518,6 +518,8 @@ void write_detection(schema::Detection::Builder out, const detect::Track& in) {
     out.setChannel(in.channel);
     out.setChannelValid(in.channel_valid);
     out.setMergedInto(in.merged_into);
+    out.setConcentration(in.shape.concentration);
+    out.setShapeMeasured(in.shape.measured);
 }
 
 void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBitsStatus& in) {

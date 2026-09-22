@@ -557,6 +557,8 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.channel = in.getChannel();
     out.channel_valid = in.getChannelValid();
     out.merged_into = in.getMergedInto();
+    out.concentration = in.getConcentration();
+    out.shape_measured = in.getShapeMeasured();
     return out;
 }
 

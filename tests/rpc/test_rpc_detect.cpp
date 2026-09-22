@@ -563,6 +563,22 @@ TEST_CASE("detections cross the wire and agree with the geometry the engine repo
             1.0 - 0.5 * std::exp(-(detection.snr_2500_db - list.detection_threshold_db) / 6.0);
         CHECK(std::abs(detection.margin_confidence - expected) < 1.0e-6);
 
+        // THE SHAPE REACHES A CLIENT TOO, and it is the same half that goes
+        // missing quietly. Both fields default to zero and false, so a client
+        // that never read them arrives holding exactly the reading that means
+        // "we could not tell", which is the failure the flag exists to stop a
+        // display drawing as "certainly junk".
+        //
+        // Every published detection was built from a candidate with positive
+        // excess in it, so there was always something to measure.
+        CHECK(detection.shape_measured);
+
+        // A fraction of the band's own excess, so it cannot be negative and
+        // cannot exceed the whole. Three bins out of three is the degenerate
+        // upper end and is reachable, so the bound is inclusive.
+        CHECK(detection.concentration > 0.0);
+        CHECK(detection.concentration <= 1.0);
+
         // Sample indices, and their order is the tracker's invariant: a track
         // was first seen before it was last detected, and last detected no
         // later than it was last seen.
