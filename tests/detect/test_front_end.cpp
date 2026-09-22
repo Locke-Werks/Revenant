@@ -489,6 +489,82 @@ constexpr double kProductSceneSeconds = 8.0;
     };
 }
 
+// ---- one emitter of each family, to see what shape reads ------------------
+
+// WHAT THIS IS FOR. peak_to_mean was measured on 2026-09-22 to separate a
+// third-order product from its QPSK parents, 2.473 against 1.607, and the
+// linear control showed it reads the signal rather than the radio. That is
+// spectral shape class, which is what docs/detection.md promises tier one will
+// give, and it is NOT a rule yet: one scene with one modulation cannot settle
+// a threshold that has to hold for everything else on the air.
+//
+// This is the scene that says what the other families read. No cubic, nothing
+// to separate, no verdict: it is a table of what the measurement says about
+// signals that are all unambiguously real.
+//
+// EIGHT SLOTS, 70 kHz APART, which is five times the widest emitter here and
+// leaves every band two of its own widths of clear space to walk its skirts
+// into.
+constexpr dsp::Hertz kFamilySpacing = 70'000;
+constexpr dsp::Hertz kFamilyFirst = -245'000;
+
+// Comfortably detected without approaching the leakage wall the tone scene
+// ran into, and stated as SNR because these emitters are not driving a
+// nonlinearity and their absolute level does not matter to anything.
+constexpr double kFamilySnrDb = 30.0;
+constexpr double kFamilySceneSeconds = 6.0;
+
+struct Family {
+    const char* name;
+    siggen::Modulation kind;
+};
+
+// The order is the order they sit on the span, lowest first.
+constexpr Family kFamilies[] = {
+    {"cw", siggen::Modulation::Cw},     {"am", siggen::Modulation::Am},
+    {"nfm", siggen::Modulation::Nfm},   {"usb", siggen::Modulation::Usb},
+    {"lsb", siggen::Modulation::Lsb},   {"fsk2", siggen::Modulation::Fsk2},
+    {"bpsk", siggen::Modulation::Bpsk}, {"qpsk", siggen::Modulation::Qpsk},
+};
+
+[[nodiscard]] siggen::SceneSpec family_scene()
+{
+    siggen::SceneSpec spec;
+    spec.rate = kSceneRate;
+    spec.center_hz = 98'100'000;
+    spec.duration_samples = static_cast<dsp::SampleIndex>(
+        std::llround(kFamilySceneSeconds * static_cast<double>(kSceneRate)));
+    spec.seed = 1234;
+    spec.noise_power_full_band_dbfs = -60.0;
+
+    std::uint64_t seed = 900;
+    for (std::size_t i = 0; i < std::size(kFamilies); ++i) {
+        siggen::ModulatorSpec modulator;
+        modulator.kind = kFamilies[i].kind;
+        modulator.common.rate = kSceneRate;
+        modulator.common.carrier_offset =
+            kFamilyFirst + static_cast<dsp::Hertz>(i) * kFamilySpacing;
+        modulator.common.seed = seed++;
+
+        // Every mode's own defaults except where a default would make the
+        // emitter something other than what its name says. siggen's SSB on the
+        // streaming path is a pure exponential per tone, so a single-tone USB
+        // is a carrier; the two-tone form is the standard SSB test signal and
+        // is at least two things rather than one.
+        modulator.ssb.tone_hz = 700;
+        modulator.ssb.tone2_hz = 1900;
+
+        siggen::EmitterPlacement placement;
+        placement.modulator = modulator;
+        placement.use_snr = true;
+        placement.snr_in_occupied_bandwidth_db = kFamilySnrDb;
+        placement.start_sample = 0;
+        placement.end_sample = spec.duration_samples;
+        spec.emitters.push_back(placement);
+    }
+    return spec;
+}
+
 // The gain swing, which is the tuner AGC hunting.
 //
 // THE PERIOD IS SET BY THE DETECTOR AND NOT BY TASTE. The monitor reads the
@@ -1120,4 +1196,110 @@ TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
     // recorded on this case.
     CHECK(parents.count > 0);
     CHECK(products.count > 0);
+}
+// What shape reads for each family of real signal, with nothing to separate.
+//
+// THE TABLE A THRESHOLD WOULD HAVE TO SURVIVE. The product survey below found
+// peak_to_mean separating a product at 2.473 from its QPSK parents at 1.607.
+// Every row here is a signal that is unambiguously real, so any rule that
+// called a row of this table a product would be wrong about it.
+//
+// WHAT THIS MEASURED, 2026-09-22, AND IT SETTLES THE QUESTION AGAINST A GLOBAL
+// THRESHOLD.
+//
+//   family   peak/mean   skirt   lower   width
+//   cw         2.384     0.000   0.603    183 Hz
+//   am         2.323     0.000   0.464    180 Hz
+//   nfm        2.256     0.000   0.514    175 Hz
+//   usb        2.112     0.000   0.453    165 Hz
+//   lsb        2.111     0.000   0.547    165 Hz
+//   fsk2       2.854     0.432   0.481    862 Hz
+//   bpsk       1.793     0.001   0.495   1465 Hz
+//   qpsk       1.703     0.039   0.499   1430 Hz
+//
+//   product    2.473     0.009   0.507   7651 Hz   (from the survey below)
+//
+// THERE IS NO PEAK_TO_MEAN THRESHOLD AND THERE CANNOT BE ONE. The product sits
+// at 2.473, between nfm at 2.256 and fsk2 at 2.854. A bar that rejected the
+// product would reject every FSK signal on the air and would sit below cw, am
+// and nfm. The only clean split in the column is the PSK pair at 1.70 and 1.79
+// against everything else, which is flat-topped against not, and is a family
+// split rather than a signal-against-interference one.
+//
+// AND MOST OF THAT SPREAD IS RESOLUTION RATHER THAN MODULATION, which the
+// width column gives away. cw, am, nfm, usb and lsb are line spectra, and the
+// detector reports their lines SEPARATELY: 135 candidates for am over 45
+// decisions is three a decision, a carrier and two sidebands, and 675 for nfm
+// is fifteen, which is the Bessel comb. Each of those bands is about 170 Hz,
+// which at 36.6 Hz a bin is four or five bins. A band that narrow cannot have
+// a shape: peak_to_mean is pinned near 2.3 by how the analysis window spreads
+// a single line, whatever produced the line.
+//
+// So peak_to_mean says something only about bands wide compared with the
+// window, which the two PSK rows and the product are and the other five are
+// not. A consumer has to check the width before believing the number, and
+// Candidate carries first_bin and last_bin so it can.
+//
+// lower_fraction does what it was meant to, at the one thing it can see here:
+// usb reads 0.453 and lsb 0.547, mirrored about a half and in the right
+// directions. It is a small margin and this is a two-tone test signal rather
+// than speech, but the sign is correct and consistent.
+//
+// skirt_fraction rules itself out as an absolute measure in the same table.
+// fsk2 reads 0.432 with a perfectly linear front end, four times what a QPSK
+// parent reads when it IS being driven into a cubic. Whatever a distortion
+// flag is built on, it cannot be a global skirt threshold.
+TEST_CASE("shape survey: what each family reads", "[.shape-survey]")
+{
+    const SceneRun run = run_scene(family_scene(), test::FrontEndModel{});
+    REQUIRE(run.decisions > 0);
+
+    for (std::size_t i = 0; i < std::size(kFamilies); ++i) {
+        const dsp::Hertz at = kFamilyFirst + static_cast<dsp::Hertz>(i) * kFamilySpacing;
+
+        // Half the spacing, so every candidate is attributed to exactly one
+        // emitter and a band that wandered is still counted rather than
+        // silently dropped.
+        const dsp::Hertz window = kFamilySpacing / 2;
+
+        std::size_t count = 0;
+        double peak_to_mean = 0.0;
+        double skirt = 0.0;
+        double lower = 0.0;
+        double snr = 0.0;
+        double width = 0.0;
+
+        for (const detect::Candidate& candidate : run.candidates) {
+            if (!candidate.shape.measured) {
+                continue;
+            }
+            if (std::abs(candidate.center - 98'100'000 - at) > window) {
+                continue;
+            }
+            ++count;
+            peak_to_mean += candidate.shape.peak_to_mean;
+            skirt += candidate.shape.skirt_fraction;
+            lower += candidate.shape.lower_fraction;
+            snr += candidate.snr_2500_db;
+            width += static_cast<double>(candidate.bandwidth);
+        }
+
+        if (count == 0) {
+            WARN(kFamilies[i].name << ": nothing detected at " << at << " Hz");
+            continue;
+        }
+
+        const auto n = static_cast<double>(count);
+        std::ostringstream out;
+        out.setf(std::ios::fixed);
+        out.precision(3);
+        out << kFamilies[i].name << ": " << count << " candidates, peak/mean "
+            << peak_to_mean / n << ", skirt " << skirt / n << ", lower " << lower / n
+            << ", snr " << snr / n << " dB, width " << width / n << " Hz";
+        WARN(out.str());
+    }
+
+    // The scene has to have produced something or the table above is empty
+    // rows. Nothing else is asserted: this case is a measurement.
+    CHECK(!run.candidates.empty());
 }

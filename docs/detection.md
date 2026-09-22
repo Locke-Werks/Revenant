@@ -723,9 +723,50 @@ population reads below the products.
 **It is not an interference test.** What it separates is flat topped from
 domed, which is spectral shape class, which is what this section promises tier
 one will give. An unmodulated carrier is the most domed thing on any span, so a
-rule calling domed bands products would call every carrier one. Three QPSK
-parents cannot settle a threshold that has to hold for AM, FM, SSB and CW, and
-the remaining work on this tier is scenes carrying those.
+rule calling domed bands products would call every carrier one.
+
+### One emitter of each family, which settles it against a threshold
+
+The scene those three QPSK parents could not settle. One emitter per mode, no
+nonlinearity, nothing to separate, measured the same day:
+
+| family | peak/mean | skirt | lower | width |
+| --- | --- | --- | --- | --- |
+| cw | 2.384 | 0.000 | 0.603 | 183 Hz |
+| am | 2.323 | 0.000 | 0.464 | 180 Hz |
+| nfm | 2.256 | 0.000 | 0.514 | 175 Hz |
+| usb | 2.112 | 0.000 | 0.453 | 165 Hz |
+| lsb | 2.111 | 0.000 | 0.547 | 165 Hz |
+| fsk2 | 2.854 | 0.432 | 0.481 | 862 Hz |
+| bpsk | 1.793 | 0.001 | 0.495 | 1465 Hz |
+| qpsk | 1.703 | 0.039 | 0.499 | 1430 Hz |
+| **product** | **2.473** | **0.009** | **0.507** | **7651 Hz** |
+
+**There is no `peak_to_mean` threshold and there cannot be one.** The product
+sits at 2.473, between `nfm` at 2.256 and `fsk2` at 2.854. A bar that rejected
+it would reject every FSK signal on the air and would sit below CW, AM and NFM.
+The one clean split in the column is the PSK pair against everything else,
+which is flat topped against not: a family split, not a signal-against-
+interference one.
+
+**And most of that spread is resolution rather than modulation.** The width
+column gives it away. CW, AM, NFM, USB and LSB are line spectra and the
+detector reports their lines separately: 135 candidates for AM over 45
+decisions is three a decision, a carrier and two sidebands, and 675 for NFM is
+fifteen, which is the Bessel comb. Each band is about 170 Hz, four or five bins
+at 36.6 Hz. A band that narrow cannot have a shape, and `peak_to_mean` is
+pinned near 2.3 by how the window spreads one line whatever produced it. The
+number says something only about bands wide compared with the window.
+
+`lower_fraction` does what it was meant to at the one thing it can see here:
+USB reads 0.453 and LSB 0.547, mirrored about a half in the right directions.
+
+**`skirt_fraction` rules itself out as an absolute measure in the same table.**
+FSK2 reads 0.432 through a perfectly linear front end, four times what a QPSK
+signal reads while it *is* being driven into a cubic. Some modulations have
+skirts. What separated was the change, 0.028 to 0.111 on the same emitters when
+the nonlinearity was switched on, so a distortion flag built on this has to
+compare a track with itself over time rather than against a constant.
 
 **`skirt_fraction` moves the other way and says something else.** It is flat
 across both populations and rises on the PARENTS when the front end is

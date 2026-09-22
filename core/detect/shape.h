@@ -53,6 +53,20 @@ struct BandShape {
     // looks like, and higher the wider the band. Large for a carrier, which
     // puts nearly all its power in the three bins the analysis window spreads
     // it over.
+    //
+    // IT SAYS NOTHING ABOUT A BAND ONLY A FEW BINS WIDE, and a caller has to
+    // check the width before believing it. Measured 2026-09-22 across one
+    // emitter of each family: cw, am, nfm, usb and lsb are line spectra whose
+    // lines the detector reports separately, about five bins each, and all
+    // five read between 2.11 and 2.38 whatever produced them. That is the
+    // analysis window spreading a single line, not the modulation. The two PSK
+    // rows, which are the only ones wide compared with the window, read 1.70
+    // and 1.79.
+    //
+    // AND IT IS NOT A SIGNAL-AGAINST-INTERFERENCE TEST AT ANY WIDTH. In the
+    // same measurement a third-order intermodulation product read 2.473, which
+    // is between nfm at 2.256 and fsk2 at 2.854. A bar that rejected the
+    // product would reject every FSK signal on the air.
     double peak_to_mean = 0.0;
 
     // Power in the lower half of the band over power in the whole band, so
@@ -80,6 +94,17 @@ struct BandShape {
     // detector has ALREADY trimmed the band to its occupied power fraction,
     // so the inside of the band is the same shape for everything by
     // construction and the tails are exactly what the trim threw away.
+    //
+    // NO ABSOLUTE READING OF THIS MEANS ANYTHING EITHER, and the same
+    // measurement says so: FSK2 reads 0.432 through a perfectly linear front
+    // end, four times what a QPSK signal reads while it IS being driven into a
+    // cubic. Some modulations simply have skirts.
+    //
+    // What did separate was the CHANGE. The same QPSK emitters went from 0.028
+    // to 0.111 when the nonlinearity was switched on, which is spectral
+    // regrowth and is a property of one track over time rather than of a
+    // number against a constant. A distortion flag built on this has to
+    // compare a track with itself.
     double skirt_fraction = 0.0;
 
     // Bins that were actually available outside the band when the skirts were
