@@ -198,6 +198,67 @@ What is missing underneath all of it is what that document also says: nothing
 here knows which of those five detections are stations and which are artefacts,
 so this is an observation and not a score.
 
+## Six excerpts, two bands, two hours
+
+The six files are the same two bands at 1359, 1501 and 1603 UT, so they are a
+controlled experiment about the ionosphere. Sixty seconds from ten minutes into
+each, converted the same way, run through the detector with default thresholds:
+
+| band | 1359 UT | 1501 UT | 1603 UT |
+| --- | --- | --- | --- |
+| 40 m, 7 MHz | 31 tracks born | 3 | **0** |
+| 20 m, 14 MHz | 10 tracks born | 23 | **51** |
+
+**The two bands move in opposite directions over the same two hours**, and the
+detector was told nothing that could produce that.
+
+**It is not a level change, which was the first thing to rule out.** The
+spectrum's own fifth and ninety-ninth percentiles barely move: 40 m runs
+-102.8 to -74.7 dBFS at 1359 and -103.4 to -75.4 at 1603, and 20 m runs -105.8
+to -81.4 and then -106.0 to -81.8. Total band power is the same at both ends.
+What changed is whether there is structure standing above it.
+
+**The parsimonious reading is the ordinary daytime pattern rather than the
+eclipse.** These three times run from mid-morning toward midday over North
+America, and rising solar elevation does two opposite things: it thickens the D
+layer, which absorbs the lower HF bands, and it raises the F layer's maximum
+usable frequency, which is what carries the higher ones. 7 MHz going quiet
+while 14 MHz fills up is what that looks like.
+
+**And three samples on one day cannot separate that from the eclipse.** A real
+eclipse result needs a control day at the same times, which these files are
+not. What is honest to claim is narrower and still worth having: the detector's
+track population tracks the ionosphere in the direction physics says it should,
+on data nobody here produced, which is evidence it is measuring the band rather
+than itself.
+
+### What a busy band looks like to it
+
+20 m at 1603 UT, the fullest of the six:
+
+    #id  state            centre    bandwidth         snr   conf  margin    age
+    #1    live        -35.442 kHz   11.726 kHz      6.8 dB   1.00    0.56   38.2s
+    #2    live        -10.947 kHz        20 Hz     13.7 dB   0.91    0.86   38.2s
+    #54   held          2.504 kHz        19 Hz     10.4 dB   0.62    0.76   15.7s
+    #74   live          2.520 kHz        11 Hz     15.9 dB   0.99    0.90    6.1s
+    #75   held          2.531 kHz         9 Hz     10.9 dB   0.61    0.78    6.1s
+    #47   live          4.495 kHz        30 Hz     16.5 dB   1.00    0.91   20.5s
+    #69   live         12.143 kHz    2.033 kHz     15.5 dB   1.00    0.90    8.9s
+
+Two things in that list are worth naming.
+
+**Three signals inside twenty-seven hertz**, at 2.504, 2.520 and 2.531 kHz,
+nine to nineteen hertz wide each, two of them holding and one live. That is a
+CW pileup and the detector is resolving it into its parts, which at the VHF
+grid's 36.6 Hz bins would have been one detection or none.
+
+**And #69 is the centre-wander case `docs/ui-spectrum.md` describes.** It is two
+to three and a half kilohertz wide and its measured centre moved 370 Hz between
+consecutive decisions, which is what a voice signal does to a centre computed
+from where the energy is. That document says a click landing on the measured
+centre wobbles with the content; here is the wobble, measured, on a real
+station.
+
 ## What they are not
 
 Not a corpus. `tests/corpus/README.md` describes what a corpus entry is: a
