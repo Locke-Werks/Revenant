@@ -678,6 +678,14 @@ changes what the detector does at the shipped VHF geometry, so it is left
 configurable and recorded rather than re-tuned: measuring a new rule needs real
 HF with ground truth, and a recording carries none.
 
+**Real HF arrived on 2026-09-22 and half of that sentence is now false.**
+`docs/recordings.md` has six hours of 40 m and 20 m at 96 kS/s. What it does
+not bring is the ground truth: nothing in those files says which signals are in
+them, and they were recorded across a total solar eclipse, so the population
+changes over the three hours rather than holding still. The measurement is
+possible now and is not cheap. The engine also cannot read them yet, for a
+reason that has nothing to do with HF.
+
 ## Identification
 
 Two tiers, split on cost.

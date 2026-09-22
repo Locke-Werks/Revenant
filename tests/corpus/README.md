@@ -38,3 +38,14 @@ data file is not present locally, so a developer without the corpus still gets
 a green synthetic run and an explicit list of what went untested.
 
 Arrives: M5, alongside extraction. Empty until then, on purpose.
+
+## What exists ahead of this
+
+Real IQ landed on the development machine on 2026-09-22, before any of the
+machinery above. `docs/recordings.md` records what it is: six hours of HF
+across the 2017 eclipse, 40 m and 20 m, 96 kS/s.
+
+It is not a corpus entry and this directory stays empty. There is no sidecar,
+no checksum, no retrieval URL and no ground-truth record, which are the four
+things an entry is. The engine cannot read the files either, because they are
+24-bit. Both of those are in that document.
