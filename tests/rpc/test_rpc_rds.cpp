@@ -44,7 +44,7 @@
 //
 //   1. It does not exist, or was removed.            refused, engine's words
 //   2. It is not an FM discriminator.                refused, condition 1
-//   3. It took the engine's default audio rate.      refused, unnameable
+//   3. It took the engine's default audio rate.      refused, names the rate
 //   4. It is at 48 kHz, decimating.                  refused, 148438 bound
 //   5. It is under 125000 with decimation one.       refused, 125000 bound
 //   6. Its granted passband cannot hold 59375 Hz.    refused, condition 4
@@ -1045,21 +1045,50 @@ TEST_CASE("an unsuitable receiver is refused in terms of the condition it failed
         CHECK(refused.error().message.find("am") != std::string::npos);
     }
 
-    // 3. The engine's default audio rate, which is a rate this server cannot
-    //    name rather than one it can refuse. VrxParams::audioRate is a
-    //    verbatim echo, so it comes back zero, and EngineInfo does not carry
-    //    the default.
+    // 3. The engine's default audio rate, which this server CAN name.
+    //
+    //    WHAT THIS CASE USED TO ASSERT, and the refusal it pinned is now
+    //    false. It expected "default audio rate" and a sentence saying the
+    //    rate "is not a number this server can read", on the grounds that
+    //    VrxParams::audioRate is a verbatim echo reading zero and EngineInfo
+    //    does not carry the default. Both halves of that are true and the
+    //    conclusion was not: VrxStatus::resolved_audio_rate is the rate the
+    //    receiver actually runs at, it is on the status this guard already
+    //    holds, and vrx.h says of it that everything asking a question OF the
+    //    audio rate asks it there. Only this guard was left asking the echo,
+    //    so it refused every receiver created the ordinary way while claiming
+    //    the number was unknowable.
+    //
+    //    It still refuses, because the default resolves to 48000 and 48000
+    //    cannot carry a 57 kHz subcarrier. What it must do now is name the
+    //    rate and the bound, so an operator has something to act on.
     {
         auto defaulted = harness.client().add_vrx(
             rpc::VrxParams{.center = 0, .bandwidth = 200'000, .demod = rpc::Demod::Wfm});
         INFO(test::message_of(defaulted));
         REQUIRE(defaulted.has_value());
 
+        // The resolved rate reaches a client, which is the half that lets a
+        // window tell an operator what their receiver is running at instead of
+        // reading the echo and seeing zero.
+        auto status = harness.client().vrx_status(*defaulted);
+        REQUIRE(status.has_value());
+        INFO("echo " << status->params.audio_rate << ", resolved "
+                     << status->resolved_audio_rate);
+        CHECK(status->params.audio_rate == 0);
+        CHECK(status->resolved_audio_rate > 0);
+
         auto refused = harness.client().rds_station(*defaulted);
         REQUIRE_FALSE(refused.has_value());
         INFO(refused.error().message);
-        CHECK(refused.error().message.find("default audio rate") != std::string::npos);
+
+        // The rate it is actually running at, by name, and the advice that
+        // survived from the old wording.
+        CHECK(refused.error().message.find(std::to_string(status->resolved_audio_rate)) !=
+              std::string::npos);
         CHECK(refused.error().message.find("171000") != std::string::npos);
+        CHECK(refused.error().message.find("not a number this server can read") ==
+              std::string::npos);
     }
 
     // 4. The listening receiver. WFM at 48 kHz is what an operator has open

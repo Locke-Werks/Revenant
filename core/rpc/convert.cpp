@@ -448,6 +448,7 @@ void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& i
     // is the request and not a reading of the result.
     write_vrx_placement(out.initPlacement(), in.placement, in.params);
     out.setDemodRate(to_wire_rate(in.demod_rate));
+    out.setResolvedAudioRate(to_wire_rate(in.resolved_audio_rate));
     out.setLevelDbfs(in.level_dbfs);
     out.setSquelchOpen(in.squelch_open);
     out.setAudioSamples(in.audio_samples);

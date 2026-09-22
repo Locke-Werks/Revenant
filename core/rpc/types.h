@@ -409,6 +409,14 @@ struct VrxStatus {
     // remove and an add rather than a push constant.
     std::uint32_t demod_rate = 0;
 
+    // The audio rate this receiver ACTUALLY runs at. params.audio_rate is an
+    // echo and reads zero whenever the request named no rate, so every
+    // question that depends on the audio rate depends on this one: the
+    // de-emphasis curve, stereo, and whether the receiver can carry an RDS
+    // composite at all. Zero means nobody filled it in, from an engine built
+    // before the field existed or from a default-constructed status.
+    std::uint32_t resolved_audio_rate = 0;
+
     double level_dbfs = -200.0;
     bool squelch_open = false;
     std::uint64_t audio_samples = 0;

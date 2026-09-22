@@ -883,6 +883,36 @@ struct VrxStatus {
     # "this did not happen" rather than "this is not measured".
     reanchors @8 :UInt64;
     reanchorFramesSkipped @9 :UInt64;
+
+    # The audio rate this receiver ACTUALLY runs at, which params.audioRate is
+    # not when the request named none.
+    #
+    # A RESULT, ON A STRUCT WHOSE OTHER RATE IS AN ECHO. params.audioRate of
+    # zero means "the engine's default", the graph resolves it once and builds
+    # the stage and the plan from the resolved value, and this is that value.
+    # The echo stays zero on purpose, because feeding a status back into
+    # setVrxParams must leave the receiver on the default rather than pinning
+    # it to whatever the default happened to be.
+    #
+    # ASK QUESTIONS OF THIS FIELD AND NOT OF THE ECHO. Everything that depends
+    # on the audio rate depends on this one: whether a de-emphasis curve or
+    # stereo applies, and whether the receiver can carry an RDS composite at
+    # all. The engine caught applied_deemphasis and decoding_stereo answering
+    # against the echo and fixed them; the server's own RDS guard was still
+    # asking the echo until 2026-09-21, and so refused every receiver created
+    # the ordinary way with a message saying the rate was unknowable. It was
+    # not unknowable, it was on the status.
+    #
+    # WHAT A CLIENT DOES WITH IT. An operator asking for RDS needs a receiver
+    # whose audio rate carries the 57 kHz subcarrier, which in practice means
+    # 171000. A client that reads only the echo cannot tell a receiver at the
+    # default from one explicitly asked for zero, and cannot tell an operator
+    # what their receiver is running at.
+    #
+    # Zero from an engine built before this field existed, and zero on a
+    # default-constructed status. Both mean "nobody filled this in", not "this
+    # receiver runs at no rate".
+    resolvedAudioRate @10 :UInt32;
 }
 
 struct SpectrumFrame {

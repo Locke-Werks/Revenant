@@ -506,6 +506,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.params = std::move(*params);
     out.placement = read_vrx_placement(in.getPlacement());
     out.demod_rate = in.getDemodRate();
+    out.resolved_audio_rate = in.getResolvedAudioRate();
     out.level_dbfs = in.getLevelDbfs();
     out.squelch_open = in.getSquelchOpen();
     out.audio_samples = in.getAudioSamples();

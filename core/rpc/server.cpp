@@ -2283,21 +2283,35 @@ namespace {
 
     // 3. The audio rate, against the RECEIVER's bound rather than the
     //    decoder's.
-    const dsp::SampleRate audio_rate = status.params.audio_rate;
+    // EFFECTIVE AND NOT THE ECHO. VrxStatus::resolved_audio_rate is the rate
+    // the receiver actually runs at, and vrx.h says of it in as many words:
+    // "Everything below that asks a question OF the audio rate asks it here."
+    // This guard asked the echo, which is zero whenever the request named no
+    // rate, so it refused every receiver created the ordinary way.
+    //
+    // WHAT THIS REFUSAL USED TO SAY, and its premise was false. It read
+    // "receiver {} took the engine's default audio rate, which is not a number
+    // this server can read: VrxParams::audioRate comes back as the verbatim
+    // zero that was sent and EngineInfo does not carry the default." The
+    // server can read it. It is on the status this function already holds, put
+    // there for exactly this reason after applied_deemphasis and
+    // decoding_stereo were caught answering against the echo. Only this guard
+    // was left asking the wrong field.
+    //
+    // The answer usually still refuses, because the default resolves to 48000
+    // and 48000 cannot carry a 57 kHz subcarrier. What changes is that the
+    // refusal below now names the rate and the bound, which is something an
+    // operator can act on, rather than reporting that the number is unknowable.
+    const dsp::SampleRate audio_rate = status.effective_audio_rate();
     if (audio_rate <= 0) {
-        // Not a rate this server can name, rather than a rate it can
-        // refuse. VrxParams::audio_rate is a verbatim echo and zero means
-        // the receiver took EngineConfig::audio_rate, which is not on
-        // EngineInfo and so is not visible from here or from a client.
-        // Guessing it would mean admitting a receiver at whatever the
-        // engine's default happens to be, and the default is 48000, where
-        // the composite is already destroyed.
+        // A default-constructed status and not a receiver: resolved_audio_rate
+        // is zero when nobody filled it in, and the echo is zero when the
+        // request named no rate, so both being zero means there is nothing
+        // here to ask about.
         return fail(std::format(
-            "receiver {} took the engine's default audio rate, which is not a number this "
-            "server can read: VrxParams::audioRate comes back as the verbatim zero that was "
-            "sent and EngineInfo does not carry the default. State the rate on the receiver. "
-            "171000 is the one to state: it is three times the 57 kHz subcarrier and 144 "
-            "times the 1187.5 bit/s bit rate, both exact",
+            "receiver {} reports no audio rate at all, neither the rate it was asked for nor "
+            "the rate it resolved to. That is a status nothing filled in rather than a "
+            "receiver running at an unusable rate, so the receiver is the thing to check",
             id));
     }
 
@@ -2313,7 +2327,9 @@ namespace {
                 "filter whose passband edge is 0.4 of the audio rate, which is {} Hz: the "
                 "composite reaches {} Hz and the top of the data band is already in the "
                 "stopband. The decoder's own bound is {}, and it is lower because a "
-                "composite from a file or a modulator went through no such filter",
+                "composite from a file or a modulator went through no such filter. State "
+                "171000 on the receiver: it is three times the 57 kHz subcarrier and 144 "
+                "times the 1187.5 bit/s bit rate, both exact",
                 id, audio_rate, kFilteredCompositeRateHz, demod_rate,
                 demod_rate / std::max<dsp::SampleRate>(audio_rate, 1),
                 (audio_rate * 2) / 5, kCompositeTopHz, decode::kMinimumRateHz));
@@ -2322,7 +2338,8 @@ namespace {
             "receiver {} runs at {} S/s of audio and the composite reaches {} Hz, so the "
             "decoder needs at least {}. Its decimation resolved to one, so the planner "
             "designed no audio filter and this is the decoder's own bound rather than the "
-            "receiver's higher one",
+            "receiver's higher one. State 171000 on the receiver: it is three times the "
+            "57 kHz subcarrier and 144 times the 1187.5 bit/s bit rate, both exact",
             id, audio_rate, kCompositeTopHz, decode::kMinimumRateHz));
     }
 
