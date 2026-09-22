@@ -152,6 +152,7 @@
 #include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/composite_probe.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
 #include "models/source_pacing.h"
@@ -974,22 +975,63 @@ class EngineLink : public QObject {
     // it on every receiver would build a composite decoder behind every
     // receiver an operator ever tuned.
     //
-    // WHAT THIS DOES NOT DO, SAID HERE SO IT IS NOT REDISCOVERED. It does
-    // not raise the receiver's audio rate to reach the subcarrier.
-    // core/rpc/client.h names four conditions a receiver must clear, and
-    // the binding one is that the audio rate has to carry 57 kHz, which in
-    // practice means 171000. On the shipped 64-channel grid the channel
-    // rate is a fraction of that, so asking for it would be refused and
-    // the pane's receiver would be lost to a failed rebuild. So the switch
-    // polls, and the engine's own refusal is the answer: it names which of
-    // the four conditions failed, which is the information an operator
-    // needs and is exactly what this round is about. Making that refusal
-    // unnecessary is a change to how the grid is sized and is not here.
+    // IT RAISES THE RECEIVER'S AUDIO RATE, AFTER ASKING THE ENGINE WHETHER
+    // IT CAN. core/rpc/client.h names four conditions a receiver must clear
+    // and the binding one is that the audio rate has to carry 57 kHz, which
+    // in practice means 171000 exactly: three times the subcarrier and 144
+    // times the 1187.5 bit/s bit rate. A receiver created the ordinary way
+    // takes the engine's default of 48000, whose 24 kHz of Nyquist has
+    // destroyed the composite before the decoder is built, so a switch that
+    // only polls is a switch that always refuses.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY, and it is why the switch shipped
+    // refusing: "It does not raise the receiver's audio rate to reach the
+    // subcarrier... On the shipped 64-channel grid the channel rate is a
+    // fraction of that, so asking for it would be refused and the pane's
+    // receiver would be lost to a failed rebuild." The reasoning assumed a
+    // 64-channel grid. revenant-engine picks its channel count from the
+    // source rate so that one channel carries a 200 kHz broadcast FM
+    // receiver, so a 2.4 MS/s dongle gets M=8 and a channel rate of 600000,
+    // which clears 171000 comfortably. Anybody tuning broadcast FM, the only
+    // band RDS exists on, is already on a grid that can carry it. The 64
+    // channels were never the shipped grid for this source; the refusal they
+    // predicted was real and its cause was the 48000 default.
+    //
+    // AND IT IS STILL NOT ASKED BLIND, because the old paragraph's fear was
+    // correct about the consequence. A rate change is a remove and an add,
+    // and a refused add leaves the pane with no receiver, so the engine is
+    // asked first on a receiver nobody is using: Client::add_vrx answers with
+    // an id or refuses and destroys nothing, which makes a throwaway receiver
+    // at 171000 a question the operator does not pay for. See
+    // models/composite_probe.h for the whole mechanism and the two conditions
+    // this window answers without asking.
+    //
+    // THE RATE IS PUT BACK WHEN THE SWITCH GOES OFF. 171000 is the multiplex
+    // and not programme audio, so a receiver left there is one nobody can
+    // listen to, and the switch would have a permanent side effect nobody
+    // asked for. While the switch is on the pane says so, because an operator
+    // with the audio on hears the composite.
 
     // The operator asked for RDS on the pane's receiver. Sticky across a
     // retune and a reconnect, on the same terms audioWanted is: it is a
     // switch and not a state.
     Q_PROPERTY(bool rdsWanted READ rdsWanted WRITE setRdsWanted NOTIFY rdsChanged)
+
+    // The pane's receiver has been raised to the composite rate, so it is
+    // handing out the 171 kHz multiplex rather than programme audio.
+    //
+    // ON rdsChanged AND NOT receiverChanged, although it is a fact about the
+    // receiver's request. The only thing that moves it is the RDS switch and
+    // the probe behind it, and a pane that redrew this on every filter edge
+    // would be reading a receiver property to learn an RDS one.
+    //
+    // It exists so the window can say what the audio has become. An operator
+    // listening to a station and turning RDS on hears the composite, and
+    // nothing else on screen would account for that: audioActive is still
+    // true, the level meter still moves, and the sound is wrong. See
+    // models/composite_probe.h for why the rate is the receiver's rather than
+    // a second receiver's.
+    Q_PROPERTY(bool rdsCompositeReceiver READ rdsCompositeReceiver NOTIFY rdsChanged)
 
     // "rds" or "rbds", which is a SETTING and never an inference. The PI
     // code cannot decide it, because the US call sign range collides with
@@ -1649,6 +1691,12 @@ public:
 
     [[nodiscard]] bool rdsWanted() const { return rds_wanted_.load(); }
     void setRdsWanted(bool wanted);
+
+    // Read off the pane's own request rather than off a status, so it is true
+    // from the moment the rebuild is posted rather than a round trip later.
+    // What it claims is that this window has asked for the composite rate on
+    // this receiver, which is the thing the sentence it drives is about.
+    [[nodiscard]] bool rdsCompositeReceiver() const { return carries_composite(wanted_); }
 
     [[nodiscard]] QString rdsRegion() const;
     void setRdsRegion(const QString& region);
@@ -2525,6 +2573,53 @@ private:
     // operator's own choice. models/rds_view.h renders it.
     void clear_rds(const QString& reason = {});
 
+    // Supervisor thread. Hands the Qt thread a sentence about why there is no
+    // decoder, with no station behind it. The body of clear_rds, lifted out
+    // because the composite gate and the region write both need exactly it
+    // and neither wants clear_rds's own bookkeeping: that function also drops
+    // rds_polled_vrx_ and rds_region_written_, which is right when the poll is
+    // being abandoned and wrong when the next pass is going to carry on.
+    //
+    // POSTED ON EVERY PASS, unlike note_receiver_fault, which suppresses a
+    // repeat. The whole RDS surface is posted on every pass for the reason
+    // poll_rds gives, and a refusal that stopped being re-posted would be
+    // cleared by the next answer that was not a refusal.
+    void post_rds_fault(QString reason);
+
+    // Supervisor thread, from poll_rds and nowhere else. Whether the pane's
+    // receiver is running at the rate a composite needs, and the work to get
+    // it there when it is not.
+    //
+    // Returns true only when the receiver is ALREADY at that rate, so a false
+    // return is "not yet or not ever" and poll_rds does not go on to build a
+    // decoder. Every false return has posted a sentence saying which.
+    //
+    // THE PROBE IS MADE ONCE PER RECEIVER, not once a second. It is two round
+    // trips and a receiver created on the engine, which is not a thing to do
+    // four times a minute for as long as a switch is on, and the answer cannot
+    // change while the receiver does not: the channel it landed in is fixed by
+    // its centre and the grid. rds_composite_probed_vrx_ is what remembers,
+    // and a receiver that changes id has to be asked again because a retune
+    // can move it into a channel of a different width.
+    [[nodiscard]] bool ensure_composite_receiver();
+
+    // Qt thread, queued from ensure_composite_receiver. Puts the composite
+    // rate into the pane's own request and posts the rebuild.
+    //
+    // THE RATE BELONGS TO THE REQUEST AND NOT TO THE SUPERVISOR. wanted_ is
+    // what every later retune, mode change and reconnect is rebuilt from, so a
+    // rate carried anywhere else would be lost by the first one of those and
+    // the decoder would silently go back to reading 48 kHz audio. It also
+    // means the rebuild is the ordinary one: post_receiver_request(true) is
+    // what a mode change already does, and a rate change is a remove and an
+    // add on the same terms.
+    void raise_receiver_to_composite();
+
+    // Qt thread, from setRdsWanted going off and from nowhere else. Takes the
+    // composite rate back out of the request, so the receiver goes back to
+    // programme audio. Does nothing when the rate was never raised.
+    void lower_receiver_from_composite();
+
     // Qt thread, queued from poll_rds.
     void adopt_rds();
 
@@ -2540,6 +2635,17 @@ private:
     qulonglong rds_polled_vrx_ = 0;
     bool rds_posted_region_rbds_ = false;
     bool rds_region_written_ = false;
+
+    // Supervisor thread only: the receiver the composite probe has already
+    // been made for, and the answer it gave.
+    //
+    // The refusal is HELD rather than re-derived, because re-deriving it means
+    // adding a receiver to the engine again. It is re-posted on every pass
+    // while it stands, which is what keeps it on screen; see post_rds_fault.
+    // Both are keyed on the id, so a rebuild for any reason asks again, and an
+    // empty refusal beside a matching id is the probe having said yes.
+    qulonglong rds_composite_probed_vrx_ = 0;
+    QString rds_composite_refusal_;
 
     std::mutex rds_mutex_;
     bool has_rds_handover_ = false;     // guarded by rds_mutex_

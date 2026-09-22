@@ -522,6 +522,19 @@ void EngineLink::removeReceiver()
     // receiver placed later by hand has none.
     tuned_detection_bandwidth_ = 0.0;
 
+    // AND THE COMPOSITE AUDIO RATE, on the same terms as the two above: it was
+    // a fact about the receiver that has gone, and the probe that justified it
+    // asked about the channel THAT receiver landed in. Carrying it forward
+    // would build the next receiver at 171000 with nothing having asked the
+    // engine whether it can, which is the one thing the probe exists to avoid,
+    // and an add that refuses leaves the operator's tune doing nothing.
+    //
+    // No post_receiver_request here. This method is already posting a remove,
+    // and the next thing to tune posts a fresh request out of wanted_. The RDS
+    // switch stays where the operator put it, so the gate probes the next
+    // receiver and raises it again; see EngineLink::ensure_composite_receiver.
+    wanted_.audio_rate = 0;
+
     // AND THE SENTENCE ABOUT ITS AUDIO ENDING, which is true and stops being
     // worth reading the moment the pane is empty.
     //
@@ -558,6 +571,10 @@ void EngineLink::removeReceiver()
     // audioEndedReason is on audioChanged, so clearing it above is invisible
     // without this. The other three signals here carry nothing about audio.
     emit audioChanged();
+
+    // rdsCompositeReceiver is on rdsChanged for the reason stated where it is
+    // declared, so dropping the rate above is invisible without this one.
+    emit rdsChanged();
 
     update_receiver_fit();
 }

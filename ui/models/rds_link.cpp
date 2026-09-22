@@ -18,14 +18,29 @@
 // behind every receiver anybody ever tuned, on an engine shared with other
 // clients.
 //
-// WHY A REFUSAL IS THE USEFUL ANSWER AND NOT A FAILURE. Four conditions
-// have to hold before a receiver can carry a composite, and the binding
-// one on the shipped grid is the audio rate: 57 kHz has to survive the
-// decimation, which means about 171000 samples a second, and a 64-channel
-// grid over 2.4 MS/s has channels a fraction of that wide. The engine
-// refuses and names WHICH condition failed. That sentence is the thing the
-// operator needs, so it goes on screen verbatim rather than being turned
-// into "RDS unavailable".
+// WHY THE SWITCH RAISES THE AUDIO RATE, AND ASKS FIRST. Four conditions
+// have to hold before a receiver can carry a composite and the binding one
+// is the audio rate: 57 kHz has to survive the audio decimation, which
+// means 171000 samples a second, and a receiver created the ordinary way
+// takes the engine's default of 48000. So the switch cannot just poll; it
+// has to rebuild the receiver at the composite rate. It asks the engine
+// whether that rate is grantable before touching the operator's receiver,
+// on a throwaway one that costs nothing when it is refused. See
+// ui/models/composite_probe.h and ensure_composite_receiver below.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "the binding one on the shipped grid is
+// the audio rate... a 64-channel grid over 2.4 MS/s has channels a
+// fraction of that wide. The engine refuses and names WHICH condition
+// failed." The refusal was real and the diagnosis was not. revenant-engine
+// sizes its channel count so one channel carries a 200 kHz broadcast FM
+// receiver, so 2.4 MS/s gets M=8 and a 600000 S/s channel, which clears
+// 171000 comfortably. What refused every poll was the 48000 default this
+// client never overrode.
+//
+// A REFUSAL IS STILL THE USEFUL ANSWER AND NOT A FAILURE, wherever one
+// comes from. The engine names WHICH condition failed, and that sentence is
+// the thing the operator needs, so it goes on screen verbatim rather than
+// being turned into "RDS unavailable".
 
 #include "models/engine_link.h"
 
@@ -38,9 +53,27 @@
 
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/composite_probe.h"
 #include "models/rds_view.h"
 
 namespace revenant::ui {
+namespace {
+
+// What the pane says while the rebuild at the composite rate is in flight.
+//
+// A function and not a file-scope QString, because a QString built before
+// QCoreApplication exists is a static with a heap allocation behind it and
+// this file is compiled into a GUI binary whose statics are constructed in an
+// order nothing here controls. QStringLiteral's data is in the binary and the
+// wrapper is free, so the call costs nothing worth a static for.
+[[nodiscard]] QString raising_rate_sentence()
+{
+    return QStringLiteral(
+        "raising this receiver to 171000 S/s so the 57 kHz subcarrier survives the "
+        "audio decimation. The audio restarts while it rebuilds.");
+}
+
+}  // namespace
 
 void EngineLink::setRdsWanted(bool wanted)
 {
@@ -69,6 +102,20 @@ void EngineLink::setRdsWanted(bool wanted)
         rds_rt_segments_ = 0;
         rds_rt_segments_total_ = 0;
         rds_block_error_rate_ = -1.0;
+
+        // AND THE RECEIVER GOES BACK TO PROGRAMME AUDIO. 171000 is the
+        // multiplex, which is not a thing anybody listens to, so a receiver
+        // left at it is one the operator cannot hear the station on. Leaving
+        // it would make this switch a control with a permanent side effect,
+        // discoverable only by turning the audio on afterwards and finding
+        // the station gone. The cost is one more audio restart, which is what
+        // the switch going on already paid.
+        //
+        // Not conditional on the audio switch. The rate is a property of the
+        // receiver and the next thing to subscribe to it inherits whatever it
+        // was left at, so tying this to whether anyone is listening now would
+        // hand the multiplex to whoever listens next.
+        lower_receiver_from_composite();
     }
 
     {
@@ -128,14 +175,188 @@ void EngineLink::clear_rds(const QString& reason)
     rds_polled_vrx_ = 0;
     rds_region_written_ = false;
 
+    // AND THE PROBE'S ANSWER, because it was about a receiver this window is
+    // no longer polling. The id it was keyed on would match again on a
+    // reconnect that handed back the same number, which is not the same
+    // receiver and need not be in the same channel.
+    rds_composite_probed_vrx_ = 0;
+    rds_composite_refusal_.clear();
+
+    post_rds_fault(reason);
+}
+
+void EngineLink::post_rds_fault(QString reason)
+{
     {
         const std::lock_guard<std::mutex> lock(rds_mutex_);
         has_rds_handover_ = true;
         handover_rds_answered_ = false;
         handover_rds_station_ = {};
-        handover_rds_fault_ = reason;
+        handover_rds_fault_ = std::move(reason);
     }
     QMetaObject::invokeMethod(this, [this] { adopt_rds(); }, Qt::QueuedConnection);
+}
+
+// ---------------------------------------------------------------------------
+// The audio rate, which is what makes the switch work at all
+// ---------------------------------------------------------------------------
+
+bool EngineLink::ensure_composite_receiver()
+{
+    // The pane's own request, which is what the live receiver was built from.
+    // Read here rather than carried on this thread, because the Qt thread owns
+    // it and a mode change or a retune moves it: a copy taken when the switch
+    // went on would probe with a centre and a mode the receiver no longer has.
+    rpc::VrxParams live;
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        live = requested_params_;
+    }
+
+    if (carries_composite(live)) {
+        // The rebuild has already happened, or is in flight and the request
+        // already carries the rate. Either way there is nothing to ask and the
+        // decoder can be built; a receiver still mid-rebuild answers the
+        // region write with a refusal naming the id, which is a sentence about
+        // one pass and is replaced by the next.
+        return true;
+    }
+
+    if (rds_composite_probed_vrx_ == live_receiver_id_) {
+        if (!rds_composite_refusal_.isEmpty()) {
+            // Asked already for this receiver and refused. Held rather than
+            // asked again, because asking means creating a receiver on the
+            // engine and the answer cannot change while the receiver does not.
+            post_rds_fault(rds_composite_refusal_);
+            return false;
+        }
+
+        // The probe said yes and the request does not carry the rate. Either
+        // the rebuild is still in flight, or the operator turned the switch
+        // off and on again and setRdsWanted took the rate back out in
+        // between. RE-POSTING IS WHAT RECOVERS THE SECOND CASE, and it is why
+        // this is not a return on a flag: a gate that trusted "already asked"
+        // would leave the second switch-on polling a 48 kHz receiver forever,
+        // with a sentence about a rebuild that nothing was going to perform.
+        // raise_receiver_to_composite does nothing in the first case.
+        QMetaObject::invokeMethod(
+            this, [this] { raise_receiver_to_composite(); }, Qt::QueuedConnection);
+        post_rds_fault(raising_rate_sentence());
+        return false;
+    }
+    rds_composite_probed_vrx_ = live_receiver_id_;
+    rds_composite_refusal_.clear();
+
+    // TWO OF THE FOUR CONDITIONS NEED NO ROUND TRIP. The demodulator is a
+    // fact about the request and this window holds the request, so asking the
+    // engine about a receiver on am would spend a receiver to be told
+    // something the client could read off a field. models/composite_probe.h
+    // has both and the sentence.
+    const CompositeProbe probe =
+        plan_composite_probe(live, demod_name(live.demod).toStdString());
+    if (!probe.worth_asking) {
+        rds_composite_refusal_ = QString::fromStdString(probe.refusal);
+        post_rds_fault(rds_composite_refusal_);
+        return false;
+    }
+
+    // THE THROWAWAY RECEIVER. Client::add_vrx either answers with an id or
+    // refuses and destroys nothing, so this is the engine answering the one
+    // question the client cannot: whether the channel this receiver landed in
+    // can be resampled to 171000 at the passband it holds. The arithmetic is
+    // dsp::plan_vrx's and this process links no part of it.
+    //
+    // It costs a receiver on the engine for the length of two calls. That is
+    // the price of not risking the operator's: a rate change is a remove and
+    // an add, and an add that failed leaves the pane empty.
+    auto added = client_->add_vrx(probe.params);
+    if (!added) {
+        rds_composite_refusal_ = QString::fromStdString(added.error().message);
+        post_rds_fault(rds_composite_refusal_);
+        return false;
+    }
+
+    // WHAT THE PROBE WAS GRANTED, WHICH THE ADD SUCCEEDING DOES NOT SAY. The
+    // fourth condition is read off VrxPlacement::grantedLow and grantedHigh
+    // rather than off the request, because each edge is fitted on its own, and
+    // a narrow receiver at 171000 is admitted by the planner and then refused
+    // by the decoder guard. Read it here, on the receiver nobody is using,
+    // rather than finding out after the operator's has been rebuilt.
+    //
+    // A FAILED READ IS NOT A REFUSAL. The add succeeded, which is the bar this
+    // whole mechanism was specified around, and turning one unanswered status
+    // call into a switch that does nothing would be worse than letting the
+    // engine's own decoder guard have the last word.
+    QString grant_refusal;
+    if (auto status = client_->vrx_status(*added)) {
+        grant_refusal = QString::fromStdString(composite_grant_refusal(
+            status->placement.granted_low, status->placement.granted_high));
+    }
+
+    // Discarded for the reason drop_receiver discards its own remove: a remove
+    // that failed because the engine no longer has the receiver has achieved
+    // what was wanted, and there is nothing else this can do about one that
+    // failed for another reason.
+    static_cast<void>(client_->remove_vrx(*added));
+
+    if (!grant_refusal.isEmpty()) {
+        rds_composite_refusal_ = grant_refusal;
+        post_rds_fault(rds_composite_refusal_);
+        return false;
+    }
+
+    // Yes. The rebuild is the Qt thread's, because wanted_ is the Qt thread's
+    // and post_receiver_request is the one path every write to it takes.
+    QMetaObject::invokeMethod(
+        this, [this] { raise_receiver_to_composite(); }, Qt::QueuedConnection);
+
+    // And say what is happening, because the rebuild takes a supervisor pass
+    // and the audio breaks during it. Silence there reads as the switch having
+    // done nothing at all, which is the state this change exists to end.
+    post_rds_fault(raising_rate_sentence());
+    return false;
+}
+
+void EngineLink::raise_receiver_to_composite()
+{
+    if (carries_composite(wanted_)) {
+        return;
+    }
+    wanted_.audio_rate = kRdsCompositeRateHz;
+
+    // A recreate and not an in-place write. The audio rate sets the
+    // decimation, which sets the tap count, which is the filter the engine
+    // says in as many words it cannot change under a running stage. Same
+    // reason setReceiverDemod posts one.
+    post_receiver_request(true);
+
+    // rdsCompositeReceiver is on rdsChanged, and post_receiver_request emits
+    // receiverChanged. Without this the sentence about the audio having become
+    // the multiplex appears at the next RDS poll rather than at the rebuild.
+    emit rdsChanged();
+}
+
+void EngineLink::lower_receiver_from_composite()
+{
+    if (!carries_composite(wanted_)) {
+        return;
+    }
+
+    // Zero and not 48000, which is the engine's business. VrxParams::audioRate
+    // of zero means "the engine's default", and naming a number here would
+    // pin this window to one an engine configured otherwise does not use.
+    wanted_.audio_rate = 0;
+
+    // NOTHING POSTED FOR AN EMPTY PANE. post_receiver_request is a request to
+    // have the receiver in wanted_, and the supervisor answers one against no
+    // live receiver by CREATING it, so turning the switch off with no receiver
+    // would conjure one at whatever the pane was last tuned to. The rate is
+    // dropped either way, which is what the next thing tuned has to inherit,
+    // and a receiver put back by a reconnect is rebuilt from wanted_ anyway.
+    if (receiver_id_ != 0) {
+        post_receiver_request(true);
+    }
+    emit rdsChanged();
 }
 
 void EngineLink::poll_rds()
@@ -174,6 +395,17 @@ void EngineLink::poll_rds()
         rds_region_written_ = false;
     }
 
+    // THE RATE BEFORE THE REGION AND BEFORE THE FIRST POLL. Both of the calls
+    // below build the decoder, and both check the four conditions, so either
+    // one made against a 48 kHz receiver is a refusal with the subcarrier
+    // already destroyed. The gate is what raises the rate first, and it
+    // returns false until the receiver is actually running at it. Every false
+    // return has posted a sentence, so there is no pass on which the switch is
+    // on and the pane says nothing.
+    if (!ensure_composite_receiver()) {
+        return;
+    }
+
     const bool want_rbds = rds_region_rbds_.load();
 
     // WRITTEN ONLY WHEN IT HAS TO BE. core/rpc/client.h: this call rebuilds
@@ -186,13 +418,7 @@ void EngineLink::poll_rds()
     if (!rds_region_written_ || want_rbds != rds_posted_region_rbds_) {
         const auto region = want_rbds ? rpc::RdsRegion::Rbds : rpc::RdsRegion::Rds;
         if (auto set = client_->set_rds_region(vrx, region); !set) {
-            const std::lock_guard<std::mutex> lock(rds_mutex_);
-            has_rds_handover_ = true;
-            handover_rds_answered_ = false;
-            handover_rds_station_ = {};
-            handover_rds_fault_ = QString::fromStdString(set.error().message);
-            QMetaObject::invokeMethod(
-                this, [this] { adopt_rds(); }, Qt::QueuedConnection);
+            post_rds_fault(QString::fromStdString(set.error().message));
             return;
         }
         rds_region_written_ = true;

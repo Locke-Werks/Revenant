@@ -351,6 +351,15 @@ endif()
 # wheel issues is not, and a coalescer that lets a burst through leaves the
 # picture moving for seconds after the gesture stopped.
 #
+# It covers plan_composite_probe and composite_grant_refusal, which decide
+# whether the RDS switch may raise the pane's receiver to 171000 S/s and what
+# it says when it may not. Two of the engine's four conditions are answered
+# here without a round trip, and getting either wrong costs the operator the
+# receiver they were listening to: a rate change is a remove and an add. The
+# fourth condition is the one a successful add does not answer, and it is read
+# off the grant rather than the request, which is the mistake that looks
+# correct.
+#
 # It covers the EN 50067 Annex E mapping, its segment placeholders and the
 # four states an empty RDS pane can be in. The mapping is the difference
 # between a letter and a different letter that renders just as plausibly,
@@ -396,6 +405,7 @@ if(REVENANT_UI_TESTS)
         add_executable(revenant_ui_tests
             audio/audio_ring.cpp
             tests/test_audio_ring.cpp
+            tests/test_composite_probe.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_frequency_entry.cpp

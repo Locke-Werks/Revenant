@@ -1755,9 +1755,17 @@ ApplicationWindow {
         // blank and says nothing.
         //
         // The switch exists because the first poll BUILDS the decoder on
-        // that receiver. See the block above the RDS surface in
-        // ui/models/engine_link.h, including what this deliberately does
-        // not do about the audio rate.
+        // that receiver. It also REBUILDS the receiver, at 171000 S/s, after
+        // asking the engine on a throwaway receiver whether that rate can be
+        // granted: 57 kHz does not survive the 48 kHz default and the switch
+        // refused every time until it did this. See the block above the RDS
+        // surface in ui/models/engine_link.h and ui/models/composite_probe.h.
+        //
+        // WHICH IS WHY THERE ARE TWO SENTENCES HERE AND NOT ONE. rdsStatus is
+        // about the decoder and always present. The line below it is about the
+        // AUDIO, which has become the multiplex, and an operator listening to
+        // the station gets no other account of why it stopped sounding like
+        // one: audioActive is still true and the level meter still moves.
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 2
@@ -1909,6 +1917,32 @@ ApplicationWindow {
                 font.pixelSize: 11
                 wrapMode: Text.WordWrap
                 maximumLineCount: 3
+                elide: Text.ElideRight
+            }
+
+            // WHAT THE AUDIO HAS BECOME, and only while somebody is listening
+            // to it. The receiver hands out the 171 kHz composite multiplex
+            // while RDS is on, which is the subcarrier the decoder needs and
+            // is not programme audio, so a listener hears the station replaced
+            // by noise with nothing on screen accounting for it.
+            //
+            // Gated on audioWanted rather than shown whenever the rate is
+            // raised. An operator who is not listening does not need to be
+            // told what the audio sounds like, and the rate is the switch
+            // working rather than a condition to warn about.
+            //
+            // inkWarn, because it is a consequence the operator did not ask
+            // for and has to act on to undo: the fix is the RDS switch, which
+            // puts the receiver back to programme audio on the way off.
+            Label {
+                Layout.fillWidth: true
+                visible: engineLink.rdsCompositeReceiver && engineLink.audioWanted
+                text: "the audio on this receiver is the FM multiplex while RDS is "
+                      + "on, not programme audio. Turn rds off to hear the station."
+                color: window.inkWarn
+                font.pixelSize: 11
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
                 elide: Text.ElideRight
             }
         }
