@@ -1624,6 +1624,37 @@ public:
         return -1.0;
     }
 
+    // The band's excess in its strongest three adjacent bins over its excess
+    // in total, or a negative number when there is nothing to report.
+    //
+    // THE NUMBER THAT SAYS A BAND IS SHAPED LIKE A TRANSMISSION, which
+    // neither of the other two does. detectionMargin says how far it stood
+    // above the threshold and the bar above says how long it has been there;
+    // a raised patch of noise floor can score well on both. Measured on 20 m
+    // on 2026-09-22, an 11.7 kHz patch sitting at confidence 1.00 read 0.02
+    // here against 0.59 to 0.86 for the carriers beside it.
+    //
+    // NEGATIVE FOR ABSENT AND ALSO FOR UNMEASURED, which is the difference
+    // from detectionMargin and is deliberate. The wire carries shapeMeasured
+    // beside the value precisely because an unmeasured band arrives as 0.0
+    // and 0.0 is the most noise-like reading there is. Folding both into one
+    // negative means a caller cannot draw "we could not tell" as "certainly
+    // junk" by forgetting to check, which is the only way this field can do
+    // harm.
+    //
+    // IT HAS TO BE READ WITH THE BANDWIDTH. High and narrow is a carrier
+    // measured correctly; high and wide is a carrier inside a bandwidth that
+    // is an overestimate; low is a band filled with whatever it is. A band of
+    // three bins or fewer reads exactly one and means nothing by it.
+    [[nodiscard]] Q_INVOKABLE double detectionConcentration(qulonglong id) const {
+        for (const rpc::Detection& detection : shown_.detections) {
+            if (detection.id == id) {
+                return detection.shape_measured ? detection.concentration : -1.0;
+            }
+        }
+        return -1.0;
+    }
+
     // ------------------------------------------------------------------
     // The receiver surface
     // ------------------------------------------------------------------

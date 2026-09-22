@@ -2663,6 +2663,48 @@ ApplicationWindow {
                     elide: Text.ElideRight
                 }
 
+                // Whether the band is SHAPED like a transmission, which is
+                // the third different question on this row and the one the
+                // other two cannot answer: "held for" is how long, margin is
+                // how strong, and a raised patch of noise floor scores well
+                // on both. Measured on 20 m, an 11.7 kHz patch at confidence
+                // 1.00 read 0.02 here while the carriers beside it read 0.59
+                // to 0.86.
+                //
+                // Hidden rather than zeroed when negative, which here covers
+                // the track having left the list AND the shape not having
+                // been measured. engine_link.h folds the two together on
+                // purpose: an unmeasured band arrives as 0.0 and 0.0 is the
+                // most noise-like reading there is, so drawing it would be
+                // reporting "we could not tell" as "certainly junk".
+                //
+                // LABELLED WITH WHAT IT MEASURES AND NOT WITH A VERDICT.
+                // "concentrated" against "spread" was written here first and
+                // taken out: picking the word needs a threshold, no threshold
+                // has been chosen, and core/detect/shape.h is explicit that
+                // choosing one is a measurement against known truth rather
+                // than a constant somebody liked. Inventing one in a QML
+                // string would be the same mistake "confidence" made, made
+                // where it is hardest to find.
+                //
+                // So the row says what the number is. A reader who wants to
+                // know whether 0.31 is good has the bandwidth on the same
+                // row, which is the comparison that answers it.
+                Label {
+                    Layout.minimumWidth: 0
+
+                    readonly property double concentration:
+                        window.tunedId > 0
+                            ? engineLink.detectionConcentration(window.tunedId)
+                            : -1.0
+
+                    visible: concentration >= 0.0
+                    text: "·  " + concentration.toFixed(2) + " of it in 3 bins"
+                    color: window.inkDim
+                    font.pixelSize: 13
+                    elide: Text.ElideRight
+                }
+
                 // WHAT ELSE WAS UNDER THAT CLICK
                 //
                 // The detector finds narrow sub-tracks inside a wide signal
