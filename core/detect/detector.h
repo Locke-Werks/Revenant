@@ -287,6 +287,23 @@ struct Track {
     // was it when it was there".
     double margin_confidence = 0.0;
 
+    // What the band looked like the last time a candidate was actually
+    // assigned to this track, straight off Candidate::shape.
+    //
+    // NOT SMOOTHED, AND IT GOES STALE THE WAY margin_confidence DOES. A
+    // holding track keeps the shape its last detection had, because the
+    // alternative is decaying a measurement toward nothing, which would read
+    // as a band changing shape when what happened is that it stopped being
+    // there. BandShape::measured says whether anything was measured at all.
+    //
+    // Smoothing was considered and not done. The fields are ratios over a
+    // window whose width moves with the band, so the same number from two
+    // decisions is not always the same quantity, and an exponential average
+    // over them would be arithmetic without a meaning. A caller wanting
+    // stability over time should watch the series rather than be handed one
+    // number pretending to be it.
+    BandShape shape;
+
     // Zero to one, rising on each decision this track was detected in and
     // decaying on each one it was missed from. This is what
     // DetectorConfig::confidence_threshold is compared against, and it is the

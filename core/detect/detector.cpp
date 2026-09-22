@@ -1474,6 +1474,11 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
             track.margin_confidence = characterise::margin_confidence(
                 track.snr_2500_db, config_.detection_threshold_db);
 
+            // Taken rather than blended, per the field's own comment. This is
+            // the one place a track sees a candidate's arrays before the next
+            // decision overwrites them.
+            track.shape = candidate.shape;
+
             ++track.hits;
             track.misses = 0;
             track.last_detected = now;
@@ -1535,6 +1540,7 @@ void Detector::update_tracks(dsp::SampleIndex now, double elapsed_seconds) {
         track.bandwidth = std::max<dsp::Hertz>(1, candidate.bandwidth);
         track.snr_2500_db = candidate.snr_2500_db;
         track.margin_confidence = candidate.margin_confidence;
+        track.shape = candidate.shape;
         track.confidence = config_.confidence_rise;
         track.first_seen = now;
         track.last_seen = now;

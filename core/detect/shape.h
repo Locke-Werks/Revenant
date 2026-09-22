@@ -69,6 +69,43 @@ struct BandShape {
     // product would reject every FSK signal on the air.
     double peak_to_mean = 0.0;
 
+    // The band's excess in its strongest three adjacent bins, over its excess
+    // in total.
+    //
+    // THE SAME QUANTITY characterise::spectral_concentration REPORTS, over a
+    // band instead of over a whole extract, so the two tiers answer in one
+    // unit and a reader can hold them side by side. That comparison was worth
+    // having the moment it was tried: on 2026-09-22 a 4.3 kHz detection on
+    // 20 m came back from the characteriser as an unmodulated carrier, which
+    // is not a thing 4.3 kHz wide, and the explanation was a narrow carrier
+    // sitting inside a band whose reported width was too wide.
+    //
+    // WHAT IT SEPARATES IS A FILLED BAND FROM AN OVER-WIDE ONE, and that is
+    // not the same question peak_to_mean fails at. Measured across 20 m at
+    // 1603 UT: five detections between 10 Hz and 301 Hz read peak_to_mean 2.23
+    // to 5.34, which is the value a patch of averaged noise reads, while two
+    // detections 3.5 and 3.7 kHz wide read 250 and 405. peak_to_mean rises
+    // with how much of the band is EMPTY, so a correctly sized narrow band
+    // scores like noise by construction and the number is close to useless on
+    // its own. Three bins over the total does not have that problem: it is a
+    // fraction, it does not grow with the width, and it is the number that
+    // already separated on the characteriser's side of the same data.
+    //
+    // READ IT WITH THE BANDWIDTH BESIDE IT, which is how it becomes an answer
+    // rather than a number. High and narrow is a carrier measured correctly.
+    // High and wide is a carrier inside a bandwidth that is an overestimate,
+    // which is a detection worth splitting and a band the second tier cannot
+    // be asked about fairly. Low is a band that is filled with whatever it is.
+    //
+    // NOT A VERDICT AND NOT THRESHOLDED, per this header's own rule. What
+    // counts as high is a measurement against known truth that has not been
+    // made.
+    //
+    // A BAND UNDER THREE BINS READS EXACTLY ONE and means nothing by it: every
+    // bin it has is in the window. Check the width first, the same way
+    // peak_to_mean's own note says to.
+    double concentration = 0.0;
+
     // Power in the lower half of the band over power in the whole band, so
     // exactly 0.5 when the band is balanced about its own centre.
     //
@@ -185,6 +222,31 @@ inline constexpr double kSkirtEndFraction = 0.1;
 
     const double mean = total / static_cast<double>(width);
     shape.peak_to_mean = peak / mean;
+
+    // Three adjacent bins because that is what a Hann-windowed tone off a bin
+    // centre spreads over, which is the reason
+    // characterise::spectral_concentration uses three, and the point of this
+    // field is to be that number. The window is clamped inside the band, so a
+    // band of one or two bins sums itself and reads one.
+    if (width <= 3) {
+        shape.concentration = 1.0;
+    } else {
+        double running = 0.0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            const double value = excess[first + i];
+            running += value > 0.0 ? value : 0.0;
+        }
+        double best = running;
+        for (std::size_t i = first + 3; i <= last; ++i) {
+            const double entering = excess[i] > 0.0 ? excess[i] : 0.0;
+            const double leaving = excess[i - 3] > 0.0 ? excess[i - 3] : 0.0;
+            running += entering - leaving;
+            if (running > best) {
+                best = running;
+            }
+        }
+        shape.concentration = best / total;
+    }
 
     // Split on the band's own centre. An odd width has a middle bin, and it is
     // counted in neither half: putting it in one would make a symmetric band

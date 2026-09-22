@@ -80,6 +80,103 @@ TEST_CASE("a carrier reads as peaked by its own width", "[detect][shape]")
     CHECK(shape.peak_to_mean == Approx(9.0));
 }
 
+// Rejects a concentration that grows with the band's width, which is the
+// defect peak_to_mean has and the reason this field exists beside it. A
+// rectangle spreads its power evenly, so three bins hold exactly three bins'
+// worth however many there are.
+TEST_CASE("a rectangular band concentrates by its bin count alone", "[detect][shape]")
+{
+    for (const std::size_t width : {std::size_t{10}, std::size_t{40}, std::size_t{160}}) {
+        std::vector<double> excess = flat(1000);
+        for (std::size_t i = 400; i < 400 + width; ++i) {
+            excess[i] = 1.0;
+        }
+
+        const BandShape shape = measure(excess, 400, 400 + width - 1);
+        REQUIRE(shape.measured);
+
+        CAPTURE(width, shape.peak_to_mean, shape.concentration);
+
+        // Three of `width` equal bins, exactly.
+        CHECK(shape.concentration == Approx(3.0 / static_cast<double>(width)));
+
+        // And the number this one is here to be better than: flat at one
+        // whatever the width, which is true and says nothing.
+        CHECK(shape.peak_to_mean == Approx(1.0));
+    }
+}
+
+// Rejects a concentration that cannot tell a band which IS a carrier from a
+// band that merely CONTAINS one. Both put all their power in three bins; what
+// differs is the width the detector reported, and the field's comment says to
+// read the two together. This is the arithmetic behind that instruction.
+TEST_CASE("concentration is one for a carrier at any reported width", "[detect][shape]")
+{
+    std::vector<double> excess = flat(1000);
+    excess[499] = 1.0;
+    excess[500] = 8.0;
+    excess[501] = 1.0;
+
+    // Sized to the carrier, which is a detection that got the width right.
+    const BandShape tight = measure(excess, 495, 505);
+    REQUIRE(tight.measured);
+    CHECK(tight.concentration == Approx(1.0));
+
+    // The same carrier inside a band a hundred times too wide, which is the
+    // shape of the 4.3 kHz detection on 20 m that the characteriser then
+    // called an unmodulated carrier.
+    const BandShape loose = measure(excess, 100, 900);
+    REQUIRE(loose.measured);
+    CHECK(loose.concentration == Approx(1.0));
+
+    // peak_to_mean is what moved, and it moved by the width rather than by
+    // anything about the signal: eight over the mean in each case.
+    CHECK(loose.peak_to_mean > 50.0 * tight.peak_to_mean);
+}
+
+// REJECTS a window that runs off the end of the band and reads a neighbour.
+// The strongest three bins have to be three bins OF THE BAND, so a carrier
+// sitting just outside it must not raise the number.
+TEST_CASE("the concentration window stays inside the band", "[detect][shape]")
+{
+    std::vector<double> excess = flat(200);
+    for (std::size_t i = 80; i < 90; ++i) {
+        excess[i] = 1.0;
+    }
+
+    // A spike one bin past each edge, far larger than the band itself.
+    excess[79] = 100.0;
+    excess[90] = 100.0;
+
+    const BandShape shape = measure(excess, 80, 89);
+    REQUIRE(shape.measured);
+    CHECK(shape.concentration == Approx(0.3));
+}
+
+// A band of one, two or three bins has every bin it owns inside the window, so
+// the answer is one by construction and carries no information. Asserted so
+// that it is a stated behaviour a reader can find rather than a surprise, and
+// because the alternative, refusing to measure, would lose the other fields
+// with it.
+TEST_CASE("a band no wider than the window reads one", "[detect][shape]")
+{
+    std::vector<double> excess = flat(200);
+    excess[100] = 4.0;
+    excess[101] = 1.0;
+
+    CHECK(measure(excess, 100, 100).concentration == Approx(1.0));
+    CHECK(measure(excess, 100, 101).concentration == Approx(1.0));
+    CHECK(measure(excess, 99, 101).concentration == Approx(1.0));
+
+    // Past the window it starts measuring. Five equal bins hold three fifths
+    // of themselves in any three of them.
+    std::vector<double> spread = flat(200);
+    for (std::size_t i = 100; i < 105; ++i) {
+        spread[i] = 1.0;
+    }
+    CHECK(measure(spread, 100, 104).concentration == Approx(0.6));
+}
+
 // Rejects a half-split that puts the middle bin in one side. A band of odd
 // width with everything dead centre is balanced, and counting the centre bin
 // as "lower" would report the most symmetric shape there is as asymmetric.

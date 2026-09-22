@@ -1666,6 +1666,27 @@ public:
         // below is what speaks to that.
         double margin;
 
+        // From detect::BandShape, straight off the track.
+        //
+        // concentration is the band's excess in its strongest three bins over
+        // its excess in total, which is the same unit
+        // characterise::spectral_concentration answers in, so the two tiers
+        // can be read side by side.
+        //
+        // IT IS NOT peak_to_mean, WHICH WAS TRIED HERE FIRST. On 20 m at 1603
+        // UT the narrow detections read peak_to_mean 2.23 to 5.34 and the wide
+        // ones 250 and 405: it rises with how much of the band is EMPTY, so a
+        // correctly sized narrow band scores like noise by construction. It
+        // stays on BandShape, where its own header explains it; it is not a
+        // column an operator can act on.
+        //
+        // balance is BandShape::lower_fraction: exactly 0.5 when the band is
+        // symmetric about its own centre, near zero or one for a sideband
+        // mode with a suppressed carrier.
+        double concentration;
+        double balance;
+        bool shape_measured;
+
         double age_seconds;
         double silent_seconds;
         std::uint32_t state;
@@ -1784,6 +1805,9 @@ public:
                 .snr_db = track.snr_2500_db,
                 .confidence = track.confidence,
                 .margin = track.margin_confidence,
+                .concentration = track.shape.concentration,
+                .balance = track.shape.lower_fraction,
+                .shape_measured = track.shape.measured,
                 .age_seconds = seconds_of(track.age_samples()),
                 .silent_seconds = seconds_of(track.silent_samples()),
                 .state = static_cast<std::uint32_t>(track.state),
@@ -1976,12 +2000,16 @@ struct CharacteriseCollector {
     if (row.silent_seconds > 0.0) {
         held = std::format(" +{:.1f}s", row.silent_seconds);
     }
+    const std::string concentration =
+        row.shape_measured ? std::format("{:>5.2f}", row.concentration) : std::string("    -");
+    const std::string balance =
+        row.shape_measured ? std::format("{:>5.2f}", row.balance) : std::string("    -");
     return std::format(
-        "  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.2f}  {:>6.1f}s  ch {}{}",
+        "  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.2f}  {}  {}  {:>6.1f}s  ch {}{}",
         row.id, detect::track_state_name(static_cast<detect::TrackState>(row.state)),
         format_hz(static_cast<Hertz>(std::llround(row.center_hz))),
         format_hz(static_cast<Hertz>(std::llround(row.bandwidth_hz))), row.snr_db, row.confidence,
-        row.margin, row.age_seconds, channel, held);
+        row.margin, concentration, balance, row.age_seconds, channel, held);
 }
 
 // The column names, on the same widths track_line uses.
@@ -1996,8 +2024,9 @@ struct CharacteriseCollector {
 // legend.
 [[nodiscard]] std::string track_header()
 {
-    return std::format("  {:<5}{:<7}{:>16}  {:>11}  {:>10}  {:>5}  {:>6}  {:>7}  {}", "#id",
-                       "state", "centre", "bandwidth", "snr", "conf", "margin", "age", "ch");
+    return std::format("  {:<5}{:<7}{:>16}  {:>11}  {:>10}  {:>5}  {:>6}  {:>6}  {:>5}  {:>7}  {}",
+                       "#id", "state", "centre", "bandwidth", "snr", "conf", "margin", "conc",
+                       "bal", "age", "ch");
 }
 
 [[nodiscard]] std::string level_bar(double dbfs)

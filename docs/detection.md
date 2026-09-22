@@ -1070,6 +1070,75 @@ against the 1/(1+N) that S/(S+N) predicts at each step: it is measuring the
 signal-to-noise ratio and it keeps measuring it after the family name has
 stopped meaning anything.
 
+#### Carrying that number back into the detector
+
+`spectral_concentration` is the one that works, and the detector holds a
+spectrum of its own, so it does not have to wait for a probe receiver to have
+it. `BandShape::concentration` is the same quantity over a detected band
+instead of over a whole extract: its excess in the strongest three adjacent
+bins, over its excess in total.
+
+**`peak_to_mean` was tried there first and it does not do this job.** Measured
+across 20 m at 1603 UT:
+
+| detection | width | peak_to_mean |
+| --- | --- | --- |
+| a real carrier | 10 Hz | 2.23 |
+| a real carrier | 15 Hz | 2.93 |
+| a signal | 301 Hz | 4.11 |
+| a patch of noise | 11.7 kHz | 68.95 |
+| a carrier inside a wide band | 3.5 kHz | 250.64 |
+| a carrier inside a wide band | 3.7 kHz | 405.45 |
+
+It is the wrong way round. `peak_to_mean` rises with how much of the band is
+**empty**, so a narrow band measured correctly is nearly all signal and scores
+like noise by construction, which is what its own header warns about from the
+other direction. What it is actually good at is the bottom two rows: a narrow
+thing inside a wide reported bandwidth. That is a bandwidth being wrong, not a
+signal being interference.
+
+`concentration` is a fraction, so it does not grow with the width. The same
+run, with the column the CLI now prints:
+
+    #id  state            centre    bandwidth         snr   conf  margin    conc
+    #1    live        -35.386 kHz   11.733 kHz      6.7 dB   1.00    0.55   0.02
+    #2    live        -10.947 kHz        10 Hz     11.7 dB   0.98    0.81   0.82
+    #83   live         -4.027 kHz    1.210 kHz      8.7 dB   0.88    0.68   0.28
+    #54   live          1.313 kHz       809 Hz      9.4 dB   0.83    0.72   0.86
+    #74   live          2.520 kHz        15 Hz     12.5 dB   1.00    0.83   0.59
+    #69   live         12.626 kHz       288 Hz     14.3 dB   1.00    0.87   0.49
+
+**Track #1 is the complaint, in one row.** An 11.7 kHz patch of raised noise
+floor, sitting at confidence 1.00 because it has been there the whole time,
+indistinguishable in that column from a station. Concentration reads 0.02
+against 0.59 to 0.86 for the carriers. The operator's "just a bump in the noise
+floor, all interference" now has a number beside it that says so.
+
+**And it agrees with the other tier where both were asked.** Independently, on
+the same three bands:
+
+| band | detector | characteriser |
+| --- | --- | --- |
+| 11.7 kHz of noise | 0.02 | 0.039 |
+| 10 Hz carrier | 0.82 | 0.700 |
+| 15 Hz carrier | 0.59 | 0.713 |
+
+Two measurements that share no arithmetic, one from an averaged power spectrum
+and one from complex baseband, landing in the same place. Where they differ is
+informative rather than contradictory: #54 reads 0.86 over its own 809 Hz band
+and 0.267 over the 1.5 kHz channel around it, which says it is concentrated
+within itself without dominating its neighbourhood, and only having both
+numbers says that.
+
+**Read it with the bandwidth, which is the one instruction it needs.** High and
+narrow is a carrier measured correctly. High and wide is a carrier inside a
+bandwidth that is an overestimate, which is the 4.3 kHz row from the cross-check
+above and a detection that wants splitting. Low is a band filled with whatever
+it is.
+
+Nothing thresholds on it. `core/detect/shape.h` says why: what counts as high
+is a measurement against known truth, and that has not been made.
+
 #### So what a modulation-driven detector can stand on today
 
 - **`spectral_concentration` can carry a decision.** It is scale-free, it is
@@ -1082,6 +1151,12 @@ stopped meaning anything.
 - A PSK call carrying no symbol rate, or one implausible for its band, is the
   shape of the artefact and is the cheapest thing to gate on if a gate is
   wanted before the probe receiver exists.
+- **And the detector does not have to wait for any of it.** `BandShape::
+  concentration` is the same measurement off the spectrum the detector already
+  holds, on every track, at no extra cost and with no receiver involved. The
+  tier that needed a probe receiver is the one that names a family; the number
+  that separates a station from a raised patch of floor was available all
+  along.
 
 None of this is an argument against driving detection from modulation. It is
 the measurement of what the current extract supports, and it is the second
