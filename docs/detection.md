@@ -819,6 +819,53 @@ that would carry the answer and its enum still has exactly one value. The
 probe-receiver argument below is the design for that seam and remains the
 part to do.
 
+### The cheap half of the seam exists, and what it measured
+
+`revenant-cli --characterise <hz>` places a raw receiver, collects one coarse
+channel of complex baseband off the existing in-process audio fan-out and hands
+it to `characterise()`. It is not the probe receiver designed below and does not
+replace it. It exists because on a slow source the thing that design rejects is
+much less bad: a coarse channel at 2.4 MS/s on a 64-channel grid is 37.5 kHz and
+useless for this, and the same channel on a 96 kS/s HF source is 1.5 kHz, which
+is narrower than an SSB signal.
+
+Measured on 55 seconds of 40 m from `docs/recordings.md`, at five frequencies,
+four of which the detector had found and one of which is empty band:
+
+| offset | family | confidence | occupied | envelope variance | concentration |
+| --- | --- | --- | --- | --- | --- |
+| 193 Hz | unmodulated carrier | 0.54 | 1298 Hz | 20.50 | 0.544 |
+| 7.192 kHz | PSK, 10.46 baud | 0.97 | 921 Hz | 4.63 | 0.449 |
+| 11.132 kHz | PSK | 0.79 | 1550 Hz | 4.14 | 0.018 |
+| 13.250 kHz | unmodulated carrier | 0.52 | 144 Hz | 4.23 | 0.521 |
+| 30 kHz, empty | unknown | 0.00 | 1553 Hz | 4.79 | 0.005 |
+| 41 kHz, empty | unknown | 0.00 | 1538 Hz | 4.82 | 0.006 |
+
+**The empty band is the row that matters.** Two frequencies with nothing in
+them answer `unknown` at zero confidence, with the estimators' refusals
+attached. A stage that named a family everywhere would be worthless and this
+one does not.
+
+**No row here is known to be right.** There is no ground truth for this
+recording, which `docs/recordings.md` says at length, so what the table shows is
+that the stage discriminates and not that it is correct.
+
+**Two tells for a non-answer, both visible above.** An occupied bandwidth near
+1550 Hz is the whole coarse channel, which means `occupied_band` found no band
+and returned everything; and a concentration near 0.005 with a family attached
+says the family came from somewhere other than the spectrum. The 11.132 kHz row
+has both and should be read as a shrug rather than as PSK.
+
+**And one assumption in the estimators does not survive real HF.**
+`CharacteriseConfig::constant_envelope_variance` is 0.05 and its comment says
+circularly symmetric complex Gaussian noise reads exactly 1.0. Through this
+path, on this band, empty noise reads 4.79 and 4.82. Atmospheric noise on 40 m
+is impulsive rather than Gaussian and the channelizer shapes what arrives, so
+the constant-envelope test cannot fire here at all, and with it the AnalogueFm
+and Fsk branches that sit behind it. That is a property of real HF through a raw
+tap rather than a defect in the estimator, and it is the sort of thing only a
+recording was ever going to show.
+
 ### What a probe receiver actually is, which the first draft got wrong
 
 The first draft said a detection becomes a `Demod::Raw` probe whose complex

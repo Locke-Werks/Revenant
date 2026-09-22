@@ -63,6 +63,7 @@
 #include "core/dsp/spectrum_levels_reference.h"
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
+#include "core/characterise/characterise.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/dsp/spectrum_reference.h"
@@ -87,6 +88,7 @@ using revenant::Status;
 using revenant::fail;
 using revenant::with_context;
 
+namespace characterise = revenant::characterise;
 namespace decode = revenant::decode;
 namespace detect = revenant::detect;
 namespace dsp = revenant::dsp;
@@ -452,6 +454,10 @@ struct Options {
     // frequency on purpose; see the flag's help text.
     std::uint32_t detect_split_gap = 0;
 
+    // Absolute hertz to characterise, or zero for not asked. A raw receiver is
+    // placed there and its complex baseband is handed to core/characterise.
+    Hertz characterise_hz = 0;
+
     // Broadcast FM stations to decode RDS from, repeatable. Each one gets a
     // receiver of its own; see RdsSpec for why it cannot share one with a
     // receiver somebody is listening to.
@@ -548,6 +554,18 @@ void print_usage()
         "                      neither says a track is real.\n"
         "                      Turns the spectrum stage on by itself, so it needs\n"
         "                      neither --vrx nor --spectrum.\n"
+        "  --characterise <hz> Ask what modulation is at this frequency. Places a raw\n"
+        "                      receiver there, collects one coarse channel of complex\n"
+        "                      baseband and hands it to core/characterise, which answers\n"
+        "                      with a family, a symbol rate where it found one, and its\n"
+        "                      own refusal where it did not.\n"
+        "                      THE COARSE CHANNEL IS THE EXTRACT, so this is honest on a\n"
+        "                      slow source and wasteful on a fast one: at 96 kS/s on a\n"
+        "                      64-channel grid a channel is 1.5 kHz, which suits an HF\n"
+        "                      signal, and at 2.4 MS/s it is 37.5 kHz, which is far wider\n"
+        "                      than anything being asked about.\n"
+        "                      It needs 16384 samples, which is 5.5 s at a 3 kS/s channel\n"
+        "                      rate, so give --duration enough to collect them.\n"
         "  --detect-split-gap <bins>\n"
         "                      How many consecutive bins at the noise floor separate two\n"
         "                      detections rather than one, default 8. IN BINS AND NOT IN\n"
@@ -684,6 +702,19 @@ void print_usage()
 
         if (arg == "--detect") {
             options.detect = true;
+            continue;
+        }
+
+        if (arg == "--characterise" || arg == "--characterize") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto hz = parse_frequency(*text, arg);
+            if (!hz) {
+                return std::unexpected(hz.error());
+            }
+            options.characterise_hz = *hz;
             continue;
         }
 
@@ -1751,6 +1782,60 @@ private:
     std::atomic<std::uint64_t> decisions_{0};
     std::atomic<std::uint64_t> dropped_{0};
     std::atomic<std::uint64_t> consume_ns_{0};
+};
+
+// Collects one coarse channel of complex baseband off a raw receiver, so
+// core/characterise has something to read.
+//
+// WHY THE RAW TAP AND NOT THE RECEIVER'S OWN BASEBAND. The fine stage already
+// produces exactly what a characteriser wants, mixed to DC and filtered to the
+// passband, and it produces it on the device where nothing copies it back.
+// core/engine/graph.h says so at StageFineOutput. The raw tap is the only
+// complex baseband that reaches the host at all, so it is what there is.
+//
+// WHAT THAT COSTS, AND WHY IT IS ACCEPTABLE HERE. The tap is one coarse
+// channel: unmixed, so the signal sits at an arbitrary offset, and unfiltered
+// beyond the channelizer's own prototype, so everything else in that channel
+// comes too. On the shipped 2.4 MS/s VHF grid a channel is 37.5 kHz and that
+// is most of a band away from what was asked about. On a 96 kS/s HF source it
+// is 1.5 kHz, which is narrower than an SSB signal, and the estimators are
+// then being asked a fair question.
+//
+// So this is a tool for slow sources. The help text says so rather than the
+// flag refusing, because a wide channel gives a worse answer rather than a
+// wrong one, and seeing it is how somebody learns the difference.
+struct CharacteriseCollector {
+    std::mutex lock;
+    std::vector<dsp::Complex32> samples;
+    dsp::SampleRate rate = 0;
+    std::uint64_t seen = 0;
+
+    // Twice the minimum, so the extract is a whole number of the segments
+    // analysis_segment picks and there is room for the estimators that want
+    // overlap. More than that is thrown away: a longer extract is a slower
+    // answer about the same signal.
+    static constexpr std::size_t kWanted = 2 * characterise::kMinCharacteriseSamples;
+
+    void take(const engine::AudioChunk& chunk)
+    {
+        const std::lock_guard<std::mutex> held(lock);
+        rate = chunk.rate;
+        seen += chunk.samples.size() / 2;
+        if (samples.size() >= kWanted || chunk.channels != 2) {
+            return;
+        }
+
+        // Interleaved I and Q, which is what the raw tap puts in an
+        // AudioChunk. core/engine/engine.h still says a chunk is real and
+        // never complex; core/engine/graph.cpp builds this one anyway, and a
+        // consumer tells the two apart by the receiver's demodulator.
+        for (std::size_t i = 0; i + 1 < chunk.samples.size(); i += 2) {
+            samples.emplace_back(chunk.samples[i], chunk.samples[i + 1]);
+            if (samples.size() >= kWanted) {
+                break;
+            }
+        }
+    }
 };
 
 // One track, as a line. Frequencies to the hertz, because a detection an
@@ -3097,6 +3182,50 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         }
     });
 
+    // The characterise receiver, placed last so it cannot disturb the ones the
+    // operator asked for and so a refusal here names itself.
+    auto collector = std::make_shared<CharacteriseCollector>();
+    engine::VrxId characterise_vrx{};
+    if (options.characterise_hz != 0) {
+        engine::VrxParams params;
+        params.center = options.characterise_hz - eng.info().source_center;
+        params.demod = engine::Demod::Raw;
+
+        auto added = eng.add_vrx(params);
+        if (!added) {
+            return std::unexpected(with_context(
+                added.error(),
+                std::format("placing a raw receiver at {} to characterise",
+                            format_hz(options.characterise_hz))));
+        }
+        characterise_vrx = *added;
+
+        if (auto wired = eng.attach_audio_sink(
+                characterise_vrx,
+                [collector](const engine::AudioChunk& chunk) -> Status {
+                    collector->take(chunk);
+                    return {};
+                });
+            !wired) {
+            return std::unexpected(with_context(
+                wired.error(), std::format("wiring the characteriser at {}",
+                                           format_hz(options.characterise_hz))));
+        }
+
+        auto status = eng.vrx_status(characterise_vrx);
+        const double channel_rate =
+            status ? static_cast<double>(status->placement.channel_rate) : 0.0;
+        std::println("characterise  raw tap at {}, channel {} at {:g} S/s",
+                     format_hz(options.characterise_hz),
+                     status ? status->placement.channel : 0, channel_rate);
+        if (channel_rate > 0.0) {
+            std::println("  needs {} samples, which is {:.1f} s at this channel rate",
+                         characterise::kMinCharacteriseSamples,
+                         static_cast<double>(characterise::kMinCharacteriseSamples) /
+                             channel_rate);
+        }
+    }
+
     Status ran = eng.run();
 
     finished.store(true, std::memory_order_release);
@@ -3174,6 +3303,72 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                  "({:.2f}x realtime)",
                  source_stats.samples_delivered, source_stats.blocks_delivered, source_seconds,
                  wall_seconds, wall_seconds > 0.0 ? source_seconds / wall_seconds : 0.0);
+
+    if (characterise_vrx.valid()) {
+        std::vector<dsp::Complex32> extract;
+        dsp::SampleRate extract_rate = 0;
+        std::uint64_t extract_seen = 0;
+        {
+            const std::lock_guard<std::mutex> held(collector->lock);
+            extract.swap(collector->samples);
+            extract_rate = collector->rate;
+            extract_seen = collector->seen;
+        }
+
+        std::println("");
+        std::println("characterise  {} samples collected of {} seen at {} S/s",
+                     extract.size(), extract_seen, extract_rate);
+
+        if (extract.size() < characterise::kMinCharacteriseSamples) {
+            // Said as an arithmetic shortfall rather than as a failure,
+            // because the fix is a longer --duration and the number to give
+            // it is right here.
+            const double needed =
+                extract_rate > 0
+                    ? static_cast<double>(characterise::kMinCharacteriseSamples -
+                                          extract.size()) /
+                          static_cast<double>(extract_rate)
+                    : 0.0;
+            std::println("  short of the {} the stage needs; run {:.1f} s longer",
+                         characterise::kMinCharacteriseSamples, needed);
+        } else {
+            characterise::CharacteriseConfig how;
+            how.rate = extract_rate;
+
+            auto answer = characterise::characterise(
+                dsp::ConstComplexSpan{extract.data(), extract.size()}, how);
+            if (!answer) {
+                std::println("  refused: {}", answer.error().message);
+            } else {
+                std::println("  family          {} at {:.2f} confidence",
+                             characterise::modulation_family_name(answer->family),
+                             answer->family_confidence);
+                std::println("  summary         {}", answer->summary);
+                if (answer->symbol_rate.found) {
+                    std::println("  symbol rate     {:.2f} baud",
+                                 answer->symbol_rate.symbol_rate_hz);
+                }
+                std::println("  occupied        {:.0f} Hz wide, centred {:.0f} Hz from the "
+                             "extract's own DC",
+                             answer->band.bandwidth_hz, answer->band.centre_hz);
+                std::println("  envelope        power variance {:.3f}, peak to average "
+                             "{:.1f} dB, concentration {:.3f}",
+                             answer->envelope.normalised_power_variance,
+                             answer->envelope.peak_to_average_db,
+                             answer->spectral_concentration);
+                if (!answer->refusal.empty()) {
+                    // Printed even when a family WAS found, because the
+                    // refusals are how a reader checks the decision rather
+                    // than taking it.
+                    std::println("  what refused    {}", answer->refusal);
+                }
+                if (!answer->candidates.empty()) {
+                    std::println("  consistent with {}",
+                                 characterise::summarise_candidates(answer->candidates));
+                }
+            }
+        }
+    }
 
     if (waterfall != nullptr) {
         const auto [floor, top] = waterfall->map_ends();
@@ -3379,7 +3574,7 @@ int main(int argc, char** argv)
     // the first two watch the whole span and need no receiver at all, and
     // the third brings its own.
     if (options->receivers.empty() && options->rds.empty() && !options->spectrum &&
-        !options->detect) {
+        !options->detect && options->characterise_hz == 0) {
         std::println(stderr,
                      "revenant-cli: nothing to do. Add a receiver with --vrx, such as "
                      "--vrx 162.550M:nfm:16k, watch the span with --spectrum, look for "
