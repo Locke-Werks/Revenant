@@ -54,6 +54,14 @@
 # one, because "a receiver that can actually hear it" is a claim about a
 # receiver that is running rather than about a placement struct.
 
+# test_vrx_reanchor.cpp needs a GPU and no radio. It drives one DemodStage
+# directly rather than an engine, because the only engine-level way to a
+# receiver whose inputs were overwritten is a dongle retune: the synthetic
+# scene declares no gap and a Demand file source blocks rather than dropping.
+# The stage holds the three cursors the branch is arithmetic over, so handing
+# it a first_block that has jumped past its ring reaches the branch on a build
+# machine.
+
 # test_audio_fanout.cpp needs neither a GPU nor a sound card. AudioFanout is
 # the one part of core/engine/engine.h that is pure host code, and the wire
 # cases in tests/rpc rest on it, so its ordering and its failure semantics are
@@ -74,6 +82,7 @@ add_executable(revenant_engine_tests
     test_signal_meter.cpp
     test_sources.cpp
     test_spectrum_scale.cpp
+    test_vrx_reanchor.cpp
     test_vrx_tune.cpp
 )
 

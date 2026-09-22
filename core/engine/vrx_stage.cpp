@@ -868,15 +868,37 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
             // the skip here is the consequence of a loss somebody has been told
             // about rather than a second one.
             //
-            // THE CASE THAT IS NOT REPORTED, and it is worth knowing before
-            // trusting a quiet receiver: a receiver can also arrive here
-            // because this device could not keep up with the channelizer, with
-            // no source-side overrun to go with it. Nothing counts that yet.
-            // A receiver doing it repeatedly would skip repeatedly and sound
-            // choppy with every counter in the engine reading clean. Giving
-            // VrxStatus a re-anchor count is the fix and it wants a wire field,
-            // so it is written down rather than done here.
+            // THE CASE NO SOURCE COUNTER REPORTS, which is what the two
+            // numbers below are for: a receiver also arrives here because
+            // this device could not keep up with the channelizer, with no
+            // source-side overrun to go with it. One doing that repeatedly
+            // skips repeatedly and sounds choppy. out.reanchors and
+            // out.reanchor_frames_skipped go to the graph, which adds both to
+            // this receiver's own totals, and VrxStatus::reanchors is where a
+            // client reads them. Beside SourceStats::samples_lost they tell
+            // the retune above apart from this: both move after a retune,
+            // only these move when the machine loses the race.
+            //
+            // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-21 it read
+            // "Nothing counts that yet", and ended "Giving VrxStatus a
+            // re-anchor count is the fix and it wants a wire field, so it is
+            // written down rather than done here". The field exists now, on
+            // VrxStatus and on the wire, so a receiver skipping for this
+            // second reason is no longer silent.
+            //
+            // THE SKIPPED AMOUNT IS MEASURED AND NOT ESTIMATED. next_audio_
+            // is where the demodulator would have written next, anchor_to
+            // moves it, and the frames between the two are exactly the frame
+            // indices nothing will ever produce. Saturating, because a
+            // restart that did not move the cursor forward would otherwise
+            // subtract unsigned into about 1.8e19 frames of reported loss,
+            // and no loss is the honest answer to a restart that skipped
+            // nothing.
+            const dsp::SampleIndex resumed_from = next_audio_;
             anchor_to(record.first_block);
+            out.reanchors = 1;
+            out.reanchor_frames_skipped =
+                next_audio_ > resumed_from ? next_audio_ - resumed_from : 0;
             return out;
         }
 

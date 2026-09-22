@@ -703,6 +703,16 @@ struct Graph::Impl {
         std::atomic<std::uint64_t> level_bits{0};
         std::atomic<bool> squelch_open{false};
 
+        // WRITTEN ON THE RECORDING THREAD, unlike the two counters above,
+        // which move on the completion thread as frames are delivered. A
+        // re-anchor is decided while the command buffer is being written and
+        // produces no frames at all, so there is no delivery to attribute it
+        // to and nothing for the completion thread to see. Atomic for the
+        // same reason the rest are: vrx_status reads them from the control
+        // plane. See VrxStatus::reanchors for what they mean.
+        std::atomic<std::uint64_t> reanchors{0};
+        std::atomic<std::uint64_t> reanchor_frames_skipped{0};
+
         void store_level(double value) {
             std::uint64_t bits = 0;
             std::memcpy(&bits, &value, sizeof(bits));
@@ -3288,6 +3298,18 @@ Expected<VrxStatus> Graph::vrx_status(VrxId id) const {
     status.squelch_open = slot->squelch_open.load(std::memory_order_relaxed);
     status.audio_samples = slot->audio_samples.load(std::memory_order_relaxed);
     status.audio_dropped = slot->audio_dropped.load(std::memory_order_relaxed);
+
+    // EVENTS FIRST AND ACQUIRING, FRAMES SECOND. control_lock keeps other
+    // control-plane callers out and locks nothing out of the sample path, so
+    // these two loads can straddle a skip. The acquire pairs with the release
+    // on the recording thread, which adds the frames before the event: an
+    // event this load can see has its frames already visible, so the frame
+    // count is never short of the events beside it. The other direction,
+    // frames whose event has not landed yet, understates by one event for one
+    // poll and corrects itself on the next.
+    status.reanchors = slot->reanchors.load(std::memory_order_acquire);
+    status.reanchor_frames_skipped =
+        slot->reanchor_frames_skipped.load(std::memory_order_relaxed);
     return status;
 }
 
@@ -3792,6 +3814,25 @@ Status Graph::on_block(const source::SourceBlock& block) {
                 impl.ring->release_reservation(granted);
                 return std::unexpected(with_context(
                     recorded.error(), std::format("receiver {} stage", slot->id.value)));
+            }
+
+            // Added here and not carried on the frame, because a re-anchor is
+            // not something a delivery reports: the dispatch that skipped
+            // recorded no audio, so the completion thread never looks at it.
+            // A receiver whose inputs were overwritten has lost frames
+            // whether or not anything was listening.
+            //
+            // Frames first and relaxed, then the event and RELEASING, which is
+            // the one place a counter in this file is not relaxed. Two relaxed
+            // increments of two locations can be observed in either order, so
+            // a reader could see the event and the old frame count and report
+            // a skip that lost nothing. The release here pairs with the
+            // acquire in Graph::vrx_status: a reader that sees this event sees
+            // the frames that went with it.
+            if (recorded->reanchors != 0) {
+                slot->reanchor_frames_skipped.fetch_add(recorded->reanchor_frames_skipped,
+                                                        std::memory_order_relaxed);
+                slot->reanchors.fetch_add(recorded->reanchors, std::memory_order_release);
             }
 
             Impl::FrameVrx entry;

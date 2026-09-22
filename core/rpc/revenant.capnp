@@ -849,6 +849,40 @@ struct VrxStatus {
     #
     # Zero from an engine built before this field existed.
     demodRate @7 :UInt32;
+
+    # Times this receiver's input samples were overwritten before the engine
+    # could filter them, and the audio frames those restarts skipped past.
+    #
+    # A receiver in that position restarts from the oldest samples still held,
+    # and the frames in between are never produced, so audioSamples cannot show
+    # them and AudioChunk::start does not step across them either: that index
+    # counts frames delivered, so the hole closes over itself. This pair is the
+    # only record that it was there, which is why a client drawing a dropout
+    # indicator wants it rather than audioDropped, and audioDropped is an
+    # engine fault that ends the run in any case.
+    #
+    # WHAT A CLIENT DOES WITH IT. reanchors climbing while
+    # SourceStats::samplesLost stands still means this machine is not
+    # keeping up with its own source, which is a machine to fix and not a
+    # radio to retune: the audio is choppy, every other counter reads clean,
+    # and nothing else on the wire says so. Both climbing together is the
+    # ordinary consequence of a device retune, which stops the transfers for
+    # about a third of a second and declares the gap, so a client that draws
+    # this pair without samplesLost beside it reports every deliberate tune as
+    # a fault.
+    #
+    # READING THE FRAME COUNT AS A RATE IS THE MISTAKE TO AVOID. It is frames
+    # never produced since the receiver was added, on the same terms
+    # audioSamples counts frames that were, so what it supports is a ratio
+    # against audioSamples and a difference between two polls. Read as an
+    # instantaneous figure it says a receiver that skipped once an hour ago is
+    # skipping now.
+    #
+    # Both zero from an engine built before these fields existed, and both
+    # zero for a raw tap, which holds no cursor that can fall behind. Zero is
+    # "this did not happen" rather than "this is not measured".
+    reanchors @8 :UInt64;
+    reanchorFramesSkipped @9 :UInt64;
 }
 
 struct SpectrumFrame {

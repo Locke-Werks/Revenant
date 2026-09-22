@@ -605,6 +605,18 @@ TEST_CASE("a slow subscriber loses chunks, and the count is exactly what it lost
     INFO(test::message_of(status));
     REQUIRE(status.has_value());
     CHECK(status->audio_dropped == 0);
+
+    // AND THE RECEIVER ITSELF DID NOT SKIP, which is the other half of "the
+    // stream had no gap in it" and the field a client should be drawing a
+    // dropout from. A re-anchor puts a hole in what every subscriber gets at
+    // once, and this case is about a hole in one of them, so the two numbers
+    // have to be distinguishable on the wire rather than only in the engine. A
+    // Demand source cannot open that hole either, because it blocks rather
+    // than dropping, so zero here is the property and not this run's luck.
+    // tests/engine/test_vrx_reanchor.cpp is where the non-zero case is
+    // refereed.
+    CHECK(status->reanchors == 0);
+    CHECK(status->reanchor_frames_skipped == 0);
 }
 
 // --- shape 2 ----------------------------------------------------------------

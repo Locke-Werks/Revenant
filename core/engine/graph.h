@@ -202,6 +202,23 @@ struct StageOutput {
     // recorded.
     std::int64_t fine_dc_numerator = 0;
     std::int64_t fine_dc_denominator = 1;
+
+    // Times this call found the channel samples it wanted already overwritten
+    // and restarted from the oldest block still in the ring, and the audio
+    // frames that restart skipped past.
+    //
+    // At most one of each per call, because a stage that restarts records
+    // nothing else and returns: this is the one thing a dispatch reports
+    // instead of samples. A stage with no cursor of its own to fall behind
+    // leaves both zero, which the graph's raw tap does.
+    //
+    // PER RECEIVER AND NOT GRAPH-WIDE, which is why they come back here
+    // rather than being counted where they happen. The loss belongs to one
+    // receiver and a sum across receivers would tell an operator the run was
+    // choppy without telling them which receiver to listen to.
+    // VrxStatus::reanchors is where they arrive.
+    std::uint32_t reanchors = 0;
+    std::uint64_t reanchor_frames_skipped = 0;
 };
 
 // A stage's own complex baseband on the device, for a second transform over

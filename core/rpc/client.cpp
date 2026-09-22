@@ -510,6 +510,13 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.squelch_open = in.getSquelchOpen();
     out.audio_samples = in.getAudioSamples();
     out.audio_dropped = in.getAudioDropped();
+
+    // Zero from an engine built before these fields existed, which is the
+    // same answer as a receiver that has never skipped. There is nothing to
+    // tell the two apart and nothing a client would do differently, so no
+    // optional and no sentinel.
+    out.reanchors = in.getReanchors();
+    out.reanchor_frames_skipped = in.getReanchorFramesSkipped();
     return out;
 }
 

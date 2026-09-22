@@ -413,6 +413,20 @@ struct VrxStatus {
     bool squelch_open = false;
     std::uint64_t audio_samples = 0;
     std::uint64_t audio_dropped = 0;
+
+    // Times the engine restarted this receiver because its input samples were
+    // overwritten before it could filter them, and the audio frames those
+    // restarts skipped past. The dropout counters: audio_dropped is an engine
+    // fault that ends the run and these are gaps a listener hears.
+    //
+    // Commented on a mirror struct that mostly carries none because the pair
+    // means nothing on its own. reanchors climbing while
+    // SourceStats::samples_lost stands still is this machine failing to keep
+    // up with its own source; both climbing together is a device retune
+    // declaring the gap it opened. core/rpc/revenant.capnp carries the full
+    // note, and core/engine/vrx.h says where the numbers come from.
+    std::uint64_t reanchors = 0;
+    std::uint64_t reanchor_frames_skipped = 0;
 };
 
 // Mirrors revenant::detect::TrackState ordinal for ordinal, and the schema's

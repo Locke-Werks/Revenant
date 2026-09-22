@@ -885,6 +885,47 @@ struct VrxStatus {
     // StageOutput::frames here.
     std::uint64_t audio_samples = 0;
     std::uint64_t audio_dropped = 0;
+
+    // Times this receiver's input samples were overwritten before it could
+    // filter them, and the audio frames those restarts skipped past.
+    //
+    // A receiver in that position restarts from the oldest channel block
+    // still in the ring, because the samples it wanted have gone and no
+    // answer for them exists either. core/engine/vrx_stage.cpp states at the
+    // branch why it restarts instead of refusing. What a reader needs here is
+    // the consequence: the audio has a hole in it, and nothing else anywhere
+    // says so. The frames between the two cursors were never produced, so
+    // audio_samples cannot show them, and AudioChunk::start counts frames
+    // delivered rather than naming a stream position the stage agrees with, so
+    // it closes over the hole instead of stepping across it. That is the
+    // difference from audio_dropped, whose two sites move the index on
+    // deliberately so that the gap is declared: frames that were produced and
+    // lost can be declared, and frames that were never produced cannot.
+    //
+    // THIS IS THE COUNTER THAT SEPARATES A DECLARED LOSS FROM AN UNDECLARED
+    // ONE, which is the whole reason it is here. A device retune stops the
+    // transfers for about a third of a second and says so, in
+    // SourceStats::samples_lost and on the block's dropped_before, so a
+    // re-anchor after one is the consequence of a loss somebody has already
+    // been told about. A receiver also arrives there when this device cannot
+    // keep up with the channelizer, and that case moves no source counter at
+    // all: before these two fields it skipped, sounded choppy, and left every
+    // counter in the engine reading clean. Read them beside SourceStats and
+    // the two cases come apart: re-anchors climbing while samples_lost stands
+    // still is this machine losing the race rather than the radio retuning.
+    //
+    // FRAMES, EXACTLY, NOT AN ESTIMATE OF THEM. The stage carries an audio
+    // frame cursor and the restart moves it, so the skipped count is the
+    // difference between where the cursor was and where it resumed: precisely
+    // the frame indices nothing will ever produce. They are frames on the
+    // same terms audio_samples is, so the two are comparable and a choppy
+    // receiver is one where the second is a noticeable fraction of the first.
+    //
+    // Zero for a raw tap for as long as it stays a buffer copy: it holds no
+    // cursor of its own to fall behind, so it cannot re-anchor. Zero is
+    // therefore "this did not happen" rather than "this is not measured".
+    std::uint64_t reanchors = 0;
+    std::uint64_t reanchor_frames_skipped = 0;
 };
 
 }  // namespace revenant::engine

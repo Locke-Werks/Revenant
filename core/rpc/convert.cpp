@@ -452,6 +452,13 @@ void write_vrx_status(schema::VrxStatus::Builder out, const engine::VrxStatus& i
     out.setSquelchOpen(in.squelch_open);
     out.setAudioSamples(in.audio_samples);
     out.setAudioDropped(in.audio_dropped);
+
+    // The pair a client reads as a dropout, which no other field on this
+    // message carries: the frames between a re-anchor's two cursors were
+    // never produced, so audioSamples cannot show them and audioDropped
+    // counts something else.
+    out.setReanchors(in.reanchors);
+    out.setReanchorFramesSkipped(in.reanchor_frames_skipped);
 }
 
 void write_spectrum_frame(schema::SpectrumFrame::Builder out,

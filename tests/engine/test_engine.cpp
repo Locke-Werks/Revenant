@@ -1467,6 +1467,23 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
                             << eng.info().source_center << ", so absolute " << absolute);
     CHECK(absolute == kOpenedAt);
 
+    // WHAT THE RETUNE COST THE RECEIVER, which is the one thing only a radio
+    // can show: retune_streaming_locked stops the transfers to move the tuner,
+    // the stream index jumps by the gap, and a receiver whose channel samples
+    // went with it restarts rather than filtering samples that no longer
+    // exist. How long that takes is the dongle's business, so whether the gap
+    // clears this engine's channel ring is not something to assert on.
+    //
+    // What is asserted is the one combination that cannot be honest: frames
+    // reported lost with no event to account for them. The reverse is legal, a
+    // restart that resumed on the same audio frame it left, so it is not
+    // checked. tests/engine/test_vrx_reanchor.cpp provokes the branch
+    // deliberately and pins the arithmetic.
+    INFO("re-anchors after the nudge: " << held->reanchors << ", skipping "
+                                        << held->reanchor_frames_skipped << " frames; source lost "
+                                        << eng.source_stats().samples_lost << " samples");
+    CHECK((held->reanchor_frames_skipped == 0 || held->reanchors > 0));
+
     // AND IT IS STILL AUDIBLE, which a surviving receiver id does not prove: a
     // receiver that is registered and silent is a receiver the operator has
     // lost, and that is exactly the shape the retune bug took before the
