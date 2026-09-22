@@ -1063,10 +1063,30 @@ struct Detection {
     # needs it to be.
     snr2500Db @3 :Float64;
 
-    # Zero to one, rising on evidence and decaying on silence. The track's own
-    # and not any single frame's, which is what makes it worth thresholding:
-    # a transmission does not change modulation halfway through, so a track
-    # that has been up for five seconds has had five seconds of evidence.
+    # Zero to one, rising on each decision the track was detected in and
+    # decaying on each one it was missed from. The track's own and never any
+    # single frame's.
+    #
+    # WHAT THIS COMMENT USED TO SAY, and it described a classifier this engine
+    # does not have. It read: "Zero to one, rising on evidence and decaying on
+    # silence. The track's own and not any single frame's, which is what makes
+    # it worth thresholding: a transmission does not change modulation halfway
+    # through, so a track that has been up for five seconds has had five
+    # seconds of evidence."
+    #
+    # IT MEASURES PERSISTENCE AND NOT QUALITY. The value is one minus
+    # (1 - rise) to the n over n consecutive detections, and no term in it
+    # reads snr2500Db, bandwidthHz, the deflection margin or the shape of the
+    # band. Two detections present in the same decisions carry bit-identical
+    # confidence however strong or weak each one is, so a steady carrier and a
+    # steady bump in the noise floor both read 1.00 after about 1.3 seconds.
+    # An operator reported exactly that against intermod products on
+    # 2026-09-21.
+    #
+    # A client thresholding on this is filtering by "how long has this been
+    # here", which is worth doing and is not what the name promises. There is
+    # no calibrated number on this wire yet; docs/detection.md sets out what
+    # one would have to be.
     #
     # It approaches one without arriving. See Session::detections, which
     # refuses a bar of one for that reason.

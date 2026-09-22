@@ -247,9 +247,24 @@ struct Track {
     dsp::Hertz bandwidth = 0;
     double snr_2500_db = 0.0;
 
-    // Zero to one, rising on evidence and decaying on silence. This is what
+    // Zero to one, rising on each decision this track was detected in and
+    // decaying on each one it was missed from. This is what
     // DetectorConfig::confidence_threshold is compared against, and it is the
     // track's, never any single frame's.
+    //
+    // IT MEASURES PERSISTENCE AND NOT QUALITY, which the name does not say
+    // and a reader should not have to derive. It is `1 - (1 - rise)^n` over n
+    // consecutive detections and no term in it reads snr_2500_db, bandwidth,
+    // the deflection margin or anything about the shape of the band. Two
+    // tracks detected in the same decisions hold bit-identical confidence
+    // however strong or weak each one is.
+    //
+    // So a steady carrier and a steady bump in the noise floor both reach
+    // 1.00 in about 1.3 seconds at the shipped rise, and on 2026-09-21 an
+    // operator reported exactly that against intermod products. The answer it
+    // gives, "this has been here continuously and for how long", is a true
+    // and useful answer to a question nobody asked it. docs/detection.md has
+    // the retraction and what a calibrated number would have to be.
     double confidence = 0.0;
 
     dsp::SampleIndex first_seen = 0;
