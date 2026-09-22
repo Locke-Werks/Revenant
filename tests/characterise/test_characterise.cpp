@@ -307,6 +307,64 @@ TEST_CASE("an unmodulated carrier is named as one", "[characterise]")
     REQUIRE(result->candidates.empty());
 }
 
+// REJECTS: a characteriser whose answer about one signal depends on how much
+// of it was handed over, with no way for a caller to hold that still.
+//
+// analysis_segment takes a sixteenth of the extract, so a longer extract gets
+// finer bins, and spectral_concentration is the power in the strongest THREE
+// of them: its window is a frequency that shrinks as the extract grows. Two
+// runs over different lengths of the same carrier are then not comparable,
+// which was measured on real 40 m on 2026-09-22 and is written up on
+// CharacteriseConfig::segment.
+//
+// Here the same tone is measured at two lengths, first with the segment left
+// to the sample count and then with it named. The first pair must differ,
+// because that is the behaviour the knob exists for; the second must not,
+// because that is the knob working.
+TEST_CASE("a named segment makes two extract lengths comparable", "[characterise]")
+{
+    constexpr std::size_t kShort = 1U << 15;
+    constexpr std::size_t kLong = 1U << 17;
+    static_assert(kShort >= characterise::kMinCharacteriseSamples);
+
+    const auto tone = characterise_test::pure_tone(kLong, kRate, 1200, 1.0);
+    const auto shorter = dsp::ConstComplexSpan(tone.data(), kShort);
+    const auto longer = dsp::ConstComplexSpan(tone);
+
+    // Left to the sample count: a sixteenth of each, so 2048 bins against
+    // 8192, and the three-bin window is four times narrower on the long one.
+    const auto loose_short = characterise::characterise(shorter, config(kRate));
+    const auto loose_long = characterise::characterise(longer, config(kRate));
+    REQUIRE(loose_short.has_value());
+    REQUIRE(loose_long.has_value());
+
+    CAPTURE(loose_short->spectral_concentration, loose_long->spectral_concentration);
+    CHECK(loose_short->spectral_concentration != loose_long->spectral_concentration);
+
+    // Named: the same transform length whatever the extract, so the same
+    // three bins span the same hertz and the number is about the signal.
+    characterise::CharacteriseConfig fixed = config(kRate);
+    fixed.segment = 2048;
+
+    const auto held_short = characterise::characterise(shorter, fixed);
+    const auto held_long = characterise::characterise(longer, fixed);
+    REQUIRE(held_short.has_value());
+    REQUIRE(held_long.has_value());
+
+    CAPTURE(held_short->spectral_concentration, held_long->spectral_concentration);
+
+    // Not bit-identical: the long extract averages more segments, so the
+    // estimate is the same quantity measured better. Within a percent is the
+    // claim, against a spread that is four times wider without the knob.
+    CHECK(std::abs(held_short->spectral_concentration -
+                   held_long->spectral_concentration) < 0.01);
+
+    // And both still name the carrier, which is what makes the agreement
+    // worth anything: two matching refusals would also be consistent.
+    CHECK(held_short->family == ModulationFamily::Unmodulated);
+    CHECK(held_long->family == ModulationFamily::Unmodulated);
+}
+
 // REJECTS: a characteriser that always answers, which is the one this
 // project's rule about silence is aimed at. There is no signal in this
 // buffer at all, and the required behaviour is a refusal that NAMES the

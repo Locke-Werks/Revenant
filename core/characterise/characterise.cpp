@@ -71,7 +71,13 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
                     "reached this call and that the buffer is the one that was filled.");
     }
 
-    auto spectrum = welch_spectrum(widened, config.rate, analysis_segment(widened.size()));
+    // The caller's transform length when it named one, so two extracts of
+    // different lengths can be compared. See CharacteriseConfig::segment for
+    // the measurement that made this worth offering.
+    const std::size_t segment =
+        config.segment != 0 ? config.segment : analysis_segment(widened.size());
+
+    auto spectrum = welch_spectrum(widened, config.rate, segment);
     if (!spectrum.has_value()) {
         return std::unexpected(with_context(spectrum.error(), "characterise"));
     }

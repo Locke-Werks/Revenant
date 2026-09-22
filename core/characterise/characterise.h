@@ -133,6 +133,41 @@ struct CharacteriseConfig {
     // range over before a constant-envelope waveform with no separable
     // tones is called analogue FM rather than refused.
     double analogue_fm_spread_fraction = 0.10;
+
+    // Transform length for the averaged spectrum, or zero to let
+    // analysis_segment pick one from the sample count.
+    //
+    // WHY A CALLER MIGHT WANT TO FIX IT. analysis_segment takes a sixteenth of
+    // the extract, so a longer extract gets finer bins, and
+    // spectral_concentration is the power in the strongest THREE of them.
+    // That makes its window a FREQUENCY that shrinks as the extract grows, and
+    // two runs over different lengths of the same signal are then not
+    // comparable.
+    //
+    // Measured on a real 40 m carrier through a 3 kS/s channel on 2026-09-22,
+    // with nothing changed but how much was handed over:
+    //
+    //   11 s    concentration 0.531, and carrier_concentration is 0.5, so the
+    //           family came back Unmodulated
+    //   20 s    0.467
+    //   40 s    0.288
+    //   58 s    0.184
+    //
+    // Three bins is 4.4 Hz at the first and 1.1 Hz at the last, and an HF
+    // carrier drifts further than 1.1 Hz in a minute between transmitter
+    // stability and propagation Doppler. The measure is right and its answer
+    // is a function of an argument the caller did not know it was passing.
+    //
+    // spectral_concentration's own comment prefers a power fraction to a
+    // frequency spread because "a power fraction is the same number at any
+    // sample rate". That holds. It is not the same number at any extract
+    // LENGTH, and on a drifting carrier that is the axis that bites.
+    //
+    // Zero keeps the old behaviour exactly, so nothing that does not set this
+    // changes. Setting it is how a caller makes two extracts comparable, and
+    // the number to set is the one whose three bins span what the signal is
+    // allowed to drift.
+    std::size_t segment = 0;
 };
 
 // Everything measured, the family decided from it, and what that is
