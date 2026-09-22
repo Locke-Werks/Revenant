@@ -1262,21 +1262,26 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     // tuning a streaming one, describing every device before opening one, and
     // describing every device while one streams. What none of them has is the
     // engine, the graph, and a close of a different backend first.
+    // describe_sources rather than enumerate_sources, because that is what the
+    // picker calls: Session.listSources answers from the describing form, and
+    // on this backend describing means opening every device index to ask the
+    // tuner what it is. So by the time the engine opens the dongle, this
+    // process has already opened and closed it once.
     std::string dongle;
     {
-        auto enumerated = source::enumerate_sources();
-        if (!enumerated) {
-            SKIP("sources could not be enumerated: " + enumerated.error().message);
+        auto described = source::describe_sources();
+        if (!described) {
+            SKIP("sources could not be described: " + described.error().message);
         }
-        for (const source::SourceDescriptor& entry : *enumerated) {
-            if (entry.backend == "rtlsdr") {
-                dongle = entry.uri;
+        for (const source::SourceCapabilities& caps : *described) {
+            if (caps.backend == "rtlsdr" && caps.available()) {
+                dongle = caps.uri;
                 break;
             }
         }
     }
     if (dongle.empty()) {
-        SKIP("no RTL-SDR is attached");
+        SKIP("no RTL-SDR described itself as available");
     }
 
     auto created = engine::Engine::create(default_config());
@@ -1296,7 +1301,11 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     REQUIRE(eng.close_source().has_value());
     first.join();
 
-    const auto opened = eng.open_source(dongle + "?rate=2400000&freq=98.1M&gain=20");
+    // The URI the picker composes with a centre typed and the rate and gain
+    // boxes left empty, rather than a fuller one written here: the backend's
+    // defaults are the same either way, and spelling them out would be testing
+    // a different string from the one that failed by hand.
+    const auto opened = eng.open_source(dongle + "?freq=98100000");
     if (!opened) {
         SKIP("the dongle could not be opened after the close: " + opened.error().message);
     }

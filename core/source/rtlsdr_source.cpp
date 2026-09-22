@@ -77,6 +77,7 @@
 #include <format>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -136,6 +137,20 @@ constexpr std::uint64_t kSlotMask = kSlotCount - 1;
 // the callback thread has to take on the sample path, which is the thing
 // docs/conventions.md forbids and the thing the slot queue exists to avoid.
 constexpr auto kIdlePoll = std::chrono::microseconds(250);
+
+// Attempts at rtlsdr_set_center_freq when the stream has just been paused for
+// it.
+//
+// Four rather than one because the first one is EXPECTED to fail, not because a
+// retry might help. join_locked already documents the reason: on Windows the
+// first control transfer issued after the bulk transfers have been cancelled
+// comes back LIBUSB_ERROR_PIPE. Measured over six consecutive pause-and-retune
+// rounds on an R820T, the first attempt failed and the second succeeded every
+// single time, so one attempt would turn a working retune into a refusal on
+// every use. The remaining two are headroom for a dongle that needs a moment
+// more, and four total still reports a genuinely unreachable frequency in the
+// same breath rather than after a wait.
+constexpr int kRetunePipeRetries = 4;
 
 // Between repeats of rtlsdr_cancel_async. See join_locked for why it repeats.
 constexpr auto kCancelPoll = std::chrono::milliseconds(2);
@@ -517,7 +532,25 @@ public:
 
     [[nodiscard]] Status start(const StreamOptions& options, BlockSink sink) override;
     [[nodiscard]] Status stop() override;
-    [[nodiscard]] bool running() const override { return running_.load(std::memory_order_acquire); }
+
+    // TRUE THROUGH A RETUNE, WHICH TAKES THE THREADS DOWN AND BRINGS THEM BACK.
+    //
+    // run_delivery clears running_ on its way out, and retune_streaming_locked
+    // joins it deliberately, so for the third of a second the tuner is moving
+    // the plain flag says this source has stopped. Engine::run polls exactly
+    // this in `while (!stop_requested && source_->running())`, so reporting the
+    // pause as a stop would make every retune end the run: the engine would
+    // stop the source, flush the graph and return, and an operator changing
+    // frequency would lose the stream instead of moving it.
+    //
+    // A caller cannot distinguish the two states and should not have to. What
+    // running() means to every caller in the tree is "this source intends to
+    // keep delivering", and through a retune it does.
+    [[nodiscard]] bool running() const override
+    {
+        return running_.load(std::memory_order_acquire) ||
+               retuning_.load(std::memory_order_acquire);
+    }
 
     [[nodiscard]] Status seek(dsp::SampleIndex index) override;
 
@@ -533,6 +566,9 @@ private:
     void run_delivery();
     void note_stream_error(Error error);
     void join_locked();
+    [[nodiscard]] Status resume_locked();
+    [[nodiscard]] Expected<dsp::Hertz> tune_locked(dsp::Hertz center, int attempts);
+    [[nodiscard]] Expected<dsp::Hertz> retune_streaming_locked(dsp::Hertz center);
     [[nodiscard]] Expected<ClockModel> make_clock_model() const;
 
     SourceCapabilities caps_{};
@@ -558,6 +594,11 @@ private:
     std::int64_t anchor_ns_ = 0;
 
     std::atomic<bool> running_{false};
+
+    // Held up across the join-and-restart a retune needs, and read by running().
+    // Written only under control_, so a second retune cannot overlap the first.
+    std::atomic<bool> retuning_{false};
+
     std::atomic<bool> cancel_requested_{false};
     std::atomic<bool> producer_done_{true};
 
@@ -568,6 +609,12 @@ private:
     // Callback thread only, both of them.
     dsp::SampleIndex produced_index_ = 0;
     std::uint64_t pending_gap_ = 0;
+
+    // The delivery thread's own two counters. Owned by that thread while it
+    // runs and only touched here by start(), which is the one point where no
+    // delivery thread exists. See run_delivery for why they are not locals.
+    std::uint64_t sequence_ = 0;
+    dsp::SampleIndex stream_index_ = 0;
 
     std::mutex error_lock_{};
     Error stop_error_{};
@@ -633,8 +680,54 @@ Expected<dsp::Hertz> RtlSdrSource::tune(dsp::Hertz center)
 
     std::scoped_lock lock(control_);
 
+    // A STREAMING DONGLE HAS TO BE PAUSED TO BE RETUNED, AND THIS IS NOT OURS.
+    //
+    // rtlsdr_set_center_freq needs the RTL2832U's I2C repeater, which is a
+    // vendor control transfer, and on this platform that transfer stalls with
+    // LIBUSB_ERROR_PIPE once rtlsdr_read_async has been running for about half a
+    // second. Measured on an R820T on 2026-09-21, one retune per run so nothing
+    // could be blamed on a previous one: a retune at 252 ms lands, one at 522 ms
+    // and every one after it is refused, and the URB length does not move that
+    // boundary in either direction (16 KiB, 64 KiB and 512 KiB transfers all
+    // fail at 330 ms). librtlsdr with nothing of ours in the picture at all,
+    // rtlsdr_open through rtlsdr_read_async on a bare thread, does exactly the
+    // same thing: 0 at 310 ms, -9 at 1026 ms. So this is librtlsdr, libusb or
+    // the WinUSB binding, and no amount of care on this side makes that transfer
+    // go through.
+    //
+    // Issuing it from the USB thread instead is not the way out: from inside the
+    // read_async callback the same call returns LIBUSB_ERROR_BUSY, because a
+    // synchronous transfer submitted from within libusb's own event handling
+    // cannot complete.
+    //
+    // What does work, six rounds out of six, is stopping the transfers around
+    // it. tests/engine/test_rtlsdr_source.cpp carries all of that as [.probe]
+    // cases, which is where the numbers above come from and how a later
+    // librtlsdr, or a dongle that does not have this problem, gets checked
+    // rather than assumed.
+    if (running_.load(std::memory_order_acquire)) {
+        return retune_streaming_locked(center);
+    }
+    return tune_locked(center, 1);
+}
+
+// One attempt for a dongle that is not streaming and several for one that has
+// just been paused. See retune_streaming_locked for why the first transfer
+// after a cancel is expected to fail, and note that a stopped dongle gets a
+// single attempt so that a real refusal is reported as one rather than four
+// times over.
+Expected<dsp::Hertz> RtlSdrSource::tune_locked(dsp::Hertz center, int attempts)
+{
     const auto requested = static_cast<std::uint32_t>(center);
-    if (const int rc = rtlsdr_set_center_freq(device_.get(), requested); rc != 0) {
+
+    int rc = 0;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+        rc = rtlsdr_set_center_freq(device_.get(), requested);
+        if (rc == 0) {
+            break;
+        }
+    }
+    if (rc != 0) {
         return fail(std::format("the tuner refused {} Hz: librtlsdr returned {}", center, rc), rc);
     }
 
@@ -661,6 +754,132 @@ Expected<dsp::Hertz> RtlSdrSource::tune(dsp::Hertz center)
     const auto landed = static_cast<dsp::Hertz>(achieved);
     center_hz_.store(landed, std::memory_order_release);
     return landed;
+}
+
+Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
+{
+    // THE TRANSFERS STOP, THE TUNER MOVES, THE TRANSFERS RESTART, AND THE
+    // SAMPLES THAT WENT MISSING ARE REPORTED AS MISSING.
+    //
+    // What must not change across this is the sample index and the clock
+    // anchor. A Paced source's timestamp is the anchor plus the index over the
+    // rate, so if the roughly 790,000 samples the device produced during the
+    // pause were simply not counted, every timestamp after the retune would be
+    // a third of a second early and stay that way for the life of the stream.
+    // note_dropped is what keeps that honest: it advances produced_index_ past
+    // them, carries the count into the next block's dropped_before, and files
+    // an overrun event, which is the same treatment a consumer too slow to keep
+    // up already gets. So the gap is visible in SourceStats::samples_lost, on
+    // the block boundary, and in the window, rather than being smoothed over.
+    //
+    // THE STREAM IS RESTARTED ON EVERY PATH OUT OF HERE, WHICH IS WHY THERE IS
+    // ONLY ONE. Everything between the join and the resume records what went
+    // wrong instead of returning, because a source that was running when this
+    // was called has to be running when it returns however badly the retune
+    // went: a client that typed a frequency this dongle cannot reach, or a
+    // device that refuses to flush its buffer, must not cost the operator the
+    // radio they were already listening to. An early return anywhere in the
+    // middle would do exactly that, and it would do it silently, because
+    // running() is held true across the pause.
+    retuning_.store(true, std::memory_order_release);
+    struct ClearOnExit {
+        std::atomic<bool>& flag;
+        ~ClearOnExit() { flag.store(false, std::memory_order_release); }
+    } clear_retuning{retuning_};
+
+    const auto paused_at = std::chrono::steady_clock::now();
+    const dsp::SampleIndex before_join = produced_index_;
+
+    join_locked();
+
+    // Whatever arrived between the cancel being asked for and read_async
+    // returning is already counted the ordinary way, so the gap is the time
+    // that passed less the samples that made it through. Without this
+    // subtraction the stream would be told it lost the drain twice.
+    const dsp::SampleIndex during_join = produced_index_ - before_join;
+
+    auto landed = tune_locked(center, kRetunePipeRetries);
+
+    // Flushed whether or not the tuner moved. On the way to a new centre it is
+    // what stops the stream resuming with samples digitised at the old one; on
+    // a refusal the buffer has still been sitting unread for the length of the
+    // pause, so those samples are stale either way.
+    std::optional<Error> flush_failed;
+    if (const int rc = rtlsdr_reset_buffer(device_.get()); rc != 0) {
+        flush_failed = Error{
+            std::format("the device's sample buffer could not be flushed after the tuner was "
+                        "moved, so the stream resumes with up to a buffer of samples digitised "
+                        "before the retune: librtlsdr returned {}",
+                        rc),
+            rc};
+    }
+
+    const double paused_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - paused_at).count();
+    const auto produced_while_down =
+        static_cast<std::uint64_t>(paused_seconds * static_cast<double>(rate_));
+    if (produced_while_down > during_join) {
+        note_dropped(static_cast<std::size_t>(produced_while_down - during_join));
+    }
+
+    auto resumed = resume_locked();
+
+    // Reported worst first, because they are not equally bad. A source that
+    // cannot resume has ended and every receiver on it is finished, which is
+    // a larger fact than where the tuner is pointing; a tuner that refused is
+    // a request that did not happen against a stream that is still running;
+    // and a buffer that would not flush costs a fraction of a second of stale
+    // samples on a stream that is otherwise fine.
+    if (!resumed) {
+        return std::unexpected(with_context(
+            resumed.error(),
+            landed ? std::format("the tuner moved to {} Hz but the stream could not be restarted",
+                                 *landed)
+                   : std::format("the tuner refused {} Hz and the stream could not be restarted "
+                                 "after the attempt",
+                                 center)));
+    }
+    if (!landed) {
+        return std::unexpected(landed.error());
+    }
+    if (flush_failed) {
+        return std::unexpected(
+            with_context(*flush_failed, std::format("the tuner moved to {} Hz", *landed)));
+    }
+    return landed;
+}
+
+// The half of start() that brings the threads back, and deliberately not the
+// rest of it. The slots, the sink, the block size, the counters and the clock
+// anchor all survive a retune, and re-running start()'s setup would zero the
+// sample index and re-anchor the clock, which is the whole thing
+// retune_streaming_locked exists to avoid.
+Status RtlSdrSource::resume_locked()
+{
+    cancel_requested_.store(false, std::memory_order_relaxed);
+    producer_done_.store(false, std::memory_order_relaxed);
+    running_.store(true, std::memory_order_release);
+
+    try {
+        deliver_thread_ = std::thread([this] { run_delivery(); });
+    } catch (const std::system_error& error) {
+        producer_done_.store(true, std::memory_order_release);
+        running_.store(false, std::memory_order_release);
+        return fail(std::format("could not restart the RTL-SDR delivery thread: {}", error.what()),
+                    error.code().value());
+    }
+
+    try {
+        usb_thread_ = std::thread([this] { run_usb(); });
+    } catch (const std::system_error& error) {
+        producer_done_.store(true, std::memory_order_release);
+        deliver_thread_.join();
+        running_.store(false, std::memory_order_release);
+        return fail(std::format("could not restart the RTL-SDR transfer thread: {}", error.what()),
+                    error.code().value());
+    }
+
+    return {};
 }
 
 Expected<dsp::SampleRate> RtlSdrSource::set_sample_rate(dsp::SampleRate rate)
@@ -837,6 +1056,8 @@ Status RtlSdrSource::start(const StreamOptions& options, BlockSink sink)
     slot_tail_.store(0, std::memory_order_relaxed);
     produced_index_ = 0;
     pending_gap_ = 0;
+    sequence_ = 0;
+    stream_index_ = 0;
 
     blocks_delivered_.store(0, std::memory_order_relaxed);
     samples_delivered_.store(0, std::memory_order_relaxed);
@@ -1096,8 +1317,19 @@ void RtlSdrSource::run_usb()
 
 void RtlSdrSource::run_delivery()
 {
-    std::uint64_t sequence = 0;
-    dsp::SampleIndex stream_index = 0;
+    // MEMBERS, NOT LOCALS, because this thread is joined and restarted by a
+    // retune while the stream it is delivering carries on.
+    //
+    // They were locals until 2026-09-21, which was correct while the only way
+    // this thread ended was the stream ending. retune_streaming_locked has to
+    // stop the transfers to move the tuner, and restarting delivery with a
+    // fresh local zero would send the consumer a second block sequence 0 at
+    // sample 0, so the block after a retune would claim the timestamp of the
+    // first block of the capture. That is not a cosmetic slip: every consumer
+    // in the tree keys off stream_index, so the retune would silently rewind
+    // the whole recording by however long it had been running.
+    std::uint64_t& sequence = sequence_;
+    dsp::SampleIndex& stream_index = stream_index_;
 
     while (true) {
         const std::uint64_t tail = slot_tail_.load(std::memory_order_relaxed);
@@ -1262,11 +1494,8 @@ struct Applied {
     // rtlsdr_open left it, which is 0 Hz. That is not a quiet no-op. Setting the
     // sample rate re-tunes the handle's current frequency as a side effect, so
     // the R820T is then asked to lock DC, its PLL does not, and it prints "PLL
-    // not locked" on the way to failing. The tuner is in a failed state from
-    // that moment: every later rtlsdr_set_center_freq returns
-    // LIBUSB_ERROR_PIPE, which reaches an operator as "the tuner refused
-    // 435000000 Hz: librtlsdr returned -9" and points at the frequency they
-    // asked for rather than at the one nobody asked for.
+    // not locked" on the way to failing. An operator gets a dongle that opened
+    // and streamed, pointed at nothing they asked for.
     //
     // Observed on 2026-09-21. The device picker omits a key whose box is empty,
     // which is right, and this was the one backend that could not take the
@@ -1274,6 +1503,13 @@ struct Applied {
     // freq=, because every documented example and every test supplies one, so a
     // silently under-specified open had no way to surface until a GUI produced
     // one.
+    //
+    // WHAT THIS GUARD IS NOT. It used to say that the wedged tuner was why
+    // retuning was refused afterwards, and that is now false: a retune is
+    // refused on a dongle opened correctly at 98.1 MHz as well, for the reason
+    // retune_streaming_locked documents, and the two faults are independent.
+    // This one is still worth refusing on its own terms, because an open with
+    // no centre is an open nobody can have meant.
     //
     // NOT REFUSED WHEN THE DEVICE CAN LEGITIMATELY SIT AT DC, which is direct
     // sampling: tune_ranges_for reports {0, xtal/2} there, so the test is

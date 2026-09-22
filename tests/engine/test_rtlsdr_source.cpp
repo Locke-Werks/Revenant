@@ -17,6 +17,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +27,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <rtl-sdr.h>
 
 #include "core/dsp/types.h"
 #include "core/source/registry.h"
@@ -699,8 +703,31 @@ TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device]") {
     // LIBUSB_ERROR_PIPE on the i2c write. The stopped-dongle case passes on the
     // same hardware minutes either side of it, so the difference is the
     // streaming.
+    //
+    // A SECOND AND A HALF BEFORE THE RETUNE, AND THAT NUMBER IS THE TEST.
+    //
+    // This case used to wait only for 300,000 samples, an eighth of a second at
+    // 2.4 MS/s, and it passed against the defect it was written for: a retune
+    // that early is inside the window where the control transfer still goes
+    // through, and the boundary is at about 500 ms. The probes at the bottom of
+    // this file pin it. So waiting long enough is what makes the case mean
+    // anything, and shortening this wait to make the suite faster puts the
+    // original bug back with a green test over it.
+    //
+    // THIS CASE PRINTS librtlsdr's OWN FAILURE LINES WHILE PASSING, one set per
+    // retune:
+    //
+    //   rtlsdr_demod_write_reg failed with -9
+    //   r82xx_write: i2c wr failed=-9 reg=1a len=1
+    //   r82xx_set_freq: failed=-9
+    //
+    // That is the first attempt after the stream is paused, which is expected to
+    // fail and is retried; see kRetunePipeRetries. librtlsdr prints from inside
+    // every register accessor, so the only way to remove those lines would be to
+    // swallow the library's stderr, which would hide real faults with them.
     constexpr dsp::Hertz kOpenAt = 98'100'000;
     constexpr dsp::Hertz kWanted = 95'100'000;
+    constexpr auto kPastTheBoundary = std::chrono::milliseconds(1500);
 
     auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
     if (!opened) {
@@ -714,26 +741,29 @@ TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device]") {
     options.block_samples = 32'768;
     REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
 
-    // Streaming for real before the tune, so this is a retune against
-    // transfers in flight rather than against a handle that has merely been
-    // started. Without the wait a fast machine can reach the tune before the
-    // first transfer completes, which is the arrangement that already works.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (std::chrono::steady_clock::now() < deadline) {
+    // Streaming for real, and for long enough, before the tune. Both halves
+    // matter: samples prove the transfers are running and the clock proves they
+    // have been running past the point where the control transfer starts being
+    // refused.
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(10);
+    for (;;) {
+        const auto now = std::chrono::steady_clock::now();
+        std::uint64_t so_far = 0;
         {
             std::scoped_lock guard(collected.lock);
-            if (collected.samples >= 300'000) {
-                break;
-            }
+            so_far = collected.samples;
+        }
+        if ((so_far >= 300'000 && now - started >= kPastTheBoundary) || now >= deadline) {
+            INFO("samples before the tune: " << so_far);
+            REQUIRE(so_far >= 300'000);
+            break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    {
-        std::scoped_lock guard(collected.lock);
-        INFO("samples before the tune: " << collected.samples);
-        REQUIRE(collected.samples >= 300'000);
-    }
     REQUIRE(radio.running());
+
+    const std::uint64_t lost_before = radio.stats().samples_lost;
 
     auto landed = radio.tune(kWanted);
     if (!landed) {
@@ -761,6 +791,35 @@ TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device]") {
         CHECK(collected.samples > at_tune);
     }
 
+    // AND THE PAUSE IS DECLARED RATHER THAN SMOOTHED OVER. Retuning a streaming
+    // dongle costs about a third of a second of samples, because the transfers
+    // have to stop for the control transfer to go through at all. Those samples
+    // are counted as lost and the index skips past them, which is what keeps
+    // every timestamp after the retune from being early by the length of the
+    // pause for the rest of the stream. A retune that reported no loss would
+    // mean the skip had not happened.
+    const source::SourceStats after = radio.stats();
+    INFO("samples lost before the retune " << lost_before << ", after " << after.samples_lost);
+    CHECK(after.samples_lost > lost_before);
+    CHECK(after.overrun_events >= 1);
+    {
+        std::scoped_lock guard(collected.lock);
+        INFO("dropped_before reported to the sink: " << collected.dropped_reported);
+        CHECK(collected.dropped_reported > 0);
+        CHECK(collected.indices_contiguous);
+    }
+
+    // A SECOND RETUNE, because the first one leaves the device in a state the
+    // first one did not start from. Every device case in this file did exactly
+    // one, which is how a sequence that wedges the tuner after its first use
+    // would have passed.
+    auto again = radio.tune(kOpenAt);
+    if (!again) {
+        INFO(again.error().message);
+    }
+    REQUIRE(again.has_value());
+    CHECK(std::abs(*again - kOpenAt) <= kOpenAt / 10'000);
+
     REQUIRE(radio.stop().has_value());
 }
 
@@ -775,7 +834,10 @@ TEST_CASE("describing every device while one is streaming does not wedge its tun
     //
     // A picker refreshes its list whenever the panel is opened, and the panel
     // gets opened while a source is already running: that is what changing radio
-    // twice looks like. describe_sources() opens EVERY device to ask it what it
+    // twice looks like. Since EngineLink::note_source_epoch started asking for a
+    // listing of its own, the client also does this WITHOUT anybody clicking,
+    // once per source change, so this case covers an automatic path rather than
+    // only an operator's. describe_sources() opens EVERY device to ask it what it
     // can do, and docs/rpc.md is explicit about what that costs on this backend:
     // "for the RTL-SDR backend that is rtlsdr_open, a libusb open, claim and
     // reset." A reset issued against a dongle another handle is streaming from
@@ -836,6 +898,93 @@ TEST_CASE("describing every device while one is streaming does not wedge its tun
     const dsp::Hertz offset = *landed - kWanted;
     INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset << " Hz");
     CHECK(std::abs(offset) <= kWanted / 10'000);
+
+    REQUIRE(radio.stop().has_value());
+}
+
+TEST_CASE("a dongle described, then opened, then streamed can still be tuned",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE ENGINE'S ACTUAL ORDER, which none of the three cases above is.
+    //
+    // "describing every device first does not stop the dongle tuning after"
+    // describes, opens and tunes WITHOUT STREAMING. "a streaming dongle can
+    // still be tuned" streams and tunes WITHOUT DESCRIBING FIRST. "describing
+    // every device while one is streaming" describes after the stream started.
+    // A client with a picker does all four steps in this order and no other:
+    // it lists when the panel opens, opens what was picked, the engine starts
+    // the graph, and only then does anybody retune.
+    //
+    // Measured by driving the picker through UI automation on 2026-09-21: the
+    // dongle opened at 98.1 MHz, the frequency axis moved to 96.75-99.15 MHz so
+    // the hardware was genuinely there, frames kept arriving, and a retune to
+    // 96.5 MHz came back "the tuner refused 96500000 Hz: librtlsdr returned -9".
+    // The three cases above pass on that same hardware in the same run, so what
+    // is left is the combination.
+    constexpr dsp::Hertz kOpenAt = 98'100'000;
+    constexpr dsp::Hertz kWanted = 96'500'000;
+
+    auto described = source::describe_sources();
+    REQUIRE(described.has_value());
+
+    std::string dongle;
+    for (const source::SourceCapabilities& caps : *described) {
+        if (caps.backend == "rtlsdr" && caps.available()) {
+            dongle = caps.uri;
+            break;
+        }
+    }
+    if (dongle.empty()) {
+        SKIP("no rtlsdr backend described itself as available");
+    }
+
+    // Exactly what the picker composes with a centre typed and the other two
+    // boxes left empty, which is the arrangement that failed by hand. The rate
+    // and the gain are the backend's own defaults either way, so spelling them
+    // out here would be testing a different URI from the one that broke.
+    auto opened = source::open_source(dongle + "?freq=98100000");
+    if (!opened) {
+        SKIP("the dongle could not be opened after being described: " +
+             opened.error().message);
+    }
+    source::Source& radio = **opened;
+    REQUIRE(radio.center() == kOpenAt);
+
+    Collected collected;
+    source::StreamOptions options;
+    options.block_samples = 32'768;
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        {
+            std::scoped_lock guard(collected.lock);
+            if (collected.samples >= 300'000) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    {
+        std::scoped_lock guard(collected.lock);
+        INFO("samples before the tune: " << collected.samples);
+        REQUIRE(collected.samples >= 300'000);
+    }
+    REQUIRE(radio.running());
+
+    auto landed = radio.tune(kWanted);
+    if (!landed) {
+        INFO(landed.error().message);
+    }
+    REQUIRE(landed.has_value());
+
+    const dsp::Hertz offset = *landed - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset << " Hz");
+    CHECK(std::abs(offset) <= kWanted / 10'000);
+    CHECK(radio.center() == *landed);
 
     REQUIRE(radio.stop().has_value());
 }
@@ -905,8 +1054,7 @@ TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
         SKIP(kNoDongle);
     }
 
-    // THE ONE THE PICKER FOUND, and the only case in this file that opens an
-    // rtlsdr for real without freq=.
+    // THE ONLY CASE IN THIS FILE THAT OPENS AN rtlsdr FOR REAL WITHOUT freq=.
     //
     // Nothing in this tree had ever done it. Every documented example and every
     // other case here supplies a frequency, so the path was reachable only from
@@ -914,13 +1062,14 @@ TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
     // rtlsdr_set_center_freq entirely and leave the tuner where rtlsdr_open put
     // it, at 0 Hz. That is not a quiet no-op: setting the sample rate re-tunes
     // the handle's current frequency as a side effect, so an R820T is asked to
-    // lock DC, its PLL does not, and every later rtlsdr_set_center_freq returns
-    // LIBUSB_ERROR_PIPE.
+    // lock DC and its PLL does not, leaving a dongle that opened and streamed
+    // while pointed at nothing anybody asked for.
     //
-    // The symptom reached the operator as "the tuner refused 435000000 Hz:
-    // librtlsdr returned -9", naming the frequency they asked for rather than
-    // the one nobody asked for. Six narrower cases were written chasing it and
-    // all six passed, because every one of them supplied a centre.
+    // THIS IS NOT WHY A RETUNE GETS REFUSED, and the comment here used to say it
+    // was. A retune is refused on a dongle opened correctly at 98.1 MHz too, for
+    // the reason retune_streaming_locked documents, so the two are independent
+    // faults that happened to be found in the same hour. What this case pins is
+    // only the open.
     auto opened = source::open_source("rtlsdr://0?rate=2400000");
 
     // A dongle whose tuner can reach DC is a different question and is not this
@@ -962,4 +1111,285 @@ TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
     }
     REQUIRE(landed.has_value());
     CHECK(std::abs(*landed - 95'100'000) <= 95'100'000 / 10'000);
+}
+
+TEST_CASE("a dongle streaming for minutes can still be tuned", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // HIDDEN, AND NAMED TO RUN, because what it measures is a threshold rather
+    // than a yes or no and REVENANT_PROBE_DELAY_MS is what moves it. Every
+    // device case above tunes as soon as it has enough samples to prove the
+    // stream is live, which at 2.4 MS/s is a fifth of a second, and all of them
+    // pass; the retune that failed in the window came minutes in. So this does
+    // ONE tune, at a delay the caller sets, which is the only way to tell "the
+    // first retune is the one that works" from "a retune this late is the one
+    // that fails".
+    const char* const delay_env = std::getenv("REVENANT_PROBE_DELAY_MS");
+    const auto delay = std::chrono::milliseconds(delay_env == nullptr ? 2000
+                                                                     : std::atoi(delay_env));
+
+    // The block sizes the URB length, so this is how the probe moves the number
+    // of transfers the stream has recycled by the time it tunes.
+    const char* const block_env = std::getenv("REVENANT_PROBE_BLOCK");
+    const auto block = static_cast<std::size_t>(
+        block_env == nullptr ? 32'768 : std::max(1, std::atoi(block_env)));
+
+    auto opened = source::open_source("rtlsdr://0?freq=98100000");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+
+    Collected collected;
+    source::StreamOptions options;
+    options.block_samples = block;
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    const auto started = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - started < delay) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    std::uint64_t samples = 0;
+    {
+        std::scoped_lock guard(collected.lock);
+        samples = collected.samples;
+    }
+    REQUIRE(radio.running());
+
+    auto landed = radio.tune(96'500'000);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    if (!landed) {
+        WARN("ONE tune at " << elapsed << " ms and " << samples
+                            << " samples FAILED: " << landed.error().message);
+    } else {
+        WARN("ONE tune at " << elapsed << " ms and " << samples << " samples landed at "
+                            << *landed << " Hz");
+    }
+    CHECK(landed.has_value());
+
+    REQUIRE(radio.stop().has_value());
+}
+
+TEST_CASE("librtlsdr on its own retunes a streaming dongle", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // REVENANT IS NOT IN THIS ONE. Nothing here goes through RtlSdrSource: it is
+    // rtlsdr_open, set the centre, set the rate, reset the buffer, read_async on
+    // a thread, then rtlsdr_set_center_freq from this one, which is what
+    // rtl_tcp does and what the backend does with several hundred lines in
+    // between.
+    //
+    // The probe above establishes that a retune at 250 ms lands and one at 500 ms
+    // is refused with -9, and that the URB length does not move that boundary.
+    // This says whether that is ours or librtlsdr's on this dongle, and the
+    // answer changes what the fix is: a bug in the backend gets fixed, and a
+    // limit of the driver gets worked around by stopping the stream around the
+    // retune. Nothing else can tell those two apart.
+    const char* const delay_env = std::getenv("REVENANT_PROBE_DELAY_MS");
+    const auto delay_ms = delay_env == nullptr ? 2000 : std::atoi(delay_env);
+
+    rtlsdr_dev_t* device = nullptr;
+    REQUIRE(rtlsdr_open(&device, 0) == 0);
+    REQUIRE(device != nullptr);
+
+    // The same order and the same values the backend applies, so a difference in
+    // the result is a difference in the code between here and there.
+    CHECK(rtlsdr_set_center_freq(device, 98'100'000) == 0);
+    CHECK(rtlsdr_set_sample_rate(device, 2'400'000) == 0);
+    CHECK(rtlsdr_set_tuner_gain_mode(device, 1) == 0);
+    CHECK(rtlsdr_set_agc_mode(device, 0) == 0);
+    REQUIRE(rtlsdr_reset_buffer(device) == 0);
+
+    std::atomic<std::uint64_t> bytes{0};
+    std::thread usb([device, &bytes] {
+        rtlsdr_read_async(
+            device,
+            [](unsigned char*, std::uint32_t length, void* ctx) {
+                static_cast<std::atomic<std::uint64_t>*>(ctx)->fetch_add(length,
+                                                                        std::memory_order_relaxed);
+            },
+            &bytes, 16, 65'536);
+    });
+
+    const auto started = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - started < std::chrono::milliseconds(delay_ms)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    const std::uint64_t seen = bytes.load(std::memory_order_relaxed);
+    const int rc = rtlsdr_set_center_freq(device, 96'500'000);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    // REPORTED, NOT ASSERTED. This case exists to measure the platform, and on
+    // the platform it was written against the answer is a failure. Asserting
+    // success would make the suite red for a defect that is not Revenant's;
+    // asserting failure would make it red on a fixed librtlsdr or a dongle
+    // without the defect, which is the outcome to hope for. So it prints the
+    // number and a reader compares it against what the backend assumes.
+    WARN("librtlsdr alone: set_center_freq at " << elapsed << " ms and " << seen
+                                               << " bytes returned " << rc
+                                               << " (0 is a working retune, -9 is the stall the "
+                                                  "backend pauses the stream to avoid)");
+
+    static_cast<void>(rtlsdr_cancel_async(device));
+    usb.join();
+    rtlsdr_close(device);
+}
+
+TEST_CASE("librtlsdr retunes a dongle whose stream is paused", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE WORKAROUND, PROVED BEFORE IT IS BUILT. Cancel the async read, join,
+    // retune, reset the buffer, read again, several times over, because the
+    // sequence has to survive being done repeatedly rather than once.
+    //
+    // The retune is retried, and that is not a blind retry. join_locked in the
+    // backend already documents the reason: on Windows the first control
+    // transfer issued after the bulk transfers have been cancelled sometimes
+    // comes back LIBUSB_ERROR_PIPE, on about two runs in three. A retune that
+    // takes the first slot after a cancel is standing exactly where that lands.
+    //
+    // It also times the pause, because a retune the operator can feel is a
+    // different product decision from one they cannot.
+    rtlsdr_dev_t* device = nullptr;
+    REQUIRE(rtlsdr_open(&device, 0) == 0);
+    REQUIRE(device != nullptr);
+
+    CHECK(rtlsdr_set_center_freq(device, 98'100'000) == 0);
+    CHECK(rtlsdr_set_sample_rate(device, 2'400'000) == 0);
+    CHECK(rtlsdr_set_tuner_gain_mode(device, 1) == 0);
+    CHECK(rtlsdr_set_agc_mode(device, 0) == 0);
+
+    std::atomic<std::uint64_t> bytes{0};
+    const auto reader = [device, &bytes] {
+        rtlsdr_read_async(
+            device,
+            [](unsigned char*, std::uint32_t length, void* ctx) {
+                static_cast<std::atomic<std::uint64_t>*>(ctx)->fetch_add(length,
+                                                                        std::memory_order_relaxed);
+            },
+            &bytes, 16, 65'536);
+    };
+
+    constexpr int kRounds = 6;
+    const std::array<std::uint32_t, 2> targets{96'500'000, 99'700'000};
+    for (int round = 0; round < kRounds; ++round) {
+        REQUIRE(rtlsdr_reset_buffer(device) == 0);
+        std::thread usb(reader);
+
+        // Well past the boundary the probes above found, so every round is a
+        // retune that would be refused without the pause.
+        const std::uint64_t before = bytes.load(std::memory_order_relaxed);
+        const auto settled = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+        while (std::chrono::steady_clock::now() < settled ||
+               bytes.load(std::memory_order_relaxed) == before) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+
+        const auto paused_at = std::chrono::steady_clock::now();
+        while (rtlsdr_cancel_async(device) != 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        usb.join();
+
+        int rc = rtlsdr_set_center_freq(device, targets[static_cast<std::size_t>(round) % 2]);
+        int tries = 1;
+        while (rc != 0 && tries < 4) {
+            ++tries;
+            rc = rtlsdr_set_center_freq(device, targets[static_cast<std::size_t>(round) % 2]);
+        }
+        const auto pause_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now() - paused_at)
+                                  .count();
+
+        WARN("round " << round << ": retune returned " << rc << " after " << tries
+                      << " tries, the stream was down for " << pause_ms << " ms");
+        CHECK(rc == 0);
+        CHECK(static_cast<std::uint32_t>(rtlsdr_get_center_freq(device)) ==
+              targets[static_cast<std::size_t>(round) % 2]);
+    }
+
+    rtlsdr_close(device);
+}
+
+TEST_CASE("librtlsdr retunes from inside its own callback", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // WHICH FIX IS AVAILABLE, and the difference between the two is large enough
+    // to be worth one probe.
+    //
+    // The case above shows the control transfer stalling from a thread that is
+    // not the one inside rtlsdr_read_async. If issuing it from the callback
+    // instead works, a retune costs nothing: park the request and let the USB
+    // thread apply it between transfers. If it stalls there too, the only thing
+    // left is cancelling the stream, retuning and restarting it, which is a real
+    // gap in the samples that every consumer then has to be told about.
+    rtlsdr_dev_t* device = nullptr;
+    REQUIRE(rtlsdr_open(&device, 0) == 0);
+    REQUIRE(device != nullptr);
+
+    CHECK(rtlsdr_set_center_freq(device, 98'100'000) == 0);
+    CHECK(rtlsdr_set_sample_rate(device, 2'400'000) == 0);
+    CHECK(rtlsdr_set_tuner_gain_mode(device, 1) == 0);
+    CHECK(rtlsdr_set_agc_mode(device, 0) == 0);
+    REQUIRE(rtlsdr_reset_buffer(device) == 0);
+
+    struct Shared {
+        rtlsdr_dev_t* device = nullptr;
+        std::atomic<std::uint64_t> bytes{0};
+        std::atomic<bool> please_tune{false};
+        std::atomic<int> result{1};
+        std::atomic<bool> answered{false};
+    };
+    Shared shared;
+    shared.device = device;
+
+    std::thread usb([&shared] {
+        rtlsdr_read_async(
+            shared.device,
+            [](unsigned char*, std::uint32_t length, void* ctx) {
+                auto& state = *static_cast<Shared*>(ctx);
+                state.bytes.fetch_add(length, std::memory_order_relaxed);
+                if (state.please_tune.exchange(false, std::memory_order_acq_rel)) {
+                    state.result.store(rtlsdr_set_center_freq(state.device, 96'500'000),
+                                       std::memory_order_relaxed);
+                    state.answered.store(true, std::memory_order_release);
+                }
+            },
+            &shared, 16, 65'536);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    shared.please_tune.store(true, std::memory_order_release);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!shared.answered.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    REQUIRE(shared.answered.load(std::memory_order_acquire));
+    const int rc = shared.result.load(std::memory_order_relaxed);
+    // Reported and not asserted, for the reason the case above gives. -6 is
+    // LIBUSB_ERROR_BUSY, which is what closes this route off.
+    WARN("from inside the callback, two seconds in and "
+         << shared.bytes.load(std::memory_order_relaxed) << " bytes: set_center_freq returned "
+         << rc << " (0 would mean a retune could be parked for the USB thread to apply, -6 means "
+                  "it cannot)");
+
+    static_cast<void>(rtlsdr_cancel_async(device));
+    usb.join();
+    rtlsdr_close(device);
 }
