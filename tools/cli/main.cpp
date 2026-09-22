@@ -676,7 +676,13 @@ void print_usage()
         "  --detect-groups <hz>\n"
         "                      Under the table, bracket tracks sitting within this of each\n"
         "                      other and say where they sit relative to the strongest of\n"
-        "                      them, which is marked with an asterisk.\n"
+        "                      them, which is marked with an asterisk, with each line\'s\n"
+        "                      age beside it.\n"
+        "                      READ THE AGES FIRST. A group off one snapshot is the thing\n"
+        "                      most likely to be a coincidence. Lines that have all been\n"
+        "                      there half a minute are a structure; an old anchor with a\n"
+        "                      line a couple of seconds old is the track list moving under\n"
+        "                      you. On real HF that is mostly what these are.\n"
         "                      WHAT IT IS FOR. Five of the eight families measured in\n"
         "                      tests/detect are reported as separate spectral lines, one\n"
         "                      detection each: an AM station is three rows in this table\n"
@@ -2178,12 +2184,19 @@ struct CharacteriseCollector {
             }
             const double anchor = sorted[strongest]->center_hz;
 
+            // AGE BESIDE EVERY OFFSET, because a group read off one
+            // snapshot is the thing most likely to be a coincidence. Lines
+            // that have all been there half a minute are a structure; an old
+            // anchor with two lines a couple of seconds old is the track list
+            // moving under the reader. Measured across the HF corpus, the
+            // second is what these mostly are.
             std::string offsets;
             for (std::size_t i = first; i <= last; ++i) {
                 const double delta = sorted[i]->center_hz - anchor;
                 offsets += std::format(
-                    " {}{}", delta == 0.0 ? "*" : "",
-                    format_hz(static_cast<Hertz>(std::llround(delta))));
+                    " {}{}({:.0f}s)", delta == 0.0 ? "*" : "",
+                    format_hz(static_cast<Hertz>(std::llround(delta))),
+                    sorted[i]->age_seconds);
             }
             out.push_back(std::format(
                 "  {} lines across {}, from {}:{}", count,

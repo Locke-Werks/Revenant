@@ -1350,15 +1350,20 @@ the CLI would be a classification smuggled in as a layout.
 
 40 m at 1359 UT, grouping at 500 Hz:
 
-    #37   live         13.135 kHz       188 Hz      8.0 dB   0.80  0.64  0.28
     #45   merged       13.238 kHz         5 Hz     11.7 dB   0.88  0.81  0.88
     #1    live         13.249 kHz        29 Hz     22.3 dB   1.00  0.97  0.41
-      3 lines across 114 Hz, from 13.249 kHz: -114 Hz -11 Hz *0 Hz
+      2 lines across 11 Hz, from 13.249 kHz: -11 Hz(8s) *0 Hz(42s)
 
-Three rows of a flat table that are one thing: a strong line at 13.249 kHz with
-a five-hertz neighbour eleven hertz below it and a 188 Hz band a hundred below
-that. Read one row at a time none of that is visible, and the grouped line is
-the shape the family survey says to look for.
+Two rows of a flat table brought together: a strong line at 13.249 kHz with a
+five-hertz neighbour eleven hertz below it. Read one row at a time neither
+points at the other.
+
+**The ages are the first thing to read and they are why this one is not a
+structure.** The anchor has been there forty-two seconds and its neighbour
+eight, so what the group shows is a stable carrier with something transient
+beside it rather than a carrier and a sideband. A real pair would have aged
+together. That reading is available in the line itself, which is the whole
+reason the age is in it.
 
 **No family pattern has come out of this corpus yet, and that is the result
 rather than a pending one.** All six excerpts at gaps of 300 Hz, 1 kHz and
