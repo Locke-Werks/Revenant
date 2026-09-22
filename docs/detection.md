@@ -698,6 +698,27 @@ minute obviously is RTTY.
 `revenant-cli --detect-split-gap` exists now so the next person can sweep it
 without rebuilding.
 
+**It is not inert, and the quiet band made it look that way.** Swept again on
+20 m at 1603 UT, the busiest of the six excerpts, it does move:
+
+| gap | born | merges | splits |
+| --- | --- | --- | --- |
+| 8 bins, 12 Hz | 51 | 36 | 10 |
+| 32 bins, 47 Hz | 55 | 28 | 10 |
+| 64 bins, 94 Hz | 50 | 40 | 12 |
+| 128 bins, 188 Hz | 51 | 45 | 11 |
+| 200 bins, 293 Hz | 51 | 40 dropped, 57 | 19 |
+
+Births stay between 50 and 55 throughout, so the constant is not changing what
+is detected. Merges climb from 36 to 57, which is the expected direction and
+worth stating because it is easy to get backwards: a LARGER gap demands more
+consecutive floor bins before one candidate is cut in two, so candidates stay
+wide, so more tracks are gated to one of them and merged.
+
+What the sweep does not show is a knee. Nothing in either band picks a value
+out, which is the same answer as before arrived at with better evidence: this
+wants ground truth rather than another sweep.
+
 ## Identification
 
 Two tiers, split on cost.
