@@ -348,6 +348,30 @@ private:
     VkDescriptorSet fine_set_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> demod_sets_;
 
+    // Where this receiver starts filtering, given the oldest channel block the
+    // graph is offering. Called once when the stage first records, and again
+    // whenever a discontinuity has put the inputs it wanted out of the ring.
+    //
+    // All three cursors move together, which is why this is one function rather
+    // than three assignments at each site: first_output_ is what the passband
+    // window is drawn from, next_output_ is the fine stage's read cursor, and
+    // next_audio_ is the demodulator's. Moving one without the others is a
+    // receiver whose display and whose audio disagree about which samples they
+    // are looking at.
+    void anchor_to(dsp::SampleIndex first_block) {
+        // The first output whose filter support is entirely inside samples this
+        // graph has actually channelized. Starting lower would filter zeros and
+        // produce a transient nobody asked for, and starting from the ring's
+        // contents would filter whatever the allocator left.
+        const dsp::SampleIndex needed =
+            first_block + static_cast<dsp::SampleIndex>(plan_.fine.taps - 1U);
+        first_output_ = lowest_output_for(needed, plan_.channel_rate, plan_.demod_rate);
+        next_output_ = first_output_;
+
+        const auto decimation = static_cast<dsp::SampleIndex>(plan_.demod.decimation);
+        next_audio_ = (first_output_ + fine_history_ + decimation - 1U) / decimation;
+    }
+
     bool started_ = false;
     bool taps_pending_ = false;
     dsp::SampleIndex first_output_ = 0;
@@ -768,17 +792,7 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     const std::uint32_t frame = record.frame_index;
 
     if (!started_) {
-        // The first output whose filter support is entirely inside samples
-        // this graph has actually channelized. Starting lower would filter
-        // zeros and produce a transient nobody asked for, and starting from
-        // the ring's contents would filter whatever the allocator left.
-        const dsp::SampleIndex needed =
-            record.first_block + static_cast<dsp::SampleIndex>(plan_.fine.taps - 1U);
-        first_output_ = lowest_output_for(needed, plan_.channel_rate, plan_.demod_rate);
-        next_output_ = first_output_;
-
-        const auto decimation = static_cast<dsp::SampleIndex>(plan_.demod.decimation);
-        next_audio_ = (first_output_ + fine_history_ + decimation - 1U) / decimation;
+        anchor_to(record.first_block);
         started_ = true;
     }
 
@@ -830,10 +844,40 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
             return std::unexpected(with_context(block.error(), "receiver fine block"));
         }
         if (newest - block->oldest_input >= channel_ring_blocks_) {
-            return fail(std::format(
-                "this dispatch would filter channel samples [{}, {}] and the channel ring only "
-                "holds the last {}. The receiver fell behind the channelizer",
-                block->oldest_input, newest, channel_ring_blocks_));
+            // RE-ANCHORED, NOT REFUSED. The inputs this dispatch wants have
+            // been overwritten and no answer exists for them, so the only
+            // question is what to do next, and refusing was the wrong answer:
+            // record() failing propagates out through Graph::on_block, the
+            // source's delivery loop treats a refusing sink as the stream
+            // ending, and the whole engine stops. An operator saw that as the
+            // engine disappearing when they typed a frequency.
+            //
+            // A receiver whose inputs are gone is in the same position as one
+            // that has just been created: the oldest thing it can honestly
+            // filter is the oldest thing still in the ring. So it starts again
+            // from here, which is exactly what the !started_ branch above
+            // computes, and the samples in between stay missing because they
+            // are missing.
+            //
+            // WHAT PUTS A RECEIVER HERE. Chiefly a device retune, which stops
+            // the transfers for about a third of a second and declares the gap
+            // through the source's overrun counters: the stream index jumps
+            // that far, the channelizer jumps with it, and this stage's cursor
+            // does not. That case is already reported, in
+            // SourceStats::samples_lost and on the block's dropped_before, so
+            // the skip here is the consequence of a loss somebody has been told
+            // about rather than a second one.
+            //
+            // THE CASE THAT IS NOT REPORTED, and it is worth knowing before
+            // trusting a quiet receiver: a receiver can also arrive here
+            // because this device could not keep up with the channelizer, with
+            // no source-side overrun to go with it. Nothing counts that yet.
+            // A receiver doing it repeatedly would skip repeatedly and sound
+            // choppy with every counter in the engine reading clean. Giving
+            // VrxStatus a re-anchor count is the fix and it wants a wire field,
+            // so it is written down rather than done here.
+            anchor_to(record.first_block);
+            return out;
         }
 
         record_dispatch(record.commands, fine_pipeline_, fine_set_,

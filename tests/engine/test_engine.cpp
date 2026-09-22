@@ -1330,6 +1330,56 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     INFO("can retune " << tuning.can_retune << ", " << tuning.low << " to " << tuning.high);
     REQUIRE(tuning.can_retune);
 
+    // A RECEIVER, LIVE, BEFORE THE RETUNE. Graph::on_block is documented "the
+    // source thread only", and retune_streaming_locked has to stop the
+    // transfers to move the tuner, which used to take the delivery thread down
+    // with them and hand on_block to a freshly spawned one. With no receiver in
+    // the graph that survived three retunes in a row by hand, VHF and UHF
+    // alike, because the recording a bare spectrum pass does is not the
+    // recording that minds. With a receiver it is a crash, which is what
+    // reached the operator: type a frequency, press enter, engine gone.
+    // nfm and not wfm: default_config pins a 64 channel grid, which guarantees
+    // a receiver 75 kHz anywhere and refuses a 200 kHz broadcast receiver in as
+    // many words. What this case needs is a receiver being recorded per block,
+    // and the mode does not matter to that.
+    engine::VrxParams listening;
+    listening.center = 0;
+    listening.bandwidth = 16'000;
+    listening.demod = engine::Demod::Nfm;
+    const auto receiver = eng.add_vrx(listening);
+    INFO(test::message_of(receiver));
+    REQUIRE(receiver.has_value());
+
+    // WITH AUDIO RUNNING, because that is what the operator had and because it
+    // is a second consumer on the sample path rather than a detail of the
+    // display. A receiver nobody is listening to records less per block than
+    // one that is feeding a sink.
+    std::atomic<std::uint64_t> audio_chunks{0};
+    REQUIRE(eng.set_audio_sink(*receiver, [&audio_chunks](const engine::AudioChunk&) -> Status {
+                   audio_chunks.fetch_add(1, std::memory_order_relaxed);
+                   return {};
+               })
+                .has_value());
+
+    // Long enough that the receiver is genuinely being recorded per block
+    // rather than merely registered.
+    const auto settled = eng.source_stats().samples_delivered + 600'000;
+    const auto vrx_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < vrx_deadline &&
+           eng.source_stats().samples_delivered < settled) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(eng.vrx_ids().size() == 1);
+
+    // THE CONTROL. How fast audio arrives with nothing being retuned, measured
+    // over the same interval the check after the retunes uses, so "audio
+    // stopped" can be told from "audio was never flowing".
+    const std::uint64_t audio_a = audio_chunks.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    const std::uint64_t audio_b = audio_chunks.load(std::memory_order_relaxed);
+    INFO("audio chunks with no retune: " << audio_a << " then " << audio_b << " one second later");
+    REQUIRE(audio_b > audio_a);
+
     constexpr dsp::Hertz kWanted = 95'100'000;
     auto landed = eng.set_source_center(kWanted);
     INFO(test::message_of(landed));
@@ -1342,6 +1392,44 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     // EngineInfo follows the tune, which is what every axis label and every
     // detection is derived from.
     CHECK(eng.info().source_center == *landed);
+
+    // AND AGAIN, TO UHF AND BACK, because the operator's report was of pressing
+    // enter more than once and because each retune leaves the transfers in a
+    // state the previous one did not start from. A jump across bands rather
+    // than a nudge, since that is what was reported.
+    auto uhf = eng.set_source_center(435'000'000);
+    INFO(test::message_of(uhf));
+    REQUIRE(uhf.has_value());
+    CHECK(eng.info().source_center == *uhf);
+
+    auto back = eng.set_source_center(98'100'000);
+    INFO(test::message_of(back));
+    REQUIRE(back.has_value());
+    CHECK(eng.info().source_center == *back);
+
+    // THE RECEIVER IS STILL THERE AND THE GRAPH IS STILL RUNNING. A retune that
+    // takes the receiver with it, or that leaves an engine that has stopped
+    // serving, is the failure this case exists for.
+    CHECK(eng.vrx_ids().size() == 1);
+    CHECK(eng.running());
+
+    // And the audio kept arriving across all three retunes, which is the half a
+    // surviving receiver id does not prove: a receiver that is registered and
+    // silent is a receiver the operator has lost.
+    const std::uint64_t audio_at_end = audio_chunks.load(std::memory_order_relaxed);
+    const auto samples_at_end = eng.source_stats().samples_delivered;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Samples first, because it says which half broke. Samples still arriving
+    // with no audio is the graph or the receiver; samples stopped is the source.
+    INFO("samples after the last retune: " << samples_at_end << ", then "
+                                           << eng.source_stats().samples_delivered
+                                           );
+    CHECK(eng.source_stats().samples_delivered > samples_at_end);
+
+    INFO("audio chunks after the last retune: " << audio_at_end << ", then "
+                                                << audio_chunks.load(std::memory_order_relaxed));
+    CHECK(audio_chunks.load(std::memory_order_relaxed) > audio_at_end);
 
     REQUIRE(eng.stop().has_value());
     second.join();

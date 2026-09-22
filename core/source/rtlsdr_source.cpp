@@ -533,15 +533,16 @@ public:
     [[nodiscard]] Status start(const StreamOptions& options, BlockSink sink) override;
     [[nodiscard]] Status stop() override;
 
-    // TRUE THROUGH A RETUNE, WHICH TAKES THE THREADS DOWN AND BRINGS THEM BACK.
+    // TRUE THROUGH A RETUNE, AND BELT AND BRACES RATHER THAN THE MECHANISM.
     //
-    // run_delivery clears running_ on its way out, and retune_streaming_locked
-    // joins it deliberately, so for the third of a second the tuner is moving
-    // the plain flag says this source has stopped. Engine::run polls exactly
-    // this in `while (!stop_requested && source_->running())`, so reporting the
-    // pause as a stop would make every retune end the run: the engine would
-    // stop the source, flush the graph and return, and an operator changing
-    // frequency would lose the stream instead of moving it.
+    // run_delivery is what clears running_, and since it no longer exits for a
+    // retune it no longer clears it for one either: pause_producer_locked takes
+    // down the USB thread alone. This still reads retuning_ because the cost of
+    // being wrong is out of proportion to the cost of the check. Engine::run
+    // polls exactly this in `while (!stop_requested && source_->running())`, so
+    // a moment of false during a retune ends the run: the engine stops the
+    // source, flushes the graph and returns, and an operator changing frequency
+    // loses the stream instead of moving it.
     //
     // A caller cannot distinguish the two states and should not have to. What
     // running() means to every caller in the tree is "this source intends to
@@ -566,7 +567,8 @@ private:
     void run_delivery();
     void note_stream_error(Error error);
     void join_locked();
-    [[nodiscard]] Status resume_locked();
+    void pause_producer_locked();
+    [[nodiscard]] Status resume_producer_locked();
     [[nodiscard]] Expected<dsp::Hertz> tune_locked(dsp::Hertz center, int attempts);
     [[nodiscard]] Expected<dsp::Hertz> retune_streaming_locked(dsp::Hertz center);
     [[nodiscard]] Expected<ClockModel> make_clock_model() const;
@@ -759,7 +761,9 @@ Expected<dsp::Hertz> RtlSdrSource::tune_locked(dsp::Hertz center, int attempts)
 Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
 {
     // THE TRANSFERS STOP, THE TUNER MOVES, THE TRANSFERS RESTART, AND THE
-    // SAMPLES THAT WENT MISSING ARE REPORTED AS MISSING.
+    // SAMPLES THAT WENT MISSING ARE REPORTED AS MISSING. The delivery thread
+    // stays up throughout; see pause_producer_locked for why that is not
+    // optional.
     //
     // What must not change across this is the sample index and the clock
     // anchor. A Paced source's timestamp is the anchor plus the index over the
@@ -790,12 +794,17 @@ Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
     const auto paused_at = std::chrono::steady_clock::now();
     const dsp::SampleIndex before_join = produced_index_;
 
-    join_locked();
+    pause_producer_locked();
 
     // Whatever arrived between the cancel being asked for and read_async
     // returning is already counted the ordinary way, so the gap is the time
     // that passed less the samples that made it through. Without this
     // subtraction the stream would be told it lost the drain twice.
+    //
+    // produced_index_ and pending_gap_ are the callback thread's, and this
+    // reads and writes both. Safe because the callback thread is the one just
+    // joined: the delivery thread still running beside this touches neither,
+    // it reads the slots and their gap_before.
     const dsp::SampleIndex during_join = produced_index_ - before_join;
 
     auto landed = tune_locked(center, kRetunePipeRetries);
@@ -822,7 +831,7 @@ Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
         note_dropped(static_cast<std::size_t>(produced_while_down - during_join));
     }
 
-    auto resumed = resume_locked();
+    auto resumed = resume_producer_locked();
 
     // Reported worst first, because they are not equally bad. A source that
     // cannot resume has ended and every receiver on it is finished, which is
@@ -849,32 +858,48 @@ Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
     return landed;
 }
 
-// The half of start() that brings the threads back, and deliberately not the
-// rest of it. The slots, the sink, the block size, the counters and the clock
-// anchor all survive a retune, and re-running start()'s setup would zero the
-// sample index and re-anchor the clock, which is the whole thing
-// retune_streaming_locked exists to avoid.
-Status RtlSdrSource::resume_locked()
+// THE TRANSFERS STOP AND THE DELIVERY THREAD DOES NOT.
+//
+// Only the USB side has to go for the control transfer to get through, and only
+// the USB side may go: Graph::on_block is documented "the source thread only",
+// this source's delivery thread is that thread, and handing on_block to a
+// freshly spawned one silently killed a receiver's audio while leaving every
+// other sign of life intact. So a retune joins usb_thread_ and leaves
+// deliver_thread_ running, draining whatever is already queued and then idling
+// on an empty queue until the transfers come back. run_delivery's exit check is
+// what makes that safe, and retuning_ is what it reads.
+void RtlSdrSource::pause_producer_locked()
+{
+    cancel_requested_.store(true, std::memory_order_release);
+
+    if (!usb_thread_.joinable()) {
+        return;
+    }
+
+    // Retried and then not again, for the reason join_locked gives at length:
+    // a cancel before read_async is armed does nothing, and a second cancel
+    // after the first was accepted frees transfers underneath libusb.
+    while (!producer_done_.load(std::memory_order_acquire)) {
+        if (rtlsdr_cancel_async(device_.get()) == 0) {
+            break;
+        }
+        std::this_thread::sleep_for(kCancelPoll);
+    }
+    usb_thread_.join();
+}
+
+Status RtlSdrSource::resume_producer_locked()
 {
     cancel_requested_.store(false, std::memory_order_relaxed);
-    producer_done_.store(false, std::memory_order_relaxed);
-    running_.store(true, std::memory_order_release);
-
-    try {
-        deliver_thread_ = std::thread([this] { run_delivery(); });
-    } catch (const std::system_error& error) {
-        producer_done_.store(true, std::memory_order_release);
-        running_.store(false, std::memory_order_release);
-        return fail(std::format("could not restart the RTL-SDR delivery thread: {}", error.what()),
-                    error.code().value());
-    }
+    producer_done_.store(false, std::memory_order_release);
 
     try {
         usb_thread_ = std::thread([this] { run_usb(); });
     } catch (const std::system_error& error) {
+        // producer_done_ back to true, so the delivery thread still running
+        // beside this finishes once retuning_ clears rather than idling for
+        // ever on a queue nothing will fill again.
         producer_done_.store(true, std::memory_order_release);
-        deliver_thread_.join();
-        running_.store(false, std::memory_order_release);
         return fail(std::format("could not restart the RTL-SDR transfer thread: {}", error.what()),
                     error.code().value());
     }
@@ -1359,7 +1384,21 @@ void RtlSdrSource::run_delivery()
         const std::uint64_t head = slot_head_.load(std::memory_order_acquire);
 
         if (tail == head) {
-            if (producer_finished) {
+            // A RETUNE IS NOT THE PRODUCER FINISHING, and this thread must not
+            // treat it as one.
+            //
+            // retune_streaming_locked stops the USB transfers to move the
+            // tuner, which sets producer_done_ exactly as the end of a stream
+            // does. Exiting here would end delivery mid-stream, and the whole
+            // point of retuning without a source change is that the stream
+            // carries on: Graph::on_block is documented "the source thread
+            // only", and this thread is that thread. Measured before this
+            // check existed: three retunes and a receiver's audio stopped at 20
+            // chunks and never resumed, while the receiver id, the spectrum
+            // frames and the engine all stayed up, because the graph waits for
+            // each block's frame on whichever thread called on_block and that
+            // thread had gone.
+            if (producer_finished && !retuning_.load(std::memory_order_acquire)) {
                 break;
             }
             std::this_thread::sleep_for(kIdlePoll);
@@ -1393,7 +1432,18 @@ void RtlSdrSource::run_delivery()
                 // precisely so a parked source wakes up, and reporting that
                 // as the reason the stream ended would turn every ordinary
                 // Ctrl-C into an error.
-                if (!cancel_requested_.load(std::memory_order_acquire)) {
+                //
+                // A RETUNE IS NOT A STOP, THOUGH IT ASKS FOR A CANCEL.
+                // pause_producer_locked sets cancel_requested_ to take the USB
+                // thread down, so without this a sink failure anywhere in the
+                // third of a second the tuner is moving was swallowed AND
+                // ended delivery: the stream stopped dead, samples_delivered
+                // froze, audio stopped, and stop() reported success because
+                // the error had been discarded on the way past. Reported and
+                // not swallowed, so whatever the sink is refusing says so.
+                const bool stopping = cancel_requested_.load(std::memory_order_acquire) &&
+                                      !retuning_.load(std::memory_order_acquire);
+                if (!stopping) {
                     note_stream_error(delivered.error());
                 }
                 finished = true;
