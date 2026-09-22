@@ -1024,6 +1024,27 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString receiverGoneText READ receiverGoneText NOTIFY receiverGoneChanged)
 
     // ------------------------------------------------------------------
+    // Receivers this window does not hold
+    // ------------------------------------------------------------------
+    //
+    // Empty unless the engine is holding receivers beyond the pane's own, and
+    // then it says how many and what releasing them would do.
+    //
+    // WHY THIS IS NOT A REAPER. A receiver outlives the client that created
+    // it, which is what lets two windows each hold their own: measured
+    // 2026-09-21 with two revenant-ui processes on one engine, each clicked a
+    // signal and neither disturbed the other. Closing a window releases its
+    // receiver; a client killed outright does not, and the engine then carries
+    // a channelizer slot and its GPU work until it is restarted.
+    //
+    // From here those two look identical. Nothing on the wire says who created
+    // a receiver, so a window that reaped what it did not recognise would take
+    // the other operator's audio away mid-listen. So this reports, and the
+    // release is something a person asks for having read what it will do.
+    Q_PROPERTY(QString strandedReceiverText READ strandedReceiverText
+                   NOTIFY strandedReceiversChanged)
+
+    // ------------------------------------------------------------------
     // RDS on the receiver the detail pane is on
     // ------------------------------------------------------------------
     //
@@ -1805,6 +1826,12 @@ public:
 
     [[nodiscard]] QString receiverGoneText() const { return receiver_gone_text_; }
 
+    [[nodiscard]] QString strandedReceiverText() const { return stranded_text_; }
+
+    // Removes every receiver the engine holds except the one this window is
+    // on, if any. Asked for explicitly, never on a timer and never at startup.
+    Q_INVOKABLE void releaseStrandedReceivers();
+
     [[nodiscard]] QStringList bookmarkLabels() const;
     [[nodiscard]] QString bookmarkFault() const { return bookmark_fault_; }
     [[nodiscard]] bool receiverBookmarked() const;
@@ -1995,6 +2022,10 @@ signals:
     // The engine let the pane's receiver go, or the operator has tuned since
     // and the sentence about it has been cleared.
     void receiverGoneChanged();
+
+    // The engine's receiver inventory changed, or this window's place in it
+    // did.
+    void strandedReceiversChanged();
 
     // The source's tuning surface changed: the range came back on a new
     // connection, a retune was granted, or one was refused. Separate from
@@ -2357,6 +2388,27 @@ private:
     // Why the pane is empty when the engine emptied it. Qt thread only, and
     // deliberately outliving the pane; see the property.
     QString receiver_gone_text_;
+
+    // What the engine says it is holding, and the sentence derived from it.
+    // Qt thread only.
+    std::vector<qulonglong> engine_receiver_ids_;
+    QString stranded_text_;
+
+    // The supervisor's copy of the same, guarded by receiver_mutex_, plus the
+    // operator's request to release what this window does not hold.
+    std::vector<qulonglong> handover_receiver_ids_;
+    bool has_receiver_ids_ = false;
+    bool release_stranded_ = false;
+
+    // Asks the engine what it is holding. On the probe pass only: an
+    // inventory changes when somebody opens or closes a window, which is not
+    // four times a second.
+    void poll_receiver_inventory();
+
+    // Performs a release the Qt thread asked for. Supervisor thread.
+    void apply_stranded_release();
+
+    void adopt_receiver_inventory();
 
     // The wheel's accumulator, its clock and its flush, one set for the whole
     // window. Qt thread only.

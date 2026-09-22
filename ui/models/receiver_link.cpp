@@ -1199,4 +1199,129 @@ bool EngineLink::reset_passband_display()
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Receivers this window does not hold
+// ---------------------------------------------------------------------------
+
+void EngineLink::poll_receiver_inventory()
+{
+    if (client_ == nullptr) {
+        return;
+    }
+
+    auto ids = client_->vrx_ids();
+    if (!ids) {
+        // Not reported. A failed inventory is the connection, which the
+        // liveness probe owns, and a fault written here would sit under a
+        // heading about receivers while the real news was that the engine had
+        // gone.
+        return;
+    }
+
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        handover_receiver_ids_.assign(ids->begin(), ids->end());
+        has_receiver_ids_ = true;
+    }
+    QMetaObject::invokeMethod(
+        this, [this] { adopt_receiver_inventory(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_receiver_inventory()
+{
+    std::vector<qulonglong> ids;
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        if (!has_receiver_ids_) {
+            return;
+        }
+        has_receiver_ids_ = false;
+        ids.swap(handover_receiver_ids_);
+    }
+
+    engine_receiver_ids_ = std::move(ids);
+
+    // How many the engine holds that this window is not on. receiver_id_ is
+    // zero when the pane holds none, and zero is never a valid id, so the
+    // subtraction is the same arithmetic either way.
+    std::size_t others = 0;
+    for (const qulonglong id : engine_receiver_ids_) {
+        if (id != receiver_id_) {
+            ++others;
+        }
+    }
+
+    QString text;
+    if (others > 0) {
+        // NAMES WHAT A RELEASE WOULD DO, because the safe reading and the
+        // dangerous one are both available from the count alone. These may be
+        // another operator's, and this window cannot tell.
+        text = others == 1
+                   ? QStringLiteral("the engine holds 1 receiver this window is not on")
+                   : QStringLiteral("the engine holds %1 receivers this window is not on")
+                         .arg(others);
+    }
+
+    if (text == stranded_text_) {
+        return;
+    }
+    stranded_text_ = text;
+    emit strandedReceiversChanged();
+}
+
+void EngineLink::releaseStrandedReceivers()
+{
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        release_stranded_ = true;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        receiver_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+}
+
+void EngineLink::apply_stranded_release()
+{
+    std::vector<qulonglong> ids;
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        if (!release_stranded_) {
+            return;
+        }
+        release_stranded_ = false;
+        ids = handover_receiver_ids_;
+    }
+
+    if (client_ == nullptr) {
+        return;
+    }
+
+    // Re-read rather than trusting the list the Qt thread was shown. That list
+    // is up to a second old, and a second is long enough for another operator
+    // to have opened a receiver since. Removing an id that arrived in the
+    // window between the poll and the click is exactly the case this whole
+    // arrangement exists to avoid.
+    auto now = client_->vrx_ids();
+    if (!now) {
+        return;
+    }
+
+    // KEEP THIS WINDOW'S OWN. live_receiver_id_ is the supervisor's copy of
+    // what the pane is on, which is the one this thread may compare against;
+    // receiver_id_ belongs to the Qt thread.
+    const auto mine = static_cast<std::uint64_t>(live_receiver_id_);
+    for (const std::uint64_t id : *now) {
+        if (id == mine) {
+            continue;
+        }
+        static_cast<void>(client_->remove_vrx(id));
+    }
+
+    // Ask again so the sentence reflects what actually went, including
+    // anything the engine refused to remove.
+    poll_receiver_inventory();
+}
+
 }  // namespace revenant::ui

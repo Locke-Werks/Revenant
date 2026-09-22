@@ -1083,6 +1083,51 @@ ApplicationWindow {
         }
 
         // ------------------------------------------------------------------
+        // Receivers this window does not hold
+        // ------------------------------------------------------------------
+        //
+        // A receiver outlives the client that created it, which is what lets
+        // two windows each hold their own. Closing a window releases its
+        // receiver; a window killed outright does not, and the engine then
+        // carries a channelizer slot and its GPU work until it is restarted.
+        //
+        // THE RELEASE IS NOT OFFERED AS A REPAIR, because from here an orphan
+        // and another operator's working receiver are the same thing: nothing
+        // on the wire says who created one. So the row states the count and
+        // the action says exactly what it will do, and somebody who knows
+        // whether another window is open decides.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: engineLink.strandedReceiverText.length > 0
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: window.width * 0.6
+                text: engineLink.strandedReceiverText
+                color: window.inkDim
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
+            Label {
+                Layout.minimumWidth: 0
+                text: "release them"
+                color: window.inkWarn
+                font.pixelSize: 12
+
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -3
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: engineLink.releaseStrandedReceivers()
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
+        // ------------------------------------------------------------------
         // A receiver the engine let go
         // ------------------------------------------------------------------
         //

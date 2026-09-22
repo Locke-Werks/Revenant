@@ -326,6 +326,12 @@ void EngineLink::supervise()
             apply_source_gain();
 
             apply_receiver_request();
+
+            // After the receiver's own request, so a release asked for in the
+            // same gesture as a tune does not take the receiver that tune just
+            // created.
+            apply_stranded_release();
+
             apply_audio_request();
             poll_receiver_status();
 
@@ -336,6 +342,10 @@ void EngineLink::supervise()
             poll_audio_stats();
             poll_detections();
             poll_rds();
+
+            // An inventory changes when somebody opens or closes a window,
+            // which is not four times a second.
+            poll_receiver_inventory();
 
             // Last, and on the probe pass only. Two more calls that exist
             // for measured fields alone; see poll_source_pacing and
