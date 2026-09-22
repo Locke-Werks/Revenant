@@ -627,9 +627,17 @@ void print_usage()
         "                      asked about, before characterising it. Without it the whole\n"
         "                      coarse channel goes in, and everything else living in that\n"
         "                      channel goes in with it.\n"
-        "                      It does not decimate: the sample count is what the stage\n"
-        "                      needs and throwing samples away to narrow the rate would\n"
-        "                      cost more than the noise does.\n"
+        "                      It decimates as well as filtering, to about three times\n"
+        "                      the width asked for. Filtering alone leaves the noise\n"
+        "                      oversampled, which is to say correlated, and a\n"
+        "                      cyclostationary detector reads correlation as a symbol\n"
+        "                      rate: empty 40 m low passed to 800 Hz at the full channel\n"
+        "                      rate came back PSK at 0.98 confidence.\n"
+        "                      THE STAGE\'S SAMPLE FLOOR CAPS HOW FAR IT CAN GO. 16384\n"
+        "                      samples have to survive, so twenty seconds of a 3 kS/s\n"
+        "                      channel can only decimate by three whatever width is asked\n"
+        "                      for. It says so when that binds, and says what\n"
+        "                      --characterise-seconds would lift it to.\n"
         "                      NARROWING THIS COLOURS THE NOISE AND THE STAGE WILL SAY SO\n"
         "                      CONFIDENTLY. Measured on empty 40 m: unfiltered and at 100\n"
         "                      and 300 Hz it answers unknown, and at 800 Hz it answers PSK\n"
@@ -3546,11 +3554,20 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             // multiplies in a tool that has already stopped the engine, and
             // the alternative is a transform that would have to be written.
             //
-            // IT DOES NOT DECIMATE. characterise() wants at least 16384
-            // samples and the extract is twice that, so throwing away seven
-            // of every eight to narrow the rate would take the count under the
-            // floor and refuse. Filtering without decimating removes the noise
-            // power and keeps the samples, which is what this is for.
+            // WHAT THIS PARAGRAPH USED TO SAY
+            //
+            // It read: "IT DOES NOT DECIMATE. characterise() wants at least
+            // 16384 samples and the extract is twice that, so throwing away
+            // seven of every eight to narrow the rate would take the count
+            // under the floor and refuse. Filtering without decimating removes
+            // the noise power and keeps the samples, which is what this is
+            // for."
+            //
+            // That is now false and the block below says why: filtering
+            // without decimating leaves the noise correlated and a
+            // cyclostationary detector reads correlation as a symbol rate. The
+            // decimation went in on 2026-09-22 and this paragraph was left
+            // sitting directly above it, contradicting the code it introduces.
             if (options.characterise_width > 0 && extract_rate > 0) {
                 // DECIMATE AS WELL AS FILTER, AND THE FIRST ATTEMPT DID NOT.
                 //
@@ -3574,16 +3591,63 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 decimation = std::max<std::size_t>(decimation, 1);
 
                 // Not so far that what is left is under the floor.
+                const std::size_t wanted_decimation = decimation;
                 while (decimation > 1 &&
                        extract.size() / decimation < characterise::kMinCharacteriseSamples) {
                     --decimation;
                 }
 
+                // AND SAY SO WHEN IT BINDS, because it used to bind silently
+                // and that is what made this flag look like it was doing
+                // nothing. The extract is what was collected, the floor is the
+                // stage's, and the ratio of the two caps the decimation
+                // however narrow a width is asked for: at the default twenty
+                // seconds of a 3 kS/s channel the cap is 3, so every width
+                // from about 350 Hz down produced the same answer. The seconds
+                // that would lift it are arithmetic and the operator should
+                // not have to do it.
+                if (decimation < wanted_decimation) {
+                    const double needed_samples =
+                        static_cast<double>(wanted_decimation) *
+                        static_cast<double>(characterise::kMinCharacteriseSamples);
+                    std::println("  narrowing       capped: {} Hz wants to decimate by {} and "
+                                 "{} samples only allow {}. The stage needs {} after "
+                                 "decimating, so pass --characterise-seconds {:.0f} to get "
+                                 "the width asked for",
+                                 options.characterise_width, wanted_decimation,
+                                 extract.size(), decimation,
+                                 characterise::kMinCharacteriseSamples,
+                                 std::ceil(needed_samples /
+                                           static_cast<double>(extract_rate)));
+                }
+
                 const double survives =
                     static_cast<double>(extract_rate) / static_cast<double>(decimation);
-                // Cut just under the surviving Nyquist, which is what stops
-                // the decimation folding anything back on top of the signal.
-                const double cutoff = 0.45 * survives;
+
+                // HALF THE WIDTH, BECAUSE THE ARGUMENT IS A WIDTH. The
+                // passband runs either side of DC, so a caller asking for
+                // 800 Hz is asking for plus and minus 400.
+                //
+                // THIS READ 0.45 * survives UNTIL 2026-09-22, which is the
+                // surviving Nyquist and not the width at all. With the
+                // decimation above at N, the surviving rate is about three
+                // times the requested width, so the old line cut at 1.35
+                // times it: asking for 800 Hz filtered to 2.7 kHz and asking
+                // for 100 Hz filtered to 450. The flag never once filtered to
+                // its own argument, and because the number it did use came
+                // from the decimation, two different widths landing on one
+                // decimation gave bit-identical answers. Measured on 20 m:
+                // 300 Hz and 100 Hz agreed to three places on every field,
+                // which is what sent somebody looking.
+                //
+                // The Nyquist term stays as a CAP and not as the value. When
+                // the decimation is clamped below what the width wanted, the
+                // surviving rate is lower than three times the width and half
+                // the width would then be above the new Nyquist, which is the
+                // one case where the caller's number cannot be honoured.
+                const auto requested_cutoff = 0.5 * width;
+                const double nyquist_cap = 0.45 * survives;
+                const double cutoff = std::min(requested_cutoff, nyquist_cap);
                 const double normalised = cutoff / static_cast<double>(extract_rate);
                 if (normalised >= 0.5) {
                     std::println("  filter          skipped, {} Hz is wider than the {} S/s "
