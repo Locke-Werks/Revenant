@@ -1196,6 +1196,13 @@ A client reconnecting starts from whatever the engine currently holds, and an
 engine restarting starts empty. Saved sessions are a client-side or a
 schema-side feature and neither exists.
 
+`revenant-ui`'s bookmarks are not that and do not close this entry.
+A bookmark is a frequency, a mode and a passband under a name, recalled when an
+operator picks it; it restores nothing on its own and `ui/models/settings.h`
+still refuses to bring a receiver back at startup. What is missing here is a
+SET of receivers coming back without being asked for, which is the thing a
+headless recorder would want and which no client offers.
+
 **WHAT THIS ENTRY USED TO SAY, and it was answered the same day it was
 written.** It read "A retune drags every receiver with it, and nobody has
 decided whether it should", and set out the alternative and the decision it
