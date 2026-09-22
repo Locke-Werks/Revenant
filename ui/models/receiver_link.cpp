@@ -194,24 +194,62 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
 {
     const double measured = detection_bandwidth_hz > 0.0 ? detection_bandwidth_hz : 0.0;
 
-    // THE MODE COMES FROM THE MEASUREMENT, NOT FROM WHAT THE PANE HAPPENS TO
-    // HOLD. An empty mode means "keep what is there" on tuneReceiver, where
-    // there is nothing else to go on, and it meant the same thing here until
+    // THE MODE COMES FROM THE MEASUREMENT UNLESS THE OPERATOR HAS ALREADY
+    // NAMED ONE ON THIS RECEIVER.
+    //
+    // An empty mode means "keep what is there" on tuneReceiver, where there
+    // is nothing else to go on, and it meant the same thing here until
     // 2026-09-21. It should not: a click on a detection is the one place the
     // client has a measurement of the signal, and letting the previous
     // receiver's mode survive it is how a 145 kHz broadcast station opened
     // in NFM with a 16 kHz filter. rpc::VrxParams::demod's Nfm default was
     // the value that arrived; nothing overriding it was the defect.
     //
-    // A mode named explicitly still wins, because that is a caller saying
-    // something the detector cannot: QML passes one when the operator picked
-    // a mode for this click rather than asking for the signal.
+    // WHAT THE FIRST VERSION OF THAT COST, reported from a live RTL-SDR on
+    // 2026-09-21 as the mode switching itself back to WFM. Deriving the mode
+    // on every detection click overrides a mode the operator picked by hand
+    // as readily as it overrides a struct default nobody picked at all, and
+    // those are not the same value to be overriding. On broadcast FM every
+    // box on screen is wider than kNarrowbandChannelHz, so
+    // demod_for_detection answers Wfm for all of them: pick nfm from the
+    // buttons, click the station again to move the receiver a little, and
+    // the mode is Wfm once more with nothing said. The click was a retune.
+    // The client held no record that the mode was anybody's choice, so it
+    // treated the operator's choice the way it treats the default.
+    //
+    // demod_touched_ is that record, and it is the rule edges_touched_
+    // already applies to the passband: what the operator placed by hand
+    // survives, and the pane stops choosing on their behalf until the
+    // receiver goes. A receiver then left in a mode that does not suit the
+    // signal is not silent about it: receiverFitText compares the granted
+    // filter against this same measurement and says it is narrow for the
+    // signal, which is what models/receiver_match.h exists for.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. It ended "A mode named explicitly
+    // still wins, because that is a caller saying something the detector
+    // cannot: QML passes one when the operator picked a mode for this click
+    // rather than asking for the signal." A named mode does still win. QML
+    // does not pass one: ui/qml/Main.qml's takeTune is the only call site and
+    // passes an empty string on every click, so that escape hatch never
+    // carried an operator's choice and never could. The choice arrives
+    // through setReceiverDemod, which is why the flag lives on the receiver
+    // rather than on the call.
     QString chosen = mode;
-    if (chosen.isEmpty() && measured > 0.0) {
+
+    // Read before the derivation below overwrites chosen. A mode NAMED by
+    // the caller is a statement the detector cannot make; one derived here is
+    // this client guessing, and the two must not record the same thing.
+    // The decision itself is click_chooses_demod in models/receiver_match.h,
+    // where it is a pure function of the three inputs and has cases in
+    // ui/tests/test_receiver_match.cpp. It lives there rather than as a
+    // condition here because this file links Qt and that test binary does not,
+    // so a rule written inline is a rule nothing checks.
+    const bool named = !chosen.isEmpty();
+    if (click_chooses_demod(named, measured, demod_touched_)) {
         chosen = demod_name(demod_for_detection(measured));
     }
 
-    tune_receiver(absolute_hz, chosen, measured);
+    tune_receiver(absolute_hz, chosen, measured, named);
 }
 
 // A receiver placed by hand has no measured signal behind it, so the
@@ -220,17 +258,32 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
 // against a band it was never measured in.
 void EngineLink::tuneReceiver(double absolute_hz, const QString& mode)
 {
-    tune_receiver(absolute_hz, mode, 0.0);
+    // A mode named here is the operator's. This entry point is a frequency
+    // and a mode stated by hand with no measurement behind either, so there
+    // is nothing else the mode could have come from. An empty one changes no
+    // mode at all and never reaches the flag.
+    tune_receiver(absolute_hz, mode, 0.0, true);
 }
 
 void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
-                               double detection_bandwidth_hz)
+                               double detection_bandwidth_hz,
+                               bool mode_named_by_operator)
 {
     bool moved = false;
 
     if (mode.isEmpty()) {
         // Keep the mode the pane has.
     } else if (auto parsed = demod_from_name(mode)) {
+        // Recorded before the comparison below, because naming the mode the
+        // pane already holds is still the operator stating which mode they
+        // want, and the next detection click has to know that. A mode this
+        // client derived from a measurement sets nothing: doing otherwise
+        // would pin the detector's own guess for the life of the receiver on
+        // the first click that made it.
+        if (mode_named_by_operator) {
+            demod_touched_ = true;
+        }
+
         if (*parsed != wanted_.demod) {
             wanted_.demod = *parsed;
             moved = true;
@@ -295,6 +348,19 @@ void EngineLink::setReceiverDemod(const QString& mode)
         emit receiverFaultChanged();
         return;
     }
+
+    // THE OPERATOR HAS NAMED A MODE ON THIS RECEIVER, which is a fact about
+    // the receiver rather than about this call, so it is recorded above the
+    // early return below. Clicking the mode the pane already holds needs no
+    // rebuild and is still a statement of which mode they want.
+    //
+    // What reads it is tuneReceiverToDetection, which holds the mechanism: a
+    // later click on a detection keeps this mode instead of deriving one from
+    // the measured bandwidth. Without that record the mode an operator picked
+    // here lasted until their next click inside a detection box, which on
+    // broadcast FM is most of the span.
+    demod_touched_ = true;
+
     if (*parsed == wanted_.demod) {
         return;
     }
@@ -445,6 +511,12 @@ void EngineLink::removeReceiver()
     receiver_status_ = {};
     receiver_edge_limit_ = 0;
     edges_touched_ = false;
+
+    // The mode the operator named belonged to that receiver too, so the next
+    // one the pane holds takes its mode from whatever places it. For a click
+    // on a detection that is the measurement, which is the case
+    // tuneReceiverToDetection exists to get right on a fresh receiver.
+    demod_touched_ = false;
 
     // The measurement belonged to the receiver that has just gone, and a
     // receiver placed later by hand has none.

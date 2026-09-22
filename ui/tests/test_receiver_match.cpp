@@ -18,6 +18,7 @@
 #include "models/receiver_match.h"
 
 using revenant::ui::classify_fit;
+using revenant::ui::click_chooses_demod;
 using revenant::ui::demod_for_detection;
 using revenant::ui::FitFlag;
 using revenant::ui::fit_from_status;
@@ -49,6 +50,46 @@ TEST_CASE("the mode comes from the measured width", "[fit]")
     // the answer is the same default a caller that said nothing would get.
     CHECK(demod_for_detection(0.0) == revenant::rpc::Demod::Nfm);
     CHECK(demod_for_detection(-1.0) == revenant::rpc::Demod::Nfm);
+}
+
+TEST_CASE("a mode the operator picked survives the next detection click", "[fit]")
+{
+    // THE SECOND HALF OF THE SAME ARGUMENT, AND THE COST OF GETTING THE FIRST
+    // HALF TOO KEEN. Choosing the mode from the measurement fixed a broadcast
+    // station opening in NFM; doing it on EVERY click broke the opposite case,
+    // reported from a live RTL-SDR on 2026-09-21 as the mode switching itself
+    // back to WFM. On broadcast FM every detection is wider than 25 kHz, so an
+    // operator who picked nfm by hand lost it the moment they clicked the
+    // station again to nudge the receiver.
+    //
+    // The distinction is whose value is being overridden. Overriding
+    // rpc::VrxParams::demod's Nfm default, which nobody chose, is the fix.
+    // Overriding a mode the operator named is the bug.
+
+    // Nothing chosen by hand: the measurement decides, which is the 145 kHz
+    // case above still working.
+    CHECK(click_chooses_demod(false, 145'000.0, false));
+
+    // The operator has named a mode on this receiver. The measurement does
+    // not get to argue, however wide the signal is.
+    CHECK_FALSE(click_chooses_demod(false, 145'000.0, true));
+
+    // A caller that named a mode outranks both. That is a statement the
+    // detector cannot make, and it is the path setReceiverDemod takes.
+    CHECK_FALSE(click_chooses_demod(true, 145'000.0, false));
+    CHECK_FALSE(click_chooses_demod(true, 145'000.0, true));
+
+    // No measurement is nothing to derive from, so the receiver keeps what it
+    // has whoever chose it. Zero and negative are both "not measured" rather
+    // than a measurement of zero.
+    CHECK_FALSE(click_chooses_demod(false, 0.0, false));
+    CHECK_FALSE(click_chooses_demod(false, -1.0, false));
+
+    // The first click on a fresh receiver still derives, which is what stops
+    // the detector's own guess pinning itself for the receiver's life: the
+    // call site records `operator_chose` only for a mode that was NAMED, never
+    // for one this rule derived.
+    CHECK(click_chooses_demod(false, 16'000.0, false));
 }
 
 TEST_CASE("the 16 kHz receiver on the 145 kHz detection", "[fit]")

@@ -81,6 +81,38 @@ inline constexpr double kNarrowbandChannelHz = 25'000.0;
     return occupied_hz > kNarrowbandChannelHz ? rpc::Demod::Wfm : rpc::Demod::Nfm;
 }
 
+// Whether a click on a detection gets to choose the demodulator, or has to
+// leave the one the receiver already has.
+//
+// THE RULE THE WFM REVERT WAS MISSING. Deriving the mode from the measurement
+// on every click overrides a mode the operator picked by hand exactly as
+// readily as it overrides rpc::VrxParams::demod's Nfm default, and those are
+// not the same value to be overriding. Reported from a live RTL-SDR on
+// 2026-09-21 as the mode switching itself back to WFM: on broadcast FM every
+// detection on the span is wider than kNarrowbandChannelHz, so pick nfm from
+// the buttons, click the station again to nudge the receiver, and it is wfm
+// again with nothing said.
+//
+//   `named` is true when the caller passed a mode, which is a statement the
+//   detector cannot make and always wins.
+//   `measured_hz` is the detection's occupied bandwidth, and zero or less is
+//   no measurement, so there is nothing to derive from.
+//   `operator_chose` is whether the operator has named a mode on THIS
+//   receiver since it was created, which is the same rule the passband gets
+//   for an edge they dragged by hand.
+//
+// A derived mode deliberately does not set `operator_chose` at the call site.
+// Pinning the detector's own guess for the receiver's life would make the
+// first click decide, which is the opposite of the point.
+[[nodiscard]] inline bool click_chooses_demod(bool named, double measured_hz,
+                                              bool operator_chose)
+{
+    if (named) {
+        return false;
+    }
+    return measured_hz > 0.0 && !operator_chose;
+}
+
 // The granted passband is called narrow for the signal when it is under
 // this fraction of the detected bandwidth.
 //

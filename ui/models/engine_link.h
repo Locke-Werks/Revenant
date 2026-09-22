@@ -1412,6 +1412,14 @@ public:
     // the signal, and letting the previous receiver's mode ride through it
     // is what put a 16 kHz NFM filter on a 145 kHz broadcast station. A
     // named mode still wins.
+    //
+    // AND SO DOES A MODE THE OPERATOR ALREADY NAMED ON THIS RECEIVER, which
+    // is the qualification demod_touched_ carries. Picking a mode by hand and
+    // then clicking the signal again to move the receiver is a retune, not a
+    // request for the detector's opinion, and deriving on every click is how
+    // broadcast FM took the mode back to wfm after every click. The
+    // measurement chooses for a receiver whose mode nobody has stated, which
+    // is the case the paragraph above is about.
     Q_INVOKABLE void tuneReceiverToDetection(double absolute_hz, const QString& mode,
                                              double detection_bandwidth_hz);
 
@@ -1424,6 +1432,15 @@ public:
     // kept. Moving to a mode whose default is one-sided from a mode whose
     // default is not would otherwise throw away a filter somebody had just
     // placed by hand.
+    //
+    // THE OPERATOR'S OWN CHOICE OF MODE ARRIVES HERE, AND TODAY NOWHERE
+    // ELSE: the eight buttons in ui/qml/Main.qml are this method's only
+    // caller, and the two tune entry points are passed an empty mode by the
+    // only call site either of them has. So this is what sets
+    // demod_touched_, and it sets it even when the mode asked for is the one
+    // already running, because that is still a statement of which mode is
+    // wanted. From here on a click on a detection keeps this mode rather than
+    // deriving one from the signal's width; see tuneReceiverToDetection.
     Q_INVOKABLE void setReceiverDemod(const QString& mode);
 
     // Moves the passband edges. Signed hertz from the receiver's centre,
@@ -1963,8 +1980,14 @@ private:
     // The body both Q_INVOKABLE tune entry points share. Private because
     // the bandwidth argument is not a thing QML should be able to make up:
     // it is a measurement or it is absent.
+    //
+    // mode_named_by_operator says whether the mode was stated by a caller or
+    // derived here from a measurement, which is what decides whether it sets
+    // demod_touched_. A mode this client chose must not record the operator as
+    // having chosen it, or the first detection click would pin the detector's
+    // own guess for the life of the receiver.
     void tune_receiver(double absolute_hz, const QString& mode,
-                       double detection_bandwidth_hz);
+                       double detection_bandwidth_hz, bool mode_named_by_operator);
 
     // The bandwidth of the detection this receiver was placed by, or zero
     // for one placed by hand. Zero suppresses the signal comparison
@@ -1992,6 +2015,23 @@ private:
     // The operator has moved an edge on this receiver, so a mode change
     // keeps their edges instead of taking the new mode's default.
     bool edges_touched_ = false;
+
+    // The operator has named the mode on this receiver, so a click on a
+    // detection keeps it instead of deriving one from the measured bandwidth.
+    // The same rule edges_touched_ applies to the passband, with the same
+    // lifetime: it is a fact about this receiver and it goes when the receiver
+    // does, in removeReceiver.
+    //
+    // WHY IT EXISTS. Deriving the mode from the detection's width was added on
+    // 2026-09-21 to stop rpc::VrxParams::demod's Nfm default riding through a
+    // click onto a 145 kHz broadcast station. It derived on every click, which
+    // overrides a mode the operator picked by hand as readily as a default
+    // nobody picked. On broadcast FM every detection is wider than
+    // kNarrowbandChannelHz and ui::demod_for_detection answers Wfm for all of
+    // them, so a hand-picked nfm lasted until the next click anywhere inside a
+    // box, and an operator reported the mode switching itself back to WFM.
+    // EngineLink::tuneReceiverToDetection carries the full mechanism.
+    bool demod_touched_ = false;
 
     // A gesture is running, and a width change made during it is drawn and
     // not yet sent. sent_width_ is the width the engine was last given, so
