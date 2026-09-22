@@ -275,9 +275,21 @@ public:
     // reaching it, so a bar of 1 would list nothing however strong the signal
     // is, and an empty list is what a dead band looks like too.
     //
+    // min_margin is the same range against Detection::margin_confidence, the
+    // calibrated number, and a track has to clear BOTH. They ask independent
+    // questions, confidence being how long a track has been there and the
+    // margin how far it stood above the noise, so a caller wanting one passes
+    // zero for the other.
+    //
+    // NOT DEFAULTED, THOUGH EVERY EXISTING CALLER PASSES ZERO. A default on a
+    // virtual binds to the static type rather than the dynamic one, and the
+    // bar an operator chasing interference actually wants is this one: making
+    // it reachable by omission is how it stays unused.
+    //
     // Fails on an engine built with no spectrum stage, in that engine's own
     // words, because the detector works on spectrum frames.
-    [[nodiscard]] virtual Expected<DetectionList> detections(double min_confidence) = 0;
+    [[nodiscard]] virtual Expected<DetectionList> detections(double min_confidence,
+                                                             double min_margin) = 0;
 
     // The detector's other threshold, in dB of SNR in the 2500 Hz reference
     // bandwidth, and the one that changes what the detector FINDS rather than

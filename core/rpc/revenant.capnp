@@ -2219,7 +2219,25 @@ interface Session {
     # to one, so it approaches one and never arrives, and a bar of one lists
     # nothing however strong the signal is. An empty list is also what a dead
     # band looks like, so the failure would be invisible.
-    detections @10 (minConfidence :Float64) -> (detections :DetectionList);
+    # minMargin is the same idea against Detection::marginConfidence, which is
+    # the calibrated number, and it is the bar an operator watching
+    # interference actually wants. Zero passes everything, and so does
+    # anything up to a half: every published detection cleared the detection
+    # threshold and the margin map is a half AT the threshold, so the useful
+    # range is a half to one.
+    #
+    # BOTH BARS APPLY AND NEITHER REPLACES THE OTHER. They are independent
+    # questions: confidence is how long a track has been there and the margin
+    # is how far it stood above the noise, so a list can be asked for things
+    # that are both persistent and strong, or either alone. A caller wanting
+    # one passes zero for the other.
+    #
+    # Refused at one and above on the same grounds as minConfidence. The map
+    # is 1 - 0.5*exp(-(margin - threshold)/6), which approaches one without
+    # arriving, so a bar of one lists nothing however strong the signal is and
+    # an empty list is also what a dead band looks like.
+    detections @10 (minConfidence :Float64, minMargin :Float64)
+        -> (detections :DetectionList);
 
     # The detector's other knob, in dB of SNR in the 2500 Hz reference
     # bandwidth. docs/detection.md: both thresholds belong to the operator,

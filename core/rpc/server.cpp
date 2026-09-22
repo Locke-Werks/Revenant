@@ -1008,7 +1008,8 @@ public:
     // Event loop thread, all three. See the detector notes at the top of the
     // file for why the object is built on demand and locked as a whole.
     [[nodiscard]] Status ensure_detector();
-    [[nodiscard]] Expected<DetectionSnapshot> detections(double min_confidence);
+    [[nodiscard]] Expected<DetectionSnapshot> detections(double min_confidence,
+                                                        double min_margin);
     [[nodiscard]] Status set_detection_threshold(double threshold_db);
 
     // Completion thread, with detect_lock_ already held and a detector that
@@ -1601,6 +1602,7 @@ public:
 
     kj::Promise<void> detections(DetectionsContext context) override {
         const double bar = context.getParams().getMinConfidence();
+        const double margin_bar = context.getParams().getMinMargin();
 
         // Refused rather than answered with an empty list, because an empty
         // list is also what a quiet band looks like and the caller would have
@@ -1613,7 +1615,19 @@ public:
                 bar)});
         }
 
-        auto taken = owner_.detections(bar);
+        // The same rule for the same reason. The margin map approaches one
+        // without arriving, so a bar of one is a filter that can only be
+        // empty.
+        if (!std::isfinite(margin_bar) || margin_bar < 0.0 || margin_bar >= 1.0) {
+            return to_exception(Error{std::format(
+                "minMargin was {}, and it has to be from 0 up to but not including 1. The "
+                "margin map is 1 - 0.5*exp(-(margin - threshold)/6), which approaches 1 "
+                "without ever reaching it, so a bar of 1 lists nothing however strong the "
+                "signal is",
+                margin_bar)});
+        }
+
+        auto taken = owner_.detections(bar, margin_bar);
         if (!taken) {
             return to_exception(taken.error());
         }
@@ -2172,7 +2186,7 @@ detect::FrontEndObservation ServerImpl::front_end() {
     return front_end_.observation();
 }
 
-Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence) {
+Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence, double min_margin) {
     if (auto ready = ensure_detector(); !ready) {
         return std::unexpected(ready.error());
     }
@@ -2204,9 +2218,13 @@ Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence) {
     // put five hundred rows on the wire for a display that asked for the
     // handful above its bar. tracks() is already ascending in frequency and a
     // filter preserves that.
+    //
+    // BOTH BARS, AND A TRACK HAS TO CLEAR BOTH. They ask independent questions
+    // and a caller wanting one passes zero for the other, so anding them is
+    // what makes "persistent AND strong" expressible without a third call.
     out.tracks.reserve(tracks.size());
     for (const detect::Track& track : tracks) {
-        if (track.confidence >= min_confidence) {
+        if (track.confidence >= min_confidence && track.margin_confidence >= min_margin) {
             out.tracks.push_back(track);
         }
     }

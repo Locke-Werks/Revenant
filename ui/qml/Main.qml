@@ -1580,6 +1580,68 @@ ApplicationWindow {
                 elide: Text.ElideRight
             }
 
+            // THE OTHER BAR, AND THE ONE THE OLD LABEL WAS PROMISING. It
+            // filters on Detection::marginConfidence, which is how far a
+            // detection stood above the detection threshold, so it hides what
+            // is weak rather than what is new. The two are independent and a
+            // track has to clear both, which is how "strong AND settled"
+            // becomes expressible with two handles and no third call.
+            //
+            // IT STILL DOES NOT FILTER OUT INTERFERENCE and the label does not
+            // pretend to. A strong intermodulation product stands well above
+            // the noise and clears any margin bar, correctly; the front-end
+            // line above is what speaks to that.
+            //
+            // Starts at zero and is not remembered across launches, unlike the
+            // bar beside it. A margin bar left high hides weak signals, which
+            // looks exactly like a quiet band, so a window coming up with one
+            // set would be making a claim about a band it had not looked at.
+            Label {
+                Layout.minimumWidth: 0
+                text: "stronger than"
+                color: window.inkDim
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
+            Slider {
+                id: marginSlider
+
+                Layout.preferredWidth: 120
+                from: 0.0
+                to: engineLink.maxConfidenceBar
+                stepSize: 0.01
+
+                // The same pin the confidence handle uses, and for the same
+                // reason: the engine refuses a bar of exactly one, so a handle
+                // at full travel has to arrive as the largest value below it
+                // rather than as one.
+                readonly property double bar: {
+                    if (marginSlider.value >= engineLink.maxConfidenceBar) {
+                        return engineLink.maxConfidenceBar
+                    }
+                    const step = marginSlider.stepSize > 0 ? marginSlider.stepSize : 0.01
+                    return Math.min(Math.round(marginSlider.value / step) * step,
+                                    engineLink.maxConfidenceBar)
+                }
+
+                onMoved: engineLink.marginBar = marginSlider.bar
+            }
+
+            // Below a half passes the whole list, because every published
+            // detection cleared the detection threshold and the margin map is
+            // exactly a half at it. Saying so stops the first half of the
+            // travel reading as a filter that does nothing for no reason.
+            Label {
+                Layout.minimumWidth: 0
+                text: marginSlider.bar < 0.5
+                      ? "everything"
+                      : marginSlider.bar.toFixed(2) + "  this window"
+                color: window.ink
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
+
             Label {
                 Layout.minimumWidth: 0
                 text: "detect"

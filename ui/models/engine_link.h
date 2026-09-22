@@ -756,6 +756,21 @@ class EngineLink : public QObject {
     // second client existed.
     Q_PROPERTY(double confidenceBar READ confidenceBar WRITE setConfidenceBar
                    NOTIFY detectionsChanged)
+
+    // The bar on Detection::margin_confidence, which is the other half of the
+    // pair and the one an operator chasing interference reaches for.
+    //
+    // THE SAME RANGE AND THE SAME CLAMP AS confidenceBar, for the same reason:
+    // the margin map approaches one without arriving, so a bar of one is a
+    // filter that can only be empty and the engine refuses it. The useful
+    // range starts at a half, because every published detection cleared the
+    // detection threshold and the map is a half AT the threshold, so anything
+    // below that passes the whole list.
+    //
+    // This window's own, like confidenceBar and unlike the dB threshold:
+    // nothing on the engine changes and another client's list is unaffected.
+    Q_PROPERTY(double marginBar READ marginBar WRITE setMarginBar
+                   NOTIFY detectionsChanged)
     Q_PROPERTY(double detectionThresholdDb READ detectionThresholdDb
                    WRITE setDetectionThresholdDb NOTIFY detectionsChanged)
 
@@ -1535,8 +1550,10 @@ public:
     [[nodiscard]] const rpc::SpectrumFrame& frame() const { return display_; }
 
     [[nodiscard]] double confidenceBar() const { return confidence_bar_; }
+    [[nodiscard]] double marginBar() const { return margin_bar_; }
     [[nodiscard]] double maxConfidenceBar() const { return kMaxConfidenceBar; }
     void setConfidenceBar(double bar);
+    void setMarginBar(double bar);
     [[nodiscard]] double detectionThresholdDb() const { return shown_.detection_threshold_db; }
     void setDetectionThresholdDb(double threshold_db);
 
@@ -2198,6 +2215,10 @@ private:
     // torn on any platform this builds for and a stale value costs one poll
     // at the old bar, so it is atomic rather than locked.
     std::atomic<double> confidence_bar_{0.0};
+
+    // Zero passes everything, which is what an operator who has never touched
+    // it should get.
+    std::atomic<double> margin_bar_{0.0};
 
     // Set by the Qt thread when the operator moves the engine-side control,
     // consumed and cleared by the supervisor on its next pass. The write

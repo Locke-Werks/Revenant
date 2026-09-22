@@ -846,7 +846,8 @@ void EngineLink::poll_detections()
         }
     }
 
-    auto listed = client_->detections(confidence_bar_.load(std::memory_order_acquire));
+    auto listed = client_->detections(confidence_bar_.load(std::memory_order_acquire),
+                                      margin_bar_.load(std::memory_order_acquire));
     if (!listed) {
         // Two unrelated failures arrive here as the same Expected, and only
         // one of them is anything an operator can act on. Ask which.
@@ -1023,6 +1024,27 @@ void EngineLink::setConfidenceBar(double bar)
     // No signal here. The bar changes what the next poll asks for, and the
     // poll emits detectionsChanged when the answer differs. Emitting now
     // would tell the overlay to redraw a list fetched at the old bar.
+}
+
+void EngineLink::setMarginBar(double bar)
+{
+    // Every argument setConfidenceBar makes above applies here unchanged: the
+    // clamp is against the same top of range because the margin map also
+    // approaches one without arriving and the engine refuses a bar of one the
+    // same way, NaN goes to the floor because it would pass both bounds and
+    // there is no slider position it could have meant, and nothing is emitted
+    // because the bar changes what the NEXT poll asks for.
+    //
+    // NOT REMEMBERED ACROSS LAUNCHES, which is the one difference and is
+    // deliberate. A confidence bar left high hides tracks that have not been
+    // up long, which an operator notices within seconds. A margin bar left
+    // high hides weak signals, which looks exactly like a quiet band, and a
+    // window that came up filtering them out would be making a claim about
+    // the band it had not looked at. That is the same argument
+    // models/settings.h makes for not restoring the receiver.
+    const double wanted = std::isnan(bar) ? 0.0 : bar;
+    const double clamped = std::clamp(wanted, 0.0, kMaxConfidenceBar);
+    margin_bar_.store(clamped, std::memory_order_release);
 }
 
 void EngineLink::setDetectionThresholdDb(double threshold_db)

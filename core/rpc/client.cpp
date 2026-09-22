@@ -977,7 +977,8 @@ public:
     [[nodiscard]] Expected<VrxStatus> vrx_status(std::uint64_t id) override;
     [[nodiscard]] Expected<std::vector<std::uint64_t>> vrx_ids() override;
 
-    [[nodiscard]] Expected<DetectionList> detections(double min_confidence) override;
+    [[nodiscard]] Expected<DetectionList> detections(double min_confidence,
+                                                     double min_margin) override;
     [[nodiscard]] Status set_detection_threshold(double threshold_db) override;
 
     [[nodiscard]] Status subscribe_spectrum(std::uint32_t every_nth,
@@ -1539,13 +1540,14 @@ Expected<std::vector<std::uint64_t>> ClientImpl::vrx_ids() {
     });
 }
 
-Expected<DetectionList> ClientImpl::detections(double min_confidence) {
+Expected<DetectionList> ClientImpl::detections(double min_confidence, double min_margin) {
     // Two Expecteds deep and flattened, the same shape as vrx_status and for
     // the same reason: the outer one is whether the call happened, the inner
     // one is whether every row carried a state this build can name.
-    auto response = on_loop("detections", [min_confidence](LoopState& state) {
+    auto response = on_loop("detections", [min_confidence, min_margin](LoopState& state) {
         auto request = state.session.detectionsRequest();
         request.setMinConfidence(min_confidence);
+        request.setMinMargin(min_margin);
         return request.send().then(
             [](auto&& reply) { return read_detection_list(reply.getDetections()); });
     });

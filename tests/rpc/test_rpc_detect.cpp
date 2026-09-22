@@ -150,7 +150,7 @@ void bring_up(Harness& harness, const HarnessOptions& options) {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     rpc::DetectionList last;
     for (;;) {
-        auto answered = client.detections(0.0);
+        auto answered = client.detections(0.0, 0.0);
         if (answered) {
             last = std::move(*answered);
             if (last.decisions >= min_decisions && !last.detections.empty()) {
@@ -172,7 +172,7 @@ void bring_up(Harness& harness, const HarnessOptions& options) {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     rpc::DetectionList last;
     for (;;) {
-        auto answered = client.detections(0.0);
+        auto answered = client.detections(0.0, 0.0);
         if (answered) {
             last = std::move(*answered);
             if (last.decisions > 0 && last.detections.empty()) {
@@ -205,7 +205,7 @@ struct FadeOut {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     FadeOut out;
     for (;;) {
-        auto answered = client.detections(0.0);
+        auto answered = client.detections(0.0, 0.0);
         if (answered) {
             if (!answered->detections.empty()) {
                 out.last_populated = std::move(*answered);
@@ -250,7 +250,7 @@ struct ConfidenceRange {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     rpc::DetectionList last;
     for (;;) {
-        auto answered = client.detections(0.0);
+        auto answered = client.detections(0.0, 0.0);
         if (answered) {
             last = std::move(*answered);
             const ConfidenceRange range = confidence_range(last);
@@ -272,7 +272,7 @@ struct ConfidenceRange {
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     rpc::DetectionList last;
     for (;;) {
-        auto answered = client.detections(0.0);
+        auto answered = client.detections(0.0, 0.0);
         if (answered) {
             last = std::move(*answered);
             const bool merged = std::ranges::any_of(last.detections, [](const rpc::Detection& d) {
@@ -456,7 +456,7 @@ TEST_CASE("detections cross the wire and agree with the geometry the engine repo
     // nothing found. It would read identically if the detector were built at
     // startup and fed nothing, which is why the run below is what separates
     // the two.
-    auto first = harness.client().detections(0.0);
+    auto first = harness.client().detections(0.0, 0.0);
     INFO(test::message_of(first));
     REQUIRE(first.has_value());
     CHECK(first->decisions == 0);
@@ -483,7 +483,7 @@ TEST_CASE("detections cross the wire and agree with the geometry the engine repo
     INFO(test::message_of(stopped));
     REQUIRE(stopped.has_value());
 
-    auto settled = harness.client().detections(0.0);
+    auto settled = harness.client().detections(0.0, 0.0);
     INFO(test::message_of(settled));
     REQUIRE(settled.has_value());
 
@@ -616,7 +616,7 @@ TEST_CASE("detections cross the wire and agree with the geometry the engine repo
     // The same call twice against a stopped engine is the same answer. A
     // detector still being fed, or a list rebuilt per call from something
     // that moves, fails here.
-    auto again = harness.client().detections(0.0);
+    auto again = harness.client().detections(0.0, 0.0);
     REQUIRE(again.has_value());
     CHECK(again->last_decision == list.last_decision);
     CHECK(again->detections.size() == list.detections.size());
@@ -679,7 +679,7 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
     INFO(test::message_of(stopped));
     REQUIRE(stopped.has_value());
 
-    auto unfiltered = harness.client().detections(0.0);
+    auto unfiltered = harness.client().detections(0.0, 0.0);
     INFO(test::message_of(unfiltered));
     REQUIRE(unfiltered.has_value());
     REQUIRE(unfiltered->detections.size() > 1);
@@ -704,7 +704,7 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
     //
     // This pair, with the one below it, is what pins the filter to the exact
     // boundary rather than to "somewhere around here".
-    auto at_bar = harness.client().detections(range.lowest);
+    auto at_bar = harness.client().detections(range.lowest, 0.0);
     INFO(test::message_of(at_bar));
     REQUIRE(at_bar.has_value());
     REQUIRE(at_bar->last_decision == unfiltered->last_decision);
@@ -716,7 +716,7 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
     REQUIRE(bar < 1.0);
     REQUIRE(bar <= range.highest);
 
-    auto filtered = harness.client().detections(bar);
+    auto filtered = harness.client().detections(bar, 0.0);
     INFO(test::message_of(filtered));
     REQUIRE(filtered.has_value());
 
@@ -766,7 +766,7 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
 
     // And the bar did not leak into the server: a second caller asking for
     // everything still gets everything.
-    auto after = harness.client().detections(0.0);
+    auto after = harness.client().detections(0.0, 0.0);
     REQUIRE(after.has_value());
     CHECK(after->detections.size() == unfiltered->detections.size());
 }
@@ -895,7 +895,7 @@ TEST_CASE("the detection threshold is the operator's and changes what the detect
     // Read back through the list rather than trusted. This is engine-wide
     // state and the reply is the only place a client can see what it really
     // is.
-    auto acknowledged = harness.client().detections(0.0);
+    auto acknowledged = harness.client().detections(0.0, 0.0);
     REQUIRE(acknowledged.has_value());
     CHECK(acknowledged->detection_threshold_db == kSilencingThresholdDb);
 
@@ -971,7 +971,7 @@ TEST_CASE("the detector's hold crosses the wire and bounds what the detector doe
     // display sizes its drawing from this and the first list it has rows to
     // draw is later than this, so a field that only appeared once something
     // was found would be a field arriving after it was needed.
-    auto first = harness.client().detections(0.0);
+    auto first = harness.client().detections(0.0, 0.0);
     INFO(test::message_of(first));
     REQUIRE(first.has_value());
     CHECK(first->decisions == 0);
@@ -1064,17 +1064,17 @@ TEST_CASE("the detector refuses the arguments that would fail silently",
     // track's confidence approaches one without arriving. An empty list is
     // also what a dead band looks like, so this has to fail rather than
     // answer.
-    auto at_one = harness.client().detections(1.0);
+    auto at_one = harness.client().detections(1.0, 0.0);
     CHECK_FALSE(at_one.has_value());
 
-    auto above_one = harness.client().detections(1.5);
+    auto above_one = harness.client().detections(1.5, 0.0);
     CHECK_FALSE(above_one.has_value());
 
-    auto below_zero = harness.client().detections(-0.25);
+    auto below_zero = harness.client().detections(-0.25, 0.0);
     CHECK_FALSE(below_zero.has_value());
 
     auto not_a_number =
-        harness.client().detections(std::numeric_limits<double>::quiet_NaN());
+        harness.client().detections(std::numeric_limits<double>::quiet_NaN(), 0.0);
     CHECK_FALSE(not_a_number.has_value());
 
     // The open interval's own edge is fine, and it is the value a clamped
@@ -1095,7 +1095,7 @@ TEST_CASE("the detector refuses the arguments that would fail silently",
     constexpr double kTopOfRange = 1.0 - std::numeric_limits<double>::epsilon() / 2.0;
     CHECK(kTopOfRange == std::nextafter(1.0, 0.0));
 
-    auto just_under = harness.client().detections(kTopOfRange);
+    auto just_under = harness.client().detections(kTopOfRange, 0.0);
     INFO(test::message_of(just_under));
     CHECK(just_under.has_value());
 
@@ -1106,7 +1106,7 @@ TEST_CASE("the detector refuses the arguments that would fail silently",
     // little below it, fails one of this pair.
     const double one_step_higher = std::nextafter(kTopOfRange, 2.0);
     CHECK(one_step_higher == 1.0);
-    auto refused_at_one = harness.client().detections(one_step_higher);
+    auto refused_at_one = harness.client().detections(one_step_higher, 0.0);
     CHECK_FALSE(refused_at_one.has_value());
 
     // And the threshold's bounds, which are the command line's rather than
@@ -1123,7 +1123,7 @@ TEST_CASE("the detector refuses the arguments that would fail silently",
 
     // A refused threshold left the detector where it was, rather than half
     // applying.
-    auto unchanged = harness.client().detections(0.0);
+    auto unchanged = harness.client().detections(0.0, 0.0);
     INFO(test::message_of(unchanged));
     REQUIRE(unchanged.has_value());
     CHECK(unchanged->detection_threshold_db == 6.0);
@@ -1132,7 +1132,7 @@ TEST_CASE("the detector refuses the arguments that would fail silently",
     INFO(test::message_of(accepted));
     REQUIRE(accepted.has_value());
 
-    auto applied = harness.client().detections(0.0);
+    auto applied = harness.client().detections(0.0, 0.0);
     REQUIRE(applied.has_value());
     CHECK(applied->detection_threshold_db == 11.5);
 }
@@ -1282,7 +1282,7 @@ TEST_CASE("an engine with no spectrum stage refuses detections in the engine's o
     options.center_hz = kSceneCenter;
     bring_up(harness, options);
 
-    auto refused = harness.client().detections(0.0);
+    auto refused = harness.client().detections(0.0, 0.0);
     REQUIRE_FALSE(refused.has_value());
 
     const std::string message = refused.error().message;
@@ -1300,4 +1300,120 @@ TEST_CASE("an engine with no spectrum stage refuses detections in the engine's o
     auto also_refused = harness.client().set_detection_threshold(20.0);
     INFO(test::message_of(also_refused));
     CHECK_FALSE(also_refused.has_value());
+}
+// The margin bar, which is the half of this pair that can actually partition a
+// real list.
+//
+// WHY THIS CASE IS SHORTER THAN THE CONFIDENCE ONE ABOVE. That one has to
+// manufacture a spread before it can test a filter, by raising the DETECTION
+// threshold until half the tracks stop being detected and start decaying,
+// because a column of confidence is otherwise constant across everything that
+// has been up for a second. The margin column has a spread by construction:
+// it is a monotone function of each track's own SNR, and this scene places
+// emitters from 14 to 45 dB.
+TEST_CASE("the margin bar filters the list and belongs to the caller",
+          "[rpc][detect]") {
+    Harness harness;
+    bring_up(harness, detecting_options());
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    const rpc::DetectionList live = wait_for_detections(harness.client(), 8, 20000);
+    INFO(std::format("{} decisions, {} detections", live.decisions, live.detections.size()));
+    REQUIRE(live.detections.size() > 1);
+
+    // Frozen, so every list below describes the same instant and the
+    // comparisons are exact rather than approximate.
+    const auto stopped = harness.stop_engine();
+    INFO(test::message_of(stopped));
+    REQUIRE(stopped.has_value());
+
+    auto unfiltered = harness.client().detections(0.0, 0.0);
+    INFO(test::message_of(unfiltered));
+    REQUIRE(unfiltered.has_value());
+    REQUIRE(unfiltered->detections.size() > 1);
+
+    double lowest = 1.0;
+    double highest = 0.0;
+    for (const rpc::Detection& detection : unfiltered->detections) {
+        lowest = std::min(lowest, detection.margin_confidence);
+        highest = std::max(highest, detection.margin_confidence);
+    }
+    INFO(std::format("margin runs {:.6f} to {:.6f} across {} detections", lowest, highest,
+                     unfiltered->detections.size()));
+
+    // THE SPREAD IS THE POINT AND IS ASSERTED. A column that reads the same
+    // for everything cannot be partitioned by any bar, which is the defect
+    // this number was added to fix, so a run where it were constant would
+    // make everything below pass without meaning anything.
+    REQUIRE(lowest < highest);
+
+    // Inclusive at the bar, so the weakest track and everything above it stay.
+    auto at_bar = harness.client().detections(0.0, lowest);
+    INFO(test::message_of(at_bar));
+    REQUIRE(at_bar.has_value());
+    REQUIRE(at_bar->last_decision == unfiltered->last_decision);
+    CHECK(at_bar->detections.size() == unfiltered->detections.size());
+
+    // One representable step above, so that track goes and the stronger ones
+    // do not.
+    const double bar = std::nextafter(lowest, 1.0);
+    auto filtered = harness.client().detections(0.0, bar);
+    INFO(test::message_of(filtered));
+    REQUIRE(filtered.has_value());
+    REQUIRE(filtered->last_decision == unfiltered->last_decision);
+    REQUIRE(!filtered->detections.empty());
+    CHECK(filtered->detections.size() < unfiltered->detections.size());
+
+    // The bar is the caller's and is not stored: the detector still holds
+    // everything it held.
+    CHECK(filtered->total == unfiltered->total);
+
+    for (const rpc::Detection& detection : filtered->detections) {
+        INFO(std::format("detection {} kept at margin {:.17g} against a bar of {:.17g}",
+                         detection.id, detection.margin_confidence, bar));
+        CHECK(detection.margin_confidence >= bar);
+    }
+
+    // THE TWO BARS ARE INDEPENDENT AND BOTH APPLY. A list asked for things
+    // that are both strong and settled is the intersection, which is what
+    // makes the pair worth having over a single knob.
+    auto both = harness.client().detections(0.5, bar);
+    INFO(test::message_of(both));
+    REQUIRE(both.has_value());
+    CHECK(both->detections.size() <= filtered->detections.size());
+    for (const rpc::Detection& detection : both->detections) {
+        CHECK(detection.margin_confidence >= bar);
+        CHECK(detection.confidence >= 0.5);
+    }
+}
+
+// Refused rather than answered emptily, on exactly the grounds the confidence
+// bar is: the map approaches one without arriving, so a bar of one lists
+// nothing however strong the signal is, and an empty list is also what a dead
+// band looks like.
+TEST_CASE("a margin bar of one is refused rather than answered empty",
+          "[rpc][detect]") {
+    Harness harness;
+    bring_up(harness, detecting_options());
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    static_cast<void>(wait_for_detections(harness.client(), 4, 20000));
+
+    for (const double bad : {1.0, 1.5, -0.25, std::numeric_limits<double>::quiet_NaN()}) {
+        auto refused = harness.client().detections(0.0, bad);
+        INFO(std::format("margin bar {}", bad));
+        CHECK_FALSE(refused.has_value());
+    }
+
+    // And the largest value below one is accepted, so the refusal is about
+    // the unreachable bar rather than about the top of the range.
+    auto accepted = harness.client().detections(0.0, std::nextafter(1.0, 0.0));
+    INFO(test::message_of(accepted));
+    CHECK(accepted.has_value());
 }
