@@ -468,11 +468,37 @@ intermittent: CW is keyed, RTTY has gaps, FT8 transmits 12.6 seconds in every
 15 and is silent for the remaining 2.4. Without hold the display flickers and
 a click lands on something that has just vanished.
 
-A track is also where identification accumulates, for the reason in
+**WHAT THIS PARAGRAPH USED TO SAY, and it was read as a description of the
+`confidence` field rather than of the identification that is still design.**
+It read: "A track is also where identification accumulates, for the reason in
 `docs/ui-spectrum.md`: a classification is stable because a transmission does
 not change modulation halfway through, so a track that has been up for five
 seconds has had five seconds of evidence. The confidence the operator
-thresholds on is the track's, not any single frame's.
+thresholds on is the track's, not any single frame's."
+
+Every clause of that is still true of the classifier this does not have yet.
+Sitting directly under the field list, it reads as though it describes the
+number the wire actually carries, and on 2026-09-21 that misreading was the
+whole of an operator's complaint: intermod bumps on a noise floor, reported at
+1.00.
+
+What `detector.cpp` computes is a stopwatch. Birth sets confidence to
+`confidence_rise`, every later decision the track is detected in moves it the
+same fraction of the way to one, and a decision it is missed from decays it by
+half-life. So after n consecutive detections it is `1 - 0.65^n` at the shipped
+rise, which passes 0.994 at twelve and prints as 1.00 from about 1.3 seconds
+onward. Nothing in either expression reads SNR, bandwidth, deflection margin
+or spectral shape. Two tracks with the same detection history arrive at
+bit-identical confidence however strong or weak each one is, which
+`tests/rpc/test_rpc_detect.cpp` measured on 2026-09-19 and had to work around:
+to get any spread into the column at all, that test raises the detection
+threshold until half the tracks stop being detected and start decaying.
+
+It answers "has this been here continuously, and for how long", which is worth
+knowing and is not what the name promises. A signal that is genuinely present
+and genuinely interference earns 1.00 honestly. The number to threshold
+belief on does not exist yet, and "Confidence, and unknown as a real answer"
+below sets the bar it would have to clear.
 
 Five rules the first draft left out, each of which breaks something:
 
@@ -646,8 +672,27 @@ over time. That separates the broad families, and often finishes the job: a
 2.8 kHz asymmetric block with no carrier is SSB, known from the same frames
 that found it.
 
-**From a narrowband extract**, for what shape cannot settle: envelope
-variance, tone structure, symbol rate, cyclostationary features.
+**WHAT THE SECOND TIER USED TO READ AS WORK TO DO.** The line was: "**From a
+narrowband extract**, for what shape cannot settle: envelope variance, tone
+structure, symbol rate, cyclostationary features."
+
+All four of those are written, tested and sitting in `core/characterise`,
+which this document never named, so a reader planning the uplift off this
+section would set out to build a library that exists. `characterise()` takes
+complex baseband and answers with a
+`ModulationFamily` of Unmodulated, AnalogueFm, Fsk, Psk or Ofdm, plus the
+symbol rate, the tone structure, the modulation order and the OFDM frame where
+it found them. Its own confidence is a monotone function of the measured
+margin above each test's threshold, which is the calibrated shape the section
+below asks for and the detector's stopwatch is not. The AnalogueFm branch caps
+itself at half because it is an elimination rather than a positive finding.
+
+So what is unbuilt is the seam and not the estimators: `characterise` reads
+complex baseband, the detector reads spectrum frames, and nothing routes a
+narrowband extract from one to the other. `Track::classification` is the field
+that would carry the answer and its enum still has exactly one value. The
+probe-receiver argument below is the design for that seam and remains the
+part to do.
 
 ### What a probe receiver actually is, which the first draft got wrong
 

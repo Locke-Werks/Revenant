@@ -355,3 +355,28 @@ instead: The code's minimum distance is 3. Enumerated twice independently over
     undetectable floor starts at weight three, where those seven codewords
     arrive with a zero syndrome and are delivered as clean with the wrong
     contents. core/decode/rds_groups.h has the measured table.
+
+phrase: a track that has been up for five seconds has had five seconds of evidence
+retired: 2026-09-21
+commit: 0000000
+instead: True of the identification that is still design, and read as a
+    description of the shipped confidence field sitting beside it, which it is
+    not. detector.cpp computes a stopwatch: birth sets confidence_rise and each
+    later detection moves the same fraction toward one, so n consecutive
+    detections give 1 minus 0.65 to the n and it prints as 1.00 after about 1.3
+    seconds. No term reads SNR, bandwidth, deflection margin or spectral shape,
+    so two tracks with the same history are bit-identical however strong each
+    one is. An intermod bump reported at 1.00 is the number working. See
+    docs/detection.md.
+
+phrase: From a narrowband extract, for what shape cannot settle: envelope
+    variance, tone structure, symbol rate, cyclostationary features
+retired: 2026-09-21
+commit: 0000000
+instead: Listed as tier-two work to be done, and all four are written and
+    tested in core/characterise, which docs/detection.md never named.
+    characterise() answers with a ModulationFamily plus symbol rate, tone
+    structure, modulation order and OFDM frame, on a confidence calibrated
+    against the measured margin. What is unbuilt is the seam: it reads complex
+    baseband, the detector reads spectrum frames, and Track::classification
+    still has one enumerator.
