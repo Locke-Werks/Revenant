@@ -522,6 +522,23 @@ void EngineLink::removeReceiver()
     // receiver placed later by hand has none.
     tuned_detection_bandwidth_ = 0.0;
 
+    // AND THE SENTENCE ABOUT ITS AUDIO ENDING, which is true and stops being
+    // worth reading the moment the pane is empty.
+    //
+    // A receiver the ENGINE removed, which is what a retune past its frequency
+    // does now, ends its audio stream on the way out. The client is told, quite
+    // correctly, that the receiver went away, and audioEndedReason holds that
+    // sentence. Left standing beside an empty pane it reads as a fault about a
+    // receiver that is simply gone, and worse, it is the last thing on screen
+    // about a receiver the NEXT one has nothing to do with. An operator who
+    // pressed clear gets the same treatment for the same reason.
+    //
+    // Not the audio switch itself, which is deliberately left where the
+    // operator put it: somebody who had audio on wants it on for whatever they
+    // tune next, and turning it off here would make every receiver change a
+    // two-step gesture.
+    audio_ended_reason_.clear();
+
     {
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
         has_receiver_request_ = false;
@@ -537,6 +554,11 @@ void EngineLink::removeReceiver()
     emit receiverChanged();
     emit receiverStatusChanged();
     emit passbandChanged();
+
+    // audioEndedReason is on audioChanged, so clearing it above is invisible
+    // without this. The other three signals here carry nothing about audio.
+    emit audioChanged();
+
     update_receiver_fit();
 }
 
