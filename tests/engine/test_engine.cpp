@@ -1110,6 +1110,62 @@ TEST_CASE("closing a running source stops the stream first", "[gpu][engine][m2]"
     CHECK(after.samples_delivered > 0);
 }
 
+TEST_CASE("a retune holds each receiver's frequency and drops the ones it leaves behind",
+          "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    // A SYNTHETIC SCENE CANNOT RETUNE, so this drives the rebase through the
+    // arithmetic rather than through a device: what the engine does to a
+    // receiver's offset is the same whichever backend moved the oscillator, and
+    // the case that needs a dongle is in the device test further down.
+    //
+    // Two receivers, placed either side of the centre, so the near one survives
+    // a small move and the far one does not. Before 2026-09-21 both survived
+    // every move, because a receiver kept its BASEBAND offset and was carried
+    // along with the span: an operator retuning from broadcast FM found their
+    // receiver still making noise at a frequency they had not chosen.
+    auto created = engine::Engine::create(default_config());
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    REQUIRE(eng.open_source(tone_uri(0, 400'000)).has_value());
+
+    const dsp::Hertz half_span = static_cast<dsp::Hertz>(kSourceRate / 2);
+
+    engine::VrxParams near_centre;
+    near_centre.center = 100'000;
+    near_centre.bandwidth = 16'000;
+    near_centre.demod = engine::Demod::Nfm;
+    const auto near_id = eng.add_vrx(near_centre);
+    INFO(test::message_of(near_id));
+    REQUIRE(near_id.has_value());
+
+    engine::VrxParams near_edge;
+    near_edge.center = half_span - 50'000;
+    near_edge.bandwidth = 16'000;
+    near_edge.demod = engine::Demod::Nfm;
+    const auto edge_id = eng.add_vrx(near_edge);
+    INFO(test::message_of(edge_id));
+    REQUIRE(edge_id.has_value());
+
+    REQUIRE(eng.vrx_ids().size() == 2);
+
+    // The synthetic source refuses, which is the point: a refused retune must
+    // not touch a receiver at all. A rebase applied before the device answered
+    // would move every receiver on a call that changed nothing.
+    const auto refused = eng.set_source_center(462'000'000);
+    REQUIRE_FALSE(refused.has_value());
+
+    CHECK(eng.vrx_ids().size() == 2);
+    auto near_after = eng.vrx_status(*near_id);
+    REQUIRE(near_after.has_value());
+    CHECK(near_after->params.center == 100'000);
+    auto edge_after = eng.vrx_status(*edge_id);
+    REQUIRE(edge_after.has_value());
+    CHECK(edge_after->params.center == half_span - 50'000);
+}
+
 TEST_CASE("an HF recording gets the finer grid its content needs", "[gpu][engine][m2]") {
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
@@ -1380,7 +1436,17 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     INFO("audio chunks with no retune: " << audio_a << " then " << audio_b << " one second later");
     REQUIRE(audio_b > audio_a);
 
-    constexpr dsp::Hertz kWanted = 95'100'000;
+    // A NUDGE FIRST, AND THE RECEIVER STAYS ON ITS OWN FREQUENCY.
+    //
+    // 100 kHz and not the 3 MHz this case used to move, because the order now
+    // matters: the receiver was added at a baseband offset of 0, so at a centre
+    // of 98.1 MHz it is on 98.1 MHz, and a 3 MHz move puts it outside a 2.4 MHz
+    // span and removes it. Moving 100 kHz has to leave it on 98.1 MHz, which
+    // means its offset becomes -100 kHz. Before 2026-09-21 the offset stayed at
+    // 0 and the receiver was dragged to 98.0 MHz with nothing said, which is
+    // the behaviour an operator reported from broadcast FM.
+    constexpr dsp::Hertz kOpenedAt = 98'100'000;
+    constexpr dsp::Hertz kWanted = 98'000'000;
     auto landed = eng.set_source_center(kWanted);
     INFO(test::message_of(landed));
     REQUIRE(landed.has_value());
@@ -1393,43 +1459,62 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     // detection is derived from.
     CHECK(eng.info().source_center == *landed);
 
-    // AND AGAIN, TO UHF AND BACK, because the operator's report was of pressing
-    // enter more than once and because each retune leaves the transfers in a
-    // state the previous one did not start from. A jump across bands rather
-    // than a nudge, since that is what was reported.
-    auto uhf = eng.set_source_center(435'000'000);
-    INFO(test::message_of(uhf));
-    REQUIRE(uhf.has_value());
-    CHECK(eng.info().source_center == *uhf);
+    REQUIRE(eng.vrx_ids().size() == 1);
+    auto held = eng.vrx_status(*receiver);
+    REQUIRE(held.has_value());
+    const dsp::Hertz absolute = eng.info().source_center + held->params.center;
+    INFO("receiver offset " << held->params.center << " at centre "
+                            << eng.info().source_center << ", so absolute " << absolute);
+    CHECK(absolute == kOpenedAt);
 
-    auto back = eng.set_source_center(98'100'000);
-    INFO(test::message_of(back));
-    REQUIRE(back.has_value());
-    CHECK(eng.info().source_center == *back);
-
-    // THE RECEIVER IS STILL THERE AND THE GRAPH IS STILL RUNNING. A retune that
-    // takes the receiver with it, or that leaves an engine that has stopped
-    // serving, is the failure this case exists for.
-    CHECK(eng.vrx_ids().size() == 1);
-    CHECK(eng.running());
-
-    // And the audio kept arriving across all three retunes, which is the half a
-    // surviving receiver id does not prove: a receiver that is registered and
-    // silent is a receiver the operator has lost.
-    const std::uint64_t audio_at_end = audio_chunks.load(std::memory_order_relaxed);
-    const auto samples_at_end = eng.source_stats().samples_delivered;
+    // AND IT IS STILL AUDIBLE, which a surviving receiver id does not prove: a
+    // receiver that is registered and silent is a receiver the operator has
+    // lost, and that is exactly the shape the retune bug took before the
+    // delivery thread was kept alive across a pause.
+    const std::uint64_t audio_before_jump = audio_chunks.load(std::memory_order_relaxed);
+    const auto samples_before_jump = eng.source_stats().samples_delivered;
     std::this_thread::sleep_for(std::chrono::seconds(1));
 
     // Samples first, because it says which half broke. Samples still arriving
     // with no audio is the graph or the receiver; samples stopped is the source.
-    INFO("samples after the last retune: " << samples_at_end << ", then "
-                                           << eng.source_stats().samples_delivered
-                                           );
-    CHECK(eng.source_stats().samples_delivered > samples_at_end);
+    INFO("samples after the nudge: " << samples_before_jump << ", then "
+                                     << eng.source_stats().samples_delivered);
+    CHECK(eng.source_stats().samples_delivered > samples_before_jump);
+    INFO("audio chunks after the nudge: " << audio_before_jump << ", then "
+                                          << audio_chunks.load(std::memory_order_relaxed));
+    CHECK(audio_chunks.load(std::memory_order_relaxed) > audio_before_jump);
 
-    INFO("audio chunks after the last retune: " << audio_at_end << ", then "
-                                                << audio_chunks.load(std::memory_order_relaxed));
-    CHECK(audio_chunks.load(std::memory_order_relaxed) > audio_at_end);
+    // AND A JUMP IT DOES NOT SURVIVE. 435 MHz is 337 MHz away and the span is
+    // 2.4 MHz wide, so the receiver's centre is nowhere near reachable and it
+    // is removed rather than carried along or clamped to the edge. The
+    // operator's words for what they wanted were "disappearing VRX".
+    auto uhf = eng.set_source_center(435'000'000);
+    INFO(test::message_of(uhf));
+    REQUIRE(uhf.has_value());
+    CHECK(eng.info().source_center == *uhf);
+    CHECK(eng.vrx_ids().empty());
+    CHECK_FALSE(eng.vrx_status(*receiver).has_value());
+
+    // THE RETUNE ITSELF STILL SUCCEEDED AND THE ENGINE IS STILL SERVING. A
+    // receiver that could not come along is not a failed retune, and an engine
+    // that stopped is the failure this case was written for in the first place.
+    auto back = eng.set_source_center(98'100'000);
+    INFO(test::message_of(back));
+    REQUIRE(back.has_value());
+    CHECK(eng.info().source_center == *back);
+    CHECK(eng.running());
+
+    // AND THE SOURCE IS STILL DELIVERING with no receiver left on it, which is
+    // the state a removal leaves behind and the one the engine has to keep
+    // serving: the spectrum, the waterfall and the detector all run without a
+    // receiver, so an engine that stopped when its last receiver went would
+    // take the operator's whole display with it.
+    const auto samples_at_end = eng.source_stats().samples_delivered;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    INFO("samples after the last retune: " << samples_at_end << ", then "
+                                           << eng.source_stats().samples_delivered);
+    CHECK(eng.source_stats().samples_delivered > samples_at_end);
+    CHECK(eng.vrx_ids().empty());
 
     REQUIRE(eng.stop().has_value());
     second.join();

@@ -97,6 +97,32 @@ struct ReceiverMarker {
 // A band whose edges arrived crossed or equal draws nothing. A receiver has a
 // width or it has not been placed, and a zero-width filter is the state
 // before the engine has answered rather than a filter to mark.
+//
+// WHICH OF THESE PATHS THE PROGRAM CAN ACTUALLY REACH, because the answer is
+// not all of them and a reader should not have to work that out from the tests.
+//
+// A band CLIPPED at one end is reachable now: a receiver placed near the edge
+// of the span is wider than the room left beside it, and a 200 kHz broadcast
+// receiver 50 kHz from the edge hangs half its filter past Nyquist.
+//
+// A band with NO OVERLAP AT ALL is not reachable, and the reason is worth
+// knowing before anybody trusts it. A receiver is placed in the source's
+// baseband frame, so retuning the front end moves the span and carries every
+// receiver with it at the same offset: the highlight rides along at a fixed
+// relative position and cannot fall off the display. Confirmed by an operator
+// on 2026-09-21, who retuned from broadcast FM and watched the marker keep its
+// place in the span. Engine::set_source_center then began re-pinning each
+// receiver to the absolute frequency it was tuned to and REMOVING one whose
+// centre falls outside the new span, which keeps this path unreachable from
+// the other direction: a receiver far enough out to be invisible here is a
+// receiver that no longer exists.
+//
+// So it is defensive rather than live, and it is kept for two reasons. It is
+// the honest answer if a receiver ever outlives its span, and the wrong answer
+// it rejects is the dangerous one: a band clamped onto the display edge would
+// tell an operator a receiver is at the edge of the span when it is nowhere
+// near it. Do not delete it because nothing exercises it; the cases in
+// ui/tests/test_receiver_marker.cpp are what exercise it.
 [[nodiscard]] inline ReceiverMarker plan_receiver_marker(const ReceiverBand& band,
                                                          double span_low_hz,
                                                          double span_high_hz,

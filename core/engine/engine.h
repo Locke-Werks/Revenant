@@ -1133,16 +1133,42 @@ public:
     // device actually took, which a synthesiser with a tuning step will
     // round.
     //
-    // WHY THIS IS A SMALL CHANGE, WHICH IS THE PART THAT IS NOT OBVIOUS
+    // WHAT THIS USED TO SAY, AND IT IS NOW FALSE
     //
-    // The channelizer, every receiver and the whole of the spectrum stage
-    // work in the source's baseband frame and are never told where the front
-    // end is pointed. engine::place is handed the grid, the rate and the
-    // request; core/engine/vrx.h says in as many words that no build of this
-    // engine has ever rebased a receiver's centre. So a retune moves two
-    // things and no more: the device's own oscillator, and the constant in
-    // EngineInfo::source_center that relates baseband to real radio
-    // frequency.
+    // This block was headed "WHY THIS IS A SMALL CHANGE" and argued that a
+    // retune "moves two things and no more: the device's own oscillator, and
+    // the constant in EngineInfo::source_center that relates baseband to real
+    // radio frequency", because "no build of this engine has ever rebased a
+    // receiver's centre".
+    //
+    // It rebases them now, and the reason the old behaviour was wrong was
+    // never visible from inside this file. VrxParams::center is a BASEBAND
+    // offset, so leaving every receiver alone meant carrying them along with
+    // the span: a receiver at +100 kHz was hearing 98.2 MHz at a centre of
+    // 98.1 and heard 435.1 MHz at a centre of 435, without refusing, moving on
+    // any display, or saying anything. An operator retuned from broadcast FM
+    // on 2026-09-21 and found their receiver still making noise at a frequency
+    // they had not chosen. A receiver is a VFO and a VFO stays where it was
+    // put.
+    //
+    // SO A RETUNE MOVES THREE THINGS, AND CAN REMOVE RECEIVERS
+    //
+    // The device's oscillator, EngineInfo::source_center, and every receiver's
+    // baseband offset, recomputed to hold the absolute frequency it was tuned
+    // to. A receiver whose CENTRE then falls outside the new span is REMOVED
+    // rather than clamped or parked, because a receiver the front end cannot
+    // reach is not a receiver any more.
+    //
+    // The centre and not the passband, which are different by up to half a
+    // receiver's width at the span edges. The centre is the frequency somebody
+    // typed or clicked, so it is the one they would say the receiver is on. A
+    // receiver left half over the edge keeps running and sounds wrong, and both
+    // the passband highlight and the client's own fit sentence already say so.
+    //
+    // A client finds out the way it finds out about any receiver that has gone,
+    // through vrx_status refusing and its subscriptions ending. This call still
+    // answers with the centre the device took: the retune succeeded, and a
+    // receiver that could not come along is not a failed retune.
     //
     // WHAT IS DELIBERATELY NOT RESET, AND WHY THE RING IS THE EASY ONE
     //
@@ -1166,13 +1192,15 @@ public:
     //
     // WHAT IS RESET, AND IT IS NOT THE SAMPLES
     //
-    // Every receiver's tuning epoch. Nothing about a receiver's placement
-    // moves, but every sample it produces after the boundary came from a
-    // different front-end centre, and AudioChunk::tuning_epoch is exactly
-    // the marker a consumer that accumulates state about the transmitter it
-    // is hearing waits for. So this re-queues each receiver's own params,
-    // unchanged, which moves that receiver's epoch through the one path the
-    // graph already applies at a block boundary. The alternative was a
+    // Every receiver's tuning epoch. This sentence used to read "Nothing
+    // about a receiver's placement moves", and a receiver's offset does move
+    // now, for the reason the block above gives. The epoch argument is
+    // unchanged by that: every sample a receiver produces after the boundary
+    // came from a different front-end centre, and AudioChunk::tuning_epoch is
+    // exactly the marker a consumer that accumulates state about the
+    // transmitter it is hearing waits for. So this re-queues each receiver's
+    // params, now rebased, which moves that receiver's epoch through the one
+    // path the graph already applies at a block boundary. The alternative was a
     // second, source-level epoch beside it, which would leave a consumer
     // having to watch two numbers to answer one question.
     //

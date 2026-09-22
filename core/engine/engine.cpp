@@ -618,14 +618,16 @@ public:
         // move the emitters instead; a dongle says which ranges it reaches.
         // Three different things to do about it, and a message of this
         // layer's own would replace all three with a category.
+        // Read BEFORE the tune, because it is what every receiver's absolute
+        // frequency is measured against and the line below overwrites it.
+        const dsp::Hertz was = info_.source_center;
+
         auto landed = source_->tune(center);
         if (!landed) {
             return std::unexpected(with_context(landed.error(), "Engine::set_source_center"));
         }
 
-        // The one piece of engine state a retune moves. Everything else in
-        // the chain works in the source's baseband frame, which has not
-        // changed; see the note on Engine::set_source_center.
+        // The one piece of engine state a retune moves.
         info_.source_center = *landed;
 
         // And the marker on every receiver's stream, so a consumer that
@@ -640,17 +642,72 @@ public:
         // it was, which is the one thing that is certainly untrue. A
         // receiver that went away between the tune and this pass is the
         // ordinary case and is exactly what fails.
+        // A RECEIVER STAYS ON THE FREQUENCY IT WAS TUNED TO, AND IS REMOVED
+        // WHEN THE FRONT END CAN NO LONGER REACH IT.
+        //
+        // VrxParams::center is a BASEBAND offset, which is the only frame the
+        // grid has, so leaving it alone across a retune carried every receiver
+        // along with the span: one at +100 kHz was hearing 98.2 MHz at a centre
+        // of 98.1 and heard 435.1 MHz at a centre of 435. Reported by an
+        // operator on 2026-09-21, who retuned from broadcast FM and found the
+        // receiver still making noise at a frequency they had not chosen, and
+        // watched its highlight ride along at a fixed position in the span.
+        // That is not what a VFO does.
+        //
+        // So the offset is recomputed to hold the absolute frequency: what was
+        // `was + offset` before is the same number after, which means the new
+        // offset is the old one less however far the front end moved.
+        //
+        // OUTSIDE THE SPAN IS REMOVED, NOT CLAMPED AND NOT PARKED. The
+        // operator's own words for what they wanted to see were "disappearing
+        // VRX", and the test is the receiver's CENTRE rather than its passband:
+        // those differ by up to half a receiver's width at the edges, and the
+        // centre is the frequency somebody typed or clicked, so it is the one
+        // they would say the receiver "is on". A receiver half off the edge
+        // keeps running and sounds wrong, which the passband highlight and
+        // receiverFitText both already report.
+        //
+        // A failure to re-place is treated the same as being out of range,
+        // because it is: place() refuses a receiver the new grid cannot carry,
+        // and leaving it registered on a placement that no longer describes it
+        // would be a receiver producing audio from the wrong channel.
         if (graph_ != nullptr) {
+            const dsp::Hertz moved = *landed - was;
+            const dsp::Hertz half_span = static_cast<dsp::Hertz>(info_.source_rate / 2);
+
             for (const VrxId id : graph_->vrx_ids()) {
                 auto status = graph_->vrx_status(id);
                 if (!status) {
                     continue;
                 }
-                auto placement = place(info_.grid, info_.source_rate, status->params);
+
+                VrxParams repinned = status->params;
+                repinned.center = status->params.center - moved;
+
+                // Strictly outside. A receiver exactly on the Nyquist edge is
+                // reachable, and a half-open test would drop one that had been
+                // sitting there happily before anybody retuned.
+                const bool reachable =
+                    repinned.center >= -half_span && repinned.center <= half_span;
+
+                auto placement = reachable
+                                     ? place(info_.grid, info_.source_rate, repinned)
+                                     : Expected<VrxPlacement>{std::unexpected(
+                                           Error{"the receiver's centre is outside the new span"})};
                 if (!placement) {
+                    // Discarded for the reason the block above gives: the
+                    // device has already moved, and a client hears about the
+                    // receiver through vrx_status and its own subscriptions
+                    // rather than through this call's return.
+                    static_cast<void>(graph_->remove_vrx(id));
                     continue;
                 }
-                static_cast<void>(graph_->set_vrx_params(id, status->params, *placement));
+
+                // Re-queued rather than left alone even when the offset did not
+                // change, which is the epoch bump the declaration argues for:
+                // every sample after this boundary came from a different
+                // front-end centre.
+                static_cast<void>(graph_->set_vrx_params(id, repinned, *placement));
             }
         }
 
