@@ -1627,12 +1627,20 @@ public:
     // The band's excess in its strongest three adjacent bins over its excess
     // in total, or a negative number when there is nothing to report.
     //
-    // THE NUMBER THAT SAYS A BAND IS SHAPED LIKE A TRANSMISSION, which
-    // neither of the other two does. detectionMargin says how far it stood
-    // above the threshold and the bar above says how long it has been there;
-    // a raised patch of noise floor can score well on both. Measured on 20 m
-    // on 2026-09-22, an 11.7 kHz patch sitting at confidence 1.00 read 0.02
-    // here against 0.59 to 0.86 for the carriers beside it.
+    // THE NUMBER THAT SEPARATES A BAND THAT IS NEARLY ALL SIGNAL FROM ONE
+    // THAT IS NEARLY ALL FLOOR, which neither of the other two does.
+    // detectionMargin says how far it stood above the threshold and the bar
+    // above says how long it has been there; a raised patch of noise floor
+    // can score well on both. Measured on 20 m on 2026-09-22, an 11.7 kHz
+    // patch sitting at confidence 1.00 read 0.02 here against 0.59 to 0.86
+    // for the carriers beside it.
+    //
+    // THAT IS THE WHOLE CLAIM AND IT IS NOT AN INTERFERENCE TEST. Against the
+    // product scene, where a station and its own third-order products are in
+    // the same frames with truth known by construction, the stations read
+    // 0.079 and the products 0.033 while the artefacts elsewhere read 0.155:
+    // no bar separates them. core/detect/shape.h has the survey and the
+    // reason. A strong interferer can be perfectly concentrated.
     //
     // NEGATIVE FOR ABSENT AND ALSO FOR UNMEASURED, which is the difference
     // from detectionMargin and is deliberate. The wire carries shapeMeasured

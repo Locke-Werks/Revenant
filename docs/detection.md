@@ -1139,6 +1139,34 @@ it is.
 Nothing thresholds on it. `core/detect/shape.h` says why: what counts as high
 is a measurement against known truth, and that has not been made.
 
+**And it is not an interference test, which was checked rather than assumed.**
+The product scene is the one place in the tree where a station and its own
+third-order products appear in the same frames with truth known by
+construction. Concentration across it:
+
+| population | concentration | width |
+| --- | --- | --- |
+| parent stations | 0.079 | 2.8 kHz |
+| their products | 0.033 | 7.7 kHz |
+| artefacts elsewhere | **0.155** | 1.2 kHz |
+| parents, linear front end | 0.047 | 3.5 kHz |
+
+The population that is nothing at all reads highest, and a real station moves
+from 0.047 to 0.079 on nothing but whether the front end is linear. Any bar in
+that range keeps and drops both populations together.
+
+That is the same answer `peak_to_mean` gets on the same scene, and for the same
+reason: both are the band's power in its peak against its power in total, and
+they differ only in whether the width divides in. Where every population is a
+**filled** wideband band, both come down to how wide each one is.
+
+**It bounds the claim rather than retracting it.** On real HF the separation
+was not width alone: two bands of 809 Hz and 1210 Hz on the same span read 0.86
+and 0.28. What concentration separates is a band that is nearly all signal from
+a band that is nearly all floor, which is the complaint it was built for.
+Telling a station from its own intermod product is a different question and no
+field here answers it.
+
 #### So what a modulation-driven detector can stand on today
 
 - **`spectral_concentration` can carry a decision.** It is scale-free, it is

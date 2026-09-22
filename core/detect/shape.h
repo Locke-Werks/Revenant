@@ -101,6 +101,22 @@ struct BandShape {
     // counts as high is a measurement against known truth that has not been
     // made.
     //
+    // AND IT IS NOT AN INTERFERENCE TEST, which was measured rather than
+    // assumed and is the same answer peak_to_mean gets. Against the product
+    // scene, where a station and its own third-order products appear in the
+    // same frames with truth known by construction, the parents read 0.079,
+    // the products 0.033 and the artefacts elsewhere 0.155: the population
+    // that is nothing at all reads highest, and a real parent moves 0.047 to
+    // 0.079 on nothing but whether the front end is linear. The survey is in
+    // tests/detect/test_front_end.cpp.
+    //
+    // The reason is structural and it is why these two fields are not
+    // independent evidence. Both are the band's power in its peak against its
+    // power in total, differing in whether the width divides in, so on a scene
+    // where every population is a FILLED wideband band they both come down to
+    // how wide each one is. What concentration separates is a band that is
+    // nearly all signal from a band that is nearly all floor.
+    //
     // A BAND UNDER THREE BINS READS EXACTLY ONE and means nothing by it: every
     // bin it has is in the window. Check the width first, the same way
     // peak_to_mean's own note says to.

@@ -1084,6 +1084,36 @@ TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
     // one scene with one modulation cannot settle a threshold that has to hold
     // for AM, FM, SSB and CW.
     //
+    // CONCENTRATION WAS ADDED TO THIS SURVEY ON 2026-09-22 AND DOES NOT
+    // SEPARATE THESE POPULATIONS EITHER, which is worth keeping because it was
+    // added on the strength of a result that looked like it would.
+    //
+    //   parent          conc 0.079   width 2844 Hz
+    //   product         conc 0.033   width 7651 Hz
+    //   elsewhere       conc 0.155   width 1210 Hz
+    //   parent, linear  conc 0.047   width 3538 Hz
+    //
+    // The artefact population reads HIGHEST, above both the stations and their
+    // products, and a real parent moves from 0.047 to 0.079 on nothing but
+    // whether the front end is linear. A bar anywhere in that range keeps and
+    // drops both populations together.
+    //
+    // WHY, AND IT IS THE SAME REASON peak_to_mean FAILS HERE. Both are the
+    // band's power in its peak against the band's power in total; they differ
+    // in whether the width divides in. Every population in this scene is a
+    // FILLED wideband band, so all three read low and what is left ordering
+    // them is mostly how wide each one is.
+    //
+    // THIS DOES NOT RETRACT WHAT CONCENTRATION MEASURED ON REAL HF, where an
+    // 11.7 kHz patch of noise floor read 0.02 against 0.59 to 0.86 for the
+    // carriers beside it, and that separation was not width alone: two bands
+    // of 809 Hz and 1210 Hz on the same span read 0.86 and 0.28. It bounds the
+    // claim. Concentration separates a band that is nearly all signal from a
+    // band that is nearly all floor, which is the complaint it was built for.
+    // It does not separate a station from its own intermodulation product,
+    // both of those being real filled bands, and it must not ship as though it
+    // did. docs/detection.md carries both halves.
+    //
     // skirt_fraction is the other finding and it moves the other way. It is
     // flat across the two populations and rises on the PARENTS when the front
     // end is nonlinear, 0.028 linear to 0.111 through the cubic. That is
@@ -1098,6 +1128,7 @@ TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
     struct Tally {
         std::size_t count = 0;
         double peak_to_mean = 0.0;
+        double concentration = 0.0;
         double skirt = 0.0;
         double lower = 0.0;
         double snr = 0.0;
@@ -1108,6 +1139,7 @@ TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
         {
             ++count;
             peak_to_mean += candidate.shape.peak_to_mean;
+            concentration += candidate.shape.concentration;
             skirt += candidate.shape.skirt_fraction;
             lower += candidate.shape.lower_fraction;
             snr += candidate.snr_2500_db;
@@ -1126,7 +1158,8 @@ TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
             std::ostringstream out;
             out.setf(std::ios::fixed);
             out.precision(3);
-            out << count << " candidates, peak/mean " << peak_to_mean / n << ", skirt "
+            out << count << " candidates, peak/mean " << peak_to_mean / n << ", conc "
+                << concentration / n << ", skirt "
                 << skirt / n << ", lower " << lower / n << ", snr " << snr / n << " dB, width "
                 << bandwidth / n << " Hz, " << no_room << " with no room to look";
             return out.str();
