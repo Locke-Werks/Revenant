@@ -957,6 +957,7 @@ public:
     [[nodiscard]] Expected<std::int64_t> set_source_center(std::int64_t center_hz) override;
     [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override;
     [[nodiscard]] Status set_source_gain_auto(std::string_view stage, bool on) override;
+    [[nodiscard]] Expected<std::optional<SourceDescriptor>> source_descriptor() override;
     [[nodiscard]] Expected<SourceTuning> source_can_retune() override;
     [[nodiscard]] Status open_source(std::string_view uri) override;
     [[nodiscard]] Status close_source() override;
@@ -1426,6 +1427,18 @@ Status ClientImpl::set_source_gain_auto(std::string_view stage, bool on) {
         return std::unexpected(done.error());
     }
     return {};
+}
+
+Expected<std::optional<SourceDescriptor>> ClientImpl::source_descriptor() {
+    return on_loop("source_descriptor", [](LoopState& state) {
+        return state.session.sourceDescriptorRequest().send().then(
+            [](auto&& response) -> std::optional<SourceDescriptor> {
+                if (!response.getOpen()) {
+                    return std::nullopt;
+                }
+                return read_source_descriptor(response.getSource());
+            });
+    });
 }
 
 Expected<SourceTuning> ClientImpl::source_can_retune() {

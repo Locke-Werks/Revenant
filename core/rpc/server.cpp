@@ -1765,6 +1765,26 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> sourceDescriptor(SourceDescriptorContext context) override {
+        auto results = context.getResults();
+
+        // No source is a state and not a failure: a client polls through the
+        // window between engine start and the first openSource, and a refusal
+        // there would have it reporting a fault for an engine that is fine.
+        const bool open = owner_.engine().has_source();
+        results.setOpen(open);
+        if (!open) {
+            return kj::READY_NOW;
+        }
+
+        // The same writer listSources uses, on the capabilities the engine
+        // already holds for the source it opened. No device is touched: this is
+        // a read of what open_source already learned, which is the whole
+        // difference between this call and listSources.
+        write_source_descriptor(results.initSource(), owner_.engine().source_capabilities());
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> setSourceGain(SetSourceGainContext context) override {
         auto params = context.getParams();
         const capnp::Text::Reader stage = params.getStage();

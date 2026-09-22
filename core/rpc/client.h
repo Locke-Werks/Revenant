@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -117,19 +118,46 @@ public:
     // device actually took, which a synthesiser with a tuning step will
     // round.
     //
-    // THE RECEIVERS SURVIVE, AND SO DOES EVERYTHING ELSE. Until this
-    // existed, changing band meant restarting the engine process, which
-    // took the operator's receivers, the waterfall's history and the audio
-    // with it. Nothing here is torn down: a receiver's centre is a baseband
-    // offset, the grid does not know where the front end is pointed, and
-    // every subscription keeps running.
+    // A RECEIVER KEEPS ITS FREQUENCY, AND IS REMOVED IF THE FRONT END CANNOT
+    // REACH IT ANY MORE.
     //
-    // WHICH IS ALSO THE TRAP. A receiver stays where it is in baseband and
-    // is therefore now hearing a different piece of spectrum. A client with
-    // receivers open across a retune has to decide what it meant by each
-    // one and move it, and this call will not do that for it: there is no
-    // reading of "keep this receiver on 145.1 MHz" that is right for every
-    // client, and one imposed here would be wrong for a scanner.
+    // Until this call existed, changing band meant restarting the engine
+    // process, which took the operator's receivers, the waterfall's history
+    // and the audio with it. None of that happens; what does happen to a
+    // receiver changed on 2026-09-21.
+    //
+    // WHAT THESE TWO PARAGRAPHS USED TO SAY, AND IT IS NOW FALSE. Under the
+    // heading "THE RECEIVERS SURVIVE, AND SO DOES EVERYTHING ELSE" they read
+    // "Nothing here is torn down: a receiver's centre is a baseband offset,
+    // the grid does not know where the front end is pointed, and every
+    // subscription keeps running", and then "WHICH IS ALSO THE TRAP. A
+    // receiver stays where it is in baseband and is therefore now hearing a
+    // different piece of spectrum. A client with receivers open across a
+    // retune has to decide what it meant by each one and move it, and this
+    // call will not do that for it: there is no reading of 'keep this
+    // receiver on 145.1 MHz' that is right for every client, and one imposed
+    // here would be wrong for a scanner."
+    //
+    // The engine does it now. A receiver's offset is rebased to hold the
+    // absolute frequency it was tuned to, and one whose CENTRE falls outside
+    // the new span is removed. The reason the old behaviour was indefensible
+    // is that nothing announced it: an operator retuned from broadcast FM to
+    // 435 MHz and their receiver carried on making noise at a frequency they
+    // had never chosen, with its highlight sitting at the same place in the
+    // span.
+    //
+    // The scanner objection was real and was overruled rather than missed. A
+    // client that wants a receiver to follow the front end can add one at the
+    // new centre, which is one call and is explicit; a client that wanted the
+    // old behaviour could not tell it had happened. So the surprising case is
+    // the one that now needs asking for.
+    //
+    // A REMOVED RECEIVER IS NOT REPORTED THROUGH THIS CALL. It answers with
+    // the centre the device took, because the retune succeeded and a receiver
+    // that could not come along is not a failed retune. A client finds out the
+    // way it finds out about any receiver that has gone: vrx_status refuses
+    // and the subscriptions end. Check vrx_ids after a retune rather than
+    // assuming the set is unchanged.
     //
     // EVERY ABSOLUTE FREQUENCY THIS CLIENT IS HOLDING IS STALE WHEN THIS
     // RETURNS. Call info() again and use the new source_center rather than
@@ -164,6 +192,20 @@ public:
     // Hands the stage to the device's own AGC, or takes it back. Only offer it
     // where GainStage::has_auto says the device will do it.
     [[nodiscard]] virtual Status set_source_gain_auto(std::string_view stage, bool on) = 0;
+
+    // What the OPEN source can do, which is a different question from what
+    // list_sources answers.
+    //
+    // list_sources describes candidates and opens every device index to do it.
+    // This describes the one already open and touches no device, and it is the
+    // only way to learn a running source's gain stages, its flow control or its
+    // sample formats. A client that attached to an engine somebody else started
+    // with a URI has never seen a descriptor otherwise, which is what stopped
+    // it offering a gain control at all.
+    //
+    // Nothing when no source is open. That is a state to poll through and not
+    // a failure, so it is an empty optional rather than an error.
+    [[nodiscard]] virtual Expected<std::optional<SourceDescriptor>> source_descriptor() = 0;
 
     // Whether the call above will work, and over what range.
     //

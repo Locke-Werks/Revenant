@@ -2547,4 +2547,31 @@ interface Session {
     # Costs the same brief stop in the transfers setSourceGain does, on the
     # same hardware and for the same reason.
     setSourceGainAuto @21 (stage :Text, on :Bool) -> ();
+
+    # What the OPEN source can do, as opposed to what the devices on this
+    # machine can do.
+    #
+    # listSources describes candidates and opens every device to do it. This
+    # describes the one that is already open, costs no device access, and is the
+    # only way to learn a running source's gain stages, its flow control or its
+    # sample formats.
+    #
+    # WHY IT WAS NEEDED. A client drawing a gain control has to know the stage's
+    # name, its range and its discrete steps, and those live on
+    # SourceDescriptor::gainStages. A client that opened the source through
+    # listSources could remember them from the row it picked; a client that
+    # attached to an engine somebody else started with a URI on the command
+    # line, which is how revenant-engine is normally run, had never seen a
+    # descriptor at all and could not offer the control.
+    #
+    # `open` is false with no source, and the descriptor is then a default one
+    # rather than an error, because "nothing is open" is a state a client polls
+    # through rather than a call that failed.
+    #
+    # FlowControl comes back here too, and reading it is what stops a client
+    # misreporting a live radio. EngineInfo::sourcePacedBy is the setting that
+    # matters on a Demand source and is ignored entirely on a Paced one, so a
+    # client without this field told an operator their dongle was "paced at
+    # 1.00x on purpose" when the dongle had never looked at the setting.
+    sourceDescriptor @22 () -> (open :Bool, source :SourceDescriptor);
 }

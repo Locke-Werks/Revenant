@@ -1232,6 +1232,40 @@ TEST_CASE("a refused retune comes back in the source's own words", "[gpu][rpc][m
     CHECK(refused.error().message.find("span_low") != std::string::npos);
 }
 
+TEST_CASE("the open source describes itself without touching a device", "[gpu][rpc][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // THE QUESTION listSources CANNOT ANSWER. It describes candidates and opens
+    // every device index to do it; this describes the one already open. A
+    // client that attached to an engine somebody else started with a URI has
+    // never seen a descriptor, so before this call it could not know the
+    // source's gain stages, its flow control or its formats, and could not
+    // offer a gain control at all.
+    auto described = harness.client().source_descriptor();
+    INFO(test::message_of(described));
+    REQUIRE(described.has_value());
+    REQUIRE(described->has_value());
+
+    const rpc::SourceDescriptor& open = **described;
+    INFO("backend " << open.backend << ", " << open.gain_stages.size() << " gain stages");
+    CHECK(open.backend == "synthetic");
+
+    // FLOW CONTROL, which is the field a client has to read to report pacing
+    // honestly. A synthetic scene is Demand: its consumer sets the rate, so
+    // EngineInfo::sourcePacedBy is the setting that matters on it. On a Paced
+    // source that setting is ignored entirely, and a client without this field
+    // told an operator their dongle was "paced at 1.00x on purpose" when the
+    // dongle had never looked at the setting.
+    CHECK(open.flow == rpc::FlowControl::Demand);
+
+    // A synthetic scene has no amplifier to turn up, so it offers no stage and
+    // a client draws no gain control rather than one that always refuses.
+    CHECK(open.gain_stages.empty());
+}
+
 TEST_CASE("a refused gain change comes back in the source's own words", "[gpu][rpc][m2]") {
     REVENANT_NEEDS_GPU();
 
