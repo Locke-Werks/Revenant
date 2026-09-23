@@ -8,28 +8,40 @@
 // exists for: an hour of 20 MS/s is 288 gigabytes and there is no version of
 // this that buffers it.
 //
-// This file deliberately does not include channel.h. The channel simulator is
-// being written in parallel and its header is a moving target while this one
-// is compiled and checked, so the two are kept independent until integration.
-// Adding a `channel` subcommand later is a header include and one more branch
-// in run().
+// The rds and dv subcommands are the exceptions to streaming. An RDS payload
+// and a digital voice transmission are rendered whole by their transmitters
+// and are seconds long, so they are built in memory and written once. They
+// are also the two that take noise, through channel.h, because they exist to
+// produce a known bit sequence at a known Eb/N0 or SNR for a decoder to be
+// scored against.
+//
+// This comment used to say the file deliberately does not include channel.h
+// because the channel simulator was being written in parallel. It was
+// finished long ago, and the rds and dv subcommands include it.
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <format>
 #include <ios>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
 
+#include "core/decode/rds_bits.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
+#include "core/dsp/synth/channel.h"
+#include "core/dsp/synth/dv_mod.h"
 #include "core/dsp/synth/modulators.h"
+#include "core/dsp/synth/rds_mod.h"
 #include "core/dsp/synth/wfm_mod.h"
 #include "core/dsp/synth/wideband.h"
 
@@ -1067,6 +1079,337 @@ struct StationOptions {
 }
 
 // ---------------------------------------------------------------------------
+// RDS
+// ---------------------------------------------------------------------------
+
+// Writes the bits a decoder should recover, one '0' or '1' per bit on a single
+// line, so a measurement against this file has its ground truth beside it.
+[[nodiscard]] Status write_bits(const std::string& path, const std::vector<std::uint8_t>& bits)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return fail(std::format("cannot open '{}' for writing", path));
+    }
+    std::string text(bits.size(), '0');
+    for (std::size_t i = 0; i < bits.size(); ++i) {
+        text[i] = bits[i] != 0 ? '1' : '0';
+    }
+    text += '\n';
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    out.flush();
+    if (!out) {
+        return fail(std::format("failed to write '{}'", path));
+    }
+    return {};
+}
+
+// The RDS composite on its own: pilot, programme tone and the 57 kHz
+// subcarrier, REAL and at the composite rate, which is what
+// core/decode/rds_bits.h reads. Not complex baseband, so not cf32: it is
+// written as raw little-endian float32, one sample per value, 1.0 being
+// 75 kHz of deviation. The wfm subcommand is the same station modulated onto
+// a carrier.
+[[nodiscard]] Status run_rds(Options& options)
+{
+    auto out_path = options.text("out", "");
+    auto rate = options.integer("rate", 171000);
+    auto bit_count = options.integer("bits", 4096);
+    auto seed = options.integer("seed", 0);
+    auto rds_deviation = options.integer("rds-deviation", 2000);
+    auto pilot_deviation = options.integer("pilot-deviation", 6750);
+    auto mono_tone = options.integer("mono-tone", 1000);
+    auto mono_deviation = options.integer("mono-deviation", 40000);
+    auto subcarrier_phase = options.real("subcarrier-phase", 0.0);
+    auto clock_error = options.real("clock-error-ppm", 0.0);
+    auto ebn0 = options.text("ebn0", "");
+    auto bits_out = options.text("bits-out", "");
+    const bool no_pilot = options.flag("no-pilot");
+
+    if (!out_path) { return std::unexpected(out_path.error()); }
+    if (!rate) { return std::unexpected(rate.error()); }
+    if (!bit_count) { return std::unexpected(bit_count.error()); }
+    if (!seed) { return std::unexpected(seed.error()); }
+    if (!rds_deviation) { return std::unexpected(rds_deviation.error()); }
+    if (!pilot_deviation) { return std::unexpected(pilot_deviation.error()); }
+    if (!mono_tone) { return std::unexpected(mono_tone.error()); }
+    if (!mono_deviation) { return std::unexpected(mono_deviation.error()); }
+    if (!subcarrier_phase) { return std::unexpected(subcarrier_phase.error()); }
+    if (!clock_error) { return std::unexpected(clock_error.error()); }
+    if (!ebn0) { return std::unexpected(ebn0.error()); }
+    if (!bits_out) { return std::unexpected(bits_out.error()); }
+    if (out_path->empty()) { return fail("--out is required"); }
+    if (*bit_count <= 0) { return fail("--bits must be positive"); }
+
+    if (auto clean = options.reject_unused(); !clean) {
+        return clean;
+    }
+
+    siggen::RdsModSpec spec;
+    spec.rate = *rate;
+    spec.pilot_enabled = !no_pilot;
+    spec.pilot_deviation_hz = *pilot_deviation;
+    spec.rds_deviation_hz = *rds_deviation;
+    spec.subcarrier_phase_radians = *subcarrier_phase;
+    spec.mono_tone_hz = *mono_tone;
+    spec.mono_deviation_hz = *mono_deviation;
+    spec.clock_error_ppm = *clock_error;
+    spec.bits = siggen::random_bits(static_cast<std::size_t>(*bit_count), static_cast<std::uint64_t>(*seed));
+
+    auto composite = siggen::generate_rds(spec);
+    if (!composite) {
+        return std::unexpected(with_context(composite.error(), "siggen rds"));
+    }
+
+    std::optional<siggen::RdsNoiseReport> noise;
+    if (!ebn0->empty()) {
+        double level_db = 0.0;
+        const char* begin = ebn0->data();
+        const char* end = begin + ebn0->size();
+        const auto parsed = std::from_chars(begin, end, level_db);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return fail(std::format("--ebn0 '{}' is not a number", *ebn0));
+        }
+        // Calibrated against the RDS component's power and the information
+        // rate, per docs/snr-convention.md, so the figure is the one the BER
+        // literature and tools/bench's rds mode both use.
+        auto report = siggen::add_real_awgn(
+            dsp::RealSpan(composite->samples), composite->rds_mean_power,
+            siggen::NoiseLevel::eb_over_n0_db(level_db, revenant::decode::kBitRateHz), spec.rate,
+            siggen::derive_seed(static_cast<std::uint64_t>(*seed), 0x5244'534E));
+        if (!report) {
+            return std::unexpected(with_context(report.error(), "siggen rds noise"));
+        }
+        noise = *report;
+    }
+
+    std::ofstream stream(*out_path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        return fail(std::format("cannot open '{}' for writing", *out_path));
+    }
+    stream.write(reinterpret_cast<const char*>(composite->samples.data()),
+                 static_cast<std::streamsize>(composite->samples.size() * sizeof(float)));
+    stream.flush();
+    if (!stream) {
+        return fail(std::format("failed to write '{}'", *out_path));
+    }
+    if (!bits_out->empty()) {
+        if (auto written = write_bits(*bits_out, composite->data_bits); !written) {
+            return written;
+        }
+    }
+
+    std::print("rds composite at {} S/s, real float32\n", spec.rate);
+    std::print("  data bits         {} from seed {}, {:.1f} bit/s\n", composite->data_bits.size(), *seed,
+               composite->bit_rate_hz);
+    std::print("  injection         {} Hz of deviation at 57 kHz, pilot {}\n", spec.rds_deviation_hz,
+               spec.pilot_enabled ? std::format("{} Hz", spec.pilot_deviation_hz) : std::string("off"));
+    std::print("  rds mean power    {:.6g} (the figure noise is calibrated against)\n",
+               composite->rds_mean_power);
+    if (noise) {
+        std::print("  noise             Eb/N0 {:.2f} dB, SNR {:.2f} dB in {} Hz\n", noise->eb_over_n0_db,
+                   noise->snr_in_reference_bandwidth_db, noise->reference_bandwidth_hz);
+    } else {
+        std::print("  noise             none\n");
+    }
+    std::print("  samples written   {}\n", composite->samples.size());
+    std::print("  wrote             {}\n", *out_path);
+    if (!bits_out->empty()) {
+        std::print("  bits              {}\n", *bits_out);
+    }
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Digital voice
+// ---------------------------------------------------------------------------
+
+// A PRBS for payload the transmitters carry but this project cannot
+// synthesise, the D-STAR AMBE slots. The same generator the D-STAR round trip
+// test uses, so a capture made here is one that test has the shape of.
+std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_frames(std::size_t count,
+                                                                                     std::uint64_t seed)
+{
+    std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> out(count);
+    std::uint64_t state = seed;
+    for (auto& frame : out) {
+        for (std::uint8_t& bit : frame) {
+            state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+            bit = static_cast<std::uint8_t>((state >> 40U) & 1ULL);
+        }
+    }
+    return out;
+}
+
+[[nodiscard]] Expected<std::vector<Complex32>> render_dv(std::string_view mode, SampleRate rate,
+                                                         std::int64_t frames, std::uint64_t seed,
+                                                         std::int64_t talkgroup, std::string& summary)
+{
+    namespace decode = revenant::decode;
+
+    if (mode == "p25p1") {
+        // TIA-102.BAAA-A clause 10.2: a Header Data Unit and terminator,
+        // unencrypted, repeated. A receiver loses the tail of a capture to
+        // its filter and timing window, so each copy is what lets the one
+        // before it decode, which is the arrangement test_p25p1.cpp uses.
+        siggen::P25HeaderMessage message;
+        message.header.algorithm_id = decode::kP25AlgidUnencrypted;
+        message.header.talkgroup_id = static_cast<std::uint16_t>(talkgroup);
+        auto dibits = siggen::p25_header_message_dibits(message);
+        if (!dibits) {
+            return std::unexpected(dibits.error());
+        }
+        std::vector<std::uint8_t> stream;
+        for (std::int64_t i = 0; i < frames; ++i) {
+            stream.insert(stream.end(), dibits->begin(), dibits->end());
+        }
+        siggen::P25ModConfig config;
+        config.rate = rate;
+        summary = std::format("{} header data units and terminators, NAC 0x{:03X}, talkgroup {}", frames,
+                              message.network_access_code, talkgroup);
+        return siggen::p25_render_dibits(config, stream);
+    }
+
+    if (mode == "dstar") {
+        // JARL clause 4.1.1: header and voice frames, the AMBE slots a PRBS.
+        siggen::DStarMessage message;
+        message.header.flag1 = 0b0100'0000;
+        message.header.destination_repeater = "DIRECT";
+        message.header.departure_repeater = "DIRECT";
+        message.header.companion = "CQCQCQ";
+        message.header.own_callsign = "N0CALL";
+        message.header.own_suffix = "SGEN";
+        message.voice_frames = voice_frames(static_cast<std::size_t>(frames), seed);
+        siggen::DStarModConfig config;
+        config.rate = rate;
+        summary = std::format("header and {} voice frames from seed {}, own callsign {}", frames, seed,
+                              message.header.own_callsign);
+        return siggen::dstar_render(config, message);
+    }
+
+    if (mode == "tetra") {
+        // EN 300 392-2 clause 9.4.4.2.6: synchronisation bursts, one per TDMA
+        // frame, with the frame number counting 1 to 18 as a cell's would.
+        decode::TetraSyncPdu pdu;
+        pdu.system_code = 0b0011;
+        pdu.colour_code = 37;
+        pdu.multiframe_number = 1;
+        pdu.mobile_country_code = 234;
+        pdu.mobile_network_code = 1'234;
+        std::vector<std::uint8_t> bits;
+        for (std::int64_t i = 0; i < frames; ++i) {
+            pdu.frame_number = static_cast<std::uint8_t>(1 + i % 18);
+            auto burst = siggen::tetra_sync_burst_bits(pdu, siggen::derive_seed(seed, static_cast<std::uint64_t>(i)));
+            if (!burst) {
+                return std::unexpected(burst.error());
+            }
+            bits.insert(bits.end(), burst->begin(), burst->end());
+        }
+        siggen::TetraModConfig config;
+        config.rate = rate;
+        summary = std::format("{} synchronisation bursts, colour code {}, MCC {} MNC {}", frames, pdu.colour_code,
+                              pdu.mobile_country_code, pdu.mobile_network_code);
+        return siggen::tetra_render_bits(config, bits);
+    }
+
+    return fail(std::format("unknown --mode '{}', expected p25p1, dstar or tetra", mode));
+}
+
+[[nodiscard]] Status run_dv(Options& options)
+{
+    auto mode = options.text("mode", "");
+    if (!mode) {
+        return std::unexpected(mode.error());
+    }
+    // The symbol rates differ, so the default sample rate follows the mode:
+    // 48000 carries P25's 4800 baud and D-STAR's 4800 bit/s at ten samples
+    // each, and 72000 is TETRA's 18000 baud at four.
+    const SampleRate default_rate = (*mode == "tetra") ? 72000 : 48000;
+
+    auto out_path = options.text("out", "");
+    auto rate = options.integer("rate", default_rate);
+    auto frames = options.integer("frames", 4);
+    auto seed = options.integer("seed", 0);
+    auto talkgroup = options.integer("talkgroup", 0x2A7);
+    auto snr = options.text("snr", "");
+    auto format = options.text("format", "cf32");
+    auto scale = options.real("scale", 1.0);
+
+    if (!out_path) { return std::unexpected(out_path.error()); }
+    if (!rate) { return std::unexpected(rate.error()); }
+    if (!frames) { return std::unexpected(frames.error()); }
+    if (!seed) { return std::unexpected(seed.error()); }
+    if (!talkgroup) { return std::unexpected(talkgroup.error()); }
+    if (!snr) { return std::unexpected(snr.error()); }
+    if (!format) { return std::unexpected(format.error()); }
+    if (!scale) { return std::unexpected(scale.error()); }
+    if (mode->empty()) { return fail("--mode is required: p25p1, dstar or tetra"); }
+    if (out_path->empty()) { return fail("--out is required"); }
+    if (*frames <= 0) { return fail("--frames must be positive"); }
+    if (*talkgroup < 0 || *talkgroup > 0xFFFF) { return fail("--talkgroup must fit in 16 bits"); }
+    if (!std::isfinite(*scale) || *scale <= 0.0) { return fail("--scale must be positive"); }
+
+    auto parsed_format = format_from_name(*format);
+    if (!parsed_format) {
+        return std::unexpected(parsed_format.error());
+    }
+
+    if (auto clean = options.reject_unused(); !clean) {
+        return clean;
+    }
+
+    std::string summary;
+    auto samples = render_dv(*mode, *rate, *frames, static_cast<std::uint64_t>(*seed), *talkgroup, summary);
+    if (!samples) {
+        return std::unexpected(with_context(samples.error(), std::format("siggen dv {}", *mode)));
+    }
+
+    std::optional<siggen::NoiseReport> noise;
+    if (!snr->empty()) {
+        double level_db = 0.0;
+        const char* begin = snr->data();
+        const char* end = begin + snr->size();
+        const auto parsed = std::from_chars(begin, end, level_db);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return fail(std::format("--snr '{}' is not a number", *snr));
+        }
+        // In 2500 Hz, the reference bandwidth docs/snr-convention.md sets for
+        // every figure this project reports that is not an Eb/N0.
+        auto report = siggen::add_awgn(dsp::ComplexSpan(*samples), siggen::NoiseLevel::snr_in_2500_hz_db(level_db),
+                                       *rate, siggen::derive_seed(static_cast<std::uint64_t>(*seed), 0x4456'4E00));
+        if (!report) {
+            return std::unexpected(with_context(report.error(), "siggen dv noise"));
+        }
+        noise = *report;
+    }
+
+    auto stream = open_output(*out_path);
+    if (!stream) {
+        return std::unexpected(stream.error());
+    }
+    Writer writer(*stream, *parsed_format, *scale);
+    if (auto written = writer.consume(ConstComplexSpan(*samples)); !written) {
+        return written;
+    }
+    stream->flush();
+    if (!*stream) {
+        return fail(std::format("failed to flush '{}'", *out_path));
+    }
+
+    std::print("{} at {} S/s\n", *mode, *rate);
+    std::print("  transmission      {}\n", summary);
+    if (noise) {
+        std::print("  noise             SNR {:.2f} dB in {} Hz, {:.2f} dB full band\n",
+                   noise->snr_in_reference_bandwidth_db, noise->reference_bandwidth_hz,
+                   noise->snr_in_full_band_db);
+    } else {
+        std::print("  noise             none\n");
+    }
+    report_buffer(writer, *scale);
+    std::print("  wrote             {}\n", *out_path);
+    return {};
+}
+
+// ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
 
@@ -1080,6 +1423,8 @@ void print_usage()
         "Modes:\n"
         "  cw am nfm usb lsb fsk2 bpsk qpsk   one emitter, streamed to a file\n"
         "  wfm                                a broadcast FM station carrying RDS\n"
+        "  rds                                the RDS composite alone, real float32\n"
+        "  dv                                 P25 Phase 1, D-STAR or TETRA, whole\n"
         "  wideband                           a populated scene with ground truth\n"
         "  modes                              list the mode names\n"
         "\n"
@@ -1113,6 +1458,21 @@ void print_usage()
         "                    The default rate is 684000, four times what the RDS\n"
         "                    decoder wants and enough to carry the whole station.\n"
         "\n"
+        "  rds               --out PATH --rate N (171000) --bits N (4096) --seed N\n"
+        "                    --rds-deviation N --pilot-deviation N --no-pilot\n"
+        "                    --mono-tone N --mono-deviation N --subcarrier-phase X\n"
+        "                    --clock-error-ppm X --ebn0 X --bits-out PATH\n"
+        "                    Writes raw float32, not IQ: the composite is real, and\n"
+        "                    is what core/decode/rds_bits.h reads. --ebn0 adds noise\n"
+        "                    at that Eb/N0 against the 1187.5 bit/s data rate, and\n"
+        "                    --bits-out writes the data bits as a line of 0s and 1s.\n"
+        "\n"
+        "  dv                --mode p25p1|dstar|tetra --out PATH --frames N (4)\n"
+        "                    --rate N (48000, 72000 for tetra) --seed N\n"
+        "                    --talkgroup N (p25p1) --snr X --format F --scale X\n"
+        "                    From core/dsp/synth/dv_mod.h. --snr adds noise at that\n"
+        "                    SNR in 2500 Hz.\n"
+        "\n"
         "  wideband          --emitters N --bursts N --span-low N --span-high N\n"
         "                    --noise-dbfs X --no-noise --snr-min X --snr-max X\n"
         "                    --min-burst S --max-burst S --modes a,b,c\n"
@@ -1143,6 +1503,12 @@ void print_usage()
     }
     if (command == "wfm") {
         return run_wfm(*options);
+    }
+    if (command == "rds") {
+        return run_rds(*options);
+    }
+    if (command == "dv") {
+        return run_dv(*options);
     }
 
     auto kind = siggen::modulation_from_name(command);
