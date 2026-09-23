@@ -908,6 +908,39 @@ mutilated; DSC, which reuses the discriminator and has not been written; and
 the meaning of NAVTEX's B1 and B2 letters, which is in the IMO NAVTEX Manual,
 not held, so they are reported as the letters sent.
 
+**PSK31, PSK63 and QPSK31, receiver audio to text.** `core/decode/psk31.cpp`,
+with the alphabet in `core/decode/varicode.cpp` and the mixer and carrier
+search it shares with CW in `core/decode/tone_frontend.cpp`. It reads the real
+audio a USB demodulator hands to `attach_audio_sink`, at any audio rate, so the
+Demod enum does not grow. Written from G3PLX's article as reprinted in QEX
+July/August 1999, whose Table 1 is the Varicode source; PSK63's symbol rate is
+cited to Wavecom's decoder documentation because the article predates it.
+
+What comes out is text, each character placed at the audio sample where its
+first bit was decided, plus the measured carrier offset. The AFC captures a
+tone up to 40 Hz either side of the configured centre by squaring the signal,
+or raising it to the fourth for QPSK, over the first two seconds; it will not
+acquire on noise, whose best line measured 3.9 against a threshold of 6.
+QPSK31 decodes through `core/decode/dv_codes.cpp`'s Viterbi decoder: the
+article's 32-entry phase table is reproduced exactly by a K=5 code with
+generators D+D^2+D^3 and 1+D^3+D^4, read as the in-phase and quadrature signs
+of the phase shift advanced by 45 degrees, and the test regenerates all 32
+entries and the article's worked example from those two polynomials.
+
+Measured over 600 characters at 48 kHz, signal to noise in 2500 Hz of audio:
+BPSK31 has a bit error rate of 2.5e-3 at -10 dB, QPSK31 2.8e-2 at -12 dB and
+PSK63 4.0e-3 at -7 dB, with no errors at +10 dB in any of the three. Against
+differential BPSK theory that is about 2 dB of implementation loss, most of it
+the sixth of each neighbour a matched filter leaves on a two-symbol pulse.
+`core/dsp/synth/psk31_mod.cpp` is the transmitter and `tests/decode/test_psk31.cpp`
+the round trips, at 48 kHz and 11025 Hz with the tone 12 and 27 Hz off centre.
+
+Two things it does not do. The extended alphabet of codes longer than ten bits
+is reported as unrecognised rather than decoded, which is what the article says
+early decoders do. And arrl.org/psk31-spec, the HTML copy of the same table,
+has three errors that make two pairs of characters indistinguishable, so it
+must not be used as a source; `core/decode/varicode.h` lists them.
+
 ## What would change the list
 
 **A patent expiring.** The dated rows are in the patent exclusion table.
