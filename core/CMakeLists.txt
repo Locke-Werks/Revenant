@@ -55,6 +55,20 @@ find_package(rtlsdr CONFIG REQUIRED)
 # and the first sign of it would be a link error somewhere unrelated or,
 # worse, nothing at all. A missing source is now a broken build, which is
 # what it is.
+# The machine-wide device lock, source/device_lock.h. Its own small library
+# rather than a file in revenant_core so a tool that opens hardware without the
+# engine, tools/devicespike, takes the same lock without linking Vulkan and the
+# rest of the engine to get it. advapi32 carries the security descriptor calls.
+add_library(revenant_device_lock STATIC
+    source/device_lock.cpp
+)
+target_include_directories(revenant_device_lock PUBLIC "${CMAKE_SOURCE_DIR}")
+target_link_libraries(revenant_device_lock PUBLIC Threads::Threads)
+if(WIN32)
+    target_link_libraries(revenant_device_lock PRIVATE advapi32)
+endif()
+revenant_apply_warnings(revenant_device_lock)
+
 add_library(revenant_core STATIC
     characterise/catalogue.cpp
     characterise/characterise.cpp
@@ -137,6 +151,7 @@ target_link_libraries(revenant_core PUBLIC
     Vulkan::Vulkan
     GPUOpen::VulkanMemoryAllocator
     Threads::Threads
+    revenant_device_lock
 )
 
 # WIN32 only, because the Linux and macOS audio backends arrive later and

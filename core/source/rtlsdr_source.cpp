@@ -395,7 +395,11 @@ private:
     return {};
 }
 
-[[nodiscard]] Expected<std::uint32_t> resolve_index(const RtlSdrSourceConfig& config)
+// Everything about finding the device that can be answered without opening
+// one, which is why it runs before the machine-wide lock is taken: a URI naming
+// a dongle that is not there fails at once with the reason, rather than after
+// waiting out somebody else's stream to be told the same thing.
+[[nodiscard]] Status check_attached(const RtlSdrSourceConfig& config)
 {
     const std::uint32_t attached = rtlsdr_get_device_count();
     if (attached == 0) {
@@ -404,15 +408,24 @@ private:
                     "driver rather than to WinUSB.");
     }
 
+    if (!config.by_serial && config.index >= attached) {
+        return fail(std::format(
+            "there is no RTL-SDR at index {}: {} attached, so the indices run 0 to {}",
+            config.index, attached, attached - 1));
+    }
+    return {};
+}
+
+// UNDER THE LOCK ONLY. A serial is looked up by rtlsdr_get_index_by_serial,
+// which opens every attached dongle in turn to read its string descriptors, so
+// it is as much an open as rtlsdr_open is.
+[[nodiscard]] Expected<std::uint32_t> resolve_index(const RtlSdrSourceConfig& config)
+{
     if (!config.by_serial) {
-        if (config.index >= attached) {
-            return fail(std::format(
-                "there is no RTL-SDR at index {}: {} attached, so the indices run 0 to {}",
-                config.index, attached, attached - 1));
-        }
         return config.index;
     }
 
+    const std::uint32_t attached = rtlsdr_get_device_count();
     const int found = rtlsdr_get_index_by_serial(config.serial.c_str());
     if (found >= 0) {
         return static_cast<std::uint32_t>(found);
@@ -442,6 +455,27 @@ private:
             rc);
     }
     return Device(handle);
+}
+
+struct OpenedDevice {
+    std::uint32_t index = 0;
+    Device device{};
+};
+
+// The part of an open or a describe that touches the device. Always called
+// through open_under_lock or probe_under_lock, which is what makes the lock
+// come first on every path here.
+[[nodiscard]] Expected<OpenedDevice> find_and_open(const RtlSdrSourceConfig& config)
+{
+    auto index = resolve_index(config);
+    if (!index) {
+        return std::unexpected(std::move(index.error()));
+    }
+    auto device = open_device(*index);
+    if (!device) {
+        return std::unexpected(std::move(device.error()));
+    }
+    return OpenedDevice{*index, std::move(*device)};
 }
 
 // The tuner's gain table, in tenths of a decibel, ascending.
@@ -557,7 +591,7 @@ public:
     RtlSdrSource() = default;
     ~RtlSdrSource() override;
 
-    [[nodiscard]] Status open(const RtlSdrSourceConfig& config, Device device,
+    [[nodiscard]] Status open(const RtlSdrSourceConfig& config, DeviceLock lock, Device device,
                               SourceCapabilities caps, std::vector<int> gain_steps,
                               dsp::SampleRate rate, dsp::Hertz center);
 
@@ -733,6 +767,12 @@ private:
     [[nodiscard]] Expected<ClockModel> make_clock_model() const;
 
     SourceCapabilities caps_{};
+
+    // The machine-wide lock, held for as long as this source exists, which is
+    // the whole of the device's open life. Declared before device_ so it is
+    // destroyed after it: the handle closes first and only then may another
+    // process open the dongle.
+    DeviceLock lock_{};
     Device device_{};
     std::vector<int> gain_steps_{};
     bool ppm_given_ = false;
@@ -810,10 +850,12 @@ RtlSdrSource::~RtlSdrSource()
     join_locked();
 }
 
-Status RtlSdrSource::open(const RtlSdrSourceConfig& config, Device device, SourceCapabilities caps,
-                          std::vector<int> gain_steps, dsp::SampleRate rate, dsp::Hertz center)
+Status RtlSdrSource::open(const RtlSdrSourceConfig& config, DeviceLock lock, Device device,
+                          SourceCapabilities caps, std::vector<int> gain_steps,
+                          dsp::SampleRate rate, dsp::Hertz center)
 {
     caps_ = std::move(caps);
+    lock_ = std::move(lock);
     device_ = std::move(device);
     gain_steps_ = std::move(gain_steps);
     ppm_given_ = config.ppm_given;
@@ -1953,22 +1995,24 @@ Expected<SourceCapabilities> describe_rtlsdr_source(const RtlSdrSourceConfig& co
     if (auto ok = validate(config); !ok) {
         return std::unexpected(ok.error());
     }
-
-    auto index = resolve_index(config);
-    if (!index) {
-        return std::unexpected(index.error());
+    if (auto present = check_attached(config); !present) {
+        return std::unexpected(present.error());
     }
 
-    auto device = open_device(*index);
-    if (!device) {
-        return std::unexpected(device.error());
+    // Released when this returns, the device first and then the lock.
+    auto opened =
+        probe_under_lock(rtlsdr_lock_policy(), [&config] { return find_and_open(config); });
+    if (!opened) {
+        return std::unexpected(opened.error());
     }
+    const std::uint32_t index = opened->handle.index;
+    rtlsdr_dev_t* const device = opened->handle.device.get();
 
-    const char* name = rtlsdr_get_device_name(*index);
-    const rtlsdr_tuner tuner = rtlsdr_get_tuner_type(device->get());
-    const std::vector<int> gain_steps = gain_steps_of(device->get());
+    const char* name = rtlsdr_get_device_name(index);
+    const rtlsdr_tuner tuner = rtlsdr_get_tuner_type(device);
+    const std::vector<int> gain_steps = gain_steps_of(device);
 
-    return capabilities_of(config, *index,
+    return capabilities_of(config, index,
                            (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner,
                            gain_steps);
 }
@@ -1978,34 +2022,38 @@ Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& c
     if (auto ok = validate(config); !ok) {
         return std::unexpected(ok.error());
     }
-
-    auto index = resolve_index(config);
-    if (!index) {
-        return std::unexpected(index.error());
+    if (auto present = check_attached(config); !present) {
+        return std::unexpected(present.error());
     }
 
-    auto device = open_device(*index);
-    if (!device) {
-        return std::unexpected(device.error());
+    // Every return below that is not the source itself drops `opened`, which
+    // closes the device and then lets go of the lock, in that order.
+    auto opened =
+        open_under_lock(rtlsdr_lock_policy(), [&config] { return find_and_open(config); });
+    if (!opened) {
+        return std::unexpected(opened.error());
     }
+    const std::uint32_t index = opened->handle.index;
+    rtlsdr_dev_t* const device = opened->handle.device.get();
 
-    const char* name = rtlsdr_get_device_name(*index);
-    const rtlsdr_tuner tuner = rtlsdr_get_tuner_type(device->get());
-    std::vector<int> gain_steps = gain_steps_of(device->get());
+    const char* name = rtlsdr_get_device_name(index);
+    const rtlsdr_tuner tuner = rtlsdr_get_tuner_type(device);
+    std::vector<int> gain_steps = gain_steps_of(device);
 
     SourceCapabilities caps = capabilities_of(
-        config, *index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps);
+        config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps);
 
-    auto applied = configure(device->get(), config, gain_steps, caps.tune_ranges);
+    auto applied = configure(device, config, gain_steps, caps.tune_ranges);
     if (!applied) {
         return std::unexpected(with_context(applied.error(), caps.display_name));
     }
 
     auto source = std::make_unique<RtlSdrSource>();
-    if (auto opened = source->open(config, std::move(*device), std::move(caps),
-                                   std::move(gain_steps), applied->rate, applied->center);
-        !opened) {
-        return std::unexpected(opened.error());
+    if (auto started = source->open(config, std::move(opened->lock),
+                                    std::move(opened->handle.device), std::move(caps),
+                                    std::move(gain_steps), applied->rate, applied->center);
+        !started) {
+        return std::unexpected(started.error());
     }
     return std::unique_ptr<Source>(std::move(source));
 }

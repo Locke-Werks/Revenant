@@ -30,7 +30,10 @@ if(NOT TARGET libusb::libusb)
 endif()
 
 add_executable(devicespike main.cpp)
-target_link_libraries(devicespike PRIVATE libusb::libusb)
+# revenant_device_lock and nothing else of the engine: it opens the dongle, so
+# it takes the machine-wide lock every other opener takes. See
+# core/source/rtlsdr_lock.h.
+target_link_libraries(devicespike PRIVATE libusb::libusb revenant_device_lock)
 target_include_directories(devicespike PRIVATE "${CMAKE_SOURCE_DIR}")
 revenant_apply_warnings(devicespike)
 revenant_embed_version(devicespike DESCRIPTION "Revenant device path spike")

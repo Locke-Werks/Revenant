@@ -46,6 +46,7 @@
 #include "core/dsp/types.h"
 #include "core/error.h"
 #include "core/source/capabilities.h"
+#include "core/source/rtlsdr_lock.h"
 #include "core/source/source.h"
 
 namespace revenant::source {
@@ -171,8 +172,19 @@ struct RtlSdrDevice {
 // capability set with the tuner-dependent parts left empty. A GUI that reads
 // an empty gain table has no way to tell "this tuner has no gain stages" from
 // "nobody could ask".
+//
+// Takes kRtlSdrLockName without waiting. When another process holds it the
+// device is not opened at all and the failure opens with kProbeHeldElsewhere,
+// "in use by another Revenant process", which a listing shows as the row's
+// reason. A picker that waited here would freeze for as long as somebody
+// else's stream ran.
 [[nodiscard]] Expected<SourceCapabilities> describe_rtlsdr_source(const RtlSdrSourceConfig& config);
 
+// Takes kRtlSdrLockName, waiting up to kRtlSdrOpenWait for another process to
+// let go, and holds it until the source is destroyed: for the whole of the
+// device's open life, streaming or not, and not only across rtlsdr_open. A
+// timeout fails with an Error naming the lock and saying another process holds
+// the dongle, and the device is never touched.
 [[nodiscard]] Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& config);
 
 // The hardware's two sample-rate windows, as rtl-sdr.h documents them. Public

@@ -1087,6 +1087,12 @@ Expected<std::vector<SourceCapabilities>> describe_sources()
     //
     // So a description that could not be completed comes back marked rather
     // than thrown away, carrying what enumeration alone established.
+    //
+    // A dongle another Revenant process holds is now known to be held before
+    // anything opens it: describe_rtlsdr_source asks for the machine-wide lock
+    // without waiting and reports "in use by another Revenant process" when it
+    // is taken. So a listing never waits on somebody else's stream and never
+    // opens a device under it.
     std::vector<SourceCapabilities> out;
     out.reserve(listed->size());
     for (const SourceDescriptor& descriptor : *listed) {

@@ -54,6 +54,8 @@
 #include <print>
 #include <string>
 
+#include "core/source/rtlsdr_lock.h"
+
 namespace {
 
 // Realtek's vendor id and the RTL2832U's product id, as they appear on the USB
@@ -165,6 +167,19 @@ int main() {
 
     std::println("found {:04x}:{:04x} on bus {} address {}", kRealtekVendorId, kRtl2832uProductId,
                  libusb_get_bus_number(target), libusb_get_device_address(target));
+
+    // The same machine-wide lock the engine takes, held until the end of main,
+    // so this never claims the interface out from under a stream or a test.
+    // Taken after the descriptor scan because nothing above opens the device,
+    // and a diagnostic that refused to list anything while a stream ran would
+    // be refusing exactly when somebody wants to know what is attached.
+    auto lock = revenant::source::lock_for_open(revenant::source::rtlsdr_lock_policy());
+    if (!lock) {
+        std::println(stderr, "{}", lock.error().message);
+        libusb_free_device_list(devices, 1);
+        libusb_exit(context);
+        return 1;
+    }
 
     libusb_device_handle* handle = nullptr;
     result = libusb_open(target, &handle);
