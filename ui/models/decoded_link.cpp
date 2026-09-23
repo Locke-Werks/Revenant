@@ -293,8 +293,7 @@ void EngineLink::forget_decoded()
     // subscription with it.
     live_decoded_.clear();
     live_decoded_vrx_ = 0;
-    decode_ended_vrx_ = 0;
-    work_decode_ended_.clear();
+    decode_ended_.clear();
     decode_refusals_.clear();
     decode_tried_vrx_ = 0;
     decode_tried_choice_.clear();
@@ -327,21 +326,16 @@ void EngineLink::apply_decode_request()
     }
 
     // Ended arrivals first, because they change what is held. The client has
-    // already forgotten the subscription, so there is nothing to cancel.
-    for (const DecodedEnded& gone : ended) {
+    // already forgotten the subscription, so there is nothing to cancel, and
+    // only that decoder is left off: the others on the receiver run on.
+    for (DecodedEnded& gone : ended) {
         if (gone.vrx == live_decoded_vrx_) {
             std::erase(live_decoded_, gone.decoder);
             if (live_decoded_.empty()) {
                 live_decoded_vrx_ = 0;
             }
         }
-        decode_ended_vrx_ = gone.vrx;
-        work_decode_ended_ =
-            QStringLiteral("%1: %2")
-                .arg(QString::fromStdString(gone.decoder),
-                     gone.reason.empty()
-                         ? QStringLiteral("the engine ended the stream and gave no reason")
-                         : QString::fromStdString(gone.reason));
+        decode_ended_.record(gone.vrx, std::move(gone.decoder), std::move(gone.reason));
     }
 
     // The list, once per connection. A failure is said rather than retried
@@ -372,16 +366,17 @@ void EngineLink::apply_decode_request()
     const bool wanted = decode_wanted_.load(std::memory_order_acquire);
     const std::string mode = demod_name(live_receiver_demod_).toStdString();
 
-    // The switch going round is the operator asking again, so a receiver
-    // whose stream ended is tried once more. A removed one then says so in
-    // the engine's words, as a refusal.
+    // The switch going round is the operator asking again, so a decoder
+    // whose stream ended is tried once more. A removed receiver then says so
+    // in the engine's words, as a refusal.
     if (!wanted) {
-        decode_ended_vrx_ = 0;
+        decode_ended_.clear();
     }
 
     std::vector<std::string> target;
-    if (wanted && vrx != 0 && vrx != decode_ended_vrx_) {
-        target = resolve_decoder_choice(choice, work_decoder_infos_, mode);
+    if (wanted && vrx != 0) {
+        target = decode_ended_.still_wanted(
+            vrx, resolve_decoder_choice(choice, work_decoder_infos_, mode));
     }
 
     // Held on a receiver the pane has left.
@@ -429,7 +424,6 @@ void EngineLink::apply_decode_request()
         }
         live_decoded_vrx_ = vrx;
         live_decoded_.push_back(name);
-        work_decode_ended_.clear();
     }
 
     note_decode();
@@ -456,9 +450,12 @@ void EngineLink::note_decode()
             detail += QStringLiteral("%1: %2").arg(QString::fromStdString(name),
                                                    QString::fromStdString(sentence));
         }
-    } else if (!work_decode_ended_.isEmpty()) {
-        label = QStringLiteral("stream ended");
-        detail = work_decode_ended_;
+    } else if (const EndedChip chip = ended_chip(decode_ended_.on(live_receiver_id_));
+               !chip.label.empty()) {
+        // Only the decoders that ended, named, so a chip on a receiver still
+        // decoding with six others says which one stopped.
+        label = QString::fromStdString(chip.label);
+        detail = QString::fromStdString(chip.detail);
     }
 
     if (attached == posted_decode_attached_ && label == posted_decode_label_ &&

@@ -152,6 +152,105 @@ inline constexpr std::string_view kAutoDecoder = "auto";
 }
 
 // ---------------------------------------------------------------------------
+// Streams the engine ended
+// ---------------------------------------------------------------------------
+
+// Which decoders' streams the engine has ended, on which receiver and why,
+// so the reconcile leaves those off and keeps the rest running.
+//
+// PER DECODER, NOT PER RECEIVER. auto on a usb receiver is seven
+// subscriptions, and one of them ending, a decoder that refused a chunk
+// among the ways it can, says nothing about the other six. This used to be
+// one receiver id, set by any ended(): the next pass then resolved nothing
+// for that receiver and cancelled every decoder still running on it, and
+// decoding stayed off until the switch went round.
+//
+// An ended stream is not tried again until the switch goes round, which is
+// the operator asking again; a removed receiver then answers in the engine's
+// words, as a refusal.
+struct EndedDecoder {
+    std::uint64_t vrx = 0;
+    std::string decoder;
+    std::string reason;
+};
+
+class EndedDecoders {
+public:
+    // Recorded once per decoder and receiver; a second ended() for the same
+    // pair keeps the newer reason.
+    void record(std::uint64_t vrx, std::string decoder, std::string reason)
+    {
+        for (EndedDecoder& known : ended_) {
+            if (known.vrx == vrx && known.decoder == decoder) {
+                known.reason = std::move(reason);
+                return;
+            }
+        }
+        ended_.push_back(EndedDecoder{vrx, std::move(decoder), std::move(reason)});
+    }
+
+    void clear() { ended_.clear(); }
+
+    [[nodiscard]] bool has(std::uint64_t vrx, std::string_view decoder) const
+    {
+        return std::ranges::any_of(ended_, [&](const EndedDecoder& known) {
+            return known.vrx == vrx && known.decoder == decoder;
+        });
+    }
+
+    // `names` without the decoders whose stream ended on `vrx`, in order.
+    [[nodiscard]] std::vector<std::string> still_wanted(std::uint64_t vrx,
+                                                        std::vector<std::string> names) const
+    {
+        std::erase_if(names, [&](const std::string& name) { return has(vrx, name); });
+        return names;
+    }
+
+    // The ones on `vrx`, in the order they ended, for the chip.
+    [[nodiscard]] std::vector<EndedDecoder> on(std::uint64_t vrx) const
+    {
+        std::vector<EndedDecoder> out;
+        for (const EndedDecoder& known : ended_) {
+            if (known.vrx == vrx) {
+                out.push_back(known);
+            }
+        }
+        return out;
+    }
+
+private:
+    std::vector<EndedDecoder> ended_;
+};
+
+// The chip for the streams that ended on the pane's receiver: its label,
+// "rtty ended" for one and "2 ended" for more, and each decoder's reason in
+// the engine's words. Both empty when none has.
+struct EndedChip {
+    std::string label;
+    std::string detail;
+};
+
+[[nodiscard]] inline EndedChip ended_chip(const std::vector<EndedDecoder>& ended)
+{
+    EndedChip out;
+    if (ended.empty()) {
+        return out;
+    }
+    out.label = ended.size() == 1 ? ended.front().decoder + " ended"
+                                  : std::format("{} ended", ended.size());
+    for (const EndedDecoder& gone : ended) {
+        if (!out.detail.empty()) {
+            out.detail += "\n\n";
+        }
+        out.detail += gone.decoder + ": " +
+                      (gone.reason.empty() ? std::string("the engine ended the stream and gave "
+                                                         "no reason")
+                                           : gone.reason);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // One line of the log
 // ---------------------------------------------------------------------------
 

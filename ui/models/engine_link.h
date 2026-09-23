@@ -3431,14 +3431,18 @@ private:
     qulonglong live_decoded_vrx_ = 0;
     std::vector<std::string> live_decoded_;
 
-    // The receiver a stream on it ended, whether because the engine removed
-    // it or because a decoder refused what it delivered. Nothing is
-    // subscribed on it again: a removed receiver refuses and a refusing
+    // Each decoder whose stream the engine ended, on which receiver, whether
+    // because the receiver was removed or because the decoder refused what it
+    // delivered. That decoder is not subscribed there again, and the others
+    // on the receiver keep running: a removed receiver refuses and a refusing
     // decoder refuses again, and either would write a second sentence over
-    // the engine's own. A new receiver is a new id and does not match it, and
-    // the switch going off clears it.
-    qulonglong decode_ended_vrx_ = 0;
-    QString work_decode_ended_;
+    // the engine's own. The switch going off clears it. models/decoded_log.h
+    // has why it is per decoder.
+    //
+    // WHAT THIS USED TO BE: one receiver id, "The receiver a stream on it
+    // ended", which one decoder's ended() set, and every other decoder on
+    // that receiver was cancelled on the next pass.
+    EndedDecoders decode_ended_;
 
     // The receiver and choice the refusals below were collected for, so a
     // refused name is asked once and not on every pass.

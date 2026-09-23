@@ -21,6 +21,9 @@ using revenant::ui::DecodedLine;
 using revenant::ui::DecodedLog;
 using revenant::ui::decoder_choices;
 using revenant::ui::effective_decoder_choice;
+using revenant::ui::ended_chip;
+using revenant::ui::EndedChip;
+using revenant::ui::EndedDecoders;
 using revenant::ui::encrypted_chip;
 using revenant::ui::field_value_text;
 using revenant::ui::make_decoded_line;
@@ -220,6 +223,61 @@ TEST_CASE("a choice the receiver does not offer falls to the head of its menu", 
     CHECK(resolve_decoder_choice("psk31", engine_list(), "usb") == Strings{"psk31"});
     CHECK(resolve_decoder_choice("auto", engine_list(), "raw") == Strings{"p25p1"});
     CHECK(resolve_decoder_choice("auto", engine_list(), "wfm").empty());
+}
+
+// ---------------------------------------------------------------------------
+// Streams the engine ended
+// ---------------------------------------------------------------------------
+
+// Rejects the receiver-wide rule this replaced: one decoder's ended() on a
+// usb receiver running auto left the reconcile resolving nothing there, and
+// it cancelled the other six. Here the one that ended is left off and the six
+// are still wanted, in the menu's order.
+TEST_CASE("one decoder ending leaves the others on its receiver wanted", "[decoded]")
+{
+    const Strings wanted = resolve_decoder_choice("auto", engine_list(), "usb");
+    REQUIRE(wanted == Strings{"rtty", "sitor_b", "navtex", "psk31", "psk63", "qpsk31", "cw"});
+
+    EndedDecoders ended;
+    ended.record(4, "navtex", "the navtex decoder was built for 48000 S/s");
+    CHECK(ended.still_wanted(4, wanted) ==
+          Strings{"rtty", "sitor_b", "psk31", "psk63", "qpsk31", "cw"});
+
+    // Another receiver is untouched by it.
+    CHECK(ended.still_wanted(5, wanted) == wanted);
+
+    // The receiver going is every decoder on it ending, and then nothing is
+    // wanted there until the switch goes round.
+    for (const std::string& name : wanted) {
+        ended.record(4, name, "the receiver was removed");
+    }
+    CHECK(ended.still_wanted(4, wanted).empty());
+    ended.clear();
+    CHECK(ended.still_wanted(4, wanted) == wanted);
+}
+
+// Rejects a chip that says only "stream ended" while six decoders run on,
+// which reads as all of them having stopped, and one that shows a stream
+// that ended on a receiver the pane has left.
+TEST_CASE("the ended chip names the decoders that ended on the pane's receiver", "[decoded]")
+{
+    EndedDecoders ended;
+    CHECK(ended_chip(ended.on(4)).label.empty());
+
+    ended.record(4, "navtex", "refused a chunk");
+    ended.record(7, "rtty", "the receiver was removed");
+    const EndedChip one = ended_chip(ended.on(4));
+    CHECK(one.label == "navtex ended");
+    CHECK(one.detail == "navtex: refused a chunk");
+
+    // A second ended() for the same decoder is one entry with the newer
+    // reason, not two.
+    ended.record(4, "navtex", "");
+    ended.record(4, "cw", "refused a chunk");
+    const EndedChip two = ended_chip(ended.on(4));
+    CHECK(two.label == "2 ended");
+    CHECK(two.detail ==
+          "navtex: the engine ended the stream and gave no reason\n\ncw: refused a chunk");
 }
 
 // ---------------------------------------------------------------------------
