@@ -632,7 +632,8 @@ bool notch_offered(engine::Demod mode) {
         case engine::Demod::Wfm:
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
-        case engine::Demod::Tetra: return false;
+        case engine::Demod::Tetra:
+        case engine::Demod::Dmr: return false;
     }
     return false;
 }
@@ -663,7 +664,8 @@ std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz, Hert
         case engine::Demod::Wfm:
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
-        case engine::Demod::Tetra: return std::nullopt;
+        case engine::Demod::Tetra:
+        case engine::Demod::Dmr: return std::nullopt;
     }
     return std::nullopt;
 }

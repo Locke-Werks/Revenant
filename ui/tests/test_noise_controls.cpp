@@ -57,6 +57,7 @@ TEST_CASE("each mode offers the stages the engine takes on it", "[ui][noise]")
         {Demod::P25p1, false, false, false, false},
         {Demod::Dstar, false, false, false, false},
         {Demod::Tetra, false, false, false, false},
+        {Demod::Dmr, false, false, false, false},
     };
     for (const Row& row : rows) {
         INFO("mode " << static_cast<int>(row.mode));

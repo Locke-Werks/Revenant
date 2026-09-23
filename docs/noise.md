@@ -28,7 +28,7 @@ below comes from.
 | AM, USB, LSB, DSB | yes | yes | yes | yes |
 | CW | yes | yes | refused | yes |
 | NFM, WFM | yes | no | no | yes |
-| raw, P25, D-STAR, TETRA | no | no | no | no |
+| raw, P25, D-STAR, TETRA, DMR | no | no | no | no |
 
 A request for a stage a mode does not offer is refused by `engine::place` on
 the call, in a sentence naming the stage and the mode, rather than accepted

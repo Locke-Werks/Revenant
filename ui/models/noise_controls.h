@@ -64,7 +64,8 @@ struct NoiseOffer {
         case rpc::Demod::Raw:
         case rpc::Demod::P25p1:
         case rpc::Demod::Dstar:
-        case rpc::Demod::Tetra: return {};
+        case rpc::Demod::Tetra:
+        case rpc::Demod::Dmr: return {};
     }
     return {};
 }
@@ -116,7 +117,8 @@ inline constexpr double kNrStrengthMax = 1.0;
         case rpc::Demod::Wfm:
         case rpc::Demod::P25p1:
         case rpc::Demod::Dstar:
-        case rpc::Demod::Tetra: return 0.0;
+        case rpc::Demod::Tetra:
+        case rpc::Demod::Dmr: return 0.0;
     }
     return 0.0;
 }
@@ -275,7 +277,7 @@ inline bool toggle_noise_stage(rpc::VrxParams& params, NoiseStage stage)
         return "not on cw, where the steady tone is the signal";
     }
     if (mode == rpc::Demod::Raw || mode == rpc::Demod::P25p1 || mode == rpc::Demod::Dstar ||
-        mode == rpc::Demod::Tetra) {
+        mode == rpc::Demod::Tetra || mode == rpc::Demod::Dmr) {
         return "not on a complex tap, which has no audio";
     }
     return "not on FM, whose audio is not placed by the passband";
