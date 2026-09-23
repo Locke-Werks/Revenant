@@ -4,7 +4,7 @@ Two workflows. `ci.yml` runs on pushes to `main`, on version tags, and on every 
 request; `nightly.yml` runs the long BER sweeps on a schedule.
 
 Note what that leaves out: a push to a topic branch with no pull request open runs
-nothing. That is deliberate, because the GPU legs occupy the workstation, but it means
+nothing. That is deliberate, because the GPU jobs occupy the workstation, but it means
 the first CI a branch sees is when the pull request is opened. Push early if you want
 the feedback earlier, or run `scripts/build.ps1 -Preset ci` locally, which is the same
 build the runner does.
@@ -54,7 +54,7 @@ from then on.
 
 The consequence is honest and worth stating: an outside contributor's pull request does
 not get GPU verification. `CONTRIBUTING.md` asks contributors to run all three presets
-locally and to say which devices they ran on, and a maintainer runs the matrix before
+locally and to say which devices they ran on, and a maintainer runs the suite before
 merging. A conformance result nobody can trust is worth less than one that is late.
 
 ## Jobs
@@ -62,17 +62,23 @@ merging. A conformance result nobody can trust is worth less than one that is la
 | Job | Runner | What it does |
 | --- | --- | --- |
 | `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, checks the version parses, and checks every test target suppresses modal dialogs. Cheap, and it answers even when the workstation is off |
-| `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite. A matrix over the two GPUs, one leg per device |
+| `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite on the RTX 4090 |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
 | `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
 | `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, and keeps it as an artifact. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
 | `release` | `windows-latest` | On a `v*` tag only: signs the payload, forges, signs the installer, publishes. Has never run. docs/packaging.md holds the order and why it is that order |
 | `sweep` (nightly) | self-hosted | Runs the BER sweep and compares against `tests/baselines/ber-vs-snr.json`, failing on a regression |
 
-The matrix legs select their device with `REVENANT_GPU_INDEX`, which is the same
-mechanism a developer uses locally. There is one runner, so the legs execute in sequence
-rather than in parallel. That is fine at this scale and is the reason the long sweeps are
-nightly rather than per-commit.
+`build-and-test` and the nightly sweep select their device with `REVENANT_GPU_INDEX`,
+which is the same mechanism a developer uses locally, and both pin it to 0, the RTX 4090.
+The pin matters because the machine also carries the Radeon integrated graphics in its
+Ryzen 9 7950X, which is not supported and not tested, and a driver update that reordered
+enumeration would otherwise point the suite at it. There is one runner, so the jobs
+execute in sequence rather than in parallel. That is fine at this scale and is the reason
+the long sweeps are nightly rather than per-commit.
+
+Until 2026-09-22 `build-and-test` was a matrix with one leg per device, the second on
+the integrated part. That leg is gone; "Coverage, stated honestly" below says why.
 
 ### The modal-dialog guard, and the one target exempt from it
 
@@ -209,12 +215,26 @@ say "the engine tree's 361 tests", a count that was 590 by 2026-09-22.
 
 ## Coverage, stated honestly
 
-The runner has an NVIDIA RTX 4090 and the AMD Radeon integrated GPU on a Ryzen 9 7950X,
-so two of the three target vendors get real driver coverage on every run.
+The suite runs on an NVIDIA RTX 4090, so one of the three target vendors gets real driver
+coverage on every run.
+
+**AMD is not covered.** The runner also carries the Radeon integrated GPU on its Ryzen 9
+7950X, and that device is not supported and not tested. Its driver corrupts the spectrum
+kernel at a rate that climbs by two orders of magnitude once several dispatches share a
+command buffer, which is what the engine records, and in run 35813177662 on 2026-09-22
+its leg failed in `tests/rpc/test_rpc_detect.cpp` on a detector that never went quiet.
+The kernel's
+arithmetic is exact on the 4090 over the same work. It was dropped from CI that day rather
+than chased; `docs/fft.md` keeps the measurements. There is no discrete AMD card in the
+machine, so AMD's gap stays open until one appears.
 
 **Intel is not covered.** There is no Intel GPU in the machine and none available. This
 is a real gap in the conformance matrix, not an oversight, and it stays open until
 hardware appears. macOS and MoltenVK are out of scope until there is something to render.
+
+WHAT THIS SECTION USED TO SAY: "The runner has an NVIDIA RTX 4090 and the AMD Radeon
+integrated GPU on a Ryzen 9 7950X, so two of the three target vendors get real driver
+coverage on every run." True until 2026-09-22, when the integrated part left the matrix.
 
 ## Registering the runner
 
@@ -266,9 +286,9 @@ assuming, because the failure looks identical.
 
 Session 0 isolation. A Windows service runs with no desktop, and the worry was that
 Vulkan would refuse to enumerate a physical device from there. It does not: compute-only
-Vulkan works from the service account on both the NVIDIA and the AMD device, and the
-full suite passes. No change was needed, and the runner does not need to run as an
-interactive user.
+Vulkan works from the service account on the NVIDIA device, and the full suite passes. It
+enumerated the integrated AMD device too while that was in the matrix. No change was
+needed, and the runner does not need to run as an interactive user.
 
 ## Cost
 

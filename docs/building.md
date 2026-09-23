@@ -50,7 +50,7 @@ failing halfway through with an unrelated message, and takes a device index:
 ```powershell
 .\scripts\build.ps1                    # configure, build and test dev
 .\scripts\build.ps1 -Preset ci         # the same for ci
-.\scripts\build.ps1 -Gpu 1             # run the suite against the second device
+.\scripts\build.ps1 -Gpu 0             # run the suite against device 0
 .\scripts\build.ps1 -Clean -NoTest     # rebuild from scratch, skip the tests
 ```
 
@@ -106,26 +106,35 @@ Check what you are actually getting:
 
 ## Choosing a GPU
 
-Device selection is explicit and overridable, because the conformance suite runs
-the same kernels against every device in the machine and a context that quietly
-picks "the best one" cannot be pointed at the integrated GPU to prove a kernel
-behaves the same there.
+Device selection is explicit and overridable, because a machine can carry more
+than one device and a context that quietly picks "the best one" cannot be
+pointed at a particular one to prove a kernel behaves the same there.
 
 `REVENANT_GPU_INDEX` selects the device by index when no explicit index is
 passed in code:
 
 ```powershell
-$env:REVENANT_GPU_INDEX = 1
+$env:REVENANT_GPU_INDEX = 0
 ctest --preset ci
 ```
 
 The index is the position in the order Vulkan enumerates physical devices. On
 the development machine and on the CI runner, which are the same box:
 
-| Index | Device | Vulkan |
-| --- | --- | --- |
-| 0 | NVIDIA GeForce RTX 4090, discrete | 1.4.351 |
-| 1 | AMD Radeon integrated graphics, Ryzen 9 7950X | 1.4.315 |
+| Index | Device | Vulkan | Status |
+| --- | --- | --- | --- |
+| 0 | NVIDIA GeForce RTX 4090, discrete | 1.4.351 | Supported, tested in CI |
+| 1 | AMD Radeon integrated graphics, Ryzen 9 7950X | 1.4.315 | **Not supported, not tested** |
+
+Index 1 is still enumerated because the part is still in the machine. Its
+driver corrupts the spectrum kernel when dispatches share a submission, which
+`docs/fft.md` measured, and on 2026-09-22 it was dropped from CI and from
+support. Pointing the suite at it will show failures that say nothing about
+this tree.
+
+This section used to say the conformance suite "runs the same kernels against
+every device in the machine", and its example set `REVENANT_GPU_INDEX = 1`,
+which pointed at the integrated part. Both were true of CI until 2026-09-22.
 
 To list what a machine actually has, build and run `revenant-devices`:
 
@@ -143,18 +152,18 @@ devices in the same order and is the independent check when an index is in
 doubt.
 
 With the variable unset, selection prefers a discrete GPU, then anything else,
-and is stable for a given machine. Nothing in CI relies on that: both
-conformance legs pass an explicit index, so a driver update that reorders
-enumeration shows up as the wrong device name in the log rather than as one
-device silently being tested twice.
+and is stable for a given machine. Nothing in CI relies on that:
+`build-and-test` and the nightly sweep pin index 0, so a driver update that
+reorders enumeration shows up as the wrong device name in the log rather than
+as the unsupported part being tested in silence.
 
 ### A value the test suite cannot read is an error, not a fallback
 
 `index_from_environment` in `core/gpu/context.cpp` returns an optional, so a
 value it cannot parse is indistinguishable there from the variable being
 unset, and selection falls back to "pick the best device". On this machine that
-is index 0. A leg meant for the integrated part would then run the discrete one
-twice and report two green runs.
+is index 0. A run meant for another device would then run the discrete one and
+report a green run for a device that was never touched.
 
 The test suite does not accept that. `tests/reference/gpu_fixture.cpp` reads the
 variable again with `std::from_chars` and every GPU case fails, with the reason,
@@ -176,7 +185,7 @@ driver that has quietly died would report a green build having tested nothing on
 the device.
 
 Set `REVENANT_REQUIRE_GPU=1` and a missing device is a failure naming the
-driver's own message instead of a skip. Both CI conformance legs set it. Set it
+driver's own message instead of a skip. CI's `build-and-test` sets it. Set it
 locally whenever a green run is supposed to mean the kernels were actually
 executed.
 

@@ -199,8 +199,8 @@ launch one invocation per workgroup, and leave most of the output buffer
 untouched, which surfaces as a reference diff failing for what looks like an
 arithmetic reason.
 
-The conformance suite runs the same kernel on every device in the machine and
-those devices have different limits. `DeviceInfo::max_workgroup_size_x` in
+The conformance suite runs the same kernel on whichever device it is pointed at,
+and devices have different limits. `DeviceInfo::max_workgroup_size_x` in
 `core/gpu/context.h` is read at runtime for exactly this reason: a kernel that
 bakes in 256 cannot even be launched on a device that caps lower, so the one
 device that would have caught the bug is the one that never ran the test.
@@ -353,7 +353,7 @@ body: which kernel, which devices it ran on, and the worst deviation observed.
 ```
 Correct the FIR tail on non-multiple block sizes
 
-reference-diff: fir_decimate, nvidia-4090 and amd-igpu, max |err| 4.1e-7
+reference-diff: fir_decimate, nvidia-4090, max |err| 4.1e-7
 against tests/reference/fir_decimate.cpp over 2^20 samples, seed 20260918.
 ```
 
