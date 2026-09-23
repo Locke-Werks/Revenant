@@ -36,7 +36,9 @@ granted enough filter to pass the subcarrier. The passband waterfall keeps its
 history in absolute hertz as the receiver moves, shifting rows by
 `ui/render/history_shift.h`. AFT is a tick box beside the receiver's dial, off
 until ticked; `ui/models/aft.h` carries the loop and the rules below, and it
-drives the same `moveReceiverCentre` path as the wheel. Both windows remember where they were, and the top bar's
+drives the same `moveReceiverCentre` path as the wheel. The auto filter
+sits beside it, also off until ticked; see "Auto filter" below. Both windows
+remember where they were, and the top bar's
 "receivers" button brings the second back after it is closed.
 
 A frequency dial steps one digit per wheel notch, with carry and borrow, and
@@ -620,6 +622,73 @@ deriving it:
 | USB, LSB | The suppressed carrier, which since the passband became two edges IS `VrxParams::center` by definition. Read, not derived, and never taken from the energy |
 | RTTY and FSK | The midpoint of the tones, derived from one tone and the known shift |
 | PSK | The centre, which for these is where the energy already is |
+
+## Auto filter
+
+The owner's request of 2026-09-23: when a receiver is tuned onto a signal,
+fit its passband to that signal instead of leaving the edges to be dragged.
+It is a tick box beside AFT in the receiver window, off by default and not
+remembered across a restart, with a chip in AFT's style saying what the last
+fit did. `ui/models/auto_filter.h` holds the rules and their cases are in
+`ui/tests/test_auto_filter.cpp`; `ui/models/auto_filter_link.cpp` is when
+it runs.
+
+**Once, on a tune.** A fit is armed by a click on a detection and by ticking
+the box, and by nothing else. A filter that refitted itself on every retune
+would be a second pair of hands on the handles. Tuning by hand, the wheel, a
+change of mode or a removed receiver drop a fit that is still measuring and
+clear the chip.
+
+**Never against the operator.** A fit that comes due while an edge or the
+band is under the pointer is dropped, and so is one still measuring when the
+operator touches the filter by any route. The drag wins and the fit is not
+held over to land after it.
+
+**From the pane, which is why it could not exist before the display tap.**
+The pane is the air around the receiver with none of its filter in it, so an
+occupied band can be read off it. One frame is too noisy for that, so the
+frames are averaged as power over at least 0.4 s and four distinct analysis
+windows, starting only once the engine's status confirms the receiver is
+where the client put it; a bin is occupied when the average stands 6 dB over
+the noise mean, which is each frame's 5th percentile plus 12.90 dB as AFT
+reads it. The detection's occupied width, when the tune came from a
+detection, widens a fit and never narrows one.
+
+| Mode | Fit |
+| --- | --- |
+| AM | Symmetric about the carrier, out to the outermost pair of lines mirrored either side of it, chained outward from the carrier across gaps of up to 4 kHz, plus two bins |
+| USB, LSB | From the suppressed carrier, the receiver's centre, to the far edge of the occupied band on whichever side holds more occupied power by 3 dB. Neither side ahead is no change |
+| CW, and sideband signals under 500 Hz | A window on the tone: its occupied run down to 20 dB under its peak, plus a bin, at least 100 Hz |
+| NFM, WFM, DSB | Symmetric about the centre, out to the occupied band's further edge plus two bins, or the detection's width if wider |
+| raw | Nothing |
+
+Mirrored lines rather than the loudest nearby, because a neighbour sits on
+one side and a station's sidebands on both. The side of an SSB fit comes from
+the energy and not from the mode's name, because on this engine the edges are
+the sideband: a USB receiver on a signal below its centre is fitted below it.
+
+**What it does not use.** `core/detect/groups.h` follows the lines one
+emitter puts on the spectrum as a set, which is what "out to the outer
+sideband lines" wants. None of it reaches the client: `rpc::Detection`
+carries no group and nothing in `core/rpc` reads that header. So the AM rule
+finds its lines on the pane.
+
+**Clamped and shown.** Every fit is clamped to the channel's edge limit and
+the minimum width, and is not made until the engine has stated the limit and
+the receiver's edges. The edges are written into the request without marking
+them as the operator's, so a later change of mode still takes that mode's
+default. The pane eases its rules from the old edges to the fitted ones over
+150 ms, holds them in the active colour to 700 ms, and arms the same span
+ease a drag's release gets, since a fit can cross a rung.
+
+**Measured on the synthetic scene** `synthetic:wideband?rate=2400000&center=100000000&emitters=10&modes=am,nfm&span_low=-100000&span_high=100000&snr_min=20&snr_max=35&seed=3`
+on 2026-09-23. The AM station at 99.9922 MHz, whose generator records a
+5 kHz band from a 2.5 kHz tone, was fitted to ±2.86 kHz, taking both lines
+and leaving the NFM neighbour whose upper edge is 3.8 kHz below the carrier
+outside. The NFM station at 99.9090 MHz, recorded as 10.8 kHz wide, was
+fitted from the 16 kHz default to ±6.59 kHz. The first run of the AM case
+bridged only 1.5 kHz between line pairs and fitted the carrier alone, 0.73
+kHz wide; the 4 kHz bridge is the correction.
 
 ## Identification, and why AFT does not have to wait for it
 
