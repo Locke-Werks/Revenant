@@ -53,6 +53,7 @@
 #include "core/dsp/pfb_fft_reference.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/engine/graph.h"
+#include "core/engine/open_built_source.h"
 #include "core/engine/ring_consumer.h"
 #include "core/engine/scheduler.h"
 #include "core/engine/vrx_stage.h"
@@ -171,8 +172,27 @@ public:
         if (!opened) {
             return std::unexpected(with_context(opened.error(), "Engine::open_source"));
         }
-        auto source = std::move(*opened);
+        return adopt_source_locked(std::move(*opened), uri);
+    }
 
+    // open_built_source's way in. See core/engine/open_built_source.h.
+    [[nodiscard]] Status adopt_source(std::unique_ptr<source::Source> source) {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (source == nullptr) {
+            return fail("open_built_source with no source");
+        }
+        if (source_ != nullptr) {
+            return fail("this engine already has a source open. Close it first");
+        }
+        clamp_note_.clear();
+        const std::string name = source->capabilities().uri;
+        return adopt_source_locked(std::move(source), name);
+    }
+
+    // Everything open_source does once a source exists. The caller holds the
+    // lifecycle lock and has checked that no source is open.
+    [[nodiscard]] Status adopt_source_locked(std::unique_ptr<source::Source> source,
+                                             std::string_view uri) {
         const dsp::SampleRate rate = source->sample_rate();
         if (rate <= 0) {
             return fail(std::format("'{}' reports a sample rate of {}", uri, rate));
@@ -1243,6 +1263,18 @@ Expected<std::unique_ptr<Engine>> Engine::create(const EngineConfig& config) {
         return std::unexpected(configured.error());
     }
     return std::unique_ptr<Engine>(std::move(engine));
+}
+
+Status open_built_source(Engine& engine, std::unique_ptr<source::Source> source) {
+    auto* impl = dynamic_cast<EngineImpl*>(&engine);
+    if (impl == nullptr) {
+        return fail("open_built_source needs an engine made by Engine::create; a wrapper "
+                    "forwards open_source and has no way to take a source object");
+    }
+    if (auto adopted = impl->adopt_source(std::move(source)); !adopted) {
+        return std::unexpected(with_context(adopted.error(), "open_built_source"));
+    }
+    return {};
 }
 
 }  // namespace revenant::engine
