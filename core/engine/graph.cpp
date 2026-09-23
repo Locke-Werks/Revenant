@@ -3429,6 +3429,13 @@ Status Graph::on_block(const source::SourceBlock& block) {
         // "faster than realtime": there is no throttle anywhere, only this
         // parking until a dispatch has finished with the samples it read.
         if (auto taken = impl.ring->reserve_blocking(need); !taken) {
+            // cancel() stops the ring to wake exactly this wait, so a refusal
+            // after it is the stop that was asked for rather than a fault in
+            // the ring. Reported in the words run()'s callers already treat as
+            // a clean finish, the way the frame-slot wait below reports its own.
+            if (impl.cancelled.load(std::memory_order_acquire)) {
+                return fail("the engine was stopped while the producer waited for ring room");
+            }
             return std::unexpected(with_context(taken.error(), "Graph::on_block"));
         }
         granted = need;
