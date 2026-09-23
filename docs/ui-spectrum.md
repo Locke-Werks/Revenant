@@ -31,8 +31,9 @@ which are notes that wait in the drawer.
 The receiver window holds the receiver rack, one strip per receiver in the
 receiver's colour with a live meter, and the focused receiver's controls: its
 own dial, its mode, its bandwidth, the fine-tuning display below with its own
-waterfall under it, RDS and audio. RDS is offered only on a wfm receiver
-granted enough filter to pass the subcarrier. The passband waterfall keeps its
+waterfall under it, RDS, decoding and audio. RDS is offered only on a wfm
+receiver granted enough filter to pass the subcarrier, and decoding only on a
+receiver whose mode some decoder reads; see "Decoding" below. The passband waterfall keeps its
 history in absolute hertz as the receiver moves, shifting rows by
 `ui/render/history_shift.h`. AFT is a tick box beside the receiver's dial, off
 until ticked; `ui/models/aft.h` carries the loop and the rules below, and it
@@ -689,6 +690,78 @@ outside. The NFM station at 99.9090 MHz, recorded as 10.8 kHz wide, was
 fitted from the 16 kHz default to ±6.59 kHz. The first run of the AM case
 bridged only 1.5 kHz between line pairs and fitted the carrier alone, 0.73
 kHz wide; the 4 kHz bridge is the correction.
+
+## Decoding
+
+The decode section sits under RDS in the receiver window and puts
+`Session.subscribeDecoded` in front of the operator for the focused receiver.
+`ui/models/decoded_log.h` holds the rules, with cases in
+`ui/tests/test_decoded_log.cpp`; `ui/models/decoded_link.cpp` is the wire half
+and `ui/qml/DecodePane.qml` the layout.
+
+**The menu is the engine's own list**, cut to the decoders whose
+`DecoderInfo::modes` include the receiver's mode, in the engine's order, with
+auto first wherever it would attach anything. A decoder added to the engine
+appears without the client knowing its name. The section is absent where
+nothing reads the mode, which is am, dsb and wfm; wfm keeps its RDS section.
+
+| Receiver | Offered |
+| --- | --- |
+| usb, lsb | auto, rtty, sitor_b, navtex, psk31, psk63, qpsk31, cw |
+| nfm | auto, ax25, pocsag |
+| cw | auto, cw |
+| raw | p25p1, dstar, tetra, m17 |
+
+**Auto is the window's and means what `revenant-cli --decode auto` means**:
+the decoder named after the mode where there is one, and otherwise every audio
+decoder that reads the mode. The wire has no auto. Its empty name is the first
+half alone and is refused on a usb or nfm receiver, so the window resolves auto
+to names and subscribes each. A raw tap gets no auto, as the CLI's does not:
+four decoders read one and nothing in the samples says which protocol is there.
+Auto on a sideband receiver runs seven decoders at once, and a start-stop or
+PSK decoder listening to a signal that is not its own prints framing noise, so
+a decoder picked by name is the quieter log whenever the mode is known.
+
+**It follows the focused receiver**, reconciled on every supervisor pass the
+way the audio is, so a retune, a mode change, a clear and a reconnect are one
+path. Subscriptions are cancelled before the window removes a receiver, so an
+`ended()` is only ever about a removal somebody else made. A refused
+subscription is a chip carrying the engine's sentence; a stream the engine
+ended is a chip too, and that receiver is not asked again until the pane holds
+a different one or the switch goes round.
+
+**The log.** Newest at the bottom, following the newest line unless the
+operator has scrolled up, with a "newest" button while they have. Each line is
+a time, the decoder and the text line, in Cascadia Mono with fixed-width
+columns. The time is where the message ended in the receiver's own stream,
+`end_sample / sample_rate` as hh:mm:ss.t: nothing on the wire anchors a
+sample index to a wall clock, so this is the same reading for a live radio and
+a replayed capture, and the wall clock the line reached the window at is in
+its expansion, named as an arrival. A click opens a line's fields: its kind,
+receiver, sample span, sequence and arrival, then every field the decoder
+sent, with the P25 identifiers in hexadecimal as the line above writes them.
+An encrypted P25 header is a dim chip, "encrypted: talkgroup N", and never an
+error. The log keeps 2000 lines; a chip counts what the cap let go and what
+the engine's 256-message queue lost, and its sentence names the two apart.
+Copy acts on a line, with its fields, or on the whole log, and clear empties
+it. A change of receiver does not: what was decoded stays decoded.
+
+**Driven with nobody at the mouse.** `revenant-ui --receiver FREQ:MODE
+--decode NAME` opens a receiver and attaches a decoder once a source reaches
+the frequency, and `--grab-receivers FILE` writes the receiver window to a PNG
+as a `--smoke-seconds` run ends, on the offscreen platform. Measured on
+2026-09-23 against revenant-engine on the 30 dB captures
+`tests/rpc/test_rpc_decode_audio.cpp` writes, each behind 4 s of silence and
+played at `--pace 1` through a 4-channel grid at 288000 S/s: rtty on a usb
+receiver logged "CQ DE N0CALL" and "RYRY 0123456789 73", then four lines of
+framing noise from the capture's noise tail; psk31 on a usb receiver logged
+"CQ DE N0CALL" and "TEST 73" after one two-character line of noise; auto on an
+nfm receiver attached ax25 and pocsag and logged all four POCSAG pages, the
+512 bit/s one among them, and all four AX.25 frames with the APRS position,
+status and message. p25p1 on a raw receiver at the channel centre, fed
+`siggen dv --mode p25p1 --rate 288000` twice clear on talkgroup 1201 and twice
+with `--algid 132` on talkgroup 2402, logged every header: the clear ones as
+lines, the encrypted ones as lines behind an "encrypted: talkgroup 2402" chip.
 
 ## Identification, and why AFT does not have to wait for it
 
