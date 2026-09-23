@@ -934,17 +934,40 @@ POCSAG is measured in `tests/decode/test_pocsag.cpp` at all three rates, at
 signal, a channel filter and the FM discriminator in `core/decode/dv_phy.cpp`
 rather than from ideal audio alone. Through `add_awgn` at 1200 bit/s over 40
 pages of 15 codewords: no page lost at 20 dB in 2500 Hz, including tuned 1 kHz
-off; none lost at 12 dB, where the raw bit error rate is 0.00019; 0.40 lost at
-8 dB, where the raw bit error rate is 0.023 and BCH corrected 584 bits and
+off; none lost at 12 dB, where the raw bit error rate is 0.00019; 0.475 lost
+at 8 dB, where the raw bit error rate is 0.023 and BCH corrected 584 bits and
 failed on one codeword in thirty; all lost at 4 dB, below the discriminator's
 threshold. The code corrects every one and two bit error and refuses every
-three bit error, checked exhaustively on twelve code words. Checking Tables 1
+three bit error, checked exhaustively on twelve code words. WHAT THE 8 dB
+FIGURE USED TO SAY: "0.40 lost at 8 dB, where the raw bit error rate is
+0.023", before the address correction budget below. Checking Tables 1
 and 2 against clause 1.4 found that M.584-2 misprints the idle codeword: Table 2
 is one bit from a code word, although clause 1.3.4 calls it a valid address
 codeword, and the decoder uses the code word. What it does not reach: one rate
 per decoder instance, so a receiver scanning all three runs three; no message
 format for function bits 01 and 10, which M.584 does not define; and FLEX,
 which is blocked on its document.
+
+**POCSAG refuses what M.584-2 lets it refuse**, since 2026-09-23. Through the
+wire at 6 and 4 dB it reported pages for addresses nobody sent, and
+`tests/decode/test_pocsag_false_pages.cpp` reproduces that at decode level:
+0.625 false pages per page sent at 6 dB, 0.546 at 5 dB and 0.154 at 4 dB, and
+from noise alone 8.1 an hour across the three rates. Two rules now stand
+between the code and a page. An address codeword is taken with at most one
+corrected bit, parity included: clause 1.4's code has distance 6 with its
+even parity bit, so correcting one leaves every two to four bit error
+detected, where correcting two let a four bit error land on another address,
+many of them an idle codeword read one code word over. And a synchronization
+codeword found without the clause 1.1 preamble in front of it starts a
+provisional batch whose pages are held until the next batch's synchronization
+codeword confirms it, clause 2.3's "synchronization on receipt of a number of
+valid batches". After: 0.0125 false pages per page sent at 6 dB, 0.029 at 5 dB,
+none at 4, 8 and 12 dB, and none in 40 hours of noise. The cost is at 8 dB,
+where 113 of 240 pages come through whole rather than 131; at 12 dB all 240
+still do. What is left below 8 dB is a codeword with five or more errors
+within one bit of another, which the code cannot tell from a real one. A
+receiver that joins a one-batch transmission after its preamble now reports
+nothing from it, which is what clause 2.3 asks.
 
 SITOR-B and NAVTEX sit on the same FSK discriminator and clock as RTTY and
 AX.25. Checking M.625-4's Table 1 against ITU-T S.1's through the RTTY table
