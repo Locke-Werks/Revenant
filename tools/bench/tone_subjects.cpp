@@ -46,7 +46,7 @@ constexpr dsp::Hertz kPskToneHz = 1508;
 constexpr dsp::Hertz kPskCentreHz = 1500;
 
 ModeSubject psk(decode::Psk31Mode kind, std::string_view name, std::string_view description, double start,
-                double stop) {
+                double stop, std::uint64_t trials) {
     ModeSubject mode;
     mode.mode = std::string(name);
     mode.subject = std::format("{} at 48000 S/s, tone 8 Hz off a 1500 Hz centre; character error rate against "
@@ -58,7 +58,7 @@ ModeSubject psk(decode::Psk31Mode kind, std::string_view name, std::string_view 
     mode.minimum_payload_bytes = 16;
     mode.snr_start_db = start;
     mode.snr_stop_db = stop;
-    mode.trials = 256;
+    mode.trials = trials;
     mode.generator = [kind](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {
         siggen::Psk31ModConfig mod;
         mod.rate = kAudioRate;
@@ -202,14 +202,18 @@ ModeSubject cw() {
 }  // namespace
 
 Expected<ModeSubject> make_tone_subject(std::string_view mode) {
+    // QPSK31 at 256 trials rather than 512 because its Viterbi decoder makes
+    // a failing trial several times dearer than a BPSK one, and its curve
+    // falls from all lost to 0.01 in 2 dB, so the extra trials would buy
+    // little where they cost most.
     if (mode == "psk31") {
-        return psk(decode::Psk31Mode::Bpsk31, mode, "bpsk31", -15.0, -3.0);
+        return psk(decode::Psk31Mode::Bpsk31, mode, "bpsk31", -15.0, -3.0, 512);
     }
     if (mode == "psk63") {
-        return psk(decode::Psk31Mode::Bpsk63, mode, "bpsk63", -13.0, -1.0);
+        return psk(decode::Psk31Mode::Bpsk63, mode, "bpsk63", -13.0, -1.0, 512);
     }
     if (mode == "qpsk31") {
-        return psk(decode::Psk31Mode::Qpsk31, mode, "qpsk31", -14.0, -4.0);
+        return psk(decode::Psk31Mode::Qpsk31, mode, "qpsk31", -14.0, -4.0, 256);
     }
     if (mode == "cw") {
         return cw();

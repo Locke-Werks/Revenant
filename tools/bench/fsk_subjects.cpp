@@ -359,8 +359,11 @@ ModeSubject sitor_b() {
     mode.default_payload_bytes = 100;
     mode.minimum_payload_bytes = 16;
     mode.snr_start_db = -10.0;
-    mode.snr_stop_db = 0.0;
-    mode.trials = 256;
+    mode.snr_stop_db = 2.0;
+    // About one trial in 250 loses most of its text between -1 and +2 dB,
+    // so a point needs a thousand trials before that is a rate rather than
+    // a coincidence.
+    mode.trials = 1024;
     mode.generator = [](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {
         auto codes = siggen::ita2_encode_text(widen(text_from_payload(payload, kSitorPool)));
         if (!codes) {

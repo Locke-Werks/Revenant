@@ -104,7 +104,7 @@ ModeSubject m17(std::uint64_t destination, std::uint64_t source) {
     mode.payload_multiple = decode::kM17StreamPayloadBytes;
     mode.snr_start_db = 13.0;
     mode.snr_stop_db = 22.0;
-    mode.trials = 256;
+    mode.trials = 512;
     mode.real_audio = false;
     mode.generator = [destination, source](std::span<const std::uint8_t> payload, double snr_db,
                                            std::uint64_t seed) {
@@ -195,7 +195,6 @@ ModeSubject p25p1() {
     mode.snr_start_db = 12.0;
     mode.snr_stop_db = 26.0;
     mode.trials = 128;
-    mode.min_errors = 0;
     mode.real_audio = false;
     mode.generator = [](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {
         siggen::P25ModConfig mod;
@@ -269,7 +268,6 @@ ModeSubject dstar() {
     mode.snr_start_db = 10.0;
     mode.snr_stop_db = 24.0;
     mode.trials = 128;
-    mode.min_errors = 0;
     mode.real_audio = false;
     mode.generator = [](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {
         siggen::DStarModConfig mod;
@@ -362,7 +360,6 @@ ModeSubject tetra() {
     mode.snr_start_db = 12.0;
     mode.snr_stop_db = 26.0;
     mode.trials = 128;
-    mode.min_errors = 0;
     mode.rate = kTetraRate;
     mode.real_audio = false;
     mode.generator = [](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {

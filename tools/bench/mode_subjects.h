@@ -3,7 +3,7 @@
 //
 // WHY
 //
-// docs/architecture.md's M4 milestone asks for a BER/SNR curve per mode, and
+// The architecture's M4 milestone asks for a BER/SNR curve per mode, and
 // the project rule is never to ship a decoder that quietly does worse than the
 // free tool it replaces. That makes each mode's sensitivity a published
 // number, and a number that is published has to be reproducible from one
@@ -105,13 +105,17 @@ struct ModeSubject {
     double snr_step_db = 1.0;
     std::uint64_t trials = 0;
 
-    // SweepConfig::min_bit_errors. 100 for the modes counted in characters,
-    // frames, pages and messages. Zero for the bit modes: a bit trial carries
-    // thousands of bits, so 100 errors would end every point after its first
-    // batch whatever the error rate, and one trial that slipped would be most
-    // of what the point measured, which is the RDS subject's reason for the
-    // same setting in the nightly.
-    std::uint64_t min_errors = 100;
+    // SweepConfig::min_bit_errors, zero for every mode: every point runs all
+    // its trials. The early stop assumes errors arrive one at a time, and in
+    // these subjects they arrive in clumps. A bit trial carries thousands of
+    // bits and one that slips is half wrong from there on, the RDS subject's
+    // reason for the same setting in the nightly; and a text trial that loses
+    // its phasing or its acquisition loses a hundred characters at once. With
+    // the harness default of 100 the first baselines stopped SITOR-B's points
+    // from -3 to -1 dB after one batch of 64 trials, on the batch that held
+    // such a trial, and read its crossing at -0.85 dB where 1024 trials a
+    // point put it at -1.76.
+    std::uint64_t min_errors = 0;
 
     // The rate the generator renders at, and whether its output is real audio
     // carried in the real part of the complex samples the harness moves, or
