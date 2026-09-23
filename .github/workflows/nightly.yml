@@ -158,6 +158,62 @@ jobs:
           & '${{ steps.preflight.outputs.tool }}' compare $baseline $curve
           if ($LASTEXITCODE -ne 0) { throw "compare exited $LASTEXITCODE" }
 
+      # Every other decoder with a transmitter, tools/bench/mode_subjects.h,
+      # each against tests/baselines/ber-vs-snr-<mode>.json. The grid, trial
+      # count, payload and early stop live in the subject, so the command is
+      # the same for every mode and is the one docs/sensitivity.md gives; the
+      # baselines were made with it and this seed. compare reads each curve at
+      # its mode's own error rate, 0.05 for cw and 0.01 for the rest.
+      #
+      # A mode whose baseline is missing is skipped with a warning, as the RDS
+      # step does. A mode that regresses does not stop the loop: every mode is
+      # swept and compared, and the step fails at the end naming each one,
+      # because a regression in one decoder is no reason to stop looking at
+      # the next.
+      #
+      # Runtime, measured on 2026-09-23 making the baselines on the RTX 4090
+      # workstation's CPU with other builds running on it: 664 s for all
+      # fifteen, of which navtex took 151 s, qpsk31 134 s, psk31 91 s, cw
+      # 69 s, sitor-b 68 s and psk63 54 s, and the other nine under 45 s
+      # each. With the RDS step's 226 s and the BPSK sweep's fraction of a
+      # second, the sweeps in this job come to about 15 minutes, so every
+      # mode runs every night. If they pass 30 minutes, the rule is to split
+      # this list across alternate nights by family, the audio modes one
+      # night and the complex baseband ones the next, rather than to cut
+      # trials, because the trial counts are what make the tails of these
+      # curves a rate rather than a coincidence.
+      - name: Sweep the decoders
+        if: steps.preflight.outputs.ready == 'true' && !cancelled()
+        shell: pwsh
+        run: |
+          $modes = 'rtty', 'ax25', 'pocsag-512', 'pocsag-1200', 'pocsag-2400', 'sitor-b', 'navtex',
+                   'psk31', 'psk63', 'qpsk31', 'cw', 'm17', 'p25p1', 'dstar', 'tetra'
+          New-Item -ItemType Directory -Force -Path bench-out | Out-Null
+          $failed = @()
+          $all = [System.Diagnostics.Stopwatch]::StartNew()
+          foreach ($mode in $modes) {
+            $baseline = "tests/baselines/ber-vs-snr-$mode.json"
+            if (-not (Test-Path $baseline)) {
+              Write-Output "::warning::$mode sweep skipped, $baseline is missing"
+              continue
+            }
+            $curve = "bench-out/ber-vs-snr-$mode-nvidia-4090.json"
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            & '${{ steps.preflight.outputs.tool }}' sweep --mode $mode `
+                --seed $env:REVENANT_BENCH_SEED `
+                --commit $env:GITHUB_SHA `
+                --out $curve
+            if ($LASTEXITCODE -ne 0) {
+              $failed += "$mode (sweep exited $LASTEXITCODE)"
+              continue
+            }
+            & '${{ steps.preflight.outputs.tool }}' compare $baseline $curve
+            if ($LASTEXITCODE -ne 0) { $failed += "$mode (compare exited $LASTEXITCODE)" }
+            "{0}: {1:N0} s" -f $mode, $clock.Elapsed.TotalSeconds
+          }
+          "all decoders: {0:N0} s" -f $all.Elapsed.TotalSeconds
+          if ($failed) { throw "decoder sweeps failed: $($failed -join ', ')" }
+
       # Uploaded whether or not the comparison passed. A passing curve is the
       # record of where the numbers were on a given night, and a failing one is
       # the evidence of what moved. The committed baseline under tests/baselines
