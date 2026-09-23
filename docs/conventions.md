@@ -171,12 +171,18 @@ nothing downstream can tell.
 One kernel per file, under `core/shaders/`, named for what it does.
 
 Workgroup size is a specialization constant. Never hardcoded, never a `#define`
-patched at build time. One line, and it is the same line in all eleven kernels
-under `core/shaders/`:
+patched at build time. One line, and it is the same line in every kernel under
+`core/shaders/`, twelve of them on 2026-09-23:
 
 ```glsl
 layout(local_size_x_id = 0) in;
 ```
+
+WHAT THE SENTENCE BEFORE THE SNIPPET USED TO SAY: "it is the same line in all
+eleven kernels under `core/shaders/`". The twelfth, `convert_cs24_cf32.comp`,
+arrived with "Widen 24-bit samples on the device, reading each from two words"
+and carries the same line. The count is dated now rather than stated, because
+it is the part that goes stale; the rule is the part a reader acts on.
 
 Id 0 is reserved for the workgroup size and nothing else. A kernel's own
 specialization constants start at 1, which is why every one of them reads

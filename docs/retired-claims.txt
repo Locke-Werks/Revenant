@@ -1167,3 +1167,9 @@ commit: "Write up the raw RDS groups, TMC's limits and what RDS2 needs"
 instead: IEC 62106-1:2018's preview confirms the four subcarriers and a group
     type C; modulation, blocks and offset words on the new streams are
     unverified, and the engine's audio filter cuts the new streams off.
+
+phrase: the same line in all eleven kernels under core/shaders
+retired: 2026-09-22
+commit: "Widen 24-bit samples on the device, reading each from two words"
+instead: Every .comp under core/shaders is a kernel and carries
+    layout(local_size_x_id = 0) in; there were twelve on 2026-09-23.
