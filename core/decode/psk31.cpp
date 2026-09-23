@@ -255,8 +255,16 @@ void Psk31::run_symbols(std::span<const Complex32> baseband, std::vector<Psk31Ch
     const std::size_t taps = matched_.size();
     const std::size_t matched_delay = (taps - 1) / 2;
 
-    corrected_.clear();
-    corrected_.reserve(baseband.size());
+    // matched_history_ holds the last taps - 1 corrected samples from earlier
+    // calls, oldest first, or fewer at the start of a stream. This call's go
+    // on the end, each output of the filter reads back from its own, and one
+    // erase per call trims it. It used to erase the front once per sample,
+    // which moved the whole filter's memory for every sample. The newest
+    // `taps` samples reach each sum either way and in the same order, so the
+    // output is bit for bit what it was, which tests/decode/test_psk31.cpp
+    // pins.
+    const std::size_t memory = matched_history_.size();
+    matched_history_.reserve(memory + baseband.size());
     for (const Complex32 sample : baseband) {
         // Coarse correction by the acquired offset, with the phase taken from
         // the absolute decimated index so the blocking does not matter.
@@ -265,22 +273,30 @@ void Psk31::run_symbols(std::span<const Complex32> baseband, std::vector<Psk31Ch
         const std::complex<double> rotation = std::polar(1.0, -2.0 * kPi * cycles);
         const std::complex<double> value =
             std::complex<double>{sample.real(), sample.imag()} * rotation;
-
         matched_history_.push_back(
             Complex32{static_cast<float>(value.real()), static_cast<float>(value.imag())});
-        if (matched_history_.size() > taps) {
-            matched_history_.erase(matched_history_.begin());
-        }
+        ++corrected_index_;
+    }
+
+    corrected_.clear();
+    corrected_.reserve(baseband.size());
+    for (std::size_t n = 0; n < baseband.size(); ++n) {
+        const std::size_t newest = memory + n;
+        const std::size_t have = std::min(newest + 1, taps);
         double real = 0.0;
         double imag = 0.0;
-        const std::size_t have = matched_history_.size();
         for (std::size_t i = 0; i < have; ++i) {
-            const Complex32 x = matched_history_[have - 1 - i];
+            const Complex32 x = matched_history_[newest - i];
             real += static_cast<double>(matched_[i]) * x.real();
             imag += static_cast<double>(matched_[i]) * x.imag();
         }
         corrected_.push_back(Complex32{static_cast<float>(real), static_cast<float>(imag)});
-        ++corrected_index_;
+    }
+    if (matched_history_.size() > taps - 1) {
+        matched_history_.erase(
+            matched_history_.begin(),
+            matched_history_.begin() +
+                static_cast<std::ptrdiff_t>(matched_history_.size() - (taps - 1)));
     }
 
     recovered_.clear();

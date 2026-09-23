@@ -15,8 +15,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <set>
 #include <string>
 #include <vector>
@@ -491,6 +493,55 @@ TEST_CASE("the PSK31 receiver does not depend on how its input is blocked",
     CHECK(whole.text == small.text);
     CHECK(whole.bits == small.bits);
     CHECK(whole.text == text);
+}
+
+TEST_CASE("the PSK31 matched filter's output is pinned bit for bit", "[decode][psk31]") {
+    // The matched filter used to erase the front of its history once per
+    // sample and now trims it once per call. That changed the bookkeeping and
+    // not one sum, so every decision and the fine AFC's average come out the
+    // same, and the figures below were taken from the build before the change.
+    // The AFC's residual is a leaky average of every differential phasor, so
+    // frequency_offset_hz moves in its last bit if any filter output does.
+    // Noisy QPSK31 in 997-sample blocks and whole, and BPSK63 in blocks of 1000.
+    struct Pin {
+        decode::Psk31Mode mode;
+        std::size_t block;
+        std::uint64_t bits_hash;
+        std::uint64_t offset_bits;
+    };
+    const auto hash_of = [](const Decoded& got) {
+        std::uint64_t h = 0xCBF2'9CE4'8422'2325ULL;
+        for (const std::uint8_t bit : got.bits) {
+            h = (h ^ bit) * 0x0100'0000'01B3ULL;
+        }
+        return h;
+    };
+    const std::string text = pseudorandom_text(120, 0x0B17'1DE7ULL);
+    const Pin pins[] = {
+        {decode::Psk31Mode::Qpsk31, 997, 0x0933'1AAE'5026'3DB4ULL, 0x4018'402D'B068'B309ULL},
+        {decode::Psk31Mode::Qpsk31, 0, 0x0933'1AAE'5026'3DB4ULL, 0x4018'402D'B068'B309ULL},
+        {decode::Psk31Mode::Bpsk63, 1000, 0x44E1'E1A2'0136'021AULL, 0x4018'260A'C01F'CDB5ULL},
+    };
+    for (const Pin& pin : pins) {
+        siggen::Psk31ModConfig mod;
+        mod.tone_hz = 1006;
+        mod.mode = pin.mode;
+        const std::vector<float> audio = render(mod, text, -4.0, 0x0B17'5EEDULL, true);
+        decode::Psk31Config config;
+        config.mode = pin.mode;
+        if (pin.mode == decode::Psk31Mode::Bpsk63) {
+            config.acquisition_symbols = 128;
+        }
+        const Decoded got = decode_audio(config, audio, pin.block == 0 ? audio.size() : pin.block);
+        const std::uint64_t hash = hash_of(got);
+        const auto offset = std::bit_cast<std::uint64_t>(got.offset_hz);
+        WARN(std::format("PSK pin mode {} block {}: {} bits, hash {:#018x}, offset {} Hz bits "
+                         "{:#018x}",
+                         static_cast<int>(pin.mode), pin.block, got.bits.size(), hash,
+                         got.offset_hz, offset));
+        CHECK(hash == pin.bits_hash);
+        CHECK(offset == pin.offset_bits);
+    }
 }
 
 TEST_CASE("PSK31 error rates against noise, measured", "[decode][psk31]") {
