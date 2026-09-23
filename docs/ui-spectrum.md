@@ -47,6 +47,90 @@ stops at the source's tuning limits; `ui/models/frequency_dial.h` has the
 arithmetic. The bands are `ui/models/band_plan.h`, which cites the band plans
 its edges came from.
 
+## Keys
+
+One table decides every key. `ui/models/key_actions.h` holds each action's
+id, label, group, keys, where the keys apply, what it needs and the name of
+its handler. `ui/tests/test_key_actions.cpp` holds the table to three rules:
+no two actions share a key where both apply, no window key is one the filter
+display or the overlay also takes, and the key map below is the one the
+table prints.
+
+Not bound, because the client cannot do them: next and previous receiver,
+and solo. The engine holds any number of receivers and this client holds one
+per window, so there is nothing to move to and nothing to solo against. The
+detections key opens the detection thresholds, which is the panel there is;
+nothing in the client lists the detections themselves.
+
+<!-- The key map. Generated from ui/models/key_actions.h and checked by ui/tests/test_key_actions.cpp: edit the table, not these lines. -->
+
+**anywhere.** In either window, except that a text field keeps the keys it types with.
+
+| Group | Action | Keys |
+| --- | --- | --- |
+| tuning | step the radio up by the tuning digit | `Alt+Up` |
+| tuning | step the radio down by the tuning digit | `Alt+Down` |
+| tuning | move the tuning digit left | `Alt+Left` |
+| tuning | move the tuning digit right | `Alt+Right` |
+| tuning | page the radio up a tenth of the span | `PgUp` |
+| tuning | page the radio down a tenth of the span | `PgDown` |
+| tuning | type a frequency for the radio | `Ctrl+G` |
+| tuning | jump to a band | `Ctrl+J` |
+| receiver | put the receiver on the span centre | `Ctrl+N` |
+| receiver | type a frequency for the receiver | `Ctrl+Shift+G` |
+| receiver | remove the receiver | `Ctrl+Del` |
+| receiver | turn AFT on or off | `Ctrl+T` |
+| receiver | turn the auto filter on or off | `Ctrl+Shift+F` |
+| mode | switch the receiver to am | `Alt+1` |
+| mode | switch the receiver to nfm | `Alt+2` |
+| mode | switch the receiver to wfm | `Alt+3` |
+| mode | switch the receiver to usb | `Alt+4` |
+| mode | switch the receiver to lsb | `Alt+5` |
+| mode | switch the receiver to dsb | `Alt+6` |
+| mode | switch the receiver to cw | `Alt+7` |
+| mode | switch the receiver to raw | `Alt+8` |
+| filter | widen the filter | `Ctrl+=` |
+| filter | narrow the filter | `Ctrl+-` |
+| filter | put the mode's default filter back | `Ctrl+0` |
+| filter | put the arrow keys on the filter edges | `Ctrl+E` |
+| audio | mute or unmute the audio | `Ctrl+M` |
+| audio | turn the volume up | `Alt+=` |
+| audio | turn the volume down | `Alt+-` |
+| display | pin or unpin the spectrum floor | `Ctrl+[` |
+| display | pin or unpin the spectrum ceiling | `Ctrl+]` |
+| panels | open the radio picker | `Ctrl+O` |
+| panels | open the detections panel | `Ctrl+Shift+D` |
+| panels | open the bookmarks | `Ctrl+B` |
+| panels | bookmark the receiver | `Ctrl+D` |
+| panels | show or hide the receiver window | `Ctrl+R` |
+| help | open the command palette | `Ctrl+K`, `Ctrl+Shift+P` |
+| help | show the key map | `F1` |
+
+**on the filter display.** After a click on the display, or Ctrl+E from anywhere. A step is 10 Hz, 100 Hz with Shift and 1 Hz with Ctrl.
+
+| Group | Action | Keys |
+| --- | --- | --- |
+| filter edges | select the low edge | `[` |
+| filter edges | select the high edge | `]` |
+| filter edges | select both edges | `\` |
+| filter edges | move the selection down | `Left` |
+| filter edges | move the selection up | `Right` |
+| filter edges | widen both edges | `Up` |
+| filter edges | narrow both edges | `Down` |
+| filter edges | put the mode's default filter back | `Home` |
+| filter edges | cancel a drag | `Esc` |
+
+**in the palette and the key map.** While the command palette or the key map is open.
+
+| Group | Action | Keys |
+| --- | --- | --- |
+| palette | next entry | `Down` |
+| palette | previous entry | `Up` |
+| palette | run the chosen entry | `Return`, `Enter` |
+| palette | close | `Esc` |
+
+<!-- End of the key map. -->
+
 ## Auto-scaling, both ends
 
 The colour map's floor and ceiling both track the signal automatically, over a

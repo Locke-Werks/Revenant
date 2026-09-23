@@ -166,6 +166,8 @@ qt_add_executable(revenant_ui
     models/engine_link.h
     models/band_plan.h
     models/frequency_dial.h
+    models/key_actions.h
+    models/key_steps.h
     models/level_meter.h
     models/mode_choice.h
     models/receiver_scroll.h
@@ -457,6 +459,12 @@ endif()
 # (models/status_summary.h, models/level_meter.h). Each is the part of its
 # control that can be wrong while still looking right.
 #
+# It covers the keyboard: the one table of actions and their keys
+# (models/key_actions.h), which it holds to having no two actions on one key
+# and to matching the key map in docs/ui-spectrum.md, the steps the keys take
+# (models/key_steps.h). A dead key is what a conflict looks like, since Qt
+# runs neither of two shortcuts on one sequence, and nothing on screen says so.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -510,6 +518,8 @@ if(REVENANT_UI_TESTS)
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_history_shift.cpp
+            tests/test_key_actions.cpp
+            tests/test_key_steps.cpp
             tests/test_mode_choice.cpp
             tests/test_frequency_dial.cpp
             tests/test_frequency_entry.cpp
@@ -531,6 +541,12 @@ if(REVENANT_UI_TESTS)
             "${REVENANT_SOURCE_DIR}"
             "${CMAKE_CURRENT_SOURCE_DIR}"
         )
+
+        # Where docs/ is, for the one case that reads a document: the key map
+        # in docs/ui-spectrum.md is checked against models/key_actions.h so
+        # the two cannot drift.
+        target_compile_definitions(revenant_ui_tests PRIVATE
+            REVENANT_DOCS_DIR="${REVENANT_SOURCE_DIR}/docs")
 
         target_link_libraries(revenant_ui_tests PRIVATE Catch2::Catch2WithMain)
 
