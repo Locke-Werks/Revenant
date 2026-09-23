@@ -18,6 +18,7 @@ add_executable(revenant_characterise_tests
     signal_lab.cpp
     test_catalogue.cpp
     test_characterise.cpp
+    test_empty_channel.cpp
     test_cyclostationary.cpp
     test_periodicity.cpp
     test_tones.cpp

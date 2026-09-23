@@ -97,6 +97,36 @@ namespace revenant::characterise {
 // shorter than any transmission worth characterising.
 inline constexpr std::size_t kMinCharacteriseSamples = 16384;
 
+// The most a PSK call that measured no symbol rate is allowed to claim.
+//
+// THE OWNER'S DECISION OF 2026-09-22, and the three properties it asks for:
+// such a call is KEPT, it is FLAGGED (Characterisation::psk_without_symbol_rate),
+// its confidence is CAPPED here, and may_drive_detection() refuses it.
+//
+// Kept rather than refused, because real PSK loses its symbol rate before it
+// loses its order: tests/characterise/test_empty_channel.cpp walks a 2400
+// baud BPSK signal down and it is still called PSK with no rate at 5 dB and at
+// 0 dB in 2500 Hz, at 0.93 and 0.65. Refusing would throw those away.
+//
+// Capped, because with no rate the call rests on the M-th power line alone,
+// and a bare carrier whose envelope the noise has taken lights that line
+// exactly the way BPSK does. Measured in the same file, with no rate:
+//
+//   real BPSK, 5 and 0 dB in 2500 Hz     0.929 and 0.650, margins 17.7, 8.1 dB
+//   a carrier in noise, 0 to -12 dB      0.667 to 0.989, margins 8.4 to 28.7 dB
+//
+// The two populations overlap over the whole range, so no cap above a half
+// separates them and the order's own margin says nothing about which one a
+// call belongs to. With a rate, every call measured sat at 0.972 or above.
+//
+// So a half, which is the same bar the AnalogueFm branch holds itself to and
+// for the same reason: the finding is an elimination between things the one
+// remaining test cannot tell apart, not a positive identification. It is also
+// the least margin_confidence ever reports for a test that passed, so a
+// capped call ranks under every PSK call that found its rate and level with
+// the weakest one that did.
+inline constexpr double kPskWithoutRateConfidence = 0.5;
+
 struct CharacteriseConfig {
     dsp::SampleRate rate = 0;
 
@@ -133,6 +163,42 @@ struct CharacteriseConfig {
     // range over before a constant-envelope waveform with no separable
     // tones is called analogue FM rather than refused.
     double analogue_fm_spread_fraction = 0.10;
+
+    // How much of the extract's own power the carrier the M-th power line
+    // names has to sit on, as a share of the median power across the occupied
+    // band, before the PSK branch is taken.
+    //
+    // THE RULE. A linear modulation's spectrum peaks at its carrier. Band
+    // limited noise squared has no line in it and a CORNER where the band
+    // stops, and estimate_modulation_order compares a peak against a local
+    // baseline, which a corner defeats, so it names a carrier where the band's
+    // power has already fallen away. docs/detection.md found that on real
+    // 40 m; tests/characterise/test_empty_channel.cpp reproduces it on
+    // synthetic noise narrowed the way the CLI narrows an extract: 62 of 96
+    // empty channels called PSK, 22 of them WITH a symbol rate and at up to
+    // 0.98 confidence, so the missing-rate flag alone would not have caught
+    // them. Every one put its carrier 0.45 to 0.56 of the band's width from
+    // the band's centre, which is the edge.
+    //
+    // WHY POWER AND NOT DISTANCE FROM THE CENTRE, which was tried first. The
+    // occupied band of a noise-filled extract is not centred on anything: a
+    // real BPSK signal at -7 kHz and 20 dB in 2500 Hz came back with its band
+    // centred at +6.06 kHz, its carrier 0.34 of the width away, and a bar on
+    // distance refused it. The power at the carrier does not move with where
+    // the noise dragged the band.
+    //
+    // THE MARGINS, from the same file. The 62 order lines on empty channels
+    // named carriers sitting on at most 0.195 of the band's median power.
+    // Real BPSK and QPSK at 0, +3 and -7 kHz from 30 dB down to 0 dB in
+    // 2500 Hz, wherever the order was found, sat on at least 0.88 of it, the
+    // low end at 30 dB where the band is the signal's own flat top, and on
+    // 2 to 110 times it once noise fills the extract. A half is a factor of
+    // 2.6 inside each. With the rule, 0 of the 96 empty channels is named.
+    //
+    // The level is read at whichever of the carrier's M-fold aliases, rate/M
+    // apart, stands highest, because the power law cannot tell those apart
+    // and a real carrier reported at an alias is still a real carrier.
+    double psk_carrier_level_fraction = 0.5;
 
     // Transform length for the averaged spectrum, or zero to let
     // analysis_segment pick one from the sample count.
@@ -181,6 +247,23 @@ struct Characterisation {
     ModulationFamily family = ModulationFamily::Unknown;
     double family_confidence = 0.0;
 
+    // True when family is Psk and neither cyclic detector produced a symbol
+    // rate. The call is kept, its confidence is held to
+    // kPskWithoutRateConfidence, the summary says why, and
+    // may_drive_detection() refuses it. See kPskWithoutRateConfidence for
+    // the measurement.
+    bool psk_without_symbol_rate = false;
+
+    // The extract's power at the power law's carrier, at its highest M-fold
+    // alias, over the median power across the occupied band. Negative when
+    // no order or no band was found to measure it against.
+    //
+    // psk_carrier_outside_band is set when it fell under
+    // CharacteriseConfig::psk_carrier_level_fraction, in which case the PSK
+    // branch was not taken and the refusal says so.
+    double psk_carrier_level = -1.0;
+    bool psk_carrier_outside_band = false;
+
     // True when nothing at all was established: no family and no frame
     // period either. A frame period without a family is still a finding,
     // because a repeat is a repeat whatever is repeating, so it is not a
@@ -228,5 +311,17 @@ struct Characterisation {
 
 [[nodiscard]] Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
                                                       const CharacteriseConfig& config);
+
+// Whether this characterisation may be one of the inputs that decides what the
+// detector does: a threshold, a hold, whether a track is kept.
+//
+// NECESSARY, NOT SUFFICIENT. It refuses an Unknown family and a flagged PSK
+// call, which are the two cases with a stated reason to refuse, and it
+// certifies nothing else. docs/detection.md measured that the family call on
+// real HF cannot carry a detection decision on its own; a caller that routes a
+// family into detection passes through here first and still owes its own
+// measurement of what it is doing. Nothing in this tree routes one yet, and
+// nothing goes on the wire as a family.
+[[nodiscard]] bool may_drive_detection(const Characterisation& result);
 
 }  // namespace revenant::characterise

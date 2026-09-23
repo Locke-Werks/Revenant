@@ -405,8 +405,8 @@ TEST_CASE("a channel of noise is refused, and the refusal carries the numbers",
 // that makes the family alone drive detection.
 //
 // This is the measured limit, not a bug being reported. Buried far enough in
-// noise an unmodulated carrier is called 2-PSK, with high confidence, and the
-// mechanism is written into ModulationOrder's own comment: squaring a tone
+// noise an unmodulated carrier is called 2-PSK, and the mechanism is written
+// into ModulationOrder's own comment: squaring a tone
 // gives another tone. A carrier lights the M-th power line at exponent 2
 // exactly the way BPSK does. What separates them is the envelope, and the
 // envelope is what the noise takes away first: at enough noise the normalised

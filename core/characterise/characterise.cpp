@@ -40,6 +40,54 @@ namespace {
     return "; consistent with " + summarise_candidates(candidates);
 }
 
+// The extract's own power at the power law's carrier, over the median power
+// across the occupied band, taken at whichever of the carrier's M-fold
+// aliases stands highest: the law reads a line at M times the carrier, so the
+// carrier it reports is only known modulo rate/M. Three bins around each
+// alias, so one bin's variance does not decide it. Negative when there is no
+// band or no order to measure against.
+[[nodiscard]] double carrier_level(const ModulationOrder& order, const OccupiedBand& band,
+                                   const PowerSpectrum& spectrum)
+{
+    if (!order.found || order.order <= 0 || !band.found || spectrum.bins.empty()) {
+        return -1.0;
+    }
+    std::vector<double> inside;
+    for (std::size_t k = 0; k < spectrum.bins.size(); ++k) {
+        const double f = spectrum.frequency_at(static_cast<double>(k));
+        if (f >= band.low_hz && f <= band.high_hz) {
+            inside.push_back(spectrum.bins[k]);
+        }
+    }
+    if (inside.empty()) {
+        return -1.0;
+    }
+    const std::size_t middle = inside.size() / 2;
+    std::nth_element(inside.begin(), inside.begin() + static_cast<std::ptrdiff_t>(middle),
+                     inside.end());
+    const double typical = inside[middle];
+    if (!(typical > 0.0)) {
+        return -1.0;
+    }
+
+    const std::size_t count = spectrum.bins.size();
+    const double alias = static_cast<double>(spectrum.rate) / static_cast<double>(order.order);
+    double best = 0.0;
+    for (int k = -order.order; k <= order.order; ++k) {
+        const std::size_t at =
+            spectrum.bin_at(order.carrier_offset_hz + static_cast<double>(k) * alias);
+        if (at >= count) {
+            continue;
+        }
+        double sum = 0.0;
+        for (std::size_t d = 0; d < 3; ++d) {
+            sum += spectrum.bins[(at + count - 1 + d) % count];
+        }
+        best = std::max(best, sum / 3.0);
+    }
+    return best / typical;
+}
+
 }  // namespace
 
 Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
@@ -119,6 +167,13 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
 
     const bool constant_envelope =
         out.envelope.normalised_power_variance < config.constant_envelope_variance;
+
+    // Whether the power law's carrier sits where the extract has no power of
+    // its own, which is where band-limited noise puts one. See
+    // CharacteriseConfig::psk_carrier_level_fraction for the measurement.
+    out.psk_carrier_level = carrier_level(out.order, out.band, *spectrum);
+    out.psk_carrier_outside_band =
+        out.psk_carrier_level >= 0.0 && out.psk_carrier_level < config.psk_carrier_level_fraction;
 
     ProtocolQuery query;
     query.bandwidth_hz = out.band.found ? out.band.bandwidth_hz : 0.0;
@@ -208,7 +263,7 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             "extract cannot separate{}{}",
             hertz(out.tones.frequency_spread_hz), hertz(out.band.bandwidth_hz), cycle,
             candidate_clause(out.candidates));
-    } else if (out.order.found && !constant_envelope) {
+    } else if (out.order.found && !constant_envelope && !out.psk_carrier_outside_band) {
         out.family = ModulationFamily::Psk;
         out.family_confidence = out.order.confidence;
         out.symbol_rate =
@@ -225,6 +280,20 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             hertz(out.order.carrier_offset_hz),
             hertz(static_cast<double>(config.rate) / static_cast<double>(out.order.order)),
             hertz(out.band.bandwidth_hz), candidate_clause(out.candidates));
+
+        // Kept, flagged and capped rather than refused, and the reason is on
+        // kPskWithoutRateConfidence: real PSK loses its rate before its order,
+        // and a carrier in noise lights the same order line with no rate at
+        // all, at confidences the two share.
+        if (!out.symbol_rate.found) {
+            out.psk_without_symbol_rate = true;
+            out.family_confidence = std::min(out.family_confidence, kPskWithoutRateConfidence);
+            out.summary += std::format(
+                ". No symbol rate was measured, so this rests on the M-th power line alone, "
+                "which a bare carrier in noise lights the same way: confidence held to {:.2f} "
+                "and not to be used to drive detection",
+                kPskWithoutRateConfidence);
+        }
     }
 
     if (out.family == ModulationFamily::Unknown) {
@@ -247,6 +316,18 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             out.frequency_transition.refusal.empty() ? "it found a symbol rate."
                                                      : out.frequency_transition.refusal,
             out.ofdm.refusal.empty() ? "it found a cyclic prefix." : out.ofdm.refusal);
+
+        if (out.psk_carrier_outside_band) {
+            out.refusal += std::format(
+                " The M-th power law found an order-{} line, {:.1f} dB up, and put its carrier at "
+                "{}, where the extract's own power is {:.2f} of the median across its occupied "
+                "band, against the {:.2f} a carrier has to reach. A linear modulation's spectrum "
+                "peaks at its carrier; a carrier where the band's power has fallen away is the "
+                "corner band-limited noise leaves at its edge, not a line. So no PSK call was "
+                "made from it.",
+                out.order.order, out.order.margin_db, hertz(out.order.carrier_offset_hz),
+                out.psk_carrier_level, config.psk_carrier_level_fraction);
+        }
 
         if (out.frame.found) {
             out.summary = std::format(
@@ -287,6 +368,11 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
     }
 
     return out;
+}
+
+bool may_drive_detection(const Characterisation& result)
+{
+    return result.family != ModulationFamily::Unknown && !result.psk_without_symbol_rate;
 }
 
 }  // namespace revenant::characterise
