@@ -582,6 +582,91 @@ a Cap'n Proto field number is permanent and three branches appending to one
 schema would collide. Nothing moved when each landed, which is the whole of
 what that bought.
 
+### Every other decoder reports through one seam
+
+`Session::decoders` lists what the engine can attach and
+`Session::subscribeDecoded(vrx, decoder, receiver)` attaches one to a receiver
+and streams what it recovers as `DecodedMessage`s. P25 Phase 1, D-STAR and
+TETRA report through it as of 2026-09-22; RTTY, APRS, POCSAG, PSK31, CW and M17
+are being written as pure libraries in `core/decode` and each reaches the wire
+as one adapter and one registry row in `core/rpc/decoders.h`, with nothing in
+the schema, `types.h`, the client or the server moving.
+
+**One message shape and not a struct per mode.** A message carries the
+receiver, the decoder's registry name, a `kind` within that decoder, a sample
+span, a list of fields and an optional line of text. A field is a key and a
+value that is one of an integer, a real, a flag, text or bytes, so a talkgroup
+is an integer on the wire and a client sorting by it parses nothing. A struct
+per mode would be a schema change, a mirror, a conversion and a client change
+per decoder, and a client built before a mode existed could not show it. The
+keys each decoder emits are listed above its adapter, and a key once published
+is not renamed, on the ground a field ordinal is not renumbered.
+
+**RDS stays where it is.** A station is a state that accumulates over many
+groups and is polled whole; what these decoders produce is events, and an event
+polled is an event missed. The two surfaces have different shapes on purpose.
+
+**Attaching is subscribing.** Nothing decodes until something subscribes, two
+subscribers to one decoder on one receiver share one instance, and the last
+leaving takes it off, which is `subscribePassband`'s and `subscribeAudio`'s
+rule and for their reason: a decoder costs the completion thread on every chunk.
+An empty decoder name means the one named after the receiver's mode and
+`decoderResolved` says which ran; the mode chooses the channel filter and the
+decoder what is read out of it, so they are separate, and an AFSK decoder when
+one exists will read an `nfm` receiver's audio. Refused in words for a receiver
+that is not there, a name the engine does not have, and an input the receiver
+cannot give.
+
+**Where it runs.** On the engine's completion thread inside an audio sink
+joined through `attach_audio_sink`, exactly as the RDS decoder does, with the
+retune fence it uses: `setVrxParams` and `setSourceCenter` reset every decoder
+on the receiver and discard chunks recorded at the old tuning. The decoder is
+built on the first chunk at the rate that chunk carries and never from
+`VrxStatus`, because the two complex paths deliver at different rates: a
+digital voice receiver's fine stage at 48000 or 72000, which `demodRate` states,
+and a raw tap at the channel rate, which `demodRate` does not.
+
+**Delivery queues, as audio's does.** A message is the only copy of an event,
+so each subscription holds up to 256 and evicts the oldest when full, and
+`droppedBefore` on the next message says how many went. `sequence` is counted
+per decoder, so two subscribers see the same numbers.
+
+**`ended()` says why a stream stopped**, on `AudioReceiver::ended`'s argument
+that a stream which simply stops looks like a quiet channel: the receiver was
+removed, by anybody or by its session ending; the decoder refused what the
+receiver delivered, which is terminal for that decoder on that receiver; or a
+`message()` call failed.
+
+**The sample span is where the message completed**, `[startSample,
+endSample)` in the receiver's own stream at `sampleRate`, which is the chunk
+that delivered its last sample. It bounds when the message ended to within one
+chunk and does not say where it began.
+
+**The adapters are a header** because two programs run them and only one links
+the wire. `revenant-cli --decode <name>` attaches the same code to its `--vrx`
+receivers in-process and prints each message; `revenant_core` is all it links.
+
+**Measured, not asserted**, by `tests/rpc/test_rpc_decode.cpp` on 2026-09-22
+against the RTX 4090. A P25 capture carrying six headers, three in clear and
+three encrypted, through a four-channel grid at 288000 S/s with the carrier 5 kHz
+off the channel centre: four headers crossed with their talkgroup, algorithm,
+key id and encrypted flag intact, from both of two subscribers under the same
+sequence numbers. A D-STAR header crossed with every callsign and the flags.
+TETRA crossed at least nine of eighteen synchronisation bursts, with MCC, MNC,
+colour code and timeslot. The P25 adapter spent 83.58 ms of one core per second
+of 48000 S/s input in a Debug build; an optimised build was not measured.
+
+**Two things found on the way, both in `core/decode/p25p1.cpp`.** A Header Data
+Unit whose sync and NID arrived in one call and whose body arrived in the next
+was reported without its header and never tried again, so through the engine a
+P25 stream reported NACs and no talkgroups; that is fixed and
+`tests/decode/test_p25p1.cpp` splits a header across two calls to hold it. The
+other is open: the decoder's output depends on how its input is blocked. The
+same capture gave four of its six headers at 16384-sample engine blocks and one
+at 65536, `revenant-cli`'s default. The decoder subtracts each call's mean as
+its carrier offset estimate, which is one block-dependent step; whether it is
+the responsible one is not established.
+
 ### The front end can be pointed somewhere else
 
 `Session::setSourceCenter` retunes the source and answers with the centre the
@@ -841,10 +926,12 @@ What the schema does carry is the state a client needs to draw and control:
 `EngineInfo` with the device, grid, rates and spectrum geometry;
 `SourceDescriptor` for a picker; `SourceStats` and `VrxStatus` for the
 counters; the `DetectionList` above, which is the detection metadata the
-engine's promise names and the reason that clause is in it; and `RdsStation`,
-which is the "decoded symbols" clause of the same promise now that something
-decodes. Nothing new crosses the bus for it: the composite is audio PCM the
-engine already returns, and the decode happens on the host.
+engine's promise names and the reason that clause is in it; and `RdsStation`
+and `DecodedMessage`, which are the "decoded symbols" clause of the same
+promise now that something decodes. Nothing new crosses the bus for either:
+the composite is audio PCM the engine already returns, a digital voice
+receiver's baseband comes back through the same readback at its decoder's
+rate, and the decode happens on the host.
 Overruns and lost samples travel because they are correctness events, and a
 remote client is exactly the caller that cannot read the log.
 `VrxStatus::audioDropped` travels beside them and is narrower than it reads:

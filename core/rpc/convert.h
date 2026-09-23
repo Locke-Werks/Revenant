@@ -30,6 +30,7 @@
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
 #include "core/rpc/revenant.capnp.h"
+#include "core/rpc/types.h"
 #include "core/source/capabilities.h"
 #include "core/source/source.h"
 
@@ -242,6 +243,19 @@ void write_rds_station(schema::RdsStation::Builder out, const decode::StationSta
 void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBitsStatus& in);
 
 [[nodiscard]] Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in);
+
+// A decoded message and a registry row, outbound.
+//
+// From core/rpc/types.h's structs rather than from an engine struct, because
+// the adapters in core/rpc/decoders.h produce types.h's DecodedMessage
+// directly: a third copy of the same event, engine-side, would be a struct
+// with nothing to add and a conversion with nothing to check. Here rather
+// than in server.cpp because a field dropped on the way out is exactly the
+// failure this file exists to make reviewable, and the value union is the
+// part with a case to forget.
+void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMessage& in);
+void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
+                        DecoderInput input, std::string_view description);
 
 // There is deliberately no read_spectrum_geometry here.
 //

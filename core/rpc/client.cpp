@@ -873,6 +873,69 @@ void read_audio_chunk(AudioChunk& out, schema::AudioChunk::Reader in) {
     return out;
 }
 
+// A field whose union this build cannot name, because a newer engine added a
+// kind, is dropped rather than read as whichever alternative sits at that
+// ordinal. The message is still delivered and its other fields are not
+// disturbed, so an older client keeps working against a newer decoder.
+void read_decoded_message(DecodedMessage& out, schema::DecodedMessage::Reader in) {
+    out.vrx = in.getVrx();
+    out.decoder = read_text(in.getDecoder());
+    out.kind = read_text(in.getKind());
+    out.start_sample = in.getStartSample();
+    out.end_sample = in.getEndSample();
+    out.sample_rate = in.getSampleRate();
+    out.text = read_text(in.getText());
+    out.sequence = in.getSequence();
+    out.dropped_before = in.getDroppedBefore();
+
+    out.fields.clear();
+    auto fields = in.getFields();
+    out.fields.reserve(fields.size());
+    for (const auto field : fields) {
+        DecodedField entry;
+        entry.key = read_text(field.getKey());
+        const auto value = field.getValue();
+        switch (value.which()) {
+            case schema::DecodedField::Value::INTEGER:
+                entry.value.emplace<0>(value.getInteger());
+                break;
+            case schema::DecodedField::Value::REAL:
+                entry.value.emplace<1>(value.getReal());
+                break;
+            case schema::DecodedField::Value::FLAG:
+                entry.value.emplace<2>(value.getFlag());
+                break;
+            case schema::DecodedField::Value::TEXT:
+                entry.value.emplace<3>(read_text(value.getText()));
+                break;
+            case schema::DecodedField::Value::BYTES: {
+                const auto bytes = value.getBytes();
+                entry.value.emplace<4>(bytes.begin(), bytes.end());
+                break;
+            }
+            default:
+                continue;
+        }
+        out.fields.push_back(std::move(entry));
+    }
+}
+
+[[nodiscard]] DecodedStats read_decoded_stats(schema::DecodedStats::Reader in) {
+    DecodedStats out;
+    out.messages_sent = in.getMessagesSent();
+    out.messages_dropped = in.getMessagesDropped();
+    out.backlog = in.getBacklog();
+    out.chunks_discarded = in.getChunksDiscarded();
+    out.sample_rate = in.getSampleRate();
+    return out;
+}
+
+// The key a decoded-message subscription is held under: the receiver and the
+// decoder name exactly as the caller passed it, empty included. Keyed on what
+// was asked rather than what the engine resolved, so unsubscribe_decoded takes
+// the same arguments subscribe_decoded did.
+using DecodedKey = std::pair<std::uint64_t, std::string>;
+
 // Everything the event loop thread owns, in one place on its own stack.
 //
 // See the thread model at the top of the file. These three cannot be members
@@ -901,6 +964,9 @@ struct LoopState {
     // above, because a client watching a receiver's passband and listening
     // to it is the ordinary case and the two end independently.
     std::map<std::uint64_t, kj::Own<schema::AudioSubscription::Client>> audios;
+
+    // And decoded messages, one per decoder per receiver.
+    std::map<DecodedKey, kj::Own<schema::DecodedSubscription::Client>> decodeds;
 };
 
 class ClientImpl;
@@ -948,6 +1014,22 @@ public:
 private:
     ClientImpl& owner_;
     std::uint64_t vrx_ = 0;
+};
+
+// The same, for one decoder on one receiver. It carries the key the
+// subscription was made under, for the reason AudioReceiverImpl carries the
+// receiver: a message routed by its own fields could reach another pane.
+class DecodedReceiverImpl final : public schema::DecodedReceiver::Server {
+public:
+    DecodedReceiverImpl(ClientImpl& owner, DecodedKey key)
+        : owner_(owner), key_(std::move(key)) {}
+
+    kj::Promise<void> message(MessageContext context) override;
+    kj::Promise<void> ended(EndedContext context) override;
+
+private:
+    ClientImpl& owner_;
+    DecodedKey key_;
 };
 
 class ClientImpl final : public Client {
@@ -1005,6 +1087,15 @@ public:
     [[nodiscard]] Expected<RdsStation> rds_station(std::uint64_t vrx) override;
     [[nodiscard]] Status set_rds_region(std::uint64_t vrx, RdsRegion region) override;
 
+    [[nodiscard]] Expected<std::vector<DecoderInfo>> decoders() override;
+    [[nodiscard]] Expected<std::string> subscribe_decoded(std::uint64_t vrx,
+                                                          std::string_view decoder,
+                                                          DecodedCallback on_message,
+                                                          DecodedEndedCallback on_ended) override;
+    void unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) override;
+    [[nodiscard]] Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
+                                                       std::string_view decoder) override;
+
     [[nodiscard]] std::uint64_t frames_received() const override;
     [[nodiscard]] std::uint64_t frames_dropped() const override;
 
@@ -1018,6 +1109,10 @@ public:
     void deliver_audio(std::uint64_t vrx, schema::AudioChunk::Reader in);
     void deliver_audio_ended(std::uint64_t vrx, capnp::Text::Reader reason);
 
+    // Loop thread only, called by DecodedReceiverImpl.
+    void deliver_decoded(const DecodedKey& key, schema::DecodedMessage::Reader in);
+    void deliver_decoded_ended(const DecodedKey& key, capnp::Text::Reader reason);
+
 private:
     void run(const std::string& address, std::uint16_t port, std::promise<Status>& ready);
 
@@ -1029,6 +1124,11 @@ private:
     [[nodiscard]] kj::Promise<void> end_subscription(LoopState& state);
     [[nodiscard]] kj::Promise<void> end_passband(LoopState& state, std::uint64_t vrx);
     [[nodiscard]] kj::Promise<void> end_audio(LoopState& state, std::uint64_t vrx);
+    [[nodiscard]] kj::Promise<void> end_decoded(LoopState& state, const DecodedKey& key);
+
+    // forget_audio's twin: every trace of one decoded-message subscription on
+    // this side, the capability included. Loop thread only.
+    void forget_decoded(const DecodedKey& key);
 
     // Everything one audio subscription owns on this side, dropped in one
     // place. Loop thread only.
@@ -1123,6 +1223,12 @@ private:
     std::map<std::uint64_t, AudioCallback> audio_callbacks_;
     std::map<std::uint64_t, AudioEndedCallback> audio_ended_;
     std::map<std::uint64_t, AudioChunk> audio_scratch_;
+
+    // The same pair per decoded-message subscription. No scratch: a message
+    // is a handful of fields and is read fresh, where a chunk is thousands of
+    // floats whose buffer is worth keeping.
+    std::map<DecodedKey, DecodedCallback> decoded_callbacks_;
+    std::map<DecodedKey, DecodedEndedCallback> decoded_ended_;
 
     // client.h says calls queue. This is what makes them.
     std::mutex calls_;
@@ -1873,6 +1979,154 @@ void ClientImpl::deliver_audio_ended(std::uint64_t vrx, capnp::Text::Reader reas
     // under it, and it is what makes a later audio_stats on this receiver
     // refuse rather than report a corpse.
     forget_audio(vrx);
+
+    if (callable) {
+        callable(text);
+    }
+}
+
+kj::Promise<void> DecodedReceiverImpl::message(MessageContext context) {
+    owner_.deliver_decoded(key_, context.getParams().getMessage());
+
+    // Answered only once the callback has run, so a slow callback fills the
+    // engine's queue for this subscription rather than this process's.
+    return kj::READY_NOW;
+}
+
+kj::Promise<void> DecodedReceiverImpl::ended(EndedContext context) {
+    owner_.deliver_decoded_ended(key_, context.getParams().getReason());
+    return kj::READY_NOW;
+}
+
+Expected<std::vector<DecoderInfo>> ClientImpl::decoders() {
+    return on_loop("decoders", [](LoopState& state) {
+        return state.session.decodersRequest().send().then([](auto&& response) {
+            std::vector<DecoderInfo> out;
+            for (const auto row : response.getDecoders()) {
+                DecoderInfo info;
+                info.name = read_text(row.getName());
+                info.description = read_text(row.getDescription());
+                // An input kind this build cannot name is reported as the
+                // complex one rather than dropped, with the name intact: the
+                // row is still a decoder that exists, and subscribing is what
+                // would refuse it in words.
+                info.input = row.getInput() == schema::DecoderInput::REAL_AUDIO
+                                 ? DecoderInput::RealAudio
+                                 : DecoderInput::ComplexBaseband;
+                out.push_back(std::move(info));
+            }
+            return out;
+        });
+    });
+}
+
+void ClientImpl::forget_decoded(const DecodedKey& key) {
+    decoded_callbacks_.erase(key);
+    decoded_ended_.erase(key);
+
+    // The capability too, which is the half forget_audio's note says used to
+    // be left behind for audio.
+    if (state_ != nullptr) {
+        state_->decodeds.erase(key);
+    }
+}
+
+kj::Promise<void> ClientImpl::end_decoded(LoopState& state, const DecodedKey& key) {
+    auto found = state.decodeds.find(key);
+    if (found == state.decodeds.end()) {
+        forget_decoded(key);
+        return kj::READY_NOW;
+    }
+
+    // Cancel, then drop, for end_audio's ordering reason, and so that the
+    // server never sends ended() for a stop this client asked for.
+    auto cancelled = found->second->cancelRequest().send().ignoreResult();
+    forget_decoded(key);
+    return cancelled.catch_([](kj::Exception&&) {});
+}
+
+Expected<std::string> ClientImpl::subscribe_decoded(std::uint64_t vrx, std::string_view decoder,
+                                                    DecodedCallback on_message,
+                                                    DecodedEndedCallback on_ended) {
+    if (!on_message) {
+        return fail("subscribe_decoded: the message callback is empty. unsubscribe_decoded is "
+                    "how a subscription ends");
+    }
+
+    DecodedKey key{vrx, std::string(decoder)};
+    return on_loop("subscribe_decoded", [this, &key, &on_message,
+                                         &on_ended](LoopState& state) {
+        // Replacing, as subscribe_audio does, and the old one is ended first
+        // so a message from it cannot reach the new callback.
+        return end_decoded(state, key).then([this, &state, &key, &on_message, &on_ended]() {
+            // Installed before the request goes out, because the engine may
+            // call message() before it answers the subscribe.
+            decoded_callbacks_[key] = std::move(on_message);
+            decoded_ended_[key] = std::move(on_ended);
+
+            auto request = state.session.subscribeDecodedRequest();
+            request.setVrx(key.first);
+            request.setDecoder(key.second);
+            request.setReceiver(
+                schema::DecodedReceiver::Client(kj::heap<DecodedReceiverImpl>(*this, key)));
+
+            return request.send()
+                .then([&state, key](auto&& response) -> std::string {
+                    state.decodeds[key] = kj::heap<schema::DecodedSubscription::Client>(
+                        response.getSubscription());
+                    return read_text(response.getDecoderResolved());
+                })
+                .catch_([this, key](kj::Exception&& failure) -> kj::Promise<std::string> {
+                    forget_decoded(key);
+                    return kj::Promise<std::string>(kj::mv(failure));
+                });
+        });
+    });
+}
+
+void ClientImpl::unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) {
+    // No error channel, for the reason unsubscribe_spectrum gives.
+    const DecodedKey key{vrx, std::string(decoder)};
+    static_cast<void>(on_loop("unsubscribe_decoded", [this, &key](LoopState& state) {
+        return end_decoded(state, key);
+    }));
+}
+
+Expected<DecodedStats> ClientImpl::decoded_stats(std::uint64_t vrx, std::string_view decoder) {
+    const DecodedKey key{vrx, std::string(decoder)};
+    return on_loop("decoded_stats", [&key](LoopState& state) -> kj::Promise<DecodedStats> {
+        auto found = state.decodeds.find(key);
+        if (found == state.decodeds.end()) {
+            kj::throwFatalException(KJ_EXCEPTION(
+                FAILED, "this client holds no decoded-message subscription under that receiver "
+                        "and decoder name"));
+        }
+        return found->second->statsRequest().send().then(
+            [](auto&& response) { return read_decoded_stats(response.getStats()); });
+    });
+}
+
+void ClientImpl::deliver_decoded(const DecodedKey& key, schema::DecodedMessage::Reader in) {
+    auto callback = decoded_callbacks_.find(key);
+    if (callback == decoded_callbacks_.end() || !callback->second) {
+        // An unsubscribe that crossed a message already on the wire.
+        return;
+    }
+    DecodedMessage message;
+    read_decoded_message(message, in);
+    callback->second(message);
+}
+
+void ClientImpl::deliver_decoded_ended(const DecodedKey& key, capnp::Text::Reader reason) {
+    auto ended = decoded_ended_.find(key);
+    if (ended == decoded_ended_.end()) {
+        return;
+    }
+
+    // Copied out before the teardown, on deliver_audio_ended's reasoning.
+    DecodedEndedCallback callable = ended->second;
+    const std::string text = read_text(reason);
+    forget_decoded(key);
 
     if (callable) {
         callable(text);

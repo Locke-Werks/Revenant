@@ -675,4 +675,58 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     return out;
 }
 
+void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMessage& in) {
+    out.setVrx(in.vrx);
+    out.setDecoder(in.decoder);
+    out.setKind(in.kind);
+    out.setStartSample(in.start_sample);
+    out.setEndSample(in.end_sample);
+    out.setSampleRate(in.sample_rate);
+    out.setText(in.text);
+    out.setSequence(in.sequence);
+    out.setDroppedBefore(in.dropped_before);
+
+    auto fields = out.initFields(static_cast<unsigned>(in.fields.size()));
+    for (unsigned i = 0; i < fields.size(); ++i) {
+        const DecodedField& field = in.fields[i];
+        fields[i].setKey(field.key);
+        auto value = fields[i].initValue();
+
+        // By index and exhaustively, so a sixth alternative added to
+        // DecodedValue fails to compile here rather than crossing as the
+        // union's default, which is an integer zero.
+        static_assert(std::variant_size_v<DecodedValue> == 5,
+                      "a new DecodedValue alternative needs a case here and in client.cpp");
+        switch (field.value.index()) {
+            case 0: value.setInteger(std::get<0>(field.value)); break;
+            case 1: value.setReal(std::get<1>(field.value)); break;
+            case 2: value.setFlag(std::get<2>(field.value)); break;
+            case 3: value.setText(std::get<3>(field.value)); break;
+            case 4: {
+                const std::vector<std::uint8_t>& bytes = std::get<4>(field.value);
+                value.setBytes(capnp::Data::Reader(bytes.data(), bytes.size()));
+                break;
+            }
+            default: break;
+        }
+    }
+}
+
+void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
+                        DecoderInput input, std::string_view description) {
+    out.setName(std::string(name));
+    out.setDescription(std::string(description));
+
+    // Exhaustive and with no default, per docs/conventions.md, so a third
+    // input kind stops the build here.
+    switch (input) {
+        case DecoderInput::ComplexBaseband:
+            out.setInput(schema::DecoderInput::COMPLEX_BASEBAND);
+            return;
+        case DecoderInput::RealAudio:
+            out.setInput(schema::DecoderInput::REAL_AUDIO);
+            return;
+    }
+}
+
 }  // namespace revenant::rpc

@@ -2129,6 +2129,125 @@ struct RdsStation {
 }
 
 # ---------------------------------------------------------------------------
+# Decoded messages
+# ---------------------------------------------------------------------------
+#
+# ONE SHAPE FOR EVERY DECODER THAT PRODUCES EVENTS, so that a decoder added
+# later reports through this without growing the schema. P25 Phase 1, D-STAR
+# and TETRA report through it first; RTTY, APRS, POCSAG, PSK31, CW and M17 are
+# written as pure libraries and each needs an adapter in core/rpc/decoders.h
+# and nothing here.
+#
+# WHY RDS DOES NOT MOVE ONTO IT. An RDS station is a STATE: PS, RadioText and
+# the AF list accumulate over many groups and a client polls the whole of it.
+# What these decoders produce is a stream of EVENTS, one per frame or header
+# or burst, and an event polled is an event missed. So the two surfaces have
+# different shapes on purpose and RdsStation stays as it is.
+#
+# WHY KEY AND VALUE RATHER THAN A STRUCT PER MODE. A struct per mode is a
+# schema change, a types.h mirror, a conversion and a client change for every
+# decoder, and a client built before a mode existed could not show it at all.
+# Typed values keep the half a struct would have bought: a talkgroup is an
+# integer on the wire and never a string a client has to parse back. The keys
+# each decoder emits are listed beside its adapter in core/rpc/decoders.h, and
+# a key once published is not renamed, on the ground a field ordinal is not
+# renumbered.
+
+struct DecodedField {
+    key @0 :Text;
+    value :union {
+        integer @1 :Int64;
+        real @2 :Float64;
+        flag @3 :Bool;
+        text @4 :Text;
+
+        # What a transmitter sent, where the standard does not say it is
+        # ASCII. A client decides how to show it, on RdsStation::ps's argument.
+        bytes @5 :Data;
+    }
+}
+
+struct DecodedMessage {
+    vrx @0 :UInt64;
+
+    # The decoder's registry name and the kind of message within it, both
+    # lower case and stable: "p25p1" and "hdu", "dstar" and "header".
+    decoder @1 :Text;
+    kind @2 :Text;
+
+    # [startSample, endSample) in the receiver's own stream at sampleRate, the
+    # frame AudioChunk::sampleIndex counts in. It is the span of the delivery
+    # that COMPLETED the message, so it bounds when the message ended to
+    # within one chunk and says nothing about where it began. Sample indices
+    # and not wall clock, per docs/conventions.md.
+    startSample @3 :UInt64;
+    endSample @4 :UInt64;
+    sampleRate @5 :UInt32;
+
+    fields @6 :List(DecodedField);
+
+    # One line for a person, or empty. Never parsed.
+    text @7 :Text;
+
+    # Messages this decoder produced before this one, counted per decoder and
+    # not per subscription, so two subscribers see the same numbers.
+    sequence @8 :UInt64;
+
+    # Messages THIS subscription lost from its queue between the previous one
+    # it was sent and this one. A message is the only copy of an event, so a
+    # subscription queues, as audio does, and evicts the oldest when full.
+    droppedBefore @9 :UInt64;
+}
+
+enum DecoderInput {
+    # A receiver whose mode is a complex tap: raw, p25p1, dstar or tetra.
+    complexBaseband @0;
+
+    # A receiver producing real audio: every other mode.
+    realAudio @1;
+}
+
+struct DecoderInfo {
+    name @0 :Text;
+    input @1 :DecoderInput;
+    description @2 :Text;
+}
+
+struct DecodedStats {
+    messagesSent @0 :UInt64;
+    messagesDropped @1 :UInt64;
+    backlog @2 :UInt64;
+
+    # Chunks the decoder discarded because a retune of its receiver was still
+    # in flight, on the fence RdsStation::discarding describes. Per decoder
+    # and so shared by every subscriber to it.
+    chunksDiscarded @3 :UInt64;
+
+    # The rate the decoder was built for, zero until the first chunk arrived.
+    sampleRate @4 :UInt32;
+}
+
+interface DecodedReceiver {
+    message @0 (message :DecodedMessage) -> ();
+
+    # No further message will arrive, and why. Called at most once and never
+    # for a cancel this client asked for. Three things send it: the receiver
+    # being removed, by anybody or by its session ending; the decoder
+    # refusing what the receiver delivers, which is terminal for that
+    # decoder on that receiver; and a message() call on this capability
+    # coming back failed. Best effort, on the terms AudioReceiver::ended
+    # states.
+    ended @1 (reason :Text) -> ();
+}
+
+# Dropping this ends the subscription, and the decoder with it once nobody
+# else is subscribed to the same decoder on the same receiver.
+interface DecodedSubscription {
+    cancel @0 () -> ();
+    stats @1 () -> (stats :DecodedStats);
+}
+
+# ---------------------------------------------------------------------------
 # The root capability
 # ---------------------------------------------------------------------------
 
@@ -2789,4 +2908,38 @@ interface Session {
     # client without this field told an operator their dongle was "paced at
     # 1.00x on purpose" when the dongle had never looked at the setting.
     sourceDescriptor @22 () -> (open :Bool, source :SourceDescriptor);
+
+    # The decoders this engine can attach, by name, with what each reads.
+    decoders @23 () -> (decoders :List(DecoderInfo));
+
+    # Attaches a decoder to a receiver and streams what it recovers.
+    #
+    # PER RECEIVER, PER DECODER AND OPT IN, like subscribePassband and
+    # subscribeAudio: nothing decodes until something subscribes, two
+    # subscribers to the same decoder on the same receiver share one
+    # instance, and the last one leaving takes it off. A decoder costs CPU on
+    # the engine's completion thread for every chunk the receiver produces,
+    # which is the cost "nobody asked, nothing runs" exists to hold down.
+    #
+    # decoder EMPTY means the one named after the receiver's mode, so a p25p1
+    # receiver gets the p25p1 decoder, and it is refused on a mode no decoder
+    # is named after. decoderResolved says which ran. The mode chooses the
+    # channel filter and the decoder chooses what is read out of it, so they
+    # are separate on purpose: an AFSK decoder, when one exists, reads an nfm
+    # receiver's audio.
+    #
+    # REFUSED, in words, for a receiver that does not exist, for a decoder
+    # this engine does not have, and for an input the receiver cannot give:
+    # a complex-baseband decoder needs a receiver whose mode is a complex tap
+    # and an audio decoder needs one whose mode is not. The rate is NOT
+    # checked here. The decoder is built on the first chunk at the rate that
+    # chunk carries, because the rate a complex tap delivers is the engine's
+    # business and is changing, and a decoder that cannot run at it says so
+    # through ended().
+    #
+    # A RETUNE FENCES IT exactly as it fences an RDS decoder: setVrxParams and
+    # setSourceCenter reset the decoder and discard chunks recorded at the
+    # old tuning, so a message is never assembled from two transmitters.
+    subscribeDecoded @24 (vrx :UInt64, decoder :Text, receiver :DecodedReceiver)
+        -> (subscription :DecodedSubscription, decoderResolved :Text);
 }

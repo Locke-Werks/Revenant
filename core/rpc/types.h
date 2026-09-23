@@ -25,6 +25,8 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
+#include <variant>
 #include <vector>
 
 namespace revenant::rpc {
@@ -1086,6 +1088,124 @@ struct RdsStation {
     std::uint64_t discarded_chunks = 0;
 
     [[nodiscard]] bool decoding() const { return fault.empty(); }
+};
+
+// ---------------------------------------------------------------------------
+// Decoded messages
+// ---------------------------------------------------------------------------
+//
+// ONE SHAPE FOR EVERY DECODER THAT PRODUCES EVENTS, which is the seam and the
+// reason these exist. RDS has its own struct and keeps it, because a station
+// is a STATE that accumulates and is polled. A P25 frame, a D-STAR header, a
+// TETRA synchronisation burst, and the RTTY, APRS, POCSAG, PSK31, CW and M17
+// output that follows them are EVENTS, and an event is a name, a place in the
+// stream and a handful of typed values. Growing the schema by one struct per
+// mode would mean a schema change, a conversion and a client change for every
+// decoder, and a client that could not show a mode it was built before.
+// core/rpc/decoders.h is the engine side of the same seam.
+
+// A field's value. One of five kinds and never a string that has to be
+// parsed back into a number: a talkgroup is an integer on the wire, so a
+// client sorting or filtering by it does not guess at a format.
+//
+// BYTES ARE NOT TEXT. A field holding what a transmitter sent, a D-STAR
+// callsign or a P25 message indicator, is text only where the standard says
+// it is ASCII; anything else crosses as bytes and a client decides how to
+// show it, on the argument RdsStation::ps makes.
+using DecodedValue =
+    std::variant<std::int64_t, double, bool, std::string, std::vector<std::uint8_t>>;
+
+struct DecodedField {
+    // Lower snake case, stable per decoder, and documented beside the decoder
+    // that emits it in core/rpc/decoders.h. A client keys a column on this.
+    std::string key;
+    DecodedValue value;
+
+    [[nodiscard]] const std::int64_t* integer() const {
+        return std::get_if<std::int64_t>(&value);
+    }
+    [[nodiscard]] const double* real() const { return std::get_if<double>(&value); }
+    [[nodiscard]] const bool* flag() const { return std::get_if<bool>(&value); }
+    [[nodiscard]] const std::string* text() const { return std::get_if<std::string>(&value); }
+    [[nodiscard]] const std::vector<std::uint8_t>* bytes() const {
+        return std::get_if<std::vector<std::uint8_t>>(&value);
+    }
+};
+
+// One thing a decoder recovered from one receiver's stream.
+struct DecodedMessage {
+    std::uint64_t vrx = 0;
+
+    // The registry name of the decoder that produced it, "p25p1" and so on,
+    // and the kind of message within that decoder: "hdu", "ldu1", "header",
+    // "sync". Both lower case, both stable.
+    std::string decoder;
+    std::string kind;
+
+    // WHERE IN THE RECEIVER'S OWN STREAM, as [start_sample, end_sample) at
+    // sample_rate, in the same frame AudioChunk::sample_index counts in.
+    //
+    // THE SPAN OF THE DELIVERY THAT COMPLETED THE MESSAGE, which bounds when it
+    // ENDED to within one chunk and does not say where it began. A P25 header
+    // is 82.5 ms on the air and a chunk is about 7 ms at the test fixture's
+    // block size, so the span is the last few symbols of it and not the whole.
+    // Sample indices rather than wall clock, per docs/conventions.md: a
+    // message from a replayed capture carries the index it had live.
+    std::uint64_t start_sample = 0;
+    std::uint64_t end_sample = 0;
+    std::uint32_t sample_rate = 0;
+
+    std::vector<DecodedField> fields;
+
+    // One line a person can read, or empty. Never parsed: the fields are the
+    // machine-readable half and say everything this does.
+    std::string text;
+
+    // Messages this decoder produced before this one, so a gap between two
+    // consecutive sequences is messages this subscription did not see.
+    std::uint64_t sequence = 0;
+
+    // Messages this subscription lost from its queue between the previous one
+    // it was sent and this one, because it could not keep up. A sequence gap
+    // larger than this was lost somewhere else, which no path does today.
+    std::uint64_t dropped_before = 0;
+
+    // The first field named `key`, or null. Linear, because a message carries
+    // about ten.
+    [[nodiscard]] const DecodedField* field(std::string_view key) const {
+        for (const DecodedField& entry : fields) {
+            if (entry.key == key) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+};
+
+// What a decoder reads. A complex decoder is fed a receiver's raw tap, two
+// floats per sample, and an audio decoder a receiver's real audio.
+enum class DecoderInput : std::uint8_t { ComplexBaseband, RealAudio };
+
+struct DecoderInfo {
+    std::string name;
+    DecoderInput input = DecoderInput::ComplexBaseband;
+
+    // One sentence naming the standard it implements and what it recovers.
+    std::string description;
+};
+
+// One decoded-message subscription's running totals.
+struct DecodedStats {
+    std::uint64_t messages_sent = 0;
+    std::uint64_t messages_dropped = 0;
+    std::uint64_t backlog = 0;
+
+    // Chunks the decoder behind this subscription threw away because a retune
+    // was still in flight. Shared by every subscriber to the same decoder.
+    std::uint64_t chunks_discarded = 0;
+
+    // The rate the decoder was built for, zero until the first chunk.
+    std::uint32_t sample_rate = 0;
 };
 
 }  // namespace revenant::rpc

@@ -304,6 +304,7 @@
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/rpc/convert.h"
+#include "core/rpc/decoders.h"
 #include "core/rpc/listen.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
@@ -838,6 +839,100 @@ struct RdsRoute {
     std::string fault;
 };
 
+// ---------------------------------------------------------------------------
+// Decoded messages
+// ---------------------------------------------------------------------------
+
+// How many messages one subscription holds before it evicts the oldest.
+//
+// A message is the only copy of an event, so a subscription queues, which is
+// audio's rule rather than the display streams'. The depth is a count rather
+// than a duration because a decoder's message rate is the transmitter's and
+// not the engine's: P25 produces a data unit every 180 ms during a call and
+// nothing between calls. 256 is 46 seconds of back-to-back P25 voice frames,
+// which is far longer than any client stall this is meant to absorb, and at a
+// few hundred bytes a message it is well under a megabyte a subscription.
+constexpr std::size_t kDecodedQueueDepth = 256;
+
+// One subscriber to one decoder on one receiver.
+//
+// Split the way AudioNode is: the loop thread alone touches the capability and
+// the flight flags, and the queue under `lock` is written by the completion
+// thread and drained by the loop.
+struct DecodedNode : std::enable_shared_from_this<DecodedNode> {
+    DecodedNode(schema::DecodedReceiver::Client client, engine::VrxId which,
+                std::string_view name)
+        : vrx(which), decoder(name), receiver(kj::mv(client)) {}
+
+    // Set here and never written again.
+    const engine::VrxId vrx;
+    const std::string decoder;
+
+    // Loop thread only.
+    schema::DecodedReceiver::Client receiver;
+    bool in_flight = false;
+    bool cancelled = false;
+    bool ended_sent = false;
+
+    // Both threads, under `lock`.
+    std::mutex lock;
+    std::deque<DecodedMessage> queue;
+    std::uint64_t dropped_before = 0;
+    std::uint64_t messages_sent = 0;
+    std::uint64_t messages_dropped = 0;
+};
+
+// One decoder attached to one receiver, shared by every subscriber to it.
+//
+// The shape of AudioRoute with a decoder inside it. The sink callable
+// co-owns it, so a dispatch already in flight when the sink comes off still
+// finds live memory, and `owner` is cleared under `lock` so that such a
+// dispatch finds null rather than a server that has gone.
+struct DecodeRoute {
+    DecodeRoute(engine::VrxId which, const DecoderSpec& what) : vrx(which), spec(what) {}
+
+    const engine::VrxId vrx;
+    const DecoderSpec& spec;
+
+    // Loop thread only: the token that detaches the sink, and whether the
+    // fault below has already been turned into ended() calls.
+    engine::AudioSinkId sink = 0;
+    bool fault_reported = false;
+
+    // Everything below is under this lock. The completion thread writes the
+    // decoder's state and the nodes' queues; the loop thread adds and removes
+    // nodes, resets the decoder for a retune and reads the counters.
+    std::mutex lock;
+    ServerImpl* owner = nullptr;
+    std::vector<std::shared_ptr<DecodedNode>> nodes;
+
+    // Built on the first chunk, at that chunk's rate, because the rate a
+    // complex tap delivers is the engine's business and is changing. See
+    // core/rpc/decoders.h.
+    std::unique_ptr<ChunkDecoder> decoder;
+    std::uint32_t rate = 0;
+
+    // The retune fence, on exactly RdsRoute::epoch_target's terms. A chunk
+    // below the target is the tuning the client left and is discarded.
+    std::uint64_t epoch_target = 0;
+    std::uint64_t epoch_reached = 0;
+    std::uint64_t chunks_discarded = 0;
+    [[nodiscard]] bool discarding() const { return epoch_reached < epoch_target; }
+
+    // Messages this decoder has produced, which is what DecodedMessage::
+    // sequence counts.
+    std::uint64_t sequence = 0;
+
+    // Why this decoder stopped, empty while it has not. Terminal, on
+    // RdsRoute::fault's argument: the only refusals are shape, and a retune
+    // that changes shape is refused by the engine.
+    std::string fault;
+
+    // Scratch the decoder appends into, kept so a busy decoder does not
+    // allocate a vector per chunk.
+    std::vector<DecodedMessage> scratch;
+};
+
 // One subscriber to one receiver's passband. Loop thread only, same as
 // Subscription above and for the same reasons.
 struct PassbandNode : std::enable_shared_from_this<PassbandNode> {
@@ -1108,6 +1203,32 @@ public:
     // the squelch shut sounds identical, so the subscriber is told in words.
     void after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason);
 
+    // Decoded messages. Event loop thread unless marked.
+    //
+    // add_decoded attaches the decoder on the first subscriber to it on that
+    // receiver and joins the node to it after that; `status` is the receiver
+    // as the caller already read it, for the fence's starting epoch.
+    // end_decoded takes one node off and the decoder with the last.
+    // end_decoded_for_vrx tells every subscriber on a receiver why its stream
+    // stopped and ends them, for a removal. reset_decoded_for_vrx clears and
+    // fences every decoder on a receiver, for a retune.
+    [[nodiscard]] Status add_decoded(std::shared_ptr<DecodedNode> node,
+                                     const engine::VrxStatus& status, const DecoderSpec& spec);
+    void end_decoded(const std::shared_ptr<DecodedNode>& node);
+    void end_decoded_for_vrx(engine::VrxId vrx, kj::StringPtr reason);
+    void reset_decoded_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target);
+    [[nodiscard]] Expected<DecodedStats> decoded_stats(DecodedNode& node);
+
+    // Engine completion thread, with route.lock held by the sink callable.
+    // Never fails the dispatch: a decoder that refuses records a fault and
+    // the loop turns it into ended() calls, on the argument decode_rds_chunk
+    // makes for RDS.
+    void on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& chunk);
+
+    // Any thread. Rings the bell the loop thread is waiting on, taken rather
+    // than borrowed so a burst rings it once.
+    void wake_loop();
+
 private:
     void serve(ServerOptions options);
     void announce(Status status);
@@ -1129,6 +1250,11 @@ private:
 
     void drain_audio();
     void pump_audio(const std::shared_ptr<AudioNode>& node);
+
+    void drain_decoded();
+    void pump_decoded(const std::shared_ptr<DecodedNode>& node);
+    void send_decoded_ended(const std::shared_ptr<DecodedNode>& node, kj::StringPtr reason);
+    void end_decode_route(const std::shared_ptr<DecodeRoute>& route, kj::StringPtr reason);
 
     void taskFailed(kj::Exception&&) override {
         // Every send already carries its own error handler, which ends the
@@ -1295,6 +1421,13 @@ private:
     std::uint64_t next_session_ = 1;
     std::map<std::uint32_t, VrxOwner> vrx_owners_;
 
+    // One route per decoder per receiver with at least one subscriber, keyed
+    // by the receiver and the decoder's registry name. The map is the loop
+    // thread's; each route's contents are shared with the completion thread
+    // under that route's own lock, as audio_routes_ are.
+    std::map<std::pair<std::uint32_t, std::string>, std::shared_ptr<DecodeRoute>>
+        decode_routes_;
+
     kj::TaskSet* sends_ = nullptr;
 };
 
@@ -1405,6 +1538,64 @@ private:
 
     ServerImpl& owner_;
     std::shared_ptr<AudioNode> node_;
+};
+
+class DecodedSubscriptionImpl final : public schema::DecodedSubscription::Server {
+public:
+    DecodedSubscriptionImpl(ServerImpl& owner, std::shared_ptr<DecodedNode> node)
+        : owner_(owner), node_(std::move(node)) {}
+
+    DecodedSubscriptionImpl(const DecodedSubscriptionImpl&) = delete;
+    DecodedSubscriptionImpl& operator=(const DecodedSubscriptionImpl&) = delete;
+
+    // Not an override, for the reason SubscriptionImpl's destructor gives.
+    // This is what makes a client that drops the capability, or dies, end the
+    // subscription and, with the last one, the decoder.
+    ~DecodedSubscriptionImpl() { end(); }
+
+    kj::Promise<void> cancel(CancelContext) override {
+        end();
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> stats(StatsContext context) override {
+        if (node_ == nullptr) {
+            return to_exception(Error{"this decoded-message subscription has been cancelled, "
+                                      "so it has no counters left to report"});
+        }
+        // Ended by the server and not cancelled, on AudioSubscriptionImpl's
+        // argument: answering would report a healthy stream on one that has
+        // stopped.
+        if (node_->cancelled) {
+            return to_exception(Error{
+                "this decoded-message subscription was ended by the server rather than "
+                "cancelled by this client, so its counters are frozen. DecodedReceiver::ended "
+                "carried the reason"});
+        }
+        auto taken = owner_.decoded_stats(*node_);
+        if (!taken) {
+            return to_exception(taken.error());
+        }
+        auto out = context.getResults().initStats();
+        out.setMessagesSent(taken->messages_sent);
+        out.setMessagesDropped(taken->messages_dropped);
+        out.setBacklog(taken->backlog);
+        out.setChunksDiscarded(taken->chunks_discarded);
+        out.setSampleRate(taken->sample_rate);
+        return kj::READY_NOW;
+    }
+
+private:
+    void end() {
+        if (node_ == nullptr) {
+            return;
+        }
+        owner_.end_decoded(node_);
+        node_.reset();
+    }
+
+    ServerImpl& owner_;
+    std::shared_ptr<DecodedNode> node_;
 };
 
 class SubscriptionImpl final : public schema::SpectrumSubscription::Server {
@@ -1576,6 +1767,11 @@ public:
             return to_exception(status.error());
         }
         owner_.reset_rds_for_vrx(*id, status->tuning_epoch);
+
+        // Every event decoder on the receiver too, on the same fence and for
+        // the same reason: a P25 header half from one transmitter and half
+        // from another decodes to a talkgroup neither of them sent.
+        owner_.reset_decoded_for_vrx(*id, status->tuning_epoch);
         return kj::READY_NOW;
     }
 
@@ -1960,6 +2156,97 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> decoders(DecodersContext context) override {
+        const std::span<const DecoderSpec> registry = decoder_registry();
+        auto out = context.getResults().initDecoders(static_cast<unsigned>(registry.size()));
+        for (unsigned i = 0; i < out.size(); ++i) {
+            write_decoder_info(out[i], registry[i].name, registry[i].input,
+                               registry[i].description);
+        }
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> subscribeDecoded(SubscribeDecodedContext context) override {
+        auto request = context.getParams();
+        if (!request.hasReceiver()) {
+            return to_exception(Error{"subscribeDecoded needs a receiver capability, and this "
+                                      "request carried a null pointer in its place"});
+        }
+
+        auto id = to_vrx_id(request.getVrx());
+        if (!id) {
+            return to_exception(id.error());
+        }
+
+        // The engine's own words for a receiver that is not there, before the
+        // decoder name is looked at: "no receiver 9" is the true answer
+        // whatever was asked of it.
+        auto status = owner_.engine().vrx_status(*id);
+        if (!status) {
+            return to_exception(status.error());
+        }
+
+        const capnp::Text::Reader asked_text = request.getDecoder();
+        const std::string_view asked(asked_text.begin(), asked_text.size());
+        const engine::Demod mode = status->params.demod;
+
+        // Empty means the decoder named after the receiver's mode. Resolved
+        // here rather than on the client, which does not know which modes
+        // have a decoder, and answered back in decoderResolved so the client
+        // can say which one ran.
+        const DecoderSpec* spec =
+            find_decoder(asked.empty() ? std::string_view(engine::demod_name(mode)) : asked);
+        if (spec == nullptr) {
+            if (asked.empty()) {
+                return to_exception(Error{std::format(
+                    "receiver {} is {} and no decoder is named after that mode, so there is "
+                    "nothing to attach by default. Name one; this engine has {}",
+                    id->value, engine::demod_name(mode), decoder_names())});
+            }
+            return to_exception(Error{std::format(
+                "this engine has no decoder named '{}'. It has {}", asked, decoder_names())});
+        }
+
+        // The input the decoder reads against what the receiver gives. Checked
+        // here, in words naming both, because the alternative is a decoder
+        // fed the wrong shape and a stream that ends one chunk later with a
+        // sentence about channel counts.
+        const bool complex_tap = engine::is_complex_tap(mode);
+        if (spec->input == DecoderInput::ComplexBaseband && !complex_tap) {
+            return to_exception(Error{std::format(
+                "the {} decoder reads complex baseband and receiver {} is {}, which produces "
+                "audio. Add a receiver in a complex tap mode, raw or {}, on the signal",
+                spec->name, id->value, engine::demod_name(mode), spec->name)});
+        }
+        if (spec->input == DecoderInput::RealAudio && complex_tap) {
+            return to_exception(Error{std::format(
+                "the {} decoder reads audio and receiver {} is {}, a complex tap that produces "
+                "none",
+                spec->name, id->value, engine::demod_name(mode))});
+        }
+
+        auto node = std::make_shared<DecodedNode>(request.getReceiver(), *id, spec->name);
+
+        // The sink goes on before the capability exists, so a refusal comes
+        // back as a sentence rather than as a subscription that never
+        // delivers.
+        if (auto added = owner_.add_decoded(node, *status, *spec); !added) {
+            return to_exception(added.error());
+        }
+
+        schema::DecodedSubscription::Client handle =
+            kj::heap<DecodedSubscriptionImpl>(owner_, std::move(node));
+        auto results = context.getResults();
+        results.setSubscription(kj::mv(handle));
+        // Copied into a std::string for its terminator: capnp::Text::Reader
+        // over a pointer and a length asserts a NUL at the end, which a
+        // string_view does not promise. end_audio_for_vrx's note has the
+        // same trap in kj::StringPtr.
+        const std::string resolved(spec->name);
+        results.setDecoderResolved(resolved.c_str());
+        return kj::READY_NOW;
+    }
+
 private:
     ServerImpl& owner_;
 
@@ -2133,6 +2420,12 @@ void ServerImpl::serve(ServerOptions options) {
         // caller's. The routes themselves stay: stop() detaches their engine
         // sinks and closes them once this thread has been joined.
         for (const auto& entry : audio_routes_) {
+            const std::scoped_lock owned(entry.second->lock);
+            entry.second->nodes.clear();
+        }
+
+        // Decoded-message subscribers hold one too, on the same terms.
+        for (const auto& entry : decode_routes_) {
             const std::scoped_lock owned(entry.second->lock);
             entry.second->nodes.clear();
         }
@@ -2863,6 +3156,11 @@ void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
     // session ending is cleaned up by that next poll instead.
     end_rds_for_vrx(vrx);
 
+    // And every event decoder, which does need a message: a decoded-message
+    // stream that simply stops is what a quiet channel looks like, for the
+    // reason audio's does.
+    end_decoded_for_vrx(vrx, reason);
+
     vrx_owners_.erase(vrx.value);
 }
 
@@ -2939,6 +3237,7 @@ void ServerImpl::forget_across_retune() {
             continue;
         }
         reset_rds_for_vrx(id, status->tuning_epoch);
+        reset_decoded_for_vrx(id, status->tuning_epoch);
     }
 }
 
@@ -3099,6 +3398,7 @@ kj::Promise<void> ServerImpl::pump() {
     drain();
     drain_passbands();
     drain_audio();
+    drain_decoded();
 
     return armed.promise.then([this]() { return pump(); });
 }
@@ -3770,6 +4070,331 @@ void ServerImpl::end_audio_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Decoded messages
+// ---------------------------------------------------------------------------
+
+void ServerImpl::wake_loop() {
+    kj::Own<kj::CrossThreadPromiseFulfiller<void>> waker;
+    {
+        const std::scoped_lock held(frame_lock_);
+        waker = kj::mv(wakeup_);
+    }
+    if (waker.get() != nullptr) {
+        waker->fulfill();
+    }
+}
+
+void ServerImpl::on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& chunk) {
+    if (!route.fault.empty()) {
+        return;
+    }
+
+    // The retune fence, asked before anything else and recorded whether the
+    // chunk is decoded or discarded, exactly as decode_rds_chunk does it.
+    route.epoch_reached = std::max(route.epoch_reached, chunk.tuning_epoch);
+    if (route.discarding()) {
+        ++route.chunks_discarded;
+        return;
+    }
+
+    const DecoderChunk in{
+        .samples = chunk.samples,
+        .channels = chunk.channels,
+        .rate = chunk.rate,
+        .start = chunk.start,
+    };
+    if (in.frames() == 0) {
+        return;
+    }
+
+    if (route.decoder == nullptr) {
+        auto made = route.spec.make(chunk.rate);
+        if (!made) {
+            route.fault = made.error().message;
+            wake_loop();
+            return;
+        }
+        route.decoder = std::move(*made);
+        route.rate = static_cast<std::uint32_t>(chunk.rate);
+    }
+
+    route.scratch.clear();
+    if (auto consumed = route.decoder->consume(in, route.scratch); !consumed) {
+        route.fault = consumed.error().message;
+        wake_loop();
+        return;
+    }
+    if (route.scratch.empty()) {
+        return;
+    }
+
+    for (DecodedMessage& message : route.scratch) {
+        message.vrx = route.vrx.value;
+        message.sequence = route.sequence++;
+        for (const auto& node : route.nodes) {
+            const std::scoped_lock held(node->lock);
+            // From the front, on audio's argument: the oldest message is the
+            // one a subscriber that fell behind is least likely to still
+            // want, and front eviction is what makes droppedBefore exact.
+            while (node->queue.size() >= kDecodedQueueDepth) {
+                node->queue.pop_front();
+                ++node->dropped_before;
+                ++node->messages_dropped;
+            }
+            node->queue.push_back(message);
+        }
+    }
+    wake_loop();
+}
+
+Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
+                               const engine::VrxStatus& status, const DecoderSpec& spec) {
+    auto key = std::make_pair(node->vrx.value, node->decoder);
+    auto existing = decode_routes_.find(key);
+    if (existing == decode_routes_.end()) {
+        // Across the attach and not merely checked before it, for the reason
+        // start_rds gives.
+        const std::scoped_lock held(sink_lock_);
+        if (sink_closed_) {
+            return fail("this server is stopping and will install no further sinks");
+        }
+
+        auto route = std::make_shared<DecodeRoute>(node->vrx, spec);
+        route->owner = this;
+
+        // The fence starts where the receiver is, on start_rds's argument: a
+        // decoder attached to a receiver retuned nine times must not accept a
+        // chunk stamped with an older tuning.
+        route->epoch_target = status.tuning_epoch;
+
+        auto attached = engine_.attach_audio_sink(
+            node->vrx, [route](const engine::AudioChunk& chunk) -> Status {
+                const std::scoped_lock owned(route->lock);
+                if (route->owner != nullptr) {
+                    route->owner->on_decoded_chunk(*route, chunk);
+                }
+                return {};
+            });
+        if (!attached) {
+            return std::unexpected(attached.error());
+        }
+        route->sink = *attached;
+        existing = decode_routes_.emplace(std::move(key), std::move(route)).first;
+    }
+
+    const std::scoped_lock held(existing->second->lock);
+    existing->second->nodes.push_back(std::move(node));
+    return {};
+}
+
+void ServerImpl::end_decoded(const std::shared_ptr<DecodedNode>& node) {
+    node->cancelled = true;
+
+    auto found = decode_routes_.find(std::make_pair(node->vrx.value, node->decoder));
+    if (found == decode_routes_.end()) {
+        return;
+    }
+
+    bool last = false;
+    {
+        const std::scoped_lock held(found->second->lock);
+        const auto before = found->second->nodes.size();
+        std::erase(found->second->nodes, node);
+        if (found->second->nodes.size() == before) {
+            // Already ended: a cancel followed by the capability being dropped.
+            return;
+        }
+        last = found->second->nodes.empty();
+    }
+    if (!last) {
+        return;
+    }
+
+    auto route = found->second;
+    decode_routes_.erase(found);
+
+    // Unconditionally and without sink_lock_, for the reason end_rds_for_vrx
+    // gives at length: a removal is always allowed, and skipping it when
+    // stop() has set its flag is the window three sinks were once left in.
+    static_cast<void>(engine_.detach_audio_sink(route->vrx, route->sink));
+
+    // Taken last, which waits for a dispatch already inside the decoder; the
+    // callable keeps the route alive and finds owner null afterwards.
+    const std::scoped_lock owned(route->lock);
+    route->owner = nullptr;
+}
+
+void ServerImpl::send_decoded_ended(const std::shared_ptr<DecodedNode>& node,
+                                    kj::StringPtr reason) {
+    // Best effort, on send_audio_ended's terms.
+    if (node->ended_sent || sends_ == nullptr) {
+        return;
+    }
+    node->ended_sent = true;
+    auto request = node->receiver.endedRequest();
+    request.setReason(reason);
+    sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
+}
+
+void ServerImpl::end_decode_route(const std::shared_ptr<DecodeRoute>& route,
+                                  kj::StringPtr reason) {
+    std::vector<std::shared_ptr<DecodedNode>> nodes;
+    {
+        const std::scoped_lock held(route->lock);
+        nodes = route->nodes;
+    }
+    for (const auto& node : nodes) {
+        // Never for a cancel the client asked for.
+        if (!node->cancelled) {
+            send_decoded_ended(node, reason);
+        }
+        end_decoded(node);
+    }
+}
+
+void ServerImpl::end_decoded_for_vrx(engine::VrxId vrx, kj::StringPtr reason) {
+    std::vector<std::shared_ptr<DecodeRoute>> routes;
+    for (const auto& [key, route] : decode_routes_) {
+        if (key.first == vrx.value) {
+            routes.push_back(route);
+        }
+    }
+    for (const auto& route : routes) {
+        end_decode_route(route, reason);
+    }
+}
+
+void ServerImpl::reset_decoded_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target) {
+    for (const auto& [key, route] : decode_routes_) {
+        if (key.first != vrx.value) {
+            continue;
+        }
+        const std::scoped_lock held(route->lock);
+        if (route->decoder != nullptr) {
+            route->decoder->reset();
+        }
+
+        // Never lowered, on reset_rds_for_vrx's argument: another session may
+        // have retuned in between and read a higher number.
+        route->epoch_target = std::max(route->epoch_target, epoch_target);
+
+        // Messages already queued are left alone. Each was completed from the
+        // old tuning and says so by its sample index, and a client that has
+        // not read them yet is owed them: an event that happened is not made
+        // false by the receiver moving afterwards.
+    }
+}
+
+Expected<DecodedStats> ServerImpl::decoded_stats(DecodedNode& node) {
+    auto found = decode_routes_.find(std::make_pair(node.vrx.value, node.decoder));
+    if (found == decode_routes_.end()) {
+        return fail("this decoded-message subscription's decoder is no longer attached");
+    }
+
+    DecodedStats out;
+    {
+        const std::scoped_lock held(found->second->lock);
+        out.chunks_discarded = found->second->chunks_discarded;
+        out.sample_rate = found->second->rate;
+    }
+    {
+        const std::scoped_lock held(node.lock);
+        out.messages_sent = node.messages_sent;
+        out.messages_dropped = node.messages_dropped;
+        out.backlog = node.queue.size();
+    }
+    return out;
+}
+
+void ServerImpl::drain_decoded() {
+    // Faults first. A decoder that refused a chunk has stopped for good, and
+    // every subscriber to it is told why rather than left watching a stream
+    // that went quiet.
+    std::vector<std::pair<std::shared_ptr<DecodeRoute>, std::string>> faulted;
+    std::vector<std::shared_ptr<DecodedNode>> ready;
+    for (const auto& entry : decode_routes_) {
+        const auto& route = entry.second;
+        const std::scoped_lock held(route->lock);
+        if (!route->fault.empty() && !route->fault_reported) {
+            route->fault_reported = true;
+            faulted.emplace_back(route, route->fault);
+            continue;
+        }
+        ready.insert(ready.end(), route->nodes.begin(), route->nodes.end());
+    }
+
+    for (const auto& [route, fault] : faulted) {
+        const std::string reason = std::format("the {} decoder on receiver {} stopped: {}",
+                                               route->spec.name, route->vrx.value, fault);
+        end_decode_route(route, kj::StringPtr(reason.c_str()));
+    }
+
+    std::vector<std::shared_ptr<DecodedNode>> gone;
+    for (const auto& node : ready) {
+        if (node->cancelled) {
+            gone.push_back(node);
+            continue;
+        }
+        pump_decoded(node);
+    }
+    for (const auto& node : gone) {
+        end_decoded(node);
+    }
+}
+
+void ServerImpl::pump_decoded(const std::shared_ptr<DecodedNode>& node) {
+    // One message in flight per subscription, the wire's own serialisation;
+    // anything arriving meanwhile is queued, as audio's chunks are.
+    if (node->cancelled || node->in_flight || sends_ == nullptr) {
+        return;
+    }
+
+    DecodedMessage message;
+    std::uint64_t dropped_before = 0;
+    {
+        const std::scoped_lock held(node->lock);
+        if (node->queue.empty()) {
+            return;
+        }
+        message = std::move(node->queue.front());
+        node->queue.pop_front();
+        dropped_before = node->dropped_before;
+        node->dropped_before = 0;
+        ++node->messages_sent;
+    }
+    message.dropped_before = dropped_before;
+
+    auto request = node->receiver.messageRequest();
+    write_decoded_message(request.initMessage(), message);
+    node->in_flight = true;
+
+    auto weak = node->weak_from_this();
+    sends_->add(request.send().ignoreResult().then(
+        [this, weak]() {
+            if (auto live = weak.lock()) {
+                live->in_flight = false;
+                pump_decoded(live);
+            }
+        },
+        [this, weak](kj::Exception&& failure) {
+            // pump_audio's two cases: a connection that went has nothing left
+            // to tell, and a receiver that threw is still there to be told.
+            auto live = weak.lock();
+            if (live == nullptr) {
+                return;
+            }
+            live->in_flight = false;
+            live->cancelled = true;
+            if (failure.getType() == kj::Exception::Type::DISCONNECTED) {
+                return;
+            }
+            send_decoded_ended(live, kj::str("this receiver failed the message call, so the "
+                                             "subscription was ended: ",
+                                             failure.getDescription()));
+        }));
+}
+
 void ServerImpl::add_subscription(std::shared_ptr<Subscription> subscription) {
     subscriptions_.push_back(std::move(subscription));
     refresh_subscriber_summary();
@@ -3807,6 +4432,16 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
     }
     for (const std::uint32_t id : rds_ids) {
         end_rds_for_vrx(engine::VrxId{id});
+    }
+
+    // Every event decoder, telling its subscribers why, as audio's are told.
+    std::vector<std::shared_ptr<DecodeRoute>> decode_routes;
+    decode_routes.reserve(decode_routes_.size());
+    for (const auto& entry : decode_routes_) {
+        decode_routes.push_back(entry.second);
+    }
+    for (const auto& route : decode_routes) {
+        end_decode_route(route, reason);
     }
 
     // Every receiver goes with the source, so nothing is left to own. A
@@ -4122,6 +4757,17 @@ void ServerImpl::stop() {
         const std::scoped_lock owned(entry.second->lock);
     }
     rds_routes_.clear();
+
+    // And every event decoder. Clearing owner under the route's lock is what
+    // makes a sink call already inside on_decoded_chunk finish before this
+    // returns, and what makes a later one ring nothing.
+    for (const auto& entry : decode_routes_) {
+        static_cast<void>(engine_.detach_audio_sink(entry.second->vrx, entry.second->sink));
+        const std::scoped_lock owned(entry.second->lock);
+        entry.second->owner = nullptr;
+        entry.second->nodes.clear();
+    }
+    decode_routes_.clear();
 
     {
         std::scoped_lock held(frame_lock_);

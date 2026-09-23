@@ -485,6 +485,37 @@ public:
     // of its own, which it is already doing to reach 171000.
     [[nodiscard]] virtual Status set_rds_region(std::uint64_t vrx, RdsRegion region) = 0;
 
+    // The decoders the engine can attach, and what each one reads.
+    [[nodiscard]] virtual Expected<std::vector<DecoderInfo>> decoders() = 0;
+
+    // Attaches a decoder to a receiver and streams what it recovers, one
+    // DecodedMessage per event, until the subscription or the receiver ends.
+    //
+    // `decoder` empty asks for the one named after the receiver's mode, so a
+    // p25p1 receiver gets the p25p1 decoder; the answer is the name that was
+    // resolved. The subscription is held under the name AS PASSED, empty
+    // included, and unsubscribe_decoded and decoded_stats take the same pair.
+    // Subscribing again under the same pair replaces the first.
+    //
+    // THE CALLBACKS RUN ON THE EVENT LOOP THREAD, under the same rule as the
+    // spectrum callback: copy, post a wake-up to your own thread, return, and
+    // never call back into this Client from inside one. on_ended fires at most
+    // once, with the server's reason, when the receiver is removed, when the
+    // decoder refuses what the receiver delivers, or when a message call
+    // failed; never for an unsubscribe. By the time it runs the subscription
+    // is already forgotten here.
+    //
+    // Refused, in words, for a receiver that does not exist, a decoder the
+    // engine does not have, and an input the receiver cannot give.
+    using DecodedCallback = std::function<void(const DecodedMessage&)>;
+    using DecodedEndedCallback = std::function<void(const std::string& reason)>;
+    [[nodiscard]] virtual Expected<std::string> subscribe_decoded(
+        std::uint64_t vrx, std::string_view decoder, DecodedCallback on_message,
+        DecodedEndedCallback on_ended) = 0;
+    virtual void unsubscribe_decoded(std::uint64_t vrx, std::string_view decoder) = 0;
+    [[nodiscard]] virtual Expected<DecodedStats> decoded_stats(std::uint64_t vrx,
+                                                               std::string_view decoder) = 0;
+
     // Frames this client was sent.
     [[nodiscard]] virtual std::uint64_t frames_received() const = 0;
 

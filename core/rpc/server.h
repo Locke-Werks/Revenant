@@ -184,7 +184,8 @@ public:
     // EVERY SINK COMES OFF, not only the engine-wide one this paragraph
     // names. A server also installs a per-receiver passband sink for each
     // receiver something is watching and a per-receiver audio sink for each
-    // one something is listening to or decoding RDS from, and stop() takes
+    // one something is listening to, decoding RDS from, or running an event
+    // decoder from core/rpc/decoders.h on, and stop() takes
     // all of them off whether the subscriptions were still open or had
     // already gone. Said here because until 2026-09-20 it was not true: a
     // subscription torn down after stop() had set its flag but before the
