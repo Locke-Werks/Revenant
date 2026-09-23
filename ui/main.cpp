@@ -8,7 +8,15 @@
 //
 // USAGE
 //
-//   revenant-ui [address] [port] [--every-nth N]
+//   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
+//
+// --smoke-seconds is for CI, which has no screen and no one to close the
+// window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
+// another, loads the QML, runs for N seconds and exits, 0 if the QML loaded
+// and logged no warning and 1 otherwise. It writes no settings, so a run on a
+// developer's machine leaves their remembered engine and windows alone. The
+// engine need not be running: a window waiting for one is a state the QML
+// has to draw too.
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
@@ -31,6 +39,7 @@
 // a tunnel. core/rpc/server.h carries the full record.
 
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -41,11 +50,13 @@
 #include <QObject>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQmlError>
 #include <QQuickStyle>
 #include <QRect>
 #include <QScreen>
 #include <QSettings>
 #include <QStringList>
+#include <QTimer>
 #include <QVariant>
 #include <QWindow>
 
@@ -255,6 +266,18 @@ void remember_window(QGuiApplication& app, QWindow* window, const QSettings& sto
 
 int main(int argc, char* argv[])
 {
+    // Looked for before the application exists, because the platform is
+    // chosen when it is constructed. The value is parsed properly below.
+    bool smoke = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--smoke-seconds") {
+            smoke = true;
+        }
+    }
+    if (smoke && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
+        qputenv("QT_QPA_PLATFORM", "offscreen");
+    }
+
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName(QStringLiteral("Revenant"));
     QGuiApplication::setOrganizationName(QStringLiteral("Locke Werks"));
@@ -308,6 +331,7 @@ int main(int argc, char* argv[])
         port = kDefaultPort;
     }
     std::uint32_t every_nth = kDefaultEveryNth;
+    std::uint32_t smoke_seconds = 0;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
@@ -316,6 +340,14 @@ int main(int argc, char* argv[])
             const std::string value = args[++i].toStdString();
             if (!parse_u32(value, every_nth)) {
                 std::fputs("--every-nth wants a whole number\n", stderr);
+                return 2;
+            }
+            continue;
+        }
+        if (args[i] == QStringLiteral("--smoke-seconds")) {
+            const std::string value = i + 1 < args.size() ? args[++i].toStdString() : "";
+            if (!parse_u32(value, smoke_seconds) || smoke_seconds == 0) {
+                std::fputs("--smoke-seconds wants a whole number of seconds\n", stderr);
                 return 2;
             }
             continue;
@@ -338,8 +370,9 @@ int main(int argc, char* argv[])
 
     // Written after the parse, so a rejected port is never stored, and
     // written whether or not argv supplied one: rewriting the remembered
-    // value with itself costs nothing and keeps this to one line.
-    {
+    // value with itself costs nothing and keeps this to one line. Not in a
+    // smoke run, whose address is CI's and not the operator's.
+    if (!smoke) {
         QSettings out;
         out.setValue(settings::kEngineAddress, address);
         out.setValue(settings::kEnginePort, static_cast<unsigned>(port));
@@ -377,9 +410,36 @@ int main(int argc, char* argv[])
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 
+    // A smoke run fails on any QML warning, since a binding that throws or a
+    // property that does not exist is a window that loads and is wrong. The
+    // engine still prints them itself.
+    int qml_warnings = 0;
+    if (smoke) {
+        QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app,
+                         [&qml_warnings](const QList<QQmlError>& errors) {
+                             qml_warnings += static_cast<int>(errors.size());
+                         });
+    }
+
     engine.loadFromModule("Revenant", "Main");
     if (engine.rootObjects().isEmpty()) {
         return 1;
+    }
+
+    if (smoke) {
+        QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app, [] {
+            QCoreApplication::exit(0);
+        });
+        const int code = QGuiApplication::exec();
+        if (code != 0) {
+            return code;
+        }
+        if (qml_warnings > 0) {
+            std::fprintf(stderr, "smoke: %d QML warning(s)\n", qml_warnings);
+            return 1;
+        }
+        std::fputs("smoke: loaded and ran without a QML warning\n", stderr);
+        return 0;
     }
 
     // Both windows' places, remembered between launches. See remember_window.

@@ -340,9 +340,16 @@ if(WIN32)
         # from any shell. Asked for it anyway, it prints a warning and
         # carries on, which is a warning on every build for a file CMake can
         # find properly on its own. The copy below is that.
+        #
+        # --include-plugins qoffscreen for --smoke-seconds, which runs on the
+        # offscreen platform. windeployqt deploys qwindows alone by default,
+        # and a platform plugin that is missing is not a failed exit: Qt puts
+        # up a modal message box and waits, which on CI is a job that hangs
+        # until its timeout.
         add_custom_command(TARGET revenant_ui POST_BUILD
             COMMAND "${REVENANT_WINDEPLOYQT}"
                     --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/qml"
+                    --include-plugins qoffscreen
                     --no-translations
                     --no-system-d3d-compiler
                     --no-compiler-runtime
