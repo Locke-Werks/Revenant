@@ -1,0 +1,106 @@
+{
+  "commit": "587045b",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 512,
+    "snr_start_db": 2.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 12.000000,
+    "trial_batch": 64,
+    "trials_per_point": 1024
+  },
+  "mode": "rds",
+  "points": [
+    {
+      "ber": 5.000000000000e-01,
+      "bit_errors": 2097152,
+      "bits_total": 4194304,
+      "decoded_count": 0,
+      "snr_db": 2.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 4.225860127736e-01,
+      "bit_errors": 1357184,
+      "bits_total": 3211616,
+      "decoded_count": 422,
+      "snr_db": 3.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 8.388779867694e-02,
+      "bit_errors": 271877,
+      "bits_total": 3240960,
+      "decoded_count": 1014,
+      "snr_db": 4.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 4.042033175636e-02,
+      "bit_errors": 145006,
+      "bits_total": 3587452,
+      "decoded_count": 1024,
+      "snr_db": 5.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.974701289703e-02,
+      "bit_errors": 73191,
+      "bits_total": 3706434,
+      "decoded_count": 1024,
+      "snr_db": 6.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.243589740185e-02,
+      "bit_errors": 46834,
+      "bits_total": 3766033,
+      "decoded_count": 1024,
+      "snr_db": 7.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 4.021593763766e-03,
+      "bit_errors": 15282,
+      "bits_total": 3799986,
+      "decoded_count": 1024,
+      "snr_db": 8.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.681321624026e-03,
+      "bit_errors": 6423,
+      "bits_total": 3820209,
+      "decoded_count": 1024,
+      "snr_db": 9.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.610901705493e-04,
+      "bit_errors": 617,
+      "bits_total": 3830153,
+      "decoded_count": 1024,
+      "snr_db": 10.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 5.217316900872e-05,
+      "bit_errors": 200,
+      "bits_total": 3833388,
+      "decoded_count": 1024,
+      "snr_db": 11.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 3835483,
+      "decoded_count": 1024,
+      "snr_db": 12.000000,
+      "trials": 1024
+    }
+  ],
+  "schema": 1,
+  "subject": "rds-bits/171000"
+}

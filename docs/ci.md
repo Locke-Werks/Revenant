@@ -68,7 +68,7 @@ merging. A conformance result nobody can trust is worth less than one that is la
 | `two-process` | self-hosted | Builds `tests/twoprocess`, a small client compiled `/MD` from `core/rpc/client.cpp`, and runs it in its own process against the `/MT` `revenant-engine.exe` that `build-and-test` staged: login, source list, spectrum frames and a receiver's audio across the two runtimes |
 | `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, checks both carry their licence material, builds the corresponding-source archive, and keeps both as artifacts. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
 | `release` | `windows-latest` | On a `v*` tag only: checks the tag against the version, signs the payload, forges, signs the installer, and publishes it with the corresponding-source archive. Has never run. docs/packaging.md holds the order and why it is that order |
-| `sweep` (nightly) | self-hosted | Runs the BER sweep and compares against `tests/baselines/ber-vs-snr.json`, failing on a regression |
+| `sweep` (nightly) | self-hosted | Runs two BER sweeps, the reference BPSK detector against `tests/baselines/ber-vs-snr.json` and the RDS decoder against `tests/baselines/ber-vs-snr-rds.json`, failing on a regression in either |
 
 `build-and-test` and the nightly sweep select their device with `REVENANT_GPU_INDEX`,
 which is the same mechanism a developer uses locally, and both pin it to 0, the RTX 4090.
