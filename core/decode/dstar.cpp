@@ -95,8 +95,17 @@ std::array<std::uint8_t, kHeaderBytes> dstar_header_bytes(const DStarHeader& hea
     // Ap1.4 makes the whole frame least significant first at the bit level.
     // A round trip against this project's own transmitter cannot settle it,
     // because both ends would make the same choice. Settling it needs a real
-    // capture, and until one is recorded a receiver reporting fcs_valid false
-    // on live traffic should suspect this line first.
+    // capture. Until one is recorded, a receiver that finds frame syncs on
+    // live traffic and never reports a header should suspect this line
+    // first: DStar::decode_header refuses a header whose P_FCS does not
+    // check, so the wrong order shows up as no header at all, never as a
+    // header carrying fcs_valid false.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "a receiver reporting fcs_valid false
+    // on live traffic should suspect this line first". No receiver can
+    // report that: the refusal in DStar::decode_header has been there since
+    // the decoder was written, and core/rpc/decoders.h says fcs_valid is
+    // always true on what the adapter sends.
     bytes[39] = static_cast<std::uint8_t>(fcs & 0xFFU);
     bytes[40] = static_cast<std::uint8_t>((fcs >> 8U) & 0xFFU);
     return bytes;
