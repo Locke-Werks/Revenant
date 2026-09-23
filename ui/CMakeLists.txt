@@ -474,7 +474,9 @@ endif()
 #
 # It covers the eight receiver colours (models/receiver_palette.h), which are
 # held to a minimum CIEDE2000 difference in normal and simulated protan, deutan
-# and tritan vision and to being the output of the search that chose them.
+# and tritan vision and to being the output of the search that chose them, and
+# the rack they are worn in: its slots, focus, mute and solo, the strip gain
+# and what a click on the span does (models/receiver_rack.h).
 #
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
@@ -542,6 +544,7 @@ if(REVENANT_UI_TESTS)
             tests/test_receiver_marker.cpp
             tests/test_receiver_match.cpp
             tests/test_receiver_palette.cpp
+            tests/test_receiver_rack.cpp
             tests/test_receiver_scroll.cpp
             tests/test_ruler.cpp
             tests/test_scroll_tune.cpp
