@@ -156,6 +156,82 @@ nothing in the client lists the detections themselves.
 
 <!-- End of the key map. -->
 
+## The receiver rack
+
+The receiver window's left column is a rack of up to eight receivers, one
+strip each: its label, its frequency in a fixed-width readout, its mode, a
+live level meter, a gain, mute, solo and remove. One receiver is FOCUSED, and
+it is the one the rest of the receiver window is about: the dial, the mode,
+the filter, the passband display, decoding and RDS all follow it. The others
+are held: each keeps running on the engine with its own audio and its strip
+shows its frequency, mode and level, but nothing retunes it until it is
+focused again. `ui/models/receiver_rack.h` holds the rules with cases in
+`ui/tests/test_receiver_rack.cpp`, and `ui/models/rack_link.cpp` is the wire
+half.
+
+**What a click does.** On the spectrum, the waterfall or the ruler:
+
+| Gesture | Where | Does |
+| --- | --- | --- |
+| click | inside another receiver's band | focuses that receiver, retunes nothing |
+| click | anywhere else | tunes the focused receiver there, or opens the first |
+| double click | away from every receiver but the focused one | adds a receiver there and focuses it; the focused one goes back to where the first click found it |
+| click | a strip in the rack | focuses that receiver |
+
+A narrow receiver inside a wide one is the narrow one's band. The focused
+receiver's own band is never a focus target, so a click inside it is the fine
+retune it has always been. The first click of a double click has already
+retuned the focused receiver by the time the second arrives, so the second
+puts it back, mode and edges and all, before the new receiver opens; a
+double click on a full rack keeps the first click's retune and says the rack
+is full. The rule is said in one line under the strips and in the ruler's
+tooltip. Ctrl+N and the rack's "+ add" put a new receiver on the span centre.
+
+**Mute and solo** are the client's, not the wire's: the engine has no such
+field, and a receiver nobody hears is simply not subscribed. With a solo in
+force only the soloed receiver is heard, muted or not, and one solo replaces
+another; with none, every receiver that is not muted is heard. The audio
+section's listen switch and the player's volume and mute sit above all of it.
+
+**The mix.** Each heard receiver has its own audio subscription and its own
+ring, one per rack slot, and the player sums them at the sink's format, each
+scaled by its strip's gain, which runs from 0 dB down to -40 dB and then off.
+The underrun, gap and overrun accounting is each ring's own and unchanged,
+and the audio section describes the focused receiver's stream. Three things
+were decided rather than read off the code, and are the open points:
+
+- A ring at another rate or channel count than the lead's, the focused
+  receiver's when it is heard, is left out of the mix rather than resampled,
+  because the client holds no DSP. Every receiver runs at the engine's 48000
+  until RDS raises the focused one to its composite rate, which is the
+  multiplex and not programme audio.
+- There is no alignment across receivers. Each ring plays from its own head,
+  so two receivers on one transmission can be up to a ring's depth, 200 ms,
+  apart. The chunks carry absolute sample indices and aligning on them is
+  possible; it needs a policy for a ring that has fallen behind.
+- The sum is plain, so several loud receivers can exceed full scale and the
+  device clips. The strip gains are the control over it.
+
+**The colours** are `ui/models/receiver_palette.h`: eight, one per slot, the
+same on the strip, the marker on both displays, the ruler's band and the
+focused receiver's passband display. They are a search over an OKLCH grid,
+seeded with the azure the marker always had, and `ui/tests/test_receiver_palette.cpp`
+holds them to at least 10 in CIEDE2000 between any two, in normal vision and
+in protan, deutan and tritan vision simulated with the severity 1.0 matrices of
+Machado, Oliveira and Fernandes (IEEE TVCG 15(6), 2009), and to staying off
+the detection magenta. The worst pair is 10.18, in tritan vision. The held
+receivers are drawn fainter and without edge rules, so the focused one is the
+one that stands out.
+
+**Nothing survives a restart.** Whether a session comes back as it was left is
+the owner's decision on session restore and has not been taken, so the rack
+comes up empty and its empty state says so. A reconnect within a session puts
+every receiver back.
+
+`revenant-ui --receiver FREQ:MODE` may be given up to eight times; the first is
+focused and the rest are held, which is how the rack is photographed with
+`--grab-receivers` and the span's markers with `--grab-main`.
+
 ## Auto-scaling, both ends
 
 The colour map's floor and ceiling both track the signal automatically, over a
