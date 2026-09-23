@@ -640,10 +640,20 @@ struct DetectorConfig {
     //
     // Worked through, because the size of it is the point. The paragraph above
     // defends RTTY at 36.6 Hz per bin, where 170 Hz is 4.6 bins and eight has
-    // margin. An HF recording asking for PSK31 at four bins across gets a
-    // 16384-point transform, about 1.9 Hz per bin: 170 Hz is then 89 bins, so
-    // eight is a gap RTTY's own two tones clear easily and every RTTY signal on
-    // the band splits into two detections.
+    // margin. An HF source asking for PSK31 at four bins across does not get a
+    // longer transform: dsp::kMaxSpectrumTransform is 2048 and the shipped
+    // default is already there. The CHANNEL COUNT is where HF resolution comes
+    // from. On the 96 kS/s recordings in docs/recordings.md, at the 64
+    // channels revenant-cli pins, the grid is 1.465 Hz per bin and 170 Hz is
+    // 116 bins; left to Engine::open_source they open on 16 channels at
+    // 5.86 Hz, where it is 29. Either way eight is a gap RTTY's own two tones
+    // clear, and docs/detection.md has the synthetic RTTY that does split.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "An HF recording asking for PSK31 at
+    // four bins across gets a 16384-point transform, about 1.9 Hz per bin:
+    // 170 Hz is then 89 bins". No transform that long can be built. The
+    // twiddle table shared with the channelizer caps it at 2048, so the
+    // conclusion held and the mechanism it named did not.
     //
     // WHY THIS IS NOT FIXED BY MAKING IT A FREQUENCY. A single frequency is
     // wrong across bands in the other direction. Eight bins at 36.6 Hz is about

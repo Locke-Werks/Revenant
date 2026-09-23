@@ -686,3 +686,12 @@ instead: The six KF4FIC files are 13:59 to 17:05 UT, one continuous recording
     16:13 UT and peaked there at 17:33 UT, after the last file ends. The
     recordings that cross the eclipse are in the Zenodo record and not on this
     machine. See docs/recordings.md, "What day this is".
+
+phrase: asking for PSK31 at four bins across gets a 16384-point transform
+retired: 2026-09-22
+commit: the change that recorded this retraction
+instead: dsp::kMaxSpectrumTransform is 2048 and the shipped default is already
+    there, so no longer transform exists to be chosen. HF resolution comes from
+    the channel count: 1.465 Hz per bin on the 96 kS/s recordings at the 64
+    channels revenant-cli pins, where RTTY's 170 Hz shift is 116 bins, and
+    5.86 Hz on the 16 Engine::open_source chooses left to itself.
