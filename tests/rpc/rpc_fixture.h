@@ -176,6 +176,14 @@ struct HarnessOptions {
     // radio will retune, and the server's half of setSourceCenter needs one
     // that does. Everything else is still the real engine.
     bool retunable = false;
+
+    // Open the source through tests/engine/movable_centre.h and
+    // engine::open_built_source instead, so the real engine's own
+    // set_source_center runs and the wire carries its answer rather than
+    // retunable_engine.h's imitation of it. What that buys is the engine's
+    // shape refusal, which the imitation cannot produce as the engine does.
+    // Ignored when `retunable` is set.
+    bool movable_centre = false;
 };
 
 // A ring request the engine satisfies in full, so nothing is clamped.

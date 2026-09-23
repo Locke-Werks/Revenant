@@ -21,7 +21,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +39,7 @@
 #include "core/engine/vrx.h"
 #include "core/source/registry.h"
 #include "core/source/source.h"
+#include "tests/engine/movable_centre.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 
@@ -47,53 +47,7 @@ using namespace revenant;
 
 namespace {
 
-// A source whose centre can be moved, and whose samples cannot.
-//
-// Everything but the centre is the wrapped source's. The capabilities gain one
-// tune range, because Engine::source_tuning reads them and a client asks that
-// before it retunes; the engine itself calls tune() whatever they say.
-class MovableCentre final : public source::Source {
-public:
-    explicit MovableCentre(std::unique_ptr<source::Source> inner)
-        : inner_(std::move(inner)), caps_(inner_->capabilities()), center_(inner_->center()) {
-        caps_.tune_ranges = {source::TuneRange{.low = 0, .high = 6'000'000'000, .step = 0}};
-    }
-
-    [[nodiscard]] const source::SourceCapabilities& capabilities() const override {
-        return caps_;
-    }
-    [[nodiscard]] Expected<dsp::Hertz> tune(dsp::Hertz center) override {
-        center_.store(center, std::memory_order_release);
-        return center;
-    }
-    [[nodiscard]] dsp::Hertz center() const override {
-        return center_.load(std::memory_order_acquire);
-    }
-    [[nodiscard]] Expected<dsp::SampleRate> set_sample_rate(dsp::SampleRate rate) override {
-        return inner_->set_sample_rate(rate);
-    }
-    [[nodiscard]] dsp::SampleRate sample_rate() const override { return inner_->sample_rate(); }
-    [[nodiscard]] Expected<double> set_gain(std::string_view stage, double db) override {
-        return inner_->set_gain(stage, db);
-    }
-    [[nodiscard]] Status set_gain_auto(std::string_view stage, bool on) override {
-        return inner_->set_gain_auto(stage, on);
-    }
-    [[nodiscard]] Status start(const source::StreamOptions& options,
-                               source::BlockSink sink) override {
-        return inner_->start(options, std::move(sink));
-    }
-    [[nodiscard]] Status stop() override { return inner_->stop(); }
-    [[nodiscard]] bool running() const override { return inner_->running(); }
-    [[nodiscard]] Status seek(dsp::SampleIndex index) override { return inner_->seek(index); }
-    [[nodiscard]] source::SourceStats stats() const override { return inner_->stats(); }
-    [[nodiscard]] source::ClockQuality clock() const override { return inner_->clock(); }
-
-private:
-    std::unique_ptr<source::Source> inner_;
-    source::SourceCapabilities caps_;
-    std::atomic<dsp::Hertz> center_;
-};
+using test::MovableCentre;
 
 // An HF-shaped front end: 2 MS/s over 256 channels, which is what
 // source::resolution_for_span asks for below 30 MHz. Channels run at 15625 S/s
@@ -270,11 +224,13 @@ TEST_CASE("after a retune every receiver is on its own frequency or reported rem
     CHECK(kept > 0);
 
     // The control removal names the span; the rest name the filter, in the
-    // graph's own words.
+    // graph's own words. The cause says the same thing to code.
     for (const engine::RetuneRemoval& gone : landed->removed) {
         if (gone.frequency == kOpenedAt - 998'000) {
+            CHECK(gone.cause == engine::RetuneCause::OutsideSpan);
             CHECK(gone.reason.find("outside the span") != std::string::npos);
         } else {
+            CHECK(gone.cause == engine::RetuneCause::ShapeChanged);
             CHECK(gone.reason.find("remove and an add") != std::string::npos);
         }
     }

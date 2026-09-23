@@ -1403,6 +1403,97 @@ TEST_CASE("a refused retune leaves the engine exactly where it was", "[gpu][rpc]
     CHECK(std::ranges::find(*ids, id) != ids->end());
 }
 
+TEST_CASE("a retune says why it removed each receiver, and which can come back",
+          "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE REAL ENGINE'S ANSWER, NOT AN IMITATION. tests/rpc/retunable_engine.h
+    // decides for itself which receivers go; this case opens a synthetic
+    // scene through tests/engine/movable_centre.h instead, so what crosses the
+    // wire is Engine::set_source_center's own list, including the shape
+    // refusal that only the graph produces.
+    //
+    // The front end tests/engine/test_engine_retune.cpp uses: 2 MS/s over 256
+    // channels, 7812.5 Hz apart. There a 10 kHz AM receiver on a channel
+    // centre, moved 3500 Hz by a retune, needs a narrower filter from its new
+    // place and the graph refuses it; one 998 kHz below the centre leaves the
+    // span; a USB receiver keeps its shape and comes along.
+    constexpr dsp::Hertz kOpenedAt = 7'100'000;
+    constexpr dsp::Hertz kMove = 3'500;
+    HarnessOptions options;
+    options.source_uri = std::format(
+        "synthetic:wideband?rate=2000000&center={}&emitters=0&samples=2000000&seed=20260923",
+        kOpenedAt);
+    options.channels = 256;
+    options.movable_centre = true;
+
+    Harness harness;
+    bring_up(harness, options);
+
+    const auto add = [&](rpc::Demod demod, std::int64_t center) {
+        rpc::VrxParams params;
+        params.center = center;
+        params.demod = demod;
+        // Zero asks for the mode's own passband, as the engine case does.
+        params.bandwidth = 0;
+        params.audio_rate = 48'000;
+        return harness.client().add_vrx(params);
+    };
+    auto reshaped = add(rpc::Demod::Am, 0);
+    auto stranded = add(rpc::Demod::Am, -998'000);
+    auto kept = add(rpc::Demod::Usb, 62'500);
+    INFO(test::message_of(reshaped) << " / " << test::message_of(stranded) << " / "
+                                    << test::message_of(kept));
+    REQUIRE(reshaped.has_value());
+    REQUIRE(stranded.has_value());
+    REQUIRE(kept.has_value());
+
+    auto retuned = harness.client().retune_source(kOpenedAt + kMove);
+    INFO(test::message_of(retuned));
+    REQUIRE(retuned.has_value());
+    CHECK(retuned->granted_hz == kOpenedAt + kMove);
+
+    for (const rpc::RetuneRemoval& gone : retuned->removed) {
+        WARN(std::format("removed {} at {} Hz, cause {}: {}", gone.id, gone.frequency_hz,
+                         static_cast<int>(gone.cause), gone.reason));
+    }
+    REQUIRE(retuned->removed.size() == 2);
+
+    const auto find = [&](std::uint64_t id) {
+        return std::ranges::find_if(retuned->removed,
+                                    [&](const rpc::RetuneRemoval& gone) { return gone.id == id; });
+    };
+
+    // The shape refusal: named as such, with the graph's own sentence, which
+    // is what the client's "moved off" sentence got wrong before this field.
+    const auto shape = find(*reshaped);
+    REQUIRE(shape != retuned->removed.end());
+    CHECK(shape->frequency_hz == kOpenedAt);
+    CHECK(shape->cause == rpc::RetuneCause::ShapeChanged);
+    CHECK(shape->reason.find("remove and an add") != std::string::npos);
+
+    // The span, the cause there always was.
+    const auto span = find(*stranded);
+    REQUIRE(span != retuned->removed.end());
+    CHECK(span->frequency_hz == kOpenedAt - 998'000);
+    CHECK(span->cause == rpc::RetuneCause::OutsideSpan);
+    CHECK(span->reason.find("outside the span") != std::string::npos);
+
+    auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(*ids == std::vector<std::uint64_t>{*kept});
+
+    // WHAT THE CAUSE IS FOR. A receiver refused for its shape comes back from
+    // an add at the frequency the answer reported, which builds the new shape
+    // from scratch; one that left the span does not, because the same
+    // frequency is still outside it. The client offers the first and not the
+    // second on exactly this distinction.
+    auto back = add(rpc::Demod::Am, shape->frequency_hz - (kOpenedAt + kMove));
+    INFO(test::message_of(back));
+    CHECK(back.has_value());
+    CHECK_FALSE(add(rpc::Demod::Am, span->frequency_hz - (kOpenedAt + kMove)).has_value());
+}
+
 // ---------------------------------------------------------------------------
 // The realtime factor, which is the diagnosis nobody could make
 // ---------------------------------------------------------------------------

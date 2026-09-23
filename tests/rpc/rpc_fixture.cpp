@@ -3,7 +3,10 @@
 #include <format>
 #include <utility>
 
+#include "core/engine/open_built_source.h"
 #include "core/engine/vrx.h"
+#include "core/source/registry.h"
+#include "tests/engine/movable_centre.h"
 #include "tests/rpc/retunable_engine.h"
 
 namespace revenant::test {
@@ -66,7 +69,18 @@ Status Harness::open(const HarnessOptions& options) {
     const std::string uri = options.source_uri.empty()
                                 ? scene_uri(options.samples, options.center_hz)
                                 : options.source_uri;
-    if (auto opened = engine_->open_source(uri); !opened) {
+    if (options.movable_centre && !options.retunable) {
+        auto source = source::open_source(uri);
+        if (!source) {
+            return std::unexpected(with_context(source.error(), std::format("opening {}", uri)));
+        }
+        if (auto opened = engine::open_built_source(
+                *engine_, std::make_unique<MovableCentre>(std::move(*source)));
+            !opened) {
+            return std::unexpected(
+                with_context(opened.error(), std::format("opening {} with a movable centre", uri)));
+        }
+    } else if (auto opened = engine_->open_source(uri); !opened) {
         return std::unexpected(with_context(opened.error(), std::format("opening {}", uri)));
     }
 
