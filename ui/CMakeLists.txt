@@ -172,8 +172,11 @@ qt_add_executable(revenant_ui
     models/receiver_link.cpp
     models/source_link.cpp
     render/colour_map.h
+    render/history_shift.h
     render/passband_item.cpp
     render/passband_item.h
+    render/passband_waterfall_item.cpp
+    render/passband_waterfall_item.h
     render/spectrum_item.cpp
     render/spectrum_item.h
     render/spectrum_scale.h
@@ -486,6 +489,7 @@ if(REVENANT_UI_TESTS)
             tests/test_composite_probe.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
+            tests/test_history_shift.cpp
             tests/test_frequency_dial.cpp
             tests/test_frequency_entry.cpp
             tests/test_gain_control.cpp

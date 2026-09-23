@@ -260,6 +260,32 @@ ColumnLayout {
         }
     }
 
+    // The receiver's own history, on the same frames as the display above
+    // and at the same width, so a carrier's column here is under its peak
+    // there. Kept across receiver moves; see render/passband_waterfall_item.h.
+    Item {
+        Layout.fillWidth: true
+        Layout.fillHeight: true
+        Layout.minimumHeight: 80
+
+        PassbandWaterfallItem {
+            id: passbandWaterfall
+            anchors.fill: parent
+            link: engineLink
+        }
+
+        // Where the history ends, as on the span waterfall, so an empty
+        // lower half reads as not yet filled rather than as silence.
+        Rectangle {
+            visible: passbandWaterfall.historyFraction > 0.0
+                     && passbandWaterfall.historyFraction < 1.0
+            y: Math.round(parent.height * passbandWaterfall.historyFraction)
+            width: parent.width
+            height: 1
+            color: Theme.border
+        }
+    }
+
     // The readout, which is the whole of what a drag says back.
     // Live while one is running and the granted pair when one is
     // not, so the strip never goes blank and never shows a stale
