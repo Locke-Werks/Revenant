@@ -16,6 +16,12 @@ would refuse, which bars a royalty-bearing pool or a field-of-use restriction at
 any price including zero. And the mode is unencrypted, or its framing travels in
 the clear under an encrypted payload.
 
+**One mode is in against the patent rule, by the owner's decision.** DMR's
+framing and metadata are in scope although Motorola's US8306071, live until
+2027-02-19, may read on a receiver: the owner accepted that risk on
+2026-09-23. "The ETSI IPR query, and what it did to DMR" below keeps the query
+that excluded it and records the decision that put it back.
+
 The scope rule underneath all of that: identification is always in scope,
 because classifying a waveform practises nothing and needs no document. Decode
 requires something to decode from. Decryption is never attempted, and a
@@ -123,6 +129,7 @@ what these systems carry in the clear.
 
 | Mode | Numbers | Specification | Effort |
 | --- | --- | --- | --- |
+| DMR Tier I/II/III | 4FSK, 4800 sym/s, 9600 bit/s, 12.5 kHz, two-slot TDMA in 30 ms slots | ETSI TS 102 361-1 to -4, free. In by the owner's decision of 2026-09-23 against a live patent; see "The ETSI IPR query, and what it did to DMR" | Medium |
 | dPMR446 and licensed modes 2/3 | 4FSK, 2400 sym/s, 4800 bit/s, 6.25 kHz FDMA | ETSI TS 102 490 and TS 102 658, free | Medium |
 | NXDN (IDAS, NEXEDGE) | 4FSK; 6.25 kHz at 2400 sym/s, 80 ms frames; 12.5 kHz at 4800 sym/s, 40 ms frames; RRC alpha 0.2 | NXDN TS 1-A v1.3, November 2011, free from the NXDN Forum, download permitted and redistribution forbidden | Medium |
 | P25 Phase 1 FDMA | C4FM 4FSK, 4800 sym/s, 9600 bit/s, 12.5 kHz; CQPSK/LSM on simulcast at the same symbol rate | TIA-102.BAAA-A plus the TIA-102.AABx trunking set, purchasable | Large |
@@ -153,14 +160,22 @@ at h=0.5. Confirm with ORI before writing a demodulator. Their software is
 stated as "GPL 2.0" with no "or later", so none of it can be vendored, which
 does not affect clean-rooming from their description.
 
-**The M17 specification document is GPL-2.0.** The repository's own LICENSE file
-is the plain version 2 text with no "or later" at the root, which under this
-project's per-file rule establishes 2.0-only until a per-file notice says
-otherwise. Earlier survey text called it GNU Free Documentation License 1.3 and
-that is contradicted by the repository. The verdict does not move, because sync
-words, polynomials and bit layouts are facts and Revenant writes its own code
-from them. The operative rule is unchanged: cite clause and figure numbers,
-never paste a table, a figure or a paragraph.
+**The M17 specification has two licences, and its repository a third
+reading.** The document's own Licenses page, in Part I version 2.0.4 of 21
+January 2026 as `core/decode/m17.h` records it, puts the specification text
+under the GNU Free Documentation License 1.3 or later, and only the software
+listings printed inside it under GPL-2.0-or-later. The repository's LICENSE
+file is the plain GPL-2.0 text with no "or later" at the root. Both are true
+of different things, and neither moves the verdict: sync words, polynomials
+and bit layouts are facts, and Revenant writes its own code from them. The
+operative rule is unchanged: cite clause and figure numbers, never paste a
+table, a figure or a paragraph, and do not implement from the embedded
+listings, whose exposure `docs/clean-room.md` logs.
+
+WHAT THIS PARAGRAPH USED TO SAY: "**The M17 specification document is
+GPL-2.0.**", and that the earlier survey's GNU Free Documentation License 1.3
+"is contradicted by the repository". The document's Licenses page says the
+FDL for the text; the repository's LICENSE file is what said GPL-2.0.
 
 ### Amateur text, data and image
 
@@ -513,7 +528,6 @@ pool. Paying does not fix this. Each row says when to look again.
 
 | Mode | Patent position | Revisit |
 | --- | --- | --- |
-| DMR Tier I/II/III | Motorola's US8306071, active to 2027-02-19, declared essential to ETSI TS 102 361-1 and claiming a method that receives a burst and compares its synchronisation pattern against known patterns. Three further Motorola patents run to 2031 and read on transmitting rather than receiving. A narrowing limitation in claim 1 gives a receive-only decoder an argument, and an argument is the reason this is excluded rather than shipped. The full query is in "The ETSI IPR query, and what it did to DMR" below | 2027-02-19, when US8306071 expires and the question closes with it. The physical layer is 4FSK at 4800 sym/s, which is the same path P25 Phase 1 already has, so the cost on that day is the framing and not the demodulator |
 | LoRa physical layer | EP2449690B1, Semtech, priority 2009-07-02, filed 2010-07-02, granted 2016-01-06, expiry 2030-07-02, with claims covering the receiver: multiply by a locally generated conjugate chirp and apply an FFT. Later receiver-specific grants EP3264622B1 and US10305535B2 run to 2036. There is also no published specification, which measurement would now answer, so the exclusion rests on the patent alone | 2030 for the base claim, 2036 for the receiver grants |
 | LoRaWAN | Inherits the LoRa physical layer. The L2 1.0.4 and RP002 documents are free and complete, and the MAC is genuinely specified | With LoRa |
 | Meshtastic | Inherits the LoRa physical layer. Nothing above it is a problem: the documentation is good, the protobuf schema is published, and the clear header is the useful part | With LoRa. Put it first in the queue on that day |
@@ -526,6 +540,14 @@ pool. Paying does not fix this. Each row says when to look again.
 | DATV carrying H.264/AVC or H.265/HEVC | Active pools with filings running into the late 2020s and beyond. MPEG-2 video is clear, the last pool patent having expired 2018-02-13, so the defensible subset is a DVB-S or DVB-S2 demodulator and transport stream demultiplexer that identifies the elementary streams and decodes MPEG-2 only | AVC in the late 2020s; HEVC later |
 | DVB-T, DVB-T2, ATSC 1.0 and 3.0, ISDB-T | Live pools on the physical layer profiles and on every codec they carry. Also outside what this receiver is for | Not scheduled regardless |
 | C-V2X PC5 | Thousands of declared standard-essential patents from Qualcomm, Huawei, Ericsson, Nokia and LG, licensed FRAND through Avanci and Sisvel, with 2015-onward filings running to 2035. The 3GPP specifications are free, which does not resolve it. Whether a receive-only decoder practises the asserted claims is arguable rather than obviously no | Listed under open legal questions below as well |
+
+WHAT THIS TABLE USED TO SAY, from 2026-09-21 to 2026-09-23, in a first row,
+"DMR Tier I/II/III", naming Motorola's US8306071 and ending "A narrowing
+limitation in claim 1 gives a receive-only decoder an argument, and an
+argument is the reason this is excluded rather than shipped", with 2027-02-19
+to revisit. The patent and the argument are unchanged. The owner put DMR back
+in scope on 2026-09-23 and accepted the risk, so the row moved to the land
+mobile table above; the query section below has both.
 
 ### Excluded for want of anything to work from
 
@@ -577,14 +599,19 @@ on a lookup. None should be started before an answer.
 | DVB-S2 | Sisvel runs a DVB-S2 licensing programme. The underlying LDPC and APSK filings from 2001 to 2003 have run their twenty years, and a live programme means somebody believes otherwise. Section 11 means taking the licence would not solve it, because a licence that stops at the licensee bars conveyance rather than permitting it. Whether the programme reaches receive-only decoder software is the question |
 | C-V2X PC5 | Listed under live patents above. The specification being a free 3GPP download is not clearance |
 
-**The ETSI IPR database was queried on 2026-09-21. DMR is now excluded.** The
-query is recorded in full below, under "The ETSI IPR query, and what it did to
-DMR". The short version: TS 102 361-1 and -2 carry four licensing declarations
-from Motorola, the most recent signed 2024-05-16, and one of the declared
-patents is live until 2027-02-19 with a claim whose first step is receiving a
-burst and comparing its synchronisation pattern. That is the operation a
-framing decoder exists to perform. DMR moves to the live-patent exclusion
-table.
+**DMR is in scope again, by the owner's decision of 2026-09-23, with the risk
+the ETSI IPR query found accepted.** The query is recorded in full below,
+under "The ETSI IPR query, and what it did to DMR", and the decision after it.
+The short version: TS 102 361-1 and -2 carry four licensing declarations from
+Motorola, the most recent signed 2024-05-16, and one of the declared patents
+is live until 2027-02-19 with a claim whose first step is receiving a burst
+and comparing its synchronisation pattern. That is the operation a framing
+decoder exists to perform, and the one `core/decode/dmr.cpp` performs.
+
+WHAT THIS PARAGRAPH USED TO SAY, from 2026-09-21: "**The ETSI IPR database was
+queried on 2026-09-21. DMR is now excluded.**", ending "DMR moves to the
+live-patent exclusion table." The query stands; the exclusion it led to was
+reversed two days later.
 
 TETRA was queried at the same time and came back clean, which is why EN 300
 392-2 work proceeded.
@@ -666,6 +693,11 @@ real and it is an argument, which is the problem: whether a receive-only
 framing decoder infringes turns on a claim limitation, and resolving that is a
 claim construction rather than a reading of a database.
 
+The two paragraphs below are kept as they were written on 2026-09-21, and
+what they used to say about DMR's status is now false: the exclusion they
+conclude with was reversed on 2026-09-23. The subsection after them has the
+decision that reversed it. The reasoning in them is not withdrawn.
+
 So the position is not "DMR infringes". It is that DMR is the one mode in this
 document where the receiver question is genuinely open, on a live patent,
 against a holder who re-declared essentiality sixteen months ago. For a named
@@ -679,6 +711,29 @@ DMR was included on "no patent identified" while mioty and Sigfox were
 excluded on found pools, and that difference really was search effort rather
 than a legal distinction. Having done the search, the verdicts now agree with
 each other.
+
+### The owner's decision, 2026-09-23
+
+DMR is back in scope. The owner chose to accept the risk on US8306071, over
+waiting for it to expire on 2027-02-19 or identifying DMR by its structure
+alone, and Revenant decodes DMR's framing and metadata clean-room from ETSI TS
+102 361-1 V2.7.1 and TS 102 361-2 V2.5.1: the syncs, the CACH and its Short
+LC, the slot type and colour code, the Full LC with its talkgroup and radio
+IDs, the CSBK and the data headers. AMBE+2 voice stays out, because no
+document for it exists, which is the voice table's reason and not the
+patent's. The decision is recorded in Reliquary under the topic
+revenant.modes.dmr.
+
+What the decision does not change is recorded as plainly as what it does.
+The patent is live and nothing here argues it away. The four transmitting
+patents are still satisfied on the merits, since `core/decode/dmr.cpp`
+transmits nothing, and `core/dsp/synth/dmr_mod.cpp` is a test instrument that
+renders to a buffer and never reaches an antenna. The narrowing limitation
+above is a fact about what the decoder does, not a defence it relies on: it
+correlates the ten patterns of Table 9.2, all of them DMR's own, and does not
+select between an FDMA and a TDMA air interface. The inclusion rule at the top of this document
+is unchanged for every other mode, which is why the paragraph under it names
+DMR as the one exception and mioty and Sigfox stay excluded.
 
 ### What the same query said about the other three modes
 
@@ -718,6 +773,7 @@ baseband out unchanged. `core/decode` recovers the symbols on the host.
 | P25 Phase 1 | 12.5 kHz | 48000 S/s | 10 of TIA-102.BAAA-A clause 9.2's 4800 |
 | D-STAR DV | 6 kHz | 48000 S/s | 10 of JARL Ver 7.0 clause 4.1.2 b's 4800 bit/s |
 | TETRA V+D | 25 kHz | 72000 S/s | 4 of EN 300 392-2 clause 5.3's 18000 |
+| DMR | 12.5 kHz | 48000 S/s | 10 of TS 102 361-1 clause 10.2.1's 4800 |
 
 WHAT THIS PARAGRAPH USED TO SAY, until 2026-09-22: "They are complex taps
 rather than kernels: the receiver hands out baseband at the channel's width".
@@ -755,6 +811,39 @@ the deviation, 14 of 128 slip at 15 dB in 2500 Hz rather than 56, and the
 curve reads 0.082 there. WHAT THIS PARAGRAPH USED TO SAY: "17.3 dB for
 D-STAR", "4.5 dB" across the sample rate, and "twelve single transmissions at
 the same level gave 0.055 to 0.357, and the curve reads 0.168 at 15 dB".
+
+**DMR, framing and metadata, 2026-09-23.** A fourth complex tap, `dmr`,
+appended after `tetra`, through the fine stage at 48000 S/s in its 12.5 kHz
+channel, and `core/decode/dmr.cpp` from ETSI TS 102 361-1 V2.7.1 and
+TS 102 361-2 V2.5.1, with Annex B's codes in `core/decode/dmr_codes.cpp`.
+
+| What | Document | What comes out |
+| --- | --- | --- |
+| Burst sync | TS 102 361-1 clause 9.1.1, Table 9.2 | All ten patterns, voice told from data by the sign of one correlation as the table's note says, each burst timed from its own sync to a fraction of a sample, and the carrier offset and deviation fitted to its 24 known symbols |
+| The CACH | Clauses 4.5, 6.3, 7.1.4, B.2.3 and B.4.1 | The TACT through Hamming (7,4), whose TDMA Channel bit names each burst's timeslot, and the Short LC over four CACH bursts through its Hamming (17,12,3) product code and 8-bit CRC, the Activity Update parsed |
+| Slot type and EMB | Clauses 9.1.2 and 9.1.3, B.3.1 and B.3.2 | Colour code and Data Type through Golay (20,8); colour code, PI and LCSS through the quadratic residue (16,7,6) code |
+| Full LC | Clauses 7.1.1 to 7.1.3, B.1.1, B.2.1, B.3.6, B.3.11 and B.3.12; TS 102 361-2 clause 7.1.1 | From the voice LC header and the terminator through BPTC (196,96) and Reed-Solomon (12,9) with their masks, and from a superframe's four embedded fragments through the Hamming (16,11,4) product code and its checksum: FLCO, FID, Service Options with the emergency and privacy bits, group or individual destination, source |
+| CSBK and MBC header | Clauses 7.2 and 7.4; TS 102 361-2 clause 7.1.2 | Opcode, FID and the raw octets through BPTC and the masked CRC-CCITT, with the target, source, options and preamble fields of the standard opcodes parsed |
+| Data headers | Clause 8.2.1 | Format, SAP, group flag, destination and source, blocks to follow, and a proprietary packet's second block |
+
+Each timeslot has its own state: the voice superframe, the embedded LC it is
+gathering, the level fit it slices with. The slot number comes from the CACH on
+a base station channel and from the sync on TDMA direct mode, and reads 0 on an
+MS transmission, whose sync names none. A PI header and the Privacy bit are
+reported and nothing is decrypted. The 216 vocoder bits of each voice burst are
+handed out and not rendered, since they are AMBE+2.
+
+`core/dsp/synth/dmr_mod.cpp` is the transmitter, written from the same clauses,
+and `tests/decode/test_dmr.cpp` the round trips: every Annex B code against its
+printed matrix, the Idle message against figure D.1's worked example, and
+bursts of every kind on a base station channel, on both timeslots at once and
+on a direct mode channel with the carrier off between bursts.
+`test_dmr_blocking.cpp` decodes one capture identically whole and in eight
+blockings. The decoder has no SymbolSync: a burst carries its timing in its
+sync, and the square-law estimator lost the symbol phase across the carrier-off
+gaps of a direct mode call. `bench sweep --mode dmr` counts CSBKs that come
+back whole, and crosses a frame error rate of 0.01 at 18.8 dB in 2500 Hz
+([sensitivity.md](sensitivity.md)).
 
 **P25 Phase 1 voice.** The header word, the Link Control word and the
 encryption sync word each sit under a shortened Reed-Solomon code over
@@ -1274,8 +1363,14 @@ and none of the decoder work changes, because the framing decoders are what feed
 it. That is the reason the framing is worth building before the dongle exists
 rather than after. Task #40 is the dongle and task #43 is the plugin ABI.
 
-**The ETSI IPR query coming back.** It could tighten DMR rather than loosen it.
-Either answer is better than the current position, which is that nobody looked.
+**US8306071 expiring on 2027-02-19.** It ends the one risk the owner accepted
+to put DMR back in scope, and the paragraph under "What decides inclusion"
+naming DMR as the exception goes with it.
+
+WHAT THIS PARAGRAPH USED TO SAY: "**The ETSI IPR query coming back.** It
+could tighten DMR rather than loosen it." It came back on 2026-09-21 and did
+tighten it; "The ETSI IPR query, and what it did to DMR" has the query and the
+decision that followed.
 
 ## What is not verified
 

@@ -1577,3 +1577,27 @@ retired: 2026-09-23
 commit: "Serve DMR bursts over the wire as decoded messages"
 instead: Fourteen decoders report through Session.subscribeDecoded, dmr the
     fourteenth. docs/rpc.md's table lists them.
+
+phrase: queried on 2026-09-21. DMR is now excluded
+phrase: DMR moves to the live-patent exclusion table
+phrase: an argument is the reason this is excluded rather than shipped
+phrase: mode is excluded until the patent expires on 2027-02-19
+retired: 2026-09-23
+commit: "Put DMR back in scope in modes.md and say what licenses M17's text"
+instead: The owner put DMR back in scope on 2026-09-23, accepting the risk on
+    US8306071. docs/modes.md keeps the ETSI IPR query and records the
+    decision; DMR sits in the land mobile table and AMBE+2 voice stays out.
+
+phrase: It could tighten DMR rather than loosen it
+retired: 2026-09-23
+commit: "Put DMR back in scope in modes.md and say what licenses M17's text"
+instead: The query came back on 2026-09-21 and excluded DMR; the owner put it
+    back on 2026-09-23. US8306071 expiring on 2027-02-19 is what would change
+    DMR's position now.
+
+phrase: The M17 specification document is GPL-2.0
+retired: 2026-09-23
+commit: "Put DMR back in scope in modes.md and say what licenses M17's text"
+instead: M17's Licenses page puts the specification text under the GFDL 1.3 or
+    later and its embedded software listings under GPL-2.0-or-later; the
+    repository's LICENSE file is plain GPL-2.0. The verdict is unchanged.
