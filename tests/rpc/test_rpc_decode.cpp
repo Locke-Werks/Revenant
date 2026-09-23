@@ -839,6 +839,76 @@ TEST_CASE("a D-STAR transmission still open when its receiver goes is reported b
     CHECK(integer_of(tail, "voice_frames_total") == 21 + held);
 }
 
+TEST_CASE("a D-STAR transmission still open when a retune strands its receiver is reported",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // The case above with the receiver taken by a front-end retune instead of
+    // removeVrx. Session.setSourceCenter hands each receiver the engine
+    // removed to the same cleanup removeVrx does, so the decoder is flushed
+    // there too; this holds that path to it, through
+    // tests/rpc/retunable_engine.h because a file will not retune.
+    auto signal = dstar_transmission();
+    INFO(test::message_of(signal));
+    REQUIRE(signal.has_value());
+    const std::size_t cut = signal->size() * 2 / 3;
+    CaptureFile file("dstar-cut-retune");
+    REQUIRE(file.write(std::span<const dsp::Complex32>(*signal).first(cut), false).has_value());
+
+    HarnessOptions options;
+    options.source_uri = file.uri();
+    options.channels = kGridChannels;
+    options.block_samples = kBlockSamples;
+    options.retunable = true;
+    Harness harness;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    auto vrx = harness.client().add_vrx(on_the_carrier(rpc::Demod::Dstar));
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<MessageLog>();
+    REQUIRE(harness.client().subscribe_decoded(*vrx, "dstar", into(log), ending(log)).has_value());
+
+    run_to_completion(harness, file);
+
+    const auto before = wait_for(*log, [](const auto& got) { return !got.empty(); });
+    REQUIRE(before.size() == 1);
+    CHECK(before.front().kind == "header");
+
+    // 300 kHz up from the file's 420 MHz leaves the receiver 295 kHz below
+    // DC, outside the 144 kHz either side a 288000 S/s span holds.
+    constexpr std::int64_t kRetuneTo = 420'300'000;
+    auto retuned = harness.client().retune_source(kRetuneTo);
+    INFO(test::message_of(retuned));
+    REQUIRE(retuned.has_value());
+    REQUIRE(retuned->removed.size() == 1);
+    CHECK(retuned->removed.front().id == *vrx);
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!log->ended() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    INFO(log->reason());
+    REQUIRE(log->ended());
+    CHECK(log->reason().find("retuned to 420300000 Hz") != std::string::npos);
+
+    const auto after = log->messages();
+    std::string arrived;
+    for (const rpc::DecodedMessage& message : after) {
+        arrived += std::format("\n  #{} {} {}", message.sequence, message.kind, message.text);
+    }
+    INFO(std::format("{} messages arrived:{}", after.size(), arrived));
+    REQUIRE(after.size() == 2);
+    const rpc::DecodedMessage& tail = after.back();
+    CHECK(tail.kind == "superframe");
+    CHECK(flag_of(tail, "flushed"));
+    CHECK_FALSE(flag_of(tail, "ended"));
+    CHECK(integer_of(tail, "voice_frames") > 0);
+}
+
 TEST_CASE("TETRA synchronisation bursts cross the wire as decoded messages",
           "[gpu][rpc][decode]") {
     REVENANT_NEEDS_GPU();
