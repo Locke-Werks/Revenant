@@ -312,6 +312,48 @@ Status RealFir::process(ConstRealSpan in, RealSpan out) {
 
 void RealFir::reset() { std::fill(history_.begin(), history_.end(), 0.0F); }
 
+Expected<ComplexFir> ComplexFir::create(std::vector<float> taps) {
+    if (taps.empty()) {
+        return fail("ComplexFir was given no taps");
+    }
+    ComplexFir filter;
+    filter.history_.assign(taps.size() - 1, Complex32{});
+    filter.taps_ = std::move(taps);
+    return filter;
+}
+
+Status ComplexFir::process(ConstComplexSpan in, ComplexSpan out) {
+    if (in.size() != out.size()) {
+        return fail(std::format("ComplexFir needs equal spans; got {} in and {} out", in.size(),
+                                out.size()));
+    }
+    if (taps_.empty()) {
+        return fail("ComplexFir was never created with taps");
+    }
+    const std::size_t memory = taps_.size() - 1;
+    history_.insert(history_.end(), in.begin(), in.end());
+
+    // RealFir's indexing, and filter_complex's loop order and accumulation in
+    // double, so the sums round alike.
+    for (std::size_t n = 0; n < in.size(); ++n) {
+        double real = 0.0;
+        double imag = 0.0;
+        for (std::size_t k = 0; k < taps_.size(); ++k) {
+            const double tap = static_cast<double>(taps_[k]);
+            const Complex32 sample = history_[memory + n - k];
+            real += tap * static_cast<double>(sample.real());
+            imag += tap * static_cast<double>(sample.imag());
+        }
+        out[n] = Complex32{static_cast<float>(real), static_cast<float>(imag)};
+    }
+
+    history_.erase(history_.begin(),
+                   history_.begin() + static_cast<std::ptrdiff_t>(history_.size() - memory));
+    return {};
+}
+
+void ComplexFir::reset() { std::fill(history_.begin(), history_.end(), Complex32{}); }
+
 // ---------------------------------------------------------------------------
 // Symbol timing recovery
 // ---------------------------------------------------------------------------

@@ -174,8 +174,14 @@ struct TetraSyncPdu {
 };
 
 struct TetraBurst {
-    // Index into the recovered symbol run at which the burst's first symbol
-    // sits.
+    // The differential symbol at which the burst's first bit pair sits,
+    // counted from the first one the stream produced since create() or
+    // reset(), however many process() calls it took to get there.
+    //
+    // WHAT THIS USED TO SAY, until 2026-09-23: "Index into the recovered
+    // symbol run at which the burst's first symbol sits." The run was the
+    // decoder's own buffer, trimmed as the stream went by, so the same burst
+    // had a different number under a different blocking.
     std::size_t first_symbol = 0;
 
     double sync_score = 0.0;
@@ -226,14 +232,16 @@ class Tetra {
     Tetra() = default;
 
     TetraConfig config_{};
-    std::vector<float> filter_taps_;
+    ComplexFir filter_{};
     SymbolSync sync_{};
 
     // Soft bits, two per recovered symbol, from the clause 5.4 differential
     // phase. The sign convention is core/decode/dv_codes.h's: positive leans
-    // towards zero.
+    // towards zero. `trimmed_` counts the bits dropped off the front, so a
+    // burst's position can be given from the start of the stream.
     std::vector<float> soft_bits_;
     std::size_t consumed_ = 0;
+    std::size_t trimmed_ = 0;
 
     std::vector<RecoveredSymbol> recovered_;
     std::vector<Complex32> filtered_;

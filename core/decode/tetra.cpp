@@ -255,17 +255,24 @@ Expected<Tetra> Tetra::create(const TetraConfig& config) {
         return std::unexpected(with_context(sync.error(), "creating the TETRA symbol timing"));
     }
 
+    auto filter = ComplexFir::create(std::move(*taps));
+    if (!filter) {
+        return std::unexpected(with_context(filter.error(), "building the TETRA matched filter"));
+    }
+
     Tetra decoder;
     decoder.config_ = config;
-    decoder.filter_taps_ = std::move(*taps);
+    decoder.filter_ = std::move(*filter);
     decoder.sync_ = std::move(*sync);
     return decoder;
 }
 
 void Tetra::reset() {
+    filter_.reset();
     sync_.reset();
     soft_bits_.clear();
     consumed_ = 0;
+    trimmed_ = 0;
     previous_symbol_ = Complex32{1.0F, 0.0F};
     have_previous_ = false;
 }
@@ -275,8 +282,13 @@ Status Tetra::process(ConstComplexSpan samples, std::vector<TetraBurst>& out) {
         return {};
     }
 
-    filtered_.assign(samples.size(), Complex32{});
-    if (auto status = filter_complex(samples, filter_taps_, filtered_); !status) {
+    // The filter carries its history across calls, so the symbols a stream
+    // produces do not depend on how it was blocked. Until 2026-09-23 it
+    // restarted from zeros at every call, which in 1024-sample calls lost 24
+    // of 36 bursts that the whole capture decoded;
+    // tests/decode/test_tetra_blocking.cpp has the figures.
+    filtered_.resize(samples.size());
+    if (auto status = filter_.process(samples, filtered_); !status) {
         return std::unexpected(with_context(status.error(), "TETRA matched filtering"));
     }
 
@@ -333,7 +345,7 @@ Status Tetra::process(ConstComplexSpan samples, std::vector<TetraBurst>& out) {
         }
 
         TetraBurst burst;
-        burst.first_symbol = burst_start / 2;
+        burst.first_symbol = (trimmed_ + burst_start) / 2;
         burst.sync_score = score;
         for (std::size_t i = 0; i < kTetraBurstBits; ++i) {
             burst.bits[i] = static_cast<std::uint8_t>(soft_bits_[burst_start + i] < 0.0F ? 1 : 0);
@@ -362,6 +374,7 @@ Status Tetra::process(ConstComplexSpan samples, std::vector<TetraBurst>& out) {
         soft_bits_.erase(soft_bits_.begin(),
                          soft_bits_.begin() + static_cast<std::ptrdiff_t>(drop));
         consumed_ -= drop;
+        trimmed_ += drop;
     }
     return {};
 }

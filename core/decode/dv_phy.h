@@ -201,6 +201,28 @@ class RealFir {
     std::vector<float> history_;
 };
 
+// filter_complex for a stream that arrives in pieces, for the reason RealFir
+// gives. TETRA's matched filter is the case: 65 taps at 72000 S/s is 16
+// symbols ramping up from silence at every block boundary when the history is
+// dropped. Sample for sample the same as filter_complex over the stream in
+// one call, by the same argument as RealFir.
+class ComplexFir {
+   public:
+    ComplexFir() = default;
+
+    [[nodiscard]] static Expected<ComplexFir> create(std::vector<float> taps);
+
+    // Spans must be the same length.
+    [[nodiscard]] Status process(ConstComplexSpan in, ComplexSpan out);
+
+    // Forgets the history. Between independent captures only.
+    void reset();
+
+   private:
+    std::vector<float> taps_;
+    std::vector<Complex32> history_;
+};
+
 // ---------------------------------------------------------------------------
 // Symbol timing recovery
 // ---------------------------------------------------------------------------
