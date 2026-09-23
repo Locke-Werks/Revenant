@@ -721,7 +721,7 @@ on the relink question:
 Every exposure gets recorded here, with what was seen, when, and what was done
 about it. The log stays useful after the licence change, for the same reason it
 was useful before: it is the record of what the people writing this project
-actually read. Five entries, all self-reported by the person who did it, which
+actually read. Six entries, all self-reported by the person who did it, which
 is the behaviour the practice needs to keep producing.
 
 **2026-09-18, polyphase channelizer design.** While verifying the licences of
@@ -809,6 +809,27 @@ provenance for anything libusb or librtlsdr does, because Revenant links both
 rather than reimplementing either. The entry exists because the analysis above
 cites those two headers as its evidence, and a reader checking that citation
 should be able to see exactly how far the read went.
+
+**2026-09-23, M17 specification's embedded listings.** The M17 decoder was
+written from the M17 Protocol Specification Part I, version 2.0.4 of 21
+January 2026. The document's Licenses page puts its prose under the GNU Free
+Documentation License 1.3 or later and the software listings printed inside it
+under GPL-2.0-or-later. While reading the document from a text dump, the
+session writing the decoder saw three things. It read the PRBS9 generator and
+synchroniser listings of Appendix G, figures G.3 to G.5, in full, before
+noticing their licence. The last line of the Appendix A.5 decoder example, a
+closing brace and a return, showed above Appendix B. The first lines of the
+MATLAB snippet under Appendix D's Golay matrix appeared in a search for
+section headings.
+
+Resolution: nothing in `core/decode/m17.cpp` implements Appendix G. BERT
+frames are recognised by their sync burst and left undecoded. The PRBS9
+receiver is left to someone who has not read those listings, and
+`docs/modes.md` says so. The Golay code is built from Appendix D's generator
+polynomial, which the appendix prose states, and is checked against the
+printed matrix, not against the snippet. The Appendix A.5 fragment carries
+nothing to reproduce. `core/decode/m17.h` records the same exposure in its
+CLEAN ROOM section, next to the code it concerns.
 
 **What the log is for now.** Under the old rule an exposure was a contamination
 to be contained. Under the current one it still gets written down, because the
