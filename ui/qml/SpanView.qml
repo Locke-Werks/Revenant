@@ -48,6 +48,7 @@ ColumnLayout {
             id: spectrum
             anchors.fill: parent
             link: engineLink
+            mapPins: ScaleSettings
             selectedDetection: span.selection.selectedDetection
             onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted) =>
                              span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
@@ -69,21 +70,33 @@ ColumnLayout {
         // of the top edge rather than moved away from it: the detection
         // labels are painted in that strip, and a QML Rectangle drawn
         // over the item would cover one.
-        Plate {
+        //
+        // Each end carries its pin beside it, since 2026-09-22. A pin holds
+        // that end at the level drawn when it went in, on both displays,
+        // until it is taken out; see PinPlate.qml.
+        PinPlate {
             anchors.left: parent.left
             anchors.top: parent.top
             anchors.leftMargin: 4
             anchors.topMargin: 28
             visible: span.drawing
             text: spectrum.drawCeilingDb.toFixed(1) + " dBFS ceiling"
+            pinned: ScaleSettings.ceilingPinned
+            onPinRequested: ScaleSettings.pinCeiling(spectrum.drawCeilingDb)
+            onUnpinRequested: ScaleSettings.unpinCeiling()
+            onNudged: (steps) => ScaleSettings.nudgeCeiling(steps)
         }
 
-        Plate {
+        PinPlate {
             anchors.left: parent.left
             anchors.bottom: parent.bottom
             anchors.margins: 4
             visible: span.drawing
             text: spectrum.drawFloorDb.toFixed(1) + " dBFS floor"
+            pinned: ScaleSettings.floorPinned
+            onPinRequested: ScaleSettings.pinFloor(spectrum.drawFloorDb)
+            onUnpinRequested: ScaleSettings.unpinFloor()
+            onNudged: (steps) => ScaleSettings.nudgeFloor(steps)
         }
 
         Plate {
@@ -110,6 +123,7 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: true
         link: engineLink
+        mapPins: ScaleSettings
         selectedDetection: span.selection.selectedDetection
         onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted) =>
                          span.selection.takeTune(id, centerHz, bandwidthHz, candidates,

@@ -810,3 +810,16 @@ instead: M17's randomiser is the 46-byte sequence of Appendix B, Table B.1, XORe
     into each frame's 368 payload bits per section 1.4.4 of the v2.0.4
     specification. PRBS9 is Appendix G's fill for BERT frames and randomises
     nothing. core/decode/m17.h carries the table.
+
+phrase: chosen for monotone luminance
+retired: 2026-09-22
+commit: Pin either end of the span colour map, and test the scale arithmetic
+instead: Rec. 709 luma rises to about 182 at the yellow-green stop and falls
+    to about 168 at the orange one before climbing to the white. The map is
+    monotone below 0.72 and above 0.86, which is what ui/tests asserts.
+
+phrase: There is no pin control in this client yet
+retired: 2026-09-22
+commit: Pin either end of the span colour map, and test the scale arithmetic
+instead: Either end can be pinned from the plates on the spectrum, and the
+    pins are remembered across launches.

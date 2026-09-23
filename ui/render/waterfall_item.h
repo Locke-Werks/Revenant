@@ -115,6 +115,11 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(double drawCeilingDb READ drawCeilingDb NOTIFY endsChanged)
     Q_PROPERTY(double headroomDb READ headroomDb NOTIFY endsChanged)
 
+    // The operator's pins on either end of the colour map, shared with the
+    // other span display. Null draws against the frame's ends alone.
+    Q_PROPERTY(revenant::ui::ScaleSettings* mapPins READ mapPins WRITE setMapPins
+                   NOTIFY mapPinsChanged)
+
     // Written by QML and never by this item, so the two displays share one
     // selection. See the same property on SpectrumItem.
     Q_PROPERTY(qulonglong selectedDetection READ selectedDetection WRITE setSelectedDetection
@@ -130,12 +135,16 @@ public:
     [[nodiscard]] double drawCeilingDb() const { return ends_.ceiling_db; }
     [[nodiscard]] double headroomDb() const { return headroom_db_; }
 
+    [[nodiscard]] ScaleSettings* mapPins() const { return map_pins_; }
+    void setMapPins(ScaleSettings* pins);
+
     [[nodiscard]] qulonglong selectedDetection() const { return selected_detection_; }
     void setSelectedDetection(qulonglong id);
 
 signals:
     void linkChanged();
     void endsChanged();
+    void mapPinsChanged();
     void selectedDetectionChanged();
 
     // Same signal and the same caveats as SpectrumItem::tuneRequested, which
@@ -238,6 +247,13 @@ private:
 
     std::vector<float> columns_;
     MapEnds ends_;
+    ScaleSettings* map_pins_ = nullptr;
+
+    // The pins in force, or none, for the ends of the next row or trace.
+    [[nodiscard]] ScalePins pinsInForce() const
+    {
+        return map_pins_ == nullptr ? ScalePins{} : map_pins_->pins();
+    }
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
 

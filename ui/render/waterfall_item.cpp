@@ -119,6 +119,22 @@ void WaterfallItem::setLink(EngineLink* link)
     update();
 }
 
+void WaterfallItem::setMapPins(ScaleSettings* pins)
+{
+    if (map_pins_ == pins) {
+        return;
+    }
+    map_pins_ = pins;
+
+    // No connection to pinsChanged, unlike the spectrum. A pin changes the
+    // ends of rows not yet written; the rows already in the history were
+    // coloured against the ends in force when they arrived and are left that
+    // way, because recolouring them would need the levels they were drawn
+    // from, which the ring does not keep, and a history repainted to a new
+    // scale would claim those rows were measured against it.
+    emit mapPinsChanged();
+}
+
 void WaterfallItem::setSelectedDetection(qulonglong id)
 {
     if (selected_detection_ == id) {
@@ -518,7 +534,7 @@ void WaterfallItem::takeFrame()
     }
 
     reduce_peak(frame.power_db, columns_);
-    ends_ = map_ends(frame.floor_db, frame.ceiling_db, headroom_db_);
+    ends_ = resolve_ends(frame.floor_db, frame.ceiling_db, headroom_db_, pinsInForce());
 
     const float span = ends_.span_db();
     if (span <= 0.0F) {

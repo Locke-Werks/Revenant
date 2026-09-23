@@ -165,6 +165,7 @@ qt_add_executable(revenant_ui
     models/level_meter.h
     models/status_summary.h
     models/ruler.h
+    models/scale_settings.h
     models/ui_rules.h
     models/rds_link.cpp
     models/receiver_link.cpp
@@ -173,7 +174,6 @@ qt_add_executable(revenant_ui
     render/passband_item.h
     render/spectrum_item.cpp
     render/spectrum_item.h
-    render/spectrum_scale.cpp
     render/spectrum_scale.h
     render/waterfall_item.cpp
     render/waterfall_item.h
@@ -193,6 +193,7 @@ qt_add_qml_module(revenant_ui
         qml/Main.qml
         qml/Theme.qml
         qml/Plate.qml
+        qml/PinPlate.qml
         qml/NoticeRow.qml
         qml/TuneSelection.qml
         qml/StatusRow.qml
@@ -493,6 +494,7 @@ if(REVENANT_UI_TESTS)
             tests/test_scroll_tune.cpp
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
+            tests/test_spectrum_scale.cpp
             tests/test_status_summary.cpp
         )
 

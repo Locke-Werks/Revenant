@@ -982,6 +982,25 @@ void SpectrumItem::setLink(EngineLink* link)
     update();
 }
 
+void SpectrumItem::setMapPins(ScaleSettings* pins)
+{
+    if (map_pins_ == pins) {
+        return;
+    }
+    if (map_pins_ != nullptr) {
+        disconnect(map_pins_, nullptr, this, nullptr);
+    }
+    map_pins_ = pins;
+    if (map_pins_ != nullptr) {
+        // A pin moves the trace at once, redrawn from the frame in hand, so
+        // the operator sees where the end went while their hand is still on
+        // the control rather than at the next frame.
+        connect(map_pins_, &ScaleSettings::pinsChanged, this, &SpectrumItem::takeFrame);
+    }
+    emit mapPinsChanged();
+    takeFrame();
+}
+
 void SpectrumItem::setSelectedDetection(qulonglong id)
 {
     if (selected_detection_ == id) {
@@ -1147,7 +1166,7 @@ void SpectrumItem::takeFrame()
     }
 
     reduce_peak(frame.power_db, columns_);
-    ends_ = map_ends(frame.floor_db, frame.ceiling_db, headroom_db_);
+    ends_ = resolve_ends(frame.floor_db, frame.ceiling_db, headroom_db_, pinsInForce());
     have_frame_ = true;
 
     // The detection list has not changed, but the clock the fade is measured

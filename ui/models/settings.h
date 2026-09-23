@@ -74,6 +74,14 @@ inline constexpr QLatin1StringView kVrxWindowGeometry{"vrxWindow/geometry"};
 inline constexpr QLatin1StringView kVrxWindowVisibility{"vrxWindow/visibility"};
 inline constexpr QLatin1StringView kVrxWindowOpen{"vrxWindow/open"};
 
+// The pins on either end of the span displays' colour map, and the levels
+// they were pinned at. Remembered because the job a pin does, comparing
+// captures, spans sessions; see models/scale_settings.h.
+inline constexpr QLatin1StringView kScaleFloorPinned{"display/floorPinned"};
+inline constexpr QLatin1StringView kScaleFloorDb{"display/floorDb"};
+inline constexpr QLatin1StringView kScaleCeilingPinned{"display/ceilingPinned"};
+inline constexpr QLatin1StringView kScaleCeilingDb{"display/ceilingDb"};
+
 // The bookmark list, as one JSON array in one value rather than a QSettings
 // array of groups.
 //

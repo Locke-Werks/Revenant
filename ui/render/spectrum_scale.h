@@ -2,7 +2,8 @@
 //
 // Three things live here because both the spectrum trace and the waterfall
 // need all three and neither owns them: the column reduction, the correction
-// that reduction forces on the floor, and the colour map.
+// that reduction forces on the floor, and the colour map. A fourth, the
+// operator's pins on either end of the map, joined them on 2026-09-22.
 //
 // WHAT THIS DELIBERATELY DOES NOT DO
 //
@@ -30,9 +31,19 @@
 // tools/cli/main.cpp's SpectrumView carries the long form of the same
 // reasoning and the same arithmetic. This is that logic ported, not a
 // second derivation of it.
+//
+// HEADER ONLY, AND HOLDING NO Qt. It was a .cpp compiled into the client and
+// nothing else, so none of it was tested: the reduction's tiling, the
+// headroom's harmonic number and the pin rule were asserted only by looking
+// at the picture. ui/tests links headers of this shape and not .cpp files,
+// for the reason ui/CMakeLists.txt gives above the test target, so the
+// functions moved here whole.
 
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -60,7 +71,33 @@ inline constexpr float kSpectrumFloorDb = -200.0F;
 // a bin across several, which draws a stepped trace rather than interpolating
 // one. Interpolation would invent structure between two measured bins, and
 // on a spectrum that reads as a signal.
-void reduce_peak(std::span<const float> bins, std::span<float> columns);
+inline void reduce_peak(std::span<const float> bins, std::span<float> columns)
+{
+    const std::size_t bin_count = bins.size();
+    const std::size_t column_count = columns.size();
+    if (bin_count == 0 || column_count == 0) {
+        return;
+    }
+
+    for (std::size_t c = 0; c < column_count; ++c) {
+        // Integer arithmetic on the numerator so the runs tile the span
+        // exactly: a float step accumulates and leaves the last column
+        // covering one bin more or fewer than it should, which is a
+        // frequency error at the right-hand edge that nothing else explains.
+        const std::size_t begin = bin_count * c / column_count;
+        std::size_t end = bin_count * (c + 1) / column_count;
+        if (end <= begin) {
+            end = begin + 1;
+        }
+        end = std::min(end, bin_count);
+
+        float peak = bins[begin];
+        for (std::size_t i = begin + 1; i < end; ++i) {
+            peak = std::max(peak, bins[i]);
+        }
+        columns[c] = peak;
+    }
+}
 
 // How far above the frame's low percentile a noise-only column draws, when
 // that column is the largest of `bins_per_column` bins.
@@ -75,7 +112,18 @@ void reduce_peak(std::span<const float> bins, std::span<float> columns);
 // K = 2 upwards. K = 1 is the exact answer rather than the limit, and it is
 // not a degenerate case: a display with one bin per column still draws a
 // value a mean above the fifth percentile.
-[[nodiscard]] float peak_reduction_headroom_db(std::size_t bins_per_column);
+[[nodiscard]] inline float peak_reduction_headroom_db(std::size_t bins_per_column)
+{
+    constexpr double kEulerMascheroni = 0.577215664901532861;
+    const double count = static_cast<double>(bins_per_column);
+    const double harmonic =
+        bins_per_column <= 1 ? 1.0 : std::log(count) + kEulerMascheroni + 0.5 / count;
+
+    const double fraction = static_cast<double>(kSpectrumLowPermille) / 1000.0;
+    const double percentile_of_mean = -std::log(1.0 - fraction);
+
+    return static_cast<float>(10.0 * std::log10(harmonic / percentile_of_mean));
+}
 
 struct MapEnds {
     float floor_db = kSpectrumFloorDb;
@@ -98,11 +146,104 @@ struct MapEnds {
 // something has to give it comes out of the end that is still automatic, and
 // if both are pinned nothing gives. The CLI got this wrong first and drew a
 // pinned ceiling well above where it was asked for, which defeats the one
-// job pinning has. There is no pin control in this client yet; the rule is
-// carried here so that adding one is a control and not a rewrite.
-[[nodiscard]] MapEnds map_ends(float frame_floor_db, float frame_ceiling_db,
-                               float headroom_db, bool floor_pinned = false,
-                               bool ceiling_pinned = false);
+// job pinning has. The span displays offer the pins since 2026-09-22; see
+// ScalePins below and resolve_ends.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. It ended "There is no pin control in this
+// client yet; the rule is carried here so that adding one is a control and
+// not a rewrite." It was, and the control is qml/SpanView.qml's.
+[[nodiscard]] inline MapEnds map_ends(float frame_floor_db, float frame_ceiling_db,
+                                      float headroom_db, bool floor_pinned = false,
+                                      bool ceiling_pinned = false)
+{
+    MapEnds ends;
+    ends.floor_db = floor_pinned ? frame_floor_db : frame_floor_db + headroom_db;
+    ends.ceiling_db = frame_ceiling_db;
+
+    // The engine already holds its own two ends apart, and the correction
+    // above has just eaten into that gap, so what is drawn against gets the
+    // same bound re-applied. It comes out of whichever end is not pinned.
+    if (ends.span_db() < kSpectrumMinimumSpanDb) {
+        if (ceiling_pinned && !floor_pinned) {
+            ends.floor_db = ends.ceiling_db - kSpectrumMinimumSpanDb;
+        } else if (!ceiling_pinned) {
+            ends.ceiling_db = ends.floor_db + kSpectrumMinimumSpanDb;
+        }
+        // Both pinned: the operator has said exactly what they want,
+        // including a narrow span, and gets it.
+    }
+    return ends;
+}
+
+// ---------------------------------------------------------------------------
+// The operator's pins
+// ---------------------------------------------------------------------------
+//
+// docs/ui-spectrum.md: automatic is the default because it is right almost
+// always, and the exception is comparing two captures, where a scale that
+// moves is a scale that lies about which signal was stronger. So either end
+// can be pinned at a level in dBFS, and the display draws against that level
+// instead of the frame's.
+
+// The narrowest map two pins may make. map_ends obeys a pair of pins however
+// close, so the control that sets them is what keeps them apart; a map one
+// decibel wide is already a two-colour picture, and a map of none or less
+// divides by zero or draws upside down.
+inline constexpr float kMinPinnedSpanDb = 1.0F;
+
+// How far one press of a pin's nudge moves it.
+inline constexpr float kPinStepDb = 1.0F;
+
+struct ScalePins {
+    bool floor_pinned = false;
+    float floor_db = 0.0F;
+    bool ceiling_pinned = false;
+    float ceiling_db = 0.0F;
+};
+
+// The ends to draw against for this frame, with each pinned end in place of
+// the frame's.
+[[nodiscard]] inline MapEnds resolve_ends(float frame_floor_db, float frame_ceiling_db,
+                                          float headroom_db, const ScalePins& pins)
+{
+    return map_ends(pins.floor_pinned ? pins.floor_db : frame_floor_db,
+                    pins.ceiling_pinned ? pins.ceiling_db : frame_ceiling_db, headroom_db,
+                    pins.floor_pinned, pins.ceiling_pinned);
+}
+
+// Where a pin lands when the operator pins an end: at the level drawn at that
+// moment, to a tenth of a decibel, which is what the plate beside it prints.
+// Pinning where the map already is means the picture does not jump when the
+// pin goes in.
+[[nodiscard]] inline float pin_level(float drawn_db)
+{
+    return std::round(drawn_db * 10.0F) / 10.0F;
+}
+
+// A pin set or moved, kept at least kMinPinnedSpanDb from the other end when
+// that end is pinned too. The end being moved is the one that gives: the
+// operator is holding the other one where they put it.
+[[nodiscard]] inline ScalePins set_floor_pin(ScalePins pins, float floor_db)
+{
+    pins.floor_pinned = true;
+    pins.floor_db = pins.ceiling_pinned
+                        ? std::min(floor_db, pins.ceiling_db - kMinPinnedSpanDb)
+                        : floor_db;
+    return pins;
+}
+
+[[nodiscard]] inline ScalePins set_ceiling_pin(ScalePins pins, float ceiling_db)
+{
+    pins.ceiling_pinned = true;
+    pins.ceiling_db = pins.floor_pinned
+                          ? std::max(ceiling_db, pins.floor_db + kMinPinnedSpanDb)
+                          : ceiling_db;
+    return pins;
+}
+
+// ---------------------------------------------------------------------------
+// The colour map
+// ---------------------------------------------------------------------------
 
 struct Rgb {
     std::uint8_t r = 0;
@@ -110,13 +251,75 @@ struct Rgb {
     std::uint8_t b = 0;
 };
 
+namespace detail {
+
+// Stops for the colour map, darkest first. A dark blue through teal to a warm
+// white. A ramp that dips in brightness puts a false edge in the middle of an
+// otherwise smooth region, and on a waterfall that reads as a band boundary.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. It said the stops were "chosen for monotone
+// luminance". They are not quite: Rec. 709 luma rises to about 182 at the
+// yellow-green stop and falls to about 168 at the orange one before climbing
+// to the white, measured when ui/tests/test_spectrum_scale.cpp was written on
+// 2026-09-22. The dip is among strong signals, not in the noise floor, and it
+// is left for the owner to decide on because it changes what every pixel of
+// both displays looks like.
+struct ColourStop {
+    float position;
+    Rgb colour;
+};
+
+inline constexpr std::array<ColourStop, 7> kColourStops{{
+    {0.00F, {4, 6, 16}},
+    {0.18F, {18, 30, 92}},
+    {0.38F, {24, 86, 160}},
+    {0.56F, {34, 160, 148}},
+    {0.72F, {176, 196, 64}},
+    {0.86F, {244, 158, 48}},
+    {1.00F, {255, 246, 214}},
+}};
+
+[[nodiscard]] inline std::uint8_t mix_channel(std::uint8_t low, std::uint8_t high, float t)
+{
+    const float value = static_cast<float>(low) +
+                        (static_cast<float>(high) - static_cast<float>(low)) * t;
+    return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 255.0F)));
+}
+
+}  // namespace detail
+
 // Darkest to brightest, for a level already normalised to [0, 1]. Values
 // outside that range are clamped rather than wrapped: a frame briefly above
 // its own ceiling should saturate white, not fold back to black.
-[[nodiscard]] Rgb colour_at(float level);
+[[nodiscard]] inline Rgb colour_at(float level)
+{
+    const auto& stops = detail::kColourStops;
+    const float position = std::clamp(level, 0.0F, 1.0F);
+
+    std::size_t upper = 1;
+    while (upper + 1 < stops.size() && stops[upper].position < position) {
+        ++upper;
+    }
+
+    const detail::ColourStop& low = stops[upper - 1];
+    const detail::ColourStop& high = stops[upper];
+    const float width = high.position - low.position;
+    const float t = width <= 0.0F ? 0.0F : (position - low.position) / width;
+
+    return Rgb{
+        detail::mix_channel(low.colour.r, high.colour.r, t),
+        detail::mix_channel(low.colour.g, high.colour.g, t),
+        detail::mix_channel(low.colour.b, high.colour.b, t),
+    };
+}
 
 // The same map as a 0xAARRGGBB word, which is what QImage::Format_RGB32 and
 // QRgb want. Kept beside colour_at so the two cannot disagree.
-[[nodiscard]] std::uint32_t colour_argb_at(float level);
+[[nodiscard]] inline std::uint32_t colour_argb_at(float level)
+{
+    const Rgb rgb = colour_at(level);
+    return 0xFF000000U | (static_cast<std::uint32_t>(rgb.r) << 16U) |
+           (static_cast<std::uint32_t>(rgb.g) << 8U) | static_cast<std::uint32_t>(rgb.b);
+}
 
 }  // namespace revenant::ui
