@@ -39,8 +39,19 @@ find_package(rtlsdr CONFIG REQUIRED)
 # D-STAR and TETRA stop at the bits. P25 goes through to audio: p25p1.cpp
 # cuts the IMBE frames out of each LDU and hands them to imbe.cpp. D-STAR's
 # voice is AMBE with no published algorithm, and TETRA's is ACELP and
-# unimplemented. docs/modes.md has the scope and the reasoning, including why
-# DMR is absent from a list naming its three neighbours.
+# unimplemented. docs/modes.md has the scope and the reasoning.
+#
+# dmr.cpp and dmr_codes.cpp are the fourth, DMR's framing and metadata from
+# ETSI TS 102 361-1 and -2, with its Annex B codes in a file of their own
+# because they are more than the other three standards' together. It shares
+# dv_phy.cpp's discriminator and filter and not its symbol timing, because a
+# TDMA burst carries its own; core/decode/dmr.h says why. Its voice is
+# AMBE+2 and stops at the bits like D-STAR's.
+#
+# WHAT THE END OF THE PARAGRAPH ABOVE USED TO SAY: "including why DMR is
+# absent from a list naming its three neighbours". DMR was excluded on
+# 2026-09-21 over a live patent and put back in scope by the owner on
+# 2026-09-23; docs/modes.md has both.
 #
 # vocoder.cpp is the voice-codec seam every implementation writes against. It
 # carries no codec and not one frame size; core/decode/vocoder.h says why a
@@ -79,6 +90,8 @@ add_library(revenant_core STATIC
     decode/aprs.cpp
     decode/ax25.cpp
     decode/cw.cpp
+    decode/dmr.cpp
+    decode/dmr_codes.cpp
     decode/dstar.cpp
     decode/dv_codes.cpp
     decode/dv_phy.cpp
@@ -116,6 +129,7 @@ add_library(revenant_core STATIC
     dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
+    dsp/synth/dmr_mod.cpp
     dsp/synth/dv_mod.cpp
     dsp/synth/fsk_mod.cpp
     dsp/synth/m17_mod.cpp

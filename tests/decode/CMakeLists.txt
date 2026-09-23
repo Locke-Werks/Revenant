@@ -38,6 +38,12 @@
 # blockings, down to one sample a call, and requires every data unit to come
 # out identical, which is the property the engine's block-at-a-time feed needs.
 #
+# test_dmr.cpp and test_dmr_blocking.cpp are the same two groups and the same
+# blocking case for DMR, ETSI TS 102 361: every Annex B code against its
+# printed matrix and the Idle message's worked BPTC example, then round trips
+# on a base station channel, on both timeslots at once and on a direct mode
+# channel with the carrier off between bursts.
+#
 # Every error rate in those three is measured and reported in an INFO line and
 # the assertion around it is loose. A bit error rate asserted to three decimal
 # places is a test that fails when somebody improves the receiver, and the
@@ -122,6 +128,8 @@ add_executable(revenant_decode_tests
     test_aprs.cpp
     test_ax25.cpp
     test_cw.cpp
+    test_dmr.cpp
+    test_dmr_blocking.cpp
     test_dstar.cpp
     test_dstar_blocking.cpp
     test_imbe.cpp
