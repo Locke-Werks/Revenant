@@ -469,8 +469,15 @@ TEST_CASE("the snapshot's format and generation come from the same write",
     ring.set_depth_millis(20);
 
     std::atomic<bool> writing{true};
+    std::atomic<bool> reading{false};
 
+    // On a loaded CI runner the writer could finish all its writes before
+    // the reader was first scheduled, leaving nothing read at all. The
+    // writer waits for the reader to be running first.
     std::thread writer([&] {
+        while (!reading.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
         for (std::uint64_t generation = 1; generation <= kWrites; ++generation) {
             ring.write(make_chunk(0, 64, 0.25F, true, 0, expected_rate(generation), 1));
         }
@@ -482,7 +489,12 @@ TEST_CASE("the snapshot's format and generation come from the same write",
     std::uint64_t split_reads = 0;
     std::uint64_t split_tears = 0;
 
-    while (writing.load(std::memory_order_acquire)) {
+    reading.store(true, std::memory_order_release);
+    // The last pass runs after the writer finished, so at least one read
+    // sees a generation even if this thread was descheduled throughout.
+    bool last_pass = false;
+    while (!last_pass) {
+        last_pass = !writing.load(std::memory_order_acquire);
         const AudioRing::Snapshot state = ring.snapshot();
         if (state.generation > 0) {
             ++snapshot_reads;
