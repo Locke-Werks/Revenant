@@ -501,6 +501,14 @@ endif()
 # and what a click on the span does (models/receiver_rack.h), with when that
 # click brings the receiver window forward (models/window_raise.h).
 #
+# It covers the frequency manager's model and its importers: the memory file
+# and its schema, the migration of the old bookmark list, search, sort, tags,
+# delete and undo, scan lists (models/memories.h), the JSON reader under them
+# (models/json_lite.h), and reading SDR#, SDR++ and CHIRP files and writing
+# CHIRP's (models/memory_import.h), against sample files in tests/data/memories.
+# A memory list is kept for years; a reader that drops an entry or reads a
+# frequency a few hertz off produces a list that looks complete.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -564,8 +572,11 @@ if(REVENANT_UI_TESTS)
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_history_shift.cpp
+            tests/test_json_lite.cpp
             tests/test_key_actions.cpp
             tests/test_key_steps.cpp
+            tests/test_memories.cpp
+            tests/test_memory_import.cpp
             tests/test_mode_choice.cpp
             tests/test_palette_match.cpp
             tests/test_frequency_dial.cpp
@@ -598,6 +609,12 @@ if(REVENANT_UI_TESTS)
         # the two cannot drift.
         target_compile_definitions(revenant_ui_tests PRIVATE
             REVENANT_DOCS_DIR="${REVENANT_SOURCE_DIR}/docs")
+
+        # The sample memory files the frequency manager's importers are tested
+        # against, which were written for those tests; see
+        # models/memory_import.h for what each was written from.
+        target_compile_definitions(revenant_ui_tests PRIVATE
+            REVENANT_UI_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
 
         target_link_libraries(revenant_ui_tests PRIVATE Catch2::Catch2WithMain)
 

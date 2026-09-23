@@ -1,0 +1,69 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- A sample in the shape SDR# writes, made for ui/tests/test_memory_import.cpp.
+     The frequencies are real allocations; the names are invented. -->
+<ArrayOfMemoryEntry xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <MemoryEntry>
+    <IsFavourite>true</IsFavourite>
+    <Name>Local FM</Name>
+    <GroupName>Broadcast</GroupName>
+    <Frequency>98500000</Frequency>
+    <DetectorType>WFM</DetectorType>
+    <Shift>0</Shift>
+    <FilterBandwidth>180000</FilterBandwidth>
+  </MemoryEntry>
+  <MemoryEntry>
+    <IsScanned>false</IsScanned>
+    <IsFavourite>false</IsFavourite>
+    <Name>Tower &amp; Ground</Name>
+    <GroupName>Airband</GroupName>
+    <Frequency>118300000</Frequency>
+    <DetectorType>AM</DetectorType>
+    <Shift>0</Shift>
+    <FilterBandwidth>8333</FilterBandwidth>
+    <CenterFrequency>0</CenterFrequency>
+  </MemoryEntry>
+  <MemoryEntry>
+    <IsFavourite>false</IsFavourite>
+    <Name>20 m FT8</Name>
+    <GroupName />
+    <Frequency>14074000</Frequency>
+    <DetectorType>USB</DetectorType>
+    <Shift>0</Shift>
+    <FilterBandwidth>2700</FilterBandwidth>
+  </MemoryEntry>
+  <MemoryEntry>
+    <IsFavourite>false</IsFavourite>
+    <Name>40 m net</Name>
+    <GroupName>Amateur</GroupName>
+    <Frequency>7150000</Frequency>
+    <DetectorType>LSB</DetectorType>
+    <Shift>-125000000</Shift>
+    <FilterBandwidth>2400</FilterBandwidth>
+  </MemoryEntry>
+  <MemoryEntry>
+    <IsFavourite>false</IsFavourite>
+    <Name>Digital broadcast</Name>
+    <GroupName>Broadcast</GroupName>
+    <Frequency>3995000</Frequency>
+    <DetectorType>DRM</DetectorType>
+    <Shift>0</Shift>
+    <FilterBandwidth>10000</FilterBandwidth>
+  </MemoryEntry>
+  <MemoryEntry>
+    <IsFavourite>false</IsFavourite>
+    <Name>No frequency</Name>
+    <GroupName>Broken</GroupName>
+    <DetectorType>NFM</DetectorType>
+    <Shift>0</Shift>
+    <FilterBandwidth>12500</FilterBandwidth>
+  </MemoryEntry>
+  <MemoryEntry>
+    <IsFavourite>false</IsFavourite>
+    <Name>Marine 16</Name>
+    <GroupName>Marine</GroupName>
+    <Frequency>156800000</Frequency>
+    <DetectorType>NFM</DetectorType>
+    <Shift>0</Shift>
+    <FilterBandwidth>12500</FilterBandwidth>
+  </MemoryEntry>
+</ArrayOfMemoryEntry>

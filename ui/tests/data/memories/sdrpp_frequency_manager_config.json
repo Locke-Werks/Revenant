@@ -1,0 +1,80 @@
+{
+    "bookmarkDisplayMode": 1,
+    "lists": {
+        "Air Band": {
+            "bookmarks": {
+                "Approach": {
+                    "bandwidth": 15000.0,
+                    "frequency": 118200000.0,
+                    "mode": 2
+                },
+                "ATIS": {
+                    "bandwidth": 15000.0,
+                    "frequency": 134500000.0,
+                    "mode": 2
+                }
+            },
+            "showOnWaterfall": true
+        },
+        "FM Broadcast": {
+            "bookmarks": {
+                "Community radio ": {
+                    "bandwidth": 224298.0625,
+                    "frequency": 101500000.0,
+                    "mode": 1
+                }
+            },
+            "showOnWaterfall": true
+        },
+        "HF": {
+            "bookmarks": {
+                "Time signal": {
+                    "bandwidth": 4600.0,
+                    "frequency": 10000000.0,
+                    "mode": 3
+                },
+                "20 m SSB": {
+                    "bandwidth": 2800.0,
+                    "frequency": 14200000.0,
+                    "mode": 4
+                },
+                "Beacon": {
+                    "bandwidth": 200.0,
+                    "frequency": 14100000.0,
+                    "mode": 5
+                },
+                "80 m SSB": {
+                    "bandwidth": 2800.0,
+                    "frequency": 3750000.0,
+                    "mode": 6
+                },
+                "IQ": {
+                    "bandwidth": 12000.0,
+                    "frequency": 6000000.0,
+                    "mode": 7
+                },
+                "Unknown mode": {
+                    "bandwidth": 3000.0,
+                    "frequency": 7000000.0,
+                    "mode": 9
+                },
+                "No frequency": {
+                    "bandwidth": 3000.0,
+                    "mode": 4
+                }
+            },
+            "showOnWaterfall": false
+        },
+        "PMR": {
+            "bookmarks": {
+                "PMR 01": {
+                    "bandwidth": 12500.0,
+                    "frequency": 446006250.0,
+                    "mode": 0
+                }
+            },
+            "showOnWaterfall": true
+        }
+    },
+    "selectedList": "Air Band"
+}

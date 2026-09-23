@@ -1,0 +1,14 @@
+{
+    "bookmarks": {
+        "PMR 01": {
+            "bandwidth": 12500.0,
+            "frequency": 446006250.0,
+            "mode": 0
+        },
+        "PMR 02": {
+            "bandwidth": 12500.0,
+            "frequency": 446018750.0,
+            "mode": 0
+        }
+    }
+}
