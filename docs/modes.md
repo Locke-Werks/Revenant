@@ -941,6 +941,36 @@ early decoders do. And arrl.org/psk31-spec, the HTML copy of the same table,
 has three errors that make two pairs of characters indistinguishable, so it
 must not be used as a source; `core/decode/varicode.h` lists them.
 
+**CW, receiver audio to text and speed.** `core/decode/cw.cpp`, on the same
+audio seam and front end as PSK31. The table is ITU-R M.1677-1 Annex 1 clause
+1.1, service signals included and written as their clause 1.1.3 names in angle
+brackets, and the element and space ratios are its clause 2. The Recommendation
+states no speed, so words per minute and Farnsworth timing come from the ARRL
+Morse Transmission Timing Standard, QEX April 1990, whose PARIS word the test
+confirms is fifty units under clause 2.
+
+What comes out is each character with its dots and dashes and the sample where
+it started, the character speed, and the overall speed its letter spaces imply,
+which is lower than the character speed under Farnsworth. The dot length is
+estimated from the signal between 5 and 50 WPM and follows a change of speed
+within a few characters. Envelope detection runs through a boxcar sized to the
+estimated dot, against a noise floor tracked as a Rayleigh lower quartile, with
+a squelch that needs 5.5 noise deviations to open and 2 to stay open.
+
+Measured over 186 characters, signal to noise in 2500 Hz of audio: no errors
+down to -6 dB at 12 and 20 WPM; a character error rate of 0.086 at -10 dB for
+20 WPM, 0.10 for 12 WPM, and 0.075 at -8 dB for 35 WPM. It decodes nothing
+from a minute of noise after a transmission ends. `core/dsp/synth/cw_mod.cpp`
+is the keyer, with Farnsworth spacing and seeded hand-sending jitter, and
+`tests/decode/test_cw.cpp` the round trips at 48 kHz and 11025 Hz with the
+tone 50 and 30 Hz off centre.
+
+Not done: the measured speed reads slow in noise, 18.3 WPM for 20 at -10 dB
+and 33.3 for 35 at -8 dB, and the reason has not been found. The decoder holds
+the first characters back until it has seen runs of two different lengths,
+then decodes them, so text made only of one length, all dots or all dashes
+with nothing between, is never decoded at all.
+
 ## What would change the list
 
 **A patent expiring.** The dated rows are in the patent exclusion table.
