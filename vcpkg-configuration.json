@@ -4,5 +4,8 @@
     "kind": "git",
     "repository": "https://github.com/microsoft/vcpkg",
     "baseline": "d3a1e8c161275780ebf2eebd8c6b70d9fabc0a19"
-  }
+  },
+  "overlay-ports": [
+    "./vcpkg-overlays/rtlsdr"
+  ]
 }
