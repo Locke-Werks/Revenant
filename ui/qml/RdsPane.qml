@@ -28,6 +28,8 @@ import QtQuick.Layouts
 import Revenant
 
 ColumnLayout {
+    id: rds
+
     Layout.fillWidth: true
     spacing: 2
     // OFFERED ONLY WHERE IT CAN WORK. The section is there for a wfm
@@ -48,6 +50,10 @@ ColumnLayout {
 
     visible: offered || engineLink.rdsWanted
 
+    // The decoder belongs to the focused receiver, so its switch and its
+    // chips wear that receiver's colour, as the detail and decode sections do.
+    readonly property color tint: Theme.receiverColours[engineLink.focusedSlot]
+
     RowLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
@@ -58,7 +64,7 @@ ColumnLayout {
             checkable: true
             checked: engineLink.rdsWanted
             text: "rds"
-            tint: Theme.receiverColours[0]
+            tint: rds.tint
             ink: Theme.inkDim
             font.bold: true
             onClicked: engineLink.rdsWanted = !engineLink.rdsWanted
@@ -89,7 +95,7 @@ ColumnLayout {
             label: engineLink.rdsLabel
             detail: engineLink.rdsStatus
             ink: engineLink.rdsIsFault ? Theme.inkWarn
-                 : engineLink.rdsDecoding ? Theme.receiverColours[0]
+                 : engineLink.rdsDecoding ? rds.tint
                  : Theme.inkDim
         }
 
@@ -278,7 +284,7 @@ ColumnLayout {
         StatusChip {
             label: engineLink.rdsTmcLabel
             detail: engineLink.rdsTmcDetail
-            ink: Theme.receiverColours[0]
+            ink: rds.tint
         }
 
         Readout {
