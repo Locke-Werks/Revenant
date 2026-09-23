@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <complex>
 #include <cstdint>
 #include <filesystem>
@@ -73,6 +74,7 @@ using test::HarnessOptions;
 using test::ending;
 using test::flag_of;
 using test::integer_of;
+using test::real_of;
 using test::into;
 using test::MessageLog;
 using test::text_of;
@@ -534,6 +536,9 @@ TEST_CASE("a P25 header crosses the wire as a decoded message", "[gpu][rpc][deco
 
     std::size_t headers = 0;
     std::size_t trusted = 0;
+    double worst_offset = 0.0;
+    double narrowest = 2.0;
+    double widest = 0.0;
     for (const rpc::DecodedMessage& message : seen) {
         CHECK(message.vrx == *vrx);
         CHECK(message.decoder == "p25p1");
@@ -552,6 +557,20 @@ TEST_CASE("a P25 header crosses the wire as a decoded message", "[gpu][rpc][deco
         }
         ++trusted;
         CHECK(integer_of(message, "nac") == kNac);
+
+        // The receiver sits on the carrier and the fine stage mixes it to
+        // DC, so the sync word's fit should find it there. The deviation
+        // reads under nominal, as tests/decode/test_p25p1_blocking.cpp
+        // measures without the engine: the outer symbols land inside +/-3.
+        // Loose, and printed so the figures through the engine are on record.
+        const double offset = real_of(message, "carrier_offset_hz");
+        const double deviation = real_of(message, "deviation_ratio");
+        worst_offset = std::max(worst_offset, std::abs(offset));
+        narrowest = std::min(narrowest, deviation);
+        widest = std::max(widest, deviation);
+        CHECK(std::abs(offset) < 50.0);
+        CHECK(deviation > 0.75);
+        CHECK(deviation < 1.1);
 
         if (message.kind != "hdu") {
             continue;
@@ -580,6 +599,9 @@ TEST_CASE("a P25 header crosses the wire as a decoded message", "[gpu][rpc][deco
                      headers, seen.size(), trusted));
     CHECK(headers == 6);
     CHECK(trusted + 1 >= seen.size());
+    WARN(std::format("p25p1: carrier offset within {:.2f} Hz of DC and deviation {:.4f} to "
+                     "{:.4f} of nominal over {} trusted data units",
+                     worst_offset, narrowest, widest, trusted));
 
     // The sequence numbers are the decoder's and not the subscription's.
     const auto theirs =
@@ -697,7 +719,21 @@ TEST_CASE("a D-STAR header crosses the wire as a decoded message", "[gpu][rpc][d
         CHECK_FALSE(flag_of(piece, "flushed"));
         CHECK(text_of(piece, "my") == "JA1RL");
         CHECK(text_of(piece, "ur") == "CQCQCQ");
+
+        // The first frame sync's fit, on every piece. The receiver is on the
+        // carrier and the transmitter at GMSK's nominal deviation, and the
+        // fit reads both low for the reason tests/decode/test_dstar_blocking.cpp
+        // gives: at BT 0.5 a lone bit falls short of full deviation, and the
+        // frame sync is mostly lone bits. Measured there without the engine,
+        // 0.646 to 0.693 of nominal and 40 to 80 Hz under the carrier.
+        CHECK(real_of(piece, "carrier_offset_hz") == real_of(seen.front(), "carrier_offset_hz"));
+        CHECK(std::abs(real_of(piece, "carrier_offset_hz")) < 120.0);
+        CHECK(real_of(piece, "deviation_ratio") > 0.55);
+        CHECK(real_of(piece, "deviation_ratio") < 0.8);
     }
+    WARN(std::format("dstar: carrier offset {:.2f} Hz, deviation ratio {:.4f}",
+                     real_of(seen.front(), "carrier_offset_hz"),
+                     real_of(seen.front(), "deviation_ratio")));
 
     const rpc::DecodedMessage& header = seen.front();
     CHECK(header.decoder == "dstar");

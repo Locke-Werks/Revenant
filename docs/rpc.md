@@ -607,7 +607,7 @@ through it as of 2026-09-22, each one adapter and one registry row in
 
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
-| `p25p1` | NAC and DUID of every data unit; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband: a `p25p1` receiver, or any complex tap |
+| `p25p1` | NAC and DUID of every data unit, with the carrier offset and deviation its sync word measured; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband: a `p25p1` receiver, or any complex tap |
 | `dstar` | The radio header's four callsigns, suffix and flags, then one message per superframe of voice frames | Complex baseband: a `dstar` receiver, or any complex tap |
 | `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband: a `tetra` receiver, or any complex tap |
 | `m17` | Each link setup whose CRC checked: callsigns, type, encrypted flag; each stream's end; end of transmission | Complex baseband of a `p25p1` receiver, 48000 S/s in its 12.5 kHz channel, or a `raw` tap |

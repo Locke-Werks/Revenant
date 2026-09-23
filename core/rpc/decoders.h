@@ -524,6 +524,20 @@ enum class LineEnd : std::uint8_t { LineEnd, Length, Idle, NewTransmission };
 //                               is the nearest code word, not the sent one
 //   sync_score           real   normalised correlation of the frame sync
 //   inverted             flag   the discriminator polarity was reversed
+//   carrier_offset_hz    real   the carrier's offset from DC as the
+//                               discriminator saw it, from the least-squares
+//                               fit of this unit's 24 sync symbols
+//   deviation_ratio      real   the deviation against Table 9-1's nominal
+//                               from the same fit
+//
+// The last two are what the decoder sliced this unit with, so a client can
+// see a transmitter drifting off frequency or deviating wide before the
+// headers stop decoding. The deviation reads under 1.0 for a transmitter on
+// specification, because the outer symbols land a little inside +/-3 after
+// the filters: tests/decode/test_p25p1_blocking.cpp measured 0.919 to 0.974
+// without the engine, and the six-header capture in
+// tests/rpc/test_rpc_decode.cpp read 0.8478 to 0.9671, with the carrier
+// within 6.62 Hz of DC, over 12 data units through the engine on 2026-09-23.
 //
 // A Header Data Unit adds, from clause 10.2:
 //   talkgroup            int    TGID
@@ -576,6 +590,8 @@ public:
                 integer_field("nid_corrected_bits", frame.nid.corrected_bits));
             message.fields.push_back(real_field("sync_score", frame.sync_score));
             message.fields.push_back(flag_field("inverted", frame.inverted));
+            message.fields.push_back(real_field("carrier_offset_hz", frame.carrier_offset_hz));
+            message.fields.push_back(real_field("deviation_ratio", frame.deviation_ratio));
 
             message.text = std::format("NAC 0x{:03X} {}", frame.nid.network_access_code,
                                        message.kind);
@@ -634,6 +650,24 @@ private:
 //                               open, and this is what it had recovered
 //   sync_score           real   the first frame sync's
 //   inverted             flag
+//   carrier_offset_hz    real   the carrier's offset from DC as the
+//                               discriminator saw it, from the least-squares
+//                               fit of the first frame sync's 15 bits
+//   deviation_ratio      real   the deviation against a quarter of the bit
+//                               rate from the same fit
+//
+// Every superframe carries the first frame sync's two figures, as
+// core/decode/dstar.h hands them over. The decoder refits on each
+// resynchronisation signal to slice with, and does not report the refit.
+//
+// BOTH READ LOW FOR A TRANSMITTER ON NOMINAL, so read them as a trend rather
+// than against 0 Hz and 1.0. At BT 0.5 a lone bit falls short of full
+// deviation and the frame sync is mostly lone bits, so the straight-line fit
+// reads a smaller gain and moves the offset with it: without the engine,
+// tests/decode/test_dstar_blocking.cpp measured 0.646 to 0.693 of nominal
+// and 40 to 80 Hz under the carrier, and the fifty-frame transmission in
+// tests/rpc/test_rpc_decode.cpp read 0.6621 and -46.77 Hz through the
+// engine on 2026-09-23.
 //
 // A transmission is closed by the piece with `ended` or `flushed`, or by one
 // with fewer than 21 voice frames: that is a resynchronisation signal missing
@@ -764,6 +798,8 @@ private:
         message.fields.push_back(flag_field("flushed", flushed));
         message.fields.push_back(real_field("sync_score", piece.sync_score));
         message.fields.push_back(flag_field("inverted", piece.inverted));
+        message.fields.push_back(real_field("carrier_offset_hz", piece.carrier_offset_hz));
+        message.fields.push_back(real_field("deviation_ratio", piece.deviation_ratio));
 
         const char* closing = piece.ended ? ", ended" : flushed ? ", stream ended" : "";
         if (piece.header.has_value()) {
