@@ -1068,3 +1068,13 @@ commit: "Keep the passband waterfall's history across a rebuilt receiver"
 instead: The passband waterfall's rows are the display tap in absolute hertz,
     so a rebuilt receiver keeps them; only the axis, or a pane left with no
     receiver, clears them.
+
+phrase: Below this, measured from the frame's floor, there is no signal
+phrase: Key-down for the CW rule: the carrier well clear of the floor
+phrase: The frame's low percentile, which the display's floor is drawn from
+retired: 2026-09-23
+commit: "Re-derive AFT's gates against the flat passband floor"
+instead: AFT reads levels against the noise mean, each frame's raw 5th
+    percentile plus 12.90 dB averaged over half a second, gates on
+    10 log10(ln(N / 0.05)) dB for N bins searched, and confirms across four
+    analysis windows. models/aft.h has the derivation.

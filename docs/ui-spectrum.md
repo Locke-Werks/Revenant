@@ -546,6 +546,49 @@ is either a second signal or the operator turning the dial, and in both cases
 the correct response is to stop tracking rather than to chase. Manual tuning
 always wins; AFT resumes from wherever it was left.
 
+### What counts as a signal on the flat pane
+
+`ui/models/aft.h` carries the derivation; this is the result. Until the
+display tap, the no-signal hold compared the loudest bin in the filter
+against the frame's smoothed 5th percentile, at 10 dB for any signal and 15
+dB for CW key-down. That percentile sat in the filter's stopband, so noise
+inside the filter read about 85 dB above it and the hold could never trigger.
+On the flat pane the same constants still pass noise: a frame is one windowed
+transform, a noise bin's power is exponentially distributed with its 5th
+percentile 12.90 dB under its mean, and the loudest of the 164 bins in a
+6 kHz filter at 36.6 Hz sits about 7.5 dB over the mean, so noise alone read
+about 20 dB "above the floor".
+
+Three things replaced the two constants.
+
+- **The noise reference is the mean**, each frame's raw 5th percentile plus
+  12.90 dB, averaged over half a second. One frame's percentile of 512 bins
+  scatters by about 0.86 dB, which would let noise through the gate in about
+  18% of frames instead of the 5% it is sized for.
+- **The per-frame gate is sized by the filter**: the level the loudest of N
+  noise bins passes in one frame in twenty, 10 log10(ln(N / 0.05)) dB over the
+  mean, which is 8.1 dB for 30 bins, 9.1 dB for 164 and 9.7 dB for 600.
+- **Nothing is acted on until it is confirmed** across four distinct analysis
+  windows. A peak must reappear within two bins of itself; a centroid must
+  keep clearing the gate with no more than two frames missing, through its
+  two-second average as well. One frame outside the jump allowance is an
+  outlier, not acted on and not announced; two in a row are a jump.
+
+The NFM and WFM centroid is taken over the occupied band only: the run of
+bins over the threshold that contains the loudest, bridging gaps of four
+bins, with the threshold at 12 dB under the loudest or 6 dB over the noise,
+whichever is higher. Weighing every bin in the filter within 12 dB of the
+loudest, as it did, pulled the centroid 167 Hz towards a second, weaker band
+in the same filter in the case `ui/tests/test_aft.cpp` holds.
+
+Measured in that file on synthetic flat-pane frames, 512 bins at 36.62 Hz and
+a 6 kHz filter: two minutes of noise alone moved the receiver zero times on
+each of the peak, keyed and centroid rules across twelve seeds, and a carrier
+whose peak bin is 10 dB over the noise, 400 Hz off, was followed on both peak
+rules and all twelve seeds in exactly four moves, the last of them 1.67 to
+1.86 seconds in, ending 0.0 to 9.9 Hz from the carrier. The committed cases
+run four of the seeds.
+
 ### What AFT should actually aim at
 
 Not a peak, and not a centroid. Both are statistics of the instantaneous

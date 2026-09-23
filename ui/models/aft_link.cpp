@@ -69,17 +69,27 @@ void EngineLink::run_aft()
     }
 
     // The frame's own axis, in absolute hertz: bin centres sit half a bin in
-    // from the outer edges passbandFrequencyAtFraction reports.
+    // from the outer edges passbandFrequencyAtFraction reports. The bin width
+    // is the geometry's, which is the display rate over the transform, rather
+    // than anything derived from the receiver's demodulation rate.
+    const rpc::PassbandGeometry& geometry = frame.geometry;
     const double low = passbandFrequencyAtFraction(0.0);
-    const double high = passbandFrequencyAtFraction(1.0);
-    const double bin_hz = (high - low) / static_cast<double>(frame.power_db.size());
+    const double bin_hz = geometry.bin_width.denominator == 0
+                              ? 0.0
+                              : static_cast<double>(geometry.bin_width.numerator) /
+                                    static_cast<double>(geometry.bin_width.denominator);
     const double centre = receiverCenterHz();
 
     AftFrame measured;
     measured.power_db = frame.power_db;
     measured.first_bin_hz = low + 0.5 * bin_hz;
     measured.bin_hz = bin_hz;
-    measured.floor_db = frame.floor_db;
+
+    // The frame's own percentile, not the smoothed floor: see models/aft.h.
+    measured.percentile_low_db = frame.percentile_low_db;
+    measured.window_s = geometry.rate == 0 ? 0.0
+                                           : static_cast<double>(geometry.transform) /
+                                                 static_cast<double>(geometry.rate);
 
     // The filter the engine granted, which is what the audio passes. Before
     // the first grant the edges asked for, and with neither the whole frame.
@@ -94,7 +104,7 @@ void EngineLink::run_aft()
         measured.search_high_hz = centre + static_cast<double>(edge_high);
     } else {
         measured.search_low_hz = low;
-        measured.search_high_hz = high;
+        measured.search_high_hz = passbandFrequencyAtFraction(1.0);
     }
 
     const AftStep step = aft_.step(seconds(scroll_clock_), centre,
