@@ -1046,6 +1046,17 @@ Status Dmr::process(ConstComplexSpan samples, std::vector<DmrBurst>& out) {
     // two and the sync peak's reach on top.
     const double burst_span = static_cast<double>(kDmrBurstSymbols) * sps + sps + 3.0;
 
+    // The search looks at every tenth of a symbol, not every sample. At
+    // 48000 S/s that is every sample; on a raw tap at 192000 it is every
+    // fourth, where scoring every sample made this the costliest adapter on
+    // the tap, 127.2 ms of a core per second of input on 2026-09-23 against
+    // 76.9 with the stride and 64.4 for P25 in the same run. A tenth of
+    // a symbol off the peak still scores near it, and a trigger nine tenths
+    // of the threshold sends anything close to peak_near, which looks at
+    // every sample either side and applies the threshold itself.
+    const auto stride = std::max<std::size_t>(1, static_cast<std::size_t>(std::floor(sps / 10.0)));
+    const double trigger = stride > 1 ? 0.9 * config_.sync_threshold : config_.sync_threshold;
+
     while (true) {
         const auto end = static_cast<double>(trimmed_ + shaped_.size());
         const double search_start = static_cast<double>(search_) - to_centre;
@@ -1073,7 +1084,7 @@ Status Dmr::process(ConstComplexSpan samples, std::vector<DmrBurst>& out) {
         }
         // Bursts starting before the stream did cannot be read.
         if (search_start < static_cast<double>(trimmed_) + 2.0) {
-            ++search_;
+            search_ += stride;
             continue;
         }
         // A position the grid already reads is left to it.
@@ -1083,14 +1094,14 @@ Status Dmr::process(ConstComplexSpan samples, std::vector<DmrBurst>& out) {
                 phase += slot;
             }
             if (phase <= 3.0 * sps || slot - phase <= 3.0 * sps) {
-                ++search_;
+                search_ += stride;
                 continue;
             }
         }
         const auto here = score_at(static_cast<double>(search_));
-        if (here->score < config_.sync_threshold) {
+        if (here->score < trigger) {
             note_sync(*here);
-            ++search_;
+            search_ += stride;
             continue;
         }
         // Past the threshold: the peak is somewhere in the next symbol.
