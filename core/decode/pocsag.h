@@ -232,7 +232,6 @@ class PocsagDecoder {
     bool inverted_ = false;
     std::size_t bit_in_word_ = 0;
     std::size_t word_in_batch_ = 0;
-    std::uint32_t word_ = 0;
     SampleIndex word_sample_ = 0;
     bool expecting_sync_ = false;
 

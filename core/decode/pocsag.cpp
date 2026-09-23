@@ -188,7 +188,6 @@ void PocsagDecoder::reset() {
     inverted_ = false;
     bit_in_word_ = 0;
     word_in_batch_ = 0;
-    word_ = 0;
     word_sample_ = 0;
     expecting_sync_ = false;
     open_.reset();
