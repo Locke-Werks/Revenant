@@ -111,6 +111,7 @@ void WaterfallItem::setLink(EngineLink* link)
         std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
     }
     filled_rows_ = 0;
+    emit historyChanged();
     write_row_ = std::max(history_.height() - 1, 0);
     std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
     boxes_.clear();
@@ -174,6 +175,7 @@ void WaterfallItem::onConnectionChanged()
     }
     write_row_ = std::max(history_.height() - 1, 0);
     filled_rows_ = 0;
+    emit historyChanged();
     reduced_bins_ = 0;
     std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
@@ -255,6 +257,7 @@ void WaterfallItem::resizeRows(int rows)
     row_spans_ = std::move(spans);
     write_row_ = plan.write_row;
     filled_rows_ = plan.rows_kept;
+    emit historyChanged();
 
     // Every tile, because every one of them is a texture built from pixels
     // that have just moved. columns_, reduced_bins_ and headroom_db_ are
@@ -298,6 +301,7 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     // puts that first row at the top with the empty ring below it.
     write_row_ = tall - 1;
     filled_rows_ = 0;
+    emit historyChanged();
     row_spans_.assign(static_cast<std::size_t>(tall), RowSpan{});
 
     const int tiles = (tall + kTileRows - 1) / kTileRows;
@@ -462,7 +466,13 @@ void WaterfallItem::rebuildOverlay()
     // is the constraint that made a detection a rectangle rather than a band
     // in the first place.
     if (link_ != nullptr) {
-        build_receiver_quads(build_receiver_marker(*link_, width()), height(), quads_);
+        // DOWN TO THE OLDEST ROW, NOT TO THE BOTTOM OF THE ITEM. While the
+        // history is still filling, the rows below it have never been written,
+        // and a band running on down through them reads as the receiver being
+        // there at a time nothing was recorded. Seen on 2026-09-22 as a blue
+        // box hanging below the end of the picture.
+        const double drawn = height() * historyFraction();
+        build_receiver_quads(build_receiver_marker(*link_, width()), drawn, quads_);
     }
 
     placeLabels();
@@ -558,7 +568,10 @@ void WaterfallItem::takeFrame()
     tile_dirty_[static_cast<std::size_t>(write_row_ / kTileRows)] = 1;
 
     write_row_ = (write_row_ + tall - 1) % tall;
-    filled_rows_ = std::min(filled_rows_ + 1, tall);
+    if (filled_rows_ < tall) {
+        filled_rows_ += 1;
+        emit historyChanged();
+    }
 
     // After the row is in, because the newest row is the leading edge of
     // every live rectangle. This frame also carries a later sample index, so
@@ -577,6 +590,7 @@ void WaterfallItem::setHovered(std::uint64_t id)
     hovered_detection_ = id;
     setCursor(id == 0 ? Qt::ArrowCursor : Qt::PointingHandCursor);
     rebuildOverlay();
+    emit hoveredDetectionChanged();
     update();
 }
 

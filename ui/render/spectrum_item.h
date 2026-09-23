@@ -507,6 +507,12 @@ class SpectrumItem : public QQuickItem {
     Q_PROPERTY(qulonglong selectedDetection READ selectedDetection WRITE setSelectedDetection
                    NOTIFY selectedDetectionChanged)
 
+    // The track under the pointer, or zero. Read by the hover card in
+    // qml/SpanView.qml, which is where the numbers that no longer fit on a
+    // label go.
+    Q_PROPERTY(qulonglong hoveredDetection READ hoveredDetection
+                   NOTIFY hoveredDetectionChanged)
+
 public:
     explicit SpectrumItem(QQuickItem* parent = nullptr);
 
@@ -523,11 +529,14 @@ public:
     [[nodiscard]] qulonglong selectedDetection() const { return selected_detection_; }
     void setSelectedDetection(qulonglong id);
 
+    [[nodiscard]] qulonglong hoveredDetection() const { return hovered_detection_; }
+
 signals:
     void linkChanged();
     void endsChanged();
     void mapPinsChanged();
     void selectedDetectionChanged();
+    void hoveredDetectionChanged();
 
     // A click landed on a detection, or on nothing, in which case id is zero
     // and the other two are the click's own frequency rather than a track's.

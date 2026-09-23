@@ -57,7 +57,10 @@ QtObject {
     readonly property color border: "#263040"
 
     // Behind a label drawn over the trace. See Plate.qml.
-    readonly property color plate: "#b3060810"
+    // At 70% the trace read through the floor plates, which sit on the
+    // tallest part of it; 90% leaves the label legible and still shows that
+    // there is a trace behind it.
+    readonly property color plate: "#e6060810"
 
     // RECEIVER COLOURS, one per receiver in the order they were made, and the
     // same colour on the span marker, the rack strip and the receiver's dial.

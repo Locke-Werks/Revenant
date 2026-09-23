@@ -115,6 +115,11 @@ class WaterfallItem : public QQuickItem {
     Q_PROPERTY(double drawCeilingDb READ drawCeilingDb NOTIFY endsChanged)
     Q_PROPERTY(double headroomDb READ headroomDb NOTIFY endsChanged)
 
+    // How much of the display the history fills, from the top: 1 once the
+    // ring has wrapped, less while it is still filling after a start, a
+    // reconnect or a resize. The rows below it have never been written.
+    Q_PROPERTY(double historyFraction READ historyFraction NOTIFY historyChanged)
+
     // The operator's pins on either end of the colour map, shared with the
     // other span display. Null draws against the frame's ends alone.
     Q_PROPERTY(revenant::ui::ScaleSettings* mapPins READ mapPins WRITE setMapPins
@@ -124,6 +129,12 @@ class WaterfallItem : public QQuickItem {
     // selection. See the same property on SpectrumItem.
     Q_PROPERTY(qulonglong selectedDetection READ selectedDetection WRITE setSelectedDetection
                    NOTIFY selectedDetectionChanged)
+
+    // The track under the pointer, or zero. Read by the hover card in
+    // qml/SpanView.qml, which is where the numbers that no longer fit on a
+    // label go.
+    Q_PROPERTY(qulonglong hoveredDetection READ hoveredDetection
+                   NOTIFY hoveredDetectionChanged)
 
 public:
     explicit WaterfallItem(QQuickItem* parent = nullptr);
@@ -135,17 +146,28 @@ public:
     [[nodiscard]] double drawCeilingDb() const { return ends_.ceiling_db; }
     [[nodiscard]] double headroomDb() const { return headroom_db_; }
 
+    [[nodiscard]] double historyFraction() const
+    {
+        return history_.height() <= 0
+                   ? 0.0
+                   : static_cast<double>(filled_rows_) / static_cast<double>(history_.height());
+    }
+
     [[nodiscard]] ScaleSettings* mapPins() const { return map_pins_; }
     void setMapPins(ScaleSettings* pins);
 
     [[nodiscard]] qulonglong selectedDetection() const { return selected_detection_; }
     void setSelectedDetection(qulonglong id);
 
+    [[nodiscard]] qulonglong hoveredDetection() const { return hovered_detection_; }
+
 signals:
     void linkChanged();
     void endsChanged();
+    void historyChanged();
     void mapPinsChanged();
     void selectedDetectionChanged();
+    void hoveredDetectionChanged();
 
     // Same signal and the same caveats as SpectrumItem::tuneRequested, which
     // carries the note about the measured centre not being the logical one

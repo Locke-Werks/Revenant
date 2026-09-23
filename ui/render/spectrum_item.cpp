@@ -143,8 +143,17 @@ constexpr double kReceiverCentreTickPx = 9.0;
             break;
     }
     return megahertz + QStringLiteral("  ") + QString::number(box.snr_2500_db, 'f', 1) +
-           QStringLiteral(" dB  ") + QString::number(box.confidence, 'f', 2);
+           QStringLiteral(" dB");
 }
+
+// WHAT THE LABEL USED TO END WITH: the track's confidence to two places, after
+// the decibels. That number is a stopwatch, one minus (1 - rise) to the n of
+// consecutive detections, and it reads 1.00 on anything that has stayed put
+// for about a second and a half, a bump in the noise floor included; the owner
+// read it on 2026-09-22 as the detector being certain of a bump. The label
+// keeps the frequency and the SNR, which is the calibrated number, and the
+// stopwatch goes with the margin and the concentration to the hover card in
+// qml/SpanView.qml, where each is named for what it measures.
 
 // THE LABEL DOES NOT FADE, WHICH IS A REVERSAL
 //
@@ -1187,6 +1196,7 @@ void SpectrumItem::setHovered(std::uint64_t id)
     hovered_detection_ = id;
     setCursor(id == 0 ? Qt::ArrowCursor : Qt::PointingHandCursor);
     rebuildOverlay();
+    emit hoveredDetectionChanged();
     update();
 }
 

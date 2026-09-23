@@ -1672,6 +1672,18 @@ public:
     // 0.117 and qpsk at 0.121, while cw, am, nfm, usb and lsb are all too
     // narrow to resolve and read 0.946 alike. A high reading on a wide band
     // is a carrier with sidebands.
+    // The track's confidence, the stopwatch the detections bar filters on, or a
+    // negative number when the list does not hold it. For the hover card,
+    // which names it for what it counts; see the long note on confidenceBar.
+    [[nodiscard]] Q_INVOKABLE double detectionConfidence(qulonglong id) const {
+        for (const rpc::Detection& detection : shown_.detections) {
+            if (detection.id == id) {
+                return detection.confidence;
+            }
+        }
+        return -1.0;
+    }
+
     [[nodiscard]] Q_INVOKABLE double detectionConcentration(qulonglong id) const {
         for (const rpc::Detection& detection : shown_.detections) {
             if (detection.id == id) {

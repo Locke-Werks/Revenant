@@ -106,6 +106,54 @@ ColumnLayout {
             visible: span.drawing && spectrum.headroomDb > 0.05
             text: "floor +" + spectrum.headroomDb.toFixed(1) + " dB for the column peak"
         }
+
+        // THE TRACK UNDER THE POINTER, in full, on either display.
+        //
+        // A span label says the frequency and the SNR and nothing else since
+        // 2026-09-22. The three numbers that used to crowd it, or were never
+        // on it, are here, each named for what it measures: how long the
+        // track has held (the stopwatch the detections bar filters on, which
+        // the label used to print bare as a confidence), how far it stood above
+        // the threshold, and how much of it is in three bins. Only while the
+        // pointer is on a box, so the card is never over a picture nobody asked
+        // about.
+        Rectangle {
+            id: hoverCard
+
+            readonly property var trackId: spectrum.hoveredDetection !== 0
+                                      ? spectrum.hoveredDetection
+                                      : waterfall.hoveredDetection
+            readonly property double held: trackId !== 0 ? engineLink.detectionConfidence(trackId) : -1
+            readonly property double margin: trackId !== 0 ? engineLink.detectionMargin(trackId) : -1
+            readonly property double concentration:
+                trackId !== 0 ? engineLink.detectionConcentration(trackId) : -1
+
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.rightMargin: 6
+            anchors.topMargin: 28
+            visible: trackId !== 0 && held >= 0
+            width: hoverText.implicitWidth + 16
+            height: hoverText.implicitHeight + 10
+            radius: Theme.radius
+            color: Theme.panel
+            border.width: 1
+            border.color: Theme.border
+
+            Text {
+                id: hoverText
+                anchors.centerIn: parent
+                color: Theme.ink
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+                text: "track " + hoverCard.trackId
+                      + "  ·  held for " + hoverCard.held.toFixed(2)
+                      + (hoverCard.margin >= 0 ? "  ·  margin " + hoverCard.margin.toFixed(2) : "")
+                      + (hoverCard.concentration >= 0
+                         ? "  ·  " + hoverCard.concentration.toFixed(2) + " of it in 3 bins"
+                         : "")
+            }
+        }
     }
 
     // The ruler, between the two displays it labels. See Ruler.qml.
@@ -122,6 +170,30 @@ ColumnLayout {
         id: waterfall
         Layout.fillWidth: true
         Layout.fillHeight: true
+
+        // WHERE THE HISTORY ENDS, while it is still filling. Rows arrive at
+        // the top and push the history down, so for the first minute after a
+        // start, a reconnect or a resize the bottom of the waterfall has never
+        // been written and is the background. Seen on 2026-09-22 as the
+        // waterfall stopping three quarters of the way down; it had not
+        // stopped, it had not got there yet. A line and a note at the edge
+        // say which.
+        Rectangle {
+            visible: waterfall.historyFraction > 0 && waterfall.historyFraction < 1
+            y: Math.round(waterfall.height * waterfall.historyFraction)
+            width: parent.width
+            height: 1
+            color: Theme.border
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 6
+                text: "history fills in from the top as frames arrive"
+                color: Theme.inkOff
+                font.family: Theme.uiFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
         link: engineLink
         mapPins: ScaleSettings
         selectedDetection: span.selection.selectedDetection
