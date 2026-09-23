@@ -1448,3 +1448,13 @@ retired: 2026-09-23
 commit: "Measure the source's pace over two seconds, excusing its own pauses"
 instead: A source that has stopped reads lower from the moment its next block
     is late, down to two blocks over the two-second window, and never zero.
+
+phrase: IMBE voice decodes to audio in core/decode and is not served
+phrase: subscribeAudio refuses a p25p1 receiver today because its output is a complex tap
+phrase: The three digital voice modes are refused too, in their own words
+phrase: The three digital voice modes are refused as well, in words of their own
+retired: 2026-09-23
+commit: "Serve a P25 receiver's voice on subscribeAudio"
+instead: subscribeAudio on a p25p1 receiver serves its IMBE voice at 8000 S/s,
+    silent between calls and through an encrypted one; D-STAR and TETRA are
+    still refused, for want of a voice codec. core/rpc/voice_audio.h has it.

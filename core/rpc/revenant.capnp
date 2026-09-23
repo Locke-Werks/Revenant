@@ -2795,11 +2795,20 @@ interface Session {
     # separate method that does not exist yet, and putting it behind this name
     # is the only thing that would make it look like one.
     #
-    # The three digital voice modes are refused as well, in words of their
-    # own. Since 2026-09-22 they are not raw taps: they go through the fine
-    # stage and come out as complex baseband mixed to DC at their decoder's
-    # rate, which VrxStatus::demodRate states, and subscribeDecoded is what
-    # reads that stream. The refusal names the rate and points there.
+    # D-STAR and TETRA are refused as well, in words of their own. Since
+    # 2026-09-22 the digital voice modes are not raw taps: they go through the
+    # fine stage and come out as complex baseband mixed to DC at their
+    # decoder's rate, which VrxStatus::demodRate states, and subscribeDecoded
+    # is what reads that stream. The refusal names the rate, says the engine
+    # has no voice codec for the mode, and points there.
+    #
+    # A P25 RECEIVER IS SERVED, AND WHAT CROSSES IS ITS VOICE. Since
+    # 2026-09-23: IMBE voice at 8000 S/s mono, sampleIndex counted at that
+    # rate from the receiver's own stream, zeros with squelchOpen false
+    # between calls and through an encrypted call, which is never decoded.
+    # docs/rpc.md and core/rpc/voice_audio.h have the rest. WHAT THIS
+    # PARAGRAPH USED TO SAY, in its first sentence: "The three digital voice
+    # modes are refused as well, in words of their own."
     subscribeAudio @13 (vrx :UInt64, receiver :AudioReceiver,
                         bufferMillis :UInt32)
         -> (subscription :AudioSubscription, bufferMillisGranted :UInt32);

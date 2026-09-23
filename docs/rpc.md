@@ -434,14 +434,21 @@ as two-channel PCM renders as noise at the wrong speed, at tens of times the
 rate this design was costed at. An I/Q subscription is a separate method that
 does not exist.
 
-The three digital voice modes are refused too, in their own words. They left
-the raw tap for the fine stage on 2026-09-22 and hand out complex baseband
-mixed to DC at the rate their decoder was built for, 48000 S/s for P25 and
-D-STAR and 72000 for TETRA, which `VrxStatus::demodRate` states. Until this
-change the refusal called every one of them "a raw tap" at "the coarse channel
-rate", which named the wrong path and the wrong rate for three of the four. It
-now names the mode and the rate and points at `subscribeDecoded`, which is
-what reads that stream.
+D-STAR and TETRA are refused too, in their own words. The three digital voice
+modes left the raw tap for the fine stage on 2026-09-22 and hand out complex
+baseband mixed to DC at the rate their decoder was built for, 48000 S/s for
+P25 and D-STAR and 72000 for TETRA, which `VrxStatus::demodRate` states. Until
+that change the refusal called every one of them "a raw tap" at "the coarse
+channel rate", which named the wrong path and the wrong rate for three of the
+four. It names the mode and the rate, says the engine has no AMBE or ACELP
+voice codec, and points at `subscribeDecoded`, which is what reads that
+stream.
+
+**A P25 receiver's audio is its voice**, since 2026-09-23 and on the owner's
+decision that for a digital voice receiver the decoded voice takes the place
+of the receiver's analog audio. The next section but one has how it is served.
+WHAT THE PARAGRAPH ABOVE USED TO SAY, in its first sentence: "The three
+digital voice modes are refused too, in their own words."
 
 ### RDS is served, per receiver, off the audio fan-out
 
@@ -804,20 +811,37 @@ PSK31 0.323 s, PSK63 0.353 s, CW 0.372 s and QPSK31 0.888 s. The last four mix
 and filter every audio sample before decimating, and QPSK31 runs a Viterbi
 decoder besides, all on the completion thread.
 
-**P25 voice is not on the wire.** `core/decode/p25p1.h`'s `P25Voice` turns a
-clear call's LDU voice frames into 8 kHz PCM, and nothing serves it. It is audio
-out rather than events, so it belongs on `subscribeAudio` rather than this seam,
-and `subscribeAudio` refuses a `p25p1` receiver today because its output is a
-complex tap. Serving it is a design decision rather than an adapter, and the
-questions it has to answer are: what the chunk's `sampleIndex` counts, when the
-receiver's own stream is the tap at 48000 and the voice is 8000; whether the
-gaps between calls, and a withheld encrypted call, are silence on the wire or no
-chunks at all; and whether the refusal on a `p25p1` receiver becomes a voice
-subscription or a second method. The smallest change that answers them is an
-audio route in `core/rpc/server.cpp` for a `p25p1` receiver that runs
-`P25Phase1` and `P25Voice` in the sink and queues 8000 S/s mono chunks with an
-8000-rate index of their own, zeros between calls, under the fence the decoder
-routes use, with no schema change because `AudioChunk` carries its own rate.
+**P25 voice is on `subscribeAudio`**, since 2026-09-23. `core/decode/p25p1.h`'s
+`P25Voice` turns a clear call's LDU voice frames into 8 kHz PCM; it is audio
+out rather than events, so it went on `subscribeAudio` rather than this seam,
+built as the smallest change this section had named: an audio route in
+`core/rpc/server.cpp` for a `p25p1` receiver that runs `P25Phase1` and
+`P25Voice` in the sink, under the fence the decoder routes use, with no schema
+change because `AudioChunk` carries its own rate. `core/rpc/voice_audio.h`
+holds it and answers the three questions:
+
+- `sampleIndex` counts frames at 8000 S/s, `floor(start * 8000 / rate)` of the
+  receiver's own chunk, so a chunk covers exactly the time the receiver chunk
+  behind it covers and an upstream gap is a gap of the same length here.
+- The time between calls, and an encrypted call, are silence at the full 8000
+  S/s with `squelchOpen` false, which is how a closed squelch already crosses.
+  `P25Voice` hands nothing out for an encrypted call, so nothing of one plays.
+- The refusal became the subscription. D-STAR and TETRA are still refused,
+  saying there is no AMBE or ACELP codec in the engine.
+
+`P25Voice` hands a call over an LDU at a time, 1440 samples every 180 ms of
+air, detected at the end of whichever engine block holds the LDU's last
+symbol, so the voice of a call starts behind a pre-roll of the longer of 50 ms
+and the longest chunk seen. A shorter one underruns by up to a chunk on every
+LDU. `tests/rpc/test_rpc_voice.cpp` holds the voice to the vocoder's own PCM
+for the frames the transmitter sent, sample for sample and with no gap inside
+the call, at 328, 2731 and 16384 samples a chunk and over the wire through a
+p25p1 receiver on a 288000 S/s capture; a fixed 50 ms underran at 16384. An
+encrypted call crosses as chunks of zeros with the gate shut.
+
+WHAT THIS PARAGRAPH USED TO SAY, headed "P25 voice is not on the wire": "and
+nothing serves it", and "`subscribeAudio` refuses a `p25p1` receiver today
+because its output is a complex tap", followed by the questions above.
 
 **Two things found on the way, both in `core/decode/p25p1.cpp`.** A Header Data
 Unit whose sync and NID arrived in one call and whose body arrived in the next

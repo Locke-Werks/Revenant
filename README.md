@@ -151,9 +151,11 @@ Each is written from its specification and checked by a round trip through a
 transmitter written from the same clauses; `docs/modes.md` says where each one
 stops, and [docs/sensitivity.md](docs/sensitivity.md) has what each needs in
 white noise, read off a committed curve, rather than a copy of that table
-here. P25's IMBE voice decodes to audio in `core/decode` and is not served:
-the wire, and so the client, carry each P25 data unit's NAC and DUID and the
-header's fields, and none of the voice.
+here. A P25 receiver's audio is its IMBE voice, since 2026-09-23: the wire
+carries it at 8000 S/s through `Session.subscribeAudio`, silent between calls
+and through an encrypted one, and the client plays it in the receiver's mix.
+D-STAR and TETRA voice is not decoded. WHAT THIS PARAGRAPH USED TO SAY: "P25's
+IMBE voice decodes to audio in `core/decode` and is not served".
 
 The client has had its first design pass. The main window is the span, a
 frequency ruler between the spectrum and the waterfall, and a top bar with a

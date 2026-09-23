@@ -306,6 +306,7 @@
 #include "core/rpc/convert.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/listen.h"
+#include "core/rpc/voice_audio.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
 
@@ -639,6 +640,30 @@ struct AudioRoute {
     ServerImpl* owner = nullptr;
     std::vector<std::shared_ptr<AudioNode>> nodes;
     engine::AudioSinkId sink = 0;
+
+    // A p25p1 receiver's route carries its voice rather than its output. Set
+    // when the route is made and never written again, so the completion
+    // thread reads it under `lock` like everything else here without it ever
+    // changing under a chunk. See core/rpc/voice_audio.h.
+    bool p25_voice = false;
+
+    // Everything below is the voice route's, under `lock`. The stream is
+    // built on the first chunk at that chunk's rate, on DecodeRoute's
+    // argument that the rate a complex path delivers is the chunk's.
+    std::unique_ptr<P25AudioStream> voice;
+    VoiceChunk voice_out;
+
+    // The retune fence, on exactly RdsRoute::epoch_target's terms. A chunk
+    // below the target goes out as silence rather than being decoded.
+    std::uint64_t epoch_target = 0;
+    std::uint64_t epoch_reached = 0;
+    [[nodiscard]] bool discarding() const { return epoch_reached < epoch_target; }
+
+    // Why the voice stream stopped, empty while it has not. Terminal, on
+    // RdsRoute::fault's argument, and turned into ended() on the loop thread
+    // because the completion thread must not touch a capability.
+    std::string fault;
+    bool fault_reported = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -1042,8 +1067,24 @@ public:
 
     // Event loop thread. Attaches the engine sink on the first subscriber to
     // a receiver and detaches it with the last, so a receiver nobody is
-    // listening to costs nothing on the wire.
-    [[nodiscard]] Status add_audio(std::shared_ptr<AudioNode> node);
+    // listening to costs nothing on the wire. The status is the receiver's
+    // as subscribeAudio read it: its mode decides whether the route carries
+    // the receiver's output or a p25p1 receiver's voice, and its tuning
+    // epoch is where a voice route's fence starts.
+    [[nodiscard]] Status add_audio(std::shared_ptr<AudioNode> node,
+                                   const engine::VrxStatus& status);
+
+    // Engine completion thread, with route.lock held. Queues one chunk's
+    // samples on every subscriber of the route. Split out of on_audio_chunk
+    // so the voice route queues what it made through the same eviction and
+    // accounting as the receiver's own audio.
+    void queue_audio(AudioRoute& route, std::span<const float> samples, std::uint64_t start,
+                     std::uint32_t rate, std::uint16_t channels, bool squelch_open);
+
+    // Event loop thread. The voice routes' fence and decoder state, on
+    // reset_decoded_for_vrx's terms: a retune clears what the voice stream
+    // held and silences chunks from the old tuning.
+    void reset_audio_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target);
     void end_audio(const std::shared_ptr<AudioNode>& node);
 
     // Event loop thread. Tells every subscriber on this receiver that no
@@ -1782,6 +1823,9 @@ public:
         // the same reason: a P25 header half from one transmitter and half
         // from another decodes to a talkgroup neither of them sent.
         owner_.reset_decoded_for_vrx(*id, status->tuning_epoch);
+
+        // And a P25 receiver's voice, which is a decoder in an audio route.
+        owner_.reset_audio_for_vrx(*id, status->tuning_epoch);
         return kj::READY_NOW;
     }
 
@@ -1959,8 +2003,25 @@ public:
         // subscribeDecoded. WHAT THIS REFUSAL USED TO SAY for all four: "is
         // a raw tap ... at the coarse channel rate", which named the wrong
         // path and the wrong rate for three of them.
+        //
+        // P25 IS SERVED, AND WHAT IT SERVES IS ITS VOICE. Owner decision,
+        // 2026-09-23: a digital voice receiver plays the decoded voice in
+        // place of its analog audio. The route in add_audio runs P25Phase1
+        // and P25Voice in the sink and queues 8000 S/s mono chunks, silent
+        // between calls and through an encrypted one. core/rpc/voice_audio.h
+        // has the index and the timing. D-STAR and TETRA have no voice codec
+        // in this tree, so theirs are still refused, saying so.
         const engine::Demod mode = status->params.demod;
-        if (!engine::produces_audio(mode)) {
+        if (mode == engine::Demod::Dstar || mode == engine::Demod::Tetra) {
+            return to_exception(Error{std::format(
+                "receiver {} is {}, which hands out complex baseband at {} S/s for a decoder. "
+                "Its voice is not served, because this engine has no {} voice codec, so there "
+                "is nothing on it to listen to. subscribeDecoded reads the stream: the {} "
+                "decoder is attached to that receiver by passing an empty decoder name",
+                id->value, engine::demod_name(mode), status->demod_rate,
+                mode == engine::Demod::Dstar ? "AMBE" : "ACELP", engine::demod_name(mode))});
+        }
+        if (!engine::produces_audio(mode) && mode != engine::Demod::P25p1) {
             if (mode == engine::Demod::Raw) {
                 return to_exception(Error{std::format(
                     "receiver {} is a raw tap, so there is no audio on it to subscribe to. The "
@@ -1985,7 +2046,7 @@ public:
         // The sink goes on before the capability exists, so a refusal comes
         // back as a sentence rather than as a subscription that can never
         // produce a chunk.
-        if (auto installed = owner_.add_audio(node); !installed) {
+        if (auto installed = owner_.add_audio(node, *status); !installed) {
             return to_exception(installed.error());
         }
 
@@ -3333,6 +3394,7 @@ void ServerImpl::forget_across_retune() {
         }
         reset_rds_for_vrx(id, status->tuning_epoch);
         reset_decoded_for_vrx(id, status->tuning_epoch);
+        reset_audio_for_vrx(id, status->tuning_epoch);
     }
 }
 
@@ -3807,9 +3869,57 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
     if (chunk.channels == 0) {
         return {};
     }
-    const auto frames = static_cast<std::uint32_t>(chunk.samples.size() / chunk.channels);
-    if (frames == 0) {
+
+    if (!route.p25_voice) {
+        queue_audio(route, chunk.samples, chunk.start, static_cast<std::uint32_t>(chunk.rate),
+                    static_cast<std::uint16_t>(chunk.channels), chunk.squelch_open);
         return {};
+    }
+
+    // THE VOICE ROUTE. A stopped stream sends nothing more; the loop has been
+    // woken to end its subscribers in words.
+    if (!route.fault.empty()) {
+        return {};
+    }
+
+    // The fence first, recorded whether the chunk is decoded or silenced,
+    // exactly as on_decoded_chunk does it.
+    route.epoch_reached = std::max(route.epoch_reached, chunk.tuning_epoch);
+
+    const DecoderChunk in{
+        .samples = chunk.samples,
+        .channels = chunk.channels,
+        .rate = chunk.rate,
+        .start = chunk.start,
+    };
+    if (route.voice == nullptr) {
+        auto made = P25AudioStream::create(chunk.rate);
+        if (!made) {
+            route.fault = made.error().message;
+            wake_loop();
+            return {};
+        }
+        route.voice = std::make_unique<P25AudioStream>(std::move(*made));
+    }
+    if (auto made = route.voice->process(in, route.discarding(), route.voice_out); !made) {
+        route.fault = made.error().message;
+        wake_loop();
+        return {};
+    }
+    queue_audio(route, route.voice_out.samples, route.voice_out.start, kP25VoiceRateHz, 1,
+                route.voice_out.voiced);
+    return {};
+}
+
+void ServerImpl::queue_audio(AudioRoute& route, std::span<const float> samples,
+                             std::uint64_t start, std::uint32_t rate, std::uint16_t channels,
+                             bool squelch_open) {
+    if (channels == 0) {
+        return;
+    }
+    const auto frames = static_cast<std::uint32_t>(samples.size() / channels);
+    if (frames == 0) {
+        return;
     }
 
     bool queued = false;
@@ -3834,7 +3944,7 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
         // Recomputing an answer that cannot change is the cheap half of that
         // trade and it needs no state.
         const std::uint64_t depth =
-            static_cast<std::uint64_t>(node->granted_millis) * chunk.rate / 1000U;
+            static_cast<std::uint64_t>(node->granted_millis) * rate / 1000U;
         const std::uint64_t floor = 2ULL * frames;
         node->buffer_frames = std::max(depth, floor);
 
@@ -3873,12 +3983,12 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
 
         // assign rather than a fresh vector, so a recycled buffer copies the
         // samples without reaching the allocator.
-        buffer.samples.assign(chunk.samples.begin(), chunk.samples.end());
-        buffer.sample_index = chunk.start;
+        buffer.samples.assign(samples.begin(), samples.end());
+        buffer.sample_index = start;
         buffer.frames = frames;
-        buffer.rate = static_cast<std::uint32_t>(chunk.rate);
-        buffer.channels = static_cast<std::uint16_t>(chunk.channels);
-        buffer.squelch_open = chunk.squelch_open;
+        buffer.rate = rate;
+        buffer.channels = channels;
+        buffer.squelch_open = squelch_open;
 
         node->queued_frames += frames;
         node->queue.push_back(std::move(buffer));
@@ -3886,7 +3996,7 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
     }
 
     if (!queued) {
-        return {};
+        return;
     }
 
     // The same bell the two display streams ring, taken rather than borrowed
@@ -3899,16 +4009,49 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
     if (waker.get() != nullptr) {
         waker->fulfill();
     }
-    return {};
+}
+
+void ServerImpl::reset_audio_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target) {
+    auto found = audio_routes_.find(vrx.value);
+    if (found == audio_routes_.end()) {
+        return;
+    }
+    AudioRoute& route = *found->second;
+    const std::scoped_lock held(route.lock);
+    if (!route.p25_voice) {
+        // A receiver's own audio has no state here to clear: the engine
+        // retunes the stage and the chunks say where they came from.
+        return;
+    }
+    if (route.voice != nullptr) {
+        route.voice->reset();
+    }
+
+    // Never lowered, on reset_rds_for_vrx's argument.
+    route.epoch_target = std::max(route.epoch_target, epoch_target);
 }
 
 void ServerImpl::drain_audio() {
+    // A voice route whose stream refused a chunk has stopped for good, and
+    // its subscribers are told why rather than left on a silent stream.
+    // Collected first and ended after the pass, for the reason `gone` is
+    // below: ending mutates audio_routes_.
+    std::vector<std::pair<engine::VrxId, std::string>> faulted;
+
     // Snapshotted under each route's lock and pumped outside it, so the
     // completion thread is not held off for the length of a fan-out.
     std::vector<std::shared_ptr<AudioNode>> ready;
     for (const auto& entry : audio_routes_) {
         const std::scoped_lock held(entry.second->lock);
+        if (!entry.second->fault.empty() && !entry.second->fault_reported) {
+            entry.second->fault_reported = true;
+            faulted.emplace_back(engine::VrxId{entry.first}, entry.second->fault);
+        }
         ready.insert(ready.end(), entry.second->nodes.begin(), entry.second->nodes.end());
+    }
+    for (const auto& [vrx, why] : faulted) {
+        const std::string reason = "this receiver's P25 voice stream stopped: " + why;
+        end_audio_for_vrx(vrx, kj::StringPtr(reason.c_str(), reason.size()));
     }
 
     std::vector<std::shared_ptr<AudioNode>> gone;
@@ -4034,7 +4177,7 @@ void ServerImpl::pump_audio(const std::shared_ptr<AudioNode>& node) {
     }
 }
 
-Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node) {
+Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxStatus& status) {
     const std::uint32_t key = node->vrx.value;
 
     auto existing = audio_routes_.find(key);
@@ -4046,6 +4189,12 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node) {
 
         auto route = std::make_shared<AudioRoute>();
         route->owner = this;
+
+        // Fixed for the life of the route, because the engine never changes a
+        // receiver's demodulator in place. The fence starts where the
+        // receiver is, on start_rds's argument.
+        route->p25_voice = status.params.demod == engine::Demod::P25p1;
+        route->epoch_target = status.tuning_epoch;
 
         // attach rather than set, which is the whole point of the seam in
         // core/engine/engine.h: a recording or a loudspeaker already on this

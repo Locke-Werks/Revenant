@@ -68,6 +68,7 @@
 // rate a chunk is about 328 frames and 6.8 ms of sound.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -403,7 +404,7 @@ TEST_CASE("subscribeAudio refuses a raw tap", "[gpu][rpc][audio]") {
     CHECK(ids->size() == 1);
 }
 
-TEST_CASE("subscribeAudio refuses a digital voice receiver and names its reader",
+TEST_CASE("subscribeAudio refuses a digital voice receiver with no codec and names its reader",
           "[gpu][rpc][audio]") {
     REVENANT_NEEDS_GPU();
 
@@ -411,12 +412,18 @@ TEST_CASE("subscribeAudio refuses a digital voice receiver and names its reader"
     // 2026-09-22, so the raw tap's refusal no longer describes them. What they
     // hand out is complex baseband at the rate their decoder was built for,
     // and the refusal says so and points at the method that reads it.
+    //
+    // WHAT THIS CASE USED TO RUN ON: a p25p1 receiver. P25 voice is served
+    // since 2026-09-23, tests/rpc/test_rpc_voice.cpp has it, and the two modes
+    // with no voice codec in this tree are what is refused now.
+    const rpc::Demod mode = GENERATE(rpc::Demod::Dstar, rpc::Demod::Tetra);
+
     Harness harness;
     bring_up(harness, HarnessOptions{});
 
     rpc::VrxParams params = nfm_receiver();
-    params.demod = rpc::Demod::P25p1;
-    params.bandwidth = 12'500;
+    params.demod = mode;
+    params.bandwidth = 0;
     auto vrx = harness.client().add_vrx(params);
     INFO(test::message_of(vrx));
     REQUIRE(vrx.has_value());
@@ -430,7 +437,9 @@ TEST_CASE("subscribeAudio refuses a digital voice receiver and names its reader"
     REQUIRE_FALSE(refused.has_value());
     INFO(refused.error().message);
     CHECK(refused.error().message.find("raw tap") == std::string::npos);
-    CHECK(refused.error().message.find("p25p1") != std::string::npos);
+    CHECK(refused.error().message.find(mode == rpc::Demod::Dstar ? "dstar" : "tetra") !=
+          std::string::npos);
+    CHECK(refused.error().message.find("voice codec") != std::string::npos);
     CHECK(refused.error().message.find("subscribeDecoded") != std::string::npos);
     CHECK(refused.error().message.find(std::format("{} S/s", status->demod_rate)) !=
           std::string::npos);
