@@ -190,10 +190,8 @@ Expected<BitClock> BitClock::create(const BitClockConfig& config) {
     }
 
     BitClock c;
+    c.config_ = config;
     c.nominal_step_ = config.symbol_rate / static_cast<double>(config.rate);
-    c.phase_gain_ = config.phase_gain;
-    c.frequency_gain_ = config.frequency_gain;
-    c.max_rate_error_ = config.max_rate_error;
     c.reset();
     return c;
 }
@@ -205,50 +203,55 @@ void BitClock::reset() {
     previous_ = 0.0F;
     have_previous_ = false;
     index_ = 0;
+    last_centre_ = 0.0;
+    have_last_centre_ = false;
+    boundary_ = 0.0;
+    have_boundary_ = false;
 }
 
 void BitClock::process(ConstRealSpan soft, std::vector<SoftBit>& out) {
-    const double low = nominal_step_ * (1.0 - max_rate_error_);
-    const double high = nominal_step_ * (1.0 + max_rate_error_);
+    const double low = nominal_step_ * (1.0 - config_.max_rate_error);
+    const double high = nominal_step_ * (1.0 + config_.max_rate_error);
 
     for (const float s : soft) {
         const double before = phase_;
         phase_ += step_;
+        const auto at = [&](double target) {
+            const double u = std::clamp((target - before) / step_, 0.0, 1.0);
+            return std::pair{static_cast<double>(previous_) + u * static_cast<double>(s - previous_),
+                             u};
+        };
 
-        // Read the bit where the accumulator passes the middle of it, between
-        // the previous sample and this one.
-        if (!emitted_ && phase_ >= 0.5 && have_previous_) {
-            const double u = std::clamp((0.5 - before) / step_, 0.0, 1.0);
+        if (have_previous_ && !emitted_ && phase_ >= 0.5) {
+            const auto [centre, u] = at(0.5);
             SoftBit bit;
-            bit.value = static_cast<float>(static_cast<double>(previous_) +
-                                           u * static_cast<double>(s - previous_));
+            bit.value = static_cast<float>(centre);
             bit.position = (u < 0.5) ? index_ - 1 : index_;
             out.push_back(bit);
             emitted_ = true;
-        }
 
-        if (have_previous_ && ((previous_ < 0.0F) != (s < 0.0F))) {
-            const double denominator = static_cast<double>(previous_) - static_cast<double>(s);
-            const double t = (denominator != 0.0)
-                                 ? std::clamp(static_cast<double>(previous_) / denominator, 0.0, 1.0)
-                                 : 0.5;
-            // Phase at the crossing, relative to the nearest bit boundary.
-            // Boundaries sit at whole numbers of the accumulator.
-            double error = before + t * step_;
-            error -= std::floor(error + 0.5);
-
-            phase_ -= phase_gain_ * error;
-            step_ = std::clamp(step_ - frequency_gain_ * error * nominal_step_, low, high);
+            if (have_last_centre_ && have_boundary_) {
+                // Gardner: on a ramp from -1 to +1 over one bit, a boundary
+                // reading taken tau bits after the crossing reads 2*tau, and
+                // the change across it is 2, so the product is 4*tau. Late
+                // reads positive, and a late loop is behind, so the phase
+                // goes forward.
+                const double tau = std::clamp((centre - last_centre_) * boundary_ / 4.0, -0.5, 0.5);
+                phase_ += config_.phase_gain * tau;
+                step_ = std::clamp(step_ + config_.frequency_gain * tau * nominal_step_, low, high);
+            }
+            last_centre_ = centre;
+            have_last_centre_ = true;
+            have_boundary_ = false;
         }
 
         if (phase_ >= 1.0) {
+            if (have_previous_) {
+                boundary_ = at(1.0).first;
+                have_boundary_ = true;
+            }
             phase_ -= 1.0;
             emitted_ = false;
-        } else if (phase_ < 0.0) {
-            // A correction backwards across a boundary lands in the tail of
-            // the bit already read.
-            phase_ += 1.0;
-            emitted_ = true;
         }
 
         previous_ = s;

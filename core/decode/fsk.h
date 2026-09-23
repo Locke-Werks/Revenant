@@ -28,7 +28,7 @@
 // WHAT IS NOT HERE
 //
 // No constant in this file comes from any standard. It is textbook
-// non-coherent FSK reception and a textbook transition-tracking clock loop,
+// non-coherent FSK reception and Gardner's textbook timing loop,
 // and the numbers with citations are the ones a mode file supplies: the tone
 // frequencies and the bit rate. A reader auditing provenance can skip this
 // file, which is the arrangement core/decode/dv_phy.h describes for the
@@ -40,7 +40,7 @@
 // square-law spectral line. That suits a continuous stream, and it is the
 // wrong shape for a two-level burst mode: an AX.25 frame can start with a
 // handful of flags and a POCSAG transmission switches rate between one
-// batch and the next transmitter. A loop that corrects at every data
+// batch and the next transmitter. A loop that corrects at every bit with a
 // transition has pulled in within tens of bits, and two-level NRZ has none of
 // the data-dependent error term that made a tracking loop fail on C4FM, which
 // is the reason dv_phy.h gives for not using one there.
@@ -202,17 +202,17 @@ struct BitClockConfig {
     SampleRate rate = 48000;
     double symbol_rate = 0.0;
 
-    // Fraction of each measured timing error removed at the transition that
-    // measured it. An engineering choice. Larger pulls in faster and follows
-    // noise more; 0.15 settles in about twenty transitions and moves the
-    // sampling instant by a few hundredths of a bit on a noisy one.
-    double phase_gain = 0.15;
+    // Fraction of each measured timing error removed at the bit that
+    // measured it. An engineering choice: 0.1 pulls in within the 32 flags an
+    // AX.25 transmitter leads with and moves the reading instant by a few
+    // hundredths of a bit on a noisy bit.
+    double phase_gain = 0.1;
 
     // Fraction of each timing error fed into the clock rate estimate, which
     // is what lets the loop follow a transmitter whose bit rate is not the
-    // nominal one without a standing phase error. Two orders below the phase
-    // gain keeps the loop well damped.
-    double frequency_gain = 0.002;
+    // nominal one without a standing phase error. Well below the square of
+    // the phase gain keeps the loop overdamped.
+    double frequency_gain = 0.001;
 
     // Largest departure of the tracked rate from the nominal one, as a
     // fraction. Bounds how far noise can walk the rate estimate during a
@@ -233,18 +233,35 @@ struct SoftBit {
     SampleIndex position = 0;
 };
 
-// A second-order transition-tracking loop.
+// A second-order loop driven by Gardner's timing error detector.
 //
-// The phase accumulator counts bits. At every sign change of the soft stream
-// the crossing is located to a fraction of a sample by linear interpolation,
-// and its phase is compared with the bit boundary the loop expected there;
-// the difference corrects the phase and, through a much smaller gain, the
-// rate. A bit is read each time the accumulator passes the middle of a bit.
+// The phase accumulator counts bits. The soft stream is read twice a bit, at
+// the centre the loop believes in and at the boundary halfway between two
+// centres, and the timing error is the boundary reading times the change
+// across it: zero when the boundary reading sits on the zero crossing of a
+// transition, of one sign when the loop reads late and the other when it
+// reads early, and zero when there is no transition to measure. The error
+// corrects the phase and, through a much smaller gain, the rate.
+//
+// WHY GARDNER HERE AND NOT THE ZERO CROSSING
+//
+// The crossing tracker this replaced located every sign change of the soft
+// stream and pulled the phase toward it. Every sign change counts the same
+// to it, including the ones noise makes in the middle of a bit, and those
+// are exactly half a bit out, the largest error it can measure. Measured on
+// the Bell 202 round trip at 9 dB Eb/N0, it lost 16 bits in 20000 and put
+// every bit after each slip in the wrong place. Gardner weights each error by
+// the change across the boundary, which is small where there is no
+// transition, so a noise crossing mid-bit pulls the clock by little.
+//
+// dv_phy.h records a Gardner loop failing on C4FM, and why: with four levels
+// the detector carries a data-dependent term that is large bit by bit. On two
+// levels that term is absent, which is why the same detector is right here.
 //
 // A matched filter's output crosses zero half a filter length after the bit
-// boundary at its input, and the loop locks to the crossing, so the reading
-// instant lands on the filter output's peak with no correction for the delay
-// needed here.
+// boundary at its input, and the loop locks the boundary reading to that
+// crossing, so the reading instant lands on the filter output's peak with no
+// correction for the delay needed here.
 class BitClock {
    public:
     BitClock() = default;
@@ -260,17 +277,21 @@ class BitClock {
     void reset();
 
    private:
+    BitClockConfig config_{};
     double nominal_step_ = 0.0;
     double step_ = 0.0;
-    double phase_gain_ = 0.0;
-    double frequency_gain_ = 0.0;
-    double max_rate_error_ = 0.0;
 
     double phase_ = 0.0;
     bool emitted_ = false;
     float previous_ = 0.0F;
     bool have_previous_ = false;
     std::uint64_t index_ = 0;
+
+    // The last centre reading, and the boundary reading since it.
+    double last_centre_ = 0.0;
+    bool have_last_centre_ = false;
+    double boundary_ = 0.0;
+    bool have_boundary_ = false;
 };
 
 }  // namespace revenant::decode
