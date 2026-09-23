@@ -47,6 +47,22 @@ if(TARGET bench)
         TIMEOUT 600
     )
 
+    # The rds mode, run small: one point at 12 dB Eb/N0, eight trials. It
+    # proves the transmitter, the noise and the decoder are wired into the
+    # harness and that every trial locks, which is what the decoded count
+    # says. It asserts no BER: the curve belongs to the nightly sweep, which
+    # compares it against tests/baselines/ber-vs-snr-rds.json.
+    add_test(
+        NAME bench_sweeps_rds
+        COMMAND bench sweep --mode rds
+                --snr-start 12 --snr-stop 12 --trials 8 --seed 7 --quiet
+    )
+    set_tests_properties(bench_sweeps_rds PROPERTIES
+        LABELS "tools"
+        TIMEOUT 600
+        PASS_REGULAR_EXPRESSION "\"decoded_count\": 8,"
+    )
+
     # The throughput command, run small, as a smoke test and nothing more.
     #
     # There is no performance threshold here and there must not be one. Every

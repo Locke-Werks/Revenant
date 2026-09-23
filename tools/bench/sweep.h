@@ -15,11 +15,16 @@
 // implementation of either must be pure as well: no shared mutable state, no
 // lazily initialised caches.
 //
-// There are no decoders yet. The unit under test is therefore an interface,
-// and the only implementation in tree is a coherent BPSK detector whose BER
-// against AWGN has a closed form. That is deliberate: a harness validated
-// against Q(sqrt(2*Eb/N0)) has proven its SNR calibration, its generator and
-// its accounting all at once, which a stub proves nothing about.
+// The unit under test is an interface. Two implementations are in tree: a
+// coherent BPSK detector whose BER against AWGN has a closed form, below, and
+// the RDS decoder against its own transmitter, in tools/bench/rds_subject.h.
+// The BPSK one stays because a harness validated against Q(sqrt(2*Eb/N0)) has
+// proven its SNR calibration, its generator and its accounting all at once,
+// and no decoder's curve can do that.
+//
+// This paragraph used to say "There are no decoders yet", which stopped being
+// true when core/decode/rds_bits.h landed and stayed in place until the RDS
+// subject was added here on 2026-09-22.
 
 #pragma once
 
@@ -51,9 +56,9 @@ using Subject = std::function<TrialResult(dsp::ConstComplexSpan, std::span<const
 // Produces the impaired baseband for one trial: modulate the payload, apply the
 // channel at the given SNR, using only the supplied seed for randomness.
 //
-// This is the seam where core/dsp/synth/modulators.h and core/dsp/synth/channel.h
-// plug in once they exist. Until then the in-tree reference generator below
-// fills it. Called concurrently, so it must be pure.
+// This is the seam core/dsp/synth plugs into: tools/bench/rds_subject.cpp
+// builds one from rds_mod.h and channel.h's noise. Called concurrently, so it
+// must be pure.
 using Generator = std::function<std::vector<dsp::Complex32>(std::span<const std::uint8_t> payload,
                                                             double snr_db,
                                                             std::uint64_t seed)>;
@@ -160,14 +165,14 @@ using ProgressFn = std::function<void(std::size_t point_index, const SweepPoint&
 [[nodiscard]] std::vector<std::uint8_t> random_payload(std::size_t bytes, std::uint64_t seed);
 
 // ---------------------------------------------------------------------------
-// TEMPORARY, and the only part of this file that is.
+// The reference BPSK subject.
 //
-// core/dsp/synth/modulators.h and core/dsp/synth/channel.h own signal generation
-// and the channel model. Neither exists yet. Rather than stub the harness, the
-// BPSK waveform and the AWGN are generated here so the harness can be run and
-// validated against theory today. At integration this block is deleted and
-// make_bpsk_awgn_generator is replaced by a lambda that calls siggen and
-// channel: nothing else in the harness refers to it.
+// Its waveform and its AWGN are generated here rather than by
+// core/dsp/synth, and that is now a choice rather than a stopgap. This block
+// used to say it was temporary and would be deleted once modulators.h and
+// channel.h existed. Both exist, and it stays: the reference exists to check
+// the harness against a closed form, and a check that routed through the
+// same noise generator as the subjects it referees would share their faults.
 // ---------------------------------------------------------------------------
 
 struct ReferenceBpsk {

@@ -2,16 +2,19 @@
 //
 // Four commands:
 //
-//   sweep       run a sweep and write the curve
+//   sweep       run a sweep and write the curve, for the reference BPSK
+//               subject or, with --mode rds, the RDS decoder
 //   compare     diff two curve files, exit nonzero on a regression
 //   validate    run the reference BPSK subject and check the measured curve
 //               against Q(sqrt(2*Eb/N0))
 //   throughput  measure receivers against wall clock and the channelizer
 //               against memory bandwidth
 //
-// validate is the one that keeps sweep and compare honest. There is no decoder
-// to sweep yet, so the only evidence that the harness, the SNR calibration and
-// the generator agree is that the reference subject lands on the closed form.
+// validate is the one that keeps sweep and compare honest. A decoder's curve
+// has no closed form to land on, so the evidence that the harness, the SNR
+// calibration and the generator agree is still that the reference subject
+// lands on Q(sqrt(2*Eb/N0)). This paragraph used to say there is no decoder
+// to sweep yet; the RDS decoder is one, in tools/bench/rds_subject.h.
 //
 // throughput answers a different kind of question and reports rather than
 // judges. It has no pass or fail and no threshold, because every number it
@@ -36,6 +39,7 @@
 #include "core/engine/vrx.h"
 #include "core/error.h"
 #include "tools/bench/curve.h"
+#include "tools/bench/rds_subject.h"
 #include "tools/bench/sweep.h"
 #include "tools/bench/throughput.h"
 
@@ -249,8 +253,28 @@ Expected<SweepArgs> parse_sweep_args(const ArgMap& args) {
     }
 
     parsed.mode = std::string(args.text("mode", "bpsk"));
+    if (parsed.mode == "rds") {
+        // The RDS rate is fixed by the subject, so a samples-per-symbol figure
+        // would be accepted and do nothing, which is the silent fallback
+        // require_known exists to prevent.
+        if (args.has("sps")) {
+            return fail("option '--sps' belongs to the bpsk mode; the rds mode runs at 144 samples per bit");
+        }
+        // A trial much shorter than the decoder's acquisition is mostly
+        // acquisition, so the rds mode has its own default and floor.
+        if (!args.has("payload-bytes")) {
+            parsed.config.payload_bytes = 512;
+        } else if (parsed.config.payload_bytes < bench::kRdsMinimumPayloadBytes) {
+            return fail(std::format("the rds mode needs at least {} payload bytes to lock and still score",
+                                    bench::kRdsMinimumPayloadBytes));
+        }
+    } else if (parsed.mode != "bpsk") {
+        return fail(std::format("unknown mode '{}': bpsk or rds", parsed.mode));
+    }
     parsed.subject = std::string(args.text(
-        "subject", std::format("reference-bpsk-coherent/sps{}", parsed.reference.samples_per_symbol)));
+        "subject", parsed.mode == "rds"
+                       ? std::string("rds-bits/171000")
+                       : std::format("reference-bpsk-coherent/sps{}", parsed.reference.samples_per_symbol)));
     parsed.commit = std::string(args.text("commit", "unknown"));
     parsed.out_path = std::string(args.text("out", ""));
     parsed.quiet = args.has("quiet");
@@ -300,8 +324,11 @@ int command_sweep(const ArgMap& args) {
         print_point_header();
     }
 
-    const bench::Subject subject = bench::make_bpsk_reference_subject(parsed->reference);
-    const bench::Generator generator = bench::make_bpsk_awgn_generator(parsed->reference);
+    const bool rds = parsed->mode == "rds";
+    const bench::Subject subject =
+        rds ? bench::make_rds_subject() : bench::make_bpsk_reference_subject(parsed->reference);
+    const bench::Generator generator =
+        rds ? bench::make_rds_generator() : bench::make_bpsk_awgn_generator(parsed->reference);
     const bench::ProgressFn progress =
         parsed->quiet ? bench::ProgressFn{}
                       : bench::ProgressFn{[](std::size_t, const bench::SweepPoint& point) { print_point(point); }};
@@ -460,6 +487,10 @@ int command_validate(const ArgMap& args) {
     Expected<SweepArgs> parsed = parse_sweep_args(args);
     if (!parsed) {
         std::print(stderr, "bench validate: {}\n", parsed.error().message);
+        return kExitUsage;
+    }
+    if (parsed->mode != "bpsk") {
+        std::print(stderr, "bench validate: only the bpsk mode has a closed form to validate against\n");
         return kExitUsage;
     }
     Expected<std::uint64_t> min_check_errors = args.integer("min-check-errors", 20);
@@ -800,8 +831,11 @@ sweep options (validate takes the same set):
   --min-bit-errors N      stop a point after N errors  (default 100, 0 disables)
   --batch N               trials between stop checks   (default 64)
   --threads N             worker threads               (default: hardware)
-  --sps N                 samples per symbol           (default 1)
-  --mode NAME             recorded in the curve        (default bpsk)
+  --sps N                 samples per symbol, bpsk only (default 1)
+  --mode NAME             bpsk, the reference detector, or rds, the RDS
+                          decoder against its transmitter (default bpsk).
+                          Recorded in the curve. rds defaults
+                          --payload-bytes to 512 and needs at least 128
   --subject NAME          recorded in the curve
   --commit SHA            recorded in the curve        (default unknown)
   --out FILE              write the curve here, otherwise stdout

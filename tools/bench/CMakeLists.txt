@@ -1,7 +1,7 @@
 # The BER/SNR harness: a library so tests can drive a sweep directly, and a
 # thin executable so CI can call it.
 
-add_library(revenant_bench STATIC sweep.cpp curve.cpp throughput.cpp)
+add_library(revenant_bench STATIC sweep.cpp curve.cpp throughput.cpp rds_subject.cpp)
 target_link_libraries(revenant_bench PUBLIC revenant_core)
 target_include_directories(revenant_bench PUBLIC ${CMAKE_SOURCE_DIR})
 revenant_apply_warnings(revenant_bench)
