@@ -52,6 +52,7 @@
 #include <optional>
 #include <print>
 #include <random>
+#include <set>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -115,6 +116,12 @@ struct Options {
     std::uint32_t cpus = 0;
 
     bool passband = false;
+
+    // After the warm-up, close the source and open this one over the wire,
+    // then warm up again before the window. The owner's own path to a
+    // recording: an engine started on the dongle, a file opened from the
+    // window.
+    std::string switch_to;
 };
 
 void print_usage()
@@ -145,6 +152,8 @@ void print_usage()
         "                        a busy machine (0)\n"
         "  --passband            subscribe the P25 receiver's passband, as the fine-tuning\n"
         "                        display does\n"
+        "  --switch-to URI       after the warm-up close the source and open this one over\n"
+        "                        the wire, as a window opens a recording, then warm up again\n"
         "  --cpus N              confine this process to the top N logical processors, so\n"
         "                        --burn loads those and leaves the rest of the machine alone\n"
         "  --gpu N               device index\n");
@@ -262,6 +271,10 @@ void print_usage()
             options.burn = static_cast<std::uint32_t>(*got);
         } else if (token == "--passband") {
             options.passband = true;
+        } else if (token == "--switch-to") {
+            auto text = value();
+            if (!text) { return std::unexpected(text.error()); }
+            options.switch_to = std::string(*text);
         } else if (token == "--cpus") {
             auto got = as_integer();
             if (!got) { return std::unexpected(got.error()); }
@@ -660,9 +673,24 @@ struct VoiceScore {
         }
     }
 
-    // The engine runs on a thread of its own, as revenant-engine's main does.
+    // The engine runs on a thread of its own, as revenant-engine's main does,
+    // and in the same loop: run() while there is a source, wait while there
+    // is none, so a source a client closes and opens again is run again.
     Status run_outcome;
-    std::thread runner([&] { run_outcome = eng.run(); });
+    std::atomic<bool> running_loop{true};
+    std::thread runner([&] {
+        while (running_loop.load()) {
+            if (!eng.has_source()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                continue;
+            }
+            const std::uint64_t epoch = eng.info().source_epoch;
+            run_outcome = eng.run();
+            while (running_loop.load() && eng.has_source() && eng.info().source_epoch == epoch) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+        }
+    });
 
     // The detections poll, at revenant-ui's 250 ms, on a thread of its own as
     // the UI's supervisor makes it.
@@ -670,6 +698,13 @@ struct VoiceScore {
     std::mutex poll_lock;
     PollResult last_poll;
     std::vector<double> poll_ms;
+
+    // Every track id any poll inside the window returned, and those that came
+    // with a label: a count of what the detector found over the window rather
+    // than what happened to be live at its last poll.
+    std::atomic<bool> window_open{false};
+    std::set<std::uint64_t> seen_ids;
+    std::set<std::uint64_t> labelled_ids;
     std::thread poller([&] {
         while (polling.load()) {
             const auto began = Clock::now();
@@ -680,12 +715,20 @@ struct VoiceScore {
                 result.total = listed->total;
                 result.decisions = listed->decisions;
                 result.rpc_ms = took;
+                const bool in_window = window_open.load();
+                const std::scoped_lock held(poll_lock);
                 for (const rpc::Detection& detection : listed->detections) {
-                    if (detection.label.kind != rpc::LabelKind::Unknown) {
+                    const bool is_labelled = detection.label.kind != rpc::LabelKind::Unknown;
+                    if (is_labelled) {
                         ++result.labelled;
                     }
+                    if (in_window) {
+                        seen_ids.insert(detection.id);
+                        if (is_labelled) {
+                            labelled_ids.insert(detection.id);
+                        }
+                    }
                 }
-                const std::scoped_lock held(poll_lock);
                 last_poll = result;
                 poll_ms.push_back(took);
             }
@@ -728,6 +771,7 @@ struct VoiceScore {
         if (poller.joinable()) {
             poller.join();
         }
+        running_loop.store(false);
         static_cast<void>(eng.stop());
         if (runner.joinable()) {
             runner.join();
@@ -768,6 +812,36 @@ struct VoiceScore {
 
     std::this_thread::sleep_for(std::chrono::duration<double>(options.warmup));
 
+    // What a client does to play a recording on an engine that is already
+    // serving a radio: close it and open the file over the wire, which adds
+    // pace=1 as Session.openSource does for a window. The receivers go with
+    // the old source, so --p25 and --nfm are about the first one only.
+    if (!options.switch_to.empty()) {
+        if (auto closed = client->close_source(); !closed) {
+            return std::unexpected(with_context(closed.error(), "closing the first source"));
+        }
+        if (auto opened = client->open_source(options.switch_to); !opened) {
+            return std::unexpected(with_context(opened.error(), "opening the second source"));
+        }
+        if (auto subscribed = client->subscribe_spectrum(
+                options.every_nth,
+                [observed](const rpc::SpectrumFrame& frame) {
+                    const std::scoped_lock held(observed->lock);
+                    observed->rows.push_back(Clock::now());
+                    observed->row_sequences.push_back(frame.sequence);
+                });
+            !subscribed) {
+            return std::unexpected(with_context(subscribed.error(), "resubscribing"));
+        }
+        std::println("{} switched to {} S/s, grid {} channels, block {}, {} frames in flight, "
+                     "spectrum {} bins",
+                     options.label, eng.info().source_rate, eng.info().grid.channels,
+                     eng.info().block_samples, eng.info().frames_in_flight,
+                     eng.info().spectrum.bins);
+        std::this_thread::sleep_for(std::chrono::duration<double>(options.warmup));
+    }
+
+    window_open.store(true);
     const auto t0 = Clock::now();
     const auto threads0 = sample_threads();
     const engine::EngineLoad load0 = eng.load();
@@ -777,6 +851,7 @@ struct VoiceScore {
 
     std::this_thread::sleep_for(std::chrono::duration<double>(options.seconds));
 
+    window_open.store(false);
     const auto t1 = Clock::now();
     const auto threads1 = sample_threads();
     const engine::EngineLoad load1 = eng.load();
@@ -785,10 +860,14 @@ struct VoiceScore {
     const source::SourceStats source1 = eng.source_stats();
     PollResult poll;
     std::vector<double> polls;
+    std::size_t tracks_seen = 0;
+    std::size_t labelled_seen = 0;
     {
         const std::scoped_lock held(poll_lock);
         poll = last_poll;
         polls = poll_ms;
+        tracks_seen = seen_ids.size();
+        labelled_seen = labelled_ids.size();
     }
 
     const double wall = std::chrono::duration<double>(t1 - t0).count();
@@ -877,10 +956,10 @@ struct VoiceScore {
     }
     if (!polls.empty()) {
         std::ranges::sort(polls);
-        std::println("{} detections: {} tracks, {} labelled, {} decisions; poll rpc p50 {:.1f} "
-                     "max {:.1f} ms",
-                     tag, poll.total, poll.labelled, poll.decisions, polls[polls.size() / 2],
-                     polls.back());
+        std::println("{} detections: {} tracks, {} labelled at the last poll, {} decisions; {} "
+                     "tracks and {} labelled over the window; poll rpc p50 {:.1f} max {:.1f} ms",
+                     tag, poll.total, poll.labelled, poll.decisions, tracks_seen, labelled_seen,
+                     polls[polls.size() / 2], polls.back());
     }
     std::println("{} probes: {} submitted, {} characterised, {:.1f} ms/s characterising, {:.1f} "
                  "ms/s finishing ({:.1f} ms/s of CPU), {} budget waits, {} receivers",

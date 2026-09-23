@@ -41,13 +41,17 @@
 // all of those are conversion faults and all of them are caught here.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <string>
@@ -56,6 +60,7 @@
 #include <vector>
 
 #include "core/detect/detector.h"
+#include "core/dsp/synth/wideband.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
@@ -67,6 +72,7 @@
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/rpc_fixture.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 using test::Harness;
@@ -1499,6 +1505,163 @@ TEST_CASE("a probed detection crosses the wire with its label", "[gpu][rpc][dete
     const auto stopped = rig.stop();
     INFO(test::message_of(stopped));
     REQUIRE(stopped.has_value());
+}
+
+// A RECORDING, OPENED OVER THE WIRE THE WAY A WINDOW OPENS ONE, PLAYED AT
+// REALTIME, AND LABELLED.
+//
+// The owner reported after the playtest of 2026-09-23 that signal
+// identification did nothing on a recording. This is that path end to end on
+// an engine configured as revenant-engine configures itself: no grid chosen,
+// 65536-sample blocks, a 2048-point transform, 30 rows a second asked for and
+// four probe receivers. The engine starts with no source, a client opens a
+// 96 kS/s cf32 file with no pace in its URI, which Session.openSource plays at
+// realtime, and polls the detections at revenant-ui's four a second until one
+// comes back labelled. Four AM carriers at 30 dB, the level
+// tests/engine/test_engine_probe.cpp's survey names every time, so a label
+// that never arrives is the path and not the characteriser.
+//
+// WHAT IT FOUND, recorded in docs/rpc.md under Threading: the path was not
+// broken at the engine or on the wire. It runs at the 30 rows a second
+// revenant-engine now asks for and at one row per block, which is what the
+// engine did before, and a label arrives either way; revenant-loadtest
+// labelled seven tracks of eight on the KF4FIC 7 MHz excerpt through the
+// same close-and-open.
+//
+// REJECTS: a recording opened over the wire that is not played at realtime,
+// a detector that is not rebuilt for the recording's geometry, and labels
+// that never arrive for a file.
+TEST_CASE("a recording opened over the wire at realtime is detected and labelled",
+          "[gpu][rpc][detect][m2]") {
+    REVENANT_NEEDS_GPU();
+    const double rows = GENERATE(30.0, 0.0);
+    INFO("rows a second asked for: " << rows);
+
+    constexpr dsp::SampleRate kRate = 96'000;
+    constexpr double kSeconds = 14.0;
+    const auto samples = static_cast<dsp::SampleIndex>(kSeconds * kRate);
+
+    siggen::SceneSpec spec;
+    spec.rate = kRate;
+    spec.duration_samples = samples;
+    spec.seed = 20260923;
+    spec.noise_power_full_band_dbfs = -60.0;
+    spec.worker_threads = 1;
+    spec.random.emitter_count = 4;
+    spec.random.span_low_hz = -40'000;
+    spec.random.span_high_hz = 40'000;
+    spec.random.snr_in_occupied_bandwidth_db_min = 30.0;
+    spec.random.snr_in_occupied_bandwidth_db_max = 30.0;
+    spec.random.palette = {siggen::Modulation::Am};
+    auto scene = siggen::Scene::create(spec);
+    INFO(test::message_of(scene));
+    REQUIRE(scene.has_value());
+
+    const std::filesystem::path path = test::unique_temp_path("revenant-recording", ".cf32");
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        const auto wrote = siggen::stream_scene(
+            *scene, 0, samples, 65'536,
+            [&](const dsp::BlockTimestamp&, dsp::ConstComplexSpan block) -> Status {
+                out.write(reinterpret_cast<const char*>(block.data()),
+                          static_cast<std::streamsize>(block.size_bytes()));
+                return out.good() ? Status{} : fail("writing the recording failed");
+            });
+        INFO(test::message_of(wrote));
+        REQUIRE(wrote.has_value());
+    }
+    struct Remove {
+        std::filesystem::path path;
+        ~Remove() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } const remove{path};
+
+    engine::EngineConfig config;
+    config.gpu_index = -1;
+    config.channels = 0;
+    config.block_samples = 65'536;
+    config.ring_seconds = 2.0;
+    config.spectrum_transform = 2048;
+    config.spectrum_rows_per_second = rows;
+    config.probe_receivers = 4;
+    auto created = engine::Engine::create(config);
+    REQUIRE(created.has_value());
+    engine::Engine& eng = **created;
+
+    rpc::ServerOptions server_options;
+    const rpc::Token token = test::test_token();
+    server_options.token.assign(token.begin(), token.end());
+    auto served = rpc::Server::create(eng, server_options);
+    REQUIRE(served.has_value());
+    auto connected = rpc::Client::connect("127.0.0.1", (*served)->port(), token);
+    REQUIRE(connected.has_value());
+    rpc::Client& client = **connected;
+
+    // revenant-engine's own loop: run while there is a source.
+    std::atomic<bool> serving{true};
+    std::thread runner([&] {
+        while (serving.load()) {
+            if (!eng.has_source()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            const std::uint64_t epoch = eng.info().source_epoch;
+            static_cast<void>(eng.run());
+            while (serving.load() && eng.has_source() && eng.info().source_epoch == epoch) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+    });
+
+    const std::string uri = std::format("file:///{}?rate={}&format=cf32&center=14100000",
+                                        path.generic_string(), kRate);
+    const auto opened = client.open_source(uri);
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    rpc::DetectionList last;
+    const rpc::Detection* labelled = nullptr;
+    const auto began = std::chrono::steady_clock::now();
+    const auto deadline = began + std::chrono::seconds(static_cast<int>(kSeconds) - 1);
+    while (labelled == nullptr && std::chrono::steady_clock::now() < deadline) {
+        auto answered = client.detections(0.0, 0.0);
+        REQUIRE(answered.has_value());
+        last = std::move(*answered);
+        for (const rpc::Detection& detection : last.detections) {
+            if (detection.label.kind != rpc::LabelKind::Unknown) {
+                labelled = &detection;
+                break;
+            }
+        }
+        if (labelled == nullptr) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+    }
+    const double waited =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
+    const engine::SourcePacing pacing = eng.source_pacing();
+    const engine::EngineInfo info = eng.info();
+    INFO(std::format("{} detections at decision {} after {:.1f} s; paced by {}, block {}",
+                     last.detections.size(), last.last_decision, waited, pacing.paced_by,
+                     info.block_samples));
+
+    serving.store(false);
+    static_cast<void>(eng.stop());
+    runner.join();
+
+    // Played at realtime, as a window's open asks, and at the row rate asked.
+    CHECK(pacing.paced_by == 1.0);
+    CHECK(info.source_rate == kRate);
+    CHECK((info.block_samples < 65'536) == (rows > 0.0));
+
+    REQUIRE(labelled != nullptr);
+    CHECK(labelled->label.kind == rpc::LabelKind::AnalogModulation);
+    CHECK(labelled->label.probes > 0);
+    CHECK(labelled->center_hz > 14'100'000 - 40'000);
+    CHECK(labelled->center_hz < 14'100'000 + 40'000);
 }
 
 // The client's label table against the server's decoder registry, here

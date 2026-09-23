@@ -345,6 +345,23 @@ detection is asking to be put near a signal rather than on a channel centre.
 `Detection::centerHz` is absolute and `VrxParams::center` is a baseband
 offset, so tuning is `centerHz - EngineInfo::sourceCenter`.
 
+**A recording is detected and labelled over the wire as a radio is.** The
+owner reported after the playtest of 2026-09-23 that signal identification did
+nothing on a recording. The engine and this server were checked on his path,
+an engine serving a paced source and a client that closes it and opens a file
+with `openSource`, with `revenant-loadtest --switch-to`, polling detections
+four times a second over 40 s of the KF4FIC 7 MHz excerpt from 600 s: 7
+tracks and 6 labelled at one row per block, 8 and 7 at 30 rows a second. The
+full 1359UT file opened at its start finds one live track in its first 35 s,
+and `revenant-cli --detect` finds the same over the same seconds: 3 born, 2
+dropped. A 48 kS/s cf32 opened the same way labelled 5 tracks. So the path
+was not broken below the client, and "a recording opened over the wire at
+realtime is detected and labelled" in `tests/rpc/test_rpc_detect.cpp` holds
+it: an engine configured as `revenant-engine`, a 96 kS/s cf32 of four AM
+carriers opened over the wire, and a labelled detection within its fourteen
+seconds, at 30 rows a second and at one per block. What the owner saw has to
+be looked for in the client, or in the recording.
+
 ### Audio crosses as raw PCM, and it queues rather than skipping
 
 `AudioChunk`, `AudioReceiver`, `AudioSubscription` and
