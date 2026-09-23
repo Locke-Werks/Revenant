@@ -287,7 +287,8 @@ TEST_CASE("D-STAR bit error rate against noise, measured", "[decode][dstar]") {
         double allowed_bit_error_rate;
     };
     // Measured on 2026-09-21: 0 bit errors in 11994 at 30 dB, and a bit
-    // error rate of 0.056 at 2 dB.
+    // error rate of 0.056 at 2 dB. On 2026-09-23, with the discriminator
+    // output limited before the bit timing, 0 and 0.054.
     const Point points[] = {{30.0, 0.002}, {2.0, 0.09}};
 
     for (const Point& point : points) {

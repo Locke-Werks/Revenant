@@ -68,6 +68,16 @@ const ConvolutionalCode& dstar_code() {
 // something else.
 constexpr double kMinimumSyncGain = 0.1;
 
+// Where the shaped discriminator output is limited, in units of the nominal
+// deviation. An engineering choice, with the reason at its use in
+// DStar::process: two and a half times the deviation, which a run of ones
+// reaches only with the carrier one and a half deviations off. Over the
+// bench's first 128 D-STAR trials, bits wrong at 15 and 20 dB in 2500 Hz:
+// unlimited 0.168 and 509, at 3.0 0.120 and 512, at 2.5 0.082 and 525, at 2.0
+// 0.067 and 545. Tighter limits slip less below the FM threshold and cost a
+// little above it, where what they cut is more often noise than a click.
+constexpr float kClickLimit = 2.5F;
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -438,10 +448,23 @@ Status DStar::process(ConstComplexSpan samples, std::vector<DStarTransmission>& 
     // offset is removed here: it reaches the bits as a constant, the frame
     // sync search is blind to one, and the fit on each frame sync measures it
     // before anything is sliced.
+    //
+    // Then limited, for the bit timing. Below the FM threshold the
+    // discriminator clicks: the noise carries the phase once round the
+    // origin and the output jumps by a whole turn's worth of frequency, which
+    // the receive filter spreads into a pulse many times the deviation.
+    // SymbolSync weights each sample by its energy, so one click could outvote
+    // a window of bits and move the timing by up to half a bit, and a run of
+    // them slipped it a whole bit, after which every bit it read was the
+    // wrong one. Measured on the bench's D-STAR trials at 15 dB in 2500 Hz:
+    // 56 of 128 transmissions slipped and read 0.168 of their bits wrong;
+    // limited here, 14 and 0.082. kClickLimit is above every level GMSK
+    // reaches at any carrier offset up to one and a half deviations, so what
+    // it cuts is what a click or the noise added.
     const auto scale = static_cast<float>(1.0 / kDStarPeakDeviationHz);
     shaped_.resize(filtered_.size());
     for (std::size_t i = 0; i < filtered_.size(); ++i) {
-        shaped_[i] = Complex32{filtered_[i] * scale, 0.0F};
+        shaped_[i] = Complex32{std::clamp(filtered_[i] * scale, -kClickLimit, kClickLimit), 0.0F};
     }
 
     recovered_.clear();
