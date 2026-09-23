@@ -3426,7 +3426,8 @@ private:
     // it or because a decoder refused what it delivered. Nothing is
     // subscribed on it again: a removed receiver refuses and a refusing
     // decoder refuses again, and either would write a second sentence over
-    // the engine's own. A new receiver is a new id and clears it.
+    // the engine's own. A new receiver is a new id and does not match it, and
+    // the switch going off clears it.
     qulonglong decode_ended_vrx_ = 0;
     QString work_decode_ended_;
 

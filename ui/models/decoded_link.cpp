@@ -372,6 +372,13 @@ void EngineLink::apply_decode_request()
     const bool wanted = decode_wanted_.load(std::memory_order_acquire);
     const std::string mode = demod_name(live_receiver_demod_).toStdString();
 
+    // The switch going round is the operator asking again, so a receiver
+    // whose stream ended is tried once more. A removed one then says so in
+    // the engine's words, as a refusal.
+    if (!wanted) {
+        decode_ended_vrx_ = 0;
+    }
+
     std::vector<std::string> target;
     if (wanted && vrx != 0 && vrx != decode_ended_vrx_) {
         target = resolve_decoder_choice(choice, work_decoder_infos_, mode);
