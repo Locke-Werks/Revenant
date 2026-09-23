@@ -17,19 +17,10 @@ constexpr double kMinimumSyncGain = 0.1;
 
 // And the largest. Clause 10.2.2.3 holds a transmitter's deviation to 10 per
 // cent either side of nominal; 1.5 is five times that margin, an engineering
-// choice. A pattern matched in noise fits whatever gain the noise has, and on
-// the tests' guard time at 35 dB one fitted 1.76.
+// choice. A pattern matched in noise fits whatever gain the noise has: one
+// matched in the guard time of a direct mode test at 35 dB fitted 1.76, while
+// this decoder still timed its symbols with dv_phy.h's SymbolSync.
 constexpr double kMaximumSyncGain = 1.5;
-
-// Where the shaped discriminator output is limited, in symbol units. A
-// discriminator reading noise, in a click or in the guard time between two
-// bursts with the carrier off, reads a frequency anywhere in +/- rate/2, many
-// times the deviation, and one such value in a sync's 24 symbols moves its
-// centred correlation and its level fit more than every other symbol
-// together. 5 is the +3 outer symbol with two symbol units, 1296 Hz, of
-// carrier offset on top; an engineering choice, as core/decode/dstar.cpp's
-// limit is.
-constexpr float kClickLimit = 5.0F;
 
 // Grid slots in a row that carried nothing this decoder recognised before
 // the grid is dropped and the search starts again. An engineering choice:
@@ -37,11 +28,6 @@ constexpr float kClickLimit = 5.0F;
 // transmission that merely paused between superframes keeps its framing and
 // one that ended lets the search take over within a superframe's time.
 constexpr std::size_t kDropMisses = 12;
-
-// How far either side of a predicted burst start the centre field is looked
-// for, in symbols. The grid is kept in sample positions, so this only has to
-// cover what the symbol timing moves by between syncs; an engineering choice.
-constexpr std::size_t kGridSlack = 1;
 
 // The five patterns whose complements are the other five, Table 9.2's note.
 constexpr std::array<DmrSyncType, 5> kBaseSyncs = {
@@ -1036,13 +1022,21 @@ Status Dmr::process(ConstComplexSpan samples, std::vector<DmrBurst>& out) {
         return std::unexpected(with_context(status.error(), "DMR receive filtering"));
     }
 
-    // Scaled so a Table 10.3 symbol comes out at its symbol-column value, and
-    // limited. No carrier offset is removed: every burst's sync measures its
-    // own.
+    // Scaled so a Table 10.3 symbol comes out at its symbol-column value. No
+    // carrier offset is removed: every burst's sync measures its own.
+    //
+    // NOT LIMITED, which the D-STAR and POCSAG paths are, and the difference
+    // is measured. Their limits protect a symbol timing estimate that weighs
+    // every sample by its energy, and this decoder has none. A limit at five
+    // symbol units, 3240 Hz, was tried on 2026-09-23 and bought nothing: 28
+    // CSBKs of 60 at 16 dB in 2500 Hz against 27 without, and 2 bursts in a
+    // minute of noise against none. It cost a raw tap everything, since a
+    // carrier 5 kHz off DC sits past it: 0 CSBKs of 40 at 30 dB through the
+    // engine, against all 40 without.
     const double sign = config_.invert ? -1.0 : 1.0;
     const auto scale = static_cast<float>(sign / kDmrDeviationPerSymbolUnitHz);
     for (const float value : filtered_) {
-        shaped_.push_back(std::clamp(value * scale, -kClickLimit, kClickLimit));
+        shaped_.push_back(value * scale);
     }
 
     const double sps = samples_per_symbol_;

@@ -870,8 +870,10 @@ TEST_CASE("a minute of noise gives no DMR bursts", "[decode][dmr]") {
     }
     std::println("test_dmr noise: {} s gave {} bursts, {} carrying a decoded payload", kSeconds,
                  bursts.size(), with_payload);
-    // Measured 2026-09-23: 2 bursts in the minute, neither carrying anything
-    // a CRC, a checksum or the Reed-Solomon code passed.
+    // Measured 2026-09-23: no bursts in the minute. With the discriminator
+    // limited at five symbol units, which core/decode/dmr.cpp says why it is
+    // not, there were 2, neither carrying anything a CRC, a checksum or the
+    // Reed-Solomon code passed.
     CHECK(with_payload == 0);
     CHECK(bursts.size() <= 4);
 }
@@ -930,9 +932,9 @@ TEST_CASE("DMR CSBK error rate against noise, measured", "[decode][dmr]") {
         double allowed_frame_error_rate;
     };
     // SNR in 2500 Hz. Measured 2026-09-23: 60 of 60 whole at 30 dB, with 0
-    // of 11760 channel bits wrong before the BPTC; 28 of 60 at 16 dB, a
-    // frame error rate of 0.533, with 666 of 11564 channel bits wrong,
-    // 0.0576. The curve between is tools/bench's dmr subject.
+    // of 11760 channel bits wrong before the BPTC; 27 of 60 at 16 dB, a
+    // frame error rate of 0.550, with 658 of 11172 channel bits wrong,
+    // 0.0589. The curve between is tools/bench's dmr subject.
     const Point points[] = {{30.0, 0.0}, {16.0, 0.8}};
     for (const Point& point : points) {
         std::vector<dsp::Complex32> samples = *clean;
