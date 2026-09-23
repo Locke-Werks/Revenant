@@ -192,6 +192,15 @@ void PassbandWaterfallItem::takeFrame()
         // The link empties the frame when the receiver changes identity,
         // mode or frequency. The history is not thrown away for that: the
         // next frame says by its own axis whether the rows still line up.
+        //
+        // A pane with no receiver at all is the exception. The rows are the
+        // band the last receiver sat in, and the next one tuned into the same
+        // stretch of it would join them with no mark where the time went.
+        if (link_->receiverId() == 0 && axis_.valid()) {
+            axis_ = {};
+            clearRows();
+            update();
+        }
         return;
     }
 
@@ -206,11 +215,13 @@ void PassbandWaterfallItem::takeFrame()
     const int wide = history_.width();
     const int tall = history_.height();
 
-    if (frame.vrx != receiver_) {
-        receiver_ = frame.vrx;
-        axis_ = {};
-    }
-
+    // NOT RESET ON A NEW RECEIVER ID. A width change the engine will not take
+    // in place, and every mode change, rebuilds the pane's receiver under a
+    // new id, and this used to start a fresh history on each. The rows are the
+    // display tap, which carries none of the receiver's filter, in absolute
+    // hertz, so they describe the band rather than the receiver: the axis
+    // below is the whole test of whether they still line up, and a width
+    // dragged inside a rung leaves it exactly where it was.
     const HistoryShift plan =
         plan_history_shift(axis_, link_->passbandFrequencyAtFraction(0.0),
                            link_->passbandFrequencyAtFraction(1.0), wide);

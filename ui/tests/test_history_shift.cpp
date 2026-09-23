@@ -80,6 +80,45 @@ TEST_CASE("a different span discards the history", "[historyshift]")
     CHECK_THAT(plan.axis.hz_per_px, WithinAbs(100.0, 1e-9));
 }
 
+// Rejects a history keyed on the filter's width, which is what this was while
+// the pane was the fine stream and its span was the demodulation rate. The
+// span is half the display rate now, and docs/ui-spectrum.md's own example is
+// a USB high edge dragged from 1 kHz to 20 kHz in 250 Hz steps on a 75 kS/s
+// channel, which moves the display rate at three of the 77 positions. Frames
+// at every other position carry the same axis and must keep every row.
+TEST_CASE("only a rung of the display rate discards the history", "[historyshift]")
+{
+    // The display rate at each position, by the rate rule: the largest rung
+    // of 1, 2, 4, 8, 20 that keeps the pane at least four reaches wide, where
+    // a USB band [0, B] reaches B.
+    const auto display_rate = [](double high_edge_hz) {
+        for (const double rung : {20.0, 8.0, 4.0, 2.0, 1.0}) {
+            const double rate = 75'000.0 / rung;
+            if (rate / 2.0 >= 4.0 * high_edge_hz) {
+                return rate;
+            }
+        }
+        return 75'000.0;
+    };
+
+    constexpr double kMix = 14'230'000.0;
+    HistoryAxis axis;
+    int resets = 0;
+    for (int step = 0; step <= 76; ++step) {
+        const double high = 1'000.0 + 250.0 * step;
+        const double pane = display_rate(high) / 2.0;
+        const auto plan = plan_history_shift(axis, kMix - pane / 2.0, kMix + pane / 2.0, kWidth);
+        if (step > 0 && plan.reset) {
+            ++resets;
+        }
+        if (!plan.reset) {
+            CHECK(plan.shift_px == 0);
+        }
+        axis = plan.axis;
+    }
+    CHECK(resets == 3);
+}
+
 TEST_CASE("a move of the whole width or more is a fresh start", "[historyshift]")
 {
     const auto plan = plan_history_shift(HistoryAxis{kLow, 50.0}, kLow + 48'000.0,

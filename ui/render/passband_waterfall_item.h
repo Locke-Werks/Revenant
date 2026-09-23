@@ -27,7 +27,12 @@
 //
 // WHAT THE TRACE IS. The frames are the receiver's display tap, which carries
 // none of the receiver's filter, so the rows are the air around the receiver
-// with a flat noise floor, and nothing here masks outside the passband.
+// with a flat noise floor, and nothing here masks outside the passband. That
+// is also why a rebuild of the pane's own receiver, which a width change or a
+// mode change is underneath, keeps the history: the rows are in absolute
+// hertz and describe the band rather than the receiver, so the axis alone
+// decides whether they still line up. Only a pane left with no receiver
+// starts again.
 //
 // WHAT THIS PARAGRAPH USED TO SAY: "The frames are the fine stream after the
 // receiver's filter, so the noise floor carries the filter's response, and so
@@ -106,10 +111,11 @@ private:
     std::vector<std::uint8_t> tile_dirty_;
     std::vector<float> columns_;
 
-    // The absolute axis the stored rows are on, and the receiver they came
-    // from. A different receiver is a different history.
+    // The absolute axis the stored rows are on. Not the receiver they came
+    // from: see takeFrame for why a rebuilt receiver keeps its history.
+    // (This used to say "A different receiver is a different history", which
+    // held while the rows carried each receiver's own filter.)
     HistoryAxis axis_{};
-    std::uint64_t receiver_ = 0;
 };
 
 }  // namespace revenant::ui
