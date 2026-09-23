@@ -65,6 +65,34 @@ std::vector<std::uint64_t> TierTwo::pick(
     return out;
 }
 
+std::vector<std::uint64_t> TierTwo::pick_identify(
+    std::span<const Track> tracks, const std::unordered_set<std::uint64_t>& tried,
+    std::span<const std::uint64_t> in_flight, std::span<const std::uint64_t> already,
+    std::size_t free) {
+    std::vector<std::pair<dsp::SampleIndex, std::uint64_t>> eligible;
+    const auto listed = [](std::span<const std::uint64_t> ids, std::uint64_t id) {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    };
+    for (const Track& track : tracks) {
+        if (track.state != TrackState::Live || track.probes == 0 ||
+            track.protocol != identify::Protocol::None ||
+            track.bandwidth > engine::kProbeIdentifyNarrowHz || tried.contains(track.id) ||
+            listed(in_flight, track.id) || listed(already, track.id)) {
+            continue;
+        }
+        eligible.emplace_back(track.first_seen, track.id);
+    }
+    std::sort(eligible.begin(), eligible.end());
+    std::vector<std::uint64_t> out;
+    for (const auto& entry : eligible) {
+        if (out.size() >= free) {
+            break;
+        }
+        out.push_back(entry.second);
+    }
+    return out;
+}
+
 void TierTwo::take(Detector& detector, engine::Engine& engine) {
     if (outcomes_.size() < 32) {
         outcomes_.resize(32);
@@ -186,8 +214,21 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
     const std::size_t free = pool.size - in_flight_.size();
 
     const dsp::SampleIndex now = detector.last_decision();
-    const std::vector<std::uint64_t> chosen = pick(tracks, attempts_, in_flight_, free, now,
-                                                   config_.source_rate, config_.reprobe_seconds);
+    std::vector<std::uint64_t> chosen = pick(tracks, attempts_, in_flight_, free, now,
+                                             config_.source_rate, config_.reprobe_seconds);
+
+    // What the pool has left after the classification schedule goes to the
+    // identification one: a narrow track's one long dwell. See pick_identify.
+    std::erase_if(identify_tried_, [&](std::uint64_t id) {
+        return std::none_of(tracks.begin(), tracks.end(),
+                            [id](const Track& track) { return track.id == id; });
+    });
+    std::vector<std::uint64_t> identifying;
+    if (chosen.size() < free) {
+        identifying = pick_identify(tracks, identify_tried_, in_flight_, chosen,
+                                    free - chosen.size());
+        chosen.insert(chosen.end(), identifying.begin(), identifying.end());
+    }
     if (chosen.empty()) {
         return {};
     }
@@ -200,10 +241,14 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             continue;
         }
 
+        const bool long_dwell =
+            std::find(identifying.begin(), identifying.end(), id) != identifying.end();
+
         engine::ProbeRequest request{};
         request.tag = id;
         request.center = found->center - source_center;
         request.occupied_hz = found->bandwidth;
+        request.dwell_seconds = long_dwell ? engine::kProbeIdentifyDwellSeconds : 0.0;
 
         if (auto submitted = engine.submit_probe(request); !submitted) {
             ++stats_.refused;
@@ -212,6 +257,10 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
         in_flight_.push_back(id);
         attempts_[id] = now;
         ++stats_.submitted;
+        if (long_dwell) {
+            identify_tried_.insert(id);
+            ++stats_.identify_submitted;
+        }
     }
     return {};
 }

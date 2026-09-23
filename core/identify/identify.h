@@ -55,8 +55,10 @@
 //                 3-in-7 constant-ratio check, ITU-R M.625-4 clause 4.3. Eight.
 //   PSK31         a Varicode character in the table, with the unrecognised
 //                 ones under a quarter of them. Six.
-//   CW            a Morse character in the ITU-R M.1677-1 table, with the
-//                 timing locked and at most one unrecognised. Four.
+//   CW            a Morse character of two elements or more in the ITU-R
+//                 M.1677-1 table, with the timing locked and at most one
+//                 unrecognised. Four. Single elements do not count, because
+//                 a fading carrier keys itself into E and T.
 //   DMR           PENDING. The owner put DMR back in scope on 2026-09-23 and
 //                 another lane writes core/decode/dmr.* from TS 102 361-1 and
 //                 -2, sync included. attempt_dmr in identify.cpp is the one

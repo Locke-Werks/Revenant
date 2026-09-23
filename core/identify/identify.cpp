@@ -356,13 +356,25 @@ struct Counted {
     if (!decoder->timing().locked()) {
         return Counted{};
     }
+    // Only characters of two elements or more count. A carrier that fades in
+    // and out keys itself as single elements, E and T, which are in the table
+    // like any other character. On the HF corpus, counting every recognised
+    // character verified CW on 39 tracks across the six recordings, 18 of
+    // them on 20 m at 1603 UT, which is 14127 to 14223 kHz if the centre is
+    // where docs/recordings.md assumes and not a CW segment; docs/detection.md
+    // has what the run after this rule found, and why the two runs do not
+    // isolate it.
     std::uint32_t recognised = 0;
     std::uint32_t unrecognised = 0;
     for (const decode::CwCharacter& character : characters) {
         if (character.code.empty()) {
             continue;  // a word space
         }
-        (character.recognised ? recognised : unrecognised) += 1;
+        if (!character.recognised) {
+            ++unrecognised;
+        } else if (character.code.size() >= 2) {
+            ++recognised;
+        }
     }
     if (unrecognised > 1) {
         return Counted{};

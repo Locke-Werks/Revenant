@@ -511,19 +511,27 @@ struct PoolRun {
 }  // namespace
 
 TEST_CASE("a probe's bucket and dwell follow the detection and the grid", "[engine][probe-pool]") {
-    SECTION("narrow detections take the floor bucket and the identification dwell") {
-        // Collected for kProbeIdentifyDwellSeconds, characterised over the
-        // stated dwell from the front.
+    SECTION("narrow detections take the floor bucket and the stated dwell") {
         const auto shape = engine::probe_shape(10, 75'000);
         REQUIRE(shape.has_value());
         CHECK(shape->rate == engine::kProbeFloorRate);
         CHECK(shape->bandwidth == engine::kProbeFloorRate / 2);
+        CHECK(shape->samples == 24'000);
+        CHECK(shape->seconds == 2.0);
+        CHECK(shape->characterise_samples == 24'000);
+    }
+    SECTION("a narrow detection may ask for the identification dwell") {
+        // Collected for kProbeIdentifyDwellSeconds, characterised over the
+        // stated dwell from the front, and capped there however long asked.
+        const auto shape = engine::probe_shape(10, 75'000, 60.0);
+        REQUIRE(shape.has_value());
         CHECK(shape->samples == 60'000);
         CHECK(shape->seconds == 5.0);
         CHECK(shape->characterise_samples == 24'000);
     }
-    SECTION("past the narrow width the dwell is the stated one") {
-        const auto shape = engine::probe_shape(engine::kProbeIdentifyNarrowHz + 1, 75'000);
+    SECTION("past the narrow width a longer dwell is not granted") {
+        const auto shape = engine::probe_shape(engine::kProbeIdentifyNarrowHz + 1, 75'000,
+                                               engine::kProbeIdentifyDwellSeconds);
         REQUIRE(shape.has_value());
         CHECK(shape->rate == engine::kProbeFloorRate);
         CHECK(shape->samples == 24'000);

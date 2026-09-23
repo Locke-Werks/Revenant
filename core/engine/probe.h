@@ -106,13 +106,20 @@ inline constexpr double kProbeDwellSeconds = 2.0;
 // tests/characterise/test_identify.cpp at 20 dB in 2500 Hz: PSK31 verified 1
 // character of the 6 its row needs and CW 3 of 4 in two seconds.
 //
-// So a detection no wider than kProbeIdentifyNarrowHz collects
-// kProbeIdentifyDwellSeconds, and the characteriser still reads only the first
-// kProbeDwellSeconds of it: docs/detection.md measured that the extract's
-// length changes the characteriser's answer, and every figure it records was
-// taken at two seconds. What this costs is time: a narrow track's first family
-// arrives three seconds later, and a probe on one holds its receiver that much
-// longer.
+// So a caller may ask for kProbeIdentifyDwellSeconds on a detection no wider
+// than kProbeIdentifyNarrowHz, through ProbeRequest::dwell_seconds, and the
+// characteriser still reads only the first kProbeDwellSeconds of it:
+// docs/detection.md measured that the extract's length changes the
+// characteriser's answer, and every figure it records was taken at two
+// seconds. detect::TierTwo asks for it once per narrow track, after that
+// track's first probe and behind every track not yet probed at all.
+//
+// WHAT THIS USED TO BE: every detection no wider than the bar collected the
+// longer dwell on every probe. It held the pool on narrow tracks and cost
+// coverage: re-measured on the tier-two survey's twelve-second scenes, the
+// usb, lsb, fsk2, bpsk, qpsk and ofdm emitters went from probed to not probed
+// at all, and on the HF corpus answers lost with their track rose from none
+// to 38.
 //
 // A kilohertz, which is where core/identify's widest narrow row, RTTY and CW
 // on a coarse grid, stops; see identify::plausible.
@@ -150,8 +157,8 @@ struct ProbeShape {
 
     // Samples collected, and the seconds that is. Longer than
     // kProbeDwellSeconds when the grid's channel rate is under
-    // kProbeFloorRate, and when the detection is narrow enough for
-    // kProbeIdentifyDwellSeconds.
+    // kProbeFloorRate, and when the request asked for
+    // kProbeIdentifyDwellSeconds on a narrow detection.
     std::uint32_t samples = 0;
     double seconds = 0.0;
 
@@ -162,9 +169,13 @@ struct ProbeShape {
 };
 
 // The bucket and dwell for a detection, or a refusal naming why none fits.
-// Pure: the occupied bandwidth and the grid's channel rate and nothing else.
+// Pure: the occupied bandwidth, the grid's channel rate and the dwell asked
+// for and nothing else. A dwell of zero is kProbeDwellSeconds; a longer one is
+// granted only up to kProbeIdentifyDwellSeconds and only on a detection no
+// wider than kProbeIdentifyNarrowHz, and is otherwise the stated dwell.
 [[nodiscard]] Expected<ProbeShape> probe_shape(dsp::Hertz occupied_hz,
-                                               dsp::SampleRate channel_rate);
+                                               dsp::SampleRate channel_rate,
+                                               double dwell_seconds = 0.0);
 
 // One thing to probe. No default member initialisers, because it crosses a
 // SpscRing, which zero-fills its storage rather than constructing it.
@@ -179,6 +190,10 @@ struct ProbeRequest {
 
     // The detection's occupied bandwidth, which picks the bucket.
     dsp::Hertz occupied_hz;
+
+    // Seconds to collect, zero for kProbeDwellSeconds. See probe_shape for
+    // what is granted.
+    double dwell_seconds;
 };
 
 enum class ProbeStatus : std::uint8_t {

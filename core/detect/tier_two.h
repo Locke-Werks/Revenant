@@ -40,6 +40,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/detect/detector.h"
@@ -63,6 +64,9 @@ struct TierTwoConfig {
 struct TierTwoStats {
     std::uint64_t submitted = 0;
     std::uint64_t refused = 0;
+
+    // Of submitted, the identification schedule's long dwells.
+    std::uint64_t identify_submitted = 0;
 
     // Outcomes taken off the pool, by what became of them. recorded is
     // characterised and handed to the detector; orphaned is characterised for
@@ -126,6 +130,20 @@ public:
         std::span<const std::uint64_t> in_flight, std::size_t free, dsp::SampleIndex now,
         dsp::SampleRate source_rate, double reprobe_seconds);
 
+    // THE IDENTIFICATION SCHEDULE, which runs on what the one above leaves.
+    // A narrow track, no wider than engine::kProbeIdentifyNarrowHz, that has
+    // had its first probe and has no protocol yet gets one probe of
+    // engine::kProbeIdentifyDwellSeconds, once, oldest first, because the
+    // narrow modes frame too slowly for two seconds; core/engine/probe.h has
+    // the measurement. After every track not yet probed at all, so a pool on
+    // a busy band spends itself on coverage first. `tried` holds the tracks
+    // already given theirs and `already` the ids the classification schedule
+    // just picked.
+    [[nodiscard]] static std::vector<std::uint64_t> pick_identify(
+        std::span<const Track> tracks, const std::unordered_set<std::uint64_t>& tried,
+        std::span<const std::uint64_t> in_flight, std::span<const std::uint64_t> already,
+        std::size_t free);
+
     [[nodiscard]] const TierTwoStats& stats() const { return stats_; }
 
     // Tracks submitted and not yet answered. Never more than the pool holds.
@@ -151,6 +169,7 @@ private:
     std::vector<std::uint64_t> in_flight_;
     std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts_;
     std::unordered_map<std::uint64_t, engine::ProbeStatus> statuses_;
+    std::unordered_set<std::uint64_t> identify_tried_;
     std::vector<engine::ProbeOutcome> outcomes_;
 };
 

@@ -3397,11 +3397,14 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                          "first; {}",
                          options.detect_probes,
                          floor ? std::format(
-                                     "{:.1f} s of baseband at {} S/s or more per probe, {:.1f} s "
-                                     "for a detection under {} Hz so a protocol can be identified",
-                                     static_cast<double>(floor->characterise_samples) /
-                                         static_cast<double>(floor->rate),
-                                     floor->rate, floor->seconds, engine::kProbeIdentifyNarrowHz)
+                                     "{:.1f} s of baseband at {} S/s or more per probe, and one "
+                                     "{:.1f} s probe on each track under {} Hz so a protocol can "
+                                     "be identified",
+                                     floor->seconds, floor->rate,
+                                     engine::probe_shape(1, eng.info().channel_rate,
+                                                         engine::kProbeIdentifyDwellSeconds)
+                                         ->seconds,
+                                     engine::kProbeIdentifyNarrowHz)
                                : floor.error().message);
             if (eng.source_pacing().paced_by == 0.0 &&
                 eng.source_capabilities().flow != source::FlowControl::Paced) {

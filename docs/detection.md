@@ -2345,15 +2345,23 @@ verified. A steady carrier: not CW.
 
 **The HF modes need five seconds and get them.** Two seconds held one PSK31
 character of the six its row needs and three CW characters of four, and
-SITOR-B spends 2.24 s phasing before its first character. A detection no wider
-than a kilohertz now collects five seconds, the characteriser still reads the
-first two, and its first family arrives three seconds later than it did.
+SITOR-B spends 2.24 s phasing before its first character. So tier two gives a
+detection no wider than a kilohertz one probe of five seconds, after its first
+two-second probe and behind every track not yet probed at all, and the
+characteriser still reads only the first two seconds of it
+(`TierTwo::pick_identify`).
 
-WHAT THE LAST SENTENCE USED TO SAY: "A detection no wider than 600 Hz now
-collects five seconds". On the labelled scene below, at 131.8 Hz a bin, the
-detector measured keyed CW 659 Hz wide and RTTY 791 Hz, so neither got the
-longer dwell and CW was not even tried; the bar and the CW and RTTY rows'
-widths moved to a kilohertz together.
+WHAT THE LAST SENTENCE USED TO SAY, twice. First: "A detection no wider than
+600 Hz now collects five seconds". On the labelled scene below, at 131.8 Hz a
+bin, the detector measured keyed CW 659 Hz wide and RTTY 791 Hz, so neither got
+the longer dwell; the bar and the CW and RTTY rows' widths moved to a kilohertz
+together. Then: "A detection no wider than a kilohertz now collects five
+seconds, the characteriser still reads the first two, and its first family
+arrives three seconds later than it did." Every narrow probe dwelling five
+seconds held the pool: on the tier-two survey the usb, lsb, fsk2, bpsk, qpsk
+and ofdm emitters went unprobed, and on the HF corpus 38 answers came back
+after their track had gone, against none. With one long probe a track, after
+coverage, both tables are back to what "The three fixes, re-measured" records.
 
 **RTTY needs its characters read cleanly, not only framed.** A SITOR-B signal
 at 100 baud on the same 170 Hz shift framed 28 and 31 characters at RTTY's
@@ -2367,6 +2375,31 @@ verified 13 characters on the RTTY extract. So the rows run in order of how
 hard their check is to satisfy by accident and the first to verify wins: codes
 over fields first, SITOR-B's constant-ratio code, RTTY's framing, PSK31's
 Varicode, and CW's Morse table last.
+
+### What identification finds on the HF corpus
+
+The six recordings again, 120 s each at four times realtime on the engine's 16
+channels, with identification running:
+
+| band, hour | born | characterised | lost with the track | protocols verified | first family |
+| --- | --- | --- | --- | --- | --- |
+| 40 m 1359 | 16 | 20 | 0 | CW 2 | 4.89 s |
+| 40 m 1501 | 13 | 14 | 2 | CW 1 | 5.56 s |
+| 40 m 1603 | 23 | 30 | 2 | CW 3 | 5.23 s |
+| 20 m 1359 | 10 | 5 | 1 | none | 4.10 s |
+| 20 m 1501 | 33 | 35 | 1 | CW 2 | 7.55 s |
+| 20 m 1603 | 59 | 72 | 6 | CW 10, PSK31 2 | 4.91 s |
+
+**None of these is known to be right.** The recordings carry no ground truth,
+and if the centre is where `docs/recordings.md` assumes, 20 m here is 14127 to
+14223 kHz, which is not where CW and PSK31 usually sit. An earlier run, which
+gave every narrow probe five seconds and counted every recognised Morse
+character, verified CW on 39 tracks; this one, with one long probe a track and
+only characters of two elements or more counted, verifies 18. Both changed
+between the two runs, so the drop is not a measurement of either. The reason
+for the second is that a fading carrier keys itself into single elements, E
+and T; that it is what happened here is a guess. The 18 are unexamined: a
+decode of what each one keyed is the next measurement, not a conclusion.
 
 ### The labelled scene, end to end
 

@@ -53,6 +53,8 @@
 #include <print>
 #include <random>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/detect/detector.h"
@@ -2388,4 +2390,37 @@ TEST_CASE("tier two probes the oldest unclassified live track first", "[detect][
             detect::TierTwo::pick(tracks, attempts, {}, 8, 16'000'000, kScheduleRate, 10.0);
         CHECK(chosen == std::vector<std::uint64_t>{1, 7, 2});
     }
+}
+
+// REJECTS: an identification schedule that spends the long dwell on a wide
+// track, on one never probed, on one already identified, or twice on one.
+TEST_CASE("tier two gives each narrow probed track one long dwell, oldest first",
+          "[detect][tier-two]") {
+    const auto track = [](std::uint64_t id, dsp::SampleIndex born, dsp::Hertz width,
+                          std::uint32_t probes, identify::Protocol protocol) {
+        detect::Track out;
+        out.id = id;
+        out.state = detect::TrackState::Live;
+        out.first_seen = born;
+        out.bandwidth = width;
+        out.probes = probes;
+        out.protocol = protocol;
+        return out;
+    };
+    const std::vector<detect::Track> tracks = {
+        track(1, 3'000, 250, 1, identify::Protocol::None),
+        track(2, 1'000, 60, 1, identify::Protocol::None),
+        track(3, 500, 8'000, 1, identify::Protocol::None),     // too wide
+        track(4, 200, 60, 0, identify::Protocol::None),        // not probed yet
+        track(5, 100, 60, 1, identify::Protocol::Psk31),       // already identified
+        track(6, 50, 700, 2, identify::Protocol::None),
+    };
+    const std::unordered_set<std::uint64_t> tried = {6};
+    const std::uint64_t already[] = {1};
+    const auto chosen = detect::TierTwo::pick_identify(tracks, tried, {}, already, 8);
+    CHECK(chosen == std::vector<std::uint64_t>{2});
+
+    const auto all = detect::TierTwo::pick_identify(tracks, {}, {}, {}, 8);
+    CHECK(all == std::vector<std::uint64_t>{6, 2, 1});
+    CHECK(detect::TierTwo::pick_identify(tracks, {}, {}, {}, 1) == std::vector<std::uint64_t>{6});
 }

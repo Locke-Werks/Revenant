@@ -161,7 +161,8 @@ const char* probe_status_name(ProbeStatus status) {
     return "unknown";
 }
 
-Expected<ProbeShape> probe_shape(dsp::Hertz occupied_hz, dsp::SampleRate channel_rate) {
+Expected<ProbeShape> probe_shape(dsp::Hertz occupied_hz, dsp::SampleRate channel_rate,
+                                 double dwell_seconds) {
     if (channel_rate <= 0) {
         return fail("probe_shape: the grid has no channel rate, so no probe can be placed on it");
     }
@@ -216,9 +217,10 @@ Expected<ProbeShape> probe_shape(dsp::Hertz occupied_hz, dsp::SampleRate channel
     const auto dwell = static_cast<std::uint32_t>(kProbeDwellSeconds * static_cast<double>(chosen));
     shape.characterise_samples = std::max<std::uint32_t>(dwell, floor);
     shape.samples = shape.characterise_samples;
-    if (occupied <= kProbeIdentifyNarrowHz) {
-        const auto longer = static_cast<std::uint32_t>(kProbeIdentifyDwellSeconds *
-                                                       static_cast<double>(chosen));
+    if (dwell_seconds > kProbeDwellSeconds && occupied <= kProbeIdentifyNarrowHz) {
+        const double granted = std::min(dwell_seconds, kProbeIdentifyDwellSeconds);
+        const auto longer =
+            static_cast<std::uint32_t>(granted * static_cast<double>(chosen));
         shape.samples = std::max(shape.samples, longer);
     }
     shape.seconds = static_cast<double>(shape.samples) / static_cast<double>(chosen);
@@ -373,7 +375,7 @@ struct ProbePool::Impl {
     // A free receiver already running the bucket this request wants, then one
     // never built, then any free one, which is rebuilt. Null when all are busy.
     [[nodiscard]] Slot* choose_slot(const ProbeRequest& request) {
-        auto shape = probe_shape(request.occupied_hz, config.channel_rate);
+        auto shape = probe_shape(request.occupied_hz, config.channel_rate, request.dwell_seconds);
         Slot* unbuilt = nullptr;
         Slot* any = nullptr;
         for (Slot& slot : slots) {
@@ -397,7 +399,7 @@ struct ProbePool::Impl {
         ProbeOutcome outcome = blank_outcome(request);
         outcome.slot = index;
 
-        auto shape = probe_shape(request.occupied_hz, config.channel_rate);
+        auto shape = probe_shape(request.occupied_hz, config.channel_rate, request.dwell_seconds);
         if (!shape) {
             outcome.status = ProbeStatus::TooWide;
             emit(outcome);
