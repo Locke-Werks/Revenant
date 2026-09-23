@@ -161,6 +161,7 @@ qt_add_executable(revenant_ui
     models/engine_link.cpp
     models/engine_link.h
     models/frequency_dial.h
+    models/ruler.h
     models/ui_rules.h
     models/rds_link.cpp
     models/receiver_link.cpp
@@ -199,7 +200,7 @@ qt_add_qml_module(revenant_ui
         qml/EngineNotices.qml
         qml/DetectionControls.qml
         qml/SpanView.qml
-        qml/FrequencyAxis.qml
+        qml/Ruler.qml
         qml/FrequencyDial.qml
         qml/VfoPane.qml
         qml/RdsPane.qml
@@ -463,6 +464,7 @@ if(REVENANT_UI_TESTS)
             tests/test_receiver_gone.cpp
             tests/test_receiver_marker.cpp
             tests/test_receiver_match.cpp
+            tests/test_ruler.cpp
             tests/test_scroll_tune.cpp
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp

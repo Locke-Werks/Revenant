@@ -1,13 +1,13 @@
-// The span: the instantaneous spectrum, the waterfall under it, and the
-// frequency axis under both.
+// The span: the instantaneous spectrum, the frequency ruler, and the
+// waterfall, in that order and sharing one horizontal mapping.
 //
-// THE AXIS IS HERE BECAUSE IT LABELS THESE TWO AND NOTHING ELSE. It was the
+// THE SCALE IS HERE BECAUSE IT LABELS THESE TWO AND NOTHING ELSE. It was the
 // last row of the window's column, so whenever the receiver's pane, the RDS
 // pane or the audio pane was showing it sat under those instead, several
 // rows away from the columns it names. Its own comment said it was aligned
 // with the two items above it; for as long as a receiver was open, the two
-// items above it were the audio counters. Placed here it is under the
-// waterfall whatever else the window is showing.
+// items above it were the audio counters. It moved under the waterfall first,
+// and then, on 2026-09-22, between the two displays as a ruler.
 
 import QtQuick
 import QtQuick.Controls
@@ -91,6 +91,13 @@ ColumnLayout {
         }
     }
 
+    // The ruler, between the two displays it labels. See Ruler.qml.
+    Ruler {
+        Layout.fillWidth: true
+        Layout.preferredHeight: implicitHeight
+        onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false)
+    }
+
     // ------------------------------------------------------------------
     // The waterfall
     // ------------------------------------------------------------------
@@ -104,6 +111,4 @@ ColumnLayout {
                          span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
                                                  rank, exhausted)
     }
-
-    FrequencyAxis {}
 }

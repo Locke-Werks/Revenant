@@ -19,9 +19,12 @@
 #include <QObject>
 #include <QString>
 #include <QVariantList>
+#include <QVariantMap>
 #include <QtQmlIntegration>
 
 #include "models/frequency_dial.h"
+#include "models/ruler.h"
+#include "models/scroll_tune.h"
 
 namespace revenant::ui {
 
@@ -77,6 +80,45 @@ public:
             case DialSeparator::None: break;
         }
         return {};
+    }
+
+    // ---------------------------------------------------------------------
+    // The frequency ruler. See models/ruler.h.
+    // ---------------------------------------------------------------------
+
+    // One map per tick: x, major, and label, which is empty on a minor tick
+    // and on a major one whose label would not fit.
+    [[nodiscard]] Q_INVOKABLE QVariantList rulerTicks(double low, double high, double width,
+                                                      double char_px, double reserve_left) const
+    {
+        QVariantList out;
+        const RulerPlan plan = plan_ruler(low, high, width, char_px, reserve_left);
+        out.reserve(static_cast<qsizetype>(plan.ticks.size()));
+        for (const RulerTick& tick : plan.ticks) {
+            out.append(QVariantMap{{QStringLiteral("x"), tick.x_px},
+                                   {QStringLiteral("major"), tick.major},
+                                   {QStringLiteral("label"),
+                                    QString::fromStdString(tick.label)}});
+        }
+        return out;
+    }
+
+    [[nodiscard]] Q_INVOKABLE QString rulerUnit(double low, double high) const
+    {
+        return QString::fromStdString(ruler_unit_name(ruler_unit_hz(low, high)));
+    }
+
+    [[nodiscard]] Q_INVOKABLE double rulerX(double hz, double low, double high,
+                                            double width) const
+    {
+        return ruler_x(hz, low, high, width);
+    }
+
+    // The wheel's two axes resolved to one, the way the span displays do it.
+    // See models/scroll_tune.h.
+    [[nodiscard]] Q_INVOKABLE double scrollEighths(double delta_x, double delta_y) const
+    {
+        return scroll_tune_eighths(delta_x, delta_y);
     }
 
 private:

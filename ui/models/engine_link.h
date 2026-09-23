@@ -1428,7 +1428,10 @@ public:
     // The item keeps the gesture; this keeps the backlog. Nothing here reads a
     // pointer position, and the flush timer is this object's, so a display
     // being destroyed mid-sweep does not take the pending notches with it.
-    void takeScrollTune(double angle_delta_eighths);
+    //
+    // Invokable because the ruler between the two displays is QML, and the
+    // wheel over it is the same gesture into the same backlog.
+    Q_INVOKABLE void takeScrollTune(double angle_delta_eighths);
 
     // ---- the device picker -------------------------------------------------
     //
