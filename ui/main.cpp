@@ -505,13 +505,19 @@ int main(int argc, char* argv[])
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
 
     // A smoke run fails on any QML warning, since a binding that throws or a
-    // property that does not exist is a window that loads and is wrong. The
-    // engine still prints them itself.
+    // property that does not exist is a window that loads and is wrong. Each
+    // one is printed here, because a connection to warnings() takes them over
+    // and the engine then stops printing them, which left a failing run
+    // saying only how many there were.
     int qml_warnings = 0;
     if (smoke) {
         QObject::connect(&engine, &QQmlApplicationEngine::warnings, &app,
                          [&qml_warnings](const QList<QQmlError>& errors) {
                              qml_warnings += static_cast<int>(errors.size());
+                             for (const QQmlError& error : errors) {
+                                 std::fprintf(stderr, "smoke: %s\n",
+                                              error.toString().toLocal8Bit().constData());
+                             }
                          });
     }
 
