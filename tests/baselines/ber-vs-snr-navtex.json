@@ -1,5 +1,5 @@
 {
-  "commit": "21a617e",
+  "commit": "54f2890",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -29,18 +29,18 @@
       "trials": 1024
     },
     {
-      "ber": 8.554687500000e-01,
-      "bit_errors": 1752,
+      "ber": 8.559570312500e-01,
+      "bit_errors": 1753,
       "bits_total": 2048,
       "decoded_count": 18,
       "snr_db": -5.000000,
       "trials": 1024
     },
     {
-      "ber": 2.773437500000e-01,
-      "bit_errors": 568,
+      "ber": 2.768554687500e-01,
+      "bit_errors": 567,
       "bits_total": 2048,
-      "decoded_count": 538,
+      "decoded_count": 539,
       "snr_db": -4.000000,
       "trials": 1024
     },

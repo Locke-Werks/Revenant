@@ -1,5 +1,5 @@
 {
-  "commit": "21a617e",
+  "commit": "54f2890",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -13,34 +13,34 @@
   "mode": "qpsk31",
   "points": [
     {
-      "ber": 9.961328125000e-01,
-      "bit_errors": 25501,
+      "ber": 3.516406250000e-01,
+      "bit_errors": 9002,
       "bits_total": 25600,
       "decoded_count": 0,
       "snr_db": -14.000000,
       "trials": 256
     },
     {
-      "ber": 9.835937500000e-01,
-      "bit_errors": 25180,
+      "ber": 1.937109375000e-01,
+      "bit_errors": 4959,
       "bits_total": 25600,
       "decoded_count": 0,
       "snr_db": -13.000000,
       "trials": 256
     },
     {
-      "ber": 7.780078125000e-01,
-      "bit_errors": 19917,
+      "ber": 8.937500000000e-02,
+      "bit_errors": 2288,
       "bits_total": 25600,
-      "decoded_count": 1,
+      "decoded_count": 2,
       "snr_db": -12.000000,
       "trials": 256
     },
     {
-      "ber": 2.866406250000e-01,
-      "bit_errors": 7338,
+      "ber": 4.066406250000e-02,
+      "bit_errors": 1041,
       "bits_total": 25600,
-      "decoded_count": 22,
+      "decoded_count": 25,
       "snr_db": -11.000000,
       "trials": 256
     },

@@ -1348,3 +1348,48 @@ retired: 2026-09-23
 commit: "Bind next, previous, solo and a new receiver in the key table"
 instead: The key table binds Ctrl+PgDown and Ctrl+PgUp to the next and previous
     receiver in the rack, Ctrl+Shift+S to solo and Ctrl+N to a new receiver.
+
+phrase: | SITOR-B | character | 0.01 | 2500 Hz | -1.1 dB |
+phrase: 2, 4 and 2 of 1024 transmissions of 100 characters printed none
+phrase: Why those transmissions print nothing has not been established
+phrase: a character error rate of 0.01 at -1.1 dB in 2500 Hz, 0.092 at -5 dB
+phrase: About one trial in 250 loses most of its text between -1 and +2 dB
+retired: 2026-09-23
+commit: "Move the FSK bit clock off the boundary it can start on"
+instead: The transmissions SITOR-B lost whole were the FSK bit clock starting
+    on a unit boundary; with the clock's hang-up detector none of 6144 prints
+    nothing, and the 0.01 crossing is -4.4 dB in 2500 Hz.
+
+phrase: QPSK31 either acquires or prints nothing
+phrase: at -12 dB it is all or nothing per transmission
+phrase: its curve falls from all lost to 0.01 in 2 dB
+retired: 2026-09-23
+commit: "Acquire PSK31 on its idle's two tones when the squared line falls short"
+instead: Acquisition now reads the idle's two tones when the squared line
+    falls short; QPSK31 reads 0.089 at -12 dB and no transmission of 256 there
+    reads worse than 0.5. The crossing is still -9.5 dB.
+
+phrase: D-STAR's bit error rate varies a lot from transmission to transmission
+phrase: gave 0.055 to 0.357, and the curve reads 0.168 at 15 dB
+phrase: | D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.3 dB |
+retired: 2026-09-23
+commit: "Limit D-STAR's discriminator output before the bit timing"
+instead: The spread was the bit timing slipping on FM clicks; limited, 14 of
+    128 transmissions slip at 15 dB rather than 56, the curve reads 0.082
+    there, and the crossing is 17.2 dB in 2500 Hz.
+
+phrase: POCSAG at 1200 bit/s keeps losing a page in a thousand at 10 and 11 dB
+phrase: and 4 and 3 pages of 4096 still lost at 10 and 11 dB
+phrase: POCSAG 0.49 at 8 dB against 0.475 over 40 pages
+phrase: 0.475 lost at 8 dB, where the raw bit error rate is 0.023
+phrase: where 113 of 240 pages come through whole rather than 131
+phrase: 7.3 dB in 2500 Hz at 512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400
+phrase: | POCSAG, 1200 bit/s | page | 0.01 | 2500 Hz | 9.5 dB |
+phrase: | POCSAG, 512 bit/s | page | 0.01 | 2500 Hz | 7.3 dB |
+phrase: | POCSAG, 2400 bit/s | page | 0.01 | 2500 Hz | 12.0 dB |
+retired: 2026-09-23
+commit: "Limit FM discriminator clicks before POCSAG's level discriminator"
+instead: The level discriminator limits FM clicks; crossings are 6.4, 8.9 and
+    11.1 dB at 512, 1200 and 2400 bit/s, nothing is lost at 1200 bit/s from
+    10 dB, 0.10 is lost at 8 dB, and 206 of 240 pages come through whole there
+    in test_pocsag_false_pages.

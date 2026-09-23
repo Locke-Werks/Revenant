@@ -746,12 +746,15 @@ same clauses, and `tests/decode/test_p25p1.cpp`, `test_p25p1_voice.cpp`,
 or symbol error rate at a high and a low signal to noise and reports the
 figure rather than asserting it tight. `bench sweep --mode p25p1`, `dstar` and
 `tetra` extend the same measurements to curves, 128 transmissions a point, in
-SNR in 2500 Hz: a bit error rate of 0.01 at 17.9 dB for P25, 17.3 dB for
+SNR in 2500 Hz: a bit error rate of 0.01 at 17.9 dB for P25, 17.2 dB for
 D-STAR and 20.2 dB for TETRA, which across the whole sample rate is 5.0 dB,
-4.5 dB and 5.6 dB ([sensitivity.md](sensitivity.md)). D-STAR's test figure at
-its low point is the low end of a wide spread: twelve single transmissions at
-the same level gave 0.055 to 0.357, and the curve reads 0.168 at 15 dB in
-2500 Hz, 0.17 dB above it.
+4.4 dB and 5.6 dB ([sensitivity.md](sensitivity.md)). D-STAR's transmissions
+at its test's low point read about 0.055 each until the bit timing slips on
+the discriminator's clicks; since the shaped output is limited at 2.5 times
+the deviation, 14 of 128 slip at 15 dB in 2500 Hz rather than 56, and the
+curve reads 0.082 there. WHAT THIS PARAGRAPH USED TO SAY: "17.3 dB for
+D-STAR", "4.5 dB" across the sample rate, and "twelve single transmissions at
+the same level gave 0.055 to 0.357, and the curve reads 0.168 at 15 dB".
 
 **P25 Phase 1 voice.** The header word, the Link Control word and the
 encryption sync word each sit under a shortened Reed-Solomon code over
@@ -1009,18 +1012,23 @@ POCSAG is measured in `tests/decode/test_pocsag.cpp` at all three rates, at
 signal, a channel filter and the FM discriminator in `core/decode/dv_phy.cpp`
 rather than from ideal audio alone. Swept by `bench sweep --mode pocsag-512`,
 `pocsag-1200` and `pocsag-2400` through the same receiver, 4096 pages of 40
-alphanumeric characters a point: a page error rate of 0.01 at 7.3 dB in
-2500 Hz at 512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400; at 1200 bit/s 0.49
-lost at 8 dB and 0.073 at 9 dB, and 4 and 3 pages of 4096 still lost at 10 and
-11 dB before none from 12 dB up. Through `add_awgn` at 1200 bit/s over 40
-pages of 15 codewords: no page lost at 20 dB in 2500 Hz, including tuned 1 kHz
-off; none lost at 12 dB, where the raw bit error rate is 0.00019; 0.475 lost
-at 8 dB, where the raw bit error rate is 0.023 and BCH corrected 584 bits and
-failed on one codeword in thirty; all lost at 4 dB, below the discriminator's
-threshold. The code corrects every one and two bit error and refuses every
-three bit error, checked exhaustively on twelve code words. WHAT THE 8 dB
-FIGURE USED TO SAY: "0.40 lost at 8 dB, where the raw bit error rate is
-0.023", before the address correction budget below. Checking Tables 1
+alphanumeric characters a point: a page error rate of 0.01 at 6.4 dB in
+2500 Hz at 512 bit/s, 8.9 dB at 1200 and 11.1 dB at 2400; at 1200 bit/s 0.10
+lost at 8 dB and 0.0073 at 9 dB, and none from 10 dB up. Through `add_awgn`
+at 1200 bit/s over 40 pages of 15 codewords: no page lost at 20 dB in 2500
+Hz, including tuned 1 kHz off; none lost at 12 dB, where the raw bit error
+rate is 3.2e-5; 0.10 lost at 8 dB, where the raw bit error rate is 0.012 and
+BCH corrected 316 bits and failed on one codeword in ninety; all lost at
+4 dB, below the discriminator's threshold. Those figures are with the level
+discriminator limiting the discriminator's clicks, which `core/decode/fsk.h`
+explains and which moved every rate's crossing by 0.6 to 0.9 dB. The code
+corrects every one and two bit error and refuses every three bit error,
+checked exhaustively on twelve code words. WHAT THIS PARAGRAPH USED TO SAY,
+before the limiter: "7.3 dB in 2500 Hz at 512 bit/s, 9.5 dB at 1200 and
+12.0 dB at 2400", "4 and 3 pages of 4096 still lost at 10 and 11 dB", and
+"0.475 lost at 8 dB, where the raw bit error rate is 0.023 and BCH corrected
+584 bits". And before the address correction budget below: "0.40 lost at
+8 dB, where the raw bit error rate is 0.023". Checking Tables 1
 and 2 against clause 1.4 found that M.584-2 misprints the idle codeword: Table 2
 is one bit from a code word, although clause 1.3.4 calls it a valid address
 codeword, and the decoder uses the code word. What it does not reach: one rate
@@ -1042,9 +1050,13 @@ codeword found without the clause 1.1 preamble in front of it starts a
 provisional batch whose pages are held until the next batch's synchronization
 codeword confirms it, clause 2.3's "synchronization on receipt of a number of
 valid batches". After: 0.0125 false pages per page sent at 6 dB, 0.029 at 5 dB,
-none at 4, 8 and 12 dB, and none in 40 hours of noise. The cost is at 8 dB,
-where 113 of 240 pages come through whole rather than 131; at 12 dB all 240
-still do. What is left below 8 dB is a codeword with five or more errors
+none at 4, 8 and 12 dB, and none in 40 hours of noise. The cost was at 8 dB,
+where 113 of 240 pages came through whole rather than 131; at 12 dB all 240
+still did. With the click limiter the same audio gives 206 of 240 whole at
+8 dB, 1, 5 and 1 false pages at 6, 5 and 4 dB, and still none in 40 hours of
+noise. WHAT THE COST USED TO READ, before the limiter, in the present tense:
+"where 113 of 240 pages come through whole rather than 131". What is left
+below 8 dB is a codeword with five or more errors
 within one bit of another, which the code cannot tell from a real one. A
 receiver that joins a one-batch transmission after its preamble now reports
 nothing from it, which is what clause 2.3 asks.
@@ -1062,13 +1074,14 @@ in both; at -5 dB the DX copy is lost 8.9 percent and 1.2 percent are lost in
 both, which is what time diversity buys. Swept by `bench sweep --mode sitor-b`,
 1024 transmissions of 100 characters a point, scored by edit distance so a
 character lost to a loss of phase or read as another valid signal counts as
-well: a character error rate of 0.01 at -1.1 dB in 2500 Hz, 0.092 at -5 dB,
-0.015 at -3 dB. It does not reach zero by +2 dB, and what is left is whole
-transmissions: at 0, +1 and +2 dB, 2, 4 and 2 of the 1024 lost every one of
-their 102 characters, with nothing in between. Why those transmissions print
-nothing has not been established; the crossing sits where those losses and
-the noise meet, which is why a different set of trials moved it by 0.7 dB
-([sensitivity.md](sensitivity.md)). A 150 ms noise burst never prints a
+well: a character error rate of 0.01 at -4.4 dB in 2500 Hz, 0.028 at -5 dB,
+0.0012 at -3 dB, and nothing lost from -1 dB up. That is since the FSK bit
+clock moves off the boundary its first reading can land on; before it, 1 to 4
+transmissions in 1024 printed nothing at every level from 0 to 20 dB,
+because the decoder phased late or never ([sensitivity.md](sensitivity.md)).
+WHAT THIS PARAGRAPH USED TO SAY: "a character error rate of 0.01 at -1.1 dB
+in 2500 Hz, 0.092 at -5 dB, 0.015 at -3 dB", and "Why those transmissions
+print nothing has not been established". A 150 ms noise burst never prints a
 wrong character, and loses one when noise turns a DX copy into a different
 valid signal, which clause 4.3 then refuses. NAVTEX at -2 dB receives all ten
 120-character messages exactly, and at -5 dB two of ten, with every
@@ -1093,8 +1106,11 @@ cited to Wavecom's decoder documentation because the article predates it.
 What comes out is text, each character placed at the audio sample where its
 first bit was decided, plus the measured carrier offset. The AFC captures a
 tone up to 40 Hz either side of the configured centre by squaring the signal,
-or raising it to the fourth for QPSK, over the first two seconds; it will not
-acquire on noise, whose best line measured 3.9 against a threshold of 6.
+or raising it to the fourth for QPSK, over the first two seconds, and when
+that line falls short, by reading the idle's two tones half the symbol rate
+either side of the carrier directly; it will not acquire on noise, whose best
+squared line measured 3.9 against a threshold of 6, and whose best pair of
+tones 3.4 in 10 hours against 4.5.
 QPSK31 decodes through `core/decode/dv_codes.cpp`'s Viterbi decoder: the
 article's 32-entry phase table is reproduced exactly by a K=5 code with
 generators D+D^2+D^3 and 1+D^3+D^4, read as the in-phase and quadrature signs
@@ -1105,11 +1121,14 @@ Swept by `bench sweep --mode psk31`, `psk63` and `qpsk31`, transmissions of
 100 characters with the tone 8 Hz off centre, signal to noise in 2500 Hz of
 audio: a character error rate of 0.01 at -8.8 dB for PSK31, -5.8 dB for PSK63
 and -9.5 dB for QPSK31, and none from -4, -1 and -4 dB up
-([sensitivity.md](sensitivity.md)). QPSK31 goes from 0.78 at -12 dB to 0.014
-at -10, and at -12 dB it is all or nothing per transmission: of sixteen, six
-decoded with 0.05 to 0.13 and ten printed next to nothing. The test's one run
-of 600 characters, 2.8e-2 bit error rate and 0.09 character error rate at
--12 dB, was one of the six. Measured over those 600 characters at 48 kHz:
+([sensitivity.md](sensitivity.md)). QPSK31 goes from 0.089 at -12 dB to 0.014
+at -10, and no transmission of 256 at -12 dB reads worse than 0.5, since
+acquisition reads the idle's two tones when the squared line falls short;
+before that, 11 of the first 16 at -12 dB printed next to nothing and the
+curve read 0.78 there. The test's one run of 600 characters, 2.8e-2 bit error
+rate and 0.09 character error rate at -12 dB, agrees with the curve. WHAT
+THIS PARAGRAPH USED TO SAY: "QPSK31 goes from 0.78 at -12 dB to 0.014 at -10,
+and at -12 dB it is all or nothing per transmission". Measured over those 600 characters at 48 kHz:
 BPSK31 has a bit error rate of 2.5e-3 at -10 dB and PSK63 4.0e-3 at -7 dB,
 with no errors at +10 dB in any of the three. Against differential BPSK theory
 that is about 2 dB of implementation loss, most of it the sixth of each

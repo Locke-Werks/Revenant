@@ -360,9 +360,13 @@ ModeSubject sitor_b() {
     mode.minimum_payload_bytes = 16;
     mode.snr_start_db = -10.0;
     mode.snr_stop_db = 2.0;
-    // About one trial in 250 loses most of its text between -1 and +2 dB,
-    // so a point needs a thousand trials before that is a rate rather than
-    // a coincidence.
+    // A thousand trials a point, because a fault that takes a whole
+    // transmission shows at a few in a thousand and no fewer trials make it
+    // a rate rather than a coincidence. WHAT THIS USED TO SAY: "About one
+    // trial in 250 loses most of its text between -1 and +2 dB". That was
+    // the bit clock starting on the boundary between two units, and since
+    // "Move the FSK bit clock off the boundary it can start on" none of the
+    // 1024 at any of those points does.
     mode.trials = 1024;
     mode.generator = [](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {
         auto codes = siggen::ita2_encode_text(widen(text_from_payload(payload, kSitorPool)));

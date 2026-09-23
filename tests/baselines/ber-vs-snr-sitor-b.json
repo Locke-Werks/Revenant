@@ -1,5 +1,5 @@
 {
-  "commit": "21a617e",
+  "commit": "54f2890",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -13,106 +13,106 @@
   "mode": "sitor-b",
   "points": [
     {
-      "ber": 9.948969822304e-01,
-      "bit_errors": 103915,
+      "ber": 9.924842984069e-01,
+      "bit_errors": 103663,
       "bits_total": 104448,
       "decoded_count": 0,
       "snr_db": -10.000000,
       "trials": 1024
     },
     {
-      "ber": 9.615406709559e-01,
-      "bit_errors": 100431,
+      "ber": 9.561695772059e-01,
+      "bit_errors": 99870,
       "bits_total": 104448,
       "decoded_count": 0,
       "snr_db": -9.000000,
       "trials": 1024
     },
     {
-      "ber": 8.012312346814e-01,
-      "bit_errors": 83687,
+      "ber": 7.555817248775e-01,
+      "bit_errors": 78919,
       "bits_total": 104448,
       "decoded_count": 0,
       "snr_db": -8.000000,
       "trials": 1024
     },
     {
-      "ber": 4.880323223039e-01,
-      "bit_errors": 50974,
+      "ber": 3.917834712010e-01,
+      "bit_errors": 40921,
       "bits_total": 104448,
       "decoded_count": 0,
       "snr_db": -7.000000,
       "trials": 1024
     },
     {
-      "ber": 2.176489736520e-01,
-      "bit_errors": 22733,
+      "ber": 1.299115349265e-01,
+      "bit_errors": 13569,
       "bits_total": 104448,
-      "decoded_count": 1,
+      "decoded_count": 2,
       "snr_db": -6.000000,
       "trials": 1024
     },
     {
-      "ber": 9.205537683824e-02,
-      "bit_errors": 9615,
+      "ber": 2.810968137255e-02,
+      "bit_errors": 2936,
       "bits_total": 104448,
-      "decoded_count": 210,
+      "decoded_count": 240,
       "snr_db": -5.000000,
       "trials": 1024
     },
     {
-      "ber": 3.561580882353e-02,
-      "bit_errors": 3720,
+      "ber": 4.346660539216e-03,
+      "bit_errors": 454,
       "bits_total": 104448,
-      "decoded_count": 737,
+      "decoded_count": 773,
       "snr_db": -4.000000,
       "trials": 1024
     },
     {
-      "ber": 1.500268075980e-02,
-      "bit_errors": 1567,
+      "ber": 1.215916053922e-03,
+      "bit_errors": 127,
       "bits_total": 104448,
-      "decoded_count": 981,
+      "decoded_count": 997,
       "snr_db": -3.000000,
       "trials": 1024
     },
     {
-      "ber": 1.371017156863e-02,
-      "bit_errors": 1432,
+      "ber": 2.872242647059e-05,
+      "bit_errors": 3,
       "bits_total": 104448,
-      "decoded_count": 1007,
+      "decoded_count": 1022,
       "snr_db": -2.000000,
       "trials": 1024
     },
     {
-      "ber": 9.631587009804e-03,
-      "bit_errors": 1006,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 104448,
-      "decoded_count": 1014,
+      "decoded_count": 1024,
       "snr_db": -1.000000,
       "trials": 1024
     },
     {
-      "ber": 1.953125000000e-03,
-      "bit_errors": 204,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 104448,
-      "decoded_count": 1022,
+      "decoded_count": 1024,
       "snr_db": 0.000000,
       "trials": 1024
     },
     {
-      "ber": 3.906250000000e-03,
-      "bit_errors": 408,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 104448,
-      "decoded_count": 1020,
+      "decoded_count": 1024,
       "snr_db": 1.000000,
       "trials": 1024
     },
     {
-      "ber": 1.953125000000e-03,
-      "bit_errors": 204,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 104448,
-      "decoded_count": 1022,
+      "decoded_count": 1024,
       "snr_db": 2.000000,
       "trials": 1024
     }

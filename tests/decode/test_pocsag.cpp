@@ -297,6 +297,11 @@ TEST_CASE("POCSAG through an FM receiver against noise, measured", "[decode][poc
     // PocsagConfig::address_correction_budget, and 8 dB loses 0.475 of the
     // pages rather than the 0.40 above: three more addresses of the forty
     // had two bits wrong. Nothing else in the table moved.
+    //
+    // Later the same day core/decode/fsk.h's level discriminator began
+    // limiting the discriminator's clicks. 12 dB: raw bit error rate 3.2e-5,
+    // 1 bit corrected. 8 dB: 0.012, 316 corrected, one codeword in 93
+    // uncorrectable, 0.10 of the pages lost. 4 dB: 0.18, 80, 0.70 and all.
     // tests/decode/test_pocsag_false_pages.cpp has what that buys.
     const Point points[] = {
         {20.0, 0, 0.0}, {20.0, 1000, 0.0}, {12.0, 0, 0.2}, {8.0, 0, 0.6}, {4.0, 0, 1.0}};

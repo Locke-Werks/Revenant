@@ -1,5 +1,5 @@
 {
-  "commit": "21a617e",
+  "commit": "54f2890",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -13,8 +13,8 @@
   "mode": "ax25",
   "points": [
     {
-      "ber": 9.997558593750e-01,
-      "bit_errors": 4095,
+      "ber": 9.995117187500e-01,
+      "bit_errors": 4094,
       "bits_total": 4096,
       "decoded_count": 0,
       "snr_db": 6.000000,
@@ -29,26 +29,26 @@
       "trials": 1024
     },
     {
-      "ber": 5.681152343750e-01,
-      "bit_errors": 2327,
+      "ber": 5.673828125000e-01,
+      "bit_errors": 2324,
       "bits_total": 4096,
       "decoded_count": 29,
       "snr_db": 8.000000,
       "trials": 1024
     },
     {
-      "ber": 1.894531250000e-01,
-      "bit_errors": 776,
+      "ber": 1.884765625000e-01,
+      "bit_errors": 772,
       "bits_total": 4096,
-      "decoded_count": 457,
+      "decoded_count": 460,
       "snr_db": 9.000000,
       "trials": 1024
     },
     {
-      "ber": 3.613281250000e-02,
-      "bit_errors": 148,
+      "ber": 3.564453125000e-02,
+      "bit_errors": 146,
       "bits_total": 4096,
-      "decoded_count": 883,
+      "decoded_count": 884,
       "snr_db": 10.000000,
       "trials": 1024
     },

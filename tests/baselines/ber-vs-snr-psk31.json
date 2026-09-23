@@ -1,5 +1,5 @@
 {
-  "commit": "21a617e",
+  "commit": "54f2890",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -13,50 +13,50 @@
   "mode": "psk31",
   "points": [
     {
-      "ber": 7.960546875000e-01,
-      "bit_errors": 40758,
+      "ber": 4.702929687500e-01,
+      "bit_errors": 24079,
       "bits_total": 51200,
       "decoded_count": 0,
       "snr_db": -15.000000,
       "trials": 512
     },
     {
-      "ber": 3.918164062500e-01,
-      "bit_errors": 20061,
+      "ber": 3.428710937500e-01,
+      "bit_errors": 17555,
       "bits_total": 51200,
       "decoded_count": 0,
       "snr_db": -14.000000,
       "trials": 512
     },
     {
-      "ber": 2.102148437500e-01,
-      "bit_errors": 10763,
+      "ber": 2.323046875000e-01,
+      "bit_errors": 11894,
       "bits_total": 51200,
       "decoded_count": 0,
       "snr_db": -13.000000,
       "trials": 512
     },
     {
-      "ber": 1.280273437500e-01,
-      "bit_errors": 6555,
+      "ber": 1.421679687500e-01,
+      "bit_errors": 7279,
       "bits_total": 51200,
       "decoded_count": 0,
       "snr_db": -12.000000,
       "trials": 512
     },
     {
-      "ber": 6.941406250000e-02,
-      "bit_errors": 3554,
+      "ber": 7.117187500000e-02,
+      "bit_errors": 3644,
       "bits_total": 51200,
       "decoded_count": 7,
       "snr_db": -11.000000,
       "trials": 512
     },
     {
-      "ber": 3.222656250000e-02,
-      "bit_errors": 1650,
+      "ber": 3.226562500000e-02,
+      "bit_errors": 1652,
       "bits_total": 51200,
-      "decoded_count": 55,
+      "decoded_count": 54,
       "snr_db": -10.000000,
       "trials": 512
     },

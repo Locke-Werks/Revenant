@@ -42,18 +42,26 @@ convention [snr-convention.md](snr-convention.md) fixes. For the audio modes
 it is the audio's SNR in 2500 Hz of one-sided spectrum; for the complex
 baseband modes, the RF signal's. RDS keeps the Eb/N0 axis its subject was
 written on. Measured on 2026-09-23 on the RTX 4090 workstation's CPU, commit
-"Read a decoder curve at its own mode's error rate in compare", except CW,
+"Read a decoder curve at its own mode's error rate in compare". CW was
 measured again the same day at "Hold the start of a CW transmission until its
-spacing shows two clusters".
+spacing shows two clusters". SITOR-B, NAVTEX, AX.25, the three POCSAG rates,
+PSK31, PSK63, QPSK31 and D-STAR were swept again the same day at commit "Limit
+FM discriminator clicks before POCSAG's level discriminator", after the fixes
+the section below records, and their baselines replaced; of those, SITOR-B's,
+POCSAG's and D-STAR's crossings moved.
+
+WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
+512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400, SITOR-B -1.1 dB and D-STAR
+17.3 dB.
 
 | Mode | Unit counted | Error rate | SNR convention | Sensitivity | Command |
 | --- | --- | --- | --- | --- | --- |
 | RTTY, 45.45 Bd, 170 Hz shift | character | 0.01 | 2500 Hz | -5.2 dB | `bench sweep --mode rtty --seed 20260918` |
 | AX.25, 1200 bit/s Bell 202 | frame | 0.01 | 2500 Hz | 10.8 dB | `bench sweep --mode ax25 --seed 20260918` |
-| POCSAG, 512 bit/s | page | 0.01 | 2500 Hz | 7.3 dB | `bench sweep --mode pocsag-512 --seed 20260918` |
-| POCSAG, 1200 bit/s | page | 0.01 | 2500 Hz | 9.5 dB | `bench sweep --mode pocsag-1200 --seed 20260918` |
-| POCSAG, 2400 bit/s | page | 0.01 | 2500 Hz | 12.0 dB | `bench sweep --mode pocsag-2400 --seed 20260918` |
-| SITOR-B | character | 0.01 | 2500 Hz | -1.1 dB | `bench sweep --mode sitor-b --seed 20260918` |
+| POCSAG, 512 bit/s | page | 0.01 | 2500 Hz | 6.4 dB | `bench sweep --mode pocsag-512 --seed 20260918` |
+| POCSAG, 1200 bit/s | page | 0.01 | 2500 Hz | 8.9 dB | `bench sweep --mode pocsag-1200 --seed 20260918` |
+| POCSAG, 2400 bit/s | page | 0.01 | 2500 Hz | 11.1 dB | `bench sweep --mode pocsag-2400 --seed 20260918` |
+| SITOR-B | character | 0.01 | 2500 Hz | -4.4 dB | `bench sweep --mode sitor-b --seed 20260918` |
 | NAVTEX | message | 0.01 | 2500 Hz | -2.6 dB | `bench sweep --mode navtex --seed 20260918` |
 | PSK31 | character | 0.01 | 2500 Hz | -8.8 dB | `bench sweep --mode psk31 --seed 20260918` |
 | PSK63 | character | 0.01 | 2500 Hz | -5.8 dB | `bench sweep --mode psk63 --seed 20260918` |
@@ -61,7 +69,7 @@ spacing shows two clusters".
 | CW, 20 WPM | character | 0.01 | 2500 Hz | -6.2 dB | `bench sweep --mode cw --seed 20260918` |
 | M17 stream mode | frame | 0.01 | 2500 Hz | 17.0 dB | `bench sweep --mode m17 --seed 20260918` |
 | P25 Phase 1, C4FM | bit | 0.01 | 2500 Hz | 17.9 dB | `bench sweep --mode p25p1 --seed 20260918` |
-| D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.3 dB | `bench sweep --mode dstar --seed 20260918` |
+| D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.2 dB | `bench sweep --mode dstar --seed 20260918` |
 | TETRA, pi/4-DQPSK | bit | 0.01 | 2500 Hz | 20.2 dB | `bench sweep --mode tetra --seed 20260918` |
 | RDS | bit | 0.01 | Eb/N0 | 7.2 dB | `bench sweep --mode rds --snr-start 2 --snr-stop 12 --trials 1024 --min-bit-errors 0 --seed 20260918` |
 
@@ -152,26 +160,53 @@ used to open on the halved noise estimate, and now it waits for the real one.
 Swept from -11 to -8 dB with all three, -11 dB read 0.59; with that one
 turned off and the other two kept, 0.51 on the same trials.
 
-**SITOR-B loses whole transmissions.** At 0, +1 and +2 dB, 2, 4 and 2 of 1024
-transmissions of 100 characters printed none of their 102 characters, and
-every other transmission printed all of them. Why has not been established.
-The 0.01 crossing sits where those losses meet the noise, and a different set
-of trials over a narrower grid put it at -1.76 dB rather than -1.11.
+**SITOR-B lost whole transmissions to its bit clock.** 1 to 4 transmissions
+in 1024 printed nothing at each of 0, 1, 2, 6, 10 and 20 dB. The
+transmitter starts its first unit at sample zero, which puts the FSK bit
+clock's first reading on a boundary, where Gardner's detector reads nothing
+either way; on the transmissions that failed the clock was still there after
+most of the 232 bits of phasing, so the decoder phased late or never.
+`core/decode/fsk.h` now moves the clock half a bit when its boundary readings
+outweigh its centre readings, commit "Move the FSK bit clock off the boundary
+it can start on", and none of those 6144 prints nothing. The same fault was
+most of the curve between -5 and -1 dB: 0.0137 at -2 dB became 2.9e-5, and
+the crossing moved from -1.1 to -4.4 dB.
 
-**QPSK31 either acquires or prints nothing.** At -12 dB, of sixteen single
-transmissions six came back with character error rates between 0.05 and 0.13
-and ten between 0.98 and 1.0. The test's one run at -12 dB, 0.09, is one of
-the six; the curve's 0.78 is the average. Thirty-two transmissions of 600
-characters average 0.84 there against 0.85 for 100, so it is not the length.
-All or nothing per transmission points at the acquisition rather than the
-Viterbi decoder; that has not been confirmed.
+**QPSK31 failed to acquire on its idle preamble.** At -12 dB, 11 of the
+sweep's first 16 transmissions printed almost nothing. The squared line of
+the 64 symbol idle turned down most of their first windows, and QPSK data
+carries no line the square or the fourth power finds at that level, so
+acquisition waited for the postamble. `core/decode/psk31.cpp` now reads the
+idle's two tones directly when the squared line falls short, commit "Acquire
+PSK31 on its idle's two tones when the squared line falls short", and none
+of 256 transmissions at -12 dB reads worse than 0.5. The curve went from 0.78
+to 0.089 at -12 dB and from 0.996 to 0.35 at -14; from -10 dB up it did not
+move, so neither did the crossing. BPSK31 and PSK63 improve at their bottom
+two or three points and read about a tenth worse where their curves fall
+through 0.1 to 0.2: the text bits come back with fewer errors, and the extra
+characters are printed from the idle, which acquisition now reads from its
+first window.
 
-**D-STAR's bit error rate varies a lot from transmission to transmission.**
-Twelve single transmissions at 14.83 dB in 2500 Hz, which is the test's 2 dB
-across 48000 S/s, gave 0.055 to 0.357. The test's 0.056 is the low end; the
-curve reads 0.168 at 15 dB. A trial whose bits slip after the alignment is
-scored half wrong from there, as RDS's are, which is the likely spread and has
-not been confirmed.
+**D-STAR's transmissions slipped a bit.** Twelve single transmissions at
+14.83 dB in 2500 Hz gave 0.055 to 0.357; every one read about 0.055 until the
+bit timing slipped, after which it read half wrong. Not the frame sync, the
+offset refit or the deviation: below the FM threshold the discriminator
+clicks, and the square-law timing estimator weights a click by its energy.
+`core/decode/dstar.cpp` now limits the shaped output at 2.5 times the
+deviation, commit "Limit D-STAR's discriminator output before the bit
+timing": 56 of the first 128 trials at 15 dB slipped before and 14 after, the
+curve reads 0.082 there against 0.168, and the crossing moved from 17.3 to
+17.2 dB. From 18 to 22 dB it reads 1 to 6 percent more bits wrong.
+
+WHAT THE THREE PARAGRAPHS ABOVE USED TO SAY: "SITOR-B loses whole
+transmissions. At 0, +1 and +2 dB, 2, 4 and 2 of 1024 transmissions of 100
+characters printed none of their 102 characters ... Why has not been
+established"; "QPSK31 either acquires or prints nothing ... All or nothing per
+transmission points at the acquisition rather than the Viterbi decoder; that
+has not been confirmed"; and "D-STAR's bit error rate varies a lot from
+transmission to transmission ... A trial whose bits slip after the alignment
+is scored half wrong from there, as RDS's are, which is the likely spread and
+has not been confirmed".
 
 **TETRA's last burst is never found.** Before its subject sent one burst past
 the payload, every trial lost exactly one of 24, at any SNR, and the curve
@@ -181,13 +216,26 @@ the 24 its comment said; `docs/retired-claims.txt` has the correction.
 **P25 is not error free at 26 dB.** 4 to 40 bits in 1.5 million from 23 to
 26 dB, where D-STAR and TETRA reach zero by 23 and 24. Not examined.
 
-**POCSAG at 1200 bit/s keeps losing a page in a thousand at 10 and 11 dB**, 4
-and 3 of 4096, before none from 12 dB. At 512 and 2400 bit/s the fall is
-clean. Not examined.
+**POCSAG lost pages to the discriminator's clicks.** At 1200 bit/s 4 and 3
+pages of 4096 were lost at 10 and 11 dB. Of those 7, 5 had a message code
+word with three or more bits wrong and 2 an address with two, which the
+address correction budget of one refuses; the errors came in bursts, and the
+bursts were clicks. The budget and the rule holding unconfirmed batches were
+not the cause, and no rule the clauses back takes the two addresses without
+taking back what the budget refuses. `core/decode/fsk.h`'s level
+discriminator now limits its input, commit "Limit FM discriminator clicks
+before POCSAG's level discriminator", and nothing is lost from 10 dB at 1200
+bit/s. The crossings moved by 0.6 to 0.9 dB at all three rates. False pages
+stay where the budget put them: none in 40 hours of noise, and at 1200 bit/s
+1, 5 and 1 in 240 pages sent at 6, 5 and 4 dB.
+
+WHAT THE PARAGRAPH ABOVE USED TO SAY: "POCSAG at 1200 bit/s keeps losing a
+page in a thousand at 10 and 11 dB ... Not examined." And the one below
+compared "POCSAG 0.49 at 8 dB against 0.475 over 40 pages".
 
 The rest agree with their tests within counting error: RTTY 0.0077 at -5 dB
 against the test's 0.0033 over 300 characters, AX.25 0.036 at 10 dB against
-0.05 over 60 frames, POCSAG 0.49 at 8 dB against 0.475 over 40 pages, NAVTEX
+0.05 over 60 frames, POCSAG 0.10 at 8 dB against 0.10 over 40 pages, NAVTEX
 0.86 lost at -5 dB against eight of ten, PSK31 0.032 at -10 dB against 0.023,
 and
 M17's crossing at 17.0 dB, which is 11.4 dB in 9 kHz against the test's 0.01

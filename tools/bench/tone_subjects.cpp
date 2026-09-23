@@ -196,9 +196,12 @@ ModeSubject cw() {
 
 Expected<ModeSubject> make_tone_subject(std::string_view mode) {
     // QPSK31 at 256 trials rather than 512 because its Viterbi decoder makes
-    // a failing trial several times dearer than a BPSK one, and its curve
-    // falls from all lost to 0.01 in 2 dB, so the extra trials would buy
-    // little where they cost most.
+    // a failing trial several times dearer than a BPSK one, and the extra
+    // trials would buy little where they cost most. WHAT THIS USED TO SAY:
+    // "its curve falls from all lost to 0.01 in 2 dB". That was acquisition
+    // failing on the idle preamble; since "Acquire PSK31 on its idle's two
+    // tones when the squared line falls short" it falls from 0.35 at -14 dB
+    // to 0.014 at -10.
     if (mode == "psk31") {
         return psk(decode::Psk31Mode::Bpsk31, mode, "bpsk31", -15.0, -3.0, 512);
     }
