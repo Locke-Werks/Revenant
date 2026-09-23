@@ -6,6 +6,7 @@
 #include <cmath>
 #include <format>
 #include <numbers>
+#include <span>
 
 #include "core/decode/dv_codes.h"
 
@@ -31,6 +32,14 @@ constexpr std::size_t kLichEncodedBits = 96;                          // 2.8.1
 // would do; 32 is enough that the calibration's own noise is well under the
 // channel's at the signal to noise ratios this decodes at.
 constexpr std::size_t kPreambleCalibrationSymbols = 32;
+
+// Symbols of the 1.4.1 preamble that must stand in front of an LSF or BERT
+// burst for it to start a transmission. NOT A SPECIFIED VALUE: any number up
+// to 192 is what the preamble is. Inside the preamble the LSF burst is three
+// symbols from the alternating pattern, so eight preamble symbols and the
+// burst make 16 that a window over noise has to get right; 32 and the burst
+// make 40, which noise does not.
+constexpr std::size_t kAcquisitionPreambleSymbols = 32;
 
 // Share of each frame's calibration taken into the running one.
 constexpr double kCalibrationLeak = 0.25;
@@ -554,6 +563,7 @@ void M17::reset() {
     in_transmission_ = false;
     inverted_ = false;
     have_lsf_ = false;
+    mode_ = Mode::Unknown;
     calibrated_ = false;
     gain_ = 1.0;
     level_offset_ = 0.0;
@@ -712,14 +722,29 @@ void M17::search(std::vector<M17Frame>& out) {
             if (cursor_ + kM17FrameSymbols + 2 > symbols_.size()) {
                 return;
             }
-            const std::uint16_t words[] = {kM17SyncStream, kM17SyncPacket, kM17SyncBert,
-                                           kM17EotWord};
+            // Clause 2.4: only the bursts this transmission's mode allows.
+            // BERT follows only a preamble or BERT, and stream and packet
+            // bursts do not mix. The end marker can come after any of them.
+            std::array<std::uint16_t, 3> words{};
+            std::size_t count = 0;
+            if (mode_ == Mode::Bert) {
+                words[count++] = kM17SyncBert;
+            } else {
+                if (mode_ != Mode::Packet) {
+                    words[count++] = kM17SyncStream;
+                }
+                if (mode_ != Mode::Stream) {
+                    words[count++] = kM17SyncPacket;
+                }
+            }
+            words[count++] = kM17EotWord;
+
             double best = -1.0;
             std::size_t best_offset = cursor_;
             std::uint16_t best_word = kM17SyncStream;
             const std::size_t first = cursor_ > 0 ? cursor_ - 1 : cursor_;
             for (std::size_t offset = first; offset <= cursor_ + 1; ++offset) {
-                for (const std::uint16_t word : words) {
+                for (const std::uint16_t word : std::span(words).first(count)) {
                     const double score = score_at(offset, word) * (inverted_ ? -1.0 : 1.0);
                     if (score > best) {
                         best = score;
@@ -746,9 +771,12 @@ void M17::search(std::vector<M17Frame>& out) {
             }
             if (best_word == kM17SyncStream) {
                 decode_stream(best_offset, frame);
+                mode_ = Mode::Stream;
+            } else if (best_word == kM17SyncPacket) {
+                frame.kind = M17FrameKind::Packet;
+                mode_ = Mode::Packet;
             } else {
-                frame.kind = (best_word == kM17SyncPacket) ? M17FrameKind::Packet
-                                                           : M17FrameKind::Bert;
+                frame.kind = M17FrameKind::Bert;
             }
             out.push_back(std::move(frame));
             cursor_ = best_offset + kM17FrameSymbols;
@@ -759,46 +787,104 @@ void M17::search(std::vector<M17Frame>& out) {
         bool started = false;
         while (cursor_ + 2 * kM17FrameSymbols + kM17SyncSymbols <= symbols_.size()) {
             const std::size_t p = cursor_;
+            // 1.4.1 and Table 2.3: an LSF or a BERT burst follows the
+            // preamble, which alternates and ends opposite the burst's first
+            // symbol, +3, -3 for an LSF and -3, +3 for BERT. 32 of its 192
+            // symbols are checked, to the burst's own threshold.
+            //
+            // WHAT THIS USED TO SAY, until 2026-09-23: "Checking eight of
+            // them is what makes an eight-symbol burst safe to accept on its
+            // own." Eight, against the product of the two scores, started
+            // 1615 LSFs an hour on noise; tests/decode/test_m17_noise.cpp.
+            const std::vector<float> tail = lsf_preamble_tail(kAcquisitionPreambleSymbols);
+            const bool room = p >= kAcquisitionPreambleSymbols;
+            const double preamble =
+                room ? correlation_at(symbols_, tail, p - kAcquisitionPreambleSymbols) : 0.0;
             const double lsf = score_at(p, kM17SyncLsf);
-            if (std::abs(lsf) >= threshold && p >= kM17SyncSymbols) {
-                // 1.4.1: the preamble's last symbols alternate and end
-                // opposite the burst's first. Checking eight of them is what
-                // makes an eight-symbol burst safe to accept on its own.
-                const std::vector<float> tail = lsf_preamble_tail(kM17SyncSymbols);
-                const double preamble = correlation_at(symbols_, tail, p - kM17SyncSymbols);
-                if (preamble * lsf >= threshold * threshold) {
-                    inverted_ = lsf < 0.0;
-                    calibrated_ = false;
-                    M17Frame frame;
-                    frame.kind = M17FrameKind::LinkSetup;
-                    frame.first_sample = positions_[p];
-                    frame.sync_score = std::abs(lsf);
-                    frame.inverted = inverted_;
-                    const std::vector<float> soft = soft_payload(p, inverted_, kM17SyncLsf);
-                    if (auto bytes = m17_decode_lsf(soft); bytes) {
-                        frame.lsf = m17_parse_lsf(*bytes);
-                        have_lsf_ = frame.lsf->crc_valid;
+            // The BERT preamble is the LSF one negated.
+            const double bert = score_at(p, kM17SyncBert);
+            const bool lsf_found = room && std::abs(lsf) >= threshold &&
+                                   std::abs(preamble) >= threshold && lsf * preamble > 0.0;
+            // A BERT burst also needs the next burst, BERT or the end marker,
+            // since clause 2.4 lets BERT follow only a preamble or BERT. Its
+            // preamble and burst sit two symbols from an LSF's three symbols
+            // early, so without the second burst a real LSF at 12 dB was
+            // taken for BERT; tests/decode/test_m17_noise.cpp.
+            bool bert_found = room && !lsf_found && std::abs(bert) >= threshold &&
+                              std::abs(preamble) >= threshold && bert * preamble < 0.0;
+            if (bert_found) {
+                const double sign = bert < 0.0 ? -1.0 : 1.0;
+                const double next =
+                    std::max(sign * score_at(p + kM17FrameSymbols, kM17SyncBert),
+                             sign * score_at(p + kM17FrameSymbols, kM17EotWord));
+                bert_found = next >= threshold;
+            }
+            if (lsf_found) {
+                inverted_ = lsf < 0.0;
+                calibrated_ = false;
+                M17Frame frame;
+                frame.kind = M17FrameKind::LinkSetup;
+                frame.first_sample = positions_[p];
+                frame.sync_score = std::abs(lsf);
+                frame.inverted = inverted_;
+                const std::vector<float> soft = soft_payload(p, inverted_, kM17SyncLsf);
+                mode_ = Mode::Unknown;
+                if (auto bytes = m17_decode_lsf(soft); bytes) {
+                    frame.lsf = m17_parse_lsf(*bytes);
+                    have_lsf_ = frame.lsf->crc_valid;
+                    if (have_lsf_) {
+                        // Table 3.3, TYPE bit 0: which mode the frames after
+                        // this one are in.
+                        mode_ = frame.lsf->type.stream ? Mode::Stream : Mode::Packet;
                     }
-                    chunk_mask_ = 0;
-                    out.push_back(std::move(frame));
-                    in_transmission_ = true;
-                    cursor_ = p + kM17FrameSymbols;
-                    started = true;
-                    break;
                 }
+                chunk_mask_ = 0;
+                out.push_back(std::move(frame));
+                in_transmission_ = true;
+                cursor_ = p + kM17FrameSymbols;
+                started = true;
+                break;
+            }
+            if (bert_found) {
+                inverted_ = bert < 0.0;
+                have_lsf_ = false;
+                chunk_mask_ = 0;
+                mode_ = Mode::Bert;
+                in_transmission_ = true;
+                started = true;
+                break;
             }
             const double stream = score_at(p, kM17SyncStream);
             if (std::abs(stream) >= threshold) {
-                // A late join: no LSF, so the evidence is a second burst a
-                // frame later, a stream burst or the end marker.
+                // A late join: no LSF, so the evidence is a second stream
+                // burst a frame on, where 2.1 puts it, and the two frames'
+                // Frame Numbers one apart, since the FN "increments every
+                // frame" (the paragraph under Table 2.10). A second burst on
+                // its own is what this used to ask, and noise found one often
+                // enough to start a false transmission several times a
+                // minute; a pair of 15-bit numbers out of the Viterbi decoder
+                // that also count by one is one chance in 32768 on noise.
                 const double sign = stream < 0.0 ? -1.0 : 1.0;
-                const double next = std::max(sign * score_at(p + kM17FrameSymbols, kM17SyncStream),
-                                             sign * score_at(p + kM17FrameSymbols, kM17EotWord));
+                const double next = sign * score_at(p + kM17FrameSymbols, kM17SyncStream);
+                bool counted = false;
                 if (next >= threshold) {
+                    const bool inverted = stream < 0.0;
+                    auto first = m17_decode_stream_frame(
+                        soft_payload(p, inverted, kM17SyncStream));
+                    auto second = m17_decode_stream_frame(
+                        soft_payload(p + kM17FrameSymbols, inverted, kM17SyncStream));
+                    // The trial decodes leave their calibration behind, and
+                    // the transmission, if there is one, starts its own.
+                    calibrated_ = false;
+                    counted = first && second && !first->last &&
+                              ((first->frame_number + 1U) & 0x7FFFU) == second->frame_number;
+                }
+                if (counted) {
                     inverted_ = stream < 0.0;
                     calibrated_ = false;
                     have_lsf_ = false;
                     chunk_mask_ = 0;
+                    mode_ = Mode::Stream;
                     in_transmission_ = true;
                     started = true;
                     break;

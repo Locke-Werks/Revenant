@@ -317,14 +317,35 @@ struct M17Config {
     // Normalised correlation a sync burst must reach to start a transmission.
     // NOT A SPECIFIED VALUE. The bursts are eight outer symbols, so one
     // symbol wrong costs 0.25 of correlation: 0.8 admits no wrong symbol and
-    // some noise on the rest, and the preamble check that goes with an LSF
-    // burst, or a second burst 192 symbols on for a stream joined late, is
-    // what keeps a chance match in the payload from starting anything.
+    // some noise on the rest. The preamble that must stand in front of an LSF
+    // or BERT burst, checked over 32 of its 1.4.1 192 symbols to the same
+    // threshold, or for a stream joined late a second stream burst a frame on
+    // whose Frame Number is one more than the first's, is what keeps a chance
+    // match in noise or in the payload from starting anything.
+    //
+    // WHAT THIS USED TO SAY, until 2026-09-23: "the preamble check that goes
+    // with an LSF burst, or a second burst 192 symbols on for a stream joined
+    // late, is what keeps a chance match in the payload from starting
+    // anything." The preamble check was eight symbols, and on noise alone the
+    // two together started 1615 LSFs an hour and let 9808 frames through;
+    // tests/decode/test_m17_noise.cpp.
     double sync_threshold = 0.8;
 
     // The same, for a burst where an ongoing transmission says one is due.
     // Lower, because its position is already known and only its kind is
-    // being read. NOT A SPECIFIED VALUE.
+    // being read, and stated from Table 2.3's distances. Clause 2.4 lets a
+    // transmission started by an LSF carry stream or packet bursts, one mode
+    // to a transmission, then the end marker; one started on BERT, BERT
+    // bursts and the end marker. Among stream, packet and the 1.4.5 end
+    // marker the nearest two differ in four of eight symbols and correlate at
+    // 0, so 0.5 is halfway from a perfect match to the nearest other word.
+    // Until 2026-09-23 BERT was a candidate after an LSF too, and BERT is two
+    // symbols from a stream burst, correlating at 0.5 with it: this threshold
+    // then separated nothing, and noise kept a false transmission going on
+    // BERT and packet bursts. 0.625, between one and two wrong symbols, was
+    // measured as well, before the late join asked for counting Frame
+    // Numbers: on noise it gave 29 frames an hour against 31, and at 10 dB it
+    // lost 7 more of 600 stream payloads.
     double tracking_threshold = 0.5;
 };
 
@@ -371,6 +392,12 @@ class M17 {
     bool in_transmission_ = false;
     bool inverted_ = false;
     bool have_lsf_ = false;
+
+    // Which bursts clause 2.4 lets the transmission in hand carry: Unknown
+    // after an LSF whose CRC failed, until its first stream or packet burst
+    // says.
+    enum class Mode : std::uint8_t { Unknown, Stream, Packet, Bert };
+    Mode mode_ = Mode::Unknown;
 
     // Running symbol level calibration within a transmission: the gain that
     // puts the outer levels at +/-3 and the offset a carrier error leaves.

@@ -931,3 +931,12 @@ commit: "Refuse POCSAG addresses past one correction and unconfirmed batches"
 instead: 0.475 of the pages are lost at 8 dB in 2500 Hz since an address
     codeword is refused past one corrected bit; the false pages that buys are
     in tests/decode/test_pocsag_false_pages.cpp.
+
+phrase: Checking eight of them is what makes an eight-symbol burst safe to accept on its own
+phrase: or a second burst 192 symbols on for a stream joined late
+retired: 2026-09-23
+commit: "Refuse M17 syncs that noise finds, by the preamble and clause 2.4"
+instead: Eight preamble symbols and a second burst let noise alone start 1615
+    LSFs and pass 9808 frames an hour. M17 now checks 32 preamble symbols,
+    tracks only the bursts clause 2.4 lets a transmission carry, and joins a
+    stream late only on two frames whose Frame Numbers count by one.
