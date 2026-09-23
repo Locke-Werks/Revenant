@@ -119,6 +119,7 @@ add_executable(revenant_decode_tests
     test_ax25.cpp
     test_dstar.cpp
     test_imbe.cpp
+    test_navtex.cpp
     test_p25p1.cpp
     test_p25p1_voice.cpp
     test_pocsag.cpp
