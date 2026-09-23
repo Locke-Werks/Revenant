@@ -13,6 +13,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 RowLayout {
     Layout.fillWidth: true

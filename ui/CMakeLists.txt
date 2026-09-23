@@ -202,6 +202,12 @@ qt_add_qml_module(revenant_ui
         qml/RdsPane.qml
         qml/AudioPane.qml
         qml/ClickReadout.qml
+        qml/controls/RButton.qml
+        qml/controls/RCheckBox.qml
+        qml/controls/RComboBox.qml
+        qml/controls/RSegmented.qml
+        qml/controls/RSlider.qml
+        qml/controls/RTextField.qml
 )
 
 # qmlcachegen's output, which compiles each QML file to C++ and is ours no more

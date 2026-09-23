@@ -17,6 +17,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 RowLayout {
     Layout.fillWidth: true
@@ -30,7 +31,7 @@ RowLayout {
         font.bold: true
     }
 
-    TextField {
+    RTextField {
         id: bookmarkName
 
         Layout.preferredWidth: 130

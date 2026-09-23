@@ -36,6 +36,7 @@
 #include <string>
 #include <string_view>
 
+#include <QFont>
 #include <QGuiApplication>
 #include <QObject>
 #include <QQmlApplicationEngine>
@@ -103,6 +104,26 @@ int main(int argc, char* argv[])
     // customised at all, and every colour here is tied to the colour map the
     // spectrum draws with.
     QQuickStyle::setStyle(QStringLiteral("Basic"));
+
+    // Segoe UI Variable, which ships with Windows 11 and is the one family
+    // the interface is drawn in. Set on the application rather than per
+    // control so a Text with no font of its own gets it too, and qml/Theme.qml
+    // names the same family for the controls that set one.
+    //
+    // A LIST AND NOT ONE NAME. With the single name, the QML text resolved it
+    // and the detection labels, which render/spectrum_item.cpp paints through
+    // QPainter from this same application font, came out in a serif: the
+    // painter's lookup did not find the variable font's instance name and
+    // fell back to the GDI default rather than to anything sans. Plain Segoe
+    // UI second means a lookup that misses the first lands on the older cut
+    // of the same design.
+    {
+        QFont interface_font;
+        interface_font.setFamilies(
+            {QStringLiteral("Segoe UI Variable Text"), QStringLiteral("Segoe UI")});
+        interface_font.setPixelSize(12);
+        QGuiApplication::setFont(interface_font);
+    }
 
     // WHERE THE ENGINE WAS LAST TIME, UNDER WHAT ARGV SAYS AND OVER THE
     // COMPILED DEFAULT.

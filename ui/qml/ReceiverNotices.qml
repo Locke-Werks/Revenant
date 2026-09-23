@@ -4,6 +4,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 ColumnLayout {
     Layout.fillWidth: true

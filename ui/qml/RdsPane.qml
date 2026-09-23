@@ -25,6 +25,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 ColumnLayout {
     Layout.fillWidth: true
@@ -54,27 +55,12 @@ ColumnLayout {
         // decide the region, because the US call sign range
         // collides with European country codes, and getting it
         // wrong is silent. So it is two words the operator picks,
-        // and the one in force is the bold one.
-        Repeater {
-            model: ["rds", "rbds"]
-
-            Label {
-                required property string modelData
-
-                visible: engineLink.rdsWanted
-                text: modelData
-                color: engineLink.rdsRegion === modelData
-                       ? Theme.inkTune : Theme.inkDim
-                font.pixelSize: Theme.sizeBody
-                font.bold: engineLink.rdsRegion === modelData
-
-                MouseArea {
-                    anchors.fill: parent
-                    anchors.margins: -3
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: engineLink.rdsRegion = parent.modelData
-                }
-            }
+        // and the one in force is the filled one.
+        RSegmented {
+            visible: engineLink.rdsWanted
+            options: ["rds", "rbds"]
+            current: engineLink.rdsRegion
+            onPicked: (region) => engineLink.rdsRegion = region
         }
 
         // The station, which is the whole point and is only shown

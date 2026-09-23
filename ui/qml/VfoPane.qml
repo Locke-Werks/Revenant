@@ -14,6 +14,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 ColumnLayout {
     Layout.fillWidth: true
@@ -43,25 +44,11 @@ ColumnLayout {
         // underneath, because the demodulator is the stage; the
         // pane keeps its identity across that and the operator sees
         // a mode change.
-        Repeater {
-            model: ["am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw"]
-
-            Label {
-                required property string modelData
-
-                text: modelData
-                color: engineLink.receiverDemod === modelData
-                       ? Theme.inkTune : Theme.inkDim
-                font.pixelSize: Theme.sizeBody
-                font.bold: engineLink.receiverDemod === modelData
-
-                MouseArea {
-                    anchors.fill: parent
-                    anchors.margins: -3
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: engineLink.setReceiverDemod(parent.modelData)
-                }
-            }
+        RSegmented {
+            options: ["am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw"]
+            current: engineLink.receiverDemod
+            tint: Theme.receiverColours[0]
+            onPicked: (mode) => engineLink.setReceiverDemod(mode)
         }
 
         Item { Layout.fillWidth: true }

@@ -26,6 +26,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 RowLayout {
     Layout.fillWidth: true
@@ -62,7 +63,7 @@ RowLayout {
         elide: Text.ElideRight
     }
 
-    Slider {
+    RSlider {
         id: confidenceSlider
 
         Layout.preferredWidth: 120
@@ -243,7 +244,7 @@ RowLayout {
         elide: Text.ElideRight
     }
 
-    Slider {
+    RSlider {
         id: marginSlider
 
         Layout.preferredWidth: 120
@@ -309,7 +310,7 @@ RowLayout {
     // stays the value in force. When those two part company the row
     // says so rather than moving the handle out from under whoever
     // is holding it.
-    Slider {
+    RSlider {
         id: thresholdSlider
 
         Layout.preferredWidth: 120

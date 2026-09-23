@@ -21,6 +21,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 ColumnLayout {
     Layout.fillWidth: true
@@ -106,7 +107,7 @@ ColumnLayout {
             elide: Text.ElideRight
         }
 
-        Button {
+        RButton {
             text: sourceRow.open ? "hide" : "change radio"
             font.pixelSize: Theme.sizeBody
             onClicked: {
@@ -123,7 +124,7 @@ ColumnLayout {
             }
         }
 
-        Button {
+        RButton {
             text: "close source"
             font.pixelSize: Theme.sizeBody
             enabled: engineLink.sourceOpen
@@ -155,7 +156,7 @@ ColumnLayout {
                 font.bold: true
             }
 
-            Slider {
+            RSlider {
                 id: gainSlider
                 Layout.preferredWidth: 140
                 from: 0.0
@@ -358,7 +359,7 @@ ColumnLayout {
                 font.pixelSize: Theme.sizeBody
             }
 
-            TextField {
+            RTextField {
                 id: sourceFreqField
 
                 visible: !!sourceSettings.row && sourceSettings.row.tunable
@@ -374,7 +375,7 @@ ColumnLayout {
                 font.pixelSize: Theme.sizeBody
             }
 
-            TextField {
+            RTextField {
                 id: sourceRateField
 
                 Layout.preferredWidth: 110
@@ -405,7 +406,7 @@ ColumnLayout {
             // 2026-09-20 that put three intermodulation products in the
             // detector's track list at confidence 1.00; README.md carries
             // the measurement and the 5.7 dB it cost the wanted station.
-            TextField {
+            RTextField {
                 id: sourceGainField
 
                 visible: !!sourceSettings.row
@@ -417,7 +418,7 @@ ColumnLayout {
                 selectByMouse: true
             }
 
-            CheckBox {
+            RCheckBox {
                 id: sourceGainAuto
 
                 visible: !!sourceSettings.row
@@ -448,7 +449,7 @@ ColumnLayout {
                 elide: Text.ElideMiddle
             }
 
-            Button {
+            RButton {
                 text: "open"
                 font.pixelSize: Theme.sizeBody
 

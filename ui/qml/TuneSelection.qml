@@ -14,6 +14,7 @@
 // owner named.
 
 import QtQuick
+import Revenant
 
 QtObject {
     id: selection

@@ -7,6 +7,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 ColumnLayout {
     Layout.fillWidth: true
@@ -76,7 +77,7 @@ ColumnLayout {
             font.bold: true
         }
 
-        TextField {
+        RTextField {
             id: tuneField
 
             Layout.preferredWidth: 150

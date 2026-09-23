@@ -2,6 +2,7 @@
 
 import QtQuick
 import QtQuick.Controls
+import Revenant
 
 Rectangle {
     property alias text: plateText.text

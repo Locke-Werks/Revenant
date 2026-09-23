@@ -20,6 +20,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import Revenant
 
 ColumnLayout {
     Layout.fillWidth: true
@@ -91,7 +92,7 @@ ColumnLayout {
             }
         }
 
-        Slider {
+        RSlider {
             id: volumeSlider
 
             Layout.preferredWidth: 110
@@ -122,7 +123,7 @@ ColumnLayout {
             font.pixelSize: Theme.sizeBody
         }
 
-        ComboBox {
+        RComboBox {
             id: deviceBox
 
             Layout.preferredWidth: 220
