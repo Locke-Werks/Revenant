@@ -629,6 +629,16 @@ bool EngineLink::attempt_connect()
     // sentence about a source that is no longer there.
     posted_pacing_ = {};
 
+    // THE EPOCH THIS CONNECTION OPENED ON, taken from the EngineInfo it opened
+    // with rather than left for the first pacing poll to find. An open posted
+    // before the connection existed, which --open-recording is, is applied on
+    // the first pass, and that pass's poll then saw the NEW epoch as its first
+    // sighting and treated it as nothing having changed: the subscription made
+    // below belonged to the closed source, and the window drew nothing for the
+    // recording. Taken whole, zero included: zero is an engine that has never
+    // had a source, which note_source_epoch already reads as nothing seen.
+    seen_source_epoch_ = info->source_epoch;
+
     // An engine built with no spectrum stage is the default and is what a
     // headless recording runs. Connecting to one is not a failure, so the
     // window comes up, says the spectrum is off, and skips the subscription
