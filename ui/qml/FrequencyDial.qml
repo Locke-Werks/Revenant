@@ -162,13 +162,14 @@ Item {
                                 dial.activeDigit = -1
                         }
                         onClicked: dial.edit()
+                        // The direction and the carry are
+                        // UiRules.dialWheel's, so this dial turns the way
+                        // the span displays do.
                         onWheel: (wheel) => {
-                            dial.wheelCarry += wheel.angleDelta.y
-                            const notches = dial.wheelCarry > 0
-                                            ? Math.floor(dial.wheelCarry / 120)
-                                            : Math.ceil(dial.wheelCarry / 120)
-                            dial.wheelCarry -= notches * 120
-                            dial.step(cell.place, notches)
+                            const turn = UiRules.dialWheel(dial.wheelCarry, wheel.angleDelta.x,
+                                                           wheel.angleDelta.y)
+                            dial.wheelCarry = turn.carry
+                            dial.step(cell.place, turn.notches)
                         }
                     }
                 }

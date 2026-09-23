@@ -154,8 +154,24 @@ struct ScrollTunePlan {
     ScrollTuneState state;
 };
 
+// Which way a turn of the wheel tunes: -1 puts a wheel rolled away from the
+// operator, a positive angleDelta, DOWN in frequency, and a roll towards them
+// up. Every tuning wheel in the client takes its direction from here: the
+// spectrum, the waterfall and the ruler moving the front end, the passband
+// pane moving the receiver, and a frequency dial's digit, so none of them can
+// turn the other way from the rest.
+//
+// The owner's call on 2026-09-23, from using the app on the RTL-SDR, and the
+// reverse of what shipped until then.
+//
+// It inverts the horizontal fallback with the vertical. Qt reports a tilt or
+// a swipe to the left as a positive angleDelta.x, so under this sign a
+// leftward gesture tunes down, towards the low end of a span drawn low on the
+// left. Before it, a leftward tilt tuned up.
+inline constexpr double kWheelTuneDirection = -1.0;
+
 // QWheelEvent::angleDelta resolved to one signed number, positive for up in
-// frequency.
+// frequency, with kWheelTuneDirection applied.
 //
 // VERTICAL FIRST AND HORIZONTAL AS A FALLBACK, never the sum. A tilt wheel and
 // a two-finger swipe both belong on this gesture, and a touchpad delivers a
@@ -163,7 +179,7 @@ struct ScrollTunePlan {
 // is mostly vertical tune further than it looks.
 [[nodiscard]] inline double scroll_tune_eighths(double delta_x, double delta_y)
 {
-    return delta_y != 0.0 ? delta_y : delta_x;
+    return kWheelTuneDirection * (delta_y != 0.0 ? delta_y : delta_x);
 }
 
 // Whether this wheel event tunes, and where to.

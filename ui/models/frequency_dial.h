@@ -30,6 +30,8 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "models/scroll_tune.h"
+
 namespace revenant::ui {
 
 // Twelve digits reach 999.999999999 GHz, which is past anything a front end
@@ -120,6 +122,32 @@ struct DialStep {
         out.clamped = held != out.hz;
         out.hz = held;
     }
+    return out;
+}
+
+// What one wheel event over a digit does: whole notches to step it by, and
+// the travel left over for the next event.
+struct DialWheel {
+    int notches = 0;
+    double carry_eighths = 0.0;
+};
+
+// The wheel turns a digit the way it turns everything else that tunes, which
+// is scroll_tune_eighths in models/scroll_tune.h: a wheel rolled away from the
+// operator steps the digit down. The dial used to read angleDelta.y raw in
+// its QML, so it would have kept the old direction on its own when the span
+// displays were turned round; resolving it here is what keeps the two
+// together.
+//
+// A touchpad's fraction of a notch is carried, and a notch is counted towards
+// zero, so travel the other way first cancels what is carried before it
+// steps anything.
+[[nodiscard]] inline DialWheel dial_wheel(double carry_eighths, double delta_x, double delta_y)
+{
+    DialWheel out;
+    const double travel = carry_eighths + scroll_tune_eighths(delta_x, delta_y);
+    out.notches = static_cast<int>(travel / kWheelNotchEighths);
+    out.carry_eighths = travel - static_cast<double>(out.notches) * kWheelNotchEighths;
     return out;
 }
 

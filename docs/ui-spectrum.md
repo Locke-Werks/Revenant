@@ -44,7 +44,8 @@ remember where they were, and the top bar's
 
 A frequency dial steps one digit per wheel notch, with carry and borrow, and
 stops at the source's tuning limits; `ui/models/frequency_dial.h` has the
-arithmetic. The bands are `ui/models/band_plan.h`, which cites the band plans
+arithmetic. A wheel rolled away from the operator steps the digit down, the
+way it tunes everything else; see "Which way" under the scroll section. The bands are `ui/models/band_plan.h`, which cites the band plans
 its edges came from.
 
 ## Keys
@@ -517,6 +518,19 @@ uses and the one measured continuous across a change.
 Over the wide display, it moves the radio. That is `Source::tune`, and it is
 a different kind of operation with three consequences the fine case does not
 have.
+
+**Which way.** A wheel rolled away from the operator tunes down and one
+rolled towards them tunes up, on the spectrum, the waterfall and the ruler
+moving the radio, on the passband pane moving the receiver, and on a
+frequency dial's digit. A tilt or a swipe to the left tunes down, towards the
+low end drawn on the left. The owner found the opposite backwards on the
+RTL-SDR and turned it round on 2026-09-23. The direction is one constant,
+`kWheelTuneDirection` in `ui/models/scroll_tune.h`, and every one of those
+wheels resolves its angle through `scroll_tune_eighths` beside it, the dial by
+way of `dial_wheel` in `ui/models/frequency_dial.h`; until then the dial read
+the raw angle in its QML, and would have gone on turning the old way on its
+own. `ui/tests/test_scroll_tune.cpp`, `test_receiver_scroll.cpp` and
+`test_frequency_dial.cpp` each drive the raw angle through to a frequency.
 
 **Both the surface and the gesture exist now.** `Engine` exposes
 `set_source_center`, which tunes the front end and writes the landed centre

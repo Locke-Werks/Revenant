@@ -66,6 +66,16 @@ public:
         return step_dial(to_hz(hz), digit, notches, limits(low, high)).clamped;
     }
 
+    // One wheel event over a digit: {notches, carry}, the whole notches to
+    // step it by and the travel to hand back on the next event.
+    [[nodiscard]] Q_INVOKABLE QVariantMap dialWheel(double carry, double delta_x,
+                                                    double delta_y) const
+    {
+        const DialWheel turn = dial_wheel(carry, delta_x, delta_y);
+        return QVariantMap{{QStringLiteral("notches"), turn.notches},
+                           {QStringLiteral("carry"), turn.carry_eighths}};
+    }
+
     [[nodiscard]] Q_INVOKABLE int dialDigitCount(double hz, double low, double high) const
     {
         return dial_digit_count(to_hz(hz), limits(low, high));

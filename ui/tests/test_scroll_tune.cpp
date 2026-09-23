@@ -66,16 +66,42 @@ constexpr double kStep = kSpan * kScrollTuneSpanFraction;
 // depends on how straight the operator's finger was.
 TEST_CASE("the wheel resolves to one number, vertical first")
 {
-    CHECK(scroll_tune_eighths(0.0, 120.0) == Approx(120.0));
-    CHECK(scroll_tune_eighths(120.0, 0.0) == Approx(120.0));
+    CHECK(scroll_tune_eighths(0.0, 120.0) == Approx(-120.0));
+    CHECK(scroll_tune_eighths(120.0, 0.0) == Approx(-120.0));
 
     // Both axes present. The vertical one is the answer and the horizontal one
     // is discarded rather than added to it.
-    CHECK(scroll_tune_eighths(40.0, 120.0) == Approx(120.0));
+    CHECK(scroll_tune_eighths(40.0, 120.0) == Approx(-120.0));
 
     // Sign survives, because scrolling back is how an overshoot is corrected.
-    CHECK(scroll_tune_eighths(0.0, -120.0) == Approx(-120.0));
+    CHECK(scroll_tune_eighths(0.0, -120.0) == Approx(120.0));
     CHECK(scroll_tune_eighths(0.0, 0.0) == Approx(0.0));
+}
+
+// Rejects the direction that shipped until 2026-09-23, which the owner found
+// backwards on the RTL-SDR: a wheel rolled away from the operator, a positive
+// angleDelta.y, tuned the front end up. It tunes down now, and a roll towards
+// the operator tunes up. The plan is driven from the raw wheel angle, as a
+// display's wheelEvent drives it, so a direction flipped anywhere between the
+// event and the tune fails here.
+TEST_CASE("a wheel rolled away from the operator tunes down")
+{
+    const ScrollTunePlan away =
+        plan_scroll_tune(ScrollTuneState{}, wheel(scroll_tune_eighths(0.0, 120.0), 0.0));
+    REQUIRE(away.tune);
+    CHECK(away.center_hz == Approx(kCentre - kStep));
+
+    const ScrollTunePlan towards =
+        plan_scroll_tune(ScrollTuneState{}, wheel(scroll_tune_eighths(0.0, -120.0), 0.0));
+    REQUIRE(towards.tune);
+    CHECK(towards.center_hz == Approx(kCentre + kStep));
+
+    // A tilt or a swipe to the left is a positive angleDelta.x in Qt, and it
+    // tunes towards the low end, which is drawn on the left.
+    const ScrollTunePlan left =
+        plan_scroll_tune(ScrollTuneState{}, wheel(scroll_tune_eighths(120.0, 0.0), 0.0));
+    REQUIRE(left.tune);
+    CHECK(left.center_hz < kCentre);
 }
 
 // Rejects an interval imposed on the first notch as well as on the ones after

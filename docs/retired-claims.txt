@@ -1416,3 +1416,10 @@ commit: "Bring the README's status up to what the engine and client do now"
 instead: The decoders arrived during M2. M4 and beyond is the rolling capture,
     search over it, more than one radio, and what docs/modes.md lists as not
     done.
+
+phrase: down the wheel is down in frequency
+retired: 2026-09-23
+commit: "Turn every tuning wheel round, the dials with the span"
+instead: A wheel rolled away from the operator tunes down and one rolled
+    towards them tunes up, on the span, the passband pane and every dial.
+    kWheelTuneDirection in ui/models/scroll_tune.h is the one place it is set.

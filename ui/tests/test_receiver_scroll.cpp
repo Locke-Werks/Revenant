@@ -12,6 +12,7 @@ using revenant::ui::kReceiverScrollSettleMs;
 using revenant::ui::kWheelNotchEighths;
 using revenant::ui::plan_receiver_scroll;
 using revenant::ui::receiver_scroll_step_hz;
+using revenant::ui::scroll_tune_eighths;
 using revenant::ui::ReceiverScrollRequest;
 using revenant::ui::ReceiverScrollState;
 
@@ -53,10 +54,34 @@ TEST_CASE("the first notch moves the receiver at once", "[receiverscroll]")
     CHECK(plan.wait_ms == 0.0);
 }
 
-TEST_CASE("down the wheel is down in frequency", "[receiverscroll]")
+// The plan takes the angle already resolved by scroll_tune_eighths, where
+// negative is down in frequency.
+//
+// WHAT THIS CASE'S NAME USED TO SAY: "down the wheel is down in frequency". It
+// fed the plan a resolved angle and never a wheel, and since 2026-09-23 a
+// wheel rolled towards the operator, which is the down the name meant, tunes
+// up. The case below drives the raw wheel.
+TEST_CASE("a negative resolved angle moves the receiver down", "[receiverscroll]")
 {
     const auto plan = plan_receiver_scroll({}, notch(-2 * kWheelNotchEighths, 1000.0));
     CHECK(plan.centre_hz == 98'099'600.0);
+}
+
+// Rejects a passband pane that turns the other way from the span. It resolves
+// the wheel through the same scroll_tune_eighths the spectrum, the waterfall
+// and the ruler do, so a wheel rolled away from the operator moves the
+// receiver down, the way it moves the front end down over the span.
+TEST_CASE("the passband pane's wheel turns the way the span's does", "[receiverscroll]")
+{
+    const auto away =
+        plan_receiver_scroll({}, notch(scroll_tune_eighths(0.0, kWheelNotchEighths), 1000.0));
+    REQUIRE(away.tune);
+    CHECK(away.centre_hz == 98'099'800.0);
+
+    const auto towards =
+        plan_receiver_scroll({}, notch(scroll_tune_eighths(0.0, -kWheelNotchEighths), 1000.0));
+    REQUIRE(towards.tune);
+    CHECK(towards.centre_hz == 98'100'200.0);
 }
 
 // Rejects sending every event. A flick delivers a dozen inside the interval,

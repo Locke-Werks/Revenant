@@ -17,8 +17,10 @@ using revenant::ui::dial_digit_count;
 using revenant::ui::dial_place;
 using revenant::ui::dial_separator_after;
 using revenant::ui::dial_significant_digits;
+using revenant::ui::dial_wheel;
 using revenant::ui::DialLimits;
 using revenant::ui::DialSeparator;
+using revenant::ui::DialWheel;
 using revenant::ui::kDialMaxDigits;
 using revenant::ui::kDialMinDigits;
 using revenant::ui::step_dial;
@@ -136,6 +138,43 @@ TEST_CASE("the dial is as wide as the top of the range", "[dial]")
     CHECK(dial_digit_count(7'100'000, kUnknown) == kDialMinDigits);
     CHECK(dial_digit_count(14'100'000, kUnknown) == kDialMinDigits);
     CHECK(dial_digit_count(1'090'000'000, kUnknown) == 10);
+}
+
+// Rejects a dial that reads the wheel's raw angle, which is what its QML did
+// until 2026-09-23: it would have kept stepping a digit up for a wheel rolled
+// away from the operator after the span displays were turned round, and the
+// two would disagree about which way the same hand tunes.
+TEST_CASE("a wheel rolled away from the operator steps the digit down", "[dial]")
+{
+    const DialWheel away = dial_wheel(0.0, 0.0, 120.0);
+    CHECK(away.notches == -1);
+    CHECK(away.carry_eighths == 0.0);
+    CHECK(step_dial(98'100'000, 5, away.notches, kR820t).hz == 98'000'000);
+
+    const DialWheel towards = dial_wheel(0.0, 0.0, -240.0);
+    CHECK(towards.notches == 2);
+    CHECK(step_dial(98'100'000, 5, towards.notches, kR820t).hz == 98'300'000);
+}
+
+// Rejects rounding a touchpad's fraction to a notch, either way: rounding
+// down makes the touchpad do nothing, rounding up makes it fly. The fraction
+// is carried until it adds up, and travel back the other way cancels it
+// first.
+TEST_CASE("a fraction of a notch is carried to the next event", "[dial]")
+{
+    DialWheel turn = dial_wheel(0.0, 0.0, -40.0);
+    CHECK(turn.notches == 0);
+    CHECK(turn.carry_eighths == 40.0);
+
+    turn = dial_wheel(turn.carry_eighths, 0.0, -40.0);
+    CHECK(turn.notches == 0);
+    turn = dial_wheel(turn.carry_eighths, 0.0, -40.0);
+    CHECK(turn.notches == 1);
+    CHECK(turn.carry_eighths == 0.0);
+
+    turn = dial_wheel(80.0, 0.0, 40.0);
+    CHECK(turn.notches == 0);
+    CHECK(turn.carry_eighths == 40.0);
 }
 
 TEST_CASE("the groups are megahertz, kilohertz and hertz", "[dial]")
