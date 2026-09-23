@@ -368,12 +368,20 @@ TEST_CASE("TETRA bit error rate against noise, measured", "[decode][tetra]") {
     // pi/4-DQPSK carries two bits per symbol, so the low point here is at a
     // higher signal to noise than the two binary modes' and the allowance is
     // still looser.
-    // Measured on 2026-09-21: 0 bit errors in 4968 across all 24 bursts at
-    // 30 dB, and at 2 dB a bit error rate of 0.028 across the 18 bursts
-    // whose training sequence still correlated. The six that did not are
-    // the other half of what happens at that level and are reported in the
-    // INFO line rather than folded into the error rate, because a burst
-    // that was never found has no bits to be wrong.
+    // Measured on 2026-09-21: 0 bit errors in 4968 at 30 dB, which is 23
+    // bursts of 216 bits, and at 2 dB a bit error rate of 0.028 across the
+    // 18 bursts whose training sequence still correlated. The last of the 24
+    // is never found at any level: the matched filter's delay and the timing
+    // window take the end of the capture, and nothing follows it. So of the
+    // six missing at 2 dB, five are what happens at that level. They are
+    // reported in the INFO line rather than folded into the error rate,
+    // because a burst that was never found has no bits to be wrong.
+    //
+    // WHAT THIS USED TO SAY, until 2026-09-23: "0 bit errors in 4968 across
+    // all 24 bursts at 30 dB". 4968 is 23 times 216; tools/bench's tetra
+    // subject found the missing burst as a floor of exactly 1/48 on its
+    // curve at every SNR above 25 dB in 2500 Hz, and now sends one burst
+    // past the payload. tests/engine/test_engine_dv.cpp's table has 23 of 24.
     const Point points[] = {{30.0, 0.002}, {2.0, 0.05}};
 
     for (const Point& point : points) {
