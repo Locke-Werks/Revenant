@@ -82,15 +82,18 @@ namespace {
 constexpr std::uint32_t kGridChannels = 4;
 constexpr dsp::SampleRate kFileRate = 288'000;
 
-// THE BLOCK SIZE CHANGES WHAT THE P25 DECODER RECOVERS, which is a property of
-// core/decode/p25p1.cpp and not of the seam, and it is recorded here because
-// this is where it was found. The same capture through the same engine and
-// adapter gave 4 of its 6 headers at 16384-sample blocks and 1 of 6 at 65536,
-// the revenant-cli default, measured 2026-09-22; revenant-cli --decode on the
-// same file agreed with the second figure. P25Phase1::process subtracts each
-// call's mean as its carrier offset, which is one step that depends on how
-// the input is blocked; whether it is the one responsible is not established.
-// 16384 is what these cases run at, and it is not a claim that 16384 is safe.
+// The P25 case below was where the P25 decoder's dependence on its blocking
+// was found. WHAT THIS PARAGRAPH USED TO SAY, until later on 2026-09-22: "THE
+// BLOCK SIZE CHANGES WHAT THE P25 DECODER RECOVERS. The same capture through
+// the same engine and adapter gave 4 of its 6 headers at 16384-sample blocks
+// and 1 of 6 at 65536 ... P25Phase1::process subtracts each call's mean as its
+// carrier offset". It restarted its discriminator and its receive filter at
+// every call as well, and the filter was the larger cost;
+// tests/decode/test_p25p1_blocking.cpp has the three measured apart. With the
+// two carrying their state and the mean gone, the case gives all 6 headers
+// at 16384 and all 6 at 65536, measured on the RTX 4090, and
+// tests/engine/test_engine_dv.cpp holds the fine stage's samples identical
+// across the two.
 constexpr std::uint32_t kBlockSamples = 16'384;
 
 // Where every transmitter and every receiver in this file sits: 5 kHz above
@@ -573,7 +576,7 @@ TEST_CASE("a P25 header crosses the wire as a decoded message", "[gpu][rpc][deco
     }
     INFO(std::format("{} headers among {} messages, {} with a NID the code vouches for",
                      headers, seen.size(), trusted));
-    CHECK(headers >= 4);
+    CHECK(headers == 6);
     CHECK(trusted + 1 >= seen.size());
 
     // The sequence numbers are the decoder's and not the subscription's.

@@ -262,8 +262,10 @@ struct Captured {
     double raw_residual_hz = 0.0;
 };
 
+// `block_samples` overrides wide_config()'s engine block when it is not zero.
 [[nodiscard]] Captured through_engine(std::span<const dsp::Complex32> capture,
-                                      engine::Demod mode, const std::string& tag) {
+                                      engine::Demod mode, const std::string& tag,
+                                      std::uint32_t block_samples = 0) {
     // Unique per run as well as per case. %TEMP% is shared by every build of
     // this tree on the machine, and two runs writing one fixed name is how
     // tests/rpc/test_rpc_rds.cpp's end-to-end case fails when two checkouts
@@ -299,7 +301,11 @@ struct Captured {
     Captured out;
     std::mutex lock;
 
-    auto created = engine::Engine::create(wide_config());
+    engine::EngineConfig config = wide_config();
+    if (block_samples != 0) {
+        config.block_samples = block_samples;
+    }
+    auto created = engine::Engine::create(config);
     INFO(test::message_of(created));
     REQUIRE(created.has_value());
     auto& eng = **created;
@@ -974,4 +980,120 @@ TEST_CASE("TETRA through the engine, the fine stage against the raw tap",
         REQUIRE(fine.locked);
         CHECK(fine.rate() <= point.allowed_bit_error_rate);
     }
+}
+
+TEST_CASE("P25 through the engine decodes the same at 16384 and 65536-sample blocks",
+          "[gpu][engine][dv]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // On 2026-09-22 tests/rpc/test_rpc_decode.cpp's six headers came back four
+    // at a time through 16384-sample engine blocks and one at a time through
+    // 65536. Two things had to hold for that to go away, and this case holds
+    // both, one stage apart. The fine stage hands the receiver the same
+    // samples whatever the engine's block, compared here sample for sample;
+    // and P25Phase1 decodes those samples the same however they are split,
+    // here once whole and once in the pieces the engine delivers them in.
+    //
+    // Measured on the RTX 4090 the day the decoder stopped depending on its
+    // blocking: the two streams are identical, 76095 samples each, and every
+    // one of the four decodes gives five of the six headers, the same five.
+    // The one missing is the first, which starts at the carrier's first
+    // symbol. tests/rpc/test_rpc_decode.cpp's capture, the same six headers
+    // through a 288000 S/s grid, gives all six; why this one loses the first
+    // is not established.
+    std::vector<std::uint8_t> dibits;
+    for (int round = 0; round < 3; ++round) {
+        for (const bool encrypted : {false, true}) {
+            siggen::P25HeaderMessage message;
+            message.network_access_code = 0x293;
+            decode::P25Header header;
+            for (std::size_t i = 0; i < header.message_indicator.size(); ++i) {
+                header.message_indicator[i] =
+                    encrypted ? static_cast<std::uint8_t>(0x11 * (i + 1)) : std::uint8_t{0};
+            }
+            header.algorithm_id = encrypted ? std::uint8_t{0x84} : decode::kP25AlgidUnencrypted;
+            header.key_id = encrypted ? std::uint16_t{0x1234} : std::uint16_t{0};
+            header.talkgroup_id = encrypted ? std::uint16_t{0x0100} : std::uint16_t{0x02A7};
+            message.header = header;
+            auto one = siggen::p25_header_message_dibits(message);
+            REQUIRE(one.has_value());
+            dibits.insert(dibits.end(), one->begin(), one->end());
+        }
+    }
+    constexpr dsp::SampleRate kNative = decode::P25Config{}.rate;
+    siggen::P25ModConfig mod;
+    mod.rate = kNative;
+    auto native = siggen::p25_render_dibits(mod, dibits);
+    INFO(test::message_of(native));
+    REQUIRE(native.has_value());
+
+    // Half a second of nothing either side, as the rpc case's file has, so
+    // the transmission starts and stops inside the capture.
+    std::vector<dsp::Complex32> padded(kNative / 2, dsp::Complex32{});
+    padded.insert(padded.end(), native->begin(), native->end());
+    padded.insert(padded.end(), kNative / 2, dsp::Complex32{});
+
+    const auto factor = static_cast<std::uint32_t>(kWideRate / kNative);
+    auto capture = interpolate(padded, factor, 0.35 * static_cast<double>(kNative), kWideRate);
+    shift_by(capture, kCarrierHz, kWideRate);
+
+    // One line per data unit, everything a caller reads off it.
+    const auto decode_in_steps = [](std::span<const dsp::Complex32> stream, std::size_t step) {
+        auto decoder = decode::P25Phase1::create(decode::P25Config{});
+        REQUIRE(decoder.has_value());
+        std::vector<decode::P25Frame> frames;
+        for (std::size_t at = 0; at < stream.size(); at += step) {
+            const std::size_t count = std::min(step, stream.size() - at);
+            REQUIRE(decoder->process(stream.subspan(at, count), frames).has_value());
+        }
+        std::vector<std::string> lines;
+        for (const decode::P25Frame& frame : frames) {
+            lines.push_back(std::format(
+                "{} nac {:03x} at {} score {:.17g}{}", decode::p25_duid_name(frame.nid.duid),
+                frame.nid.network_access_code, frame.first_symbol, frame.sync_score,
+                frame.header ? std::format(" tg {:04x} algid {:02x}", frame.header->talkgroup_id,
+                                           frame.header->algorithm_id)
+                             : std::string{}));
+        }
+        return lines;
+    };
+    const auto headers_in = [](const std::vector<std::string>& lines) {
+        return static_cast<std::size_t>(std::ranges::count_if(
+            lines, [](const std::string& line) { return line.find(" tg ") != std::string::npos; }));
+    };
+
+    constexpr std::uint32_t kBlocks[] = {16'384, 65'536};
+    std::vector<std::vector<dsp::Complex32>> streams;
+    std::vector<std::vector<std::string>> decodes;
+    for (const std::uint32_t block : kBlocks) {
+        const Captured got =
+            through_engine(capture, engine::Demod::P25p1, std::format("p25_block_{}", block), block);
+        REQUIRE(got.fine_rate == kNative);
+
+        // The engine hands a receiver one block's worth at a time, which at
+        // the tap's rate is the block over the decimation.
+        const std::size_t chunk = block / factor;
+        decodes.push_back(decode_in_steps(got.fine, got.fine.size()));
+        decodes.push_back(decode_in_steps(got.fine, chunk));
+        WARN(std::format("p25p1 through {}-sample engine blocks: {} samples at {} S/s, {} of 6 "
+                         "headers decoded whole and {} in {}-sample pieces",
+                         block, got.fine.size(), got.fine_rate, headers_in(decodes[decodes.size() - 2]),
+                         headers_in(decodes.back()), chunk));
+        streams.push_back(got.fine);
+    }
+
+    REQUIRE(streams[0].size() == streams[1].size());
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < streams[0].size(); ++i) {
+        differing += streams[0][i] != streams[1][i] ? 1U : 0U;
+    }
+    INFO(differing << " of " << streams[0].size() << " samples differ between the two blockings");
+    CHECK(differing == 0);
+
+    for (std::size_t i = 1; i < decodes.size(); ++i) {
+        INFO("decode " << i << " against decode 0");
+        CHECK(decodes[i] == decodes[0]);
+    }
+    CHECK(headers_in(decodes[0]) >= 5);
 }
