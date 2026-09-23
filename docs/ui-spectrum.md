@@ -1521,6 +1521,20 @@ smoke run (no sound card, no settings written) that exits on its own, and
 stops the engine. Without `-Visible` it runs offscreen. `-NoReceiverWindow`
 leaves the receiver window closed, which is a control and not the load.
 
+**The windows have to be in front.** A window the script starts opens behind
+whatever is in front, and a window DWM is not composing is paced by nothing:
+its swap chain never waits, and Windows 11 serves an occluded process's timers
+at the 15.6 ms tick. A one-rectangle Qt Quick window measured 64.0 frames a
+second behind two maximised windows and 119.3 kept on top, and the client came
+out at 64 a second under both builds. `-OnTop` passes `--on-top`, which keeps
+both windows above every other window for the run. That covers the screen, so
+it is for a machine nobody is using or a slot agreed with whoever is; the
+script warns when the median interval says the display was not pacing frames.
+
+```
+.\scripts\frame-budget.ps1 -Seconds 60 -Visible -OnTop
+```
+
 ### Measured on 2026-09-23
 
 Windows 11, RTX 4090, Qt 6.8.3, Direct3D 11, threaded render loop. The only
@@ -1555,32 +1569,154 @@ The late frames are waits:
   GUI thread while a window's render thread syncs, and Qt 6 begins the frame
   before the sync, which the nonzero `begin` times confirm, so the reading consistent with these numbers is that the
   GUI thread is held through the receiver window's vsync wait and asks the
-  main window for its frame late. That is an inference from the timings, not
-  something read out of Qt. The client's latest-wins slot replaced 8408 of
+  main window for its frame late. Qt's source has since confirmed it, below.
+  WHAT THIS USED TO SAY: "That is an inference from the timings, not
+  something read out of Qt." The client's latest-wins slot replaced 8408 of
   17871 frames in the same run against 130 of 17899 offscreen, which is the
   GUI thread spending much of its time blocked.
 - **With the receiver window closed, the misses moved into `begin`.** 170
   intervals missed, 2.4%, and over them `begin` averaged 12.7 ms against 3.2
   ms of `request`: the swap chain waited a whole extra refresh. Whether that is
-  the virtual display or would happen on a monitor this run cannot say.
+  the virtual display or would happen on a monitor this run cannot say. Kept
+  on top of the other windows, the same control missed 0.4% and 0.5%, below.
 
 Offscreen, the same load on Qt's software rasteriser with no vsync and the
 basic loop drew the main window 8181 times in 61 s, interval mean 7.452 ms,
 p95 12.531, p99 16.497, and its sync and render averaged 0.067 and 0.640 ms.
 Those are offscreen numbers only and say nothing about a refresh.
 
+### Why the main window missed
+
+Read out of Qt 6.8.3's source and measured the same day.
+
+**The GUI thread waits for every window's vsync, in turn.** The threaded loop
+gives each window a render thread, but the GUI thread hands every frame over
+in `QSGThreadedRenderLoop::polishAndSync`, which posts the sync to that
+window's render thread and blocks until it is done. `QSGRenderThread::
+syncAndRender` begins the frame before it syncs ("Begin the frame before
+syncing"), and on Direct3D 11 beginning the frame is where the swap chain
+waits for the display: `QRhiD3D11::beginFrame` waits on the frame latency
+waitable object. So the block Qt's scene graph documentation describes as a
+brief one, while QML state is synchronised into the scene graph, includes the
+window's whole vsync wait, and with two vsync-paced windows the one GUI thread
+sits through each of them. Qt's documentation also presents a render thread
+per window as what keeps windows from throttling each other; the render
+threads are independent, the GUI thread they hand over from is not.
+
+**What the render loop settings do about it**, both windows open, 120 Hz, 60
+s each unless marked. These ran before the stacking finding below, with the
+windows wherever they opened, which was in front: every one of them paced at
+120 Hz.
+
+| configuration | main window over budget | receiver window over budget | engine frames replaced |
+| --- | --- | --- | --- |
+| as shipped: threaded loop, Direct3D 11 | 1413 of 6582, 21.5% | 159 of 7168, 2.2% | 8602 of 17853 |
+| `QSG_RENDER_LOOP=basic` | 1651 of 6812, 24.2% | 171 of 7162, 2.4% | 7396 of 17890 |
+| `QSG_RHI_BACKEND=vulkan` | 2753 of 6739, 40.9% | 2454 of 7187, 34.1% | 7768 of 17922 |
+| `QT_D3D_MAX_FRAME_LATENCY=0`, 30 s | 787 of 2888, 27.3% | 283 of 3129, 9.0% | 3009 of 7223 |
+| `QT_D3D_MAX_FRAME_LATENCY=1`, 30 s | 383 of 3312, 11.6% | 104 of 3612, 2.9% | 4319 of 9010 |
+| receiver window at swap interval 0 | 181 of 7154, 2.5% | 1387 of 8173, 17.0% | 7437 of 17913 |
+
+The basic loop does the same waits on one thread and misses as often.
+Vulkan is worse on both windows; a trivial one-window Qt Quick scene missed
+45% of refreshes under it on this machine, so it is the backend's
+presentation here and not the client. Frame latency moves the wait without
+removing it. A swap interval of 0 on the receiver window alone, set per
+window through its `QSurfaceFormat`, is the one setting that takes a wait off
+the GUI thread: Qt then makes that window's swap chain without the waitable
+object (`qrhid3d11.cpp`, `useFrameLatencyWaitableObject`) and presents it
+without waiting. The main window fell to the single-window level. The
+receiver window, drawn whenever the GUI thread was free, then came 17.0% of
+its frames more than 1.5 refreshes apart, which is why it is also paced.
+
+**A covered window measures the covering.** Later the same day both builds
+drew 64 frames a second, at a median interval of 15.6 ms. Nothing in the
+client had changed: its windows had opened behind two maximised windows. DWM
+does not compose a covered window, so its swap chain never waits, and Windows
+11 serves an occluded process's timers at the 15.6 ms tick, which is where
+Qt's update requests come from. A one-rectangle Qt Quick window, timed through
+Qt's own render loop log, gave 64.0 frames a second covered and 119.3 kept on
+top, where 46 of its 7206 intervals (0.64%) were over 1.5 refreshes. That is
+the floor this display gives any window. The runs below keep both windows on
+top with `--on-top`.
+
+### What was changed
+
+`ui/render/window_pacer.cpp`, installed from `ui/main.cpp`:
+
+- The receiver window has a swap interval of 0, so neither its render thread
+  nor the GUI thread on its behalf waits for the display.
+- The receiver window's update requests are held and it is drawn straight
+  after each main-window frame is handed over, which is just after the main
+  window's vsync: once a refresh, in step with the main window. When the main
+  window is not drawing, a held request goes through after 1.5 refresh
+  periods. Drawn at each main-window swap instead, it missed 28.4%; drawn
+  after each hand-over but only when its request had already arrived, 27.6%
+  with 5679 frames against the main window's 7154.
+- The main window's own request is held for half a refresh after its last
+  frame was presented. Its render thread cannot begin the next frame before
+  the next vsync, so a request made sooner only parks the GUI thread in the
+  hand-over, where it cannot take engine frames. Over 60 s each, held 0, 3
+  and 4 ms: 41.0%, 24.2% and 7.8% of engine frames replaced, with 0.9%, 0.4%
+  and 0.6% of main-window frames over budget.
+
+A window at swap interval 0 may tear where Windows gives it an independent
+flip, which it does only to a window covering a whole screen with no frame.
+The receiver window keeps its frame.
+
+### Before and after
+
+Same machine, display and load as above, both windows kept on top with
+`--on-top`, the main window maximised, the stream to the virtual display
+connected and the engine at 1.000x realtime, 60 s each. The before build is the
+commit this work started from with `--on-top` added and nothing else.
+
+| build | window | frames | interval mean | p50 | p95 | p99 | max | over budget |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| before | main | 7011 | 8.694 ms | 8.428 | 15.124 | 22.192 | 45.867 | 1182 of 7010, 16.9% |
+| before | receivers | 7301 | 8.350 ms | 8.435 | 8.819 | 10.034 | 31.421 | 56 of 7300, 0.8% |
+| after, run 1 | main | 7260 | 8.399 ms | 8.423 | 8.893 | 12.571 | 31.709 | 75 of 7259, 1.0% |
+| after, run 1 | receivers | 7233 | 8.430 ms | 8.440 | 9.035 | 16.390 | 31.696 | 101 of 7232, 1.4% |
+| after, run 2 | main | 7312 | 8.341 ms | 8.426 | 8.801 | 9.681 | 36.272 | 26 of 7311, 0.4% |
+| after, run 2 | receivers | 7289 | 8.368 ms | 8.442 | 8.842 | 11.062 | 36.386 | 55 of 7288, 0.8% |
+| before, receiver window closed | main | 7302 | 8.352 ms | 8.424 | 8.787 | 9.113 | 28.251 | 29 of 7301, 0.4% |
+| after, receiver window closed | main | 7298 | 8.357 ms | 8.422 | 8.809 | 9.666 | 30.737 | 33 of 7297, 0.5% |
+
+Engine frames replaced in the client's latest-wins slot: 8036 of 18129 (44.3%)
+before, 1563 of 18059 (8.7%) and 1299 of 18107 (7.2%) after; with the receiver
+window closed, 7718 of 18221 (42.4%) before and 2325 of 18127 (12.8%) after.
+Offscreen, where the half-refresh hold now paces the main window at the
+offscreen screen's nominal 60 Hz, 84 of 18182.
+
+A second before run gave the main window 1166 of 6792 (17.2%) with the engine
+catching up at 1.108x realtime. Two after runs were disturbed and are not in
+the table: one with the engine starved to 0.598x realtime, main window 5.2%;
+and one of 300 s during which the owner was at the desktop, engine 0.932x,
+main window 654 of 35402 (1.8%) with a 248.8 ms stall in it.
+
+The work per frame is unchanged: sync about 0.1 ms, render 0.3 and the GPU
+0.1. The main window's late frames after the change are split between the
+two waits, `request` 8.3 and `begin` 7.7 ms on average in run 1, where before
+they were all `request`, 14.9 ms.
+
 ### What is still open
 
-M2's criterion is measured and **not met** on this machine's display at full
-target load: one main-window frame in five misses a 120 Hz refresh. The
-render pipeline's own cost is about six percent of the budget, so the misses
-are pacing between two vsync-paced windows on one GUI thread, and the
-single-window control misses 2.4% in the swap chain. Both belong to the
-architecture question the criterion names: two top-level windows since
-2026-09-22 on Qt's threaded loop. What would settle it next:
+With both windows open the main window now misses a refresh about as often as
+it does alone, 0.4% and 1.0% of frames in two clean 60 s runs against 16.9%
+before. **That is at the M2 line, not clearly under it**: run 1 was 75 of 7259,
+1.03%, one interval in a hundred and so just over, and the only long run was
+disturbed. The single-window and trivial-window results, 0.4 to 0.6%, say the
+remainder is mostly this display's own pacing. What would settle it:
 
-- the same command on a physical monitor on the 4090, which takes the virtual
-  display out of the single-window result;
-- the receiver window's content in the main window as a control for the
-  two-window reading;
-- `QSG_RENDER_LOOP=basic` against the threaded loop with both windows open.
+- a long run, 300 s or more, `-Visible -OnTop`, at a time agreed with the
+  owner, since `-OnTop` takes the screen for the length of the run;
+- the same on a physical monitor on the 4090. None is part of the desktop:
+  `display_info` lists only the virtual display, and Windows reports a
+  Hisense connected over HDMI but not in the desktop, which would take a
+  display topology change on the owner's streamed session to use;
+- the engine frames the client still replaces, 7 to 9%, which are waterfall
+  rows lost while the GUI thread waits in the hand-over. Holding the main
+  window longer cut them further (1.4% at 6 ms, over 30 s) at the cost of more
+  late frames (1.7%); keeping every row would mean the hand-off queuing rows
+  for the waterfall rather than keeping only the latest, in
+  `ui/models/engine_link.cpp`.
