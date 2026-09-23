@@ -406,6 +406,41 @@ void write_source_descriptor(schema::SourceDescriptor::Builder out,
     out.setFlow(to_schema(in.flow));
     out.setSeekable(in.seekable);
     out.setLengthSamples(in.length_samples);
+    out.setSerial(in.serial);
+}
+
+source::DeviceCalibration read_calibration_settings(schema::CalibrationSettings::Reader in) {
+    source::DeviceCalibration out;
+    out.correction_ppb = in.getCorrectionPpb();
+    out.dc_removal = in.getDcRemoval();
+    out.iq_correction = in.getIqCorrection();
+    return out;
+}
+
+void write_calibration(schema::Calibration::Builder out, const engine::CalibrationState& in) {
+    out.setOpen(in.open);
+    out.setKey(in.key);
+    auto settings = out.initSettings();
+    settings.setCorrectionPpb(in.settings.correction_ppb);
+    settings.setDcRemoval(in.settings.dc_removal);
+    settings.setIqCorrection(in.settings.iq_correction);
+    out.setCorrectionApplied(in.correction_applied);
+    out.setPersisted(in.persisted);
+    out.setNote(in.note);
+    out.setDeviceCenterHz(in.device_center);
+
+    const dsp::FrontEndEstimate& estimate = in.front_end.estimate;
+    out.setMeasured(estimate.measured);
+    out.setBlocksMeasured(in.front_end.blocks_measured);
+    if (estimate.measured) {
+        out.setDcDbfs(estimate.dc_dbfs());
+        out.setGainErrorDb(estimate.gain_error_db());
+        out.setPhaseErrorDeg(estimate.phase_error_deg());
+        out.setImageRejectionDb(estimate.image_rejection_db());
+        out.setIqPlausible(estimate.iq_plausible);
+    } else {
+        out.setDcDbfs(-300.0);
+    }
 }
 
 void write_grid(schema::GridParams::Builder out, const dsp::GridParams& in) {

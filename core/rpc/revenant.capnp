@@ -591,6 +591,76 @@ struct SourceDescriptor {
     # a picker turns a path into "4 minutes 12 seconds at 2.4 MS/s" instead of
     # a filename.
     lengthSamples @14 :UInt64;
+
+    # The device's own serial string, which is what a calibration is kept
+    # under. Empty for a file and a synthetic scene, and for a dongle held by
+    # another process, which cannot be opened to be asked. Not unique: RTL-SDRs
+    # ship with "00000001" and most are never reprogrammed, so two stock
+    # dongles share one calibration. docs/calibration.md says what to do.
+    serial @15 :Text;
+}
+
+struct CalibrationSettings {
+    # What an operator sets, and what the engine keeps per device serial.
+    # docs/calibration.md has what each one does and what it costs.
+
+    # The crystal's frequency error in parts per billion, POSITIVE WHEN IT RUNS
+    # FAST, which is the sign librtlsdr's ppm= takes. Applied to the engine's
+    # own arithmetic in integer hertz, not told to the device, and bounded at a
+    # million either way.
+    correctionPpb @0 :Int64;
+
+    # Subtract a running mean: the zero-IF centre spike. Time constant 0.1 s.
+    dcRemoval @1 :Bool;
+
+    # Correct the gain and phase mismatch between I and Q, blind, from the
+    # stream's own second-order statistics. Time constant 1 s.
+    iqCorrection @2 :Bool;
+}
+
+struct Calibration {
+    # False with no source open, and nothing else here means anything then.
+    open @0 :Bool;
+
+    # What it is kept under, "rtlsdr:00000001". Empty for a source with no
+    # serial, whose calibration lasts until it is closed.
+    key @1 :Text;
+
+    settings @2 :CalibrationSettings;
+
+    # False when the device was told a correction of its own at open, which an
+    # rtlsdr URI with ppm= does. The stored correction is then kept and not
+    # applied, and note says so.
+    correctionApplied @3 :Bool;
+
+    # Whether settings are kept and restored the next time this device opens.
+    # note says why not when they are not.
+    persisted @4 :Bool;
+    note @5 :Text;
+
+    # Where the device itself is tuned, on its own crystal's scale.
+    # EngineInfo::sourceCenter is where it really listens, and the two differ
+    # by the correction.
+    deviceCenterHz @6 :Int64;
+
+    # What the front-end stage has measured, while dcRemoval or iqCorrection
+    # is on. measured is false before the first block has been read and while
+    # both are off, and the numbers below are then meaningless.
+    measured @7 :Bool;
+    blocksMeasured @8 :UInt64;
+
+    # The centre spike's level on a spectrum whose full scale is a complex
+    # sinusoid of amplitude one, before removal.
+    dcDbfs @9 :Float64;
+
+    # The I/Q imbalance the stream shows, before correction, and the image
+    # rejection that imbalance gives. iqPlausible false means the estimate is
+    # past six decibels or thirty degrees and is not being applied: the stream
+    # is not one the estimator's model holds for.
+    gainErrorDb @10 :Float64;
+    phaseErrorDeg @11 :Float64;
+    imageRejectionDb @12 :Float64;
+    iqPlausible @13 :Bool;
 }
 
 enum FrontEndState {
@@ -3195,4 +3265,25 @@ interface Session {
     # old tuning, so a message is never assembled from two transmitters.
     subscribeDecoded @24 (vrx :UInt64, decoder :Text, receiver :DecodedReceiver)
         -> (subscription :DecodedSubscription, decoderResolved :Text);
+
+    # The open source's calibration, and what the front-end stage has
+    # measured of it. open is false with no source, which is a state rather
+    # than a failure, as with sourceDescriptor.
+    calibration @25 () -> (calibration :Calibration);
+
+    # Replaces the open source's calibration, applies it and keeps it under the
+    # device's serial.
+    #
+    # A CHANGE OF CORRECTION MOVES THE NUMBERS AND NOT THE RADIO. The device is
+    # not retuned and no receiver moves: each stays on the signal it was on,
+    # and EngineInfo::sourceCenter, every detection's centre and every
+    # receiver's absolute frequency move to what they should have read. The
+    # detector's tracks are dropped, because each was placed against the old
+    # centre; the decoders are not, because every receiver is still hearing
+    # the same transmitter.
+    #
+    # Refused before a source is open and for a correction past a million ppb.
+    # A calibration file that could not be written is not a refusal: the
+    # settings are in force, and persisted and note in the answer say so.
+    setCalibration @26 (settings :CalibrationSettings) -> (calibration :Calibration);
 }

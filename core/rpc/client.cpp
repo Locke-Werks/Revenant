@@ -425,6 +425,29 @@ struct PromiseValue<kj::Promise<T>> {
 
     out.seekable = in.getSeekable();
     out.length_samples = in.getLengthSamples();
+    out.serial = read_text(in.getSerial());
+    return out;
+}
+
+[[nodiscard]] Calibration read_calibration(schema::Calibration::Reader in) {
+    Calibration out;
+    out.open = in.getOpen();
+    out.key = read_text(in.getKey());
+    const auto settings = in.getSettings();
+    out.settings.correction_ppb = settings.getCorrectionPpb();
+    out.settings.dc_removal = settings.getDcRemoval();
+    out.settings.iq_correction = settings.getIqCorrection();
+    out.correction_applied = in.getCorrectionApplied();
+    out.persisted = in.getPersisted();
+    out.note = read_text(in.getNote());
+    out.device_center_hz = in.getDeviceCenterHz();
+    out.measured = in.getMeasured();
+    out.blocks_measured = in.getBlocksMeasured();
+    out.dc_dbfs = in.getDcDbfs();
+    out.gain_error_db = in.getGainErrorDb();
+    out.phase_error_deg = in.getPhaseErrorDeg();
+    out.image_rejection_db = in.getImageRejectionDb();
+    out.iq_plausible = in.getIqPlausible();
     return out;
 }
 
@@ -1109,6 +1132,9 @@ public:
     [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override;
     [[nodiscard]] Status set_source_gain_auto(std::string_view stage, bool on) override;
     [[nodiscard]] Expected<std::optional<SourceDescriptor>> source_descriptor() override;
+    [[nodiscard]] Expected<Calibration> calibration() override;
+    [[nodiscard]] Expected<Calibration> set_calibration(
+        const CalibrationSettings& settings) override;
     [[nodiscard]] Expected<SourceTuning> source_can_retune() override;
     [[nodiscard]] Status open_source(std::string_view uri) override;
     [[nodiscard]] Status close_source() override;
@@ -1646,6 +1672,25 @@ Expected<std::optional<SourceDescriptor>> ClientImpl::source_descriptor() {
                 }
                 return read_source_descriptor(response.getSource());
             });
+    });
+}
+
+Expected<Calibration> ClientImpl::calibration() {
+    return on_loop("calibration", [](LoopState& state) {
+        return state.session.calibrationRequest().send().then(
+            [](auto&& response) { return read_calibration(response.getCalibration()); });
+    });
+}
+
+Expected<Calibration> ClientImpl::set_calibration(const CalibrationSettings& settings) {
+    return on_loop("set_calibration", [settings](LoopState& state) {
+        auto request = state.session.setCalibrationRequest();
+        auto wire = request.initSettings();
+        wire.setCorrectionPpb(settings.correction_ppb);
+        wire.setDcRemoval(settings.dc_removal);
+        wire.setIqCorrection(settings.iq_correction);
+        return request.send().then(
+            [](auto&& response) { return read_calibration(response.getCalibration()); });
     });
 }
 

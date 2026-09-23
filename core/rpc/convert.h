@@ -150,6 +150,14 @@ void write_rational(schema::Rational::Builder out, std::int64_t numerator,
 void write_device(schema::DeviceInfo::Builder out, const gpu::DeviceInfo& in);
 void write_source_descriptor(schema::SourceDescriptor::Builder out,
                              const source::SourceCapabilities& in);
+
+// A calibration's settings off the wire, and the whole state onto it. The
+// estimate's derived figures, decibels and degrees, are computed here from the
+// engine's gain and sine so the wire carries what a person reads.
+[[nodiscard]] source::DeviceCalibration read_calibration_settings(
+    schema::CalibrationSettings::Reader in);
+void write_calibration(schema::Calibration::Builder out, const engine::CalibrationState& in);
+
 void write_grid(schema::GridParams::Builder out, const dsp::GridParams& in);
 void write_spectrum_geometry(schema::SpectrumGeometry::Builder out,
                              const engine::SpectrumGeometry& in);

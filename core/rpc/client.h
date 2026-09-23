@@ -223,6 +223,18 @@ public:
     // a failure, so it is an empty optional rather than an error.
     [[nodiscard]] virtual Expected<std::optional<SourceDescriptor>> source_descriptor() = 0;
 
+    // The open source's calibration and what the front-end stage measured.
+    // Calibration::open is false with no source, which is a state to poll
+    // through rather than a failure.
+    [[nodiscard]] virtual Expected<Calibration> calibration() = 0;
+
+    // Replaces it, and the engine keeps it under the device's serial. A new
+    // correction moves EngineInfo::source_center and every absolute frequency
+    // without moving the radio; re-read info after this rather than adding
+    // the difference by hand.
+    [[nodiscard]] virtual Expected<Calibration> set_calibration(
+        const CalibrationSettings& settings) = 0;
+
     // Whether the call above will work, and over what range.
     //
     // The range is an ENVELOPE and not a promise: a device with a gap in

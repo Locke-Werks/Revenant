@@ -303,6 +303,40 @@ struct SourceDescriptor {
     // ZERO IS UNBOUNDED, which is every live device, and not a recording of no
     // length.
     std::uint64_t length_samples = 0;
+
+    // The device's serial, which a calibration is kept under. Empty for a file,
+    // a synthetic scene and a dongle nobody could open to ask.
+    std::string serial;
+};
+
+// What an operator sets per device. See the schema's CalibrationSettings.
+struct CalibrationSettings {
+    // Parts per billion, positive when the crystal runs fast.
+    std::int64_t correction_ppb = 0;
+    bool dc_removal = false;
+    bool iq_correction = false;
+
+    [[nodiscard]] bool operator==(const CalibrationSettings&) const = default;
+};
+
+// The open source's calibration and what the front-end stage measured. See
+// the schema's Calibration for every field.
+struct Calibration {
+    bool open = false;
+    std::string key;
+    CalibrationSettings settings;
+    bool correction_applied = true;
+    bool persisted = false;
+    std::string note;
+    std::int64_t device_center_hz = 0;
+
+    bool measured = false;
+    std::uint64_t blocks_measured = 0;
+    double dc_dbfs = -300.0;
+    double gain_error_db = 0.0;
+    double phase_error_deg = 0.0;
+    double image_rejection_db = 0.0;
+    bool iq_plausible = false;
 };
 
 // Mirrors revenant::detect::FrontEndVerdict ordinal for ordinal, and the

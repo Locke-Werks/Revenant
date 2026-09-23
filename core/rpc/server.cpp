@@ -1220,6 +1220,13 @@ public:
     // once everything queued has been applied.
     void forget_across_retune();
 
+    // The detector half of the above and nothing else, for a change that
+    // moves every absolute frequency without moving the radio: a new crystal
+    // correction relabels the span, so each track's centre was computed from
+    // a constant that has changed, while every receiver is still hearing the
+    // transmitter it was and its decoders are left alone.
+    void forget_detector();
+
     // Builds one, attaches its sink and records it. Split out because both
     // entry points above reach it and both have already asked the engine
     // for the receiver's status, which this needs and must not ask twice:
@@ -2176,6 +2183,39 @@ public:
         // a read of what open_source already learned, which is the whole
         // difference between this call and listSources.
         write_source_descriptor(results.initSource(), owner_.engine().source_capabilities());
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> calibration(CalibrationContext context) override {
+        // No source is a state: the engine answers open = false rather than
+        // refusing, and that crosses as it is.
+        auto state = owner_.engine().calibration();
+        if (!state) {
+            return to_exception(state.error());
+        }
+        write_calibration(context.getResults().initCalibration(), *state);
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setCalibration(SetCalibrationContext context) override {
+        const source::DeviceCalibration wanted =
+            read_calibration_settings(context.getParams().getSettings());
+
+        auto before = owner_.engine().calibration();
+        auto state = owner_.engine().set_calibration(wanted);
+        if (!state) {
+            return to_exception(state.error());
+        }
+
+        // A new correction relabels every absolute frequency without moving
+        // the radio, so the detector's tracks, each placed against the old
+        // centre, go. The decoders stay: every receiver is still on the
+        // transmitter it was on. See forget_detector.
+        if (!before || before->settings.correction_ppb != state->settings.correction_ppb) {
+            owner_.forget_detector();
+        }
+
+        write_calibration(context.getResults().initCalibration(), *state);
         return kj::READY_NOW;
     }
 
@@ -3362,22 +3402,7 @@ void ServerImpl::end_session(std::uint64_t session) {
 }
 
 void ServerImpl::forget_across_retune() {
-    {
-        std::scoped_lock held(detect_lock_);
-
-        // The completion thread checks this before it takes the lock, so
-        // clearing it first is what stops a frame from the new centre
-        // reaching the old detector between here and the reset below.
-        detecting_.store(false, std::memory_order_relaxed);
-        detector_.reset();
-
-        // Every segment now looks at a different piece of spectrum, so the
-        // window's history is a measurement of somewhere else and a slope
-        // fitted across the retune is a slope through two bands.
-        front_end_.reset();
-        have_front_end_decision_ = false;
-        last_front_end_decision_ = 0;
-    }
+    forget_detector();
 
     // detector_fault_ is deliberately left alone. A detector that faulted
     // did so for a reason that has nothing to do with where the front end
@@ -3395,6 +3420,25 @@ void ServerImpl::forget_across_retune() {
         reset_rds_for_vrx(id, status->tuning_epoch);
         reset_decoded_for_vrx(id, status->tuning_epoch);
         reset_audio_for_vrx(id, status->tuning_epoch);
+    }
+}
+
+void ServerImpl::forget_detector() {
+    {
+        std::scoped_lock held(detect_lock_);
+
+        // The completion thread checks this before it takes the lock, so
+        // clearing it first is what stops a frame from the new centre
+        // reaching the old detector between here and the reset below.
+        detecting_.store(false, std::memory_order_relaxed);
+        detector_.reset();
+
+        // Every segment now looks at a different piece of spectrum, so the
+        // window's history is a measurement of somewhere else and a slope
+        // fitted across the retune is a slope through two bands.
+        front_end_.reset();
+        have_front_end_decision_ = false;
+        last_front_end_decision_ = 0;
     }
 }
 
