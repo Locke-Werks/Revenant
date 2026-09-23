@@ -80,8 +80,8 @@ it in `ui/qml/Commands.qml`, the filter display looks its keys up in it, the
 palette lists it and the key map F1 opens is drawn from it.
 `ui/tests/test_key_actions.cpp` holds the table to three rules: no two
 actions share a key where both apply, no window key is one the filter
-display or the overlay also takes, and the key map below is the one the
-table prints. A smoke run of the client fails when `Commands.qml` lacks a
+display, the overlay or the frequency manager also takes, and the key map
+below is the one the table prints. A smoke run of the client fails when `Commands.qml` lacks a
 handler the table names. `revenant-ui --smoke-seconds N --palette QUERY
 --grab-main FILE` photographs the palette with a query typed into it, and
 `--keymap` in place of `--palette` the key map, on the offscreen platform.
@@ -298,6 +298,155 @@ every receiver back.
 `revenant-ui --receiver FREQ:MODE` may be given up to eight times; the first is
 focused and the rest are held, which is how the rack is photographed with
 `--grab-receivers` and the span's markers with `--grab-main`.
+
+## Frequency manager
+
+Bands, memories, tags and scan lists, in a panel the top bar's "memories"
+button opens, or Ctrl+B. It is a popover and not a dialog: the span keeps
+drawing under it, and a click elsewhere or Esc closes it. It works with no
+engine connected, since importing, editing and exporting need no radio;
+recalling needs an open source. Ctrl+D saves the focused receiver into it
+from anywhere. The rules are Qt-free headers with cases in `ui/tests`:
+`ui/models/memories.h` for the model, the file, search, sort, undo and scan
+lists, `ui/models/memory_import.h` for the importers and the CHIRP export,
+`ui/models/json_lite.h` for the JSON underneath both.
+`ui/models/frequency_manager.cpp` is the Qt half and
+`ui/qml/FrequencyManagerPanel.qml` the panel.
+
+**A memory** is the bookmark grown up: a name, an absolute frequency in
+integer hertz, a mode by the engine's name, filter edges in hertz from its own
+centre (both zero for the mode's default), tags, a note, a group, and when it
+was made and last recalled. Everything `ui/models/bookmarks.h` argues about a
+bookmark holds for it, including that nothing is recalled until somebody picks
+it, so remembering a thousand of them makes no claim about a band at startup.
+
+**Where it lives.** One file, `memories.json`, in the application data
+directory: `%APPDATA%\Locke Werks\Revenant\memories.json` on Windows. Not
+QSettings, which held the bookmark list as one registry string rewritten whole
+on each change; a file is what a thousand entries want and what an operator
+can back up. The panel prints the path. It is rewritten whole on every change
+through `QSaveFile`, so a crash mid-write leaves the previous file. A file
+that will not parse, or that a newer client wrote, is read-only for the
+session with the reason on a chip: rewriting it from an empty list is the one
+way this could lose an operator's memories, so it is refused.
+
+The schema, version 1:
+
+```json
+{
+  "format": "revenant-memories",
+  "version": 1,
+  "memories": [
+    { "id": 7, "name": "KXYZ", "hz": 98500000, "mode": "wfm",
+      "low": -100000, "high": 100000,
+      "tags": ["broadcast", "local"], "notes": "", "group": "FM",
+      "created": "2026-09-23T21:04:11Z", "used": "2026-09-23T21:30:00Z" }
+  ],
+  "scan_lists": [
+    { "name": "tower", "kind": "memories", "members": [7, 9] },
+    { "name": "2 m", "kind": "range", "low": 144000000, "high": 148000000,
+      "step": 12500, "mode": "nfm" }
+  ]
+}
+```
+
+`hz`, `low`, `high` and `step` are integers and are read from their literal,
+never through a double. `id` is stable for a memory's life and never reused,
+which is what scan lists name. `created` and `used` are UTC to the second, and
+absent when unknown. An entry with no frequency or no mode is skipped and
+counted in the status line; a repeated id is given a new one rather than lost.
+
+**The old bookmark list comes across once.** On the first run with no
+`memories.json`, every entry the bookmark row showed becomes a memory with the
+same name, frequency, mode and edges, in the same order, with no creation
+time. An entry the old reader dropped without a word (no frequency, no mode)
+is counted in the status line instead. The registry value `bookmarks/list` is
+left where it was, so an older client still has its list.
+
+**The list.** The search matches every typed word, without case, anywhere in a
+memory's name, group, notes, tags, mode or frequency, the frequency both in
+megahertz and in hertz, so "146.52" finds 146520000. The tag chips filter to
+memories carrying every chosen tag. The column heads sort by name, frequency,
+mode, tags or last use, and a second click turns the column round; ties fall
+back to frequency and then id, so rows do not swap on a refresh. Frequencies
+are in the monospace family. The current row's fields sit under the list and
+are written as each is left, which is editing in place; changing a mode puts
+the new mode's default filter on it. Delete is the cross or Del, and undo, the
+button or Ctrl+Z, puts the memory back in its place and in every scan list it
+was in, fifty deep.
+
+**Recall** is Return, a double click or the row's "recall", into the focused
+receiver; Shift+Return or "+rx" adds a receiver to the rack for it instead,
+and refuses in words when the rack is full. Both go through
+`EngineLink::recallPlace`, which is the bookmark recall with a flag, so a
+memory outside the span retunes the front end first and is placed when the
+granted centre arrives, on the two-turn rule in `ui/models/bookmarks.h`. A
+recall stamps the memory's last use.
+
+**Import** takes a path or a file dropped on the panel, reads it, and shows
+what it would add and every entry it would not, with the line and the reason,
+before anything is added. It de-duplicates against the list and within the
+file: the same frequency to the hertz under the same name, without case or
+surrounding space, is a duplicate, and two names on one channel are two
+memories. Four formats, told apart by content first and file name second:
+
+- SDR#'s `frequencies.xml`: `MemoryEntry` elements. `GroupName` becomes the
+  group, `IsFavourite` a "favourite" tag, `FilterBandwidth` the edges. A
+  non-zero `Shift` is recorded in the note and not applied.
+- SDR++'s `frequency_manager_config.json`, whose lists become groups, or a
+  bookmark export from it.
+- CHIRP's CSV export, columns found by header so both of the headers CHIRP
+  writes read. Frequency, name and mode are taken; duplex, offset, the tone
+  fields, skip and the D-STAR call fields go into the note in CHIRP's terms,
+  with the Comment column ahead of them.
+- Revenant's own file, which is what an export or a backup is.
+
+What each reader was written from is cited in `ui/models/memory_import.h`:
+published descriptions and files other people published, CHIRP's wiki page on
+the memory editor columns and its stock configuration CSVs, the SDR++ user
+guide, and published SDR# and SDR++ files. No implementation's source was read.
+SDR++'s mode numbers 0, 1 and 2 are confirmed by those files; 3 to 7 are taken
+from the order its radio menu lays out the rest, which is the weaker evidence
+and the first place to look if an SDR++ import comes in on the wrong mode.
+
+A saved bandwidth becomes edges symmetric about the frequency, except usb, which
+runs from the carrier up by the bandwidth, and lsb, down. Revenant's own SSB
+default starts at 300 Hz; an imported width is kept as it was saved.
+
+| Revenant | SDR# `DetectorType` | SDR++ `mode` | CHIRP `Mode` read | CHIRP `Mode` written |
+| --- | --- | --- | --- | --- |
+| am | AM | 2 | AM, NAM | AM |
+| nfm | NFM | 0 | FM, NFM, empty | FM |
+| wfm | WFM | 1 | WFM | WFM |
+| usb | USB | 4 | USB | USB |
+| lsb | LSB | 6 | LSB | LSB |
+| dsb | DSB | 3 | none | left out |
+| cw | CW | 5 | CW | CW |
+| raw | RAW | 7 | none | left out |
+| p25p1 | none | none | P25 | P25 |
+| dstar | none | none | DV | DV |
+| tetra | none | none | none | left out |
+
+Anything else is refused and listed with its reason, never guessed: DMR and
+DN (System Fusion) because the engine does not demodulate them, CWR because
+Revenant's cw has no reversed sideband, Auto because a memory needs a mode,
+and every other value by name.
+
+**Export** writes what is listed now, so a search or a tag filter is also an
+export selection: Revenant's JSON, with the scan lists trimmed to the memories
+exported, or a CHIRP CSV with CHIRP's neutral tone and duplex values, the note
+as the Comment and a memory whose mode CHIRP has no name for left out and
+counted.
+
+**Scan lists** are a named list of memories, made from what is listed, or a
+range with a step and a mode, refused past 100,000 channels. They are the model
+only: saved with the memories, and nothing scans them yet. The scanning engine
+is a later task, and the panel says so where the lists are shown.
+
+`revenant-ui --smoke-seconds N --memories FILE --panel memories --grab-main
+PNG` photographs the panel on a sample list, and `--preview-import FILE` puts
+an import preview in it first. A smoke run never writes a memory file: it
+reads only what `--memories` names, and without it starts empty.
 
 ## Auto-scaling, both ends
 
