@@ -250,6 +250,12 @@ struct Options {
     // at the floor bucket on a 2.4 MS/s grid is 1.6 ms of GPU a second.
     std::uint32_t probes = 4;
 
+    // EngineConfig::spectrum_rows_per_second. Thirty, the rate ui/main.cpp
+    // gives for a waterfall that reads as live; it changes nothing on a
+    // dongle at 2.4 MS/s, which already makes 36.6 a second in 65536-sample
+    // blocks, and turns a 96 kS/s recording's 1.46 into 30.
+    double rows_per_second = 30.0;
+
     std::optional<float> spectrum_floor_db;
     std::optional<float> spectrum_ceiling_db;
 
@@ -337,6 +343,10 @@ void print_usage()
         "  --no-passband       Build no passband stage. subscribePassband then fails\n"
         "                      with the engine's reason and the detail display in a\n"
         "                      client has nothing to draw.\n"
+        "  --rows <n>          The fewest spectrum rows a second of source, default 30.\n"
+        "                      A source too slow for that many in its blocks gets\n"
+        "                      smaller ones, so a 96 kS/s recording draws 30 rows a\n"
+        "                      second rather than 1.5. 0 is one row per block.\n"
         "  --probes <n>        Probe receivers the engine places on detections to\n"
         "                      label them, default 4, at most 16. 0 builds none and\n"
         "                      every detection is sent unlabelled.\n"
@@ -563,6 +573,19 @@ void print_usage()
                 return fail("--pace cannot be negative. Zero is unthrottled");
             }
             options.pace = *number;
+            continue;
+        }
+
+        if (arg == "--rows") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_bounded(*text, arg, 0, 1000);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            options.rows_per_second = static_cast<double>(*number);
             continue;
         }
 
@@ -802,6 +825,13 @@ void print_engine_block(const engine::Engine& eng)
         std::println("            {} per bin, bin zero at {}",
                      format_hz(info.spectrum.bin_width_hz()),
                      format_hz(info.spectrum.bin_zero_hz()));
+        if (info.block_samples != 0) {
+            std::println("            {:.1f} rows a second of source, {} samples a block, {} "
+                         "frames in flight",
+                         static_cast<double>(info.source_rate) /
+                             static_cast<double>(info.block_samples),
+                         info.block_samples, info.frames_in_flight);
+        }
     } else {
         std::println("spectrum    none. subscribeSpectrum will be refused");
     }
@@ -900,6 +930,7 @@ void print_engine_block(const engine::Engine& eng)
     config.block_samples = options.block_samples;
     config.pace = options.pace;
     config.spectrum_transform = options.spectrum_points;
+    config.spectrum_rows_per_second = options.rows_per_second;
     config.passband_transform = options.passband_points;
     config.spectrum_floor_db = options.spectrum_floor_db;
     config.spectrum_ceiling_db = options.spectrum_ceiling_db;

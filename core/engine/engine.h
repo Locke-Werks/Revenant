@@ -218,6 +218,30 @@ struct EngineConfig {
     // what was settled on.
     std::uint32_t spectrum_transform = 0;
 
+    // The fewest spectrum frames a second of source a display should get,
+    // zero for one frame per block whatever that comes to.
+    //
+    // A frame comes per dispatch and a dispatch per block, so at a fixed
+    // block the row rate is the source rate over the block: 36.6 a second
+    // for a dongle at 2.4 MS/s in 65536-sample blocks, and 1.46 for a 96 kS/s
+    // HF recording in the same blocks, which is a waterfall that takes seven
+    // minutes to fill a screen. When the source is too slow for this many,
+    // Engine::open_source takes a smaller block, the largest whole number of
+    // decimations at or under source_rate / this. The transform does not
+    // change: every frame is still spectrum_transform points of every
+    // channel, so consecutive frames overlap by what the block shrank, which
+    // is what the spectrum stage's window reaching back over several
+    // dispatches already allows. A source already fast enough keeps its
+    // block, and a client that wants fewer asks for every n-th.
+    //
+    // More frames in flight come with it, so a Paced source keeps about as
+    // much time in hand before it loses a block: see open_source.
+    //
+    // revenant-engine passes 30, the rate ui/main.cpp gives for a waterfall
+    // that reads as live. Zero here, because a library caller and every test
+    // chose its block for a reason of its own.
+    double spectrum_rows_per_second = 0.0;
+
     // Holds one or both ends of the spectrum's colour map still, in dBFS.
     //
     // Empty is automatic, which docs/ui-spectrum.md makes the default because
@@ -483,6 +507,13 @@ struct EngineInfo {
 
     // Left empty when EngineConfig::spectrum_transform was zero.
     SpectrumGeometry spectrum{};
+
+    // Samples per dispatch and frames in flight, as settled. A spectrum
+    // frame comes per dispatch, so source_rate / block_samples is the row
+    // rate; EngineConfig::spectrum_rows_per_second is what can make the
+    // block smaller than the one asked for. Zero with no source.
+    std::size_t block_samples = 0;
+    std::uint32_t frames_in_flight = 0;
 
     // Points in a passband transform, after the same clamp against this
     // device's shared memory the full-span transform takes. Zero when
@@ -1120,6 +1151,8 @@ private:
 // the source rate over EngineConfig::block_samples and is not something a
 // consumer chooses. A consumer that wants fewer decimates in time; a consumer
 // that wants more asks for smaller blocks, which costs submissions.
+// EngineConfig::spectrum_rows_per_second is that request made once for every
+// source, and EngineInfo::block_samples is the block it settled on.
 struct SpectrumFrame {
     // Power per bin in decibels relative to full scale, ascending in
     // frequency across the whole span with no gaps and nothing counted twice.

@@ -765,3 +765,92 @@ TEST_CASE("replacing the spectrum sink does not restart the sequence",
     CHECK(second_sink.front() == first_sink.back() + 1);
     CHECK(second_sink.back() == second_sink.front() + second_sink.size() - 1);
 }
+
+TEST_CASE("a slow source gets the display rows it was asked for from overlapping windows",
+          "[gpu][engine][spectrum][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // EngineConfig::spectrum_rows_per_second, on the case the owner reported
+    // after the playtest of 2026-09-23: a recording at a low rate played at
+    // realtime drew about two rows a second, because a row comes per block
+    // and 65536 samples of a 96 kS/s file is 0.68 s of it. At 30 rows a
+    // second asked for, the block becomes 3200 samples, the largest multiple
+    // of the 16-channel grid's decimation of 8 at or under 96000 / 30, and
+    // every row's window is still the full transform, so consecutive rows
+    // overlap rather than any row being made of less.
+    //
+    // REJECTS: a row rate that still follows the block, a smaller block that
+    // shortens the window with it, rows that are not evenly spaced in the
+    // stream, and a setting that changes a source already fast enough.
+    constexpr dsp::SampleRate kSlowRate = 96'000;
+    constexpr dsp::SampleIndex kSamples = 480'000;
+    const std::string uri = "synthetic:wideband?rate=" + std::to_string(kSlowRate) +
+                            "&emitters=1&modes=am&seed=424242&noise_dbfs=-120&snr_min=60"
+                            "&snr_max=60&samples=" +
+                            std::to_string(kSamples) + "&span_low=-3000&span_high=3000";
+
+    engine::EngineConfig config = spectrum_config();
+    config.channels = 16;
+    config.block_samples = 65'536;
+    config.spectrum_rows_per_second = 30.0;
+
+    const auto asked = capture_spectrum(config, uri);
+    INFO(test::message_of(asked.run_status));
+    REQUIRE(asked.run_status.has_value());
+
+    const dsp::SampleIndex window = static_cast<dsp::SampleIndex>(kTransform) *
+                                    static_cast<dsp::SampleIndex>(asked.info.grid.decimation);
+    INFO(std::format("block {}, {} frames in flight, window {} samples, {} frames",
+                     asked.info.block_samples, asked.info.frames_in_flight, window,
+                     asked.frames.size()));
+    REQUIRE(asked.info.grid.decimation == 8);
+    CHECK(asked.info.block_samples == 3'200);
+
+    // Three frames' worth of the old block's time kept in hand, capped at
+    // the graph's eight.
+    CHECK(asked.info.frames_in_flight == 8);
+
+    // Every row after the first is exactly one block on from the one before
+    // and covers the whole transform, so the window overlaps its neighbour
+    // by what the block shrank.
+    REQUIRE(asked.frames.size() > 2);
+    std::size_t uneven = 0;
+    std::size_t short_window = 0;
+    for (std::size_t i = 0; i < asked.frames.size(); ++i) {
+        if (asked.frames[i].count != window) {
+            ++short_window;
+        }
+        if (i > 0 && asked.frames[i].start - asked.frames[i - 1].start != 3'200) {
+            ++uneven;
+        }
+    }
+    CHECK(uneven == 0);
+    CHECK(short_window == 0);
+    CHECK(window > 3'200);
+
+    // Rows per second of source: every block but the few whose window was
+    // not yet whole, which is 30 a second.
+    const double seconds = static_cast<double>(kSamples) / static_cast<double>(kSlowRate);
+    const double rows = static_cast<double>(asked.frames.size()) / seconds;
+    INFO(std::format("{:.2f} rows a second of source", rows));
+    CHECK(rows >= 29.0);
+    CHECK(rows <= 30.0);
+
+    // Asked for none, the same source keeps its block and draws one row per
+    // 0.68 s of it, which is what the owner saw.
+    config.spectrum_rows_per_second = 0.0;
+    const auto plain = capture_spectrum(config, uri);
+    REQUIRE(plain.run_status.has_value());
+    CHECK(plain.info.block_samples == 65'536);
+    CHECK(plain.info.frames_in_flight == 3);
+    CHECK(plain.frames.size() <= (kSamples + 65'535) / 65'536);
+
+    // And a source already fast enough keeps its block whatever is asked.
+    engine::EngineConfig fast = spectrum_config();
+    fast.spectrum_rows_per_second = 30.0;
+    const auto quick = capture_spectrum(fast, tone_uri(0, 400'000));
+    REQUIRE(quick.run_status.has_value());
+    CHECK(quick.info.block_samples == kBlockSamples);
+    CHECK(quick.info.frames_in_flight == 3);
+}

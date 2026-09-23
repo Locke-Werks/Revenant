@@ -87,6 +87,7 @@ struct Options {
     std::uint32_t spectrum_points = 2048;
     std::uint32_t passband_points = 512;
     std::uint32_t probes = 4;
+    double rows_per_second = 30.0;
     double ring_seconds = 8.0;
     int gpu = -1;
 
@@ -128,6 +129,8 @@ void print_usage()
         "  --block N             samples per block (65536, revenant-engine's)\n"
         "  --spectrum-points N   points per channel in the span transform (2048)\n"
         "  --probes N            probe receivers (4)\n"
+        "  --rows N              the fewest spectrum rows a second of source, as\n"
+        "                        revenant-engine's --rows (30)\n"
         "  --p25 HZ              a p25p1 receiver this far from baseband DC, with its voice\n"
         "                        and its p25p1 decoder subscribed\n"
         "  --nfm HZ[,HZ...]      nfm receivers with audio subscribed, for extra load\n"
@@ -210,6 +213,10 @@ void print_usage()
             auto got = as_integer();
             if (!got) { return std::unexpected(got.error()); }
             options.spectrum_points = static_cast<std::uint32_t>(*got);
+        } else if (token == "--rows") {
+            auto got = as_real();
+            if (!got) { return std::unexpected(got.error()); }
+            options.rows_per_second = *got;
         } else if (token == "--probes") {
             auto got = as_integer();
             if (!got) { return std::unexpected(got.error()); }
@@ -533,6 +540,7 @@ struct VoiceScore {
     config.audio_rate = 48'000;
     config.block_samples = options.block;
     config.spectrum_transform = options.spectrum_points;
+    config.spectrum_rows_per_second = options.rows_per_second;
     config.passband_transform = options.passband_points;
     config.probe_receivers = options.spectrum_points != 0 ? options.probes : 0;
 
@@ -546,9 +554,10 @@ struct VoiceScore {
     }
 
     const engine::EngineInfo& info = eng.info();
-    std::println("{} source rate {} S/s, grid {} channels, block {}, spectrum {} bins, flow {}",
-                 options.label, info.source_rate, info.grid.channels, options.block,
-                 info.spectrum.bins,
+    std::println("{} source rate {} S/s, grid {} channels, block {} ({} asked), {} frames in "
+                 "flight, spectrum {} bins, flow {}",
+                 options.label, info.source_rate, info.grid.channels, info.block_samples,
+                 options.block, info.frames_in_flight, info.spectrum.bins,
                  eng.source_capabilities().flow == source::FlowControl::Paced ? "paced"
                                                                                : "demand");
 

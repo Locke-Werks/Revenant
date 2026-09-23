@@ -367,6 +367,33 @@ public:
             block_samples = grid.decimation;
         }
 
+        // --- the display's row rate -------------------------------------------
+
+        // EngineConfig::spectrum_rows_per_second has the rule. What it asks
+        // for is a hop, so the block becomes the largest whole number of
+        // decimations at or under source_rate / rows, and a source already
+        // delivering that many keeps the block it had.
+        std::uint32_t frames_in_flight = GraphConfig{}.frames_in_flight;
+        if (config_.spectrum_transform != 0 && config_.spectrum_rows_per_second > 0.0) {
+            const double hop = static_cast<double>(rate) / config_.spectrum_rows_per_second;
+            const auto decimations =
+                static_cast<std::size_t>(hop / static_cast<double>(grid.decimation));
+            const std::size_t hop_block =
+                std::max<std::size_t>(1, decimations) * static_cast<std::size_t>(grid.decimation);
+            if (hop_block < block_samples) {
+                // The frames in flight are what a Paced source has in hand
+                // before an unretired frame costs it a block. Kept at about
+                // what the larger block gave, which is its three frames'
+                // worth of time, and never past the graph's eight.
+                const std::size_t kept =
+                    (static_cast<std::size_t>(frames_in_flight) * block_samples + hop_block - 1) /
+                    hop_block;
+                frames_in_flight =
+                    static_cast<std::uint32_t>(std::clamp<std::size_t>(kept, frames_in_flight, 8));
+                block_samples = hop_block;
+            }
+        }
+
         // --- the ring ---------------------------------------------------------
 
         // One dispatch reads the filter's whole support plus a block, so a
@@ -425,6 +452,7 @@ public:
         graph_config.format = source->capabilities().native_format;
         graph_config.flow = source->capabilities().flow;
         graph_config.block_samples = block_samples;
+        graph_config.frames_in_flight = frames_in_flight;
         graph_config.audio_rate = config_.audio_rate;
         graph_config.spectrum_transform = config_.spectrum_transform;
         graph_config.spectrum_floor_db = config_.spectrum_floor_db;
@@ -481,6 +509,8 @@ public:
         info_.source_rate = rate;
         info_.spectrum = graph_->geometry().spectrum;
         info_.passband_transform = graph_->geometry().passband_transform;
+        info_.block_samples = graph_->geometry().block_samples;
+        info_.frames_in_flight = graph_->geometry().frames_in_flight;
 
         // HERE AND NOT IN close_source, SO THE NUMBER ONLY EVER NAMES A STREAM
         // THAT EXISTS. Incrementing on the way out would leave an engine with

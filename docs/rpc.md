@@ -238,6 +238,36 @@ decimation knows what it asked for; what it cannot otherwise know is whether
 the engine also skipped. Keeping the two distinguishable is what lets a
 waterfall say it is behind instead of silently lying about the band.
 
+**The row rate no longer follows a slow source.** A frame comes per dispatch
+and a dispatch per block, so at `revenant-engine`'s 65536-sample blocks a
+96 kS/s recording played at realtime drew 1.46 rows a second, which is the
+"about two" the owner reported after the playtest of 2026-09-23.
+`EngineConfig::spectrum_rows_per_second`, `--rows` on `revenant-engine` and 30
+by default there, has `Engine::open_source` take the largest block that is a
+whole number of decimations at or under `source_rate / rows` when the source's
+own blocks would give fewer. The transform is unchanged, so every row is still
+the full window and consecutive rows overlap by what the block shrank; a
+source already fast enough keeps its block, which is every dongle rate at
+65536 samples down to 1.97 MS/s, and `everyNth` is still how a client asks
+for fewer. The frames in flight go up with it, to three frames' worth of the
+old block's time and at most eight, so a Paced source keeps time in hand
+before it loses a block. `EngineInfo::block_samples` and `frames_in_flight`
+say what was settled. Measured with `revenant-loadtest` at pace 1, rows per
+wall second over 30 s:
+
+| source | block before | rows/s before | block after | rows/s after |
+| --- | --- | --- | --- | --- |
+| KF4FIC 7 MHz 1359UT, 24-bit WAV, 96 kS/s, 16 channels | 65536 | 1.46 | 3200 | 30.01 |
+| synthetic cf32, 250 kS/s, 32 channels | 65536 | 3.79 | 8320 | 30.04 |
+| synthetic cf32, 48 kS/s, 8 channels | 65536 | 0.73 | 1600 | 30.03 |
+
+What the extra rows cost on the recording: the completion thread 1.1 ms/s
+against 2.9 before, since the detector left it in the same change set; the
+recording thread 3.9 ms/s against 0.3; the GPU wait 11.0 ms/s against 0.4,
+which is twenty dispatches where there was one; and the detector, now fed 30
+frames a second rather than 1.46, 0.8 percent of a core on the WAV's 16384
+bins and 3.8 percent on the 32768-bin 250 kS/s span, well under its budget.
+
 ### A receiver's passband crosses the same way, and only when asked
 
 `subscribePassband` is `subscribeSpectrum` per receiver: the same `everyNth`,
