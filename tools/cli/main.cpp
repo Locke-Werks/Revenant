@@ -593,11 +593,14 @@ void print_usage()
         "                      the time in the receiver's stream, the receiver number,\n"
         "                      the decoder, the kind of message and one line of text.\n"
         "                      Repeatable. p25p1, dstar and tetra read a --vrx in the\n"
-        "                      mode of the same name, such as --vrx 453.1M:p25p1.\n"
-        "                      rtty, sitor_b and navtex read a usb or lsb --vrx; ax25\n"
-        "                      (with APRS) and pocsag read an nfm one. auto attaches\n"
-        "                      the decoder named after each receiver's mode, and on a\n"
-        "                      usb, lsb or nfm receiver every decoder that reads it.\n"
+        "                      mode of the same name, such as --vrx 453.1M:p25p1, and\n"
+        "                      m17 a p25p1 or raw one. rtty, sitor_b, navtex, psk31,\n"
+        "                      psk63 and qpsk31 read a usb or lsb --vrx, psk with the\n"
+        "                      tone at 1000 Hz; cw reads a cw one, or usb or lsb with\n"
+        "                      the tone at 700 Hz; ax25 (with APRS) and pocsag read an\n"
+        "                      nfm one. auto attaches the decoder named after each\n"
+        "                      receiver's mode, and on a usb, lsb or nfm receiver\n"
+        "                      every decoder that reads it.\n"
         "                      Nothing is decrypted: an encrypted P25 call is\n"
         "                      reported as encrypted.\n"
         "\n"
@@ -3395,12 +3398,12 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // sample moves. A name attaches to every receiver whose output it reads;
     // auto attaches the decoder named after each receiver's mode, and on a
     // receiver no decoder is named after, every decoder that reads its audio:
-    // a usb receiver gets rtty, sitor_b and navtex, an nfm one ax25 and
-    // pocsag. That is the right default here and not on the wire, because an
-    // operator watching a terminal wants to see which of them the channel is
-    // carrying and a client subscribing names what it wants. A request that
-    // matches no receiver is refused, because a run that prints nothing looks
-    // exactly like a band with nothing on it.
+    // a usb receiver gets rtty, sitor_b, navtex, the three PSK decoders and
+    // cw, an nfm one ax25 and pocsag. That is the right default here and not
+    // on the wire, because an operator watching a terminal wants to see which
+    // of them the channel is carrying and a client subscribing names what it
+    // wants. A request that matches no receiver is refused, because a run that
+    // prints nothing looks exactly like a band with nothing on it.
     std::vector<std::shared_ptr<DecodeTap>> decode_taps;
     for (const std::string& name : options.decode) {
         std::size_t attached = 0;
