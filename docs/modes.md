@@ -1175,15 +1175,20 @@ its long spaces fall into letter spaces and word spaces, so a first word of
 one character keeps the space after it; a pause of twice the longest space so
 far prints what is held. A new dot length is taken only when a mark in the
 recent runs is a dash by it, so a run of T, M and O cannot pull the estimate
-onto a dash.
+onto a dash. The speed it reports weights the mean dot and the mean element
+space equally, because noise shortens one and lengthens the other by about the
+same amount; the runs are still read against the pooled mean, which decoded
+better. `tests/decode/test_cw.cpp` has the measurement.
+
+Until 2026-09-23 the next paragraph used to say "The measured speed reads slow in
+noise, 18.3 WPM for 20 at -10 dB and 33.3 for 35 at -8 dB", with the cause.
+The speed estimate no longer pools dots and spaces. Averaged over 40
+transmissions at -8 dB it reads 20.13 WPM for 20 and 34.27 for 35, where
+pooling read 19.36 and 32.75.
 
 Not done. The lead-in's noise still keys a character now and then: all 18
 errors in 768 transmissions from +4 to +10 dB were at the start of one, from a
-first noise estimate that landed low. The measured speed reads slow in noise,
-18.3 WPM for 20 at -10 dB and 33.3 for 35 at -8 dB, because dots come out
-short and element spaces long in noise and the one-unit cluster holds more
-spaces than dots; `tests/decode/test_cw.cpp` has the measurement and the fix
-it points to. The decoder holds the first characters back until it has seen
+first noise estimate that landed low. The decoder holds the first characters back until it has seen
 runs of two different lengths, then decodes them, so text whose marks and
 spaces are all one length, a row of T's with letter spaces between them, is
 never decoded at all.
