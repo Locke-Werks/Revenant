@@ -426,16 +426,21 @@ struct Characterisation {
 // call, which are the two cases with a stated reason to refuse, and it
 // certifies nothing else. The two rules of 2026-09-23, a symbol rate wider
 // than the detection and a PSK call that is two tones, refuse inside
-// characterise() and so arrive here as Unknown. docs/detection.md measured that the family call on
-// real HF cannot carry a detection decision on its own; a caller that routes a
-// family into detection passes through here first and still owes its own
-// measurement of what it is doing.
+// characterise() and so arrive here as Unknown. docs/detection.md measured
+// that the family call on real HF cannot carry a detection decision on its
+// own; a caller that routes a family into detection passes through here first
+// and still owes its own measurement of what it is doing.
 //
 // core/engine/probe.h asks it of every probe, and detect::Detector::
 // record_probe lets a family change Track::classification only when it says
-// yes. Nothing the detector decides reads that field, and nothing goes on the
-// wire as a family. WHAT THIS PARAGRAPH USED TO SAY AT ITS END: "Nothing in this
-// tree routes one yet, and nothing goes on the wire as a family."
+// yes. Nothing the detector decides reads that field. What reaches the wire is
+// core/detect/label.h's label, which gives a family only when this said yes,
+// by the owner's decision of 2026-09-23.
+//
+// WHAT THIS PARAGRAPH USED TO SAY AT ITS END, twice over. First: "Nothing in
+// this tree routes one yet, and nothing goes on the wire as a family." Then:
+// "Nothing the detector decides reads that field, and nothing goes on the
+// wire as a family."
 [[nodiscard]] bool may_drive_detection(const Characterisation& result);
 
 }  // namespace revenant::characterise

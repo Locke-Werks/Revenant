@@ -1,11 +1,11 @@
 // What a detection is, in the words the bracket on the span prints.
 //
-// THE OWNER'S REQUEST OF 2026-09-23, which retired docs/detection.md's
-// "nothing goes on the wire as a family": "Digital protocols should be
-// detected on the waterfall and spectrum along with modulation. The pink block
-// that brackets a signal should show what the signal is: modulation if analog,
-// detected digi mode if digital, and it should set the receiver accordingly
-// based on that information."
+// THE OWNER'S REQUEST OF 2026-09-23. docs/detection.md used to say "nothing
+// goes on the wire as a family", and this replaced it: "Digital protocols
+// should be detected on the waterfall and spectrum along with modulation. The
+// pink block that brackets a signal should show what the signal is:
+// modulation if analog, detected digi mode if digital, and it should set the
+// receiver accordingly based on that information."
 //
 // So a track gets a label with a kind, a name, a confidence and whether it may
 // drive a receiver, and this is the one function that decides it, from fields

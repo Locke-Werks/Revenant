@@ -1237,11 +1237,20 @@ evening.
 `engine::demod_for_signal` is the rule now. It takes the occupied bandwidth
 the detector measured and, when a `characterise::ModulationFamily` is known,
 that too; `core/engine/vrx_place.cpp` carries the derivation and the list of
-what the rule gets wrong, which is long and starts with AM. Nothing on the
-wire carries a family, so a client working from `Detection` alone uses the
-width. The engine does characterise detections now, on probe receivers of its
-own (`core/engine/probe.h`), and the answer stays on the detector's track:
-`docs/detection.md` settled that nothing goes on the wire as a family.
+what the rule gets wrong, which is long and starts with AM. The engine
+characterises detections on probe receivers of its own (`core/engine/probe.h`)
+and identifies protocols by their verified sync (`core/identify/identify.h`),
+and since 2026-09-23 `Detection.label` carries the answer: a modulation, a
+digital family, a protocol or nothing, with whether a client may set a receiver
+from it. A client with a label sets the mode from it; one without uses the
+width. `revenant-engine --probes` sizes the pool and `--probes 0` sends every
+detection unlabelled.
+
+WHAT THIS PARAGRAPH USED TO SAY after "starts with AM": "Nothing on the wire
+carries a family, so a client working from `Detection` alone uses the width.
+The engine does characterise detections now, on probe receivers of its own
+(`core/engine/probe.h`), and the answer stays on the detector's track:
+`docs/detection.md` settled that nothing goes on the wire as a family."
 
 WHAT THE SECOND SENTENCE USED TO SAY: "Nothing on the wire carries a family
 yet, because `core/characterise` reads complex baseband and is not wired into

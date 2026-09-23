@@ -30,6 +30,7 @@
 #include "core/decode/rds_groups.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
+#include "core/detect/label.h"
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
 #include "core/rpc/revenant.capnp.h"
@@ -78,6 +79,18 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
               static_cast<std::uint16_t>(detect::TrackState::Held));
 static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
               static_cast<std::uint16_t>(detect::TrackState::Merged));
+
+// The label's kind, on the same terms. A renumbering would print a protocol's
+// name as though it were a family's, and a client mapping the two to receiver
+// modes differently would then tune the wrong one.
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::UNKNOWN) ==
+              static_cast<std::uint16_t>(detect::LabelKind::Unknown));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::ANALOG_MODULATION) ==
+              static_cast<std::uint16_t>(detect::LabelKind::AnalogModulation));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::DIGITAL_FAMILY) ==
+              static_cast<std::uint16_t>(detect::LabelKind::DigitalFamily));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::PROTOCOL) ==
+              static_cast<std::uint16_t>(detect::LabelKind::Protocol));
 
 // The front end's verdict, on the same terms. This one is read out only, and
 // a renumbering turns "the floor is following the strongest signal" into "the

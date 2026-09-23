@@ -12,9 +12,12 @@
 // is the Raw passthrough tests/reference/test_vrx.cpp already holds bit-exact
 // against its twin. No kernel was added for this.
 //
-// Nothing a probe learns goes on the wire as a family, and a probe itself is
-// not a receiver anybody else can see: the graph leaves VrxRole::Probe out of
-// vrx_ids, and Engine refuses a probe's id on every public receiver method.
+// What a probe learns reaches a client only as a detection's label, core/
+// detect/label.h, and a probe itself is not a receiver anybody else can see:
+// the graph leaves VrxRole::Probe out of vrx_ids, and Engine refuses a probe's
+// id on every public receiver method. WHAT THE FIRST CLAUSE USED TO SAY:
+// "Nothing a probe learns goes on the wire as a family", until the owner's
+// decision of 2026-09-23 in docs/detection.md.
 //
 // THE NUMBERS, EACH OF WHICH IS A CHOICE MADE HERE
 //

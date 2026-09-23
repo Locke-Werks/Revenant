@@ -141,6 +141,14 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
               static_cast<std::uint16_t>(TrackState::Held));
 static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
               static_cast<std::uint16_t>(TrackState::Merged));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::UNKNOWN) ==
+              static_cast<std::uint16_t>(LabelKind::Unknown));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::ANALOG_MODULATION) ==
+              static_cast<std::uint16_t>(LabelKind::AnalogModulation));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::DIGITAL_FAMILY) ==
+              static_cast<std::uint16_t>(LabelKind::DigitalFamily));
+static_assert(static_cast<std::uint16_t>(schema::LabelKind::PROTOCOL) ==
+              static_cast<std::uint16_t>(LabelKind::Protocol));
 
 // And for why a retune removed a receiver, which retune_source reads by
 // ordinal.
@@ -620,6 +628,21 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.merged_into = in.getMergedInto();
     out.concentration = in.getConcentration();
     out.shape_measured = in.getShapeMeasured();
+
+    // An unknown kind reads as Unknown rather than failing the list: a label
+    // is advice about one row, and a newer server's kind should cost that row
+    // its label, not the client its whole track list.
+    const auto label = in.getLabel();
+    const auto kind = static_cast<std::uint16_t>(label.getKind());
+    out.label.kind = kind <= static_cast<std::uint16_t>(LabelKind::Protocol)
+                         ? static_cast<LabelKind>(kind)
+                         : LabelKind::Unknown;
+    out.label.name = out.label.kind == LabelKind::Unknown ? std::string()
+                                                          : std::string(label.getName().cStr());
+    out.label.confidence = label.getConfidence();
+    out.label.may_drive = out.label.kind != LabelKind::Unknown && label.getMayDrive();
+    out.label.symbol_rate_hz = label.getSymbolRateHz();
+    out.label.probes = label.getProbes();
     return out;
 }
 

@@ -566,6 +566,21 @@ enum class TrackState : std::uint8_t { Pending, Live, Held, Merged };
     return "unknown";
 }
 
+// Mirrors revenant::detect::LabelKind ordinal for ordinal, and the schema's
+// LabelKind with it, the same arrangement TrackState has above.
+enum class LabelKind : std::uint8_t { Unknown, AnalogModulation, DigitalFamily, Protocol };
+
+// What a detection is. The schema's DetectionLabel has what each field means;
+// detect::label_track in core/detect/label.h is the rule that fills it.
+struct DetectionLabel {
+    LabelKind kind = LabelKind::Unknown;
+    std::string name;
+    double confidence = 0.0;
+    bool may_drive = false;
+    double symbol_rate_hz = 0.0;
+    std::uint32_t probes = 0;
+};
+
 // One thing the wideband detector is tracking. See the long note on the
 // schema's Detection for what is deliberately absent, which is the tracker's
 // working state and a logical centre nothing can compute yet.
@@ -625,6 +640,9 @@ struct Detection {
     // there is.
     double concentration = 0.0;
     bool shape_measured = false;
+
+    // What it is, for the bracket and for click-to-tune. See DetectionLabel.
+    DetectionLabel label;
 
     [[nodiscard]] constexpr std::uint64_t age_samples() const {
         return last_seen - first_seen;

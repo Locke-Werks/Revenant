@@ -73,7 +73,19 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
         const std::size_t count = engine.take_probe_outcomes(outcomes_);
         for (std::size_t i = 0; i < count; ++i) {
             const engine::ProbeOutcome& outcome = outcomes_[i];
+
+            // Only an answer to a probe this TierTwo submitted. A server that
+            // rebuilds its detector and its TierTwo across a retune numbers
+            // tracks from one again, so an answer still in the pool's ring
+            // from before would otherwise land on whichever new track took
+            // the old id.
+            const bool ours =
+                std::find(in_flight_.begin(), in_flight_.end(), outcome.tag) != in_flight_.end();
             std::erase(in_flight_, outcome.tag);
+            if (!ours) {
+                ++stats_.stale;
+                continue;
+            }
             statuses_[outcome.tag] = outcome.status;
 
             switch (outcome.status) {

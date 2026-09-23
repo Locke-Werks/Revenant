@@ -618,6 +618,15 @@ void write_detection(schema::Detection::Builder out, const detect::Track& in) {
     out.setMergedInto(in.merged_into);
     out.setConcentration(in.shape.concentration);
     out.setShapeMeasured(in.shape.measured);
+
+    const detect::TrackLabel label = detect::label_track(in);
+    auto wire = out.initLabel();
+    wire.setKind(static_cast<schema::LabelKind>(static_cast<std::uint16_t>(label.kind)));
+    wire.setName(capnp::Text::Reader(label.name.data(), label.name.size()));
+    wire.setConfidence(label.confidence);
+    wire.setMayDrive(label.may_drive);
+    wire.setSymbolRateHz(label.symbol_rate_hz);
+    wire.setProbes(in.probes);
 }
 
 void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBitsStatus& in) {

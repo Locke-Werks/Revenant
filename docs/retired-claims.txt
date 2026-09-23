@@ -1114,18 +1114,19 @@ retired: 2026-09-23
 commit: "Record what a probe finds on the track it was placed on"
 instead: detect::Classification carries the families core/characterise names,
     and Detector::record_probe fills Track::classification from tier two when
-    characterise::may_drive_detection allows. Nothing on the wire carries it.
+    characterise::may_drive_detection allows. Since "Put each detection's
+    label on the wire and label on the server" a label made from it is on the
+    wire.
 
 phrase: Nothing routes a family into detection yet
-phrase: Nothing in this tree routes one yet, and nothing goes on the wire as a family
 phrase: What there is still no route for is complex baseband to a classifier
 phrase: It is narrowed once a classification exists, and nothing sets one yet
 retired: 2026-09-23
 commit: "Record what a probe finds on the track it was placed on"
 instead: core/detect/tier_two.h routes a probe's family onto the track through
     record_probe, which may_drive_detection gates. Nothing the detector
-    decides reads it, the hold is not narrowed by it, and it stays off the
-    wire.
+    decides reads it and the hold is not narrowed by it. It stayed off the
+    wire until the record below "nothing goes on the wire as a family".
 
 phrase: A second call arriving while the first cancel is still draining takes
     librtlsdr's other branch
@@ -1639,3 +1640,13 @@ commit: "Let the engine choose the channel count on HF in revenant-cli"
 instead: revenant-cli's 64 channels are a default that gives way below 30 MHz,
     through EngineConfig::channels_yield_to_source, so a 96 kS/s HF recording
     opens on the engine's 16 channels unless --channels names a count.
+
+phrase: nothing goes on the wire as a family
+phrase: Nothing on the wire carries a family, so a client working from
+phrase: family, and core/rpc carries no field for this
+phrase: and the answer stays on the detector's track rather than reaching a click
+retired: 2026-09-23
+commit: "Put each detection's label on the wire and label on the server"
+instead: The owner reversed it: Detection.label carries a kind, a name, a
+    confidence and mayDrive, made by detect::label_track from a verified
+    protocol or an accepted family. docs/detection.md, "The label on the wire".

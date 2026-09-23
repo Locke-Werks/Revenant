@@ -303,6 +303,7 @@
 
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
+#include "core/detect/tier_two.h"
 #include "core/rpc/convert.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/listen.h"
@@ -1373,6 +1374,18 @@ private:
     std::mutex detect_lock_;
     std::atomic<bool> detecting_{false};
     std::optional<detect::Detector> detector_;
+
+    // Tier two, which is what puts a label on a detection: it submits the
+    // detector's tracks to the engine's probe pool and records what comes
+    // back. Built with the detector when the engine has a pool and not
+    // otherwise, so a server on an engine with EngineConfig::probe_receivers
+    // at zero labels nothing and every detection crosses the wire unknown.
+    //
+    // Under detect_lock_ and stepped on the completion thread inside
+    // on_frame, once per decision, which is the one producer and one consumer
+    // core/engine/probe.h asks for: nothing else submits to the pool.
+    std::optional<detect::TierTwo> tier_two_;       // detect_lock_
+    dsp::SampleIndex tier_two_decision_ = 0;        // detect_lock_
 
     // The front end's verdict, and the decision it was last taken at.
     //
@@ -2724,6 +2737,20 @@ Status ServerImpl::ensure_detector() {
     }
     detector_ = std::move(*made);
 
+    // Only on an engine with probe receivers: TierTwo::step asks the pool its
+    // size and would submit nothing to an engine without one, but building it
+    // there would read as labelling being on.
+    if (engine_.probe_stats().size > 0) {
+        auto tier_two = detect::TierTwo::create(
+            detect::TierTwoConfig{.source_rate = info.source_rate});
+        if (!tier_two) {
+            detector_.reset();
+            return std::unexpected(with_context(tier_two.error(), "building tier two"));
+        }
+        tier_two_ = std::move(*tier_two);
+        tier_two_decision_ = 0;
+    }
+
     // Published last, so the completion thread cannot find a detector that is
     // still being constructed.
     detecting_.store(true, std::memory_order_relaxed);
@@ -3446,6 +3473,8 @@ void ServerImpl::forget_detector() {
         // reaching the old detector between here and the reset below.
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+        tier_two_.reset();
+        tier_two_decision_ = 0;
 
         // Every segment now looks at a different piece of spectrum, so the
         // window's history is a measurement of somewhere else and a slope
@@ -3532,6 +3561,17 @@ Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
                 detector_fault_ = fed.error().message;
             } else {
                 observe_front_end();
+
+                // Once per decision, after it: the answers land on the tracks
+                // that decision published and the schedule reads them. A
+                // refusal is dropped for the reason the consume() refusal is
+                // recorded rather than returned: a full request ring is not a
+                // reason to end the run, and TierTwoStats counts it.
+                const dsp::SampleIndex decided = detector_->last_decision();
+                if (tier_two_.has_value() && decided != tier_two_decision_) {
+                    tier_two_decision_ = decided;
+                    static_cast<void>(tier_two_->step(*detector_, engine_));
+                }
             }
         }
     }
@@ -4844,6 +4884,8 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
         std::scoped_lock held(detect_lock_);
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+        tier_two_.reset();
+        tier_two_decision_ = 0;
         detector_fault_.clear();
         front_end_.reset();
         have_front_end_decision_ = false;
@@ -5133,6 +5175,8 @@ void ServerImpl::stop() {
         std::scoped_lock held(detect_lock_);
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
+        tier_two_.reset();
+        tier_two_decision_ = 0;
         front_end_.reset();
         have_front_end_decision_ = false;
         last_front_end_decision_ = 0;

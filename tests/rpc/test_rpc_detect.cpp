@@ -361,15 +361,17 @@ public:
 
     // Opens everything and starts the engine on its own thread, because a
     // case that polls the wire has to be driven while the engine runs.
-    [[nodiscard]] Status open(const std::string& uri) {
+    [[nodiscard]] Status open(const std::string& uri, std::uint32_t probes = 0,
+                              double pace = 1.0) {
         engine::EngineConfig config;
         config.gpu_index = -1;  // honours REVENANT_GPU_INDEX, like every other binary here
         config.channels = kChannels;
         config.taps_per_branch = 17;
         config.ring_seconds = 0.5;
         config.block_samples = kBlockSamples;
-        config.pace = 1.0;
+        config.pace = pace;
         config.spectrum_transform = kSpectrumTransform;
+        config.probe_receivers = probes;
 
         auto created = engine::Engine::create(config);
         if (!created) {
@@ -1432,4 +1434,67 @@ TEST_CASE("a margin bar of one is refused rather than answered empty",
     auto accepted = harness.client().detections(0.0, std::nextafter(1.0, 0.0));
     INFO(test::message_of(accepted));
     CHECK(accepted.has_value());
+}
+
+// THE LABEL ON THE WIRE, the owner's decision of 2026-09-23. A server whose
+// engine has probe receivers runs tier two on its own detector and every
+// detection carries what detect::label_track makes of its track. Carriers at
+// 30 dB, because the probe survey in tests/engine/test_engine_probe.cpp names
+// those at that level every time, so a label that never arrives is the wire
+// and not the characteriser.
+//
+// REJECTS: a server that labels nothing, a label that crosses without its
+// kind, and an unlabelled row that says it may drive a receiver.
+TEST_CASE("a probed detection crosses the wire with its label", "[gpu][rpc][detect][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    const std::string uri = std::format(
+        "synthetic:wideband?rate={}&emitters=3&seed=17&noise_dbfs=-100&snr_min=30&snr_max=30"
+        "&span_low=-150000&span_high=150000&modes=cw&center={}",
+        test::kSourceRate, kSceneCenter);
+
+    SceneRig rig;
+    const auto ready = rig.open(uri, 2, 4.0);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    rpc::DetectionList last;
+    const rpc::Detection* labelled = nullptr;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (labelled == nullptr && std::chrono::steady_clock::now() < deadline) {
+        auto answered = rig.client().detections(0.0, 0.0);
+        REQUIRE(answered.has_value());
+        last = std::move(*answered);
+        for (const rpc::Detection& detection : last.detections) {
+            if (detection.label.kind != rpc::LabelKind::Unknown) {
+                labelled = &detection;
+                break;
+            }
+        }
+        if (labelled == nullptr) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    INFO(std::format("{} detections at decision {}", last.detections.size(), last.last_decision));
+    REQUIRE(labelled != nullptr);
+
+    INFO(std::format("detection {} labelled {} '{}' at {:.2f} after {} probes", labelled->id,
+                     static_cast<int>(labelled->label.kind), labelled->label.name,
+                     labelled->label.confidence, labelled->label.probes));
+    CHECK(labelled->label.kind == rpc::LabelKind::AnalogModulation);
+    CHECK((labelled->label.name == "CW" || labelled->label.name == "AM"));
+    CHECK(labelled->label.may_drive);
+    CHECK(labelled->label.probes > 0);
+    CHECK(labelled->label.confidence > 0.0);
+
+    for (const rpc::Detection& detection : last.detections) {
+        if (detection.label.kind == rpc::LabelKind::Unknown) {
+            CHECK(detection.label.name.empty());
+            CHECK_FALSE(detection.label.may_drive);
+        }
+    }
+
+    const auto stopped = rig.stop();
+    INFO(test::message_of(stopped));
+    REQUIRE(stopped.has_value());
 }

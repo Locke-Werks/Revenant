@@ -1440,6 +1440,57 @@ struct Detection {
     # as 0.0, and 0.0 is the most noise-like reading there is, so a client
     # without this flag would draw "we could not tell" as "certainly junk".
     shapeMeasured @14 :Bool;
+
+    # What this detection is: a modulation, a digital family, a protocol, or
+    # nothing. detect::label_track is the rule and this is its answer, taken
+    # when the list was built.
+    #
+    # THE OWNER'S DECISION OF 2026-09-23. docs/detection.md used to say
+    # "nothing goes on the wire as a family", and this replaced it: "The pink
+    # block that brackets a signal should show what the signal is: modulation
+    # if analog, detected digi mode if digital, and it should set the receiver
+    # accordingly based on that information." A client prints the name on the
+    # bracket and, where
+    # mayDrive allows, sets the receiver a click tunes from it.
+    #
+    # A server built with no probe receivers never labels anything, and every
+    # detection arrives with kind unknown and probes zero, which is what a
+    # client that predates this field reads too.
+    label @15 :DetectionLabel;
+}
+
+# What a detection is, as detect::TrackLabel carries it.
+struct DetectionLabel {
+    kind @0 :LabelKind;
+
+    # "P25", "NFM", "BPSK" and the like; empty for unknown.
+    name @1 :Text;
+
+    # The verified protocol's confidence for a protocol, the accepted family's
+    # for the rest, zero for unknown. core/identify/identify.h and
+    # core/characterise/characterise.h say what each is and is not.
+    confidence @2 :Float64;
+
+    # Whether a client may set a receiver from this label. False for unknown.
+    # Its own field so the rule can tighten without a client changing.
+    mayDrive @3 :Bool;
+
+    # The symbol rate the probe measured, zero where it found none. For a
+    # hover card: a bracket has no room for it.
+    symbolRateHz @4 :Float64;
+
+    # How many probes have answered on this track. Zero with kind unknown is
+    # a track nobody has looked at yet; above zero with kind unknown, one that
+    # was looked at and named nothing, which is a different thing to tell an
+    # operator.
+    probes @5 :UInt32;
+}
+
+enum LabelKind {
+    unknown @0;
+    analogModulation @1;
+    digitalFamily @2;
+    protocol @3;
 }
 
 # One answer to Session::detections.

@@ -242,6 +242,14 @@ struct Options {
     // subscribes, because the stage is per receiver and opt in.
     std::uint32_t passband_points = 512;
 
+    // Probe receivers, EngineConfig::probe_receivers. Four by default, which
+    // is what revenant-cli runs and what docs/detection.md measured: they are
+    // what labels a detection for a client's span, and a display is what
+    // connects to this. Zero builds no pool, and every detection then crosses
+    // the wire unlabelled. docs/detection.md has the standing GPU cost: four
+    // at the floor bucket on a 2.4 MS/s grid is 1.6 ms of GPU a second.
+    std::uint32_t probes = 4;
+
     std::optional<float> spectrum_floor_db;
     std::optional<float> spectrum_ceiling_db;
 
@@ -329,6 +337,9 @@ void print_usage()
         "  --no-passband       Build no passband stage. subscribePassband then fails\n"
         "                      with the engine's reason and the detail display in a\n"
         "                      client has nothing to draw.\n"
+        "  --probes <n>        Probe receivers the engine places on detections to\n"
+        "                      label them, default 4, at most 16. 0 builds none and\n"
+        "                      every detection is sent unlabelled.\n"
         "  --spectrum-floor <dbfs>\n"
         "  --spectrum-ceiling <dbfs>\n"
         "                      Hold one or both ends of the colour map still. Both\n"
@@ -552,6 +563,19 @@ void print_usage()
                 return fail("--pace cannot be negative. Zero is unthrottled");
             }
             options.pace = *number;
+            continue;
+        }
+
+        if (arg == "--probes") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_bounded(*text, arg, 0, engine::kMaxProbeReceivers);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            options.probes = static_cast<std::uint32_t>(*number);
             continue;
         }
 
@@ -884,6 +908,10 @@ void print_engine_block(const engine::Engine& eng)
                                      "calibration.txt")
                                         .string()
                                   : options.calibration_file;
+
+    // The pool is built with the graph, so before the engine exists. It labels
+    // only what the spectrum stage detects, so it is not asked for without one.
+    config.probe_receivers = options.spectrum_points != 0 ? options.probes : 0;
 
     auto created = engine::Engine::create(config);
     if (!created) {

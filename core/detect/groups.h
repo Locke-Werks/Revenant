@@ -20,8 +20,13 @@
 //
 // WHAT IT DOES NOT DO
 //
-// It classifies nothing and names no family, and docs/detection.md decided
-// that nothing goes on the wire as a family. The gap is the caller's, for the
+// It classifies nothing and names no family, and a group goes on the wire as
+// nothing: what reaches a client is each track's own label, core/detect/
+// label.h. WHAT THIS SENTENCE USED TO SAY after "names no family": "and
+// docs/detection.md decided that nothing goes on the wire as a family",
+// which the owner reversed on 2026-09-23 for tracks.
+//
+// The gap is the caller's, for the
 // same reason both detector thresholds are the operator's: no measurement has
 // chosen one, and a constant chosen here would be a classification smuggled
 // in as a grouping rule. A group means "these lines sit within the gap of each

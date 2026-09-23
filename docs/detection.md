@@ -533,7 +533,12 @@ while it was there.
 
 What the margin is not is authenticity. A strong interferer stands well above
 the noise and scores high, correctly. Separating a signal from a product is
-the job of the identification below, and nothing on the wire does it yet.
+the job of the identification below. The label on the wire names what a probe
+found, which is not the same question: an intermod product of a BPSK station
+can be named BPSK, correctly.
+
+WHAT THE LAST SENTENCE USED TO END WITH: "and nothing on the wire does it
+yet." Since 2026-09-23 a label is on the wire and it does not do this either.
 
 Five rules the first draft left out, each of which breaks something:
 
@@ -1776,10 +1781,12 @@ earlier in this document now reads 0.50 flagged at -3 and -9 dB, under the
 the flagged call, and certifies nothing else. Tier two asks it of every probe:
 `Detector::record_probe` keeps every answer on the track and lets one change
 `Track::classification` only when this says yes, and nothing the detector
-decides reads that field. Nothing goes on the wire as a family.
+decides reads that field. The wire carries a label made from it, by the
+owner's decision recorded in "The label on the wire" below.
 
-WHAT THE LAST SENTENCE USED TO SAY: "Nothing routes a family into detection
-yet and nothing goes on the wire as one."
+WHAT THE LAST SENTENCE USED TO SAY, twice. First: "Nothing routes a family
+into detection yet and nothing goes on the wire as one." Then: "Nothing goes on
+the wire as a family."
 
 ### The OFDM branch still fires on noise, and why that one is not mine to fix
 
@@ -2252,6 +2259,109 @@ bandwidth, and the operator can listen and decide, which is what they were
 going to do. This is the same rule AFT follows in `docs/ui-spectrum.md`: an
 unidentified signal means hold still, not guess.
 
+## The label on the wire
+
+### The decision, as a record
+
+    topic       detect.label_on_wire
+    status      confirmed, the owner, 2026-09-23
+    decided     "Digital protocols should be detected on the waterfall and
+                spectrum along with modulation. The pink block that brackets a
+                signal should show what the signal is: modulation if analog,
+                detected digi mode if digital, and it should set the receiver
+                accordingly based on that information."
+    supersedes  what this document used to say under "A PSK call with no
+                symbol rate", its own rule since the probe receiver was built:
+                "nothing goes on the wire as a family"
+    took with it the integrator's three probe fixes, recorded under "The
+                three fixes, re-measured" above
+    evidence    tests/characterise/test_consistency.cpp,
+                tests/characterise/test_identify.cpp, tests/detect/
+                test_label.cpp, tests/rpc/test_rpc_detect.cpp ("a probed
+                detection crosses the wire with its label")
+
+    topic       identify.dmr
+    status      confirmed, the owner, 2026-09-23
+    decided     DMR is back in scope and its frame sync may be correlated; the
+                risk on US8306071 is accepted. Another lane writes
+                core/decode/dmr.* from TS 102 361-1 and -2.
+    here        a pending row in core/identify: plausible on a 4FSK-wide
+                signal, reporting unavailable until the decoder lands, behind
+                IdentifyConfig::dmr. Wiring it is attempt_dmr in
+                core/identify/identify.cpp. docs/modes.md's exclusion text is
+                the DMR lane's to retract.
+
+### What the label is
+
+`Detection.label` carries a kind, a name, a confidence and whether a client may
+set a receiver from it. `detect::label_track` in `core/detect/label.h` is the
+whole rule, in this order:
+
+1. **A verified protocol.** `core/identify` runs the decoders `core/decode`
+   already has over a probe's extract, where the family and the width make a
+   protocol plausible, and claims one only on what the decoder verifies. Its
+   header states what counts for each protocol and how many it needs.
+2. **An accepted family.** An unmodulated carrier is CW, or AM when its
+   sidebands mirror about it; analogue FM is NFM below 50 kHz and WFM above;
+   FSK and PSK carry their tone count and order, 2FSK or BPSK; OFDM is OFDM.
+3. **Nothing.** A track probed and named nothing gets no label.
+
+**It cannot say USB or LSB.** No family the characteriser names is single
+sideband, and relative to a carrier that is not transmitted the two differ only
+in which side their power sits, which "The lines as a set" above measured no
+per-band field can read. A sideband signal is unlabelled, which is rule 3
+rather than a gap in it.
+
+**WFM is reachable only where a probe fits.** A broadcast station is 200 kHz
+wide and a probe runs at four times its detection's width, so on the shipped
+2.4 MS/s grid a WFM carrier comes back too wide and is never labelled. RDS on
+it is the same: `core/identify` lists the row and reports it unavailable.
+
+**TETRA needs a grid with 96 kS/s channels or more.** A 25 kHz signal wants the
+96000 bucket, and 2.4 MS/s over 64 channels runs 75 kS/s channels.
+
+### What each protocol took, from one probe's extract
+
+`tests/characterise/test_identify.cpp`, each protocol rendered by its own
+transmitter in `core/dsp/synth` at 20 dB in 2500 Hz, at the rate its width
+would give it, centred at DC. The count is what the row verified against what
+it needs:
+
+| protocol | rate | verified | needed |
+| --- | --- | --- | --- |
+| P25 | 48000 | 30 data units | 2 |
+| D-STAR | 48000 | 6 | 2 |
+| TETRA | 96000 | 130 bursts | 1 |
+| M17 | 48000 | 48 | 2 |
+| POCSAG | 48000 | 7 | 2 |
+| AX.25 | 48000 | 3 frames | 1 |
+| RTTY | 12000, 5 s | 29 characters | 10 |
+| SITOR-B | 12000, 5 s | 29 characters | 8 |
+| PSK31 | 12000, 5 s | 16 characters | 6 |
+| CW | 12000, 5 s | 10 characters | 4 |
+
+Noise, three draws at each of seven widths covering every row: nothing
+verified. A steady carrier: not CW.
+
+**The HF modes need five seconds and get them.** Two seconds held one PSK31
+character of the six its row needs and three CW characters of four, and
+SITOR-B spends 2.24 s phasing before its first character. A detection no wider
+than 600 Hz now collects five seconds, the characteriser still reads the first
+two, and its first family arrives three seconds later than it did.
+
+**RTTY needs its characters read cleanly, not only framed.** A SITOR-B signal
+at 100 baud on the same 170 Hz shift framed 28 and 31 characters at RTTY's
+45.45 baud with 3 to 5 framing errors; RTTY framed 29 with none. What separated
+them is the weakest soft reading in each character: 0.94 to 0.99 on average
+for RTTY at 20, 10 and 5 dB, 0.44 to 0.49 for SITOR-B and 0.21 to 0.26 for
+noise.
+
+**One tone of an RTTY pair is a keyed carrier to the CW decoder**, and CW
+verified 13 characters on the RTTY extract. So the rows run in order of how
+hard their check is to satisfy by accident and the first to verify wins: codes
+over fields first, SITOR-B's constant-ratio code, RTTY's framing, PSK31's
+Varicode, and CW's Morse table last.
+
 ## Click to tune
 
 The track carries a centre, a bandwidth measured from the signal rather than
@@ -2288,16 +2398,20 @@ gets a receiver narrower than the signal they clicked with no error anywhere,
 and `VrxStatus::params` reports the bandwidth asked for rather than the one
 delivered. Click-to-tune has to read `placement.bandwidth_clamped` and say so.
 
-**What a click resolves against exists; what it cannot reach is the
-classifier.** `Engine::set_spectrum_sink` delivers the frames, the detector
-runs on them on the RPC server's side, and `Session::detections` publishes the
-track list a client filters by confidence. `ui/render/spectrum_item.cpp`
-resolves a click against it and tunes a receiver. Complex baseband reaches a
-classifier through the engine's own probe receivers, and the answer stays on
-the detector's track rather than reaching a click.
+**What a click resolves against exists, and so does what it is.**
+`Engine::set_spectrum_sink` delivers the frames, the detector runs on them on
+the RPC server's side, tier two runs beside it when the engine has probe
+receivers, and `Session::detections` publishes the track list with each
+track's label. `ui/render/spectrum_item.cpp` resolves a click against it and
+tunes a receiver.
 
-WHAT THE LAST SENTENCE USED TO SAY: "What there is still no route for is
-complex baseband to a classifier."
+WHAT THE HEADING AND THE LAST SENTENCE USED TO SAY. The heading was "What a
+click resolves against exists; what it cannot reach is the classifier", and
+the sentence first read "What there is still no route for is complex baseband
+to a classifier" and then "Complex baseband reaches a classifier through the
+engine's own probe receivers, and the answer stays on the detector's track
+rather than reaching a click." The label on the wire above is what reaches it
+now.
 
 This paragraph used to say there was no Engine surface for any of it and that
 the track list was exposed by nothing. That was true when it was written and

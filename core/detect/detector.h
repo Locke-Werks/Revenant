@@ -179,8 +179,10 @@ inline constexpr double kResidualPartFloor = 0.5;
 // anything but Unknown". Nothing in this file sets anything else now either;
 // record_probe copies what a probe found.
 //
-// INTERNAL. docs/detection.md settled that nothing goes on the wire as a
-// family, and core/rpc carries no field for this.
+// ON THE WIRE since 2026-09-23, as the label core/detect/label.h makes of a
+// track: the owner's decision, recorded in docs/detection.md. WHAT THIS
+// PARAGRAPH USED TO SAY: "INTERNAL. docs/detection.md settled that nothing
+// goes on the wire as a family, and core/rpc carries no field for this."
 enum class Classification : std::uint8_t {
     Unknown = 0,
     Unmodulated,

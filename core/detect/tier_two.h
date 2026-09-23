@@ -70,6 +70,10 @@ struct TierTwoStats {
     // pool's own statuses and are never recorded against a track.
     std::uint64_t recorded = 0;
     std::uint64_t orphaned = 0;
+
+    // Outcomes for a probe this TierTwo never submitted, which is a probe a
+    // TierTwo before it submitted: dropped unread. See TierTwo::take.
+    std::uint64_t stale = 0;
     std::uint64_t too_wide = 0;
     std::uint64_t unplaced = 0;
     std::uint64_t cancelled = 0;

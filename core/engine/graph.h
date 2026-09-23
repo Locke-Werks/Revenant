@@ -166,8 +166,12 @@ struct VrxStageRequest {
 // to collect baseband for core/characterise. It is a real receiver on the
 // graph, recorded and dispatched like any other, and it is left out of
 // vrx_ids so that no client, no RPC surface and no retune pass ever finds it.
-// docs/detection.md settled that nothing goes on the wire as a family, and a
-// receiver that exists to produce one does not go there either.
+// What it finds reaches a client only as a detection's label, core/detect/
+// label.h, and the receiver that found it does not go there at all.
+//
+// WHAT THE LAST SENTENCE USED TO SAY: "docs/detection.md settled that nothing
+// goes on the wire as a family, and a receiver that exists to produce one
+// does not go there either." The owner reversed the first half on 2026-09-23.
 enum class VrxRole : std::uint8_t {
     Receiver,
     Probe,
