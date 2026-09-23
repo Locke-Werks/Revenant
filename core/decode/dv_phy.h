@@ -20,6 +20,30 @@
 // deliberate: a reader auditing provenance can skip this file entirely, and a
 // reader debugging a lock failure does not have to read three standards.
 //
+// ONE CALL, OR A STREAM
+//
+// fm_discriminate, filter_real and filter_complex take each call as a whole
+// signal: the discriminator starts against 1+0i and the filters from zeros.
+// That is right for a capture handed over in one piece, which is how the
+// transmitters in core/dsp/synth use them. A decoder the engine feeds one
+// block at a time wants FmDiscriminator and RealFir instead, which carry the
+// previous sample and the filter history across calls, and SymbolSync, which
+// anchors its windows to the stream. Through those three a stream gives the
+// same symbols however it is split, bit for bit. P25 learned this the hard
+// way on 2026-09-22: in 1024-sample blocks, calling the one-call forms per
+// block, with each block's mean taken as the carrier offset on top, cost it
+// one of the six headers it decoded from the capture whole, and
+// put 38 NID bits and 28 Golay words of correction on the rest where the
+// whole capture needed none, all of it gone once the state was carried.
+// tests/decode/test_p25p1_blocking.cpp has the breakdown. D-STAR and TETRA
+// still call the one-call forms per block.
+//
+// A carrier offset through a frequency discriminator is a constant added to
+// every symbol. centred_correlation_at finds a sync word regardless of it and
+// fit_levels measures it, and the deviation, from the sync word's own known
+// symbols, so a burst receiver needs no running estimate of either and has
+// nothing to settle.
+//
 // NOTHING HERE IS BIT EXACT AGAINST A GPU TWIN
 //
 // The project's rule is that every GPU kernel has a scalar twin and the two
@@ -69,6 +93,36 @@ using dsp::SampleRate;
 // positive.
 [[nodiscard]] Status fm_discriminate(ConstComplexSpan in, RealSpan out, SampleRate rate);
 
+// The same discriminator for a stream that arrives in pieces.
+//
+// fm_discriminate takes every call as the start of a signal, so a decoder
+// calling it once per block puts a false first sample at every block
+// boundary: the argument of the block's first sample against 1+0i, which for
+// a carrier at an arbitrary phase is anywhere in +/- rate/2. At 48000 S/s that
+// is up to 24 kHz against the 600 Hz a P25 symbol unit deviates. This one
+// carries the previous sample across calls, so the first output of a call is
+// the one the whole stream would have produced there, and its output for a
+// stream is the same however the stream was split.
+class FmDiscriminator {
+   public:
+    // Default constructible so a decoder can hold one by value and assign into
+    // it from its own create(). A default-constructed one has a zero scale and
+    // outputs zeros.
+    FmDiscriminator() = default;
+
+    [[nodiscard]] static Expected<FmDiscriminator> create(SampleRate rate);
+
+    // Spans must be the same length.
+    [[nodiscard]] Status process(ConstComplexSpan in, RealSpan out);
+
+    // Forgets the previous sample. Between independent captures only.
+    void reset();
+
+   private:
+    double scale_ = 0.0;
+    Complex32 previous_{1.0F, 0.0F};
+};
+
 // ---------------------------------------------------------------------------
 // Filter design
 // ---------------------------------------------------------------------------
@@ -113,6 +167,39 @@ using ResponseFn = double (*)(double hertz, const void* context);
 // Spans must be the same length.
 [[nodiscard]] Status filter_real(ConstRealSpan in, ConstRealSpan taps, RealSpan out);
 [[nodiscard]] Status filter_complex(ConstComplexSpan in, ConstRealSpan taps, ComplexSpan out);
+
+// filter_real for a stream that arrives in pieces.
+//
+// filter_real treats the input as zero before the start of each call, which
+// is right for a whole capture and wrong for a block of one: every call then
+// begins with the filter ramping up from silence, and for the first taps-1
+// outputs only part of the impulse response sees signal. For the P25 receive
+// filter, 121 taps at 48000 S/s, that is 12 symbols at every block boundary.
+// This one keeps the last taps-1 inputs across calls, so its output for a
+// stream is the same however the stream was split, and sample for sample the
+// same as filter_real over the stream in one call: the sum runs over the taps
+// in the same order, and the zeros before the stream's start contribute
+// nothing to it.
+class RealFir {
+   public:
+    RealFir() = default;
+
+    [[nodiscard]] static Expected<RealFir> create(std::vector<float> taps);
+
+    // Spans must be the same length.
+    [[nodiscard]] Status process(ConstRealSpan in, RealSpan out);
+
+    // Forgets the history, as though the next call were the start of the
+    // stream. Between independent captures only.
+    void reset();
+
+   private:
+    std::vector<float> taps_;
+
+    // The last taps-1 inputs, oldest first, then the current call's input
+    // behind them while it is being filtered.
+    std::vector<float> history_;
+};
 
 // ---------------------------------------------------------------------------
 // Symbol timing recovery
@@ -254,6 +341,40 @@ struct SyncHit {
 // pattern is still where it expects.
 [[nodiscard]] double correlation_at(ConstRealSpan symbols, ConstRealSpan pattern,
                                     std::size_t offset);
+
+// correlation_at with the mean of each side removed first, which is the
+// Pearson correlation coefficient of the two.
+//
+// A frequency discriminator turns a carrier offset into a constant added to
+// every symbol, and a constant is exactly what this ignores, so a sync word
+// scores the same at any offset. correlation_at does not. Worked for P25's
+// 24-symbol frame sync, eleven +3 and thirteen -3, noiseless: an offset of
+// one symbol unit takes its score from 1 to 0.946, and an offset of two to
+// 0.818 or 0.846 depending on its sign, which drops a clean sync word under
+// a 0.9 threshold. The price is one degree of freedom: a pattern shorter than
+// two symbols cannot be scored, and a run with no variation at all, a
+// squelched channel or a steady tone, scores zero.
+[[nodiscard]] double centred_correlation_at(ConstRealSpan symbols, ConstRealSpan pattern,
+                                            std::size_t offset);
+
+// The straight line that takes a known pattern onto the symbols received for
+// it: symbols[offset + i] ~ gain * pattern[i] + level, by least squares.
+//
+// Through a frequency discriminator, `level` is the carrier offset in symbol
+// units and `gain` is the transmitter's deviation against the nominal, so
+// (symbol - level) / gain puts the symbols after the pattern back on the
+// levels a standard states. Both are measured from symbols the receiver
+// already knows, which is what lets a burst be sliced correctly from its
+// first symbol rather than after an estimator has settled.
+struct LevelFit {
+    double gain = 1.0;
+    double level = 0.0;
+};
+
+// Returns an error when the range runs past the end of `symbols`, or when the
+// pattern has no variation to fit a gain against.
+[[nodiscard]] Expected<LevelFit> fit_levels(ConstRealSpan symbols, ConstRealSpan pattern,
+                                            std::size_t offset);
 
 // ---------------------------------------------------------------------------
 // Bit and symbol packing

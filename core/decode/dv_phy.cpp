@@ -43,6 +43,35 @@ Status fm_discriminate(ConstComplexSpan in, RealSpan out, SampleRate rate) {
     return {};
 }
 
+Expected<FmDiscriminator> FmDiscriminator::create(SampleRate rate) {
+    if (rate <= 0) {
+        return fail(std::format("FmDiscriminator needs a positive sample rate; got {}", rate));
+    }
+    FmDiscriminator discriminator;
+    discriminator.scale_ = static_cast<double>(rate) / (2.0 * kPi);
+    return discriminator;
+}
+
+Status FmDiscriminator::process(ConstComplexSpan in, RealSpan out) {
+    if (in.size() != out.size()) {
+        return fail(std::format(
+            "FmDiscriminator needs equal spans; got {} input and {} output samples", in.size(),
+            out.size()));
+    }
+    // The same expression as fm_discriminate, so a stream given in one call
+    // comes out bit for bit as it would from there.
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const Complex32 product = in[i] * std::conj(previous_);
+        out[i] = static_cast<float>(
+            std::atan2(static_cast<double>(product.imag()), static_cast<double>(product.real())) *
+            scale_);
+        previous_ = in[i];
+    }
+    return {};
+}
+
+void FmDiscriminator::reset() { previous_ = Complex32{1.0F, 0.0F}; }
+
 // ---------------------------------------------------------------------------
 // Filter design
 // ---------------------------------------------------------------------------
@@ -242,6 +271,46 @@ Status filter_complex(ConstComplexSpan in, ConstRealSpan taps, ComplexSpan out) 
     }
     return {};
 }
+
+Expected<RealFir> RealFir::create(std::vector<float> taps) {
+    if (taps.empty()) {
+        return fail("RealFir was given no taps");
+    }
+    RealFir filter;
+    filter.history_.assign(taps.size() - 1, 0.0F);
+    filter.taps_ = std::move(taps);
+    return filter;
+}
+
+Status RealFir::process(ConstRealSpan in, RealSpan out) {
+    if (in.size() != out.size()) {
+        return fail(std::format("RealFir needs equal spans; got {} in and {} out", in.size(),
+                                out.size()));
+    }
+    if (taps_.empty()) {
+        return fail("RealFir was never created with taps");
+    }
+    const std::size_t memory = taps_.size() - 1;
+    history_.insert(history_.end(), in.begin(), in.end());
+
+    // history_[memory + n] is in[n], and history_[memory + n - k] is the
+    // input k samples before it, whether that arrived in this call or an
+    // earlier one. The loop order matches filter_real's so the sums round
+    // alike.
+    for (std::size_t n = 0; n < in.size(); ++n) {
+        double sum = 0.0;
+        for (std::size_t k = 0; k < taps_.size(); ++k) {
+            sum += static_cast<double>(taps_[k]) * static_cast<double>(history_[memory + n - k]);
+        }
+        out[n] = static_cast<float>(sum);
+    }
+
+    history_.erase(history_.begin(),
+                   history_.begin() + static_cast<std::ptrdiff_t>(history_.size() - memory));
+    return {};
+}
+
+void RealFir::reset() { std::fill(history_.begin(), history_.end(), 0.0F); }
 
 // ---------------------------------------------------------------------------
 // Symbol timing recovery
@@ -448,6 +517,69 @@ double correlation_at(ConstRealSpan symbols, ConstRealSpan pattern, std::size_t 
         return 0.0;
     }
     return dot / denominator;
+}
+
+double centred_correlation_at(ConstRealSpan symbols, ConstRealSpan pattern, std::size_t offset) {
+    if (pattern.size() < 2 || offset + pattern.size() > symbols.size()) {
+        return 0.0;
+    }
+    const auto count = static_cast<double>(pattern.size());
+    double symbol_mean = 0.0;
+    double pattern_mean = 0.0;
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        symbol_mean += static_cast<double>(symbols[offset + i]);
+        pattern_mean += static_cast<double>(pattern[i]);
+    }
+    symbol_mean /= count;
+    pattern_mean /= count;
+
+    double dot = 0.0;
+    double signal_energy = 0.0;
+    double pattern_energy = 0.0;
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        const double s = static_cast<double>(symbols[offset + i]) - symbol_mean;
+        const double p = static_cast<double>(pattern[i]) - pattern_mean;
+        dot += s * p;
+        signal_energy += s * s;
+        pattern_energy += p * p;
+    }
+    const double denominator = std::sqrt(signal_energy * pattern_energy);
+    if (denominator < kEnergyFloor) {
+        return 0.0;
+    }
+    return dot / denominator;
+}
+
+Expected<LevelFit> fit_levels(ConstRealSpan symbols, ConstRealSpan pattern, std::size_t offset) {
+    if (pattern.empty() || offset + pattern.size() > symbols.size()) {
+        return fail(std::format(
+            "fit_levels needs {} symbols from offset {}; the run holds {}", pattern.size(), offset,
+            symbols.size()));
+    }
+    const auto count = static_cast<double>(pattern.size());
+    double symbol_mean = 0.0;
+    double pattern_mean = 0.0;
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        symbol_mean += static_cast<double>(symbols[offset + i]);
+        pattern_mean += static_cast<double>(pattern[i]);
+    }
+    symbol_mean /= count;
+    pattern_mean /= count;
+
+    double covariance = 0.0;
+    double variance = 0.0;
+    for (std::size_t i = 0; i < pattern.size(); ++i) {
+        const double p = static_cast<double>(pattern[i]) - pattern_mean;
+        covariance += p * (static_cast<double>(symbols[offset + i]) - symbol_mean);
+        variance += p * p;
+    }
+    if (variance < kEnergyFloor) {
+        return fail("fit_levels was given a pattern with no variation to fit a gain against");
+    }
+    LevelFit fit;
+    fit.gain = covariance / variance;
+    fit.level = symbol_mean - fit.gain * pattern_mean;
+    return fit;
 }
 
 Expected<SyncHit> correlate_pattern(ConstRealSpan symbols, ConstRealSpan pattern) {
