@@ -677,9 +677,13 @@ The relink obligation is not the open item. These are.
    the plain version 2 text, and possibly whatever the driver it came from
    carried. Whether that reads as "any version" under GPL-2.0 section 9 or as
    2.0-only is exactly the question this document says a GPL-2.0-only file
-   raises for a GPL-3.0 work, and nobody has answered it. It drives the FC2580
-   tuner, which the dongle on the desk does not have. Undecided, and due at
-   the first tag.
+   raises for a GPL-3.0 work. It drives the FC2580 tuner, which the dongle on
+   the desk does not have. The owner decided on 2026-09-23 to leave it as it
+   is: the file stays in the build, read under librtlsdr's `COPYING` like the
+   rest of the library, and the question is an accepted risk rather than an
+   open one. Taking it out would cost nothing but FC2580 support, since the
+   library is already built from `vcpkg-overlays/rtlsdr/` with patches of our
+   own, and that is the way out if the reading is ever challenged.
 
 WHAT THIS LIST USED TO SAY. Two of its items were "There is no notices file"
 and "There is no published Corresponding Source for the dependencies as

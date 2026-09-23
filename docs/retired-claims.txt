@@ -1708,3 +1708,11 @@ retired: 2026-09-23
 commit: "Build librtlsdr from an overlay that waits for its transfers"
 instead: That was librtlsdr v2.0.2. The overlay's librtlsdr returned -5 on none
     of 3000 cancels, and none of 3000 more under full page heap.
+
+phrase: raises for a GPL-3.0 work, and nobody has answered it
+retired: 2026-09-23
+commit: "Leave tuner_fc2580.c in the build as an accepted risk"
+instead: The owner answered it on 2026-09-23: the file stays, read under
+    librtlsdr's COPYING like the rest of the library, and compiling it out of
+    the overlay is the way out if that reading is challenged.
+    docs/clean-room.md, open item 3.
