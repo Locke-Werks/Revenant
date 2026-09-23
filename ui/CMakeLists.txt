@@ -445,12 +445,17 @@ endif()
 # the same manifest as capnproto and it is the only reason ui/vcpkg.json has a
 # second dependency.
 #
-# NO CI JOB CONFIGURES THIS PROJECT. .github/workflows/ci.yml builds the
-# engine tree and the root CMakeLists.txt refuses REVENANT_BUILD_UI outright,
-# because one cache cannot hold both runtimes. So this target is run by
-# whoever builds the client and by nobody who merges, exactly like the
-# static_asserts in models/engine_link.h. Closing that needs a CI leg
-# configuring ui/ against the dynamic triplet and it is not made here.
+# CI CONFIGURES THIS PROJECT ON ITS OWN, as the ui job in
+# .github/workflows/ci.yml: cmake --preset vs with REVENANT_WERROR on, then
+# ctest --preset vs from ui/. The root CMakeLists.txt still refuses
+# REVENANT_BUILD_UI outright, because one cache cannot hold both runtimes, so
+# that separate configure is the only way this target is built by anyone who
+# merges.
+#
+# WHAT THIS PARAGRAPH USED TO SAY. It began "NO CI JOB CONFIGURES THIS
+# PROJECT" and ended "Closing that needs a CI leg configuring ui/ against the
+# dynamic triplet and it is not made here." That leg was made on 2026-09-22
+# and the sentence was true until then.
 if(REVENANT_UI_TESTS)
     find_package(Catch2 3 CONFIG QUIET)
     if(Catch2_FOUND)

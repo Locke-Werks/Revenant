@@ -781,3 +781,24 @@ commit: Move the receivers to their own window and the diagnostics behind the to
 instead: The receiver's detail is in its own window. What resizes the waterfall in
     height now is the fault banner under the top bar, which is why keeping the
     history across a height change still matters.
+
+phrase: NO CI JOB CONFIGURES THIS PROJECT
+phrase: Only ui/ compiles this header, and no CI leg configures ui/
+retired: 2026-09-22
+commit: 122e7c0
+instead: The ui job in .github/workflows/ci.yml configures ui/ on its own with
+    REVENANT_WERROR on and runs ctest --preset vs, so the client and its tests
+    are built by anyone who merges.
+
+phrase: So the 281 tests and every job in
+retired: 2026-09-22
+commit: 122e7c0
+instead: The count was a snapshot and the suite has grown; the claim it served,
+    that no CI job compiles ui/, is retired too.
+
+phrase: The engine publishes no default port
+retired: 2026-09-22
+commit: 6da6c80
+instead: revenant-engine binds 17690 by default, the port revenant-ui looks for,
+    and tools/engined/main.cpp cites ui/main.cpp's kDefaultPort. --port 0 still
+    binds whatever is free.

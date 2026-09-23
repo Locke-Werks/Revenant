@@ -60,11 +60,15 @@ namespace settings = revenant::ui::settings;
 
 namespace {
 
-// The engine publishes no default port. ServerOptions::port is zero, which
-// binds an ephemeral one so two test runs on a machine do not collide, and
-// nothing in the tree names a number for a daemon to use. This is therefore
-// this client's own choice and not a contract: when a daemon names one, that
-// number replaces this and this constant goes away.
+// The port the engine and this window agree on without either naming one.
+// revenant-engine binds 17690 by default and says why in tools/engined/main.cpp,
+// which cites this constant; --port 0 there still binds whatever is free, for
+// a supervisor running two engines on one machine.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. It began "The engine publishes no default
+// port", and said the number was this client's own choice, to be replaced
+// "when a daemon names one". The engine named this one on 2026-09-22, so the
+// two now have to change together.
 constexpr std::uint16_t kDefaultPort = 17690;
 
 // Every frame.

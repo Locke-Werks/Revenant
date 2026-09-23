@@ -343,15 +343,18 @@ inline constexpr double kMaxConfidenceBar =
 // engine is then a one-line edit whose consequences are already written down.
 inline constexpr double kDetectorConfidenceRise = 0.35;
 
-// WHERE THIS IS COMPILED, WHICH IS NOT CI
+// WHERE THIS IS COMPILED
 //
-// Only ui/ compiles this header, and no CI leg configures ui/: the root
-// CMakeLists.txt refuses REVENANT_BUILD_UI outright because one cache cannot
-// hold both runtimes. So the 281 tests and every job in
-// .github/workflows/ci.yml go past these assertions without compiling them.
-// They stop anyone who builds the client, which is everyone who ships it and
-// nobody who merges. Closing that needs a CI job configuring ui/ against the
-// dynamic triplet, which is a change to that workflow and is not made here.
+// Only ui/ compiles this header. The root CMakeLists.txt refuses
+// REVENANT_BUILD_UI outright because one cache cannot hold both runtimes, so
+// the engine's jobs go past these assertions without compiling them; the ui
+// job in .github/workflows/ci.yml configures ui/ on its own against the
+// dynamic triplet and is what compiles them for anyone who merges.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. It was headed "WHERE THIS IS COMPILED,
+// WHICH IS NOT CI", said "no CI leg configures ui/", and counted "the 281
+// tests" that went past these assertions. The ui job landed on 2026-09-22,
+// and the count was a snapshot of a suite that has grown since.
 //
 // THE MAP. Measured 2026-09-20 with MSVC 19.44.35228 at /fp:precise, by
 // bisection over doubles, and each boundary is asserted below rather than
