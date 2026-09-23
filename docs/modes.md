@@ -968,8 +968,8 @@ tone 50 and 30 Hz off centre.
 Not done: the measured speed reads slow in noise, 18.3 WPM for 20 at -10 dB
 and 33.3 for 35 at -8 dB, and the reason has not been found. The decoder holds
 the first characters back until it has seen runs of two different lengths,
-then decodes them, so text made only of one length, all dots or all dashes
-with nothing between, is never decoded at all.
+then decodes them, so text whose marks and spaces are all one length, a row
+of T's with letter spaces between them, is never decoded at all.
 
 ## What would change the list
 
