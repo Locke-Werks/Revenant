@@ -31,12 +31,13 @@ follows, and they are marked where they land.
 
 Not from one enormous transform. `docs/fft.md` scopes the project's FFT kernel
 to a whole transform resident in shared memory, which is 48 KiB on the
-discrete card and 32 KiB on the integrated one, and at eight bytes per
-`Complex32` that is 4096 points on one and 2048 on the other. A single
-transform across twenty megahertz at any useful resolution is sixteen to sixty
-times outside that, and `fft.md` explicitly declines to serve it: the
-alternatives it names are a multi-pass kernel nobody has written or VkFFT with
-a documented loss of bit-exactness.
+RTX 4090, and at eight bytes per `Complex32` that is 4096 points. The 4090 is
+the one device the project supports and tests; the integrated Radeon was
+dropped from both on 2026-09-22 by the owner's decision. A single transform
+across twenty megahertz at any useful resolution is sixteen to sixty times
+outside that, and `fft.md` explicitly declines to serve it: the alternatives
+it names are a multi-pass kernel nobody has written or VkFFT with a documented
+loss of bit-exactness.
 
 Neither is needed, because the channelizer already did most of the work. A
 second-stage transform of each coarse channel's time series reaches the same
@@ -44,8 +45,19 @@ total bin count in pieces that fit:
 
 | Per-channel transform | Shared memory | Bin width at 20 MS/s | Total bins |
 | --- | --- | --- | --- |
-| 2048 | 16 KiB, fits both devices | 305 Hz | 65536 |
-| 4096 | 32 KiB, discrete only | 153 Hz | 131072 |
+| 2048 | 16 KiB of the 4090's 48 | 305 Hz | 65536 |
+| 4096 | 32 KiB of the 4090's 48 | 153 Hz | 131072 |
+
+The 4096 row fits the device and is still not buildable:
+`dsp::kMaxSpectrumTransform` is 2048, because the twiddle table the spectrum
+stage shares with the channelizer stops there.
+
+WHAT THIS SECTION USED TO SAY, when two devices were supported: the kernel's
+shared memory was "48 KiB on the discrete card and 32 KiB on the integrated
+one, and at eight bytes per `Complex32` that is 4096 points on one and 2048 on
+the other", and the table's two rows read "16 KiB, fits both devices" and
+"32 KiB, discrete only". The arithmetic is unchanged; the second device is no
+longer part of what the project claims to run on.
 
 The arithmetic, for a 64-channel grid at 20 MS/s: each channel runs at
 625 kS/s and carries 312.5 kHz of unique spectrum, because the grid is 2x

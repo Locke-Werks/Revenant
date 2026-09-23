@@ -689,9 +689,18 @@ instead: The six KF4FIC files are 13:59 to 17:05 UT, one continuous recording
 
 phrase: asking for PSK31 at four bins across gets a 16384-point transform
 retired: 2026-09-22
-commit: the change that recorded this retraction
+commit: 0935e63
 instead: dsp::kMaxSpectrumTransform is 2048 and the shipped default is already
     there, so no longer transform exists to be chosen. HF resolution comes from
     the channel count: 1.465 Hz per bin on the 96 kS/s recordings at the 64
     channels revenant-cli pins, where RTTY's 170 Hz shift is 116 bins, and
     5.86 Hz on the 16 Engine::open_source chooses left to itself.
+
+phrase: that is 4096 points on one and 2048 on the other
+phrase: 16 KiB, fits both devices
+retired: 2026-09-22
+commit: the owner's decision of 2026-09-22, recorded in docs/detection.md
+instead: The RTX 4090 is the one supported and tested device; the integrated
+    Radeon is dropped. The kernel has 48 KiB of shared memory there, 4096
+    points, and the spectrum transform is capped at 2048 by the twiddle table
+    it shares with the channelizer rather than by any device.
