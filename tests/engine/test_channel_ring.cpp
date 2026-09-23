@@ -1,4 +1,5 @@
-// How deep the channel ring has to be for a receiver's display tap.
+// How deep the channel ring has to be for a receiver's display tap and for its
+// fine filter.
 //
 // WHAT THIS FILE IS THE RECORD OF
 //
@@ -29,10 +30,39 @@
 // that frames in flight would overwrite under it. The second runs the engine on
 // that configuration with a stationary tone, whose pane should come out the
 // same frame after frame.
+//
+// THE FINE FILTER HAD THE SAME DEFECT AND A WIDER ONE. It reaches up to
+// dsp::kMaxFineTaps channel samples below its block, the stage checked
+// `blocks + taps` against the ring, and the graph did not count the filter at
+// all: with no spectrum or passband stage the ring was bit_ceil((F + 1) * B),
+// which covers the reach only when a dispatch is at least 256 blocks. At 128
+// blocks a dispatch and three frames that is 512 blocks where the 252 tap
+// filter of a 3 kHz AM receiver needs 636, and the old check took it. Every shipped grid runs 2048 blocks or
+// more a dispatch, so this is a small-block configuration, which the engine
+// allows down to one block and revenant-engine down to 256 source samples.
+//
+// Three cases for it. The first builds the stage directly on the 512 block
+// ring and is the one that failed before the fix. The second is the kernel's
+// host twin, core/dsp/vrx_reference.h's reference_vrx_fine, run over that ring
+// with the two later frames' channel samples written before the oldest frame's
+// fine stage reads, which is an order frames in flight permit on the device:
+// it shows what the masked read returns then. The third runs the engine on the
+// small-block grid with no spectrum or passband stage, which after the stage's
+// fix alone refused the receiver outright because the graph still gave it 512.
+//
+// WHAT THE TWIN SHOWED, 2026-09-23. With the later frames written, 79 of the
+// dispatch's 82 fine outputs changed on the 512 block ring and the error was
+// 5.574e-03 of the output's power, -22.5 dB, from white noise that fills the
+// channel; on 1024 blocks none changed. Whether the device ever runs the
+// frames in that order was not measured, and the display tap's engine case
+// above never caught it doing so. The first case failed before the fix and the
+// third passed, since the old graph and the old check agreed with each other
+// on 512.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -87,23 +117,48 @@ engine::VrxParams nfm_at(dsp::Hertz centre) {
     return params;
 }
 
+// The fine filter's cases. 4096 source samples at D = 32 is 128 channel
+// blocks a dispatch, where the old graph rule gives bit_ceil(4 * 128) = 512
+// and the old stage check wants 128 + 256 = 384, so it took the ring.
+constexpr std::size_t kFineBlockSamples = 4'096;
+constexpr std::uint32_t kFineBlocksPerDispatch = kFineBlockSamples / kDecimation;
+constexpr std::uint32_t kFineOldRing = 512;
+
+// A 3 kHz AM receiver on a 75 kS/s channel, whose fine filter plans at 252
+// taps: more than the 128 that 512 - 3 * 128 leaves and within the 384 the old
+// check allowed. The cases check both rather than assuming the length.
+engine::VrxParams narrow_am_at(dsp::Hertz centre) {
+    engine::VrxParams params;
+    params.center = centre;
+    params.bandwidth = 3'000;
+    params.demod = engine::Demod::Am;
+    params.audio_rate = kAudioRate;
+    params.squelch_dbfs = -300.0;
+    return params;
+}
+
+dsp::GridParams test_grid() {
+    dsp::GridParams grid;
+    grid.channels = kChannels;
+    grid.taps_per_branch = 17;
+    grid.decimation = kDecimation;
+    return grid;
+}
+
 // Builds one receiver's stage against a channel ring `ring_blocks` deep, the
 // way Graph::add_vrx would, and hands back whatever the factory said.
-Expected<std::unique_ptr<engine::VrxStage>> build_stage(const gpu::Context& context,
-                                                        std::uint32_t ring_blocks,
-                                                        const gpu::Buffer& channel_ring) {
+Expected<std::unique_ptr<engine::VrxStage>> build_stage(
+    const gpu::Context& context, std::uint32_t ring_blocks, const gpu::Buffer& channel_ring,
+    const engine::VrxParams& params = nfm_at(0),
+    std::uint32_t blocks_per_dispatch = kBlocksPerDispatch,
+    std::uint32_t passband_transform = kPassbandTransform) {
     engine::install_default_vrx_stages();
     const engine::VrxStageFactory factory = engine::installed_vrx_stage_factory();
     if (factory == nullptr) {
         return fail("no stage factory is installed");
     }
 
-    dsp::GridParams grid;
-    grid.channels = kChannels;
-    grid.taps_per_branch = 17;
-    grid.decimation = kDecimation;
-
-    const engine::VrxParams params = nfm_at(0);
+    const dsp::GridParams grid = test_grid();
     auto placement = engine::place(grid, kSourceRate, params);
     if (!placement) {
         return std::unexpected(placement.error());
@@ -121,11 +176,98 @@ Expected<std::unique_ptr<engine::VrxStage>> build_stage(const gpu::Context& cont
     request.channel_ring_bytes = channel_ring.size();
     request.channel_ring_blocks = ring_blocks;
     request.channel_ring_mask = ring_blocks - 1;
-    request.max_blocks_per_dispatch = kBlocksPerDispatch;
+    request.max_blocks_per_dispatch = blocks_per_dispatch;
     request.frames_in_flight = kFramesInFlight;
     request.audio_rate = kAudioRate;
-    request.passband_transform = kPassbandTransform;
+    request.passband_transform = passband_transform;
     return factory(request);
+}
+
+// The fine output the stage would take last for a dispatch whose newest
+// channel sample is `newest`: floor((newest + 1) * Fd / Fc) - 1, the same
+// arithmetic as highest_output_for in core/engine/vrx_stage.cpp, which is
+// file-local there.
+dsp::SampleIndex highest_output_for(dsp::SampleIndex newest, dsp::SampleRate channel_rate,
+                                    dsp::SampleRate demod_rate) {
+    const auto fc = static_cast<dsp::SampleIndex>(channel_rate);
+    const auto fd = static_cast<dsp::SampleIndex>(demod_rate);
+    const dsp::SampleIndex bound = newest + 1U;
+    const dsp::SampleIndex whole = bound / fc;
+    const dsp::SampleIndex part = bound % fc;
+    if (part == 0) {
+        return whole * fd - 1U;
+    }
+    return whole * fd + (part * fd - 1U) / fc;
+}
+
+// White complex noise that is a pure function of the channel sample's
+// absolute index, so the samples a later frame writes differ from the history
+// they land on and any read of one in place of the other shows.
+dsp::Complex32 noise_at(dsp::SampleIndex n) {
+    std::uint64_t z = n + 0x9E37'79B9'7F4A'7C15ULL;
+    z = (z ^ (z >> 30U)) * 0xBF58'476D'1CE4'E5B9ULL;
+    z = (z ^ (z >> 27U)) * 0x94D0'49BB'1331'11EBULL;
+    z ^= z >> 31U;
+    const double re = static_cast<double>(z >> 40U) / 16'777'216.0 - 0.5;
+    const double im = static_cast<double>(z & 0xFF'FFFFU) / 16'777'216.0 - 0.5;
+    return {static_cast<float>(re), static_cast<float>(im)};
+}
+
+// One dispatch of the fine stage through its host twin, over one channel's
+// ring `ring_blocks` deep, for the frame whose first channel block is
+// `first_block`. The ring holds everything up to that frame's newest sample.
+// With `later_frames` it also holds what the next frames_in_flight - 1 frames'
+// channelizers write, which is what the device may have done by the time this
+// frame's fine stage runs.
+Expected<std::vector<dsp::Complex32>> twin_fine(const dsp::VrxPlan& plan,
+                                                const std::vector<dsp::Complex32>& nco,
+                                                std::uint32_t ring_blocks,
+                                                dsp::SampleIndex first_block,
+                                                bool later_frames) {
+    const dsp::SampleIndex newest = first_block + kFineBlocksPerDispatch - 1U;
+    const dsp::SampleIndex first_output =
+        highest_output_for(first_block - 1U, plan.channel_rate, plan.demod_rate) + 1U;
+    const dsp::SampleIndex last_output =
+        highest_output_for(newest, plan.channel_rate, plan.demod_rate);
+    const auto count = static_cast<std::uint32_t>(last_output + 1U - first_output);
+    const std::uint32_t fine_capacity = std::bit_ceil(count);
+
+    auto block = dsp::fine_block(plan, 0, ring_blocks - 1U, fine_capacity - 1U, first_output,
+                                 count);
+    if (!block) {
+        return std::unexpected(block.error());
+    }
+    if (block->newest_input > newest) {
+        return fail(std::format("the dispatch reads channel sample {} and the frame ends at {}",
+                                block->newest_input, newest));
+    }
+
+    const dsp::SampleIndex mask = ring_blocks - 1U;
+    std::vector<dsp::Complex32> ring(ring_blocks);
+    for (dsp::SampleIndex n = newest + 1U - ring_blocks; n <= newest; ++n) {
+        ring[n & mask] = noise_at(n);
+    }
+    if (later_frames) {
+        const dsp::SampleIndex end =
+            newest + 1U + static_cast<dsp::SampleIndex>(kFineBlocksPerDispatch) *
+                              (kFramesInFlight - 1U);
+        for (dsp::SampleIndex n = newest + 1U; n < end; ++n) {
+            ring[n & mask] = noise_at(n);
+        }
+    }
+
+    std::vector<dsp::Complex32> fine(fine_capacity);
+    if (auto ran = dsp::reference_vrx_fine(plan.fine, block->params, ring, plan.fine_taps, nco,
+                                           fine);
+        !ran) {
+        return std::unexpected(ran.error());
+    }
+
+    std::vector<dsp::Complex32> out(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        out[i] = fine[(block->params.out_offset + i) & (fine_capacity - 1U)];
+    }
+    return out;
 }
 
 }  // namespace
@@ -299,4 +441,195 @@ TEST_CASE("a stationary tone's passband pane is the same frame after frame with 
                      "power; {} moved more than {:.0e}",
                      frames.size() - kWarmUp, worst_frame, worst, torn, kTornAbove));
     CHECK(torn == 0);
+}
+
+TEST_CASE("a fine filter refuses a channel ring that later frames would overwrite under it",
+          "[gpu][engine][channel-ring]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+    const gpu::Context& context = test::shared_context();
+
+    const engine::VrxParams params = narrow_am_at(0);
+    auto placement = engine::place(test_grid(), kSourceRate, params);
+    INFO(test::message_of(placement));
+    REQUIRE(placement.has_value());
+    auto plan = dsp::plan_vrx(test_grid(), kSourceRate, params, *placement);
+    INFO(test::message_of(plan));
+    REQUIRE(plan.has_value());
+    const std::uint32_t taps = plan->fine.taps;
+    INFO("a " << taps << " tap fine filter");
+
+    // What the old rules gave and took, and what the filter needs.
+    static_assert(std::bit_ceil(kFineBlocksPerDispatch * (kFramesInFlight + 1U)) == kFineOldRing,
+                  "the old graph rule has to give this ring with no spectrum or passband stage");
+    REQUIRE(kFineBlocksPerDispatch + taps <= kFineOldRing);
+    REQUIRE(kFineBlocksPerDispatch * kFramesInFlight + taps > kFineOldRing);
+
+    const auto ring_of = [&](std::uint32_t blocks) {
+        return gpu::Buffer::create(
+            context, static_cast<VkDeviceSize>(kChannels) * blocks * kComplexBytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            gpu::MemoryKind::DeviceLocal);
+    };
+
+    // No passband stage, so the only thing that can refuse is the fine
+    // filter's own check.
+    auto small = ring_of(kFineOldRing);
+    INFO(test::message_of(small));
+    REQUIRE(small.has_value());
+    auto refused = build_stage(context, kFineOldRing, *small, params, kFineBlocksPerDispatch, 0);
+    INFO("a " << kFineOldRing << " block ring: " << test::message_of(refused));
+    CHECK_FALSE(refused.has_value());
+    if (!refused) {
+        CHECK(refused.error().message.find("fine filter") != std::string::npos);
+        CHECK(refused.error().message.find("frames in flight") != std::string::npos);
+    }
+
+    // The ring the graph now gives this grid, bit_ceil(3 * 128 + 256), is
+    // taken.
+    constexpr std::uint32_t kEnough =
+        std::bit_ceil(kFineBlocksPerDispatch * kFramesInFlight + dsp::kMaxFineTaps);
+    static_assert(kEnough == 1024);
+    auto large = ring_of(kEnough);
+    INFO(test::message_of(large));
+    REQUIRE(large.has_value());
+    auto taken = build_stage(context, kEnough, *large, params, kFineBlocksPerDispatch, 0);
+    INFO("a " << kEnough << " block ring: " << test::message_of(taken));
+    CHECK(taken.has_value());
+}
+
+TEST_CASE("the fine filter's twin reads a later frame's samples on the ring the old rule gave",
+          "[engine][channel-ring]") {
+    const engine::VrxParams params = narrow_am_at(0);
+    auto placement = engine::place(test_grid(), kSourceRate, params);
+    INFO(test::message_of(placement));
+    REQUIRE(placement.has_value());
+    auto plan = dsp::plan_vrx(test_grid(), kSourceRate, params, *placement);
+    INFO(test::message_of(plan));
+    REQUIRE(plan.has_value());
+    REQUIRE(kFineBlocksPerDispatch + plan->fine.taps <= kFineOldRing);
+    REQUIRE(kFineBlocksPerDispatch * kFramesInFlight + plan->fine.taps > kFineOldRing);
+
+    auto nco = dsp::build_nco_table(plan->fine.nco_log2);
+    INFO(test::message_of(nco));
+    REQUIRE(nco.has_value());
+
+    // Far enough in that every index the dispatch or the fill touches is
+    // positive, and otherwise arbitrary.
+    constexpr dsp::SampleIndex kFirstBlock = dsp::SampleIndex{1'000} * kFineBlocksPerDispatch;
+
+    const auto run = [&](std::uint32_t ring_blocks, bool later_frames) {
+        auto out = twin_fine(*plan, *nco, ring_blocks, kFirstBlock, later_frames);
+        INFO("a " << ring_blocks << " block ring: " << test::message_of(out));
+        REQUIRE(out.has_value());
+        return std::move(*out);
+    };
+
+    // What the filter should produce: nothing written above the frame yet.
+    const std::vector<dsp::Complex32> clean = run(1024, false);
+    REQUIRE(!clean.empty());
+    double power = 0.0;
+    for (const dsp::Complex32 value : clean) {
+        power += std::norm(value);
+    }
+    REQUIRE(power > 0.0);
+
+    const auto departure = [&](const std::vector<dsp::Complex32>& other, std::size_t& moved) {
+        REQUIRE(other.size() == clean.size());
+        double error = 0.0;
+        moved = 0;
+        for (std::size_t i = 0; i < clean.size(); ++i) {
+            error += std::norm(other[i] - clean[i]);
+            if (other[i] != clean[i]) {
+                ++moved;
+            }
+        }
+        return error / power;
+    };
+
+    // On the old ring the two later frames' samples wrap onto the oldest
+    // history this frame's filter is still reading.
+    std::size_t old_moved = 0;
+    const double old_error = departure(run(kFineOldRing, true), old_moved);
+    // And the same ring with nothing written above: identical, so the
+    // difference above is the later frames and nothing else.
+    std::size_t quiet_moved = 0;
+    const double quiet_error = departure(run(kFineOldRing, false), quiet_moved);
+    // On the ring the fix gives, the later frames land below everything read.
+    std::size_t new_moved = 0;
+    const double new_error = departure(run(1024, true), new_moved);
+
+    WARN(std::format("{} fine outputs from a {} tap filter over {} blocks. On {} blocks with the "
+                     "later frames written, {} of them moved and the error was {:.3e} of the "
+                     "output's power ({:.1f} dB); on {} blocks, {} moved",
+                     clean.size(), plan->fine.taps, kFineBlocksPerDispatch, kFineOldRing,
+                     old_moved, old_error, 10.0 * std::log10(old_error), 1024, new_moved));
+    CHECK(quiet_moved == 0);
+    CHECK(quiet_error == 0.0);
+    CHECK(old_moved > 0);
+    CHECK(old_error > 1e-3);
+    CHECK(new_moved == 0);
+    CHECK(new_error == 0.0);
+}
+
+TEST_CASE("a small-block grid with no spectrum or passband stage takes a narrow receiver",
+          "[gpu][engine][channel-ring]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Channel 3's centre, and an AM emitter the synthetic scene places inside
+    // a 3.2 kHz span around it.
+    constexpr dsp::Hertz kReceiver = 3 * (kSourceRate / static_cast<dsp::Hertz>(kChannels));
+    constexpr dsp::SampleIndex kSamples = 600'000;
+
+    engine::EngineConfig config;
+    config.channels = kChannels;
+    config.taps_per_branch = 17;
+    config.ring_seconds = 0.5;
+    config.block_samples = kFineBlockSamples;
+    config.audio_rate = kAudioRate;
+    config.spectrum_transform = 0;
+    config.passband_transform = 0;
+    config.gpu_index = -1;
+
+    std::mutex lock;
+    std::size_t audio_samples = 0;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    const auto opened = eng.open_source(
+        "synthetic:wideband?rate=" + std::to_string(kSourceRate) +
+        "&emitters=1&modes=am&seed=424242&noise_dbfs=-120&snr_min=60&snr_max=60" +
+        "&samples=" + std::to_string(kSamples) + "&span_low=" + std::to_string(kReceiver - 1'600) +
+        "&span_high=" + std::to_string(kReceiver + 1'600));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    // Refused with "frames in flight" in the message when the graph sized the
+    // ring without counting the fine filter, because it gave 512 blocks.
+    auto added = eng.add_vrx(narrow_am_at(kReceiver));
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    REQUIRE(eng.set_audio_sink(*added,
+                               [&](const engine::AudioChunk& chunk) -> Status {
+                                   const std::lock_guard<std::mutex> guard(lock);
+                                   audio_samples += chunk.samples.size();
+                                   return {};
+                               })
+                .has_value());
+
+    const Status ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    // 600000 samples at 2.4 MS/s is 250 ms, 12000 samples of 48 kHz audio
+    // less the filters' fill.
+    const std::lock_guard<std::mutex> guard(lock);
+    INFO(audio_samples << " audio samples");
+    CHECK(audio_samples > 6'000);
 }

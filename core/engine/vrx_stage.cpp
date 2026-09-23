@@ -476,16 +476,27 @@ Status DemodStage::build(const VrxStageRequest& request) {
     }
 
     // The fine filter reaches taps-1 channel samples below its first input,
-    // and a dispatch advances the input by a whole block. Both have to be
-    // live in the channel ring at once or the kernel's masked read returns
-    // the far end of the ring and quietly filters the wrong samples.
-    const std::uint64_t channel_span = blocks + plan_.fine.taps;
+    // and every frame in flight behind this one writes its own dispatch above
+    // it. Frames overlap on the device, so all of that has to be live in the
+    // channel ring at once or a later frame's channelizer overwrites history
+    // this frame's fine stage is still reading, the kernel's masked read
+    // returns the new samples, and the receiver quietly filters the wrong
+    // ones. The display tap below has the same rule.
+    //
+    // WHAT THIS USED TO COUNT: `blocks + taps`, one dispatch above the reach.
+    // At 128 blocks and three frames in flight it accepted a 512 block ring
+    // for the 252 tap filter of a 3 kHz AM receiver, which needs 636, and the
+    // graph gave exactly that ring to a grid with no spectrum or passband
+    // stage. Run through the kernel's host twin with the two later frames
+    // written first, 79 of that dispatch's 82 outputs changed.
+    // tests/engine/test_channel_ring.cpp.
+    const std::uint64_t channel_span = blocks * frames_in_flight_ + plan_.fine.taps;
     if (channel_span > channel_ring_blocks_) {
         return fail(std::format(
-            "a {} tap fine filter over a {} block dispatch needs {} channel samples live and "
-            "the channel ring holds {}. Either the receiver is too narrow for this grid or the "
-            "engine's ring_seconds is too short",
-            plan_.fine.taps, blocks, channel_span, channel_ring_blocks_));
+            "a {} tap fine filter with {} frames in flight of {} blocks each needs {} channel "
+            "samples live and the channel ring holds {}. Either the receiver is too narrow for "
+            "this grid or the engine's ring_seconds is too short",
+            plan_.fine.taps, frames_in_flight_, blocks, channel_span, channel_ring_blocks_));
     }
 
     max_outputs_ = static_cast<std::uint32_t>(outputs_for(blocks));

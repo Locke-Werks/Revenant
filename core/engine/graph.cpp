@@ -2167,21 +2167,32 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
                                               config.frames_in_flight);
         }
 
-        // Every receiver's display tap reads dsp::kDisplayTaps channel
-        // samples below the block it is filtering, and the frames submitted
-        // behind it are writing above that, for the spectrum's reason above.
-        // The stage refuses a ring that cannot hold the reach and every frame
-        // in flight at once.
+        // Every receiver's fine filter reads up to dsp::kMaxFineTaps channel
+        // samples below the block it is filtering, and its display tap reads
+        // dsp::kDisplayTaps, and the frames submitted behind either are
+        // writing above that, for the spectrum's reason above. The stage
+        // refuses a ring that cannot hold the reach and every frame in flight
+        // at once. Receivers are added after the ring is built, so this
+        // reserves for the longest filter any of them can plan rather than
+        // for the ones present now. It only moves the ring when a dispatch is
+        // under 256 blocks and no spectrum stage of 256 points or more is
+        // built: the spare dispatch above covers the reach at 256 blocks or
+        // longer, and such a spectrum window covers it at any length.
         //
         // WHAT THIS USED TO COUNT: `max_blocks + kDisplayTaps`, one dispatch
-        // above the reach and not frames_in_flight of them. At 100 blocks a
-        // dispatch and three frames that is 512 blocks where the 256 tap
-        // display filter needs 556, and a spectrum stage of 256 points or more
-        // hid it by making the ring larger for its own reasons.
-        if (config.passband_transform != 0) {
+        // above the display tap's reach and not frames_in_flight of them, and
+        // only with a passband stage; the fine filter was not counted at all.
+        // At 128 blocks a dispatch and three frames the ring was 512 blocks
+        // where a 3 kHz AM receiver's 252 tap fine filter needs 636, and the
+        // stage's own check, which counted one dispatch, took it.
+        {
+            std::uint64_t reach = dsp::kMaxFineTaps;
+            if (config.passband_transform != 0) {
+                reach = std::max<std::uint64_t>(reach, dsp::kDisplayTaps);
+            }
             wanted = std::max(wanted, static_cast<std::uint64_t>(max_blocks) *
                                               config.frames_in_flight +
-                                          dsp::kDisplayTaps);
+                                          reach);
         }
         ring_blocks = static_cast<std::uint32_t>(std::bit_ceil(wanted));
     }
