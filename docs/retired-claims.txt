@@ -450,3 +450,16 @@ instead: The client is a separate process built against the dynamic CRT and
     links no part of the engine. Spectrum and waterfall are Qt scene graph
     nodes fed from frames that arrive over a socket, so the raster data is
     read back to the host and crosses a socket before anything draws it.
+
+phrase: Development and CI run against an NVIDIA RTX 4090 and the integrated Radeon
+phrase: Radeon integrated graphics on a Ryzen 9 7950X, Vulkan 1.4.315. Every push.
+phrase: Two of the three target vendors get genuine driver coverage
+phrase: So the spectrum kernel is refereed on the discrete card and skipped elsewhere
+phrase: a conformance suite diffs the two on every device in the machine
+retired: 2026-09-22
+commit: 84a424d
+instead: The integrated Radeon in the CI machine's Ryzen 9 7950X is not
+    supported and not tested. build-and-test and the nightly sweep run on the
+    RTX 4090 alone, with REVENANT_GPU_INDEX pinned to 0, so NVIDIA is the one
+    vendor with CI coverage and AMD has none, the same as Intel. docs/fft.md
+    keeps the driver fault that decided it as history.

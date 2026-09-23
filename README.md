@@ -30,9 +30,11 @@ buffers that never come back. Tuning, filtering, decimation, demodulation and
 decoding all run on the device. The host schedules work and reads out results.
 
 The engine is Vulkan compute, written against the API rather than against a
-vendor's toolkit, so the same kernels run on NVIDIA, AMD and Intel hardware.
-Every kernel has a CPU reference implementation, and a conformance suite diffs
-the two on every device in the machine. That suite is the first thing the
+vendor's toolkit, so the same kernels are meant to run on NVIDIA, AMD and
+Intel hardware. Every kernel has a CPU reference implementation, and a
+conformance suite diffs the two on the device it is pointed at; CI points it at
+an RTX 4090, the one device this project supports and tests today. That suite
+is the first thing the
 project built, before anything user-facing, because a signal processing engine
 whose numbers nobody has checked is an engine that produces confident garbage.
 
@@ -203,21 +205,20 @@ the engine actually runs, and 60.2% at its worst size.
 The conformance suite is bit-exact, not close, and the RTX 4090 stays that
 way under 3.7 million dispatches of deliberate abuse.
 
-The integrated Radeon does not, and the size of that is the thing to state
-plainly. One dispatch per submission, it computes a wrong spectrum frame
-about once in 1,900. Share a command buffer between several dispatches, which
-is what the engine records, and the rate climbs by two orders of magnitude:
-at the five dispatches per frame the graph actually submits, the shipped
-transform shape is wrong 19% of the time, and at six it is 85%. Nothing else
-changes, and the channelizer's branch filter in the same command buffers
-never fails once in 528,000 dispatches.
+**The integrated Radeon in a Ryzen 9 7950X is not supported and not tested.**
+Its driver computes a wrong spectrum frame about once in 1,900 dispatches, and
+far more often when several dispatches share a command buffer, which is what
+the engine records; the kernel's arithmetic is exact on the RTX 4090 over the
+same work. That was measured as a driver concurrency fault and not identified
+further, and on 2026-09-22 the device was dropped from CI rather than chased.
+`docs/fft.md` keeps the measurements as history, and `tools/gpustress` is
+still the instrument if a new driver is worth a second look.
 
-So the spectrum kernel is refereed on the discrete card and skipped
-elsewhere, and on that device the waterfall is not to be trusted. The cause
-is narrowed to a concurrency fault in that driver rather than identified.
-`docs/fft.md` carries the measurements and `tools/gpustress` is the
-instrument, so the next person reruns it against a new driver instead of
-re-arguing it.
+WHAT THIS SECTION USED TO SAY. It gave the same failure rates and went on "So
+the spectrum kernel is refereed on the discrete card and skipped elsewhere, and
+on that device the waterfall is not to be trusted." That described a device
+still in the test matrix with one kernel excused on it. The device is out of
+the matrix now, so nothing about it is refereed, not only the spectrum.
 
 ### Where it is going
 
@@ -238,9 +239,16 @@ here is finished.
 
 Windows 11, x64.
 
-A GPU with Vulkan 1.3 or newer, which means essentially any discrete card from
-the last several years and most integrated graphics. Development and CI run
-against an NVIDIA RTX 4090 and the integrated Radeon in a Ryzen 9 7950X.
+A GPU with Vulkan 1.3 or newer. The one device tested is an NVIDIA RTX 4090,
+which is what development and CI run against. Other Vulkan 1.3 devices may
+work and are not tested. The integrated Radeon in a Ryzen 9 7950X is not
+supported: its driver corrupts the spectrum kernel, as "What has been
+measured" above says.
+
+This paragraph used to read, at its end, "Development and CI run against an
+NVIDIA RTX 4090 and the integrated Radeon in a Ryzen 9 7950X." Until
+2026-09-22 CI did, and the sentence read as a statement that the integrated
+part was a tested configuration. It is neither tested nor supported now.
 
 An SDR device, optionally: an RTL-SDR v3 works today, through librtlsdr. The
 synthetic wideband source and the file source need no hardware at all and are
@@ -267,7 +275,7 @@ installation that have each cost an afternoon.
 ## GPU conformance
 
 Every compute kernel is diffed against a CPU reference implementation whose
-floating-point behaviour is pinned, on every device in the CI machine, on every
+floating-point behaviour is pinned, on the RTX 4090 in the CI machine, on every
 push. The reference is compiled with contraction disabled so that it gives the
 same answer regardless of which host compiler built it. A referee that moves
 cannot referee anything.
@@ -279,14 +287,22 @@ correctness argument depends on.
 | Vendor | Coverage |
 | --- | --- |
 | NVIDIA | RTX 4090, discrete, Vulkan 1.4.351. Every push. |
-| AMD | Radeon integrated graphics on a Ryzen 9 7950X, Vulkan 1.4.315. Every push. |
+| AMD | **No coverage.** The Radeon integrated graphics in the CI machine's Ryzen 9 7950X is not supported and was dropped from CI on 2026-09-22, and there is no discrete AMD card. |
 | Intel | **No coverage.** There is no Intel GPU in the machine and one cannot be added to it. |
 
-The Intel gap is real and is recorded rather than papered over. Two of the three
-target vendors get genuine driver coverage on every commit; Intel gets none, and
-a kernel that behaves differently there would not be caught until somebody runs
-it on one. Adding an Intel device to the conformance machine is the fix, and
-until that happens this table is the honest statement of what is verified.
+The AMD and Intel gaps are real and are recorded rather than papered over. One
+of the three target vendors gets genuine driver coverage on every commit. AMD
+and Intel get none, and a kernel that behaves differently on either would not
+be caught until somebody runs it on one. A discrete AMD card and an Intel
+device in the conformance machine are the fix, and until that happens this
+table is the honest statement of what is verified.
+
+WHAT THIS SECTION USED TO SAY. Until 2026-09-22 the AMD row read "Radeon
+integrated graphics on a Ryzen 9 7950X, Vulkan 1.4.315. Every push." and the
+paragraph under the table said "Two of the three target vendors get genuine
+driver coverage on every commit". The integrated part left the matrix that
+day, so anyone who chose AMD hardware on the strength of that row was relying
+on coverage that no longer exists.
 
 macOS through MoltenVK is out of scope until there is something to render.
 
