@@ -18,6 +18,11 @@ none.
 
 All fetches and licence checks below were performed on 2026-09-18.
 
+The last section, "The librtlsdr the engine links", is later and different in
+kind. It is dated 2026-09-23, it changed the build, and it read librtlsdr's
+and libusb's source, which `docs/clean-room.md` permits for a library Revenant
+links and patches. It carries its own disclosure.
+
 ---
 
 ## Finding 1: the R820T2 register map. Positive, with gaps.
@@ -536,3 +541,265 @@ contradiction of it:
   holds. For the demodulator it does not, because the missing part is not a
   fraction of the register writes but the one step the rest of them exist to
   serve.
+
+---
+
+## The librtlsdr the engine links
+
+Dated 2026-09-23. Owner-approved trial of other librtlsdr and libusb builds,
+because the one the engine linked crashed it.
+
+**What ships.** librtlsdr from `osmocom/rtl-sdr` at commit
+`797f8143266d983c56d8f35d2d442527529dd8a5`, which was master that day and is
+also the v2.0.3 tag, built by the overlay port in `vcpkg-overlays/rtlsdr/`
+with four patches: the registry port's `dependencies.diff`, rebased by one
+context line, its `library-linkage.diff` and `tools.diff` unchanged, and
+Revenant's `cancel-waits-for-transfers.diff`. libusb stays at 1.0.29 from the
+registry baseline, unpatched. `vcpkg-configuration.json` lists the overlay, so
+every build of the engine, locally and in CI, gets this librtlsdr and no other.
+
+### The fault
+
+`rtlsdr_read_async` sometimes returns -5, `LIBUSB_ERROR_NOT_FOUND`, when it is
+cancelled, and in that case it has freed a bulk transfer libusb still holds.
+libusb then touches the freed memory: the RTL-SDR lane caught it in
+`add_to_flying_list` (io.c) under the next control transfer and in
+`windows_iocp_thread` (windows_common.c), under full page heap. Its record is
+in `run_usb` in `core/source/rtlsdr_source.cpp`.
+
+Why, from librtlsdr's source. Once a cancel is asked for, the loop in
+`rtlsdr_read_async` makes passes over the transfers. In each pass it calls
+`libusb_cancel_transfer` on every transfer whose `status` field is not
+`LIBUSB_TRANSFER_CANCELLED`, and if no call in the pass succeeds it stops,
+frees every transfer and returns the last call's result. Two things make that
+exit wrong:
+
+- `status` is only written when libusb hands a transfer back. A transfer
+  cancelled in one pass whose completion has not been handled yet still shows
+  its previous status, `LIBUSB_TRANSFER_COMPLETED`, so the next pass cancels it
+  again.
+- libusb 1.0.29's `libusb_cancel_transfer` answers `LIBUSB_ERROR_NOT_FOUND` for
+  a transfer that is not in flight and equally for one it is already
+  cancelling.
+
+So a pass in which every remaining transfer is cancelling but not yet handed
+back looks, to librtlsdr, exactly like a pass in which there is nothing left
+to cancel. It frees them, returns -5, and the completions arrive for memory
+that has gone. The callback also resubmits every completed transfer whatever
+the state, which is why the lane counted 15 to 56 transfers completing after a
+cancel.
+
+### What changed between v2.0.2 and 797f814
+
+Eleven commits, read from the repository's history. One touches the async
+path: `65f0658`, "Fix application hang on USB transfer errors". It stops the
+transfer callback calling `rtlsdr_cancel_async` itself when a transfer fails,
+moves `rtlsdr_read_async` into its cancelling state when the device is lost,
+and makes it return -1 in that case. The cancel loop's exit condition, the
+thing above, is unchanged. The rest: RTL-SDR Blog V4 Lite support in
+`librtlsdr.c` and `tuner_r82xx.c` (`0204c9c`), gated on that board's USB
+strings; CMake's minimum-version range and a project-relative include path;
+the version number; a CI script and Debian packaging. Nothing there was
+expected to move the count, and the trial below could not tell master from
+v2.0.2.
+
+### What changed between libusb 1.0.29 and 1.0.30
+
+1.0.30 was released 2026-05-17 and vcpkg's registry carries it, at a commit
+newer than this project's baseline. `libusb_cancel_transfer` is the same
+function in both, still answering NOT_FOUND for a transfer already being
+cancelled. The Windows changes are hotplug support, RAW_IO in the WinUSB
+backend, a bus number fix and `604a55c`, which takes the transfer's lock
+around the handle in the completion path; none of them changes what a caller
+is told about a cancel. The trial took the registry's 1.0.30 port verbatim,
+from `microsoft/vcpkg` at `2e87314a3f6524e847ac5bb6a7b5d6e7559cb121`, as an
+overlay, rather than moving the baseline and every other port with it.
+
+### The fix
+
+`cancel-waits-for-transfers.diff` changes `src/librtlsdr.c` only. Every
+transfer is counted in flight from just before it is submitted until libusb
+hands it back through the callback without it being resubmitted. The callback
+resubmits only while the stream is running, so once a cancel is asked for the
+count can only fall. The cancel loop cancels every transfer, treating
+NOT_FOUND as the harmless answer it is, and then waits on libusb's events,
+repeating the cancels each time, until the count is zero. Only then are the
+transfers freed. If libusb's event handling itself fails with transfers still
+out, they are leaked rather than freed, which costs a megabyte at the engine's
+sixteen 64 KiB transfers and does not write into the heap.
+
+A clean cancel now returns 0 without the per-transfer `Sleep(1)` the old loop
+made on Windows. The public API is unchanged.
+
+### The trial
+
+`tools/rtlsdr-cancel-trial` makes the engine's pause over and over: stream with
+`rtlsdr_read_async` on its own thread, sleep `(round % 7) * 20` ms, cancel
+with the engine's retry, join, one control call of the three kinds the engine
+makes, flush, stream again. Sixteen 64 KiB transfers, as the engine. It runs
+the cancels in child processes of 300 and counts from the children's output
+and exit codes, so a crash is counted rather than ending the run. After a -5 a
+child does what the engine now does, which is to stop streaming and close the
+device; `rtlsdr_close` makes control transfers, so a use after free the -5 left
+can still land in it, and a crash there is counted against that -5.
+
+It calls `rtl-sdr.h` and nothing of Revenant's, and it builds on its own
+against any vcpkg install tree, which is how the five builds below were
+compared without building the engine five times. Its `CMakeLists.txt` has the
+command.
+
+This machine was shared with nine other lanes' builds while it ran, with the
+processor 82% busy when it was sampled, and load moves this race. So the five
+configurations ran in rotation, one slice of 300 cancels each in turn, ten
+rounds from 11:02 to 12:47, and drift in the load fell on all five alike
+rather than on whichever happened to run during a busy stretch. Each row is
+3000 cancels without page heap.
+
+| Configuration | librtlsdr | libusb | Returned -5 | Processes that died | Died after a -5 |
+| --- | --- | --- | --- | --- | --- |
+| Baseline, what shipped | v2.0.2, three patches | 1.0.29 | 27 | 22 | 21 |
+| librtlsdr master alone | `797f814`, three patches | 1.0.29 | 14 | 11 | 11 |
+| libusb new alone | v2.0.2, three patches | 1.0.30 | 9 | 7 | 7 |
+| Both | `797f814`, three patches | 1.0.30 | 16 | 13 | 13 |
+| The fix | `797f814`, four patches | 1.0.29 | 0 | 0 | 0 |
+
+Every death was 0xC0000005, an access violation. All but one came after a
+-5, inside the `rtlsdr_close` that followed it. The one that did not, on the
+baseline, died with no -5 reported before it, and page heap showed what that
+looks like: run under cdb with full page heap, a v2.0.2 child made 164 clean
+cancels and on the 165th faulted in `windows_iocp_thread`
+(`windows_common.c` line 478), in the inlined `list_del`, reading a page the
+heap had already released, before `rtlsdr_read_async` had returned. That is
+the second of the two sites the RTL-SDR lane caught, reached from the other
+side of the same race: libusb's completion thread unlinking a transfer
+librtlsdr had just freed.
+
+The -5 returns come in bursts. Each of the four unpatched builds had them in
+three or four of its ten slices and none in the rest, and a single slice
+carried as many as nine: per slice, baseline 0 6 8 9 0 4 0 0 0 0, master
+7 0 1 0 4 0 0 2 0 0, libusb 1.0.30 0 0 2 4 0 0 3 0 0 0, both 0 3 0 0 0 6 7 0
+0 0. Against that scatter the totals from 9 to 27 do not separate the four,
+and none of them reaches zero. The source says why: neither upgrade touches
+the exit condition.
+
+A separate block of 3000 baseline cancels, run before the rotation, returned
+-5 30 times and lost 27 processes. The rate is higher than the RTL-SDR lane's
+one in 275 through the engine, on a busier machine with a callback that does
+less; the trial's figures are for comparing builds, not for predicting what
+the engine meets.
+
+**Under full page heap** (`gflags /p /enable rtlsdr-cancel-trial.exe /full`),
+the fix again: 3000 cancels, none returned -5, no process died. The baseline
+under the same page heap, also 3000: 5 returned -5, and 3 processes died, each
+during a child's first cancel and before `rtlsdr_read_async` had returned,
+which is the `windows_iocp_thread` form caught under cdb above. Page heap
+slows every allocation and moved the rate along with the outcome, so those
+two figures do not compare with the table's.
+
+**Through the engine.** The RTL-SDR lane's probe, "a streaming dongle takes
+control calls back to back" in `tests/engine/test_rtlsdr_source.cpp`, at 200
+rounds, three runs, against the `ci` build with the overlay: 600 control calls,
+none refused, the stream running at the end of every run, every stop clean,
+and not one LIBUSB_ERROR_PIPE line from librtlsdr. With v2.0.2 the lane saw the
+fault in one to three runs of five at the same setting.
+
+**Two things the fix changed that were not the target.** Measured over 600
+cancels on each build, 2 slices of 300 in rotation, without page heap:
+
+| | v2.0.2 | The fix |
+| --- | --- | --- |
+| Cancel accepted to `rtlsdr_read_async` returned, median | 249.8 ms | 7.7 ms |
+| The same, 90th percentile | 250.7 ms | 12.8 ms |
+| First control call after the cancel lands on the first attempt | 190 of 600 | 600 of 600 |
+
+The quarter second is the old loop's `Sleep(1)` after each of sixteen cancels,
+at Windows' default timer resolution of 15.6 ms: sixteen of those is 250 ms.
+The failed first attempt is the LIBUSB_ERROR_PIPE the backend has retried
+around since 2026-09-21 (`kRetunePipeRetries` in
+`core/source/rtlsdr_source.cpp`). That it vanishes with the fix points at
+the cause, which is inferred and not traced: the device refusing a control
+transfer while transfers the old cancel had abandoned were still in flight.
+So every control call on a streaming dongle now pauses the stream about a
+quarter of a second less. `docs/ui-spectrum.md` has a scroll-tune interval
+sized from the old pause, and says so.
+
+### What is recommended, and why
+
+The fix: `osmocom/rtl-sdr` at `797f814` with the four patches, and libusb
+1.0.29 from the registry, unchanged. It is the only configuration that
+reached zero, under page heap as well as without it.
+
+- Neither upgrade, alone or together, is a fix. Each still returned -5 and
+  still lost processes, and neither changes the exit condition that frees the
+  transfers early.
+- master rather than v2.0.2 underneath the patch, because the patch is
+  written against it and because master's `65f0658` is a real fix to a
+  neighbouring path: a transfer error no longer calls the cancel from inside
+  the callback.
+- libusb stays at 1.0.29. 1.0.30 was not separable from it in the trial, the
+  fix does not need anything 1.0.30 changed, and keeping the registry's port
+  keeps libusb's source in the release archive exactly what the relink
+  decision in `docs/clean-room.md` names, with one overlay to maintain rather
+  than two. The trial's 1.0.30 overlay was the registry's port verbatim and
+  is not kept in the tree; the vcpkg commit named above has it if it is ever
+  wanted.
+- The engine's own handling of a -5, ending the stream rather than
+  restarting it, stays. It no longer fires, and it is still the right answer
+  if a future librtlsdr brings the fault back.
+
+Offering the patch to osmocom is how the overlay would retire. Until a
+release carries the fix, this overlay is what the engine links, and moving the
+pinned commit means rebasing the patch and running the trial again.
+
+### How CI builds it
+
+The overlay is a directory of port files. vcpkg's binary cache keys a package
+on the SHA256 of every file in its recipe, not on where the recipe came from,
+so the overlay is built once on a runner and restored after that like any
+registry port; its `vcpkg_abi_info.txt` lists the four patches, the portfile
+and the manifest by hash and no path. Checked on this machine: a `vcpkg install`
+of the manifest into a fresh directory, after librtlsdr had been built once
+with the same triplets, restored all fourteen ports from the cache, librtlsdr
+among them, and built nothing. Editing any file under `vcpkg-overlays/rtlsdr/` changes the
+key and rebuilds librtlsdr, which is what should happen.
+
+`scripts/corresponding_source.py` reads an overlay port from this repository.
+vcpkg records an overlay's origin as NOASSERTION, so `manifest` finds the
+recipe under `vcpkg-overlays/<port>/` and accepts it only when every file
+matches the SHA256 the build recorded, and `bundle` publishes it from git at
+the commit being archived. The upstream archive is fetched from
+`osmocom/rtl-sdr` at the pinned commit and checked against the SHA512 in the
+portfile, as before.
+
+### Disclosure
+
+Read for this work, all on 2026-09-23 and all for a library Revenant links
+and now patches, which `docs/clean-room.md` permits:
+
+- librtlsdr, `src/librtlsdr.c` at 797f814: the transfer callback,
+  `_rtlsdr_alloc_async_buffers`, `_rtlsdr_free_async_buffers`,
+  `rtlsdr_read_async`, `rtlsdr_cancel_async`, `rtlsdr_close`,
+  `rtlsdr_reset_buffer`, the device structure and the buffer and timeout
+  definitions. The whole diff from v2.0.2 to 797f814, which includes the Blog
+  V4 Lite changes to `tuner_r82xx.c`, and the licence notice at the head of
+  every source file.
+- libusb: `libusb_cancel_transfer` in `libusb/io.c` at v1.0.29, the ChangeLog,
+  the commit list from v1.0.29 to v1.0.30 for the core and Windows backend
+  files, and the diff of `604a55c`.
+- vcpkg's rtlsdr and libusb ports at the baseline and libusb's at
+  `2e87314a`, which are MIT-licensed build recipes.
+
+Nothing under `core/`, `tools/` or `ui/` implements anything read. The trial
+tool calls librtlsdr's public API. The patch is a change to librtlsdr, lives
+in the port that builds librtlsdr, and is distributed under librtlsdr's
+licence, which its preamble says.
+
+One finding from reading the notices, recorded and not resolved here.
+`src/tuner_fc2580.c` carries no licence notice at all: its header says it was
+"taken from the kernel driver" at a Terratec URL and nothing else. It is
+compiled into the library at v2.0.2 and at 797f814 alike, so this trial
+neither caused nor changed it. The "or later" grant `docs/clean-room.md` rests
+on was confirmed in `librtlsdr.c` and `tuner_r82xx.c`; the same check at
+797f814 finds it in `rtl-sdr.h`, `librtlsdr.c`, `tuner_r82xx.c`,
+`tuner_e4k.c`, `tuner_fc0012.c` and `tuner_fc0013.c`, and not in
+`tuner_fc2580.c`.

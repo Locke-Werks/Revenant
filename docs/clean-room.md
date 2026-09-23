@@ -80,7 +80,7 @@ neither, and it is the one thing this document has always been about.
 
 | Library | Licence | Used for | Why the clean-room path was rejected |
 | --- | --- | --- | --- |
-| `osmocom/rtl-sdr` (librtlsdr) | GPL-2.0-or-later | RTL2832U device access for the RTL-SDR v3 backend: vendor control transfers, tuner programming, and the raw IQ mode | No published specification for the IQ mode exists. `docs/rtlsdr-provenance.md`, finding 2 |
+| `osmocom/rtl-sdr` (librtlsdr) at `797f814`, with four patches, built from `vcpkg-overlays/rtlsdr/` | GPL-2.0-or-later | RTL2832U device access for the RTL-SDR v3 backend: vendor control transfers, tuner programming, and the raw IQ mode | No published specification for the IQ mode exists. `docs/rtlsdr-provenance.md`, finding 2 |
 
 The short form of that finding, so this table can be read without opening the
 other document. The Realtek RTL2832U datasheet, Rev 1.4, specifies the transport
@@ -102,6 +102,25 @@ is defensible, and it is open-ended research with no schedule attached.
 
 librtlsdr arrives as a vcpkg dependency. No GPL source lands under `core/`,
 `tools/` or `ui/`, which is why the CI guard below still means something.
+
+**Which librtlsdr, since 2026-09-23.** Not the registry's. v2.0.2 freed
+transfers libusb still held when a stream was cancelled, 27 to 30 times in
+3000 cancels on the trial's pattern, and killed the process most times it did.
+The fix is a change to librtlsdr, so the engine links a librtlsdr this
+repository patches. `vcpkg-overlays/rtlsdr/` builds
+`osmocom/rtl-sdr` at `797f8143266d`, which is master on that day and the v2.0.3
+tag, with the registry port's three patches and a fourth,
+`cancel-waits-for-transfers.diff`, that Revenant wrote. That fourth patch is
+librtlsdr's expression, modified, and it stays under librtlsdr's licence; its
+preamble says so, and `docs/rtlsdr-provenance.md`, "The librtlsdr the engine
+links", is the record of what it changes and what it was measured against.
+
+A port patch under `vcpkg-overlays/` is the one form in which GPL expression
+sits in this tree, and it is not the vendoring the list below forbids. It is
+a change to a linked library, applied by the package manager when it builds
+that library, and it never reaches `core/`, `tools/` or `ui/`. Anything that
+would copy librtlsdr code into one of those three is still forbidden, patch or
+no patch.
 
 **Adding a row.** Read the licence from the project's own licence file and from
 the notice at the head of its source files, because those disagree more often
@@ -155,7 +174,10 @@ carries them, they were true when they were written, and they are still true.
   Reading it and writing your own version of it is the worst of both.
 - Porting, transliterating, or "reimplementing from memory" after reading.
 - Vendoring a GPL file into the tree, in any directory, including tests. A
-  linked dependency comes from the package manager and stays there.
+  linked dependency comes from the package manager and stays there. The
+  exception is a patch to a linked library, carried in that library's port
+  under `vcpkg-overlays/` and recorded in the table above; see "Which
+  librtlsdr, since 2026-09-23".
 - Copying a table of magic values out of a driver into a file this project
   claims as its own. A single value read off a datasheet is a fact. A sequence
   somebody selected and ordered to bring a chip up is their expression of it,
@@ -402,6 +424,13 @@ was considered and rejected: 6b would discharge the clause for free, and it
 costs the single self-contained signed binary that the static triplet was
 chosen to produce, which is a worse trade than a file in the release.
 
+The sources moved on 2026-09-23 and the route did not. librtlsdr is
+now built from `vcpkg-overlays/rtlsdr/`, so the release carries its upstream
+at `797f814` and all four of its patches, the three from vcpkg's port and
+Revenant's own, taken from this repository at the tagged commit. libusb is
+still v1.0.29 from the registry, unpatched. `docs/packaging.md` lists the
+archive's contents.
+
 The reasoning below is unchanged and is what the decision rests on. Read it to
 check the decision, not to reopen it. The last subsection says what is still
 open, which is no longer this.
@@ -470,12 +499,19 @@ in this repository carries it. Two facts narrow that down:
   in the work" is nothing, and upstream v1.0.29 is the complete corresponding
   source.
 - The rtlsdr port is the opposite case and it is a GPL question rather than an
-  LGPL one. Its ABI includes `dependencies.diff`, `library-linkage.diff` and
-  `tools.diff`, so the librtlsdr compiled into the binary is a modified v2.0.2.
-  Those diffs are part of the Corresponding Source for the executable under
-  GPL-3.0 section 1. They live in the public vcpkg repository at the commit the
-  port's SPDX names, which is reachable and pinned, and that is the thing to
-  settle rather than assume.
+  LGPL one. Its ABI includes `dependencies.diff`, `library-linkage.diff`,
+  `tools.diff` and, since 2026-09-23, `cancel-waits-for-transfers.diff`, so
+  the librtlsdr compiled into the binary is `osmocom/rtl-sdr` at `797f814`,
+  modified. Those diffs are part of the Corresponding Source for the executable
+  under GPL-3.0 section 1. They live in this repository under
+  `vcpkg-overlays/rtlsdr/`, which the release's source archive carries at the
+  tagged commit, so their reachability no longer rests on anybody else's
+  hosting.
+
+  This item used to say the librtlsdr in the binary was a patched v2.0.2 whose
+  three diffs lived in the public vcpkg repository at the commit the port's
+  SPDX names. True from 2026-09-19 to 2026-09-23, when the overlay replaced
+  the registry's port.
 
 6d is the cheaper subsection and the one that matches how this project already
 satisfies the GPL: "If distribution of the work is made by offering access to
@@ -535,6 +571,13 @@ grant was confirmed in `librtlsdr.c` and `tuner_r82xx.c`, which is where it has
 to be, because a header contributes no object code. The vcpkg port declares
 `GPL-2.0-or-later`, again as corroboration and not as the grant.
 
+Checked again at `797f814` on 2026-09-23, when the overlay moved to it: the
+grant is in `rtl-sdr.h`, `librtlsdr.c`, `tuner_r82xx.c`, `tuner_e4k.c`,
+`tuner_fc0012.c` and `tuner_fc0013.c`. `tuner_fc2580.c`, the sixth source file
+compiled into the library, carries no notice of any kind, only a line saying
+it was taken from a kernel driver, and it is the same at v2.0.2. That is open
+and is item 3 of the list below.
+
 The licence section above gives one reason the "or later" mattered: Qt6 is
 LGPL-3.0 and a 2.0-only radio would have taken the interface with it. There is a
 second reason, which applies to the engine alone and does not need the UI to
@@ -569,7 +612,7 @@ thing that could ship today.
 
 | Port | Version | Licence, as the port declares it | In the binary | What it asks of a binary release |
 | --- | --- | --- | --- | --- |
-| rtlsdr | 2.0.2 | GPL-2.0-or-later | yes, static | Corresponding Source, including the port's three diffs; licence text; notices |
+| rtlsdr | 2.0.3, `osmocom/rtl-sdr` at `797f814`, Revenant's overlay port | GPL-2.0-or-later | yes, static | Corresponding Source, including the overlay's four diffs; licence text; notices |
 | libusb | 1.0.29 | LGPL-2.1-or-later | yes, static, pulled in by rtlsdr | section 6: notice, a copy of the LGPL, and one of 6a to 6e. 6d, decided 2026-09-20 |
 | pthreads (pthreads4w) | 3.0.0 | Apache-2.0 | yes, static, pulled in by rtlsdr | section 4: retain the copyright, patent, trademark and attribution notices, and reproduce upstream's `NOTICE` file if it has one |
 | capnproto | 1.4.0 | MIT | yes | the copyright notice and the permission notice |
@@ -627,6 +670,16 @@ The relink obligation is not the open item. These are.
    and the notices point at where each is published upstream, which is the
    weaker promise the section below describes. Undecided, and due at the first
    tag.
+3. **`tuner_fc2580.c` has no licence notice.** Found 2026-09-23 while reading
+   the notices at `797f814`, and present at v2.0.2 as well. Its header says it
+   was taken from a Terratec kernel driver and names no licence, so the file's
+   terms are whatever `COPYING` at the root of librtlsdr gives it, which is
+   the plain version 2 text, and possibly whatever the driver it came from
+   carried. Whether that reads as "any version" under GPL-2.0 section 9 or as
+   2.0-only is exactly the question this document says a GPL-2.0-only file
+   raises for a GPL-3.0 work, and nobody has answered it. It drives the FC2580
+   tuner, which the dongle on the desk does not have. Undecided, and due at
+   the first tag.
 
 WHAT THIS LIST USED TO SAY. Two of its items were "There is no notices file"
 and "There is no published Corresponding Source for the dependencies as
@@ -693,7 +746,9 @@ corroboration rather than the thing being relied on. What the release carries
 is libusb v1.0.29 upstream source, complete because the vcpkg port applies no
 patches, and the rtlsdr port's `dependencies.diff`, `library-linkage.diff`
 and `tools.diff`, which the GPL-3.0 section 1 obligation already requires
-whatever the LGPL asks.
+whatever the LGPL asks. Since 2026-09-23 that is four rtlsdr diffs against
+`797f814` rather than three against v2.0.2; see the paragraph dated 2026-09-23
+under the decision above.
 
 **The DLL was considered and rejected.** Shipping libusb beside the
 executable would take the 6b route and discharge the clause with no release
@@ -721,8 +776,8 @@ on the relink question:
 Every exposure gets recorded here, with what was seen, when, and what was done
 about it. The log stays useful after the licence change, for the same reason it
 was useful before: it is the record of what the people writing this project
-actually read. Six entries, all self-reported by the person who did it, which
-is the behaviour the practice needs to keep producing.
+actually read. Seven entries, all self-reported by the person who did it,
+which is the behaviour the practice needs to keep producing.
 
 **2026-09-18, polyphase channelizer design.** While verifying the licences of
 candidate reference implementations, the first 1200 bytes of GNU Radio's
@@ -830,6 +885,25 @@ polynomial, which the appendix prose states, and is checked against the
 printed matrix, not against the snippet. The Appendix A.5 fragment carries
 nothing to reproduce. `core/decode/m17.h` records the same exposure in its
 CLEAN ROOM section, next to the code it concerns.
+
+**2026-09-23, librtlsdr's and libusb's cancel paths.** The engine crashed
+inside libusb after librtlsdr freed transfers still in flight, and the owner
+approved trying other builds of both and patching librtlsdr. Fixing a library
+means reading it, which the policy above permits for a library this project
+links and patches. What was read: in librtlsdr at `797f814`, the transfer
+callback, the async buffer allocation and release, `rtlsdr_read_async`,
+`rtlsdr_cancel_async`, `rtlsdr_close`, `rtlsdr_reset_buffer`, the device
+structure, and the whole diff from v2.0.2, which takes in the Blog V4 Lite
+changes to `tuner_r82xx.c`; in libusb, `libusb_cancel_transfer` at v1.0.29,
+the ChangeLog and the core and Windows backend commits up to v1.0.30.
+`docs/rtlsdr-provenance.md` has the list in full.
+
+Resolution: the patch that came of it, `cancel-waits-for-transfers.diff`, is
+librtlsdr's code modified, carried in its port under `vcpkg-overlays/rtlsdr/`
+and distributed under librtlsdr's licence, which is the patch exception the
+policy now names. `tools/rtlsdr-cancel-trial` calls `rtl-sdr.h` and nothing
+else. Nothing under `core/`, `tools/` or `ui/` implements what was read, and
+the reader wrote no clean-room component touching USB transfers.
 
 **What the log is for now.** Under the old rule an exposure was a contamination
 to be contained. Under the current one it still gets written down, because the

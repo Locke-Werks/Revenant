@@ -1684,3 +1684,27 @@ instead: An undisturbed 300 s run on an idle machine, both windows open and
     kept on top, engine at 1.000x, gave the main window 154 of 36106 frames
     over budget, 0.43%, and the receiver window 0.65%. docs/ui-spectrum.md,
     "The long run".
+
+phrase: the librtlsdr compiled into the binary is a modified v2.0.2
+phrase: upstream/rtlsdr-rtl-sdr-v2.0.2.tar.gz, the archives vcpkg built from
+retired: 2026-09-23
+commit: "Build librtlsdr from an overlay that waits for its transfers"
+instead: The engine links osmocom/rtl-sdr at 797f814 with four patches, built
+    by vcpkg-overlays/rtlsdr, and the release's source archive carries that
+    upstream and the four patches. docs/rtlsdr-provenance.md, "The librtlsdr
+    the engine links".
+
+phrase: because the first one after a cancel fails every time
+phrase: the first transfer after a cancel fails every time
+phrase: the first rtlsdr_set_center_freq after a cancel fails every time
+retired: 2026-09-23
+commit: "Build librtlsdr from an overlay that waits for its transfers"
+instead: That was librtlsdr v2.0.2, whose cancel left transfers in flight. With
+    the overlay's librtlsdr the first control call after a cancel landed 600
+    times in 600 in tools/rtlsdr-cancel-trial. kRetunePipeRetries keeps four.
+
+phrase: about one cancel in three hundred comes back from rtlsdr_read_async as -5
+retired: 2026-09-23
+commit: "Build librtlsdr from an overlay that waits for its transfers"
+instead: That was librtlsdr v2.0.2. The overlay's librtlsdr returned -5 on none
+    of 3000 cancels, and none of 3000 more under full page heap.

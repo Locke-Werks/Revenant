@@ -897,9 +897,17 @@ twentieth of the span per notch, and one tune per 400 ms. The step is a
 fraction of the span rather than a hertz count so that 2.4 MS/s and 20 MS/s
 feel the same to the same gesture. The interval is the measured 330 ms of dead
 stream plus room for the round trip, the supervisor noticing, and the up-to-four
-attempts the backend makes because the first `rtlsdr_set_center_freq` after a
-cancel fails every time. The first notch goes out immediately and coalescing
-starts behind it, so an isolated scroll has no lag.
+attempts the backend makes because, with librtlsdr v2.0.2, the first
+`rtlsdr_set_center_freq` after a cancel usually failed. The first notch goes out
+immediately and coalescing starts behind it, so an isolated scroll has no lag.
+
+Both of those were v2.0.2's. Since 2026-09-23 the engine links the librtlsdr
+in `vcpkg-overlays/rtlsdr/`, whose cancel stops in a median 7.7 ms rather than
+249.8 ms and whose first control call after it lands 600 times in 600, per
+`docs/rtlsdr-provenance.md`. So the dead stream behind a retune is shorter by
+about a quarter of a second and the 400 ms has room to come down. Nobody has
+re-measured the dead stream through the client yet, and the interval stays
+where it is until somebody does.
 
 One compromise worth knowing: each display holds its own accumulator, so moving
 the pointer from the spectrum to the waterfall mid-sweep can put two tunes

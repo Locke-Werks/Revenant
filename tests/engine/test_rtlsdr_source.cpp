@@ -1700,13 +1700,22 @@ TEST_CASE("a streaming dongle takes control calls back to back",
     const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE REPRODUCER FOR THE CI SEGFAULTS OF 2026-09-23. Every control call on
-    // a streaming dongle cancels the transfers and restarts them, and about
-    // one cancel in three hundred comes back from rtlsdr_read_async as -5 with
-    // a transfer still in flight; see run_usb in core/source/rtlsdr_source.cpp.
-    // At the default thirty rounds this rarely shows it. Two hundred rounds,
-    // run five times, showed it in one to three runs of the five, and with full
-    // page heap on the binary (gflags /p /enable <exe> /full) the access to
-    // the freed transfer faults at once instead of corrupting the heap.
+    // a streaming dongle cancels the transfers and restarts them, and with
+    // librtlsdr v2.0.2 about one cancel in three hundred came back from
+    // rtlsdr_read_async as -5 with a transfer still in flight; see run_usb in
+    // core/source/rtlsdr_source.cpp. At the default thirty rounds this rarely
+    // showed it. Two hundred rounds, run five times, showed it in one to three
+    // runs of the five, and with full page heap on the binary (gflags /p
+    // /enable <exe> /full) the access to the freed transfer faulted at once
+    // instead of corrupting the heap.
+    //
+    // Since 2026-09-23 the librtlsdr linked here is vcpkg-overlays/rtlsdr,
+    // whose cancel waits for every transfer, and this probe is the check
+    // through the engine that it stays at none: at 200 rounds, three runs on
+    // 2026-09-23, 600 control calls, none refused, the stream running at the
+    // end of each and no LIBUSB_ERROR_PIPE line from librtlsdr.
+    // tools/rtlsdr-cancel-trial is the instrument for comparing librtlsdr
+    // builds; docs/rtlsdr-provenance.md has what it measured.
     //
     // REVENANT_PROBE_ROUNDS sets the rounds, REVENANT_PROBE_STEP_MS the spacing
     // (round % 7 steps of it), REVENANT_PROBE_BLOCK the block, which sizes the

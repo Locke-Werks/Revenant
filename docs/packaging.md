@@ -294,15 +294,29 @@ same `gh release create` as the installer:
 
 - `revenant-<version>-source.zip`, `git archive` of the tagged commit.
 - `upstream/libusb-libusb-v1.0.29.tar.gz` and
-  `upstream/rtlsdr-rtl-sdr-v2.0.2.tar.gz`, the archives vcpkg built from.
-- `vcpkg-port-libusb/` and `vcpkg-port-rtlsdr/`, each port's recipe from the
-  vcpkg git tree it was built from. rtlsdr's includes `dependencies.diff`,
-  `library-linkage.diff` and `tools.diff`; libusb's has no patches.
+  `upstream/rtlsdr-rtl-sdr-797f8143266d983c56d8f35d2d442527529dd8a5.tar.gz`,
+  the archives vcpkg built from. The second is `osmocom/rtl-sdr` at the commit
+  that is also its v2.0.3 tag, pinned by commit in the overlay's portfile.
+- `vcpkg-port-libusb/`, libusb's recipe from the vcpkg git tree it was built
+  from, with no patches.
+- `vcpkg-port-rtlsdr/`, rtlsdr's recipe from `vcpkg-overlays/rtlsdr/` in this
+  repository at the tagged commit: the portfile, `dependencies.diff`,
+  `library-linkage.diff`, `tools.diff` and `cancel-waits-for-transfers.diff`,
+  the last of them Revenant's own change to librtlsdr.
 - `SOURCES.txt`, saying what each piece is and how it was checked.
 
 rtlsdr's upstream archive is beyond the decision record's list of libusb's
-source, the three patches and Revenant's own archive. It is there because the
+source, the patches and Revenant's own archive. It is there because the
 patches are changes to that base and are not the source of anything without it.
+
+librtlsdr has been built from Revenant's overlay port since 2026-09-23, and
+`docs/rtlsdr-provenance.md`, "The librtlsdr the engine links", says why. vcpkg
+records an overlay port's origin as NOASSERTION rather than a git tree, so
+`corresponding_source.py manifest` finds the recipe under `vcpkg-overlays/`
+and refuses it unless every file matches the SHA256 the build recorded, and
+`bundle` takes it from git at the commit being archived. Before that date the
+rtlsdr recipe was the registry's, v2.0.2 with three patches, fetched from the
+vcpkg git tree like libusb's.
 
 The engine job writes `sources.json` from its own vcpkg tree: each copyleft
 port's upstream SHA512 and the SHA256 of every file in its recipe, all read

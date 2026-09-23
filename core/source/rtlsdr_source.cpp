@@ -141,15 +141,22 @@ constexpr auto kIdlePoll = std::chrono::microseconds(250);
 // Attempts at rtlsdr_set_center_freq when the stream has just been paused for
 // it.
 //
-// Four rather than one because the first one is EXPECTED to fail, not because a
-// retry might help. join_locked already documents the reason: on Windows the
-// first control transfer issued after the bulk transfers have been cancelled
-// comes back LIBUSB_ERROR_PIPE. Measured over six consecutive pause-and-retune
-// rounds on an R820T, the first attempt failed and the second succeeded every
-// single time, so one attempt would turn a working retune into a refusal on
-// every use. The remaining two are headroom for a dongle that needs a moment
-// more, and four total still reports a genuinely unreachable frequency in the
-// same breath rather than after a wait.
+// Four rather than one because, with librtlsdr v2.0.2, the first one was
+// EXPECTED to fail, not because a retry might help. join_locked documents the
+// reason: on Windows the first control transfer issued after the bulk transfers
+// had been cancelled came back LIBUSB_ERROR_PIPE. Measured over six consecutive
+// pause-and-retune rounds on an R820T, the first attempt failed and the second
+// succeeded every single time, so one attempt would have turned a working
+// retune into a refusal on every use. The remaining two are headroom for a
+// dongle that needs a moment more, and four total still reports a genuinely
+// unreachable frequency in the same breath rather than after a wait.
+//
+// WHAT CHANGED, 2026-09-23. The stall came from v2.0.2's cancel returning with
+// transfers still in flight. With vcpkg-overlays/rtlsdr, whose cancel waits for
+// every transfer, tools/rtlsdr-cancel-trial found the first control call after
+// a cancel landing 600 times in 600, against 190 in 600 on v2.0.2. Four stay:
+// they cost nothing when the first lands, and a different librtlsdr or dongle
+// is exactly how the stall would come back.
 constexpr int kRetunePipeRetries = 4;
 
 // Between repeats of rtlsdr_cancel_async. See join_locked for why it repeats.
@@ -698,8 +705,8 @@ private:
     //
     // `work` is called with the transfers stopped, the caller already holding
     // control_, and the delivery thread still running. It should retry its own
-    // transfer, because the first one after a cancel fails every time; see
-    // kRetunePipeRetries.
+    // transfer, because with librtlsdr v2.0.2 the first one after a cancel
+    // usually failed; see kRetunePipeRetries.
     //
     // THE STREAM IS RESTARTED WHATEVER `work` DID, including throwing its hands
     // up, because a source that was running when a control call arrived has to
@@ -781,8 +788,8 @@ private:
     // The device half of each control call, split out so the same body serves a
     // stopped dongle and a streaming one. `attempts` is one when the dongle is
     // not streaming, so a genuine refusal is reported once rather than four
-    // times over, and kRetunePipeRetries when it is, because the first transfer
-    // after a cancel fails every time.
+    // times over, and kRetunePipeRetries when it is, because with librtlsdr
+    // v2.0.2 the first transfer after a cancel usually failed.
     [[nodiscard]] Expected<dsp::Hertz> tune_locked(dsp::Hertz center, int attempts);
     [[nodiscard]] Expected<double> set_gain_locked(double db, int attempts);
     [[nodiscard]] Status set_gain_auto_locked(bool on, int attempts);
@@ -951,10 +958,10 @@ Expected<dsp::Hertz> RtlSdrSource::tune(dsp::Hertz center)
 }
 
 // One attempt for a dongle that is not streaming and several for one that has
-// just been paused. See retune_streaming_locked for why the first transfer
-// after a cancel is expected to fail, and note that a stopped dongle gets a
-// single attempt so that a real refusal is reported as one rather than four
-// times over.
+// just been paused. See kRetunePipeRetries for why the first transfer after a
+// cancel was expected to fail on librtlsdr v2.0.2, and note that a stopped
+// dongle gets a single attempt so that a real refusal is reported as one rather
+// than four times over.
 Expected<dsp::Hertz> RtlSdrSource::tune_locked(dsp::Hertz center, int attempts)
 {
     const auto requested = static_cast<std::uint32_t>(center);
@@ -1608,6 +1615,17 @@ void RtlSdrSource::run_usb()
         // 3 of 518 cancels returned -5 and two of the three processes carried
         // on with the named error rather than dying; the third still died, so
         // this narrows the crash and does not close it.
+        //
+        // WHAT CLOSED IT, 2026-09-23: the librtlsdr this tree links is no
+        // longer the registry's v2.0.2. vcpkg-overlays/rtlsdr builds it with
+        // cancel-waits-for-transfers.diff, which makes read_async wait for
+        // libusb to hand back every transfer before freeing any. Over 3000
+        // cancels each with tools/rtlsdr-cancel-trial, v2.0.2 returned -5 27
+        // times and 22 processes died; the patched library returned -5 none
+        // of 3000 and none died, and none of 3000 more under full page heap.
+        // docs/rtlsdr-provenance.md has the table. This branch stays: it is
+        // the right answer to any error from a cancelled read, and a library
+        // that returns one has left libusb in a state nobody should build on.
         note_stream_error(Error{
             std::format("rtlsdr_read_async returned {} as its transfers were cancelled, where a "
                         "clean stop returns 0. librtlsdr has returned before libusb finished "
