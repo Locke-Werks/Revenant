@@ -141,9 +141,9 @@ runs both trees. The counts move with nearly every commit, so they are dated
 rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
 engine tree and 334 in `ui/`.
 
-Thirteen decoders run on a live receiver, in the engine, from
+Fourteen decoders run on a live receiver, in the engine, from
 `revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
-P25 Phase 1, D-STAR, TETRA and M17 on complex baseband, and RTTY, SITOR-B,
+P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband, and RTTY, SITOR-B,
 NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, and POCSAG on receiver
 audio. RDS runs beside them on every wfm receiver that asks, and now reports
 programme type names, TMC and emergency warning groups as well as the text.
@@ -154,8 +154,10 @@ white noise, read off a committed curve, rather than a copy of that table
 here. A P25 receiver's audio is its IMBE voice, since 2026-09-23: the wire
 carries it at 8000 S/s through `Session.subscribeAudio`, silent between calls
 and through an encrypted one, and the client plays it in the receiver's mix.
-D-STAR and TETRA voice is not decoded. WHAT THIS PARAGRAPH USED TO SAY: "P25's
-IMBE voice decodes to audio in `core/decode` and is not served".
+D-STAR, TETRA and DMR voice is not decoded. WHAT THIS PARAGRAPH USED TO SAY:
+"P25's IMBE voice decodes to audio in `core/decode` and is not served", and
+"Thirteen decoders run on a live receiver"; DMR's framing decoder made
+fourteen on 2026-09-23.
 
 The client has had its first design pass. The main window is the span, a
 frequency ruler between the spectrum and the waterfall, and a top bar with a

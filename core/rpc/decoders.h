@@ -63,10 +63,10 @@
 // Two complex paths reach them, and the rate is the chunk's on both rather
 // than anything VrxStatus says:
 //
-//   A p25p1, dstar or tetra receiver goes through the fine stage, mixed to
-//   DC, filtered to the mode's channel and resampled to 48000, 48000 or
-//   72000, which is the rate each decoder was written at.
-//   VrxStatus::demod_rate states it for these three.
+//   A p25p1, dstar, tetra or dmr receiver goes through the fine stage, mixed
+//   to DC, filtered to the mode's channel and resampled to 48000, 48000,
+//   72000 or 48000, which is the rate each decoder was written at.
+//   VrxStatus::demod_rate states it for these four.
 //
 //   A raw receiver is RawTapStage: one coarse grid channel at the channel
 //   rate, with the carrier wherever the grid left it. VrxStatus::demod_rate
@@ -104,6 +104,7 @@
 #include "core/decode/aprs.h"
 #include "core/decode/ax25.h"
 #include "core/decode/cw.h"
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/m17.h"
 #include "core/decode/navtex.h"
@@ -157,7 +158,7 @@ struct DecoderChunk {
 // time, POCSAG a page whose closing codeword the stream cut short, NAVTEX a
 // message still waiting for its "NNNN", CW the character being keyed, and
 // RTTY, SITOR-B, the PSK modes and CW the line they were gathering. P25,
-// TETRA, AX.25 and M17
+// TETRA, DMR, AX.25 and M17
 // hold nothing a client could read, a partial frame or burst, and take the
 // default here, which appends nothing.
 //
@@ -374,9 +375,9 @@ inline constexpr std::string_view kCwModes[] = {"cw", "usb", "lsb"};
 // adapter for why these two and not dstar or tetra.
 inline constexpr std::string_view kM17Modes[] = {"p25p1", "raw"};
 
-// The three digital voice decoders read their own mode's fine stage, which
+// The four digital voice decoders read their own mode's fine stage, which
 // delivers the rate each was written at, or a raw tap at no more than
-// kRawTapRateCap.
+// kRawTapRateCap. DMR is the fourth, since 2026-09-23.
 //
 // WHAT THIS USED TO BE: no list, which reads as any complex tap, so p25p1
 // was offered on a dstar or tetra receiver's tap as well as its own, and on a
@@ -384,6 +385,7 @@ inline constexpr std::string_view kM17Modes[] = {"p25p1", "raw"};
 inline constexpr std::string_view kP25Modes[] = {"p25p1", "raw"};
 inline constexpr std::string_view kDStarModes[] = {"dstar", "raw"};
 inline constexpr std::string_view kTetraModes[] = {"tetra", "raw"};
+inline constexpr std::string_view kDmrModes[] = {"dmr", "raw"};
 
 // THE FASTEST RAW TAP A COMPLEX DECODER WILL READ.
 //
@@ -408,7 +410,9 @@ inline constexpr std::string_view kTetraModes[] = {"tetra", "raw"};
 // AN ENGINEERING CHOICE AND NOT A CITATION: 192000 is four times the 48000
 // that P25, D-STAR and M17 were written at, and there the costliest of the
 // four takes under a fifteenth of a core. Above it a raw tap is refused in
-// words naming the mode that feeds the decoder at its own rate.
+// words naming the mode that feeds the decoder at its own rate. DMR, added
+// the same day and not in the table, took 76.9 ms at 192000 in a run where
+// P25 took 64.4, which is under a twelfth.
 inline constexpr dsp::SampleRate kRawTapRateCap = 192'000;
 
 // The mode and rate that feed `decoder` without a raw tap, for the refusal.
@@ -423,6 +427,9 @@ struct OwnTap {
     }
     if (decoder == "dstar") {
         return {"dstar", 48'000};
+    }
+    if (decoder == "dmr") {
+        return {"dmr", 48'000};
     }
     // p25p1 and m17, which reads a p25p1 receiver's fine stage.
     return {"p25p1", 48'000};
@@ -1083,6 +1090,338 @@ private:
     decode::Tetra decoder_;
     std::vector<dsp::Complex32> iq_;
     std::vector<decode::TetraBurst> bursts_;
+};
+
+// ---------------------------------------------------------------------------
+// DMR
+// ---------------------------------------------------------------------------
+//
+// Reads a dmr receiver's complex baseband, core/decode/dmr.h, or a raw tap
+// below kRawTapRateCap. One message per event rather than one per burst: a
+// base station channel carries 33 bursts a second, most of them Idle or
+// voice, and a subscription holds 256 messages. So:
+//
+//   "voice_header"   a voice LC header's Full LC, TS 102 361-1 clause 7.1.1
+//   "embedded_lc"    a Full LC completed from a superframe's embedded
+//                    signalling, clause 7.1.3, when it differs from the last
+//                    Full LC this slot reported: a receiver that joined after
+//                    the header learns the call from it, and one that did not
+//                    hears nothing new
+//   "terminator"     a terminator with LC, clause 7.1.2, ending the call
+//   "csbk"           a CSBK, clause 7.2, and "mbc_header" an MBC header
+//   "data_header"    a data header block, clause 8.2.1
+//   "pi_header"      a PI header: privacy is in use on the call
+//   "short_lc"       a Short LC from the CACH, clause 7.1.4, when it differs
+//                    from the last one reported
+//
+// Idle bursts, voice bursts, data continuations and anything whose CRC or
+// Reed-Solomon code failed are not reported. payload_failures on the next
+// message counts the failures, cumulative, as m17's lsf_crc_failures does.
+//
+// Every message:
+//   slot                 int    1 or 2, or 0 where nothing on the air has
+//                               named the timeslot: an MS or simplex
+//                               transmission, whose sync names none
+//   sync                 text   Table 9.2's pattern at the burst's centre,
+//                               core/decode/dmr.h's dmr_sync_name, or "none"
+//   colour_code          int    from the slot type or EMB; absent on a burst
+//                               that carries neither
+//   data_type            text   Table 9.22's name, on a data burst
+//   sync_score, carrier_offset_hz, deviation_ratio
+//                        real   from the least-squares fit of the slot's last
+//                               sync, which the burst was sliced with
+//   began_sample         int    receiver-stream index of the burst's first
+//                               symbol
+//   payload_failures     int    cumulative
+//
+// A Full LC adds, from clause 7.1, figure 7.1 and TS 102 361-2 clause 7.1.1:
+//   flco, fid            int    and flco_name, text
+//   protect_flag         flag
+//   lc                   bytes  the nine octets
+// and for the two voice channel user opcodes with FID 0:
+//   group                flag   Grp_V_Ch_Usr rather than UU_V_Ch_Usr
+//   talkgroup            int    the group address, when group
+//   destination          int    the target address, when not
+//   source               int
+//   service_options      int    Table 7.11, bit 7 first, and parsed:
+//   emergency, privacy, broadcast, open_voice_call_mode
+//                        flag
+//   priority             int
+//   encrypted            flag   privacy is set, or a PI header arrived on
+//                               this slot since the call began. Reported,
+//                               never decrypted, per docs/modes.md
+//
+// A csbk or mbc_header adds opcode, opcode_name, fid, last_block,
+// protect_flag and the ten octets as `csbk`; target, source and
+// service_options where TS 102 361-2 Tables 7.5a to 7.7 give them; and for a
+// Preamble CSBK data_follows, group and blocks_to_follow.
+//
+// A data_header adds format and format_name (Table 9.30), sap and sap_name
+// (Table 9.31), group, response_requested, destination, source and
+// blocks_to_follow where the format has them, or for the second block of a
+// proprietary packet, proprietary_second and manufacturer_id.
+//
+// A short_lc adds slco and data, and for an Activity Update, TS 102 361-2
+// Table 7.10, activity_slot_1, activity_slot_2, hashed_address_1 and
+// hashed_address_2.
+class DmrChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "dmr";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
+        const dsp::SampleRate rate = build.rate;
+        decode::DmrConfig config;
+        config.filter_taps = decoders_detail::scaled_taps(config.filter_taps, config.rate, rate);
+        config.rate = rate;
+        auto built = decode::Dmr::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the dmr decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new DmrChunkDecoder(rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        bursts_.clear();
+        if (auto processed = decoder_.process(iq_, bursts_); !processed) {
+            return processed;
+        }
+        for (const decode::DmrBurst& burst : bursts_) {
+            describe(burst, chunk, out);
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        slots_ = {};
+        last_short_lc_.reset();
+        payload_failures_ = 0;
+    }
+
+private:
+    // What this adapter remembers about a timeslot, to report a Full LC once
+    // per change and to carry a PI header into the call's encrypted flag.
+    struct Slot {
+        std::optional<std::array<std::uint8_t, 9>> last_lc;
+        bool pi_header = false;
+    };
+
+    DmrChunkDecoder(dsp::SampleRate rate, decode::Dmr decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] Slot& slot_of(const decode::DmrBurst& burst) {
+        return slots_[burst.slot <= 2 ? burst.slot : 0];
+    }
+
+    [[nodiscard]] DecodedMessage start(std::string kind, const decode::DmrBurst& burst,
+                                       const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, std::move(kind), chunk);
+        message.fields.push_back(integer_field("slot", burst.slot));
+        message.fields.push_back(text_field(
+            "sync", burst.sync ? std::string(decode::dmr_sync_name(*burst.sync)) : "none"));
+        if (burst.colour_code) {
+            message.fields.push_back(integer_field("colour_code", *burst.colour_code));
+        }
+        if (burst.data_type) {
+            message.fields.push_back(
+                text_field("data_type", std::string(decode::dmr_data_type_name(*burst.data_type))));
+        }
+        message.fields.push_back(real_field("sync_score", burst.sync_score));
+        message.fields.push_back(real_field("carrier_offset_hz", burst.carrier_offset_hz));
+        message.fields.push_back(real_field("deviation_ratio", burst.deviation_ratio));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(base_.at(burst.first_sample))));
+        message.fields.push_back(
+            integer_field("payload_failures", static_cast<std::int64_t>(payload_failures_)));
+        return message;
+    }
+
+    // "TS1 CC7", the prefix every text line starts with.
+    [[nodiscard]] static std::string where(const decode::DmrBurst& burst) {
+        std::string out = burst.slot == 0 ? "TS?" : std::format("TS{}", burst.slot);
+        if (burst.colour_code) {
+            out += std::format(" CC{}", *burst.colour_code);
+        }
+        return out;
+    }
+
+    static void options_fields(const decode::DmrServiceOptions& options, DecodedMessage& message) {
+        using namespace decoders_detail;
+        message.fields.push_back(integer_field("service_options", options.raw));
+        message.fields.push_back(flag_field("emergency", options.emergency));
+        message.fields.push_back(flag_field("privacy", options.privacy));
+        message.fields.push_back(flag_field("broadcast", options.broadcast));
+        message.fields.push_back(flag_field("open_voice_call_mode", options.open_voice_call_mode));
+        message.fields.push_back(integer_field("priority", options.priority));
+    }
+
+    void full_lc(const decode::DmrBurst& burst, const DecoderChunk& chunk,
+                 std::vector<DecodedMessage>& out) {
+        using namespace decoders_detail;
+        const decode::DmrFullLc& lc = *burst.full_lc;
+        Slot& slot = slot_of(burst);
+        if (lc.carrier == decode::DmrLcCarrier::VoiceHeader) {
+            // A new call, whatever the last one said.
+            slot.pi_header = false;
+        }
+        if (lc.carrier == decode::DmrLcCarrier::Embedded && slot.last_lc == lc.octets) {
+            return;
+        }
+        slot.last_lc = lc.octets;
+
+        const char* kind = lc.carrier == decode::DmrLcCarrier::VoiceHeader ? "voice_header"
+                           : lc.carrier == decode::DmrLcCarrier::Terminator ? "terminator"
+                                                                            : "embedded_lc";
+        DecodedMessage message = start(kind, burst, chunk);
+        message.fields.push_back(integer_field("flco", lc.flco));
+        message.fields.push_back(text_field("flco_name", std::string(decode::dmr_flco_name(lc.fid, lc.flco))));
+        message.fields.push_back(integer_field("fid", lc.fid));
+        message.fields.push_back(flag_field("protect_flag", lc.protect_flag));
+        message.fields.push_back(
+            bytes_field("lc", std::vector<std::uint8_t>(lc.octets.begin(), lc.octets.end())));
+
+        message.text = std::format("{} {}", where(burst), kind);
+        if (lc.service_options && lc.source) {
+            const bool encrypted = lc.service_options->privacy || slot.pi_header;
+            message.fields.push_back(flag_field("group", lc.group));
+            message.fields.push_back(integer_field(lc.group ? "talkgroup" : "destination",
+                                                   lc.destination.value_or(0)));
+            message.fields.push_back(integer_field("source", *lc.source));
+            options_fields(*lc.service_options, message);
+            message.fields.push_back(flag_field("encrypted", encrypted));
+            message.text = std::format("{} {} {} {} from {}{}{}", where(burst), kind,
+                                       lc.group ? "TG" : "to", lc.destination.value_or(0), *lc.source,
+                                       lc.service_options->emergency ? ", emergency" : "",
+                                       encrypted ? ", privacy" : "");
+        } else {
+            message.text += std::format(" FLCO {} FID 0x{:02X}", lc.flco, lc.fid);
+        }
+        if (lc.carrier == decode::DmrLcCarrier::Terminator) {
+            slot.last_lc.reset();
+            slot.pi_header = false;
+        }
+        out.push_back(std::move(message));
+    }
+
+    void describe(const decode::DmrBurst& burst, const DecoderChunk& chunk,
+                  std::vector<DecodedMessage>& out) {
+        using namespace decoders_detail;
+        if (burst.payload_failed) {
+            ++payload_failures_;
+        }
+        if (burst.short_lc && last_short_lc_ != std::pair{burst.short_lc->slco, burst.short_lc->data}) {
+            const decode::DmrShortLc& lc = *burst.short_lc;
+            last_short_lc_ = std::pair{lc.slco, lc.data};
+            DecodedMessage message = start("short_lc", burst, chunk);
+            message.fields.push_back(integer_field("slco", lc.slco));
+            message.fields.push_back(integer_field("data", lc.data));
+            message.text = std::format("CACH Short LC {} 0x{:06X}", lc.slco, lc.data);
+            if (lc.activity && lc.hashed_address) {
+                message.fields.push_back(integer_field("activity_slot_1", (*lc.activity)[0]));
+                message.fields.push_back(integer_field("activity_slot_2", (*lc.activity)[1]));
+                message.fields.push_back(integer_field("hashed_address_1", (*lc.hashed_address)[0]));
+                message.fields.push_back(integer_field("hashed_address_2", (*lc.hashed_address)[1]));
+                message.text = std::format("CACH activity TS1 {} TS2 {}", (*lc.activity)[0],
+                                           (*lc.activity)[1]);
+            }
+            out.push_back(std::move(message));
+        }
+        if (burst.pi_header) {
+            slot_of(burst).pi_header = true;
+            DecodedMessage message = start("pi_header", burst, chunk);
+            message.text = std::format("{} PI header, privacy", where(burst));
+            out.push_back(std::move(message));
+        }
+        if (burst.full_lc) {
+            full_lc(burst, chunk, out);
+        }
+        if (burst.csbk) {
+            const decode::DmrCsbk& csbk = *burst.csbk;
+            DecodedMessage message = start(csbk.mbc_header ? "mbc_header" : "csbk", burst, chunk);
+            message.fields.push_back(integer_field("opcode", csbk.opcode));
+            message.fields.push_back(
+                text_field("opcode_name", std::string(decode::dmr_csbko_name(csbk.fid, csbk.opcode))));
+            message.fields.push_back(integer_field("fid", csbk.fid));
+            message.fields.push_back(flag_field("last_block", csbk.last_block));
+            message.fields.push_back(flag_field("protect_flag", csbk.protect_flag));
+            message.fields.push_back(
+                bytes_field("csbk", std::vector<std::uint8_t>(csbk.octets.begin(), csbk.octets.end())));
+            if (csbk.target) {
+                message.fields.push_back(integer_field("target", *csbk.target));
+            }
+            if (csbk.source) {
+                message.fields.push_back(integer_field("source", *csbk.source));
+            }
+            if (csbk.service_options) {
+                options_fields(*csbk.service_options, message);
+            }
+            if (csbk.preamble_data_follows) {
+                message.fields.push_back(flag_field("data_follows", *csbk.preamble_data_follows));
+            }
+            if (csbk.group) {
+                message.fields.push_back(flag_field("group", *csbk.group));
+            }
+            if (csbk.blocks_to_follow) {
+                message.fields.push_back(integer_field("blocks_to_follow", *csbk.blocks_to_follow));
+            }
+            message.text = std::format("{} {} {}", where(burst), message.kind,
+                                       decode::dmr_csbko_name(csbk.fid, csbk.opcode));
+            if (csbk.target && csbk.source) {
+                message.text += std::format(" to {} from {}", *csbk.target, *csbk.source);
+            }
+            out.push_back(std::move(message));
+        }
+        if (burst.data_header) {
+            const decode::DmrDataHeader& header = *burst.data_header;
+            DecodedMessage message = start("data_header", burst, chunk);
+            message.fields.push_back(integer_field("format", header.format));
+            message.fields.push_back(
+                text_field("format_name", std::string(decode::dmr_dpf_name(header.format))));
+            message.fields.push_back(integer_field("sap", header.sap));
+            message.fields.push_back(text_field("sap_name", std::string(decode::dmr_sap_name(header.sap))));
+            message.fields.push_back(flag_field("proprietary_second", header.proprietary_second));
+            if (header.manufacturer_id) {
+                message.fields.push_back(integer_field("manufacturer_id", *header.manufacturer_id));
+            }
+            if (header.destination && header.source) {
+                message.fields.push_back(flag_field("group", header.group));
+                message.fields.push_back(flag_field("response_requested", header.response_requested));
+                message.fields.push_back(integer_field("destination", *header.destination));
+                message.fields.push_back(integer_field("source", *header.source));
+            }
+            if (header.blocks_to_follow) {
+                message.fields.push_back(integer_field("blocks_to_follow", *header.blocks_to_follow));
+            }
+            message.text = std::format("{} data header {} {}", where(burst), decode::dmr_dpf_name(header.format),
+                                       decode::dmr_sap_name(header.sap));
+            if (header.destination && header.source) {
+                message.text += std::format(" {} {} from {}", header.group ? "TG" : "to",
+                                            *header.destination, *header.source);
+            }
+            out.push_back(std::move(message));
+        }
+    }
+
+    dsp::SampleRate rate_;
+    decode::Dmr decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::DmrBurst> bursts_;
+    std::array<Slot, 3> slots_{};
+    std::optional<std::pair<std::uint8_t, std::uint32_t>> last_short_lc_;
+    std::uint64_t payload_failures_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -2592,8 +2931,8 @@ private:
 // A NEW DECODER IS ONE ROW HERE AND ONE ADAPTER ABOVE. The name is what a
 // client passes to subscribeDecoded and what DecodedMessage::decoder carries,
 // so it is permanent once published. A decoder named after an engine::Demod,
-// as p25p1, dstar, tetra and cw are, is also what an empty name resolves to on
-// a receiver in that mode. The other audio decoders are named after their
+// as p25p1, dstar, tetra, dmr and cw are, is also what an empty name resolves
+// to on a receiver in that mode. The other audio decoders are named after their
 // protocol, because a usb receiver may be carrying any of seven of them, and
 // an empty name on a usb receiver is refused with the list of those that read
 // it.
@@ -2606,6 +2945,7 @@ private:
 [[nodiscard]] inline std::span<const DecoderSpec> decoder_registry() {
     using decoders_detail::kCwModes;
     using decoders_detail::kDStarModes;
+    using decoders_detail::kDmrModes;
     using decoders_detail::kFmModes;
     using decoders_detail::kM17Modes;
     using decoders_detail::kP25Modes;
@@ -2627,6 +2967,12 @@ private:
          "the frame and multiframe numbers. Reads the complex baseband of a tetra receiver, or "
          "a raw tap up to 192000 S/s",
          &TetraDecoder::make, kTetraModes},
+        {DmrChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "DMR, ETSI TS 102 361-1 and -2: each timeslot's voice LC header, embedded LC and "
+         "terminator with talkgroup, source, service options and privacy, CSBKs, data and PI "
+         "headers, and Short LC from the CACH. Reads the complex baseband of a dmr receiver, or "
+         "a raw tap up to 192000 S/s",
+         &DmrChunkDecoder::make, kDmrModes},
         {RttyChunkDecoder::kName, DecoderInput::RealAudio,
          "RTTY, ITA2 over start-stop FSK, ITU-T S.1 and S.3: lines of text at 45.45 baud and "
          "170 Hz shift with mark on 2125 Hz. Reads a usb or lsb receiver's audio",

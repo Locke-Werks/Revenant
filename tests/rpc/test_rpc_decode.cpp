@@ -54,9 +54,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/tetra.h"
+#include "core/dsp/synth/dmr_mod.h"
 #include "core/dsp/synth/dv_mod.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -242,6 +244,76 @@ constexpr std::size_t kTetraBursts = 18;
     return siggen::tetra_render_bits(mod, bits);
 }
 
+constexpr dsp::SampleRate kDmrTapRate = decode::DmrConfig{}.rate;
+constexpr std::uint32_t kDmrTalkgroup = 3121;
+constexpr std::uint32_t kDmrSource = 3'158'320;
+constexpr std::uint8_t kDmrColourCode = 7;
+
+// A base station channel: a group call on timeslot 1 with the Privacy bit of
+// its Service Options set, a Preamble CSBK on timeslot 2, Idle around both,
+// and an Activity Update in the CACH throughout.
+[[nodiscard]] Expected<std::vector<dsp::Complex32>> dmr_transmission() {
+    siggen::DmrVoiceCall call;
+    call.colour_code = kDmrColourCode;
+    // TS 102 361-2 Table 7.1: FLCO 0, FID 0, Service Options with bit 6,
+    // Privacy, set, then the group and the source.
+    call.lc = {0x00,
+               0x00,
+               0x40,
+               static_cast<std::uint8_t>(kDmrTalkgroup >> 16U),
+               static_cast<std::uint8_t>(kDmrTalkgroup >> 8U),
+               static_cast<std::uint8_t>(kDmrTalkgroup),
+               static_cast<std::uint8_t>(kDmrSource >> 16U),
+               static_cast<std::uint8_t>(kDmrSource >> 8U),
+               static_cast<std::uint8_t>(kDmrSource)};
+    call.voice.resize(2 * decode::kDmrSuperframeBursts);
+    for (std::size_t burst = 0; burst < call.voice.size(); ++burst) {
+        for (std::size_t bit = 0; bit < decode::kDmrVoiceBits; ++bit) {
+            call.voice[burst][bit] = static_cast<std::uint8_t>((burst + bit) & 1U);
+        }
+    }
+    auto one = siggen::dmr_voice_call_bursts(call);
+    if (!one) {
+        return std::unexpected(one.error());
+    }
+    // TS 102 361-2 Table 7.7: a Preamble CSBK, data following, to the group.
+    const std::array<std::uint8_t, 10> preamble = {
+        0xBD, 0x00, 0xC0, 0x02,
+        static_cast<std::uint8_t>(kDmrTalkgroup >> 16U), static_cast<std::uint8_t>(kDmrTalkgroup >> 8U),
+        static_cast<std::uint8_t>(kDmrTalkgroup), static_cast<std::uint8_t>(kDmrSource >> 16U),
+        static_cast<std::uint8_t>(kDmrSource >> 8U), static_cast<std::uint8_t>(kDmrSource)};
+    auto csbk = siggen::dmr_bptc_burst(decode::DmrSyncType::BsData, kDmrColourCode,
+                                       decode::DmrDataType::Csbk, preamble);
+    if (!csbk) {
+        return std::unexpected(csbk.error());
+    }
+
+    const siggen::DmrShortLcFragments short_lc =
+        siggen::dmr_short_lc_fragments(decode::kDmrSlcoActivityUpdate, 0x82'0000U);
+    std::vector<siggen::DmrSlot> slots;
+    constexpr std::size_t kLead = 4;
+    for (std::size_t i = 0; i < 2 * (one->size() + 2 * kLead); ++i) {
+        const std::size_t frame = i / 2;
+        const bool first = i % 2 == 0;
+        siggen::DmrSlot slot;
+        const std::size_t fragment = i % decode::kDmrShortLcFragments;
+        slot.cach = siggen::dmr_cach(true, first ? 1 : 2, short_lc.lcss[fragment], short_lc.payload[fragment]);
+        slot.burst = siggen::dmr_idle_burst(decode::DmrSyncType::BsData, kDmrColourCode);
+        if (first && frame >= kLead && frame - kLead < one->size()) {
+            slot.burst = (*one)[frame - kLead];
+        }
+        if (!first && frame == kLead + 2) {
+            slot.burst = *csbk;
+        }
+        slots.push_back(slot);
+    }
+
+    siggen::DmrModConfig mod;
+    mod.filter_taps = rpc::decoders_detail::scaled_taps(mod.filter_taps, mod.rate, kFileRate);
+    mod.rate = kFileRate;
+    return siggen::dmr_render_slots(mod, slots);
+}
+
 // ---------------------------------------------------------------------------
 // The file
 // ---------------------------------------------------------------------------
@@ -379,7 +451,7 @@ TEST_CASE("the decoder registry crosses the wire", "[gpu][rpc][decode]") {
             expected.emplace_back(mode);
         }
         if (expected.empty()) {
-            expected = {"raw", "p25p1", "dstar", "tetra"};
+            expected = {"raw", "p25p1", "dstar", "tetra", "dmr"};
         }
         INFO(registry[i].name);
         CHECK((*listed)[i].modes == expected);
@@ -392,6 +464,7 @@ TEST_CASE("the decoder registry crosses the wire", "[gpu][rpc][decode]") {
     CHECK(names.contains("p25p1"));
     CHECK(names.contains("dstar"));
     CHECK(names.contains("tetra"));
+    CHECK(names.contains("dmr"));
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +473,7 @@ TEST_CASE("the decoder registry crosses the wire", "[gpu][rpc][decode]") {
 
 namespace {
 
-constexpr std::string_view kComplexDecoders[] = {"p25p1", "dstar", "tetra", "m17"};
+constexpr std::string_view kComplexDecoders[] = {"p25p1", "dstar", "tetra", "dmr", "m17"};
 
 // A twentieth of a second at a time, which is about what one engine block
 // gives a raw tap on the grids this suite runs.
@@ -466,7 +539,9 @@ TEST_CASE("a complex decoder refuses a raw tap above the cap, naming the mode to
 // a second of noise at the cap, a twentieth of a second at a time. On the
 // RTX 4090 machine on 2026-09-23 the costliest, p25p1, took 66 ms. The bound
 // is four times the measurement, loose enough for a loaded machine and tight
-// enough to fail if a filter's cost stops being bounded by the rate.
+// enough to fail if a filter's cost stops being bounded by the rate. dmr,
+// added later that day, took 76.9 ms in a run where p25p1 took 64.4, so the
+// bound is 3.4 times the costliest now.
 TEST_CASE("a complex decoder at the raw tap cap costs a fraction of a core", "[rpc][decode]") {
     constexpr dsp::SampleRate kCap = rpc::decoders_detail::kRawTapRateCap;
     constexpr std::uint64_t kSeed = 20'260'923;
@@ -1107,4 +1182,76 @@ TEST_CASE("TETRA synchronisation bursts cross the wire as decoded messages",
 
     // Distinct bursts rather than one burst reported many times.
     CHECK(frames.size() >= kEnough);
+}
+
+TEST_CASE("a DMR call crosses the wire with its talkgroup, source and privacy",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto signal = dmr_transmission();
+    INFO(test::message_of(signal));
+    REQUIRE(signal.has_value());
+    CaptureFile file("dmr");
+    REQUIRE(file.write(*signal).has_value());
+
+    Harness harness;
+    bring_up(harness, file);
+
+    auto vrx = harness.client().add_vrx(on_the_carrier(rpc::Demod::Dmr));
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<MessageLog>();
+    auto resolved = harness.client().subscribe_decoded(*vrx, "", into(log), ending(log));
+    INFO(test::message_of(resolved));
+    REQUIRE(resolved.has_value());
+    CHECK(*resolved == "dmr");
+
+    run_to_completion(harness, file);
+
+    const auto has = [](const std::vector<rpc::DecodedMessage>& got, std::string_view kind) {
+        return std::any_of(got.begin(), got.end(),
+                           [&](const rpc::DecodedMessage& m) { return m.kind == kind; });
+    };
+    const auto seen = wait_for(*log, [&](const auto& got) {
+        return has(got, "voice_header") && has(got, "terminator") && has(got, "csbk") &&
+               has(got, "short_lc");
+    });
+    std::string arrived;
+    for (const rpc::DecodedMessage& message : seen) {
+        arrived += std::format("\n  {} {}", message.kind, message.text);
+    }
+    INFO(std::format("{} messages arrived:{}", seen.size(), arrived));
+    REQUIRE(has(seen, "voice_header"));
+    REQUIRE(has(seen, "terminator"));
+    REQUIRE(has(seen, "csbk"));
+    REQUIRE(has(seen, "short_lc"));
+
+    for (const rpc::DecodedMessage& message : seen) {
+        CHECK(message.decoder == "dmr");
+        CHECK(message.sample_rate == kDmrTapRate);
+        if (message.kind == "voice_header" || message.kind == "terminator") {
+            CHECK(integer_of(message, "slot") == 1);
+            CHECK(integer_of(message, "colour_code") == kDmrColourCode);
+            CHECK(flag_of(message, "group"));
+            CHECK(integer_of(message, "talkgroup") == kDmrTalkgroup);
+            CHECK(integer_of(message, "source") == kDmrSource);
+            CHECK(flag_of(message, "privacy"));
+            CHECK(flag_of(message, "encrypted"));
+            CHECK_FALSE(flag_of(message, "emergency"));
+        }
+        if (message.kind == "csbk") {
+            CHECK(integer_of(message, "slot") == 2);
+            CHECK(text_of(message, "opcode_name") == "preamble");
+            CHECK(integer_of(message, "target") == kDmrTalkgroup);
+            CHECK(integer_of(message, "source") == kDmrSource);
+            CHECK(flag_of(message, "group"));
+            CHECK(integer_of(message, "blocks_to_follow") == 2);
+        }
+        if (message.kind == "short_lc") {
+            CHECK(integer_of(message, "activity_slot_1") == 0b1000);
+        }
+        // The embedded LC repeats the header's and is not reported again.
+        CHECK(message.kind != "embedded_lc");
+    }
 }

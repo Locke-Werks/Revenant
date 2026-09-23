@@ -599,7 +599,7 @@ void print_usage()
         "                      reads, and print each message it recovers as it arrives:\n"
         "                      the time in the receiver's stream, the receiver number,\n"
         "                      the decoder, the kind of message and one line of text.\n"
-        "                      Repeatable. p25p1, dstar and tetra read a --vrx in the\n"
+        "                      Repeatable. p25p1, dstar, tetra and dmr read a --vrx in the\n"
         "                      mode of the same name, such as --vrx 453.1M:p25p1, and\n"
         "                      m17 a p25p1 or raw one. rtty, sitor_b, navtex, psk31,\n"
         "                      psk63 and qpsk31 read a usb or lsb --vrx, psk with the\n"
@@ -3630,7 +3630,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 specs.push_back(named);
             } else {
                 // Audio decoders only: a raw tap stays as it was, with nothing
-                // attached by auto, because p25p1, dstar, tetra and m17 all read
+                // attached by auto, because p25p1, dstar, tetra, dmr and m17 all read
                 // one and the operator is the one who knows which it carries.
                 for (const rpc::DecoderSpec& candidate : rpc::decoder_registry()) {
                     if (candidate.input == rpc::DecoderInput::RealAudio &&

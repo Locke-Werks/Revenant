@@ -625,15 +625,18 @@ what that bought.
 
 `Session::decoders` lists what the engine can attach and
 `Session::subscribeDecoded(vrx, decoder, receiver)` attaches one to a receiver
-and streams what it recovers as `DecodedMessage`s. Thirteen decoders report
-through it as of 2026-09-22, each one adapter and one registry row in
-`core/rpc/decoders.h`, with the keys it emits listed above its adapter:
+and streams what it recovers as `DecodedMessage`s. Fourteen decoders report
+through it as of 2026-09-23, each one adapter and one registry row in
+`core/rpc/decoders.h`, with the keys it emits listed above its adapter.
+WHAT THE SENTENCE BEFORE THAT USED TO SAY: "Thirteen decoders report through
+it as of 2026-09-22"; `dmr` is the fourteenth.
 
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
 | `p25p1` | NAC and DUID of every data unit, with the carrier offset and deviation its sync word measured; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband of a `p25p1` receiver, or a `raw` tap up to 192000 S/s |
 | `dstar` | The radio header's four callsigns, suffix and flags, then one message per superframe of voice frames | Complex baseband of a `dstar` receiver, or a `raw` tap up to 192000 S/s |
 | `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband of a `tetra` receiver, or a `raw` tap up to 192000 S/s |
+| `dmr` | Per timeslot: the voice LC header, embedded LC and terminator with talkgroup, source, service options and privacy; CSBKs, data and PI headers; Short LC from the CACH | Complex baseband of a `dmr` receiver, or a `raw` tap up to 192000 S/s |
 | `m17` | Each link setup whose CRC checked: callsigns, type, encrypted flag; each stream's end; end of transmission | Complex baseband of a `p25p1` receiver, 48000 S/s in its 12.5 kHz channel, or a `raw` tap up to 192000 S/s |
 | `rtty` | Lines of ITA2 text, 45.45 baud, 170 Hz shift, mark on 2125 Hz | Audio of a `usb` or `lsb` receiver; the sideband sets the polarity |
 | `sitor_b` | Lines of text, each character from whichever of its two copies arrived | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
@@ -659,8 +662,8 @@ what an engine older than the field sends and a client has to be able to tell
 the two apart. The descriptions still say the modes in words, for a person
 reading the list.
 
-**A raw tap is held to 192000 S/s for the complex decoders.** `p25p1`, `dstar`
-and `tetra` read their own mode's fine stage, at the rate each was written for,
+**A raw tap is held to 192000 S/s for the complex decoders.** `p25p1`, `dstar`,
+`tetra` and `dmr` read their own mode's fine stage, at the rate each was written for,
 or a `raw` tap, and `m17` a `p25p1` receiver or a `raw` tap. A raw tap runs at
 the grid's channel rate, which nothing else caps, and a decoder's receive
 filter grows with the rate and runs on the completion thread that delivers
