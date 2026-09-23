@@ -206,6 +206,10 @@ class MorseTiming {
     // come out as soon as the gap is long enough to say so, rather than when
     // the next mark ends it. A word space waits for the gap to complete,
     // because the gap joins the letter and word clusters it is judged by.
+    //
+    // Not at the start of a transmission, which is held until its spacing
+    // shows letter spaces and word spaces apart, or until a gap of twice the
+    // longest space so far says the sender has stopped. See held_.
     void idle(double seconds, std::vector<CwCharacter>& out);
 
     // Emits whatever character is in progress.
@@ -233,8 +237,13 @@ class MorseTiming {
 
     void estimate_unit();
     void remember_run(bool key_down, double seconds);
+    void remember_long_space(double seconds);
+    [[nodiscard]] bool spacing_known() const;
+    void release(std::vector<CwCharacter>& out);
     void apply_mark(double seconds, SampleIndex start, std::vector<CwCharacter>& out);
-    void apply_space(double seconds, SampleIndex start, std::vector<CwCharacter>& out);
+    // `counted` is a space release() has already put in the clusters.
+    void apply_space(double seconds, SampleIndex start, bool counted,
+                     std::vector<CwCharacter>& out);
     void end_character(std::vector<CwCharacter>& out);
     [[nodiscard]] double letter_space_estimate() const;
     [[nodiscard]] double word_threshold() const;
@@ -243,10 +252,17 @@ class MorseTiming {
     bool locked_ = false;
     double unit_ = 0.0;
 
-    // Recent runs of both kinds, which the unit is estimated from, and the
-    // runs held back until it could be.
+    // Recent runs of both kinds, which the unit is estimated from.
     std::deque<Run> recent_;
+
+    // The start of a transmission, held back until the unit is known and the
+    // long spaces show both clusters, so the first word space is judged
+    // against letter spaces rather than alone. Clause 2.4's word space is
+    // seven units only against clause 2.3's three; one space on its own
+    // could be either, and a Farnsworth letter space is often longer than
+    // seven. released_ is set once and stays set until reset().
     std::vector<Run> held_;
+    bool released_ = false;
 
     // Spaces of two units or more, for the letter and word clusters.
     std::deque<double> long_spaces_;

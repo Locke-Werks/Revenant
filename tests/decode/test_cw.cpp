@@ -282,6 +282,31 @@ TEST_CASE("the timing decoder follows a hand sender and a change of speed",
     CHECK(std::abs(changing.wpm() - 35.0) < 1.0);
 }
 
+TEST_CASE("the timing decoder keeps the space after a one-character first word",
+          "[decode][cw]") {
+    // The first long space a transmission sends has nothing to be compared
+    // with. When the first word is one character that space is a word space,
+    // clause 2.4's seven units, and the first version took the lone sample for
+    // the letter-space cluster, set the word cut at five thirds of it, and
+    // printed the first two words as one: "K PARIS" as "KPARIS". The sweep
+    // saw it at +10 dB, where the noise has no part in it: of 200
+    // transmissions of text like the sweep's, 27 lost that space and nothing
+    // else.
+    for (const std::string text : {"K PARIS", "A CQ CQ DE G3PLX", "F Q M PARIS DE G3PLX",
+                                   "0 7W0 L72"}) {
+        for (const double wpm : {12.0, 20.0, 35.0}) {
+            siggen::CwModConfig mod;
+            mod.wpm = wpm;
+            auto runs = siggen::cw_key_runs(mod, text);
+            REQUIRE(runs.has_value());
+            decode::MorseTiming timing;
+            const std::string got = decode_runs(*runs, timing);
+            INFO(wpm << " WPM sent '" << text << "' decoded '" << got << "'");
+            CHECK(got == text);
+        }
+    }
+}
+
 TEST_CASE("the timing decoder reads a run of dashes as dashes", "[decode][cw]") {
     // T, M and O carry no one-unit run between them but the element spaces
     // inside M and O, so a few of them together leave the recent runs almost

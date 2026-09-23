@@ -22,8 +22,20 @@ constexpr std::size_t kRecentRuns = 16;
 // least, since a single character's runs can all be one length.
 constexpr std::size_t kRunsToLock = 6;
 
-// Letter-or-word spaces kept for the two clusters.
+// Letter-or-word spaces kept for the two clusters. Also how many a
+// transmission may start with, all one length, before the decoder stops
+// waiting for the second cluster and prints them as letter spaces.
 constexpr std::size_t kLongSpaces = 12;
+
+// How long a gap has to run before the decoder stops holding the start of a
+// transmission back for its spacing and prints what it has: this many times
+// clause 2.4's seven units, and this many times the longest space already
+// held. NOT A SPECIFIED VALUE. Either alone would release on an ordinary
+// space: seven units is a Farnsworth letter space at 18 words per minute
+// characters and 12 overall, and the longest space held can be a letter space
+// the gap in progress is the word space after. The gap itself is judged when
+// it ends, as every space is, so releasing early costs nothing but the wait.
+constexpr double kReleaseGapFactor = 2.0;
 
 // A mark is a dot below this many units and a dash above, and a space is
 // inside a character below it. Clause 2 puts the two populations at one and
@@ -248,6 +260,7 @@ void MorseTiming::reset() {
     unit_ = 0.0;
     recent_.clear();
     held_.clear();
+    released_ = false;
     long_spaces_.clear();
     code_.clear();
     character_start_ = 0;
@@ -387,14 +400,13 @@ void MorseTiming::apply_mark(double seconds, SampleIndex start, std::vector<CwCh
     word_ended_ = false;
 }
 
-void MorseTiming::apply_space(double seconds, SampleIndex start,
+void MorseTiming::apply_space(double seconds, SampleIndex start, bool counted,
                               std::vector<CwCharacter>& out) {
     if (seconds < kDotDashSplitUnits * unit_) {
         return;
     }
-    long_spaces_.push_back(seconds);
-    if (long_spaces_.size() > kLongSpaces) {
-        long_spaces_.pop_front();
+    if (!counted) {
+        remember_long_space(seconds);
     }
     end_character(out);
     if (!word_ended_ && any_text_ && seconds >= word_threshold()) {
@@ -408,6 +420,50 @@ void MorseTiming::apply_space(double seconds, SampleIndex start,
     }
 }
 
+void MorseTiming::remember_long_space(double seconds) {
+    long_spaces_.push_back(seconds);
+    if (long_spaces_.size() > kLongSpaces) {
+        long_spaces_.pop_front();
+    }
+}
+
+bool MorseTiming::spacing_known() const {
+    // The held long spaces, by the unit as it now stands.
+    std::vector<double> spaces;
+    for (const Run& run : held_) {
+        if (!run.key_down && run.seconds >= kDotDashSplitUnits * unit_) {
+            spaces.push_back(run.seconds);
+        }
+    }
+    if (spaces.size() >= kLongSpaces) {
+        return true;
+    }
+    double low = 0.0;
+    double high = 0.0;
+    return split_two(spaces, low, high) && high >= kWordToLetterRatio * low;
+}
+
+void MorseTiming::release(std::vector<CwCharacter>& out) {
+    released_ = true;
+    const std::vector<Run> waiting = std::move(held_);
+    held_.clear();
+
+    // Every held long space joins the clusters before any of them is judged,
+    // so the first is read against the ones after it rather than alone.
+    for (const Run& run : waiting) {
+        if (!run.key_down && run.seconds >= kDotDashSplitUnits * unit_) {
+            remember_long_space(run.seconds);
+        }
+    }
+    for (const Run& run : waiting) {
+        if (run.key_down) {
+            apply_mark(run.seconds, run.start, out);
+        } else {
+            apply_space(run.seconds, run.start, true, out);
+        }
+    }
+}
+
 void MorseTiming::remember_run(bool key_down, double seconds) {
     recent_.push_back(Run{key_down, seconds, 0});
     if (recent_.size() > kRecentRuns) {
@@ -418,21 +474,12 @@ void MorseTiming::remember_run(bool key_down, double seconds) {
 void MorseTiming::mark(double seconds, SampleIndex start, std::vector<CwCharacter>& out) {
     remember_run(true, seconds);
     estimate_unit();
-    if (!locked_) {
+    if (!released_) {
         held_.push_back(Run{true, seconds, start});
-        return;
-    }
-    if (!held_.empty()) {
-        // The unit has just become known: decode what was waiting for it.
-        const std::vector<Run> waiting = std::move(held_);
-        held_.clear();
-        for (const Run& run : waiting) {
-            if (run.key_down) {
-                apply_mark(run.seconds, run.start, out);
-            } else {
-                apply_space(run.seconds, run.start, out);
-            }
+        if (locked_ && spacing_known()) {
+            release(out);
         }
+        return;
     }
     apply_mark(seconds, start, out);
 }
@@ -443,16 +490,35 @@ void MorseTiming::space(double seconds, SampleIndex start, std::vector<CwCharact
         return;
     }
     remember_run(false, seconds);
-    if (!locked_) {
+    if (!released_) {
         held_.push_back(Run{false, seconds, start});
+        if (locked_ && spacing_known()) {
+            release(out);
+        }
         return;
     }
-    apply_space(seconds, start, out);
+    apply_space(seconds, start, false, out);
 }
 
 void MorseTiming::idle(double seconds, std::vector<CwCharacter>& out) {
-    if (!locked_ || !held_.empty()) {
+    if (!locked_) {
         return;
+    }
+    if (!released_) {
+        // A transmission that stopped before its spacing showed two clusters:
+        // one word, or one-character words, then a pause. Printed once the
+        // pause is plainly more than a space inside the transmission, with
+        // whatever clusters the held spaces make.
+        double longest = kMorseWordSpaceDots * unit_;
+        for (const Run& run : held_) {
+            if (!run.key_down) {
+                longest = std::max(longest, run.seconds);
+            }
+        }
+        if (seconds < kReleaseGapFactor * longest) {
+            return;
+        }
+        release(out);
     }
     if (seconds >= kDotDashSplitUnits * unit_) {
         end_character(out);
@@ -469,6 +535,9 @@ void MorseTiming::flush(std::vector<CwCharacter>& out) {
     // guess made them. Nothing is reported rather than that.
     if (!locked_) {
         return;
+    }
+    if (!released_) {
+        release(out);
     }
     end_character(out);
 }
