@@ -593,8 +593,15 @@ Status M17::process(ConstComplexSpan samples, std::vector<M17Frame>& out) {
     const double scale =
         tap_sum / (kM17DeviationPerUnitHz * (rate / kM17SymbolRate));
 
-    std::vector<Complex32> shaped;
-    shaped.reserve(samples.size());
+    // history_ holds the discriminator's last taps - 1 outputs from earlier
+    // calls, oldest first, or fewer at the start of a stream. This call's go
+    // on the end, each output of the filter reads back from its own, and one
+    // erase per call trims it. It used to erase the front once per sample,
+    // which is a move of the whole filter's memory per sample: about a
+    // thousand floats a sample on a raw tap at 600 kS/s. The newest `taps`
+    // values reach each sum either way, so the output is the same.
+    const std::size_t memory = history_.size();
+    history_.reserve(memory + samples.size());
     for (const Complex32 sample : samples) {
         const Complex32 product = sample * std::conj(previous_);
         previous_ = sample;
@@ -602,15 +609,22 @@ Status M17::process(ConstComplexSpan samples, std::vector<M17Frame>& out) {
             std::atan2(static_cast<double>(product.imag()), static_cast<double>(product.real())) *
             rate / (2.0 * kPi);
         history_.push_back(static_cast<float>(hertz));
-        if (history_.size() > taps) {
-            history_.erase(history_.begin());
-        }
+    }
+
+    std::vector<Complex32> shaped;
+    shaped.reserve(samples.size());
+    for (std::size_t n = 0; n < samples.size(); ++n) {
+        const std::size_t newest = memory + n;
+        const std::size_t have = std::min(newest + 1, taps);
         double sum = 0.0;
-        const std::size_t have = history_.size();
         for (std::size_t i = 0; i < have; ++i) {
-            sum += static_cast<double>(taps_[i]) * history_[have - 1 - i];
+            sum += static_cast<double>(taps_[i]) * history_[newest - i];
         }
         shaped.push_back(Complex32{static_cast<float>(sum * scale), 0.0F});
+    }
+    if (history_.size() > taps - 1) {
+        history_.erase(history_.begin(),
+                       history_.begin() + static_cast<std::ptrdiff_t>(history_.size() - (taps - 1)));
     }
     samples_in_ += samples.size();
 
