@@ -49,12 +49,37 @@ its edges came from.
 
 ## Keys
 
+Every frequent action has a key, and every action the window has is in the
+command palette, which Ctrl+K or Ctrl+Shift+P opens over whichever window is
+in front. The palette is not a dialog: nothing behind it is dimmed or
+blocked, the spectrum keeps drawing under it, and Esc or a click anywhere
+else closes it. Typing filters it. Each word of the query has to appear in
+an entry with its letters in order, so "wid fil" is enough for "widen the
+filter", "20m" for the 20 m band and "mode usb" for switching the receiver to
+usb. It lists the bands beside the actions, and the three digital modes the
+selector keeps behind its last segment. Return runs the entry at the top.
+What cannot run now stays in the list, dimmed and saying what it needs,
+below everything that can. `ui/models/palette_match.h` has the matching and
+the ranking, and `ui/tests/test_palette_match.cpp` their cases.
+
+The tuning keys step one digit of the radio's dial, the kilohertz digit
+until Alt and the side arrows move it, and the dial marks that digit faintly
+while the pointer is elsewhere. The filter keys act on the receiver window's
+filter display once it has focus, which a click on it or Ctrl+E gives it and
+an outline in the accent shows.
+
 One table decides every key. `ui/models/key_actions.h` holds each action's
 id, label, group, keys, where the keys apply, what it needs and the name of
-its handler. `ui/tests/test_key_actions.cpp` holds the table to three rules:
-no two actions share a key where both apply, no window key is one the filter
+its handler. The window binds one application-wide shortcut per action from
+it in `ui/qml/Commands.qml`, the filter display looks its keys up in it, the
+palette lists it and the key map F1 opens is drawn from it.
+`ui/tests/test_key_actions.cpp` holds the table to three rules: no two
+actions share a key where both apply, no window key is one the filter
 display or the overlay also takes, and the key map below is the one the
-table prints.
+table prints. A smoke run of the client fails when `Commands.qml` lacks a
+handler the table names. `revenant-ui --smoke-seconds N --palette QUERY
+--grab-main FILE` photographs the palette with a query typed into it, and
+`--keymap` in place of `--palette` the key map, on the offscreen platform.
 
 Not bound, because the client cannot do them: next and previous receiver,
 and solo. The engine holds any number of receivers and this client holds one
@@ -342,7 +367,8 @@ reads.
 The keyboard equivalent is `[` and `]` to select an edge, `\` for both,
 arrows to move the selection, up and down to widen and narrow symmetrically,
 Home for the mode's default and Escape to cancel a drag. Shift is a hundred
-hertz and control is one.
+hertz and control is one. They are the filter display's rows of the key
+table under "Keys" above, and that table is where they are changed.
 
 ## Scroll, and what each axis means
 
