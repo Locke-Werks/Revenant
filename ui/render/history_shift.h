@@ -18,10 +18,17 @@
 // many moves there are. A row drawn from a new frame goes on that frame's own
 // axis, which is within that same half pixel of the anchor.
 //
-// A DIFFERENT SPAN IS A DIFFERENT PICTURE. A width change moves the
-// demodulation rate and with it hertz per pixel, and a stored row cannot be
+// A DIFFERENT SPAN IS A DIFFERENT PICTURE. The pane is half the receiver's
+// display rate, which steps by a factor of two or more when the passband's
+// reach crosses a rung, and with it hertz per pixel; a stored row cannot be
 // rescaled without drawing a signal at a width it never had, so the history
 // is discarded, the same rule the span waterfall applies to a width change.
+// A filter dragged inside a rung leaves the span alone and the history with
+// it.
+//
+// WHAT THAT PARAGRAPH USED TO SAY: "A width change moves the demodulation
+// rate and with it hertz per pixel", which made every width change a fresh
+// history while the pane was the fine stream.
 //
 // This header holds no Qt; ui/tests links it.
 

@@ -148,21 +148,36 @@ struct SpectrumGeometry {
 # The frequency axis of one receiver's passband frame.
 #
 # Per frame rather than in EngineInfo, unlike SpectrumGeometry above, because
-# only the transform size is engine-wide: the width of the axis is the
-# receiver's own demodulation rate and moves whenever its filter does.
+# only the transform size is engine-wide: the width of the axis is half the
+# receiver's own display rate, which steps when the passband's reach crosses
+# a rung of the channel rate's ladder.
+#
+# WHAT THIS USED TO SAY: that the width "is the receiver's own demodulation
+# rate and moves whenever its filter does", while the frame was the fine
+# stream after the filter.
 struct PassbandGeometry {
+    # Points in the transform, and the bins kept of it, which are its central
+    # half: bins is transform / 2.
     transform @0 :UInt32;
     bins @1 :UInt32;
 
-    # The fine stream's rate, which is the whole width of the frame. It is
-    # somewhat wider than the receiver's passband rather than equal to it,
-    # and the margin is where the filter's skirts are drawn.
+    # The display stream's rate, which is TWICE the width of the frame: the
+    # frame is its central half. The channel rate divided by an integer rung,
+    # the largest that keeps the pane at least four passband reaches wide, so
+    # it moves by a factor of two or more and only when the reach crosses a
+    # rung. core/dsp/vrx_reference.h, "The display tap", has the rule.
+    #
+    # WHAT THIS USED TO SAY: "The fine stream's rate, which is the whole width
+    # of the frame", wider than the passband, "and the margin is where the
+    # filter's skirts are drawn". The skirts were the fault: the pane showed
+    # the filter instead of the air around it.
     rate @2 :UInt32;
 
     binWidth @3 :Rational;
 
-    # Centre frequency of bin zero, half the demodulation rate below whatever
-    # the fine stage mixed to DC.
+    # Centre frequency of bin zero, a quarter of the display rate below
+    # whatever the fine stage mixed to DC. (This used to say half the
+    # demodulation rate below it, while the frame was the whole fine stream.)
     #
     # NOT always the receiver's centre, and carried rather than derived for
     # exactly that reason. For CW the fine stage translates the carrier to the
@@ -174,25 +189,34 @@ struct PassbandGeometry {
     binZero @4 :Rational;
 }
 
-# One receiver's own complex baseband, transformed.
+# The air around one receiver, transformed.
 #
-# The response shaping it is the receiver's own fine filter and nothing
-# divides that out. The skirts ARE the feature: a filter parked on a signal is
-# judged by where its edges fall against the signal's, which is the whole
-# reason this frame exists and the surface a passband is dragged over.
+# The stream is the receiver's display tap: the same coarse channel and the
+# same exact mix as its fine stage, then a fixed anti-alias decimator, and
+# none of the receiver's own filter. So the noise floor is flat across the
+# frame and a signal outside the passband reads at its true level, which is
+# what a filter is dragged against: a client draws the filter over this, and
+# the filter is not in it.
+#
+# WHAT THIS USED TO SAY: "The response shaping it is the receiver's own fine
+# filter and nothing divides that out. The skirts ARE the feature". Those
+# skirts were a hump in the noise floor that moved with every dragged edge
+# and hid the neighbours an operator needed to see.
 struct PassbandFrame {
     vrx @0 :UInt64;
 
-    # Decibels relative to full scale, ascending in frequency across the whole
-    # demodulation rate, no gaps and nothing counted twice.
+    # Decibels relative to full scale, ascending in frequency across half the
+    # display rate, no gaps and nothing counted twice. (This used to say
+    # across the whole demodulation rate.)
     powerDb @1 :List(Float32);
 
     geometry @2 :PassbandGeometry;
 
     # Source samples this frame's window covers, [start, start + count).
     # Absolute from the start of the stream, with both the channelizer
-    # prototype's group delay and the fine filter's already taken off, so it
-    # lines up with an AudioChunk's start and with a SpectrumFrame's.
+    # prototype's group delay and the display filter's already taken off, so
+    # it lines up with an AudioChunk's start and with a SpectrumFrame's. (This
+    # used to say the fine filter's group delay, which is not in this stream.)
     start @3 :UInt64;
     count @4 :UInt64;
 

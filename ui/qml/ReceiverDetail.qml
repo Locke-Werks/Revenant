@@ -6,11 +6,15 @@
 // full-bleed on this one, and its controls carry the receiver's colour so they
 // read as the same thing as its marker on the span and its strip in the rack.
 //
-// The display is the receiver's OWN passband, transformed by the engine,
-// and the two rules over it are that receiver's filter edges. The
-// edges are dragged here, which is the one interaction in this
-// window that changes what the engine is doing rather than what the
-// window is showing.
+// The display is the air around the receiver, from the receiver's own
+// display tap with none of its filter in it, and the two rules over it
+// are that receiver's filter edges. The edges are dragged here, which is
+// the one interaction in this window that changes what the engine is
+// doing rather than what the window is showing.
+//
+// WHAT THE FIRST SENTENCE USED TO SAY: "The display is the receiver's OWN
+// passband, transformed by the engine", which was the fine stream after the
+// filter, so the filter's shape was in the picture as well as over it.
 //
 // The controls appear when a receiver exists and not before. There is
 // nothing to draw and nothing to drag without one, and an empty
@@ -171,8 +175,11 @@ ColumnLayout {
     }
 
     // What the filter actually is, one gesture away: the demodulation rate
-    // that sets the display's span, the channel's limit on an edge, and the
-    // engine's grant when it differs from the request.
+    // the audio is made at, the channel's limit on an edge, and the engine's
+    // grant when it differs from the request. The display's span is not on
+    // this list: it is half the display rate, off the frame's own geometry,
+    // and steps only at a rung. (This used to say the demodulation rate "sets
+    // the display's span", which it did while the pane was the fine stream.)
     GridLayout {
         Layout.fillWidth: true
         visible: detail.expanded

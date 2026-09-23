@@ -38,12 +38,19 @@
 // wobbles with the text, which is why neither is offered as a stand-in. The
 // window says so where the toggle is.
 //
-// WHAT IT MEASURES FROM. The passband frames, which are after the receiver's
-// filter. The filter's shape moves with the receiver, so a centroid includes
-// some of it and is pulled towards the receiver's own centre: the error it
-// reports is short of the true one, never of the wrong sign, and the loop
-// converges over more moves rather than overshooting. Nothing here divides the
-// filter out; a pre-filter tap is the engine's to add.
+// WHAT IT MEASURES FROM. The passband frames, which are the receiver's display
+// tap: its exact mix and a fixed decimator, with none of its filter in them,
+// so the noise floor is flat across the pane and nothing about the filter's
+// shape pulls a measurement towards the receiver's centre. Only the bins
+// inside the filter are searched, because the filter is what the operator
+// said the signal is in and a neighbour beside it is not the one being
+// tracked.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "The passband frames, which are after the
+// receiver's filter", with the centroid "pulled towards the receiver's own
+// centre" by the filter's shape, and "a pre-filter tap is the engine's to
+// add". The engine added it in "Transform a display tap in the passband pane,
+// not the fine ring".
 //
 // Absolute hertz throughout, off each frame's own geometry, so a frame measured
 // before a move landed still says where the signal is rather than where it was

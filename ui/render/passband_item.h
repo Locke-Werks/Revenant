@@ -3,18 +3,26 @@
 //
 // WHAT THIS ITEM IS DRAWING, AND WHY THE TWO THINGS HAVE TO AGREE
 //
-// Underneath is the engine's per-receiver passband spectrum, which is the
-// receiver's own complex baseband transformed. Nothing divides the fine
-// filter's response out of it, deliberately: the skirts ARE the feature,
-// because a filter parked on a signal is judged by where its edges fall
-// against the signal's.
+// Underneath is the engine's per-receiver passband spectrum: the receiver's
+// display tap, which is its exact mix and a fixed anti-alias decimator with
+// none of the receiver's own filter in it, transformed. The noise floor is
+// flat across the pane and a signal outside the filter reads at its true
+// level, so a filter parked on a signal is judged by where its edges fall
+// against the signal's own shape and against the neighbours beside it.
 //
 // Over it are two rules, at the filter's low and high edges, and the fill
-// between them. The whole point of the display is that those rules land on
-// the same pixels as the skirts in the picture, so the two must be placed
-// from ONE axis. They are: PassbandFrame carries its own geometry, bin zero
-// is the frequency the fine stage mixed to DC as an exact rational, and both
-// the trace and the rules go through EngineLink::passbandFractionAtOffset.
+// between them. The filter is drawn here and nowhere else, so those rules
+// have to land on the same pixels as the signal they are being set against,
+// and the two must be placed from ONE axis. They are: PassbandFrame carries
+// its own geometry, bin zero is a quarter of the display rate below the
+// frequency the fine stage mixed to DC, carried as an exact rational, and
+// both the trace and the rules go through
+// EngineLink::passbandFractionAtOffset.
+//
+// WHAT THE FIRST PARAGRAPH USED TO SAY: "Nothing divides the fine filter's
+// response out of it, deliberately: the skirts ARE the feature", while the
+// frames were the fine stream after the filter. Those skirts were the hump
+// the owner saw move with every dragged edge.
 //
 // That is what makes CW right with no CW anywhere in this file. On that one
 // mode the fine stage translates the carrier to the operator's sidetone
@@ -26,16 +34,22 @@
 // THE MAPPING IS FROZEN FOR THE LENGTH OF A DRAG, AND THAT IS NOT AN
 // OPTIMISATION
 //
-// The pane's span is the demodulation rate, and the demodulation rate is
-// derived from the passband. So widening the filter widens the pane,
-// rescales the axis, and makes the handle jump backwards out from under the
-// pointer, which is unusable. The pixel-to-hertz mapping is therefore taken
+// The pane's span is half the display rate, and the display rate steps
+// when the passband's reach from the mix centre crosses a rung of the
+// channel rate's ladder, by a factor of two or more each time. So a drag
+// across a rung doubles or halves the pane, rescales the axis, and makes the
+// handle jump out from under the pointer, which is unusable. Inside a rung
+// the span does not move at all. The pixel-to-hertz mapping is therefore taken
 // once at drag start and held for the whole gesture. Frames arriving
 // mid-drag are drawn into the frozen mapping BY THEIR OWN AXIS, so a
 // narrower frame letterboxes and a wider one is cropped; neither is
 // stretched, because a stretched frame is a picture claiming a signal is
 // somewhere it is not. The mapping then eases back to the live one over
 // kRescaleMs, so the operator sees the span change rather than a jump.
+//
+// WHAT THAT PARAGRAPH USED TO SAY: "The pane's span is the demodulation
+// rate", so that widening the filter widened the pane on every drag. The
+// demodulation rate still moves with the width; the pane follows the rung.
 //
 // THE EASE IS ARMED AT THE RELEASE AND STARTED BY THE FRAME THAT MOVES THE
 // SPAN, WHICH IS NOT THE SAME MOMENT. This paragraph used to say "on
@@ -90,13 +104,13 @@ inline constexpr int kRescaleMs = 150;
 //
 // The easing cannot start at the release. The width change is queued there,
 // not applied: EngineLink holds it for the length of the gesture, the
-// supervisor thread makes the call afterwards, and the new demodulation
-// rate arrives on a later passband frame. So the release ARMS the easing
-// and the frame that carries a different span starts it.
+// supervisor thread makes the call afterwards, and a new display rate
+// arrives on a later passband frame. So the release ARMS the easing and the
+// frame that carries a different span starts it.
 //
 // Two seconds covers the supervisor's wake, a round trip and a frame with
 // room to spare, and it is short enough that an arm which never fires,
-// which is every drag that stayed inside one rate, cannot still be sitting
+// which is every drag that stayed inside one rung, cannot still be sitting
 // there when some unrelated change moves the span later. Nothing is drawn
 // differently while armed; the pane is already on the live axis.
 inline constexpr int kRescaleArmMs = 2'000;

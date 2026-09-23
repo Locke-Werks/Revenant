@@ -622,18 +622,24 @@ struct SpectrumFrame {
 // The frequency axis of one receiver's passband frame.
 //
 // Per frame rather than in EngineInfo, because only the transform size is
-// engine-wide: the width is the receiver's demodulation rate and moves
-// whenever its filter does.
+// engine-wide: the width is half the receiver's display rate, which steps
+// only when the passband's reach crosses a rung. revenant.capnp has the rule.
+// (This used to say the width "is the receiver's demodulation rate and moves
+// whenever its filter does", while the frame was the fine stream.)
 struct PassbandGeometry {
+    // bins is transform / 2, the transform's central half.
     std::uint32_t transform = 0;
     std::uint32_t bins = 0;
+
+    // The display stream's rate, twice the width of the frame.
     std::uint32_t rate = 0;
     Rational bin_width;
 
-    // Half the demodulation rate below whatever the fine stage mixed to DC,
-    // which is NOT always the receiver's centre: on CW it sits a pitch
+    // A quarter of the display rate below whatever the fine stage mixed to
+    // DC, which is NOT always the receiver's centre: on CW it sits a pitch
     // below. Carried rather than derived so a display drawing filter edges
-    // against it needs no per-mode arithmetic of its own.
+    // against it needs no per-mode arithmetic of its own. (Half the
+    // demodulation rate below it, this used to say.)
     Rational bin_zero;
 
     [[nodiscard]] constexpr bool enabled() const { return bins != 0; }

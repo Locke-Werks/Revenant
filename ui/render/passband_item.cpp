@@ -24,8 +24,8 @@ namespace {
 //
 // The fill is deliberately faint. It marks the band without competing with
 // the trace underneath, and the trace is what the operator is judging the
-// edges against: a fill dark enough to read on its own would hide the skirt
-// it is there to be lined up with.
+// edges against: a fill dark enough to read on its own would hide the edge of
+// the signal it is there to be lined up with.
 const QColor kBandFill{96, 176, 255, 42};
 const QColor kEdgeRule{128, 196, 255, 220};
 const QColor kEdgeRuleActive{184, 226, 255, 255};
@@ -429,8 +429,10 @@ void PassbandItem::takeFrame()
     // No headroom correction. peak_reduction_headroom_db exists because the
     // span reduces tens of bins into one column and the peak of a group runs
     // above the percentile the ends were measured from. A passband frame is
-    // 512 bins across a pane hundreds of pixels wide, so a column is one bin
-    // or two and there is nothing to correct for.
+    // half its transform in bins, geometry.bins, across a pane hundreds of
+    // pixels wide, so a column is one bin or two and there is nothing to
+    // correct for. (This used to read "A passband frame is 512 bins", which is
+    // one transform size's count and not something the frame promises.)
     ends_ = map_ends(frame.floor_db, frame.ceiling_db, 0.0F);
 
     // The axis this frame was measured on, kept so a frame arriving during a
@@ -531,8 +533,9 @@ void PassbandItem::mousePressEvent(QMouseEvent* event)
     }
 
     // The mapping is taken now and held until release. See the header: the
-    // pane's span is derived from the passband, so an axis that followed the
-    // drag would move the handle out from under the pointer.
+    // pane's span steps with the passband's reach at a rung, so an axis that
+    // followed the drag would move the handle out from under the pointer at
+    // the moment the drag crossed one.
     //
     // A new gesture supersedes an ease that was still waiting for the last
     // one's answer: the mapping taken below is the one to come back to.
@@ -640,15 +643,20 @@ void PassbandItem::armRescale()
     // ARMED AT RELEASE, STARTED WHEN THE AXIS ACTUALLY MOVES, WHICH IS NOT
     // THE SAME MOMENT AND USED TO BE TREATED AS ONE.
     //
-    // The pane's span is the demodulation rate, and the demodulation rate
-    // is the engine's answer. At release the width change has only been
-    // queued: EngineLink holds it back for the length of the gesture, the
-    // supervisor thread has still to make the call, and the new rate
-    // arrives on a later passband frame. So liveAxis() here is the span the
+    // The pane's span is half the display rate, and the display rate is the
+    // engine's answer, stepping only when the passband's reach crosses a
+    // rung. At release the width change has only been queued: EngineLink
+    // holds it back for the length of the gesture, the supervisor thread has
+    // still to make the call, and a new rate, when there is one, arrives on
+    // a later passband frame. So liveAxis() here is the span the
     // pane already has, the comparison against the frozen mapping found
     // nothing had moved, and the easing this function exists for never ran
     // for the one case it exists for: the pane snapped when the new rate
     // landed.
+    //
+    // WHAT THE FIRST SENTENCE USED TO SAY: "The pane's span is the
+    // demodulation rate", which moved with every width. It is the display
+    // rate now, and most drags never move it.
     //
     // Starting the animation blind instead would be worse. It would ease
     // towards a span that is about to change, and the change would land
@@ -711,8 +719,8 @@ void PassbandItem::tryRescale()
         return;
     }
 
-    // A drag that stayed inside one demodulation rate is the ordinary case
-    // and there is nothing to animate, but this cannot be told apart from
+    // A drag that stayed inside one rung of the display rate is the ordinary
+    // case and there is nothing to animate, but this cannot be told apart from
     // an answer still in flight without waiting. The deadline is what stops
     // an arm that will never fire from easing some unrelated rate change
     // minutes later out of a stale mapping.
@@ -918,9 +926,9 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         node->rules = new OverlayNode;
 
         // The band's fill under the trace, the rules over it: the operator
-        // is lining an edge up against a skirt, so the edge has to be the
-        // thing on top and the fill has to be the thing that does not hide
-        // the skirt.
+        // is lining an edge up against the edge of a signal, so the rule has
+        // to be the thing on top and the fill has to be the thing that does
+        // not hide the signal.
         node->appendChildNode(node->background);
         node->appendChildNode(node->band);
         node->appendChildNode(node->trace);

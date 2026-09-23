@@ -21,12 +21,18 @@
 // band, AFT. render/history_shift.h shifts the stored rows sideways by the
 // pixels the axis moved, so the history stays where it was in absolute terms
 // and a drifting carrier draws as a slant rather than as a jump at every move.
-// A change of span, which a change of filter width makes, discards it.
+// A change of span discards it, and the span changes only when the passband's
+// reach crosses a rung of the display rate, a factor of two or more; a filter
+// dragged inside a rung keeps every row.
 //
-// WHAT THE TRACE IS. The frames are the fine stream after the receiver's
-// filter, so the noise floor carries the filter's response, and so do these
-// rows. That is the engine's to change, with a pre-filter display tap, and
-// nothing here divides the response out or masks outside the passband.
+// WHAT THE TRACE IS. The frames are the receiver's display tap, which carries
+// none of the receiver's filter, so the rows are the air around the receiver
+// with a flat noise floor, and nothing here masks outside the passband.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "The frames are the fine stream after the
+// receiver's filter, so the noise floor carries the filter's response, and so
+// do these rows." And the one above ended "A change of span, which a change
+// of filter width makes, discards it."
 
 #pragma once
 
