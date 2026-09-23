@@ -87,6 +87,7 @@
 #include <vector>
 
 #include "core/source/clock_model.h"
+#include "core/thread_role.h"
 
 namespace revenant::source {
 namespace {
@@ -1561,6 +1562,7 @@ void RtlSdrSource::on_transfer(const std::uint8_t* data, std::uint32_t bytes)
 
 void RtlSdrSource::run_usb()
 {
+    name_this_thread(L"revenant rtlsdr usb");
     const int rc = rtlsdr_read_async(device_.get(), &RtlSdrSource::usb_callback, this,
                                      kTransferCount, transfer_bytes_);
 
@@ -1640,6 +1642,7 @@ void RtlSdrSource::run_usb()
 
 void RtlSdrSource::run_delivery()
 {
+    name_this_thread(L"revenant rtlsdr delivery");
     // MEMBERS, NOT LOCALS, because this thread is joined and restarted by a
     // retune while the stream it is delivering carries on.
     //

@@ -174,6 +174,36 @@ struct ServerOptions {
     std::vector<std::uint8_t> token;
 };
 
+// Where this server's own work runs and how long it takes, cumulative from
+// create, for measuring contention. Durations are nanoseconds of steady
+// clock, core/engine/load_clock.h. docs/rpc.md, under Threading, has the
+// measurement these were added for and what they showed.
+struct ServerLoad {
+    // The wideband detector: frames it consumed, and the time spent in
+    // consume and in tier two's step. detector_frames_shed counts frames the
+    // detector was offered and did not take.
+    std::uint64_t detector_frames = 0;
+    std::uint64_t detector_frames_shed = 0;
+    std::uint64_t detector_ns = 0;
+    std::uint64_t detector_max_ns = 0;
+    std::uint64_t tier_two_ns = 0;
+
+    // The loop thread's wait for the detector's lock, which a detections
+    // poll takes. Time the loop spends here is time every other client's
+    // audio and spectrum sit undelivered.
+    std::uint64_t detect_poll_wait_ns = 0;
+    std::uint64_t detect_polls = 0;
+
+    // The receiver-side work: event decoders, a P25 receiver's voice stream,
+    // RDS, and plain audio queued for a subscriber. Chunks and time.
+    std::uint64_t decode_chunks = 0;
+    std::uint64_t decode_ns = 0;
+    std::uint64_t voice_chunks = 0;
+    std::uint64_t voice_ns = 0;
+    std::uint64_t rds_ns = 0;
+    std::uint64_t audio_ns = 0;
+};
+
 class Server {
 public:
     // The engine must outlive the server. The server installs a spectrum
@@ -212,6 +242,9 @@ public:
     // had not finished with the previous one. See BACKPRESSURE above.
     [[nodiscard]] virtual std::uint64_t frames_sent() const = 0;
     [[nodiscard]] virtual std::uint64_t frames_dropped() const = 0;
+
+    // See ServerLoad.
+    [[nodiscard]] virtual ServerLoad load() const = 0;
 
     // Stops the event loop and joins its thread. Idempotent, and also run by
     // the destructor, because a server torn down while a client is mid-call

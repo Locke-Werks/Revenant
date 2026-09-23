@@ -1554,3 +1554,52 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     REQUIRE(eng.stop().has_value());
     second.join();
 }
+
+TEST_CASE("a run says where the host's time went and who it was waiting for",
+          "[gpu][engine][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    // EngineLoad is what docs/rpc.md's contention tables were read from, so
+    // what it counts has to be what happened. A sink that sleeps a known
+    // time per chunk puts at least that much on the audio-sink counter and
+    // on the completion thread's handler time, and none of it on the
+    // spectrum's, which nothing is attached to.
+    constexpr dsp::Hertz kOffset = 37'500 * 5;
+    auto created = engine::Engine::create(default_config());
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+    REQUIRE(eng.load().completions == 0);
+    REQUIRE(eng.open_source(nfm_uri(kOffset, 600'000)).has_value());
+
+    engine::VrxParams params;
+    params.center = kOffset;
+    params.bandwidth = 25'000;
+    params.demod = engine::Demod::Nfm;
+    const auto added = eng.add_vrx(params);
+    REQUIRE(added.has_value());
+
+    std::atomic<std::uint64_t> chunks{0};
+    REQUIRE(eng.set_audio_sink(*added, [&](const engine::AudioChunk&) -> Status {
+                 chunks.fetch_add(1);
+                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                 return {};
+             }).has_value());
+
+    const auto ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    const engine::EngineLoad load = eng.load();
+    INFO(chunks.load() << " chunks, " << load.audio_sink_ns << " ns in audio sinks, "
+                       << load.handler_ns << " ns in the handler");
+    REQUIRE(chunks.load() > 0);
+    CHECK(load.completions >= chunks.load());
+    CHECK(load.blocks > 0);
+    CHECK(load.audio_sink_ns >= chunks.load() * 2'000'000);
+    CHECK(load.handler_ns >= load.audio_sink_ns);
+    CHECK(load.spectrum_sink_ns == 0);
+    CHECK(load.record_ns > 0);
+
+    // A Demand source waits instead of losing anything.
+    CHECK(load.samples_dropped == 0);
+}

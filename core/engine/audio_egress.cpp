@@ -30,6 +30,7 @@
 // outside instead of the recording simply stopping.
 
 #include "core/engine/audio_egress.h"
+#include "core/thread_role.h"
 
 #include <algorithm>
 #include <array>
@@ -698,6 +699,7 @@ private:
 
     void drain_loop()
     {
+        name_this_thread(L"revenant egress");
         while (!stop_requested_.load(std::memory_order_acquire)) {
             if (!drain_pass()) {
                 std::this_thread::sleep_for(config_.idle_poll);

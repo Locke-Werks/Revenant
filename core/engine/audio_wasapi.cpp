@@ -32,6 +32,7 @@
 // no-op and it being a write to a closed handle.
 
 #include "core/engine/audio_wasapi.h"
+#include "core/thread_role.h"
 
 #ifdef _WIN32
 
@@ -645,6 +646,7 @@ void WasapiBackend::record_fault(const Error& error)
 
 void WasapiBackend::render_main()
 {
+    name_this_thread(L"revenant wasapi render");
     render_body();
 
     // A thread that got here without reporting would leave open() blocked on a

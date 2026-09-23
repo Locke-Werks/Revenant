@@ -165,6 +165,7 @@ add_library(revenant_core STATIC
     source/registry.cpp
     source/rtlsdr_source.cpp
     source/synthetic_source.cpp
+    thread_role.cpp
 )
 
 target_include_directories(revenant_core PUBLIC "${CMAKE_SOURCE_DIR}")

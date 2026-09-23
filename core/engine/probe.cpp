@@ -20,6 +20,7 @@
 
 #include "core/engine/graph.h"
 #include "core/engine/spsc_ring.h"
+#include "core/thread_role.h"
 
 namespace revenant::engine {
 namespace {
@@ -301,6 +302,7 @@ struct ProbePool::Impl {
     // --- the worker ---------------------------------------------------------
 
     void run() {
+        name_this_thread(L"revenant probe");
         for (;;) {
             {
                 std::unique_lock held(wake_lock);

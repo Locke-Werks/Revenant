@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "core/source/clock_model.h"
+#include "core/thread_role.h"
 
 namespace revenant::source {
 namespace {
@@ -1189,6 +1190,10 @@ Status FileSource::set_pace(double pace)
                                 "realtime, got {}",
                                 pace));
     }
+    if (caps_.flow == FlowControl::Paced && pace == 0.0) {
+        return fail("this file was opened with flow=paced, which plays it as a radio on its own "
+                    "clock, so it cannot be unthrottled: reopen it without flow=paced");
+    }
     std::scoped_lock lock(control_);
     own_pace_ = pace;
     pace_.store(pace, std::memory_order_release);
@@ -1230,6 +1235,7 @@ ClockQuality FileSource::clock() const
 
 void FileSource::run()
 {
+    name_this_thread(L"revenant source file");
     using Clock = std::chrono::steady_clock;
 
     std::uint64_t sequence = 0;
@@ -2428,7 +2434,9 @@ Expected<ResolvedFile> resolve_file(const FileSourceConfig& config)
     caps.native_format = format;
     caps.bits_per_component = static_cast<std::uint8_t>((bps / 2) * 8);
 
-    caps.flow = FlowControl::Demand;
+    // flow=paced plays the file as a radio: FileSourceConfig::paced_flow has
+    // what that changes and what it is for.
+    caps.flow = config.paced_flow ? FlowControl::Paced : FlowControl::Demand;
     caps.seekable = true;
     caps.length_samples = length_samples;
     caps.preferred_block_samples = kDefaultBlockSamples;

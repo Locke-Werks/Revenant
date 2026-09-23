@@ -46,6 +46,7 @@
 #include "core/source/clock_model.h"
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/wideband.h"
+#include "core/thread_role.h"
 
 namespace revenant::source {
 namespace {
@@ -464,6 +465,7 @@ ClockQuality SyntheticSource::clock() const
 
 void SyntheticSource::run()
 {
+    name_this_thread(L"revenant source synthetic");
     using Clock = std::chrono::steady_clock;
 
     // Project policy, for the whole life of this thread rather than per

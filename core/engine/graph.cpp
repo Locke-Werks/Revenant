@@ -123,6 +123,7 @@
 #include "core/dsp/spectrum_levels_reference.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/vrx_reference.h"
+#include "core/engine/load_clock.h"
 #include "core/engine/record_util.h"
 #include "core/engine/signal_meter.h"
 #include "core/engine/spectrum_scale.h"
@@ -1000,6 +1001,14 @@ struct Graph::Impl {
     std::atomic<std::uint64_t> passband_skipped{0};
     std::atomic<std::uint64_t> vrx_retune_refusals{0};
 
+    // Host time, core/engine/load_clock.h. The three sink totals are spent on
+    // the completion thread; the last two on the recording thread.
+    std::atomic<std::uint64_t> audio_sink_ns{0};
+    std::atomic<std::uint64_t> spectrum_sink_ns{0};
+    std::atomic<std::uint64_t> passband_sink_ns{0};
+    std::atomic<std::uint64_t> frame_wait_ns{0};
+    std::atomic<std::uint64_t> record_ns{0};
+
     ~Impl() { destroy(); }
 
     void destroy() noexcept {
@@ -1815,7 +1824,12 @@ struct Graph::Impl {
             chunk.tuning_epoch = entry.tuning_epoch;
 
             if (entry.sink != nullptr && *entry.sink) {
-                if (auto delivered = call_sink(*entry.sink, chunk); !delivered) {
+                Status delivered;
+                {
+                    const LoadTimer timed(audio_sink_ns);
+                    delivered = call_sink(*entry.sink, chunk);
+                }
+                if (!delivered) {
                     // Frames this receiver produced that reached nothing,
                     // which is what audio_dropped counts now that a squelch
                     // mute does not. See the note on VrxStatus::audio_dropped:
@@ -1961,7 +1975,12 @@ struct Graph::Impl {
         out.percentile_low_db = measured[0];
         out.percentile_high_db = measured[1];
 
-        if (auto delivered = call_sink(*frame.spectrum_sink, out); !delivered) {
+        Status delivered;
+        {
+            const LoadTimer timed(spectrum_sink_ns);
+            delivered = call_sink(*frame.spectrum_sink, out);
+        }
+        if (!delivered) {
             return std::unexpected(with_context(delivered.error(), "spectrum sink"));
         }
         return {};
@@ -2048,7 +2067,12 @@ struct Graph::Impl {
         out.percentile_low_db = measured[0];
         out.percentile_high_db = measured[1];
 
-        if (auto delivered = call_sink(*entry.passband_sink, out); !delivered) {
+        Status delivered;
+        {
+            const LoadTimer timed(passband_sink_ns);
+            delivered = call_sink(*entry.passband_sink, out);
+        }
+        if (!delivered) {
             return std::unexpected(with_context(
                 delivered.error(), std::format("receiver {} passband sink", slot.id.value)));
         }
@@ -3580,6 +3604,8 @@ Status Graph::on_block(const source::SourceBlock& block) {
                                 block.bytes.size(), expected_bytes - block.bytes.size()));
     }
 
+    const LoadTimer recording(impl.record_ns);
+
     // Control changes land between blocks, never inside one. A receiver added
     // mid-dispatch would be recorded against a command buffer that had already
     // been submitted.
@@ -3684,6 +3710,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
     const std::uint64_t ticket = impl.submitted.load(std::memory_order_relaxed);
     const auto in_flight = static_cast<std::uint64_t>(impl.geometry.frames_in_flight);
     bool counted_stall = false;
+    std::uint64_t stall_began = 0;
     for (;;) {
         // The epoch snapshot comes first, before anything this loop tests,
         // for the reason written on Impl::frame_epoch and on the completion
@@ -3693,11 +3720,16 @@ Status Graph::on_block(const source::SourceBlock& block) {
         const std::uint64_t epoch = impl.frame_epoch.load(std::memory_order_acquire);
         const std::uint64_t done = impl.completed.load(std::memory_order_acquire);
         if (ticket - done < in_flight) {
+            if (counted_stall) {
+                impl.frame_wait_ns.fetch_add(load_clock_ns() - stall_began,
+                                             std::memory_order_relaxed);
+            }
             break;
         }
         if (!counted_stall) {
             impl.frame_stalls.fetch_add(1, std::memory_order_relaxed);
             counted_stall = true;
+            stall_began = load_clock_ns();
         }
         if (impl.config.flow == source::FlowControl::Paced) {
             // Publish anyway so the ring's index tracks the stream's. The
@@ -4255,6 +4287,11 @@ GraphStats Graph::stats() const {
     out.passband_frames = impl.passband_frames.load(std::memory_order_relaxed);
     out.passband_skipped = impl.passband_skipped.load(std::memory_order_relaxed);
     out.vrx_retune_refusals = impl.vrx_retune_refusals.load(std::memory_order_relaxed);
+    out.audio_sink_ns = impl.audio_sink_ns.load(std::memory_order_relaxed);
+    out.spectrum_sink_ns = impl.spectrum_sink_ns.load(std::memory_order_relaxed);
+    out.passband_sink_ns = impl.passband_sink_ns.load(std::memory_order_relaxed);
+    out.frame_wait_ns = impl.frame_wait_ns.load(std::memory_order_relaxed);
+    out.record_ns = impl.record_ns.load(std::memory_order_relaxed);
     if (impl.ring != nullptr) {
         out.write_index = impl.ring->write_index();
         const auto cursor = impl.ring->cursor(impl.consumer);

@@ -87,6 +87,12 @@ struct SourceDescriptor {
 // host's pace, which for revenant-engine is --pace. See Source::own_pace.
 //
 //   file:///D:/hf/HDSDR_20260921_140307Z_7100kHz_RF.wav?pace=1
+//
+// flow=paced plays a file as a radio: the engine loses and counts a block it
+// cannot take, where a file normally waits for it. It needs a positive pace.
+// FileSourceConfig::paced_flow has why it exists.
+//
+//   file:///C:/captures/scene.cf32?rate=2160000&pace=1&flow=paced
 [[nodiscard]] Expected<std::unique_ptr<Source>> open_source(std::string_view uri);
 
 // `uri` with pace=`pace` added when it opens a file and states no pace, and

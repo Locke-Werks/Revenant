@@ -151,6 +151,15 @@ struct SchedulerStats {
     // count means a stage is round-tripping the host.
     std::uint64_t host_waits = 0;
 
+    // Host nanoseconds on the completion thread, core/engine/load_clock.h:
+    // parked on the timeline semaphore, which is the GPU not being done yet,
+    // and inside the handler, which is the readback and every sink. Their sum
+    // against wall time is how busy that one thread is, and it is the thread
+    // every frame retires through.
+    std::uint64_t wait_ns = 0;
+    std::uint64_t handler_ns = 0;
+    std::uint64_t handler_max_ns = 0;
+
     std::uint64_t chunks_run = 0;
     std::uint64_t steals = 0;
     std::uint64_t inline_runs = 0;

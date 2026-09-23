@@ -583,6 +583,19 @@ struct GraphStats {
     // Discarding it silently is what let the two lists differ unnoticed.
     std::uint64_t vrx_retune_refusals = 0;
 
+    // Host nanoseconds, core/engine/load_clock.h. The first three are spent
+    // on the completion thread inside the sinks a caller attached: every
+    // receiver's audio fan-out, the spectrum sink and the passband sinks. A
+    // sink is the caller's code, so this is where a decoder or a detector
+    // running on that thread shows up. frame_wait_ns is the recording thread
+    // parked on a frame slot, which is the completion thread being behind,
+    // and record_ns is the recording thread's whole time in on_block.
+    std::uint64_t audio_sink_ns = 0;
+    std::uint64_t spectrum_sink_ns = 0;
+    std::uint64_t passband_sink_ns = 0;
+    std::uint64_t frame_wait_ns = 0;
+    std::uint64_t record_ns = 0;
+
     dsp::SampleIndex write_index = 0;
     dsp::SampleIndex retired_index = 0;
     dsp::SampleIndex next_output_block = 0;

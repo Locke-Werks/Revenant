@@ -304,12 +304,14 @@
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/tier_two.h"
+#include "core/engine/load_clock.h"
 #include "core/rpc/convert.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/listen.h"
 #include "core/rpc/voice_audio.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
+#include "core/thread_role.h"
 
 namespace revenant::rpc {
 namespace {
@@ -1040,6 +1042,24 @@ public:
         return frames_dropped_.load(std::memory_order_relaxed);
     }
 
+    [[nodiscard]] ServerLoad load() const override {
+        ServerLoad out;
+        out.detector_frames = load_->detector_frames.load(std::memory_order_relaxed);
+        out.detector_frames_shed = load_->detector_frames_shed.load(std::memory_order_relaxed);
+        out.detector_ns = load_->detector_ns.load(std::memory_order_relaxed);
+        out.detector_max_ns = load_->detector_max_ns.load(std::memory_order_relaxed);
+        out.tier_two_ns = load_->tier_two_ns.load(std::memory_order_relaxed);
+        out.detect_poll_wait_ns = load_->detect_poll_wait_ns.load(std::memory_order_relaxed);
+        out.detect_polls = load_->detect_polls.load(std::memory_order_relaxed);
+        out.decode_chunks = load_->decode_chunks.load(std::memory_order_relaxed);
+        out.decode_ns = load_->decode_ns.load(std::memory_order_relaxed);
+        out.voice_chunks = load_->voice_chunks.load(std::memory_order_relaxed);
+        out.voice_ns = load_->voice_ns.load(std::memory_order_relaxed);
+        out.rds_ns = load_->rds_ns.load(std::memory_order_relaxed);
+        out.audio_ns = load_->audio_ns.load(std::memory_order_relaxed);
+        return out;
+    }
+
     void stop() override;
 
     [[nodiscard]] engine::Engine& engine() { return engine_; }
@@ -1412,6 +1432,31 @@ private:
     std::atomic<std::uint16_t> port_{0};
     std::atomic<std::uint64_t> frames_sent_{0};
     std::atomic<std::uint64_t> frames_dropped_{0};
+
+    // ServerLoad's counters. Written by whichever thread does the work and
+    // read by load(); relaxed throughout, since nothing is published through
+    // them.
+    //
+    // SHARED, AND THE SECOND OWNER IS NAMED: the audio, RDS and decoder sink
+    // callables capture it, and a callable outlives this server whenever a
+    // dispatch was in flight when its sink came off, which is the same
+    // argument that makes every route here co-owned by its sink.
+    struct LoadCounters {
+        std::atomic<std::uint64_t> detector_frames{0};
+        std::atomic<std::uint64_t> detector_frames_shed{0};
+        std::atomic<std::uint64_t> detector_ns{0};
+        std::atomic<std::uint64_t> detector_max_ns{0};
+        std::atomic<std::uint64_t> tier_two_ns{0};
+        std::atomic<std::uint64_t> detect_poll_wait_ns{0};
+        std::atomic<std::uint64_t> detect_polls{0};
+        std::atomic<std::uint64_t> decode_chunks{0};
+        std::atomic<std::uint64_t> decode_ns{0};
+        std::atomic<std::uint64_t> voice_chunks{0};
+        std::atomic<std::uint64_t> voice_ns{0};
+        std::atomic<std::uint64_t> rds_ns{0};
+        std::atomic<std::uint64_t> audio_ns{0};
+    };
+    std::shared_ptr<LoadCounters> load_ = std::make_shared<LoadCounters>();
 
     // What the completion thread needs to know about the loop thread's
     // subscriptions without taking a lock to find it out.
@@ -2570,6 +2615,7 @@ void ServerImpl::announce(Status status) {
 }
 
 void ServerImpl::serve(ServerOptions options) {
+    name_this_thread(L"revenant rpc loop");
     try {
         // Declared first so it is destroyed last. Everything below holds
         // promises or capabilities belonging to this loop, and kj aborts the
@@ -2804,11 +2850,16 @@ detect::FrontEndObservation ServerImpl::front_end() {
 }
 
 Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence, double min_margin) {
+    // From before ensure_detector, which takes the same lock once on its own.
+    const std::uint64_t asked = engine::load_clock_ns();
     if (auto ready = ensure_detector(); !ready) {
         return std::unexpected(ready.error());
     }
 
     std::scoped_lock held(detect_lock_);
+    load_->detect_poll_wait_ns.fetch_add(engine::load_clock_ns() - asked,
+                                        std::memory_order_relaxed);
+    load_->detect_polls.fetch_add(1, std::memory_order_relaxed);
     if (!detector_fault_.empty()) {
         return fail(detector_fault_);
     }
@@ -3311,7 +3362,8 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatu
     // for: a recording, a loudspeaker or an audio subscription already on
     // this receiver keeps its audio and this decoder joins beside it.
     auto attached = engine_.attach_audio_sink(
-        status.id, [route](const engine::AudioChunk& chunk) -> Status {
+        status.id, [route, load = load_](const engine::AudioChunk& chunk) -> Status {
+            const engine::LoadTimer timed(load->rds_ns);
             const std::scoped_lock owned(route->lock);
             decode_rds_chunk(*route, chunk);
             return {};
@@ -3553,7 +3605,13 @@ Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
     if (detecting_.load(std::memory_order_relaxed)) {
         std::scoped_lock held(detect_lock_);
         if (detector_.has_value()) {
-            if (auto fed = detector_->consume(frame); !fed) {
+            load_->detector_frames.fetch_add(1, std::memory_order_relaxed);
+            Status fed;
+            {
+                const engine::LoadTimer timed(load_->detector_ns, &load_->detector_max_ns);
+                fed = detector_->consume(frame);
+            }
+            if (!fed) {
                 // Recorded and switched off rather than returned. See the
                 // note at the top: this Status is the engine's, and failing
                 // it here would end the run over a track list.
@@ -3570,6 +3628,7 @@ Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
                 const dsp::SampleIndex decided = detector_->last_decision();
                 if (tier_two_.has_value() && decided != tier_two_decision_) {
                     tier_two_decision_ = decided;
+                    const engine::LoadTimer timed(load_->tier_two_ns);
                     static_cast<void>(tier_two_->step(*detector_, engine_));
                 }
             }
@@ -4298,7 +4357,11 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxS
         // core/engine/engine.h: a recording or a loudspeaker already on this
         // receiver keeps its audio, and this server's sink joins it.
         auto attached = engine_.attach_audio_sink(
-            node->vrx, [route](const engine::AudioChunk& chunk) -> Status {
+            node->vrx, [route, load = load_](const engine::AudioChunk& chunk) -> Status {
+                const engine::LoadTimer timed(route->p25_voice ? load->voice_ns : load->audio_ns);
+                if (route->p25_voice) {
+                    load->voice_chunks.fetch_add(1, std::memory_order_relaxed);
+                }
                 std::scoped_lock owned(route->lock);
                 if (route->owner == nullptr) {
                     return {};
@@ -4514,7 +4577,9 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
         route->epoch_target = status.tuning_epoch;
 
         auto attached = engine_.attach_audio_sink(
-            node->vrx, [route](const engine::AudioChunk& chunk) -> Status {
+            node->vrx, [route, load = load_](const engine::AudioChunk& chunk) -> Status {
+                const engine::LoadTimer timed(load->decode_ns);
+                load->decode_chunks.fetch_add(1, std::memory_order_relaxed);
                 const std::scoped_lock owned(route->lock);
                 if (route->owner != nullptr) {
                     route->owner->on_decoded_chunk(*route, chunk);
@@ -5011,6 +5076,7 @@ kj::Promise<SourceListing> ServerImpl::list_sources() {
 }
 
 void ServerImpl::run_listings() {
+    name_this_thread(L"revenant rpc listings");
     for (;;) {
         ListingFulfiller job;
         {

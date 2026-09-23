@@ -239,6 +239,20 @@ struct FileSourceConfig {
     // file carries this rather than leaving it to the host.
     bool pace_given = false;
     double pace = 0.0;
+
+    // flow=paced in the URI: report FlowControl::Paced rather than Demand, so
+    // the engine treats the file as a radio. A Demand source that falls
+    // behind simply arrives late, because the graph parks its thread until a
+    // frame slot is free; a Paced one loses the block and counts it, which is
+    // what a dongle does when the host cannot keep up. The file still reads
+    // on its own stopwatch, so this needs a positive pace and is refused
+    // without one.
+    //
+    // Added 2026-09-23 so the contention measured in docs/rpc.md, under
+    // Threading, could be reproduced as lost samples without the owner's
+    // dongle. It changes nothing about what the file delivers, only what the
+    // engine does when it cannot take a block.
+    bool paced_flow = false;
 };
 
 // Maps "cu8", "cs8", "cs16", "cs24", "cf32" onto the enum. Lives here rather than in

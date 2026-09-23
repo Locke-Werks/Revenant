@@ -1310,6 +1310,42 @@ struct GraphConditions {
     std::uint64_t frame_stalls = 0;
 };
 
+// Cumulative host time and throughput, for measuring contention rather than
+// for an operator's status line. Every duration is nanoseconds of steady
+// clock, core/engine/load_clock.h, and every field counts from the source's
+// open, so a reader takes two and subtracts. Zero with no source open.
+//
+// THE THREE THREADS IT DESCRIBES. The recording thread is the source's own,
+// running Graph::on_block. The completion thread waits for the GPU and then
+// runs every sink: audio, spectrum, passband. A sink is the caller's code,
+// which is how a decoder or a detector a server attached shows up here as
+// time on the thread every frame retires through.
+struct EngineLoad {
+    // Completion thread.
+    std::uint64_t completions = 0;
+    std::uint64_t gpu_wait_ns = 0;
+    std::uint64_t handler_ns = 0;
+    std::uint64_t handler_max_ns = 0;
+    std::uint64_t audio_sink_ns = 0;
+    std::uint64_t spectrum_sink_ns = 0;
+    std::uint64_t passband_sink_ns = 0;
+
+    // Recording thread.
+    std::uint64_t blocks = 0;
+    std::uint64_t record_ns = 0;
+    std::uint64_t frame_stalls = 0;
+    std::uint64_t frame_wait_ns = 0;
+
+    // What falling behind cost: samples a Paced source lost because no frame
+    // slot was free or the ring had no room, the same count source_stats
+    // folds in.
+    std::uint64_t overrun_events = 0;
+    std::uint64_t samples_dropped = 0;
+
+    std::uint64_t spectrum_frames = 0;
+    std::uint64_t audio_frames = 0;
+};
+
 class Engine {
 public:
     [[nodiscard]] static Expected<std::unique_ptr<Engine>> create(const EngineConfig& config);
@@ -1661,6 +1697,11 @@ public:
     // reason about two numbers the source has never heard of.
     [[nodiscard]] virtual GraphConditions graph_conditions() const = 0;
 
+    // Where the engine's host threads spend their time. EngineLoad has the
+    // fields. Virtual with an empty answer rather than pure, for the reason
+    // submit_probe is: an Engine written before it has nothing to report.
+    [[nodiscard]] virtual EngineLoad load() const;
+
     // Tier two: put a probe receiver on a detection, collect its baseband and
     // characterise it. core/engine/probe.h has the pool, the buckets and the
     // dwell.
@@ -1748,6 +1789,8 @@ inline Status Engine::submit_probe(const ProbeRequest&) {
 inline std::size_t Engine::take_probe_outcomes(std::span<ProbeOutcome>) { return 0; }
 
 inline ProbeStats Engine::probe_stats() const { return {}; }
+
+inline EngineLoad Engine::load() const { return {}; }
 
 inline Expected<CalibrationState> Engine::calibration() const {
     return fail("this engine keeps no calibration: it was written before "

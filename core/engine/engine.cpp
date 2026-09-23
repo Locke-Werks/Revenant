@@ -1377,6 +1377,31 @@ public:
         return out;
     }
 
+    [[nodiscard]] EngineLoad load() const override {
+        EngineLoad out;
+        if (graph_ == nullptr || scheduler_ == nullptr) {
+            return out;
+        }
+        const GraphStats graph = graph_->stats();
+        const SchedulerStats scheduler = scheduler_->stats();
+        out.completions = scheduler.completions_finished;
+        out.gpu_wait_ns = scheduler.wait_ns;
+        out.handler_ns = scheduler.handler_ns;
+        out.handler_max_ns = scheduler.handler_max_ns;
+        out.audio_sink_ns = graph.audio_sink_ns;
+        out.spectrum_sink_ns = graph.spectrum_sink_ns;
+        out.passband_sink_ns = graph.passband_sink_ns;
+        out.blocks = graph.blocks_in;
+        out.record_ns = graph.record_ns;
+        out.frame_stalls = graph.frame_stalls;
+        out.frame_wait_ns = graph.frame_wait_ns;
+        out.overrun_events = graph.overrun_events;
+        out.samples_dropped = graph.samples_dropped;
+        out.spectrum_frames = graph.spectrum_frames;
+        out.audio_frames = graph.audio_frames;
+        return out;
+    }
+
     [[nodiscard]] const Graph* graph() const { return graph_.get(); }
     [[nodiscard]] const Scheduler* scheduler() const { return scheduler_.get(); }
     [[nodiscard]] const dsp::PrototypeFilter& prototype() const { return prototype_; }

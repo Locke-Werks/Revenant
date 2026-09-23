@@ -587,6 +587,10 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     if (!pace_text) {
         return std::unexpected(pace_text.error());
     }
+    auto flow_text = query->text("flow", "demand");
+    if (!flow_text) {
+        return std::unexpected(flow_text.error());
+    }
 
     const bool pace_given = query->present("pace");
     const bool anchor_given = query->present("anchor_ns");
@@ -640,6 +644,18 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
         pace = *parsed;
     }
 
+    if (*flow_text != "demand" && *flow_text != "paced") {
+        return fail(std::format("flow='{}' is not a flow control this backend knows: 'demand', "
+                                "the default, waits for the engine, and 'paced' plays the file as "
+                                "a radio that loses what the engine cannot take",
+                                *flow_text));
+    }
+    const bool paced_flow = *flow_text == "paced";
+    if (paced_flow && !(pace > 0.0)) {
+        return fail("flow=paced needs a positive pace= as well: a radio's samples arrive on a "
+                    "clock, and an unthrottled file has none to lose them against");
+    }
+
     FileSourceConfig config;
     config.uri = uri.original;
     config.path = uri.body;
@@ -661,6 +677,7 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     config.ppm_uncertainty = *ppm;
     config.pace_given = pace_given;
     config.pace = pace;
+    config.paced_flow = paced_flow;
     return config;
 }
 

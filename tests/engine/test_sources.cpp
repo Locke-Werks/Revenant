@@ -625,6 +625,34 @@ TEST_CASE("a file's pace= is its own and a bad one is refused", "[source]") {
     }
 }
 
+TEST_CASE("flow=paced plays a file as a radio and needs a pace to do it", "[source]") {
+    const ScratchCapture capture(10'000);
+    const std::string base = capture.uri(2'400'000);
+
+    auto demand = source::open_source(base + "&pace=1");
+    REQUIRE(demand.has_value());
+    CHECK((*demand)->capabilities().flow == source::FlowControl::Demand);
+
+    auto paced = source::open_source(base + "&pace=1&flow=paced");
+    INFO(test::message_of(paced));
+    REQUIRE(paced.has_value());
+    CHECK((*paced)->capabilities().flow == source::FlowControl::Paced);
+
+    // Unthrottling it would leave a radio with no clock to lose samples
+    // against, so the change is refused and the pace stands.
+    const auto flat = (*paced)->set_pace(0.0);
+    REQUIRE_FALSE(flat.has_value());
+    CHECK(flat.error().message.find("flow=paced") != std::string::npos);
+    CHECK((*paced)->own_pace() == 1.0);
+
+    for (const char* bad : {"&flow=paced", "&flow=paced&pace=0", "&flow=radio&pace=1"}) {
+        auto refused = source::open_source(base + bad);
+        INFO(bad);
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error().message.find("flow") != std::string::npos);
+    }
+}
+
 TEST_CASE("a file plays at its pace and a change restarts the stopwatch", "[source]") {
     // Two seconds of capture at 100 kS/s, opened at ten times realtime, so
     // 50000 samples are out 50 ms in. The pace then drops to realtime.

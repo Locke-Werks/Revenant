@@ -11,7 +11,9 @@
 #include <thread>
 #include <vector>
 
+#include "core/engine/load_clock.h"
 #include "core/engine/spsc_ring.h"
+#include "core/thread_role.h"
 
 namespace revenant::engine {
 namespace {
@@ -259,6 +261,7 @@ struct WorkStealingPool::Impl {
     }
 
     void worker_loop(std::size_t index) {
+        name_this_thread(std::format(L"revenant pool {}", index));
         while (!stopping.load(std::memory_order_acquire)) {
             const auto observed = epoch.load(std::memory_order_acquire);
             if (run_one(index)) {
@@ -420,6 +423,9 @@ struct Scheduler::Impl {
     std::atomic<std::uint64_t> posted{0};
     std::atomic<std::uint64_t> finished{0};
     std::atomic<std::uint64_t> host_waits{0};
+    std::atomic<std::uint64_t> wait_ns{0};
+    std::atomic<std::uint64_t> handler_ns{0};
+    std::atomic<std::uint64_t> handler_max_ns{0};
 
     // Separate from `posted` on purpose. `posted` is a count that drain()
     // compares against `finished`, and shutdown has to wake the completion
@@ -460,6 +466,7 @@ struct Scheduler::Impl {
     }
 
     void loop() {
+        name_this_thread(L"revenant completion");
         for (;;) {
             Completion item{};
             const std::size_t got = queue->read(std::span<Completion>(&item, 1));
@@ -507,8 +514,11 @@ struct Scheduler::Impl {
             wait.pSemaphores = &timeline;
             wait.pValues = &item.timeline_value;
 
-            const VkResult result =
-                vkWaitSemaphores(context->device(), &wait, wait_timeout_ns);
+            VkResult result = VK_SUCCESS;
+            {
+                const LoadTimer timed(wait_ns);
+                result = vkWaitSemaphores(context->device(), &wait, wait_timeout_ns);
+            }
             host_waits.fetch_add(1, std::memory_order_relaxed);
 
             if (result == VK_TIMEOUT) {
@@ -543,6 +553,7 @@ struct Scheduler::Impl {
             // for everything else a handler can do, so that the worst case
             // is a recorded error rather than no error and no process.
             if (handler) {
+                const LoadTimer timed(handler_ns, &handler_max_ns);
                 Status status;
                 try {
                     status = handler(item.timeline_value, item.ticket);
@@ -682,6 +693,9 @@ SchedulerStats Scheduler::stats() const {
     out.completions_posted = impl_->posted.load(std::memory_order_relaxed);
     out.completions_finished = impl_->finished.load(std::memory_order_relaxed);
     out.host_waits = impl_->host_waits.load(std::memory_order_relaxed);
+    out.wait_ns = impl_->wait_ns.load(std::memory_order_relaxed);
+    out.handler_ns = impl_->handler_ns.load(std::memory_order_relaxed);
+    out.handler_max_ns = impl_->handler_max_ns.load(std::memory_order_relaxed);
     if (impl_->pool != nullptr) {
         out.chunks_run = impl_->pool->chunks_run();
         out.steals = impl_->pool->steals();
