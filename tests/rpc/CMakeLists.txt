@@ -59,6 +59,97 @@ else()
     message(STATUS "revenant_rpc_server is not present yet, skipping the RPC tests")
 endif()
 
+# revenant-cli --decode on the samples the audio decode cases send over the
+# wire.
+#
+# The captures are written by a hidden case in test_rpc_decode_audio.cpp, run
+# here as a setup fixture with REVENANT_DECODE_CAPTURE_DIR naming the build
+# tree, so the CLI and the server are asked about the same samples and the
+# transmitters are not written twice. A capture is 10 to 35 MB of cf32 and
+# the eleven of them are rewritten on every run that needs them, which is the
+# price of not keeping generated binaries in the source tree.
+#
+# Each decoder is run by name, and each audio decoder also by auto, which on
+# a usb, lsb or nfm receiver attaches every decoder that reads it; m17 has no
+# auto run because auto on a p25p1 receiver attaches p25p1. The pass regex is
+# the text a person reads, in the CLI's own line format, and the fail regex is
+# a decoder that stopped or a CLI that refused. Both, on the argument
+# engined_serves_and_reports_its_port makes below about a pass regex alone.
+#
+# Labelled tools, because what is under test is the executable; the fixture is
+# pulled in by ctest whatever label selected the entry that needs it.
+if(TARGET revenant_rpc_server AND TARGET revenant-cli)
+    set(decode_capture_dir "${CMAKE_CURRENT_BINARY_DIR}/decode-captures")
+    add_test(
+        NAME rpc_decode_audio_captures
+        COMMAND revenant_rpc_tests "[write-captures]"
+    )
+    set_tests_properties(rpc_decode_audio_captures PROPERTIES
+        ENVIRONMENT "REVENANT_DECODE_CAPTURE_DIR=${decode_capture_dir}"
+        FIXTURES_SETUP decode_audio_captures
+        LABELS "tools"
+        TIMEOUT 300
+    )
+
+    function(revenant_cli_decode name capture centre vrx decoder pass)
+        add_test(
+            NAME cli_decode_${name}
+            COMMAND revenant-cli
+                    "file:///${decode_capture_dir}/${capture}.cf32?rate=288000&format=cf32&center=${centre}"
+                    --channels 4
+                    --vrx ${vrx}
+                    --decode ${decoder}
+        )
+        set_tests_properties(cli_decode_${name} PROPERTIES
+            FIXTURES_REQUIRED decode_audio_captures
+            LABELS "tools"
+            TIMEOUT 300
+            PASS_REGULAR_EXPRESSION "${pass}"
+            FAIL_REGULAR_EXPRESSION "STOPPED|revenant-cli: "
+        )
+    endfunction()
+
+    set(rtty_lines "rtty line  CQ DE N0CALL.*rtty line  RYRY 0123456789 73")
+    revenant_cli_decode(rtty_usb rtty_usb 14000000 +5k:usb rtty "${rtty_lines}")
+    revenant_cli_decode(rtty_usb_auto rtty_usb 14000000 +5k:usb auto "${rtty_lines}")
+    revenant_cli_decode(rtty_lsb rtty_lsb 14000000 +5k:lsb rtty "${rtty_lines}")
+    revenant_cli_decode(rtty_lsb_auto rtty_lsb 14000000 +5k:lsb auto "${rtty_lines}")
+
+    set(sitor_lines "sitor_b line  CQ CQ DE N0CALL.*sitor_b line  SITOR B TEST 42")
+    revenant_cli_decode(sitor_b sitor_b_usb 14000000 +5k:usb sitor_b "${sitor_lines}")
+    revenant_cli_decode(sitor_b_auto sitor_b_usb 14000000 +5k:usb auto "${sitor_lines}")
+
+    set(navtex_line "navtex message  ZCZC EA07 GALE WARNING 042 / SW 8 TO 9\\.")
+    revenant_cli_decode(navtex navtex_usb 14000000 +5k:usb navtex "${navtex_line}")
+    revenant_cli_decode(navtex_auto navtex_usb 14000000 +5k:usb auto "${navtex_line}")
+
+    set(ax25_lines "ax25 aprs_position  N0CALL-9>APRS,WIDE1-1 49\\.0583N 72\\.0292W Test 001234.*ax25 aprs_message  N0CALL-9>APRS,WIDE1-1 to WU2Z: Testing .003.")
+    revenant_cli_decode(ax25 ax25_nfm 145000000 +5k:nfm ax25 "${ax25_lines}")
+    revenant_cli_decode(ax25_auto ax25_nfm 145000000 +5k:nfm auto "${ax25_lines}")
+
+    set(pocsag_lines "pocsag alphanumeric  1200 bit/s RIC 1234567 function 3: REVENANT PAGE TEST.*pocsag alphanumeric  512 bit/s RIC 1111111 function 3: SLOW PAGE")
+    revenant_cli_decode(pocsag pocsag_nfm 145000000 +5k:nfm pocsag "${pocsag_lines}")
+    revenant_cli_decode(pocsag_auto pocsag_nfm 145000000 +5k:nfm auto "${pocsag_lines}")
+
+    foreach(psk psk31 psk63)
+        set(psk_lines "${psk} line  CQ DE N0CALL.*${psk} line  TEST 73")
+        revenant_cli_decode(${psk} ${psk}_usb 14000000 +5k:usb ${psk} "${psk_lines}")
+        revenant_cli_decode(${psk}_auto ${psk}_usb 14000000 +5k:usb auto "${psk_lines}")
+    endforeach()
+    set(qpsk_lines "qpsk31 line  CQ DE N0CALL.*qpsk31 line  TEST 73")
+    revenant_cli_decode(qpsk31 qpsk31_lsb 14000000 +5k:lsb qpsk31 "${qpsk_lines}")
+    revenant_cli_decode(qpsk31_auto qpsk31_lsb 14000000 +5k:lsb auto "${qpsk_lines}")
+
+    # The cw receiver sits on the keyed carrier, 700 Hz above where the
+    # sideband captures put theirs.
+    set(cw_line "cw line  CQ CQ DE N0CALL K")
+    revenant_cli_decode(cw cw 14000000 +5700:cw cw "${cw_line}")
+    revenant_cli_decode(cw_auto cw 14000000 +5700:cw auto "${cw_line}")
+
+    set(m17_lines "m17 lsf  N0CALL > N0DEST CAN 0 type 0x0005 clear.*m17 stream_end  stream ended at frame 24")
+    revenant_cli_decode(m17 m17_p25p1 145000000 +5k:p25p1 m17 "${m17_lines}")
+endif()
+
 # revenant-engine itself, run as a program.
 #
 # Registered as a CTest entry rather than as a C++ case because what is under
