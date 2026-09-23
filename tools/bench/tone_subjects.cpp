@@ -147,9 +147,9 @@ ModeSubject cw() {
     mode.default_payload_bytes = 60;
     mode.minimum_payload_bytes = 16;
     // Read at 0.05, not 0.01, because the curve does not come down cleanly
-    // through 0.01. Measured on 2026-09-23 over 64 trials a point, seed 5: it
-    // falls to 0.019 at -5 dB and then sits between 0.008 and 0.016 all the
-    // way to +2 dB, and 24 trials at +10 dB still gave 0.0028. That floor is
+    // through 0.01. In the committed baseline, 256 trials a point, it falls
+    // to 0.0085 at -5 dB and then sits between 0.0084 and 0.016 all the way
+    // to +3 dB, and 24 trials at +10 dB still gave 0.0028. That floor is
     // what the decoder does at any SNR rather than the noise: a spurious E
     // before the first character, a first word space lost, and a dash read as
     // a dot after a run of dashes, all three seen at +10 dB. A crossing read
