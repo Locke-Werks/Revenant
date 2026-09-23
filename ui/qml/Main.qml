@@ -87,7 +87,7 @@ ApplicationWindow {
                 anchors.left: parent.left
                 anchors.bottom: parent.bottom
                 anchors.margins: 16
-                width: Math.min(parent.width - 32, 860)
+                width: Math.min(parent.width - 32, readout.implicitWidth + close.width + 24)
                 height: readout.implicitHeight + 16
                 visible: tuneSelection.tuned
                 radius: Theme.radius + 2

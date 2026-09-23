@@ -69,8 +69,7 @@ ColumnLayout {
 
         Label {
             Layout.minimumWidth: 0
-            text: (readout.selection.tunedHz / 1.0e6).toFixed(6) + " MHz  ("
-                  + Math.round(readout.selection.tunedHz) + " Hz)"
+            text: (readout.selection.tunedHz / 1.0e6).toFixed(6) + " MHz"
             color: Theme.ink
             font.pixelSize: Theme.sizeTitle
             font.bold: true
@@ -140,6 +139,9 @@ ColumnLayout {
         // know whether 0.31 is good has the bandwidth on the same
         // row, which is the comparison that answers it.
         Label {
+            id: concentrationLabel
+
+            // Read by the chip below; the number is its tooltip now.
             Layout.minimumWidth: 0
 
             readonly property double concentration:
@@ -147,7 +149,7 @@ ColumnLayout {
                     ? engineLink.detectionConcentration(readout.selection.tunedId)
                     : -1.0
 
-            visible: concentration >= 0.0
+            visible: false
             text: "·  " + concentration.toFixed(2) + " of it in 3 bins"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeTitle
@@ -194,22 +196,27 @@ ColumnLayout {
             elide: Text.ElideRight
         }
 
-        Item { Layout.fillWidth: true }
-    }
 
-    Label {
-        Layout.fillWidth: true
-        text: readout.selection.tunedId > 0
-              ? "the receiver moved here. This is the measured centre of the "
-                + "occupied band, not the mode's logical centre, so it is the "
-                + "carrier for AM and it is wrong for RTTY and SSB: drag the "
-                + "filter edges in the receiver window to put the passband where "
-                + "the signal is."
-              : "no detection there, so this is the frequency under the pointer."
-        color: Theme.inkDim
-        font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
+        // THE CAVEAT, ONE HOVER AWAY. It was a paragraph under this row, on
+        // screen after every click; the words are unchanged and are the
+        // chip's tooltip, with the exact hertz and the concentration beside
+        // them, so the card is one line: track, frequency, width, margin.
+        StatusChip {
+            ink: Theme.inkDim
+            label: readout.selection.tunedId > 0 ? "measured centre" : "no detection"
+            detail: (readout.selection.tunedId > 0
+                     ? "the receiver moved here. This is the measured centre of the "
+                       + "occupied band, not the mode's logical centre, so it is the "
+                       + "carrier for AM and it is wrong for RTTY and SSB: drag the "
+                       + "filter edges in the receiver window to put the passband where "
+                       + "the signal is."
+                     : "no detection there, so this is the frequency under the pointer.")
+                    + "  Exactly " + Math.round(readout.selection.tunedHz) + " Hz."
+                    + (concentrationLabel.concentration >= 0.0
+                       ? "  " + concentrationLabel.concentration.toFixed(2)
+                         + " of it in 3 bins." : "")
+        }
+
+        Item { Layout.fillWidth: true }
     }
 }
