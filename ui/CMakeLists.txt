@@ -163,6 +163,8 @@ qt_add_executable(revenant_ui
     audio/resampler.h
     models/audio_link.cpp
     models/bookmark_link.cpp
+    models/calibration.h
+    models/calibration_link.cpp
     models/decoded_link.cpp
     models/decoded_log.h
     models/decoded_model.cpp
@@ -554,6 +556,7 @@ if(REVENANT_UI_TESTS)
             tests/test_auto_filter.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
+            tests/test_calibration.cpp
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp

@@ -233,6 +233,7 @@ void EngineLink::supervise()
             // filter that jumps after the radio has already landed.
             apply_source_request();
             apply_source_tune();
+            apply_calibration();
 
             // Then the receiver work. A drag posts a request and wakes this
             // loop immediately rather than waiting out the poll interval,
@@ -356,6 +357,7 @@ void EngineLink::supervise()
             // gesture has to land first or the gain goes at the source that is
             // about to be closed.
             apply_source_gain();
+            apply_calibration();
 
             apply_receiver_request();
 
@@ -392,6 +394,7 @@ void EngineLink::supervise()
             // would always read Unmeasured.
             poll_source_pacing(*alive);
             poll_front_end(*alive);
+            poll_calibration();
         }
 
         std::unique_lock<std::mutex> lock(supervisor_mutex_);

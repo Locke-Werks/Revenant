@@ -259,6 +259,180 @@ ColumnLayout {
         lines: 3
     }
 
+    // THE DEVICE'S CALIBRATION, BEHIND AN EXPANSION. Set once per dongle and
+    // then left alone, so it is one quiet line until asked for. The engine
+    // keeps it by the device's serial and restores it on open; every rule
+    // under these controls is in models/calibration.h with its cases in
+    // ui/tests, and docs/calibration.md is the operator's account.
+    ColumnLayout {
+        id: calibration
+
+        property bool expanded: false
+
+        Layout.fillWidth: true
+        spacing: 4
+        visible: engineLink.connected && engineLink.calibrationOpen
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RButton {
+                flat: true
+                ink: Theme.inkDim
+                text: (calibration.expanded ? "▾ " : "▸ ") + "calibration"
+                onClicked: calibration.expanded = !calibration.expanded
+            }
+
+            // What is in force, in one line, so the collapsed state still
+            // says whether this dongle has been calibrated at all.
+            Label {
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                text: engineLink.calibrationPpm
+                      + (engineLink.calibrationDcRemoval ? "  ·  DC removed" : "")
+                      + (engineLink.calibrationIqCorrection ? "  ·  I/Q corrected" : "")
+                      + (engineLink.calibrationKey.length > 0
+                         ? "  ·  " + engineLink.calibrationKey : "")
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
+        }
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: calibration.expanded
+
+            Label {
+                text: "crystal"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RTextField {
+                id: ppmField
+
+                Layout.preferredWidth: 90
+                font.pixelSize: Theme.sizeBody
+                placeholderText: engineLink.calibrationPpm
+                selectByMouse: true
+                onAccepted: engineLink.setCalibrationPpm(text)
+            }
+
+            RButton {
+                text: "set"
+                font.pixelSize: Theme.sizeBody
+                enabled: ppmField.text.length > 0
+                         && engineLink.calibrationPpmProblem(ppmField.text) === ""
+                onClicked: engineLink.setCalibrationPpm(ppmField.text)
+            }
+
+            RCheckBox {
+                text: "remove DC"
+                checked: engineLink.calibrationDcRemoval
+                onToggled: {
+                    engineLink.setCalibrationDcRemoval(checked)
+                    checked = Qt.binding(function() { return engineLink.calibrationDcRemoval })
+                }
+            }
+
+            RCheckBox {
+                text: "correct I/Q"
+                checked: engineLink.calibrationIqCorrection
+                onToggled: {
+                    engineLink.setCalibrationIqCorrection(checked)
+                    checked = Qt.binding(function() { return engineLink.calibrationIqCorrection })
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: 360
+                text: engineLink.calibrationPpmProblem(ppmField.text)
+                color: Theme.inkWarn
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
+        }
+
+        // MEASURE THE CRYSTAL AGAINST A CARRIER WHOSE FREQUENCY IS KNOWN. The
+        // detection nearest the typed frequency is the one used; the line
+        // under the box says which it found, and what it would set, before
+        // anything is sent.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: calibration.expanded
+
+            Label {
+                text: "known carrier"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RTextField {
+                id: knownField
+
+                Layout.preferredWidth: 120
+                font.pixelSize: Theme.sizeBody
+                placeholderText: "162.55M"
+                selectByMouse: true
+            }
+
+            RButton {
+                text: "use"
+                font.pixelSize: Theme.sizeBody
+                enabled: knownField.text.length > 0
+                onClicked: engineLink.applyMeasuredCarrier(knownField.text)
+            }
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                // detectionCount is read so this follows each detection pass.
+                text: engineLink.detectionCount >= 0
+                      ? engineLink.measureCarrierText(knownField.text) : ""
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
+        }
+
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: calibration.expanded
+            text: engineLink.calibrationMeasured
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+            wrapMode: Text.WordWrap
+        }
+
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: calibration.expanded && engineLink.calibrationNote.length > 0
+            text: engineLink.calibrationNote
+            color: engineLink.calibrationPersisted ? Theme.inkDim : Theme.inkWarn
+            font.pixelSize: Theme.sizeSmall
+            wrapMode: Text.WordWrap
+        }
+
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: engineLink.calibrationFault.length > 0
+            text: engineLink.calibrationFault
+            color: Theme.inkBad
+            font.pixelSize: Theme.sizeSmall
+            wrapMode: Text.WordWrap
+        }
+    }
+
     // What the last open or close said when it refused. Its own row rather
     // than beside the button, because a registry refusal names the backends
     // it does know and that sentence is longer than a status strip.

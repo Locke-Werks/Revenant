@@ -653,6 +653,29 @@ class EngineLink : public QObject {
     // against the noise, which tells an operator what to do instead.
     Q_PROPERTY(QString sourceGainFault READ sourceGainFault NOTIFY sourceGainChanged)
 
+    // The open device's calibration, as the engine holds it: its crystal
+    // correction, and whether the DC removal and the I/Q correction are on.
+    // The engine keeps them by the device's serial and restores them on open,
+    // so what these show after a connect is what the engine said, not what
+    // this window last asked for. docs/calibration.md is the operator's
+    // account; models/calibration.h has the rules and their cases.
+    Q_PROPERTY(bool calibrationOpen READ calibrationOpen NOTIFY calibrationChanged)
+    Q_PROPERTY(QString calibrationKey READ calibrationKey NOTIFY calibrationChanged)
+    Q_PROPERTY(QString calibrationPpm READ calibrationPpm NOTIFY calibrationChanged)
+    Q_PROPERTY(bool calibrationDcRemoval READ calibrationDcRemoval NOTIFY calibrationChanged)
+    Q_PROPERTY(bool calibrationIqCorrection READ calibrationIqCorrection
+                   NOTIFY calibrationChanged)
+    Q_PROPERTY(bool calibrationPersisted READ calibrationPersisted NOTIFY calibrationChanged)
+    Q_PROPERTY(QString calibrationNote READ calibrationNote NOTIFY calibrationChanged)
+
+    // What the front-end stage has measured, in a line: the centre spike's
+    // level and the I/Q imbalance before correction.
+    Q_PROPERTY(QString calibrationMeasured READ calibrationMeasured NOTIFY calibrationChanged)
+
+    // The engine's refusal of the last change, or a PPM box that could not
+    // be read. Empty when the last one took.
+    Q_PROPERTY(QString calibrationFault READ calibrationFault NOTIFY calibrationChanged)
+
     // What was asked for and what the source took. A device with a tuning
     // step rounds, and the two differ by up to that step. Both zero until
     // a retune has been attempted on this connection.
@@ -1682,6 +1705,42 @@ public:
     [[nodiscard]] bool sourceGainAuto() const { return gain_auto_; }
     [[nodiscard]] QString sourceGainFault() const { return gain_fault_; }
 
+    [[nodiscard]] bool calibrationOpen() const { return calibration_.open; }
+    [[nodiscard]] QString calibrationKey() const {
+        return QString::fromStdString(calibration_.key);
+    }
+    [[nodiscard]] QString calibrationPpm() const;
+    [[nodiscard]] bool calibrationDcRemoval() const { return calibration_.settings.dc_removal; }
+    [[nodiscard]] bool calibrationIqCorrection() const {
+        return calibration_.settings.iq_correction;
+    }
+    [[nodiscard]] bool calibrationPersisted() const { return calibration_.persisted; }
+    [[nodiscard]] QString calibrationNote() const {
+        return QString::fromStdString(calibration_.note);
+    }
+    [[nodiscard]] QString calibrationMeasured() const;
+    [[nodiscard]] QString calibrationFault() const { return calibration_fault_; }
+
+    // The crystal correction, typed in ppm. A box that cannot be read is
+    // refused here, in calibrationFault, and nothing is sent.
+    Q_INVOKABLE void setCalibrationPpm(const QString& text);
+
+    // What is wrong with the text in the PPM box, or empty when it reads.
+    // For the box to say before anything is sent.
+    [[nodiscard]] Q_INVOKABLE QString calibrationPpmProblem(const QString& text) const;
+
+    Q_INVOKABLE void setCalibrationDcRemoval(bool on);
+    Q_INVOKABLE void setCalibrationIqCorrection(bool on);
+
+    // A known carrier's true frequency against the detection nearest it: what
+    // the measurement would set, as a line. Bound beside detectionCount so it
+    // follows each detection pass. models/calibration.h, measure_against_carrier.
+    [[nodiscard]] Q_INVOKABLE QString measureCarrierText(const QString& known) const;
+
+    // Sets the correction that measurement implies. Nothing is sent when no
+    // detection qualifies; the line above says why.
+    Q_INVOKABLE void applyMeasuredCarrier(const QString& known);
+
     // Asks the device for the gain a slider at this fraction means.
     //
     // A FRACTION AND NOT DECIBELS, so the caller cannot skip the settle: the
@@ -2490,6 +2549,10 @@ signals:
     // The stage, the handle, the readout and the refusal. One signal because
     // one panel reads all of them and none of them repaints a display.
     void sourceGainChanged();
+
+    // The calibration the engine holds, its measurement, or the last refusal
+    // moved.
+    void calibrationChanged();
 
     // The device list, the refresh's busy flag, or the last open or close
     // refusal moved.
@@ -3345,6 +3408,36 @@ private:
     // as current.
     void adopt_gain_stage();
     void adopt_gain(bool granted_known);
+
+    // Supervisor thread. A calibration change the Qt thread posted, and the
+    // engine's calibration read back once a second for the measurement.
+    // Both hand the answer over under calibration_mutex_ and queue
+    // adopt_calibration.
+    void apply_calibration();
+    void poll_calibration();
+
+    // Qt thread, queued from the two above.
+    void adopt_calibration();
+
+    // Qt thread. Posts settings for the supervisor.
+    void post_calibration(const rpc::CalibrationSettings& settings);
+
+    // ---- calibration ---------------------------------------------------
+    //
+    // Its own lock rather than source_mutex_, because nothing here has to be
+    // ordered against an open or a listing: the engine answers for whichever
+    // source is open when the call lands, and says which by its key.
+    std::mutex calibration_mutex_;
+    bool want_calibration_ = false;                         // guarded
+    rpc::CalibrationSettings want_calibration_settings_{};  // guarded
+    bool handover_has_calibration_ = false;                 // guarded
+    rpc::Calibration handover_calibration_{};               // guarded
+    bool handover_has_calibration_fault_ = false;           // guarded
+    QString handover_calibration_fault_;                    // guarded
+
+    // Qt thread only.
+    rpc::Calibration calibration_{};
+    QString calibration_fault_;
 
     // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
     // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per
