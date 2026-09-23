@@ -1235,7 +1235,7 @@ ClockQuality FileSource::clock() const
 
 void FileSource::run()
 {
-    name_this_thread(L"revenant source file");
+    describe_this_thread(L"revenant source file", ThreadClass::Listening);
     using Clock = std::chrono::steady_clock;
 
     std::uint64_t sequence = 0;

@@ -67,6 +67,13 @@
 // receivers, which take the graph's control lock, and characterise(), which
 // costs milliseconds to tens of milliseconds of CPU per extract and must not
 // run where GPU readbacks are retired.
+//
+// That thread is signal identification's, so it runs below normal priority
+// (core/thread_role.h) and under ProbePoolConfig::cpu_budget. Until
+// 2026-09-23 it ran at normal priority with no budget, and on a machine with
+// every core busy it was the thread that pushed the completion thread late
+// enough to lose radio samples: docs/rpc.md, under Threading, has the
+// measurement.
 
 #pragma once
 
@@ -312,6 +319,14 @@ struct ProbeStats {
     std::uint32_t size = 0;
 
     double characterise_ms_total = 0.0;
+
+    // The worker's time finishing probes, characterise() and identify()
+    // together, in wall time and in its own CPU, the second of which is what
+    // ProbePoolConfig::cpu_budget is held against; and how often a probe that
+    // could have started waited for the budget.
+    double worker_ms_total = 0.0;
+    double worker_cpu_ms_total = 0.0;
+    std::uint64_t budget_waits = 0;
 };
 
 struct ProbePoolConfig {
@@ -329,6 +344,14 @@ struct ProbePoolConfig {
 
     // identify::IdentifyConfig::dmr, the one flag the DMR row sits behind.
     bool identify_dmr = true;
+
+    // The most of one core the worker averages on finishing probes, which is
+    // characterise() and identify(). Past it the next probe waits, so a busy
+    // band gets fewer probes a second rather than a whole core. Half a core
+    // by default: measured under "Threading" in docs/rpc.md, the worker took
+    // 52 to 59 percent of one core with sixteen probes on a 300-emitter
+    // scene, and 19 percent with four.
+    double cpu_budget = 0.5;
 };
 
 // Owned by the engine, created with the graph and destroyed before it.

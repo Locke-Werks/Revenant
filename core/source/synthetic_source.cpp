@@ -465,7 +465,7 @@ ClockQuality SyntheticSource::clock() const
 
 void SyntheticSource::run()
 {
-    name_this_thread(L"revenant source synthetic");
+    describe_this_thread(L"revenant source synthetic", ThreadClass::Listening);
     using Clock = std::chrono::steady_clock;
 
     // Project policy, for the whole life of this thread rather than per

@@ -112,14 +112,18 @@
 //
 // That saving lasts until the first client asks and no longer. detecting_ is
 // set once in ensure_detector, and short of stop() the only thing that clears
-// it is a consume() that refuses a frame, so from that first call the
-// completion thread runs accumulation on every frame and a decision ten times
-// a second for the life of the Server, whether or not anyone is still reading
-// the list. The saving is for a server nobody has ever asked, not for one that
-// is idle now. Measured on 2026-09-19 with revenant-cli over this project's
-// 8192-bin test geometry, the pair cost 0.201 ms per frame, which the same run
-// put at 0.7% of one core at that frame rate; detector.h has the figures at
-// the shipped 65536.
+// it is a consume() that refuses a frame, so from that first call the sigid
+// lane runs accumulation on every frame it is not shedding and a decision ten
+// times a second for the life of the Server, whether or not anyone is still
+// reading the list. The saving is for a server nobody has ever asked, not for
+// one that is idle now. Measured on 2026-09-19 with revenant-cli over this
+// project's 8192-bin test geometry, the pair cost 0.201 ms per frame, which
+// the same run put at 0.7% of one core at that frame rate; detector.h has the
+// figures at the shipped 65536.
+//
+// WHAT THE THIRD SENTENCE USED TO SAY: "from that first call the completion
+// thread runs accumulation on every frame". THE SIGID LANE, on the members,
+// has where it moved on 2026-09-23 and why.
 //
 // Deliberate, because the alternative resets state that is not the
 // disconnecting client's to reset. detections is a poll rather than a
@@ -134,22 +138,30 @@
 // rebuild silently puts it back to the default. A display that reconnects,
 // which is the ordinary case rather than the exception, would do both.
 //
-// ONE LOCK AROUND THE WHOLE DETECTOR, AND WHY THAT IS THE CHEAP ANSWER
+// ONE LOCK AROUND THE WHOLE DETECTOR, AND A PUBLISHED COPY FOR THE POLLS
 //
-// The detector is written on the engine's completion thread, inside
-// on_frame, and read on the event loop thread, inside a call. Its own header
-// says one thread owns a Detector and there is no lock inside it, so the lock
-// has to be here.
+// The detector is written on the sigid lane, a thread of this server's own at
+// below-normal priority, and its answer is read on the event loop thread,
+// inside a call. Its own header says one thread owns a Detector and there is
+// no lock inside it, so the lock has to be here: detect_lock_ covers the
+// whole of consume() and tier two's step, and the loop thread takes it to
+// build the detector, to set a threshold and to throw the detector away.
 //
-// It covers the whole of consume(), which is the expensive half, and that
-// looks like the wrong shape until the other side is counted. The loop thread
-// holds it only to copy a bounded vector of tracks out, or to set one double;
-// neither allocates beyond that copy and neither does I/O. So the completion
-// thread waits for a memcpy and the loop thread waits for at most one
-// consume(). The alternatives are worse in ways that matter: a deferred
-// threshold applied on the completion thread cannot report that the value was
-// out of range, and a published snapshot copied per decision pays a copy on
-// the sample path for every decision whether or not anyone polls.
+// A poll does not take it. After each decision the lane copies the track list
+// and the front end's verdict into Published, and detections() and
+// sourceStats read that under a lock held for a pointer copy. The copy is
+// paid once per decision on the lane, which is signal identification's own
+// thread and not the sample path, whether or not anyone polls.
+//
+// WHAT THIS SECTION USED TO SAY, under the heading "ONE LOCK AROUND THE WHOLE
+// DETECTOR, AND WHY THAT IS THE CHEAP ANSWER": "The detector is written on
+// the engine's completion thread, inside on_frame", that "the loop thread
+// waits for at most one consume()", and that "a published snapshot copied per
+// decision pays a copy on the sample path for every decision whether or not
+// anyone polls". On 2026-09-23 the detector left the completion thread, and a
+// loop thread waiting on a lock the below-normal lane holds would be waiting
+// on the one thread a busy machine is allowed to leave waiting, so the
+// snapshot that argument refused is what the polls now read.
 //
 // Nothing takes sink_lock_ while holding detect_lock_, which is what keeps
 // ensure_detector's two locks from closing a cycle against stop().
@@ -171,9 +183,14 @@
 // core/decode/rds_bits.h takes a span of real samples and core/decode/
 // rds_groups.h takes bits, neither has a shader behind it, and this server
 // is already the thing a client asks. So the shape is the detector's: built
-// on the first call rather than at startup, run on the engine's completion
-// thread inside a sink, one lock around the whole object because its own
-// header says one thread owns it and there is no lock inside it.
+// on the first call rather than at startup, fed from a sink, one lock around
+// the whole object because its own header says one thread owns it and there
+// is no lock inside it. The sink copies the chunk onto a decode lane,
+// core/rpc/decode_lane.h, and the decoder runs there.
+//
+// WHAT THE SENTENCE BEFORE THE LAST USED TO SAY: "run on the engine's
+// completion thread inside a sink". Every decoder here moved to a decode lane
+// on 2026-09-23; THE DECODE LANES, on the members, has why.
 //
 // The half that does not, and which had to be decided rather than
 // inherited: the detector had nowhere else it could go. engine::Engine has
@@ -243,13 +260,18 @@
 // a 1368000 S/s source is 2048 composite samples, so the decoder spends
 // 0.145 ms on it against the detector's 0.201 ms on a frame.
 //
-// THE CPU SHARE IS NOT THE NUMBER THAT MATTERS. This runs on the thread
-// retiring GPU readbacks, so what it really costs is LATENCY added to every
-// other sink behind it: 0.145 ms of work inside a 12 ms chunk interval,
-// which is 1.2 percent of the budget before anything else on that thread
-// has run. Eight decoders would be 1.2 ms of a 12 ms interval, still inside
-// it and no longer negligible, and that is the point at which a decoder
-// wants its own thread rather than the sink.
+// THE CPU SHARE WAS NOT THE NUMBER THAT MATTERED, and that is why the
+// decoders moved. On the thread retiring GPU readbacks what a decoder really
+// cost was latency added to every other sink behind it: 0.145 ms of work
+// inside a 12 ms chunk interval, 1.2 percent of the budget before anything
+// else on that thread had run, and eight decoders 1.2 ms of it. That was
+// written as the point at which a decoder wants its own thread rather than
+// the sink, and since 2026-09-23 every decoder has one: the sink copies the
+// chunk to a decode lane and returns, so what a decoder costs the completion
+// thread is the copy. docs/rpc.md, under Threading, has the measurement.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "THE CPU SHARE IS NOT THE NUMBER THAT
+// MATTERS. This runs on the thread retiring GPU readbacks".
 //
 // AND IT COSTS MORE GPU THAN A LISTENING RECEIVER, NOT LESS
 //
@@ -304,8 +326,11 @@
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/tier_two.h"
+#include "core/engine/cpu_budget.h"
 #include "core/engine/load_clock.h"
+#include "core/engine/spsc_ring.h"
 #include "core/rpc/convert.h"
+#include "core/rpc/decode_lane.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/listen.h"
 #include "core/rpc/voice_audio.h"
@@ -498,8 +523,9 @@ constexpr double kMaxDetectionThresholdDb = 120.0;
 // detect_lock_.
 //
 // The tracks are copied rather than spanned. Detector::tracks() is valid only
-// until the next consume(), which the completion thread may reach the instant
-// the lock is released, and the capnp message is written after that.
+// until the next consume(), which the sigid lane may reach the instant the
+// lock is released, and the capnp message is written after that. The lane
+// takes this copy itself after each decision, and a detections call reads it.
 struct DetectionSnapshot {
     std::vector<detect::Track> tracks;
     std::uint64_t decisions = 0;
@@ -577,16 +603,18 @@ struct AudioChunkBuffer {
 // display subscriptions keep a single frame in a slot and are touched only
 // on the loop thread. Audio is a queue, because a chunk is the only copy of
 // that instant and the newest is worth no more than the one before it, and
-// the engine's completion thread has to be able to push into that queue
-// without waiting for the loop. So everything under `lock` is written by
-// both threads and everything above it is the loop thread's alone.
+// the thread the audio arrives on has to be able to push into that queue
+// without waiting for the loop: the engine's completion thread for a
+// receiver's own audio, a decode lane for a P25 receiver's voice. So
+// everything under `lock` is written by both threads and everything above it
+// is the loop thread's alone.
 struct AudioNode : std::enable_shared_from_this<AudioNode> {
     AudioNode(schema::AudioReceiver::Client client, engine::VrxId which,
               std::uint32_t millis)
         : receiver(kj::mv(client)), vrx(which), granted_millis(millis) {}
 
     // Set here and never written again, which is what makes it legal for
-    // on_audio_chunk to read them on the engine's completion thread. They
+    // on_audio_chunk to read them on the thread the audio arrives on. They
     // were both filed under "Loop thread only" below until 2026-09-20, and
     // granted_millis is read by that other thread on every chunk: a label
     // saying a field belongs to one thread while another reads it is worse
@@ -594,8 +622,8 @@ struct AudioNode : std::enable_shared_from_this<AudioNode> {
     // neighbour that looks closest.
     //
     // The node is constructed and only then handed to add_audio, so the
-    // completion thread cannot see either of these before the constructor
-    // has finished with them.
+    // thread the audio arrives on cannot see either of these before the
+    // constructor has finished with them.
     const engine::VrxId vrx;
     const std::uint32_t granted_millis = 0;
 
@@ -637,17 +665,24 @@ class ServerImpl;
 // outlives the Server whenever a dispatch was in flight when the sink came
 // off, so `owner` is cleared under this lock and a late call finds null
 // instead of freed memory. It carries the node list as well, because the
-// completion thread is the one that has to walk it.
+// thread the sink's work runs on is the one that has to walk it: the
+// completion thread for a receiver's own audio, a decode lane for a P25
+// receiver's voice.
 struct AudioRoute {
     std::mutex lock;
     ServerImpl* owner = nullptr;
     std::vector<std::shared_ptr<AudioNode>> nodes;
     engine::AudioSinkId sink = 0;
 
+    // The decode lane a voice route runs on, null for a receiver's own
+    // audio, which stays on the completion thread. Set before the sink goes
+    // on and never written again.
+    std::shared_ptr<DecodeLane> lane;
+
     // A p25p1 receiver's route carries its voice rather than its output. Set
-    // when the route is made and never written again, so the completion
-    // thread reads it under `lock` like everything else here without it ever
-    // changing under a chunk. See core/rpc/voice_audio.h.
+    // when the route is made and never written again, so the sink's work
+    // reads it like everything else here without it ever changing under a
+    // chunk. See core/rpc/voice_audio.h.
     bool p25_voice = false;
 
     // Everything below is the voice route's, under `lock`. The stream is
@@ -664,7 +699,8 @@ struct AudioRoute {
 
     // Why the voice stream stopped, empty while it has not. Terminal, on
     // RdsRoute::fault's argument, and turned into ended() on the loop thread
-    // because the completion thread must not touch a capability.
+    // because the decode lane the stream runs on must not touch a
+    // capability.
     std::string fault;
     bool fault_reported = false;
 };
@@ -700,13 +736,12 @@ constexpr dsp::SampleRate kFilteredCompositeRateHz = 148'438;
 // that route's lock.
 //
 // The station state is COPIED rather than referenced, for the reason
-// DetectionSnapshot copies tracks: the completion thread may be inside the
-// decoder the instant the lock is released, and the capnp message is written
-// after that. The copy allocates, on the AF, ODA and EON vectors, and the
-// completion thread waits for it. That is the same bargain the detector
-// struck and it is a better one here, because the vectors are bounded at 16
-// EON entries and a handful of frequencies where the detector's is bounded
-// only by how busy the band is.
+// DetectionSnapshot copies tracks: the decode lane may be inside the decoder
+// the instant the lock is released, and the capnp message is written after
+// that. The copy allocates, on the AF, ODA and EON vectors, and the lane
+// waits for it. The vectors are bounded at 16 EON entries and a handful of
+// frequencies, so the wait is short and it is the lane's rather than the
+// thread retiring GPU readbacks.
 struct RdsSnapshot {
     decode::StationState state;
     decode::RdsBitsStatus bits;
@@ -741,24 +776,26 @@ struct RdsSnapshot {
 //
 // THE SINK CALLABLE CO-OWNS THIS AND REACHES NOTHING ELSE. See the note at
 // the top of the file: unlike AudioRoute there is no owner pointer and no
-// gate, because the completion thread's whole job here is to push samples
-// into the two objects below and update three indices beside them.
+// gate, because the decode lane's whole job here is to push samples into
+// the two objects below and update three indices beside them.
 struct RdsRoute {
     RdsRoute(engine::VrxId which, std::uint32_t rate, decode::Region what,
              decode::RdsBitSync sync)
         : vrx(which), composite_rate(rate), region(what), bits(std::move(sync)),
           groups(what) {}
 
-    // Set before the route is handed to the completion thread and never
-    // written again, so reading them there needs no lock.
+    // Set before the route is handed to its decode lane and never written
+    // again, so reading them there needs no lock.
     const engine::VrxId vrx;
     const std::uint32_t composite_rate;
 
-    // Loop thread only: the token that detaches the sink again.
+    // Loop thread only: the token that detaches the sink again, and the
+    // decode lane the decode runs on.
     engine::AudioSinkId sink = 0;
+    std::shared_ptr<DecodeLane> lane;
 
-    // Everything below is written by the completion thread and read by the
-    // loop thread, under this lock. setRdsRegion writes all of it from the
+    // Everything below is written by the decode lane and read by the loop
+    // thread, under this lock. setRdsRegion writes all of it from the
     // loop thread instead, which is the one place the ownership reverses and
     // is why the region is in here rather than beside composite_rate.
     std::mutex lock;
@@ -932,7 +969,10 @@ struct DecodeRoute {
     engine::AudioSinkId sink = 0;
     bool fault_reported = false;
 
-    // Everything below is under this lock. The completion thread writes the
+    // The decode lane this decoder runs on. Loop thread only.
+    std::shared_ptr<DecodeLane> lane;
+
+    // Everything below is under this lock. The decode lane writes the
     // decoder's state and the nodes' queues; the loop thread adds and removes
     // nodes, resets the decoder for a retune and reads the counters.
     std::mutex lock;
@@ -1057,6 +1097,15 @@ public:
         out.voice_ns = load_->voice_ns.load(std::memory_order_relaxed);
         out.rds_ns = load_->rds_ns.load(std::memory_order_relaxed);
         out.audio_ns = load_->audio_ns.load(std::memory_order_relaxed);
+        for (const auto& lane : lanes_) {
+            const DecodeLaneStats lane_stats = lane->stats();
+            out.lane_posted += lane_stats.posted;
+            out.lane_dropped += lane_stats.dropped;
+            out.lane_waits += lane_stats.waits;
+            out.lane_busy_ns += lane_stats.busy_ns;
+            out.lane_latency_ns += lane_stats.latency_ns;
+            out.lane_latency_max_ns = std::max(out.lane_latency_max_ns, lane_stats.latency_max_ns);
+        }
         return out;
     }
 
@@ -1080,8 +1129,9 @@ public:
     [[nodiscard]] Status add_passband(std::shared_ptr<PassbandNode> node);
     void end_passband(const std::shared_ptr<PassbandNode>& node);
 
-    // Engine completion thread, with route.lock already held by the sink
-    // callable that got here. Always answers success: a subscriber that
+    // The engine's completion thread for a receiver's own audio and a decode
+    // lane for a voice route, with route.lock already held by the work that
+    // got here. Always answers success: a subscriber that
     // cannot keep up counts a drop of its own, and failing here would fail
     // the dispatch and end the run over one slow socket.
     [[nodiscard]] Status on_audio_chunk(AudioRoute& route, const engine::AudioChunk& chunk);
@@ -1095,7 +1145,7 @@ public:
     [[nodiscard]] Status add_audio(std::shared_ptr<AudioNode> node,
                                    const engine::VrxStatus& status);
 
-    // Engine completion thread, with route.lock held. Queues one chunk's
+    // on_audio_chunk's thread, with route.lock held. Queues one chunk's
     // samples on every subscriber of the route. Split out of on_audio_chunk
     // so the voice route queues what it made through the same eviction and
     // accounting as the receiver's own audio.
@@ -1186,9 +1236,37 @@ public:
                                                         double min_margin);
     [[nodiscard]] Status set_detection_threshold(double threshold_db);
 
-    // Completion thread, with detect_lock_ already held and a detector that
-    // has just taken a frame. Does nothing until the detector decides.
+    // The sigid lane, with detect_lock_ already held and a detector that has
+    // just taken a frame. Does nothing until the detector decides.
+    //
+    // WHAT THIS USED TO SAY: "Completion thread". See THE SIGID LANE.
     void observe_front_end();
+
+    // THE SIGID LANE and THE DECODE LANES, on the members. offer_to_sigid is
+    // the completion thread's; run_sigid, sigid_consume and
+    // publish_detections_locked are the lane's, the last with detect_lock_
+    // held; withdraw_detections_locked is whoever throws the detector away,
+    // with detect_lock_ held; start_lanes is start()'s and stop_sigid is
+    // stop()'s.
+    [[nodiscard]] static bool runs_unthrottled(const engine::Engine& engine);
+    [[nodiscard]] bool source_unthrottled() const;
+    [[nodiscard]] engine::AudioSink lane_sink(std::shared_ptr<DecodeLane> lane,
+                                              std::shared_ptr<const LaneWork> work);
+    static void drain_lane(const std::shared_ptr<DecodeLane>& lane);
+    void offer_to_sigid(const engine::SpectrumFrame& frame);
+    void run_sigid();
+
+    // One frame on its way to the sigid lane. See THE SIGID LANE.
+    struct DetectSlot {
+        FrameCopy copy;
+        std::uint64_t generation = 0;
+        bool may_shed = true;
+    };
+    void sigid_consume(const DetectSlot& slot);
+    void publish_detections_locked();
+    void withdraw_detections_locked();
+    [[nodiscard]] Status start_lanes(const ServerOptions& options);
+    void stop_sigid();
 
     // Event loop thread. What the monitor last said, or an Unmeasured
     // reading when nothing has asked for detections.
@@ -1293,8 +1371,8 @@ public:
     void reset_decoded_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target);
     [[nodiscard]] Expected<DecodedStats> decoded_stats(DecodedNode& node);
 
-    // Engine completion thread, with route.lock held by the sink callable.
-    // Never fails the dispatch: a decoder that refuses records a fault and
+    // A decode lane, with route.lock held by the lane's work for the route.
+    // Never fails anything: a decoder that refuses records a fault and
     // the loop turns it into ended() calls, on the argument decode_rds_chunk
     // makes for RDS.
     void on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& chunk);
@@ -1382,12 +1460,13 @@ private:
 
     // The wideband detector, and everything about it.
     //
-    // detecting_ is the completion thread's cheap way to skip the lock
-    // entirely on a server nobody has asked for detections. It is set once,
-    // after the detector exists, and cleared once: by a consume() that
-    // refuses a frame, or by stop() with both threads that could be inside
-    // the detector already gone. So a relaxed load is ordering enough, and
-    // the worst a stale read does is feed or skip one frame at the edge.
+    // detecting_ is the completion thread's cheap way to skip handing a
+    // frame to the sigid lane on a server nobody has asked for detections,
+    // and ensure_detector's way to answer a poll without detect_lock_. It is
+    // set once, after the detector exists, and cleared once: by a consume()
+    // that refuses a frame, by a retune or a close that throws the detector
+    // away, or by stop(). A frame offered on a stale read is dropped by the
+    // lane's generation check, so the worst a stale read costs is one copy.
     //
     // Nothing else clears it. A client disconnecting does not, which is the
     // decision the note at the top of this file argues.
@@ -1401,9 +1480,11 @@ private:
     // otherwise, so a server on an engine with EngineConfig::probe_receivers
     // at zero labels nothing and every detection crosses the wire unknown.
     //
-    // Under detect_lock_ and stepped on the completion thread inside
-    // on_frame, once per decision, which is the one producer and one consumer
-    // core/engine/probe.h asks for: nothing else submits to the pool.
+    // Under detect_lock_ and stepped on the sigid lane after the consume
+    // that decided, once per decision, which is the one producer and one
+    // consumer core/engine/probe.h asks for: nothing else submits to the
+    // pool. WHAT THIS USED TO SAY: "stepped on the completion thread inside
+    // on_frame". See THE SIGID LANE below.
     std::optional<detect::TierTwo> tier_two_;       // detect_lock_
     dsp::SampleIndex tier_two_decision_ = 0;        // detect_lock_
 
@@ -1428,6 +1509,81 @@ private:
     // a detector that refuses a frame must not fail the sink, so the reason
     // is kept here and reported to the next caller instead.
     std::string detector_fault_;  // detect_lock_
+
+    // THE SIGID LANE, which is where the detector and tier two run.
+    //
+    // Until 2026-09-23 on_frame fed the detector itself, on the engine's
+    // completion thread, under detect_lock_, so every frame's detection and
+    // every tier-two step stood between one GPU frame being retired and the
+    // next, and a detections poll on the loop thread waited for the lock
+    // behind them. Now on_frame copies the frame into a slot and returns, and
+    // this lane consumes it on a thread of its own at the SigId priority in
+    // core/thread_role.h. docs/rpc.md, under Threading, has what that bought.
+    //
+    // Slots cycle between two rings, completion thread to lane and back, so
+    // neither side takes a lock to hand a frame over. A frame that finds no
+    // free slot is shed and counted, which is the lane being behind; on an
+    // unthrottled Demand source the completion thread waits for one instead,
+    // on the graph's own argument that such a source has no clock to lose
+    // anything against. detect_generation_ is bumped under detect_lock_
+    // whenever the detector is thrown away, and a frame stamped with an older
+    // one is dropped unread, so a frame queued before a retune never reaches
+    // the detector built after it.
+    //
+    // THE BUDGET. On a source running on a clock the lane holds itself to
+    // ServerOptions::detector_cpu_budget of one core, core/engine/
+    // cpu_budget.h: each frame is charged the CPU its consume and tier two
+    // took, and a frame that arrives while the bucket is empty is shed.
+    std::vector<std::unique_ptr<DetectSlot>> detect_slots_;
+    std::unique_ptr<engine::SpscRing<DetectSlot*>> detect_ready_;
+    std::unique_ptr<engine::SpscRing<DetectSlot*>> detect_free_;
+    std::thread detect_thread_;
+    std::atomic<std::uint64_t> detect_signal_{0};
+    std::atomic<std::uint64_t> detect_returned_{0};
+    std::atomic<bool> detect_stopping_{false};
+    std::atomic<std::uint64_t> detect_generation_{0};
+    engine::CpuBudget detect_budget_{1.0, 250'000'000};  // the lane's own
+
+    // What a detections poll and a sourceStats read answer from, published
+    // by the lane after each decision so neither has to take detect_lock_.
+    // The loop thread is the Display class and the lane is SigId, so a loop
+    // thread waiting on a lock the lane holds would be waiting on the one
+    // thread a busy machine is allowed to leave waiting. The lock here is
+    // held for a pointer copy on either side and nothing else.
+    struct Published {
+        DetectionSnapshot all;
+        detect::FrontEndObservation front_end;
+        std::string fault;
+    };
+    std::mutex published_lock_;
+    std::shared_ptr<const Published> published_;  // published_lock_
+    dsp::SampleIndex published_decision_ = 0;     // detect_lock_
+
+    // THE DECODE LANES, core/rpc/decode_lane.h. Every event decoder, every
+    // P25 voice stream and every RDS decode runs on one of these rather than
+    // in its sink on the completion thread. Each route is pinned to one when
+    // it is made, round robin, so its chunks are decoded in order.
+    //
+    // Until 2026-09-23 all three ran inside their sinks on the completion
+    // thread, and the comments on RdsRoute, DecodeRoute, AudioRoute,
+    // decode_rds_chunk, on_decoded_chunk and on_audio_chunk named that
+    // thread as the one doing the work. They name the lane now. A receiver's
+    // own audio, which is a copy into a queue, stays on the completion
+    // thread, where it costs less than the hand-off would.
+    //
+    // Shared with the sink callables for the reason every route is: a sink
+    // can be called once more after it comes off, and must find a lane that
+    // says it has stopped rather than one that has been freed.
+    std::vector<std::shared_ptr<DecodeLane>> lanes_;
+    std::uint32_t next_lane_ = 0;  // loop thread only
+
+    // The lane a new route is pinned to. Loop thread.
+    [[nodiscard]] std::shared_ptr<DecodeLane> pick_lane() {
+        if (lanes_.empty()) {
+            return nullptr;
+        }
+        return lanes_[next_lane_++ % lanes_.size()];
+    }
 
     std::atomic<std::uint16_t> port_{0};
     std::atomic<std::uint64_t> frames_sent_{0};
@@ -1500,8 +1656,8 @@ private:
     std::vector<std::shared_ptr<PassbandNode>> passband_nodes_;
 
     // One route per receiver that has at least one audio subscriber. The map
-    // is the loop thread's; each route's node list is shared with the
-    // completion thread under that route's own lock.
+    // is the loop thread's; each route's node list is shared with the thread
+    // its audio arrives on under that route's own lock.
     //
     // No spare-buffer pool here, unlike the two display streams. A chunk's
     // buffer belongs to the subscription that queued it, because two
@@ -1512,8 +1668,7 @@ private:
 
     // One decoder per receiver a client has asked about, keyed the same way
     // and owned the same way: the map is the loop thread's and each route's
-    // contents are shared with the completion thread under that route's own
-    // lock.
+    // contents are shared with its decode lane under that route's own lock.
     //
     // Not pruned on its own. A receiver removed while a decoder was running
     // leaves its entry here until somebody polls it or removes it through
@@ -1539,8 +1694,8 @@ private:
 
     // One route per decoder per receiver with at least one subscriber, keyed
     // by the receiver and the decoder's registry name. The map is the loop
-    // thread's; each route's contents are shared with the completion thread
-    // under that route's own lock, as audio_routes_ are.
+    // thread's; each route's contents are shared with its decode lane under
+    // that route's own lock, as rds_routes_ are.
     std::map<std::pair<std::uint32_t, std::string>, std::shared_ptr<DecodeRoute>>
         decode_routes_;
 
@@ -2589,6 +2744,12 @@ private:
 };
 
 Status ServerImpl::start(const ServerOptions& options) {
+    // Before the loop, so nothing the loop does can find a route with no lane
+    // to post to.
+    if (auto lanes = start_lanes(options); !lanes) {
+        return lanes;
+    }
+
     auto ready = ready_.get_future();
     try {
         loop_ = std::thread([this, options] { serve(options); });
@@ -2615,7 +2776,7 @@ void ServerImpl::announce(Status status) {
 }
 
 void ServerImpl::serve(ServerOptions options) {
-    name_this_thread(L"revenant rpc loop");
+    describe_this_thread(L"revenant rpc loop", ThreadClass::Display);
     try {
         // Declared first so it is destroyed last. Everything below holds
         // promises or capabilities belonging to this loop, and kj aborts the
@@ -2755,6 +2916,13 @@ Status ServerImpl::ensure_detector() {
         return ready;
     }
 
+    // Without the lock when there is a running detector, which is every poll
+    // but the first. detect_lock_ is the sigid lane's for the length of a
+    // consume, and the loop thread is not to wait on it: see Published.
+    if (detecting_.load(std::memory_order_acquire)) {
+        return {};
+    }
+
     std::scoped_lock held(detect_lock_);
     if (!detector_fault_.empty()) {
         return fail(detector_fault_);
@@ -2797,9 +2965,16 @@ Status ServerImpl::ensure_detector() {
         tier_two_decision_ = 0;
     }
 
+    // An empty answer for a poll that arrives before the first decision,
+    // carrying the threshold and the hold, which a client needs from the
+    // start.
+    published_decision_ = 0;
+    publish_detections_locked();
+
     // Published last, so the completion thread cannot find a detector that is
-    // still being constructed.
-    detecting_.store(true, std::memory_order_relaxed);
+    // still being constructed. Release, for ensure_detector's own lock-free
+    // test above.
+    detecting_.store(true, std::memory_order_release);
     return {};
 }
 
@@ -2838,49 +3013,63 @@ void ServerImpl::observe_front_end() {
 }
 
 detect::FrontEndObservation ServerImpl::front_end() {
-    std::scoped_lock held(detect_lock_);
+    // The published one, for the reason detections() reads the published
+    // tracks: the monitor is the sigid lane's, and this is the loop thread.
+    // It is taken at every decision, which is the only time it moves.
+    std::shared_ptr<const Published> seen;
+    {
+        const std::scoped_lock held(published_lock_);
+        seen = published_;
+    }
 
     // An Unmeasured reading and not the last one the monitor took, because
     // without a detector there is nothing feeding it and a stale verdict
-    // would keep answering for a band nobody is watching any more.
-    if (!detector_.has_value()) {
+    // would keep answering for a band nobody is watching any more. The
+    // detector going withdraws the published answer, which is this.
+    if (seen == nullptr) {
         return {};
     }
-    return front_end_.observation();
+    return seen->front_end;
 }
 
 Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence, double min_margin) {
-    // From before ensure_detector, which takes the same lock once on its own.
+    // From before ensure_detector, which takes detect_lock_ only on the first
+    // poll, to build the detector.
     const std::uint64_t asked = engine::load_clock_ns();
     if (auto ready = ensure_detector(); !ready) {
         return std::unexpected(ready.error());
     }
 
-    std::scoped_lock held(detect_lock_);
+    // THE PUBLISHED ANSWER AND NOT THE DETECTOR, which the sigid lane may be
+    // inside. It is the lane's last decision, copied whole, so nothing here
+    // can see a track list half way through a consume. WHAT THIS USED TO DO:
+    // take detect_lock_ and copy detector_->tracks() under it, which made
+    // the loop thread wait behind whatever frame the detector was on.
+    std::shared_ptr<const Published> seen;
+    {
+        const std::scoped_lock held(published_lock_);
+        seen = published_;
+    }
     load_->detect_poll_wait_ns.fetch_add(engine::load_clock_ns() - asked,
                                         std::memory_order_relaxed);
     load_->detect_polls.fetch_add(1, std::memory_order_relaxed);
-    if (!detector_fault_.empty()) {
-        return fail(detector_fault_);
-    }
-    if (!detector_.has_value()) {
+    if (seen == nullptr) {
         return fail("the wideband detector is not running");
     }
-
-    const std::span<const detect::Track> tracks = detector_->tracks();
-
-    DetectionSnapshot out;
-    out.decisions = detector_->stats().decisions;
-    out.last_decision = detector_->last_decision();
-    out.total = static_cast<std::uint32_t>(tracks.size());
-    out.threshold_db = detector_->config().detection_threshold_db;
+    if (!seen->fault.empty()) {
+        return fail(seen->fault);
+    }
 
     // Read off the live config beside the threshold rather than off
     // DetectorConfig{}, so a detector built with a hold other than the
-    // default reports the one it is running. ensure_detector above builds it
-    // from defaults today, and a client that assumed that would be wrong the
-    // first time it stops being true.
-    out.hold_seconds = detector_->config().bootstrap_hold_seconds;
+    // default reports the one it is running. publish_detections_locked reads
+    // both off the detector.
+    DetectionSnapshot out;
+    out.decisions = seen->all.decisions;
+    out.last_decision = seen->all.last_decision;
+    out.total = seen->all.total;
+    out.threshold_db = seen->all.threshold_db;
+    out.hold_seconds = seen->all.hold_seconds;
 
     // Filtered here rather than on the client so that a busy band does not
     // put five hundred rows on the wire for a display that asked for the
@@ -2890,8 +3079,8 @@ Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence, double
     // BOTH BARS, AND A TRACK HAS TO CLEAR BOTH. They ask independent questions
     // and a caller wanting one passes zero for the other, so anding them is
     // what makes "persistent AND strong" expressible without a third call.
-    out.tracks.reserve(tracks.size());
-    for (const detect::Track& track : tracks) {
+    out.tracks.reserve(seen->all.tracks.size());
+    for (const detect::Track& track : seen->all.tracks) {
         if (track.confidence >= min_confidence && track.margin_confidence >= min_margin) {
             out.tracks.push_back(track);
         }
@@ -2923,7 +3112,15 @@ Status ServerImpl::set_detection_threshold(double threshold_db) {
     // The confidence threshold is passed back unchanged. set_thresholds takes
     // both because the detector validates them as a pair, and this call is
     // about the other one.
-    return detector_->set_thresholds(threshold_db, detector_->config().confidence_threshold);
+    auto applied =
+        detector_->set_thresholds(threshold_db, detector_->config().confidence_threshold);
+
+    // Republished at once rather than at the next decision, so a poll that
+    // follows this call reports the threshold it set.
+    if (applied) {
+        publish_detections_locked();
+    }
+    return applied;
 }
 
 // ---------------------------------------------------------------------------
@@ -3058,8 +3255,7 @@ namespace {
     return {};
 }
 
-// The engine's completion thread, with route.lock held by the callable that
-// got here.
+// A decode lane, with route.lock held by the lane's work that got here.
 //
 // A free function and not a ServerImpl member, which is the whole of the
 // difference from on_audio_chunk and is worth the line it costs to say: it
@@ -3198,6 +3394,9 @@ Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
         route = std::move(*built);
     }
 
+    // The station as of the last chunk the engine delivered rather than the
+    // last one the lane reached. See DecodeLane::drain.
+    drain_lane(route->lane);
     const std::scoped_lock held(route->lock);
 
     // A FAULTED DECODER ANSWERS RATHER THAN REFUSING, and it is the one
@@ -3250,7 +3449,7 @@ Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
 // sessions on one share its centre, its filter and its squelch, and
 // setVrxParams from either already clears the other's station through
 // reset_rds_for_vrx. A per-session decoder would put one decode per client
-// per receiver on the completion thread, which is the cost the whole
+// per receiver on a decode lane, which is the cost the whole
 // build-on-first-ask arrangement exists to hold down, and it would let two
 // clients disagree about a station that is one station. A client that wants
 // its own region adds its own receiver, which it is already doing to reach a
@@ -3361,13 +3560,14 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatu
     // attach rather than set, which is the seam core/engine/engine.h exists
     // for: a recording, a loudspeaker or an audio subscription already on
     // this receiver keeps its audio and this decoder joins beside it.
+    route->lane = pick_lane();
     auto attached = engine_.attach_audio_sink(
-        status.id, [route, load = load_](const engine::AudioChunk& chunk) -> Status {
-            const engine::LoadTimer timed(load->rds_ns);
-            const std::scoped_lock owned(route->lock);
-            decode_rds_chunk(*route, chunk);
-            return {};
-        });
+        status.id, lane_sink(route->lane, std::make_shared<const LaneWork>(
+                                              [route, load = load_](const engine::AudioChunk& chunk) {
+                                                  const engine::LoadTimer timed(load->rds_ns);
+                                                  const std::scoped_lock owned(route->lock);
+                                                  decode_rds_chunk(*route, chunk);
+                                              })));
     if (!attached) {
         return std::unexpected(attached.error());
     }
@@ -3520,9 +3720,10 @@ void ServerImpl::forget_detector() {
     {
         std::scoped_lock held(detect_lock_);
 
-        // The completion thread checks this before it takes the lock, so
-        // clearing it first is what stops a frame from the new centre
-        // reaching the old detector between here and the reset below.
+        // The completion thread checks this before it offers a frame, so
+        // clearing it first stops frames from the new centre being copied
+        // for a detector that is going; the generation bumped below is what
+        // stops one already offered from reaching the next detector.
         detecting_.store(false, std::memory_order_relaxed);
         detector_.reset();
         tier_two_.reset();
@@ -3534,6 +3735,9 @@ void ServerImpl::forget_detector() {
         front_end_.reset();
         have_front_end_decision_ = false;
         last_front_end_decision_ = 0;
+
+        // And every frame the sigid lane still holds is the old centre's.
+        withdraw_detections_locked();
     }
 }
 
@@ -3592,6 +3796,236 @@ void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target
     // that delivered the wrong thing once will deliver it again.
 }
 
+bool ServerImpl::runs_unthrottled(const engine::Engine& engine) {
+    const engine::SourcePacing pacing = engine.source_pacing();
+    return pacing.demand && pacing.paced_by == 0.0;
+}
+
+bool ServerImpl::source_unthrottled() const { return runs_unthrottled(engine_); }
+
+engine::AudioSink ServerImpl::lane_sink(std::shared_ptr<DecodeLane> lane,
+                                        std::shared_ptr<const LaneWork> work) {
+    // A decode lane's sink: copy, queue, return. Whether a full lane drops or
+    // waits is asked per chunk, because a file's pace can change while it
+    // plays. The engine outlives every sink it holds, so the pointer is safe
+    // for as long as this callable can be called.
+    return [work = std::move(work), lane = std::move(lane),
+            eng = &engine_](const engine::AudioChunk& chunk) -> Status {
+        static_cast<void>(lane->post(work, chunk, runs_unthrottled(*eng)));
+        return {};
+    };
+}
+
+void ServerImpl::drain_lane(const std::shared_ptr<DecodeLane>& lane) {
+    // A second: far past the few chunks a lane keeping up holds, and short
+    // enough that a lane which has fallen behind a radio does not stall every
+    // client's delivery for longer than that. DecodeLane::drain has why the
+    // loop thread may wait on it at all.
+    constexpr auto kLimit = std::chrono::seconds(1);
+    if (lane != nullptr) {
+        static_cast<void>(lane->drain(kLimit));
+    }
+}
+
+void ServerImpl::offer_to_sigid(const engine::SpectrumFrame& frame) {
+    // The completion thread. See THE SIGID LANE on the members.
+    const bool may_shed = !source_unthrottled();
+    DetectSlot* slot = nullptr;
+    for (;;) {
+        const std::uint64_t observed = detect_returned_.load(std::memory_order_acquire);
+        if (detect_stopping_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (detect_free_->read(std::span<DetectSlot*>(&slot, 1)) == 1) {
+            break;
+        }
+        if (may_shed) {
+            load_->detector_frames_shed.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        detect_returned_.wait(observed, std::memory_order_acquire);
+    }
+
+    slot->copy.assign(frame);
+    slot->generation = detect_generation_.load(std::memory_order_acquire);
+    slot->may_shed = may_shed;
+
+    // Cannot fail: the ring holds as many as there are slots.
+    static_cast<void>(detect_ready_->write(std::span<DetectSlot* const>(&slot, 1)));
+    detect_signal_.fetch_add(1, std::memory_order_release);
+    detect_signal_.notify_one();
+}
+
+void ServerImpl::run_sigid() {
+    describe_this_thread(L"revenant sigid", ThreadClass::SigId);
+    for (;;) {
+        const std::uint64_t observed = detect_signal_.load(std::memory_order_acquire);
+        if (detect_stopping_.load(std::memory_order_acquire)) {
+            return;
+        }
+        DetectSlot* slot = nullptr;
+        if (detect_ready_->read(std::span<DetectSlot*>(&slot, 1)) == 0) {
+            detect_signal_.wait(observed, std::memory_order_acquire);
+            continue;
+        }
+        sigid_consume(*slot);
+        static_cast<void>(detect_free_->write(std::span<DetectSlot* const>(&slot, 1)));
+        detect_returned_.fetch_add(1, std::memory_order_release);
+        detect_returned_.notify_all();
+    }
+}
+
+void ServerImpl::sigid_consume(const DetectSlot& slot) {
+    if (slot.may_shed && !detect_budget_.may_start(engine::load_clock_ns())) {
+        load_->detector_frames_shed.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    const std::uint64_t cpu_began = this_thread_cpu_ns();
+
+    {
+        std::scoped_lock held(detect_lock_);
+        if (!detector_.has_value() ||
+            slot.generation != detect_generation_.load(std::memory_order_relaxed)) {
+            // From before the detector was last thrown away: a different
+            // centre, a different source, or a server stopping.
+            return;
+        }
+
+        load_->detector_frames.fetch_add(1, std::memory_order_relaxed);
+        Status fed;
+        {
+            const engine::LoadTimer timed(load_->detector_ns, &load_->detector_max_ns);
+            fed = detector_->consume(slot.copy.frame());
+        }
+        if (!fed) {
+            // Recorded and switched off rather than returned. See the note at
+            // the top: a track list is not a reason to end the run.
+            detecting_.store(false, std::memory_order_relaxed);
+            detector_fault_ = fed.error().message;
+            publish_detections_locked();
+            return;
+        }
+        observe_front_end();
+
+        // Once per decision, after it: the answers land on the tracks that
+        // decision published and the schedule reads them. A refusal is dropped
+        // for the reason the consume() refusal is recorded rather than
+        // returned: a full request ring is not a reason to end the run, and
+        // TierTwoStats counts it.
+        const dsp::SampleIndex decided = detector_->last_decision();
+        if (tier_two_.has_value() && decided != tier_two_decision_) {
+            tier_two_decision_ = decided;
+            const engine::LoadTimer timed(load_->tier_two_ns);
+            static_cast<void>(tier_two_->step(*detector_, engine_));
+        }
+        if (decided != published_decision_) {
+            published_decision_ = decided;
+            publish_detections_locked();
+        }
+    }
+
+    // THE BUDGET, on a source running on a clock and not otherwise: an
+    // unthrottled replay has no realtime to protect and wants every frame.
+    if (slot.may_shed) {
+        detect_budget_.charge(this_thread_cpu_ns() - cpu_began, engine::load_clock_ns());
+    }
+}
+
+void ServerImpl::publish_detections_locked() {
+    // detect_lock_ is held. What a poll and sourceStats answer from until the
+    // next decision.
+    auto next = std::make_shared<Published>();
+    if (detector_.has_value()) {
+        const std::span<const detect::Track> tracks = detector_->tracks();
+        next->all.tracks.assign(tracks.begin(), tracks.end());
+        next->all.decisions = detector_->stats().decisions;
+        next->all.last_decision = detector_->last_decision();
+        next->all.total = static_cast<std::uint32_t>(tracks.size());
+        next->all.threshold_db = detector_->config().detection_threshold_db;
+        next->all.hold_seconds = detector_->config().bootstrap_hold_seconds;
+        next->front_end = front_end_.observation();
+    }
+    next->fault = detector_fault_;
+    std::shared_ptr<const Published> old;
+    {
+        const std::scoped_lock held(published_lock_);
+        old = std::exchange(published_, std::move(next));
+    }
+    // `old` goes here, outside the lock, and on this thread rather than the
+    // loop's unless the loop still holds a copy of it.
+}
+
+void ServerImpl::withdraw_detections_locked() {
+    // detect_lock_ is held. The detector has just been thrown away.
+    detect_generation_.fetch_add(1, std::memory_order_acq_rel);
+    published_decision_ = 0;
+    std::shared_ptr<const Published> old;
+    {
+        const std::scoped_lock held(published_lock_);
+        old = std::exchange(published_, nullptr);
+    }
+}
+
+Status ServerImpl::start_lanes(const ServerOptions& options) {
+    if (!(options.detector_cpu_budget > 0.0) || options.detector_cpu_budget > 1.0) {
+        return fail(std::format("the detector's CPU budget is a fraction of one core above zero "
+                                "and at most one, asked for {}",
+                                options.detector_cpu_budget));
+    }
+    if (options.decode_lanes == 0) {
+        return fail("a server needs at least one decode lane: every decoder runs on one");
+    }
+    // A quarter of a second of burst: a few dozen frames at the rates
+    // docs/rpc.md measured.
+    detect_budget_ = engine::CpuBudget(options.detector_cpu_budget, 250'000'000);
+
+    // Four slots: one being filled, two waiting and one being consumed is
+    // more than a lane keeping up ever holds, and a lane that is not keeping
+    // up sheds rather than queueing, so more would only be older frames.
+    constexpr std::size_t kDetectSlots = 4;
+    auto ready = engine::SpscRing<DetectSlot*>::create(kDetectSlots);
+    if (!ready) {
+        return std::unexpected(with_context(ready.error(), "the sigid lane's queue"));
+    }
+    auto free = engine::SpscRing<DetectSlot*>::create(kDetectSlots);
+    if (!free) {
+        return std::unexpected(with_context(free.error(), "the sigid lane's free list"));
+    }
+    detect_ready_ = std::move(*ready);
+    detect_free_ = std::move(*free);
+    for (std::size_t i = 0; i < kDetectSlots; ++i) {
+        detect_slots_.push_back(std::make_unique<DetectSlot>());
+        DetectSlot* slot = detect_slots_.back().get();
+        static_cast<void>(detect_free_->write(std::span<DetectSlot* const>(&slot, 1)));
+    }
+    try {
+        detect_thread_ = std::thread([this] { run_sigid(); });
+    } catch (const std::system_error& error) {
+        return fail(std::format("could not start the sigid lane: {}", error.what()),
+                    error.code().value());
+    }
+
+    for (std::uint32_t i = 0; i < options.decode_lanes; ++i) {
+        auto lane = DecodeLane::create(std::format(L"revenant decode {}", i));
+        if (!lane) {
+            return std::unexpected(with_context(lane.error(), "starting the decode lanes"));
+        }
+        lanes_.push_back(std::shared_ptr<DecodeLane>(std::move(*lane)));
+    }
+    return {};
+}
+
+void ServerImpl::stop_sigid() {
+    detect_stopping_.store(true, std::memory_order_release);
+    detect_signal_.fetch_add(1, std::memory_order_release);
+    detect_signal_.notify_all();
+    detect_returned_.fetch_add(1, std::memory_order_release);
+    detect_returned_.notify_all();
+    if (detect_thread_.joinable()) {
+        detect_thread_.join();
+    }
+}
+
 Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
     // The engine's completion thread. It touches no capability and it never
     // waits on the loop thread, which is serving every other client and owes
@@ -3602,37 +4036,12 @@ Status ServerImpl::on_frame(const engine::SpectrumFrame& frame) {
     // the subscribers wanted and what the detector needs are different
     // questions: a client can ask for every tenth frame and still expect the
     // track list to be built out of all of them.
+    //
+    // HANDED TO THE SIGID LANE AND NOT CONSUMED HERE. WHAT THIS USED TO DO:
+    // take detect_lock_ and run consume(), the front-end monitor and tier
+    // two's step inline, on this thread. See THE SIGID LANE on the members.
     if (detecting_.load(std::memory_order_relaxed)) {
-        std::scoped_lock held(detect_lock_);
-        if (detector_.has_value()) {
-            load_->detector_frames.fetch_add(1, std::memory_order_relaxed);
-            Status fed;
-            {
-                const engine::LoadTimer timed(load_->detector_ns, &load_->detector_max_ns);
-                fed = detector_->consume(frame);
-            }
-            if (!fed) {
-                // Recorded and switched off rather than returned. See the
-                // note at the top: this Status is the engine's, and failing
-                // it here would end the run over a track list.
-                detecting_.store(false, std::memory_order_relaxed);
-                detector_fault_ = fed.error().message;
-            } else {
-                observe_front_end();
-
-                // Once per decision, after it: the answers land on the tracks
-                // that decision published and the schedule reads them. A
-                // refusal is dropped for the reason the consume() refusal is
-                // recorded rather than returned: a full request ring is not a
-                // reason to end the run, and TierTwoStats counts it.
-                const dsp::SampleIndex decided = detector_->last_decision();
-                if (tier_two_.has_value() && decided != tier_two_decision_) {
-                    tier_two_decision_ = decided;
-                    const engine::LoadTimer timed(load_->tier_two_ns);
-                    static_cast<void>(tier_two_->step(*detector_, engine_));
-                }
-            }
-        }
+        offer_to_sigid(frame);
     }
 
     const auto subscribers = subscribers_.load(std::memory_order_relaxed);
@@ -4021,8 +4430,9 @@ void ServerImpl::detach_passband_sink(engine::VrxId vrx) {
 }
 
 Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& chunk) {
-    // The engine's completion thread, with route.lock held by the callable
-    // that got here. It touches no capability and never waits on the loop.
+    // The engine's completion thread for a receiver's own audio and a decode
+    // lane for a voice route, with route.lock held by what got here. It
+    // touches no capability and never waits on the loop.
     if (chunk.channels == 0) {
         return {};
     }
@@ -4196,7 +4606,8 @@ void ServerImpl::drain_audio() {
     std::vector<std::pair<engine::VrxId, std::string>> faulted;
 
     // Snapshotted under each route's lock and pumped outside it, so the
-    // completion thread is not held off for the length of a fan-out.
+    // thread the audio arrives on is not held off for the length of a
+    // fan-out.
     std::vector<std::shared_ptr<AudioNode>> ready;
     for (const auto& entry : audio_routes_) {
         const std::scoped_lock held(entry.second->lock);
@@ -4356,18 +4767,32 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxS
         // attach rather than set, which is the whole point of the seam in
         // core/engine/engine.h: a recording or a loudspeaker already on this
         // receiver keeps its audio, and this server's sink joins it.
-        auto attached = engine_.attach_audio_sink(
-            node->vrx, [route, load = load_](const engine::AudioChunk& chunk) -> Status {
-                const engine::LoadTimer timed(route->p25_voice ? load->voice_ns : load->audio_ns);
-                if (route->p25_voice) {
+        // A voice route decodes, so it runs on a decode lane; a receiver's
+        // own audio is a copy into a queue and stays on the completion
+        // thread, where it costs less than the hand-off would.
+        engine::AudioSink sink;
+        if (route->p25_voice) {
+            route->lane = pick_lane();
+            sink = lane_sink(route->lane, std::make_shared<const LaneWork>(
+                [route, load = load_](const engine::AudioChunk& chunk) {
+                    const engine::LoadTimer timed(load->voice_ns);
                     load->voice_chunks.fetch_add(1, std::memory_order_relaxed);
-                }
-                std::scoped_lock owned(route->lock);
+                    const std::scoped_lock owned(route->lock);
+                    if (route->owner != nullptr) {
+                        static_cast<void>(route->owner->on_audio_chunk(*route, chunk));
+                    }
+                }));
+        } else {
+            sink = [route, load = load_](const engine::AudioChunk& chunk) -> Status {
+                const engine::LoadTimer timed(load->audio_ns);
+                const std::scoped_lock owned(route->lock);
                 if (route->owner == nullptr) {
                     return {};
                 }
                 return route->owner->on_audio_chunk(*route, chunk);
-            });
+            };
+        }
+        auto attached = engine_.attach_audio_sink(node->vrx, std::move(sink));
         if (!attached) {
             return std::unexpected(attached.error());
         }
@@ -4576,16 +5001,19 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
         // chunk stamped with an older tuning.
         route->epoch_target = status.tuning_epoch;
 
+        route->lane = pick_lane();
         auto attached = engine_.attach_audio_sink(
-            node->vrx, [route, load = load_](const engine::AudioChunk& chunk) -> Status {
-                const engine::LoadTimer timed(load->decode_ns);
-                load->decode_chunks.fetch_add(1, std::memory_order_relaxed);
-                const std::scoped_lock owned(route->lock);
-                if (route->owner != nullptr) {
-                    route->owner->on_decoded_chunk(*route, chunk);
-                }
-                return {};
-            });
+            node->vrx,
+            lane_sink(route->lane, std::make_shared<const LaneWork>(
+                                       [route, load = load_](const engine::AudioChunk& chunk) {
+                                           const engine::LoadTimer timed(load->decode_ns);
+                                           load->decode_chunks.fetch_add(
+                                               1, std::memory_order_relaxed);
+                                           const std::scoped_lock owned(route->lock);
+                                           if (route->owner != nullptr) {
+                                               route->owner->on_decoded_chunk(*route, chunk);
+                                           }
+                                       })));
         if (!attached) {
             return std::unexpected(attached.error());
         }
@@ -4649,6 +5077,11 @@ void ServerImpl::send_decoded_ended(const std::shared_ptr<DecodedNode>& node,
 
 void ServerImpl::end_decode_route(const std::shared_ptr<DecodeRoute>& route,
                                   kj::StringPtr reason) {
+    // The chunks already queued on the lane first, so the flush below closes
+    // the stream the engine delivered rather than the part of it the lane
+    // had reached.
+    drain_lane(route->lane);
+
     std::vector<std::shared_ptr<DecodedNode>> nodes;
     {
         const std::scoped_lock held(route->lock);
@@ -4743,6 +5176,11 @@ Expected<DecodedStats> ServerImpl::decoded_stats(DecodedNode& node) {
     if (found == decode_routes_.end()) {
         return fail("this decoded-message subscription's decoder is no longer attached");
     }
+
+    // Everything the engine had delivered, decoded before it is counted: see
+    // DecodeLane::drain. A client comparing messagesSent with what arrived
+    // after the stream stopped needs the lane's queue in the count.
+    drain_lane(found->second->lane);
 
     DecodedStats out;
     {
@@ -4937,9 +5375,15 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
 
     // The detector, and the front end monitor that reads its arrays. Under
     // detect_lock_ alone rather than after a join, unlike stop(): the two
-    // threads that can be inside the detector are this one and the engine's
+    // threads that can be inside the detector are this one and the sigid
+    // lane, this one is here, and the lane takes this lock to feed it. The
+    // generation bumped inside withdraw_detections_locked is what stops a
+    // frame of this stream the lane still holds from reaching the detector
+    // built for the next one.
+    //
+    // WHAT THE END OF THE FIRST SENTENCE USED TO SAY: "this one and the engine's
     // completion thread, this one is here, and the completion thread takes
-    // this lock to feed it.
+    // this lock to feed it".
     //
     // detector_fault_ is cleared as well. A fault is a statement about the
     // stream that produced it, so carrying one across a close would refuse
@@ -4955,6 +5399,7 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
         front_end_.reset();
         have_front_end_decision_ = false;
         last_front_end_decision_ = 0;
+        withdraw_detections_locked();
     }
 
     // The queued copies, which are the old stream's frames numbered in its
@@ -5076,7 +5521,7 @@ kj::Promise<SourceListing> ServerImpl::list_sources() {
 }
 
 void ServerImpl::run_listings() {
-    name_this_thread(L"revenant rpc listings");
+    describe_this_thread(L"revenant rpc listings", ThreadClass::Display);
     for (;;) {
         ListingFulfiller job;
         {
@@ -5172,6 +5617,12 @@ void ServerImpl::stop() {
         loop_.join();
     }
 
+    // The sigid lane before the gate. On an unthrottled source a spectrum
+    // sink call waits inside the gate for the lane to hand a slot back, and a
+    // lane told to stop wakes that wait and lets the call return, so the gate
+    // below is not left waiting on a lane that has stopped consuming.
+    stop_sigid();
+
     // Only now, with the loop joined, can this wait for a sink call that is
     // already running: a sink call blocked on the loop thread would deadlock
     // against a stop() that had not yet released it. After this the callable
@@ -5224,6 +5675,15 @@ void ServerImpl::stop() {
     }
     decode_routes_.clear();
 
+    // The decode lanes last of the sample-side work: every route above has
+    // its owner cleared, so a job still queued finds nothing to reach, and a
+    // sink called after this finds a lane that refuses the chunk. Each is
+    // shared with its sink callables and outlives this server in them when
+    // it has to; stopped here, it holds no thread.
+    for (const auto& lane : lanes_) {
+        lane->stop();
+    }
+
     {
         std::scoped_lock held(frame_lock_);
         pending_.reset();
@@ -5235,8 +5695,13 @@ void ServerImpl::stop() {
     // Released here rather than left to the destructor, for the same reason
     // the frame buffers are: the detector holds several arrays of one double
     // per bin, and a Server kept alive after stop() should not be holding a
-    // frame's worth of them. Safe only now, with the gate closed and the loop
-    // joined, because those are the two threads that could be inside it.
+    // frame's worth of them. Safe only now, with the sigid lane joined and
+    // the loop joined, because those are the two threads that could be
+    // inside it.
+    //
+    // WHAT THE LAST SENTENCE USED TO SAY: "with the gate closed and the loop
+    // joined". The gate closes off the completion thread, which no longer
+    // runs the detector.
     {
         std::scoped_lock held(detect_lock_);
         detecting_.store(false, std::memory_order_relaxed);
@@ -5246,6 +5711,7 @@ void ServerImpl::stop() {
         front_end_.reset();
         have_front_end_decision_ = false;
         last_front_end_decision_ = 0;
+        withdraw_detections_locked();
     }
 
     release_engine(engine_);

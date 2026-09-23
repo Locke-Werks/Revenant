@@ -1562,7 +1562,7 @@ void RtlSdrSource::on_transfer(const std::uint8_t* data, std::uint32_t bytes)
 
 void RtlSdrSource::run_usb()
 {
-    name_this_thread(L"revenant rtlsdr usb");
+    describe_this_thread(L"revenant rtlsdr usb", ThreadClass::Listening);
     const int rc = rtlsdr_read_async(device_.get(), &RtlSdrSource::usb_callback, this,
                                      kTransferCount, transfer_bytes_);
 
@@ -1642,7 +1642,7 @@ void RtlSdrSource::run_usb()
 
 void RtlSdrSource::run_delivery()
 {
-    name_this_thread(L"revenant rtlsdr delivery");
+    describe_this_thread(L"revenant rtlsdr delivery", ThreadClass::Listening);
     // MEMBERS, NOT LOCALS, because this thread is joined and restarted by a
     // retune while the stream it is delivering carries on.
     //

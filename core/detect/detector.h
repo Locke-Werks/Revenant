@@ -85,11 +85,17 @@
 //
 // THREADING
 //
-// One thread owns a Detector. consume() is called from wherever the spectrum
-// sink runs, which is the engine's completion thread, and tracks() reads
-// state that call wrote. A display on another thread takes a snapshot; it
+// One thread owns a Detector. consume() is called from one thread, and
+// tracks() reads state that call wrote. revenant-cli calls it from its
+// spectrum sink, on the engine's completion thread; the RPC server calls it
+// from a thread of its own, core/rpc/server.cpp's sigid lane, which the
+// sink hands frames to. A display on another thread takes a snapshot; it
 // does not hold a reference into this object. There is no lock here and none
 // is wanted in a per-frame path.
+//
+// WHAT THE SECOND SENTENCE USED TO SAY: "consume() is called from wherever
+// the spectrum sink runs, which is the engine's completion thread". True of
+// the server until 2026-09-23.
 
 #pragma once
 

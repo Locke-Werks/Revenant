@@ -699,7 +699,7 @@ private:
 
     void drain_loop()
     {
-        name_this_thread(L"revenant egress");
+        describe_this_thread(L"revenant egress", ThreadClass::Listening);
         while (!stop_requested_.load(std::memory_order_acquire)) {
             if (!drain_pass()) {
                 std::this_thread::sleep_for(config_.idle_poll);

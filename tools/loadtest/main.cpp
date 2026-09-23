@@ -854,6 +854,18 @@ struct VoiceScore {
                  per_second(serve1.audio_ns - serve0.audio_ns),
                  ms(serve1.detect_poll_wait_ns - serve0.detect_poll_wait_ns),
                  serve1.detect_polls - serve0.detect_polls);
+    {
+        const std::uint64_t posted = serve1.lane_posted - serve0.lane_posted;
+        std::println("{} decode lanes: {} chunks, {} dropped, {} waits, busy {:.1f} ms/s, queued "
+                     "mean {:.3f} ms max {:.2f} ms",
+                     tag, posted, serve1.lane_dropped - serve0.lane_dropped,
+                     serve1.lane_waits - serve0.lane_waits,
+                     per_second(serve1.lane_busy_ns - serve0.lane_busy_ns),
+                     posted == 0 ? 0.0
+                                 : ms(serve1.lane_latency_ns - serve0.lane_latency_ns) /
+                                       static_cast<double>(posted),
+                     ms(serve1.lane_latency_max_ns));
+    }
     if (!polls.empty()) {
         std::ranges::sort(polls);
         std::println("{} detections: {} tracks, {} labelled, {} decisions; poll rpc p50 {:.1f} "
@@ -861,12 +873,14 @@ struct VoiceScore {
                      tag, poll.total, poll.labelled, poll.decisions, polls[polls.size() / 2],
                      polls.back());
     }
-    std::println("{} probes: {} submitted, {} characterised, {:.1f} ms/s characterising, {} "
-                 "receivers",
+    std::println("{} probes: {} submitted, {} characterised, {:.1f} ms/s characterising, {:.1f} "
+                 "ms/s finishing ({:.1f} ms/s of CPU), {} budget waits, {} receivers",
                  tag, probes1.submitted - probes0.submitted,
                  probes1.characterised - probes0.characterised,
                  (probes1.characterise_ms_total - probes0.characterise_ms_total) / wall,
-                 probes1.receivers);
+                 (probes1.worker_ms_total - probes0.worker_ms_total) / wall,
+                 (probes1.worker_cpu_ms_total - probes0.worker_cpu_ms_total) / wall,
+                 probes1.budget_waits - probes0.budget_waits, probes1.receivers);
     for (const auto& [name, percent] : cpu_by_name(threads0, threads1, wall, main_id)) {
         if (percent >= 0.05) {
             std::println("{} cpu {:6.1f}%  {}", tag, percent, name);

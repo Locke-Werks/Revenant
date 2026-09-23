@@ -47,6 +47,10 @@
 # run a receiver on a device; core/engine/signal_meter.h exists so the
 # divisor a buffer of interleaved floats takes is assertable on its own.
 
+# test_thread_role.cpp needs no GPU. It is the order of precedence the
+# engine's threads run in, core/thread_role.h, and the CPU budget signal
+# identification holds itself to, core/engine/cpu_budget.h.
+
 # test_vrx_tune.cpp is click-to-tune: which demodulator a measured signal
 # gets, and what happens when the grid cannot carry the receiver that choice
 # implies. Most of it is pure and needs no device, because the decision rule
@@ -148,6 +152,7 @@ add_executable(revenant_engine_tests
     test_signal_meter.cpp
     test_sources.cpp
     test_spectrum_scale.cpp
+    test_thread_role.cpp
     test_vrx_reanchor.cpp
     test_vrx_tune.cpp
 )

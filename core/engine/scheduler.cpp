@@ -261,7 +261,7 @@ struct WorkStealingPool::Impl {
     }
 
     void worker_loop(std::size_t index) {
-        name_this_thread(std::format(L"revenant pool {}", index));
+        describe_this_thread(std::format(L"revenant pool {}", index), ThreadClass::Listening);
         while (!stopping.load(std::memory_order_acquire)) {
             const auto observed = epoch.load(std::memory_order_acquire);
             if (run_one(index)) {
@@ -466,7 +466,7 @@ struct Scheduler::Impl {
     }
 
     void loop() {
-        name_this_thread(L"revenant completion");
+        describe_this_thread(L"revenant completion", ThreadClass::Listening);
         for (;;) {
             Completion item{};
             const std::size_t got = queue->read(std::span<Completion>(&item, 1));

@@ -19,7 +19,12 @@
 //
 // THREADING, WHICH IS THE ONLY HARD PART IN HERE
 //
-// Four threads matter and none of them is the same thread.
+// Six kinds of thread matter and none of them is the same thread: the four
+// below, and since 2026-09-23 the sigid lane and the decode lanes, which the
+// two paragraphs after the listing worker describe.
+//
+// WHAT THE SENTENCE ABOVE USED TO SAY: "Four threads matter and none of them
+// is the same thread."
 //
 //   The caller's. Constructs the Server, and later stops it.
 //
@@ -40,6 +45,21 @@
 //   is the split kj supports. stop() closes the queue and joins this thread
 //   before it fulfils the shutdown promise, so no listing is ever fulfilled
 //   at an event loop that has gone.
+//
+//   The sigid lane, one thread below normal priority that runs the wideband
+//   detector and tier two on frames the spectrum sink copies to it, and
+//   publishes each decision for the loop thread to answer polls from. It
+//   sheds frames it cannot take, under ServerOptions::detector_cpu_budget.
+//
+//   The decode lanes, ServerOptions::decode_lanes of them above normal
+//   priority, core/rpc/decode_lane.h, which run every event decoder, every
+//   P25 voice stream and every RDS decode on chunks their audio sinks copy
+//   to them. Neither kind touches a capability; both reach the loop the way
+//   the completion thread does.
+//
+//   core/thread_role.h has the priorities and docs/rpc.md, under Threading,
+//   the measurement that put signal identification and the decoders on
+//   threads of their own.
 //
 // The bridge between the last two is a cross-thread promise fulfiller. The
 // sink copies the frame into a single-frame slot and fulfils a promise the
@@ -118,7 +138,9 @@
 // nothing else. The engine's completion thread still walks every subscriber
 // on a receiver inline, per core/engine/engine.h's AudioFanout, so a sink
 // that blocks rather than copying delays the radio. Everything this file
-// installs copies and returns.
+// installs copies and returns, and since 2026-09-23 that includes the
+// decoders, the P25 voice stream and RDS, whose sinks copy the chunk to a
+// decode lane (core/rpc/decode_lane.h) where the decoding runs.
 
 #pragma once
 
@@ -172,6 +194,20 @@ struct ServerOptions {
     // reason: an off switch is the thing that ends up on by accident.
     // Supplying 32 bytes in a test is one line.
     std::vector<std::uint8_t> token;
+
+    // The most of one core the wideband detector and tier two average on a
+    // source running on a clock, a fraction above zero and at most one. Past
+    // it the detector's lane sheds frames rather than keep up. A quarter by
+    // default: measured under "Threading" in docs/rpc.md, the lane took 1.0
+    // to 2.3 percent of one core on a 300-emitter scene at 33 frames a
+    // second, so the budget is a ceiling for a band far busier than that and
+    // not a setting the ordinary case reaches.
+    double detector_cpu_budget = 0.25;
+
+    // Threads that run the decoders, the P25 voice streams and RDS, each
+    // route pinned to one. Two, so one receiver's decoder that has fallen
+    // behind does not hold up every other receiver's.
+    std::uint32_t decode_lanes = 2;
 };
 
 // Where this server's own work runs and how long it takes, cumulative from
@@ -202,6 +238,17 @@ struct ServerLoad {
     std::uint64_t voice_ns = 0;
     std::uint64_t rds_ns = 0;
     std::uint64_t audio_ns = 0;
+
+    // The decode lanes, summed: chunks handed to one, chunks a full lane
+    // dropped, times the completion thread waited for room (an unthrottled
+    // replay only), time the lanes spent working, and the time a chunk
+    // spent queued before its work began. core/rpc/decode_lane.h.
+    std::uint64_t lane_posted = 0;
+    std::uint64_t lane_dropped = 0;
+    std::uint64_t lane_waits = 0;
+    std::uint64_t lane_busy_ns = 0;
+    std::uint64_t lane_latency_ns = 0;
+    std::uint64_t lane_latency_max_ns = 0;
 };
 
 class Server {

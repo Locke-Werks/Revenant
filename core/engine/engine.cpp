@@ -452,6 +452,7 @@ public:
             probe_config.source_rate = rate;
             probe_config.channel_rate = graph_->geometry().channel_rate;
             probe_config.first_id = kFirstProbeId;
+            probe_config.cpu_budget = config_.probe_cpu_budget;
             auto pool = ProbePool::create(*graph_, probe_config);
             if (!pool) {
                 graph_.reset();

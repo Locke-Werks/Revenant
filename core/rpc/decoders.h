@@ -47,8 +47,9 @@
 // A complex decoder reads a complex tap: interleaved I and Q, two floats a
 // sample. An audio decoder reads what a demodulator made of the channel: one
 // float a sample, mono, at the receiver's audio rate. Both arrive through the
-// same attach_audio_sink the RDS decoder is fed by, on the completion thread,
-// behind the same retune fence, because to the engine a complex tap and a
+// same attach_audio_sink the RDS decoder is fed by, handed to a decode lane
+// (core/rpc/decode_lane.h), behind the same retune fence, because to the
+// engine a complex tap and a
 // demodulator are both a receiver's output and differ only in the channel
 // count. DecoderSpec::input says which a decoder reads and DecoderSpec::modes
 // says which demodulators produce it.
@@ -304,7 +305,7 @@ namespace decoders_detail {
 // WHAT IT COSTS. The filter is a direct-form FIR per sample, so work grows
 // with the square of the rate: the P25 filter is 121 multiplies a sample at
 // 48000, 5.8 million a second, and 363 at 144000, 52.3 million a second, on
-// the engine's completion thread. A raw tap at a coarse channel's full rate
+// the server's decode lane. A raw tap at a coarse channel's full rate
 // is the expensive case, and kRawTapRateCap below is where it stops being
 // allowed; a p25p1 receiver's fine stage delivers the design rate.
 [[nodiscard]] inline std::size_t scaled_taps(std::size_t design_taps,
@@ -393,9 +394,17 @@ inline constexpr std::string_view kDmrModes[] = {"dmr", "raw"};
 // source and the grid decide and nothing here caps. The receive filters in
 // core/decode are sized at 48000 or 72000 S/s and scaled_taps grows them with
 // the rate to hold their span, so a decoder's work grows with the square of
-// the rate, and it is done on the engine's completion thread, which delivers
-// every receiver's output. A tap fast enough to stall that thread makes the
-// source drop samples for every receiver, not only this one.
+// the rate, and it is done on a decode lane the server shares between
+// receivers. A tap fast enough to leave that lane behind makes it drop
+// chunks for every decoder pinned to it, not only this one.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "it is done on the engine's completion
+// thread, which delivers every receiver's output. A tap fast enough to stall
+// that thread makes the source drop samples for every receiver". Decoders
+// left the completion thread on 2026-09-23, core/rpc/decode_lane.h has why,
+// so a decoder that cannot keep up now costs its lane's decoders chunks
+// rather than costing the radio samples. The cap stands on that narrower
+// ground.
 //
 // Measured on 2026-09-23 on the RTX 4090 machine, one core, milliseconds per
 // second of a raw tap of noise fed a twentieth of a second at a time:
@@ -446,9 +455,9 @@ struct OwnTap {
     const OwnTap own = own_tap(decoder);
     return fail(std::format(
         "the {} decoder reads a raw tap at no more than {} S/s, and this one runs at {}, the "
-        "grid's channel rate. Its receive filter grows with the rate and runs on the engine's "
-        "completion thread, which delivers every receiver's output, so a tap this fast would "
-        "slow them all. Add a receiver in {} on the signal instead: its fine stage mixes the "
+        "grid's channel rate. Its receive filter grows with the rate and runs on a decode "
+        "thread shared with other receivers' decoders, so a tap this fast would leave them all "
+        "behind. Add a receiver in {} on the signal instead: its fine stage mixes the "
         "carrier to DC and resamples to the {} S/s this decoder was written for",
         decoder, kRawTapRateCap, rate, own.mode, own.rate));
 }
@@ -498,9 +507,10 @@ inline void append_utf8(std::string& out, char32_t c) {
 // handed, and a message's own position is in that count. The receiver's
 // stream index of the first chunk after a build or a reset is what turns one
 // into the other. Exact as long as every chunk after it reaches the decoder,
-// which the completion thread's in-order delivery gives; a chunk the graph
-// dropped would shift every later position by its length, and the graph
-// reports a drop through its own counter rather than here.
+// which the completion thread's in-order delivery and a decode lane's
+// first-in first-out run give; a chunk the graph or a full lane dropped would
+// shift every later position by its length, and each reports a drop through
+// its own counter rather than here.
 class StreamBase {
 public:
     void observe(const DecoderChunk& chunk) {

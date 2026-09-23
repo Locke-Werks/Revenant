@@ -45,9 +45,13 @@
 // to and 6.8 ms at 16384. tests/rpc/test_rpc_voice.cpp feeds this 341 ms chunks, and
 // a fixed 50 ms underran there and put a run of zeros inside the call.
 //
-// WHY A HEADER. The same argument core/rpc/decoders.h makes: this runs on the
-// engine's completion thread inside the server's audio sink, and a Catch2
-// case can drive it with no socket in the way.
+// WHY A HEADER. The same argument core/rpc/decoders.h makes: this runs on a
+// decode lane behind the server's audio sink, and a Catch2 case can drive it
+// with no socket in the way.
+//
+// WHAT THAT SENTENCE USED TO SAY: "this runs on the engine's completion
+// thread inside the server's audio sink". It moved to a decode lane on
+// 2026-09-23; core/rpc/decode_lane.h has why.
 
 #pragma once
 

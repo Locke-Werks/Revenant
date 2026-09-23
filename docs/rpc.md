@@ -461,8 +461,10 @@ it was wrong.
 
 **The decoder lives in `core/rpc/server.cpp`**, one per receiver, built on the
 first call to either method. It joins that receiver's audio through
-`Engine::attach_audio_sink` and runs on the engine's completion thread inside
-the sink, under that route's own lock. That is the detector's shape, and the
+`Engine::attach_audio_sink`, whose sink copies each chunk onto a decode lane
+(`core/rpc/decode_lane.h`), and runs there under that route's own lock. WHAT
+THIS SENTENCE USED TO SAY: "runs on the engine's completion thread inside the
+sink"; "Threading" below has why it moved on 2026-09-23. That is the detector's shape, and the
 detector is only half an argument for it: the detector had nowhere else it
 could go, and RDS did. `core/engine` could have grown a per-receiver decode
 stage. Three things decided against it. `attach_audio_sink` is the composition
@@ -569,7 +571,7 @@ state: two sessions on one already share its centre, its filter and its
 squelch, and either of them calling `setVrxParams` clears the other's station
 too. Nobody would call that a bug, because the receiver is the shared thing
 and the decoder hangs off it. A per-session decoder would mean one decode per
-client per receiver on the completion thread, which is the cost the whole
+client per receiver on a decode lane, which is the cost the whole
 "nobody asked, nothing runs" arrangement exists to keep down, and it would
 make two clients disagree about a station that is one station. A client that
 needs a region of its own creates a receiver of its own. It is already
@@ -666,9 +668,11 @@ reading the list.
 `tetra` and `dmr` read their own mode's fine stage, at the rate each was written for,
 or a `raw` tap, and `m17` a `p25p1` receiver or a `raw` tap. A raw tap runs at
 the grid's channel rate, which nothing else caps, and a decoder's receive
-filter grows with the rate and runs on the completion thread that delivers
-every receiver's output: at 600 kS/s P25 took 602 ms of a core per second of
-input on the RTX 4090 machine, against 66 ms at 192000. So `subscribeDecoded`
+filter grows with the rate and runs on a decode lane other receivers'
+decoders share: at 600 kS/s P25 took 602 ms of a core per second of
+input on the RTX 4090 machine, against 66 ms at 192000. WHAT THE CLAUSE
+BEFORE THE FIGURES USED TO SAY: "runs on the completion thread that delivers
+every receiver's output", which it did until 2026-09-23. So `subscribeDecoded`
 refuses a raw tap above `kRawTapRateCap` in `core/rpc/decoders.h`, naming the
 cap and the mode to use instead, and the adapter refuses the same on its first
 chunk for `revenant-cli`. WHAT THIS PARAGRAPH'S PREDECESSOR USED TO SAY: "the
@@ -692,7 +696,7 @@ polled is an event missed. The two surfaces have different shapes on purpose.
 **Attaching is subscribing.** Nothing decodes until something subscribes, two
 subscribers to one decoder on one receiver share one instance, and the last
 leaving takes it off, which is `subscribePassband`'s and `subscribeAudio`'s
-rule and for their reason: a decoder costs the completion thread on every chunk.
+rule and for their reason: a decoder costs a decode lane on every chunk.
 An empty decoder name means the one named after the receiver's mode and
 `decoderResolved` says which ran; the mode chooses the channel filter and the
 decoder what is read out of it, so they are separate, and `ax25` reads an `nfm`
@@ -704,14 +708,17 @@ receiver cannot give, and a receiver outside the decoder's modes: `rtty` on a
 `wfm` receiver is told it needs `usb` or `lsb`, and `m17` on a `dstar` one that
 it needs `p25p1` or `raw`.
 
-**Where it runs.** On the engine's completion thread inside an audio sink
-joined through `attach_audio_sink`, exactly as the RDS decoder does, with the
-retune fence it uses: `setVrxParams` and `setSourceCenter` reset every decoder
+**Where it runs.** On a decode lane, fed by an audio sink joined through
+`attach_audio_sink` that copies each chunk onto the lane and returns, exactly
+as the RDS decoder is, with the retune fence it uses: `setVrxParams` and
+`setSourceCenter` reset every decoder
 on the receiver and discard chunks recorded at the old tuning. The decoder is
 built on the first chunk at the rate that chunk carries and never from
 `VrxStatus`, because the two complex paths deliver at different rates: a
 digital voice receiver's fine stage at 48000 or 72000, which `demodRate` states,
-and a raw tap at the channel rate, which `demodRate` does not.
+and a raw tap at the channel rate, which `demodRate` does not. WHAT THE FIRST
+SENTENCE USED TO SAY: "On the engine's completion thread inside an audio sink
+joined through `attach_audio_sink`". "Threading" below has the move.
 
 **The audio decoders take the same path.** To the engine a demodulator's audio
 and a complex tap are both a receiver's output through the same sink, one float
@@ -812,7 +819,9 @@ POCSAG capture: RTTY, SITOR-B and NAVTEX
 0.031 s, AX.25 0.031 s, POCSAG 0.021 s, M17 0.041 s over its own 4.12 s,
 PSK31 0.323 s, PSK63 0.353 s, CW 0.372 s and QPSK31 0.888 s. The last four mix
 and filter every audio sample before decimating, and QPSK31 runs a Viterbi
-decoder besides, all on the completion thread.
+decoder besides, all on a decode lane. WHAT THAT CLAUSE USED TO SAY: "all on
+the completion thread", which was where the server ran them when these were
+measured.
 
 **P25 voice is on `subscribeAudio`**, since 2026-09-23. `core/decode/p25p1.h`'s
 `P25Voice` turns a clear call's LDU voice frames into 8 kHz PCM; it is audio
@@ -1312,7 +1321,13 @@ for a match.
 
 ## Threading
 
-Four threads on the server side, and none of them is the same thread.
+Six kinds of thread on the server side, and none of them is the same thread:
+the caller's, the event loop, the engine's completion thread, the listing
+worker, and since 2026-09-23 the sigid lane and the decode lanes. "Who runs
+what, measured" below has the last two and why they exist.
+
+WHAT THIS SECTION'S FIRST SENTENCE USED TO SAY: "Four threads on the server
+side, and none of them is the same thread."
 
 The caller's thread constructs the `Server` and later stops it. The Cap'n Proto
 event loop, which the `Server` owns, is the only thread that may touch a
@@ -1410,6 +1425,124 @@ One subscription per `Client`. Subscribing again replaces the first. Two
 waterfalls in one process is a reason to want two rates, not two connections,
 and allowing two would put the drop policy somewhere it cannot be reasoned
 about.
+
+### Who runs what, measured
+
+After the playtest of 2026-09-23 the owner reported that decoding P25 off the
+dongle while signal identification had many tracks going made the engine chug
+and IMBE decoding troublesome, and asked for decoding, the display and signal
+identification to be disconnected so they cannot contend. The order of
+precedence he gave: the receivers being listened to first, the display next,
+signal identification with what is left.
+
+**How it was measured.** `tools/loadtest`, `revenant-loadtest`, runs an engine
+configured as `revenant-engine` configures itself, this server on an ephemeral
+port, and a client doing what `revenant-ui` does: the spectrum at every frame,
+detections polled four times a second, a `p25p1` receiver with its voice on
+`subscribeAudio`, its `p25p1` decoder on `subscribeDecoded` and its passband
+subscribed. It reports P25 LDUs verified (nine IMBE frames each), the voice
+stream against a playout at 8000 S/s held to wall time with a 50 ms lead,
+display rows per second, the detector's and the probes' work, CPU per named
+thread, and `Engine::load` and `Server::load` deltas. Scenes, at 2.16 MS/s:
+the labelled scene from `siggen labelled` (twelve emitters, P25 at -150 kHz),
+light; and the same summed with 300 random emitters from `siggen wideband` at
+the same noise floor, heavy, with four `nfm` receivers on audio and sixteen
+probes. Both played with `pace=1&flow=paced`, which makes the file lose a
+block the engine cannot take, as the dongle does. "Busy" is `--cpus 4 --burn
+4`: the process confined to four logical processors with four threads of
+arithmetic at normal priority beside it, standing in for a build or a test run
+on the same machine. A 30 s window after 8 s of warm-up, on the Ryzen 9 7950X
+and RTX 4090, with the owner's own engine running on the dongle beside it at
+about 38 percent of one core. Offered, from an unthrottled run with nothing
+else attached: 5.30 LDU/s on the light scene and 5.29 on the heavy.
+
+    revenant-loadtest "file:///<scene>.cf32?rate=2160000&format=cf32&center=450000000&pace=1&flow=paced" \
+      --p25 -150000 --passband --probes 16 --nfm -600000,-800000,550000,850000 \
+      --cpus 4 --burn 4 --warmup 8 --seconds 30
+
+**Before**, at fc9140a with the counters added:
+
+| | light | light, busy | heavy | heavy, busy (three runs) | heavy, busy, no sigID |
+| --- | --- | --- | --- | --- | --- |
+| LDU/s | 5.28 | 5.27 | 5.28 | 5.30, 5.25, 5.19 | 5.28 |
+| samples lost | 0 | 0 | 0 | 0, 262144, 393216 | 0 |
+| voice underruns | 0 | 0 | 0 | 4, 6, 4 | 0 |
+| voice starved, ms | 0 | 0 | 0 | 82, 144, 203 | 0 |
+| voice arrival jitter p99, ms | 4.5 | 31.3 | 17.9 | 82, 176, 235 | 31.5 |
+| completion thread busy, ms/s | 28.7 | 42.7 | 32.6 | 46.5, 46.1, 45.4 | 27.5 |
+| completion handler longest, ms | 6.8 | 43.6 | 6.7 | 14.8, 14.7, 14.8 | 14.7 |
+| probe worker CPU, % of a core | 6.7 | 11.6 | 57.3 | 52.2, 54.3, 58.8 | none |
+| probes characterised | 18 | 17 | 127 | 77, 80, 99 | none |
+| labelled tracks | 14 | 14 | 98 | 70, 75, 75 | none |
+
+**What contended was plain CPU, not a lock and not the GPU.** On the busy
+heavy runs the completion thread spent 26 ms/s in audio sinks, which were the
+two P25 decoders and the voice stream, and 17 ms/s in the spectrum sink, which
+was the detector, all serially on the one thread that retires every frame; the
+probe worker, at normal priority, took 52 to 59 percent of a core; and four
+other normal-priority threads wanted the same four processors. When the
+completion thread fell three frames behind, 91 ms at 65536 samples a block,
+the recording thread found no free frame slot and the paced source lost the
+block: four and six of them in two of the three runs. The same load with no
+detections polled, so no detector and no probes, lost nothing, and with the
+detector running but no probe receivers it lost nothing either. The
+detections poll was not waiting on the detector's lock for long, 2.2 ms in
+total over 114 polls at the worst, and the GPU wait was the same 13 to 31 ms/s
+in runs that lost blocks and runs that did not. The LDU count hardly moved,
+because six lost blocks are 182 ms of air, about one LDU; what an operator
+hears is the voice stream running dry, four to six times in 30 s for 82 to
+203 ms.
+
+**What changed.**
+
+- Every thread has a class, `core/thread_role.h`. Listening, above normal: the
+  source's delivery threads, the pool workers that copy its blocks, the
+  completion thread and the decode lanes. Display, normal: this loop. Signal
+  identification, below normal: the sigid lane and the probe worker.
+- The decoders, the P25 voice stream and RDS run on two decode lanes,
+  `core/rpc/decode_lane.h`, fed by sinks that copy the chunk and return. A
+  receiver's own audio, a copy into a queue, stays on the completion thread.
+- The detector and tier two run on the sigid lane in `core/rpc/server.cpp`,
+  fed by a spectrum sink that copies the frame into one of four slots and sheds
+  it when none is free. A poll and `sourceStats` read a copy the lane publishes
+  after each decision, so the loop never waits on the detector's lock.
+- Both sigID threads hold a CPU budget charged in their own CPU time,
+  `core/engine/cpu_budget.h`: a quarter of a core for the detector,
+  `ServerOptions::detector_cpu_budget`, and half a core for the probes,
+  `EngineConfig::probe_cpu_budget`. Past it the detector sheds frames and the
+  probes start later. On an unthrottled Demand source neither sheds; the
+  completion thread waits instead, which is the graph's own rule for a source
+  with no clock.
+
+**After**, the same runs:
+
+| | light | light, busy | heavy | heavy, busy (three runs) | heavy, busy, no sigID |
+| --- | --- | --- | --- | --- | --- |
+| LDU/s | 5.29 | 5.28 | 5.28 | 5.30, 5.31, 5.31 | 5.30 |
+| samples lost | 0 | 0 | 0 | 0, 0, 0 | 0 |
+| voice underruns | 0 | 0 | 1 | 0, 0, 0 | 0 |
+| voice starved, ms | 0 | 0 | 4.1 | 0, 0, 0 | 0 |
+| voice arrival jitter p99, ms | 4.6 | 2.7 | 17.4 | 2.6, 2.9, 2.6 | 2.5 |
+| completion thread busy, ms/s | 1.6 | 1.0 | 3.8 | 1.7, 1.8, 1.7 | 1.0 |
+| completion handler longest, ms | 0.20 | 0.10 | 0.73 | 0.12, 0.11, 0.09 | 0.08 |
+| probe worker CPU, % of a core | 6.6 | 0.8 | 48.3 | 0.6, 0.7, 0.5 | none |
+| probes characterised | 18 | 0 | 111 | 0, 0, 0 | none |
+| labelled tracks | 14 | 0 | 90 | 0, 0, 0 | none |
+
+The decode lanes took 26.5 ms/s between them on the busy heavy runs, the time
+the completion thread used to spend in audio sinks, with a chunk queued 0.005
+ms on average and 0.09 ms at the longest. The sigid lane consumed every frame,
+992 to 994 of them, at 1.1 to 2.2 percent of a core, and shed none. The one
+underrun, on the heavy run with the machine idle, was 4.1 ms long, and that
+run's arrival jitter, p99 17.4 ms, is the 17.9 ms the same run had before.
+
+**What it costs signal identification**, stated because it is the owner's
+order working rather than a side effect. With every processor busy, the probe
+worker gets almost nothing: no probe finished in any of the busy windows, so
+no track was labelled, where before the probes took half a core and labelled
+70 to 75. With the machine idle the half-core budget bounds the heaviest
+scene at 111 probes and 90 labels in 30 s against 127 and 98 with no budget.
+The detector itself kept up everywhere.
 
 ## Backpressure
 

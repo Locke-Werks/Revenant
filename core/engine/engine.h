@@ -271,6 +271,10 @@ struct EngineConfig {
     // Clamped to kMaxProbeReceivers.
     std::uint32_t probe_receivers = 0;
 
+    // ProbePoolConfig::cpu_budget: the most of one core the probe worker
+    // averages, a fraction above zero and at most one.
+    double probe_cpu_budget = 0.5;
+
     // Where each device's calibration is kept between sessions, keyed by its
     // serial. EMPTY KEEPS NOTHING: a calibration set on this engine applies
     // for the life of the open source and is not restored next time, which is

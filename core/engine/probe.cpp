@@ -18,7 +18,9 @@
 #include <utility>
 #include <vector>
 
+#include "core/engine/cpu_budget.h"
 #include "core/engine/graph.h"
+#include "core/engine/load_clock.h"
 #include "core/engine/spsc_ring.h"
 #include "core/thread_role.h"
 
@@ -35,6 +37,9 @@ constexpr std::chrono::milliseconds kWorkerPoll{10};
 // Requests and outcomes the rings hold. detect::TierTwo never has more than
 // the pool's size outstanding, so both are far past anything it produces.
 constexpr std::size_t kRingCapacity = 256;
+
+// CPU the worker's budget may hold at once. See Impl::budget.
+constexpr std::uint64_t kProbeBudgetBurstNs = 2'000'000'000;
 
 // THE CAPTURE HANDSHAKE
 //
@@ -299,10 +304,25 @@ struct ProbePool::Impl {
     std::atomic<std::uint32_t> busy{0};
     std::atomic<std::uint64_t> characterise_us{0};
 
+    // The budget in step(), which is the worker's alone; what the worker has
+    // spent finishing probes, in wall time and in CPU; and how often a waiting
+    // probe was held back.
+    //
+    // Two seconds of burst, which is a dwell: probes placed together finish
+    // together, sixteen of them about 0.4 s of CPU at once on a 300-emitter
+    // scene, and credit built up while their captures filled has to be able
+    // to pay for that. With half a second of burst the same scene labelled
+    // 66 tracks in 30 s against 98 with no budget, the credit an idle dwell
+    // earned being thrown away at the cap.
+    CpuBudget budget{0.5, kProbeBudgetBurstNs};
+    std::atomic<std::uint64_t> worker_us{0};
+    std::atomic<std::uint64_t> worker_cpu_us{0};
+    std::atomic<std::uint64_t> budget_waits{0};
+
     // --- the worker ---------------------------------------------------------
 
     void run() {
-        name_this_thread(L"revenant probe");
+        describe_this_thread(L"revenant probe", ThreadClass::SigId);
         for (;;) {
             {
                 std::unique_lock held(wake_lock);
@@ -355,6 +375,18 @@ struct ProbePool::Impl {
         }
 
         drain_requests();
+
+        // THE BUDGET, core/engine/cpu_budget.h. Every finish is charged the
+        // CPU it took, characterise() and identify() together, and a waiting
+        // probe starts only while the bucket has credit, so however busy the
+        // band is the worker averages no more than cpu_budget of one core.
+        // What that costs is probes, not correctness: tier two keeps at most
+        // the pool's size outstanding, so a slower worker means fewer probes
+        // a second and longer between answers.
+        if (!pending.empty() && !budget.may_start(load_clock_ns())) {
+            budget_waits.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         while (!pending.empty()) {
             Slot* free = choose_slot(pending.front().request);
             if (free == nullptr) {
@@ -519,6 +551,19 @@ struct ProbePool::Impl {
     }
 
     void finish(Slot& slot, std::uint32_t index) {
+        const std::uint64_t began = load_clock_ns();
+        const std::uint64_t cpu_began = this_thread_cpu_ns();
+        finish_timed(slot, index);
+        const std::uint64_t ended = load_clock_ns();
+        const std::uint64_t cpu = this_thread_cpu_ns() - cpu_began;
+        worker_us.fetch_add((ended - began) / 1000U, std::memory_order_relaxed);
+        worker_cpu_us.fetch_add(cpu / 1000U, std::memory_order_relaxed);
+
+        // See THE BUDGET in step().
+        budget.charge(cpu, ended);
+    }
+
+    void finish_timed(Slot& slot, std::uint32_t index) {
         Capture& capture = *slot.capture;
         ProbeOutcome outcome = blank_outcome(slot.request);
         outcome.slot = index;
@@ -653,6 +698,11 @@ Expected<std::unique_ptr<ProbePool>> ProbePool::create(Graph& graph,
     if (config.first_id == 0) {
         return fail("a probe pool's first id cannot be zero, which is no receiver");
     }
+    if (!(config.cpu_budget > 0.0) || config.cpu_budget > 1.0) {
+        return fail(std::format("a probe pool's CPU budget is a fraction of one core above zero "
+                                "and at most one, asked for {}",
+                                config.cpu_budget));
+    }
 
     std::unique_ptr<ProbePool> pool(new (std::nothrow) ProbePool());
     if (pool == nullptr) {
@@ -662,6 +712,7 @@ Expected<std::unique_ptr<ProbePool>> ProbePool::create(Graph& graph,
     Impl& impl = *pool->impl_;
     impl.graph = &graph;
     impl.config = config;
+    impl.budget = CpuBudget(config.cpu_budget, kProbeBudgetBurstNs);
     impl.next_id = config.first_id;
     impl.slots.resize(config.size);
 
@@ -743,6 +794,11 @@ ProbeStats ProbePool::stats() const {
     out.size = impl.config.size;
     out.characterise_ms_total =
         static_cast<double>(impl.characterise_us.load(std::memory_order_relaxed)) / 1000.0;
+    out.worker_ms_total =
+        static_cast<double>(impl.worker_us.load(std::memory_order_relaxed)) / 1000.0;
+    out.worker_cpu_ms_total =
+        static_cast<double>(impl.worker_cpu_us.load(std::memory_order_relaxed)) / 1000.0;
+    out.budget_waits = impl.budget_waits.load(std::memory_order_relaxed);
     return out;
 }
 
