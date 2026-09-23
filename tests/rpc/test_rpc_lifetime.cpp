@@ -343,5 +343,7 @@ TEST_CASE("a listener on a reaped receiver is told the session that owned it end
     CHECK(ending->reason().find("session that created this receiver ended") !=
           std::string::npos);
 
-    CHECK(harness.stop_engine().has_value());
+    const Status stopped = harness.stop_engine();
+    INFO(test::message_of(stopped));
+    CHECK(stopped.has_value());
 }
