@@ -533,6 +533,7 @@ instead: They run both kernels: vrx_fine mixes, filters and resamples to 48000,
     48000 or 72000 S/s, and vrx_demod's complex passthrough hands the result
     out. docs/modes.md has the table and tests/engine/test_engine_dv.cpp the
     measured comparison with the raw tap they used to get.
+
 phrase: It does not produce a third-party notices file. There is not one yet.
 phrase: There is no notices file. Checked: no NOTICE, no THIRD-PARTY-NOTICES
 phrase: LICENSE in this repository is GPL-3.0 and is the only licence text in the tree
