@@ -1,5 +1,10 @@
 // One receiver's strip in the rack: its colour, its name, where it is tuned,
-// its mode, a live meter, and mute and solo.
+// its mode, a live meter, a gain, and mute and solo. A click anywhere on it
+// that is not one of its controls focuses the receiver.
+//
+// Everything shown comes from one entry of EngineLink::rackEntries, which
+// ui/models/rack_link.cpp builds; the rules behind mute, solo and the gain
+// are models/receiver_rack.h.
 //
 // The meter's scale is models/level_meter.h, fixed rather than tracking the
 // signal, because a meter that rescales to the loudest thing shows every
@@ -14,19 +19,28 @@ import Revenant
 Rectangle {
     id: strip
 
-    property color tint: Theme.accent
-    property bool focused: false
+    required property var entry
+
+    readonly property color tint: entry.colour
+    readonly property bool focused: entry.focused
 
     implicitHeight: body.implicitHeight + 16
     radius: Theme.radius
-    color: Theme.control
+    color: strip.focused ? Theme.controlHover : Theme.control
     border.width: 1
-    border.color: strip.focused ? Qt.darker(strip.tint, 1.6) : Theme.border
+    border.color: strip.focused ? strip.tint : Theme.border
+
+    // Behind the controls, so a press on a button is the button's.
+    MouseArea {
+        anchors.fill: parent
+        cursorShape: strip.focused ? Qt.ArrowCursor : Qt.PointingHandCursor
+        onClicked: engineLink.focusReceiver(strip.entry.key)
+    }
 
     // The receiver's colour down the left edge, which is what ties the strip
-    // to its marker on the span.
+    // to its marker on the span. Wider on the focused one.
     Rectangle {
-        width: 4
+        width: strip.focused ? 6 : 4
         height: parent.height - 2
         x: 1
         y: 1
@@ -49,51 +63,72 @@ Rectangle {
             spacing: 6
 
             Label {
-                text: "VFO " + engineLink.receiverId
+                text: strip.entry.label
                 color: strip.tint
                 font.pixelSize: Theme.sizeBody
                 font.bold: true
             }
 
             Label {
-                text: UiRules.modeLabel(engineLink.receiverDemod).toUpperCase()
+                text: UiRules.modeLabel(strip.entry.mode).toUpperCase()
                 color: Theme.inkDim
                 font.pixelSize: Theme.sizeSmall
             }
 
             Item { Layout.fillWidth: true }
 
-            // Mute is the player's, since one receiver's audio is all the
-            // player carries; see AudioPane.qml for why that is.
+            // Heard at the client or not. Mute takes this receiver out of
+            // the mix; solo takes every other one out. Neither touches the
+            // engine beyond the subscription: a receiver nobody hears is not
+            // streamed.
             RButton {
                 implicitWidth: 26
                 flat: true
                 checkable: true
-                checked: audioPlayer.muted
+                checked: strip.entry.muted
                 text: "M"
                 tint: Theme.inkWarn
                 ink: Theme.inkDim
-                onClicked: audioPlayer.muted = !audioPlayer.muted
+                onClicked: engineLink.setReceiverMuted(strip.entry.key, !strip.entry.muted)
                 ToolTip.visible: hovered
                 ToolTip.delay: 500
-                ToolTip.text: "mute"
+                ToolTip.text: strip.entry.muted ? "unmute this receiver" : "mute this receiver"
             }
 
             RButton {
                 implicitWidth: 26
                 flat: true
-                enabled: false
+                checkable: true
+                checked: strip.entry.solo
                 text: "S"
+                tint: strip.tint
+                ink: Theme.inkDim
+                onClicked: engineLink.toggleReceiverSolo(strip.entry.key)
                 ToolTip.visible: hovered
                 ToolTip.delay: 500
-                ToolTip.text: "solo, once the window holds more than one receiver"
+                ToolTip.text: strip.entry.solo
+                              ? "stop soloing, so every unmuted receiver is heard"
+                              : "hear this receiver alone, muted or not"
+            }
+
+            RButton {
+                implicitWidth: 22
+                flat: true
+                text: "×"
+                ink: Theme.inkDim
+                onClicked: engineLink.removeRackReceiver(strip.entry.key)
+                ToolTip.visible: hovered
+                ToolTip.delay: 500
+                ToolTip.text: "remove this receiver"
             }
         }
 
-        Label {
-            text: (engineLink.receiverCenterHz / 1.0e6).toFixed(6) + " MHz"
-            color: Theme.ink
-            font.family: Theme.monoFont
+        Readout {
+            Layout.alignment: Qt.AlignLeft
+            widest: "0000.000000 MHz"
+            horizontalAlignment: Text.AlignLeft
+            text: (strip.entry.frequencyHz / 1.0e6).toFixed(6) + " MHz"
+            color: strip.entry.pending ? Theme.inkDim : Theme.ink
             font.pixelSize: 15
         }
 
@@ -108,20 +143,44 @@ Rectangle {
                 color: Theme.panelSolid
 
                 Rectangle {
-                    width: parent.width * UiRules.meterFraction(engineLink.receiverLevelDbfs)
+                    width: parent.width * UiRules.meterFraction(strip.entry.levelDbfs)
                     height: parent.height
                     radius: 2
-                    color: strip.tint
+                    color: strip.entry.heard ? strip.tint : Theme.inkOff
                 }
             }
 
             Readout {
                 widest: "no level yet"
-                text: UiRules.meterHasReading(engineLink.receiverLevelDbfs)
-                      ? engineLink.receiverLevelDbfs.toFixed(0) + " dBFS"
-                      : "no level yet"
-                color: Theme.inkDim
-                font.family: Theme.monoFont
+                text: strip.entry.pending ? "opening"
+                      : UiRules.meterHasReading(strip.entry.levelDbfs)
+                        ? strip.entry.levelDbfs.toFixed(0) + " dBFS"
+                        : "no level yet"
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        // The strip's share of the mix. Only the audio section's switch and
+        // the player's volume sit above it.
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RSlider {
+                Layout.fillWidth: true
+                implicitHeight: 18
+                from: 0
+                to: 1
+                stepSize: 0.025
+                value: strip.entry.gain
+                tint: strip.tint
+                enabled: strip.entry.heard
+                onMoved: engineLink.setReceiverGain(strip.entry.key, value)
+            }
+
+            Readout {
+                widest: "-40 dB"
+                text: strip.entry.gainText
                 font.pixelSize: Theme.sizeSmall
             }
         }

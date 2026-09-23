@@ -17,6 +17,7 @@
 pragma Singleton
 
 import QtQuick
+import Revenant
 
 QtObject {
     // The window's own background, near black so the colour map's dynamic
@@ -62,19 +63,19 @@ QtObject {
     // there is a trace behind it.
     readonly property color plate: "#e6060810"
 
-    // RECEIVER COLOURS, one per receiver in the order they were made, and the
-    // same colour on the span marker, the rack strip and the receiver's dial.
+    // RECEIVER COLOURS, one per rack slot, and the same colour on the span
+    // marker, the ruler's band, the rack strip and the focused receiver's
+    // dial. models/receiver_palette.h derives the eight and its test holds
+    // every pair apart in normal vision and in simulated protan, deutan and
+    // tritan vision, and keeps all of them off the detection magenta. Read
+    // from there so there is one copy.
     //
-    // The first is the azure the receiver marker has always been drawn in
-    // (kReceiverEdge in render/spectrum_item.cpp), chosen there because the
-    // colour map never produces it. The rest are spread in hue at similar
-    // lightness so none of them reads as louder than another. They have NOT
-    // been checked against a colour vision deficiency simulator, and the
-    // engine holds one receiver per window today, so only the first is drawn.
-    readonly property var receiverColours: [
-        "#80c4ff", "#ffa94d", "#69db7c", "#ffd43b",
-        "#b197fc", "#ff8787", "#63e6be", "#e599f7"
-    ]
+    // WHAT THIS USED TO SAY: that the eight had "NOT been checked against a
+    // colour vision deficiency simulator, and the engine holds one receiver
+    // per window today, so only the first is drawn". They had not, and under
+    // deutan the first and the last were 1.9 apart in CIEDE2000; this list
+    // replaced them.
+    readonly property var receiverColours: UiRules.receiverColours()
 
     // One sans for the interface and one monospace for every number an
     // operator reads as a number. Both ship with Windows 11, so nothing is

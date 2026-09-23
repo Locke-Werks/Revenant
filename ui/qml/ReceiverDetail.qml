@@ -35,7 +35,7 @@ import Revenant
 ColumnLayout {
     id: detail
 
-    readonly property color tint: Theme.receiverColours[0]
+    readonly property color tint: Theme.receiverColours[engineLink.focusedSlot]
     property bool expanded: false
 
     // The receiver's dial and the filter display, for the keys in

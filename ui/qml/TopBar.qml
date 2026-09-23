@@ -148,7 +148,7 @@ Rectangle {
             checked: bar.receiverWindow !== null && bar.receiverWindow.visible
             text: "receivers"
             ink: Theme.inkDim
-            tint: Theme.receiverColours[0]
+            tint: Theme.receiverColours[engineLink.focusedSlot]
             onClicked: {
                 if (bar.receiverWindow !== null)
                     bar.receiverWindow.toggle()
