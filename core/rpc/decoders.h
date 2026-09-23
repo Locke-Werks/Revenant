@@ -1713,9 +1713,13 @@ private:
 //                               character lost in both copies is U+FFFD,
 //                               clause 4.6.5's error character
 //   characters           int
-//   lost                 int    characters lost in both copies
+//   lost                 int    characters lost in both copies, or in the one
+//                               copy a single_copy character had
 //   from_rx              int    characters whose DX copy was lost and whose
 //                               RX copy was used, clause 4.3
+//   single_copy          int    characters flush decided from the DX copy
+//                               alone because the stream ended before the RX
+//                               copy, so only on a line flush produced
 //   phasing              int    sitor_b.h's count of phasings when the line
 //                               ended; a change is a new transmission
 //   ended                text   line_end, length, idle, new_transmission or
@@ -1752,44 +1756,29 @@ public:
         end_.observe(chunk);
         characters_.clear();
         decoder_.process(chunk.samples, characters_);
-
-        using decoders_detail::LineEnd;
-        for (const decode::SitorCharacter& c : characters_) {
-            const std::uint64_t at = base_.at(c.position);
-            if (line_.characters > 0 && c.phasing != phasing_) {
-                emit(chunk, LineEnd::NewTransmission, out);
-            }
-            phasing_ = c.phasing;
-            if (line_.characters > 0 && at > line_.last_sample + idle_samples()) {
-                emit(chunk, LineEnd::Idle, out);
-            }
-            if (!c.mutilated && (c.glyph == U'\r' || c.glyph == U'\n')) {
-                emit(chunk, LineEnd::LineEnd, out);
-                continue;
-            }
-            if (!c.mutilated && c.glyph == 0) {
-                continue;
-            }
-            line_.add(c.glyph, at);
-            lost_ += c.mutilated ? 1U : 0U;
-            from_rx_ += c.from_rx ? 1U : 0U;
-            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
-                emit(chunk, LineEnd::Length, out);
-            }
-        }
+        take(chunk, out);
         if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
-            emit(chunk, LineEnd::Idle, out);
+            emit(chunk, decoders_detail::LineEnd::Idle, out);
         }
         return {};
     }
 
-    // The line in progress. A character whose DX copy arrived and whose RX
-    // copy had not is still held by sitor_b.h, which has no flush, and goes
-    // with it: clause 4.2 sends the RX copy 280 ms behind the DX, so that is
-    // the last 280 ms of a stream cut off mid-transmission and nothing of one
-    // that ended on its own idle signals.
+    // The characters sitor_b.h still holds, then the line in progress.
+    // Clause 4.2 sends the RX copy 280 ms behind the DX, so a stream cut off
+    // mid-transmission ends with DX copies whose RX copies never came.
+    // sitor_b.h's flush decides each from its DX copy alone and marks it, and
+    // they join the line before it goes, counted in single_copy. A stream that
+    // ended on its own idle signals leaves none.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "A character whose DX copy arrived and
+    // whose RX copy had not is still held by sitor_b.h, which has no flush,
+    // and goes with it".
     void flush(std::vector<DecodedMessage>& out) override {
-        emit(end_.at_end(), decoders_detail::LineEnd::StreamEnd, out);
+        characters_.clear();
+        decoder_.flush(characters_);
+        const DecoderChunk at_end = end_.at_end();
+        take(at_end, out);
+        emit(at_end, decoders_detail::LineEnd::StreamEnd, out);
     }
 
     void reset() override {
@@ -1812,10 +1801,41 @@ private:
             decode::kSitorBaud);
     }
 
+    // characters_ into the line, closing it where a character says to. The
+    // messages a close produces are stamped with `chunk`.
+    void take(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
+        using decoders_detail::LineEnd;
+        for (const decode::SitorCharacter& c : characters_) {
+            const std::uint64_t at = base_.at(c.position);
+            if (line_.characters > 0 && c.phasing != phasing_) {
+                emit(chunk, LineEnd::NewTransmission, out);
+            }
+            phasing_ = c.phasing;
+            if (line_.characters > 0 && at > line_.last_sample + idle_samples()) {
+                emit(chunk, LineEnd::Idle, out);
+            }
+            if (!c.mutilated && (c.glyph == U'\r' || c.glyph == U'\n')) {
+                emit(chunk, LineEnd::LineEnd, out);
+                continue;
+            }
+            if (!c.mutilated && c.glyph == 0) {
+                continue;
+            }
+            line_.add(c.glyph, at);
+            lost_ += c.mutilated ? 1U : 0U;
+            from_rx_ += c.from_rx ? 1U : 0U;
+            single_copy_ += c.single_copy ? 1U : 0U;
+            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
+                emit(chunk, LineEnd::Length, out);
+            }
+        }
+    }
+
     void clear_line() {
         line_.clear();
         lost_ = 0;
         from_rx_ = 0;
+        single_copy_ = 0;
     }
 
     void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,
@@ -1832,6 +1852,8 @@ private:
             integer_field("characters", static_cast<std::int64_t>(line_.characters)));
         message.fields.push_back(integer_field("lost", static_cast<std::int64_t>(lost_)));
         message.fields.push_back(integer_field("from_rx", static_cast<std::int64_t>(from_rx_)));
+        message.fields.push_back(
+            integer_field("single_copy", static_cast<std::int64_t>(single_copy_)));
         message.fields.push_back(integer_field("phasing", static_cast<std::int64_t>(phasing_)));
         message.fields.push_back(text_field("ended", std::string(line_end_name(why))));
         message.fields.push_back(
@@ -1856,6 +1878,7 @@ private:
     decoders_detail::TextLine line_;
     std::size_t lost_ = 0;
     std::size_t from_rx_ = 0;
+    std::size_t single_copy_ = 0;
     std::uint64_t phasing_ = 0;
 };
 

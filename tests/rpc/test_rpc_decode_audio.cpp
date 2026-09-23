@@ -312,7 +312,41 @@ const std::vector<std::string> kSitorLines = {"CQ CQ DE N0CALL", "SITOR B TEST 4
                    kHfCentre};
 }
 
-const std::u32string kNavtexBody = U"GALE WARNING 042\r\nSW 8 TO 9.\r\n";
+// A SITOR-B transmission cut off mid-flow rather than closed: the air stops
+// on the RX slot after the last character's DX copy, so the RX copies of the
+// last two characters were never sent. `tail_seconds` of noise follow, which
+// the flush case keeps under half a 70 ms signal so the noise cannot complete
+// a signal of its own.
+[[nodiscard]] Expected<Capture> sitor_cut_capture(std::u32string_view text, double snr_2500_db,
+                                                  double tail_seconds) {
+    auto codes = siggen::ita2_encode_text(text);
+    if (!codes) {
+        return std::unexpected(codes.error());
+    }
+    siggen::SitorModConfig mod;
+    mod.rate = kFileRate;
+    mod.upper_sideband = true;
+    mod.amplitude = 1.0;
+    std::vector<std::uint8_t> slots = siggen::sitor_b_signals(mod, *codes);
+    // DX slot 2k carries DX signal k; the clause 4.6.1 line end is the first
+    // two traffic signals, ahead of the text's own.
+    const std::size_t last = mod.phasing_pairs + 2 + codes->size() - 1;
+    slots.resize(2 * last + 2);
+    auto audio = siggen::sitor_b_render_signals(mod, slots);
+    if (!audio) {
+        return std::unexpected(audio.error());
+    }
+    auto signal = sideband(padded(*audio, tail_seconds), true);
+    if (!signal) {
+        return std::unexpected(signal.error());
+    }
+    if (auto noisy = add_noise(*signal, snr_2500_db, tail_seconds); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"sitor_b_cut_usb", std::move(*signal), rpc::Demod::Usb, kHfCentre};
+}
+
+const std::u32string kNavtexBody =U"GALE WARNING 042\r\nSW 8 TO 9.\r\n";
 constexpr std::string_view kNavtexMessage = "GALE WARNING 042\r\nSW 8 TO 9.";
 
 [[nodiscard]] Expected<std::vector<std::uint8_t>> octets(const siggen::Ax25FrameSpec& spec) {
@@ -1558,7 +1592,33 @@ TEST_CASE("a SITOR-B line still open when its receiver goes arrives before ended
     CHECK(text_of(flushed, "ended") == "stream_end");
     CHECK(flushed.text == "LAST LINE");
     CHECK(integer_of(flushed, "lost") == 0);
+    CHECK(integer_of(flushed, "single_copy") == 0);
     WARN(std::format("sitor_b flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a SITOR-B line cut off before its last RX copies arrives whole before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // No closing alphas at all: the transmission stops two characters short
+    // of carrying their RX copies out. sitor_b.h's flush decides both from
+    // their DX copies; before the adapter called it, the line arrived as
+    // "LAST LI".
+    auto capture = sitor_cut_capture(U"CQ CQ DE N0CALL\r\nLAST LINE", kHighSnrDb, 0.03);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "sitor_b");
+    CHECK(has_line_starting(removed.before, "CQ CQ DE N0CALL"));
+    CHECK_FALSE(has_line_starting(removed.before, "LAST"));
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "sitor_b");
+    CHECK(text_of(flushed, "ended") == "stream_end");
+    CHECK(flushed.text == "LAST LINE");
+    CHECK(integer_of(flushed, "lost") == 0);
+    CHECK(integer_of(flushed, "single_copy") == 2);
+    WARN(std::format("sitor_b flushed \"{}\" with {} from one copy", flushed.text,
+                     integer_of(flushed, "single_copy")));
 }
 
 TEST_CASE("a NAVTEX message with no NNNN when its receiver goes arrives before ended",

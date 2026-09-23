@@ -156,6 +156,13 @@ struct SitorCharacter {
     // The DX copy was lost and the RX copy used.
     bool from_rx = false;
 
+    // Decided by flush from the DX copy alone, because the stream ended
+    // before the RX copy arrived. Clause 4.3 with one copy to choose from:
+    // the DX copy is taken if it checks, and the character is mutilated if
+    // it does not. It had half the protection the others had, which is why
+    // it is marked.
+    bool single_copy = false;
+
     // How many times the decoder had phased when this character was
     // decided. A change means a new transmission, or the same one found
     // again after a loss of phase, which is how a layer above tells that
@@ -183,6 +190,17 @@ public:
     // return or line feed has been received after phasing.
     void process(ConstRealSpan audio, std::vector<SitorCharacter>& out);
 
+    // For the end of the stream. Clause 4.2 sends the RX copy of a character
+    // 280 ms after its DX copy, so a stream cut off mid-transmission ends
+    // with up to three DX copies whose RX copies never came. Each is decided
+    // from its DX copy alone and appended with single_copy set, under the
+    // same rules process applies: phasing and service signals print nothing,
+    // and nothing prints before clause 4.6.4's first line end. The decoder
+    // then returns to stand-by, so a second call appends nothing. A
+    // transmission that ended on clause 4.6.7's idle signals has already
+    // carried every RX copy out and leaves nothing here.
+    void flush(std::vector<SitorCharacter>& out);
+
     [[nodiscard]] const SitorStats& stats() const { return stats_; }
     [[nodiscard]] bool phased() const { return phased_; }
 
@@ -193,6 +211,8 @@ private:
 
     void on_bit(std::uint8_t bit, SampleIndex sample, std::vector<SitorCharacter>& out);
     void on_signal(std::uint8_t signal, SampleIndex sample, std::vector<SitorCharacter>& out);
+    void print(const SitorSignal& chosen, bool lost, SampleIndex sample, bool from_rx,
+               bool single_copy, std::vector<SitorCharacter>& out);
     void stand_by();
 
     SitorConfig config_{};

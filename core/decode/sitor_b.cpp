@@ -328,6 +328,29 @@ void SitorBDecoder::on_signal(std::uint8_t signal, SampleIndex sample,
         return;
     }
 
+    print(chosen, lost, first.sample, from_rx, false, out);
+}
+
+void SitorBDecoder::flush(std::vector<SitorCharacter>& out) {
+    if (phased_) {
+        for (const Pending& waiting : dx_) {
+            const SitorSignal d = sitor_classify(waiting.signal);
+            // Clause 4.4.2, as in on_signal: phasing signal 2 in a DX slot is
+            // phasing and not a character.
+            if (d.kind == SitorSignal::Kind::Phasing2) {
+                continue;
+            }
+            // Clause 4.3 with one copy: it is the character if it checks.
+            const bool lost = d.kind == SitorSignal::Kind::Mutilated;
+            stats_.dx_mutilated += lost ? 1U : 0U;
+            print(d, lost, waiting.sample, false, true, out);
+        }
+    }
+    stand_by();
+}
+
+void SitorBDecoder::print(const SitorSignal& chosen, bool lost, SampleIndex sample, bool from_rx,
+                          bool single_copy, std::vector<SitorCharacter>& out) {
     if (!lost && chosen.kind != SitorSignal::Kind::Traffic) {
         // Service signals are not printed.
         return;
@@ -344,8 +367,9 @@ void SitorBDecoder::on_signal(std::uint8_t signal, SampleIndex sample,
     }
 
     SitorCharacter c;
-    c.position = first.sample;
+    c.position = sample;
     c.from_rx = from_rx;
+    c.single_copy = single_copy;
     c.phasing = stats_.phasings;
     if (lost) {
         // Clause 4.6.5.

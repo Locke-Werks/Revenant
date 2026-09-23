@@ -199,6 +199,73 @@ TEST_CASE("time diversity recovers what one copy loses", "[decode][sitor]") {
     CHECK(from_rx == 1);
 }
 
+TEST_CASE("flush decides the characters whose RX copy never came from their DX copy",
+          "[decode][sitor]") {
+    // The stream stops on the RX slot after the DX copy of the last
+    // character, which carries the RX copy of "F", so the RX copies of "G"
+    // and "H" are never sent. Clause 4.3 with one copy: take it if it
+    // checks. "G"'s is damaged, so it is mutilated rather than guessed.
+    auto codes = siggen::ita2_encode_text(U"ABCDEFGH");
+    REQUIRE(codes.has_value());
+    siggen::SitorModConfig mod;
+    auto slots = siggen::sitor_b_signals(mod, *codes);
+    // CR, LF and the letter shift come first, so "H" is character 10.
+    const auto dx_slot = [&](std::size_t i) { return 2 * (mod.phasing_pairs + i); };
+    slots.resize(dx_slot(10) + 2);
+    slots[dx_slot(9)] ^= 0x01U;  // "G": its only copy damaged
+    auto audio = siggen::sitor_b_render_signals(mod, slots);
+    REQUIRE(audio.has_value());
+    // Half a signal of silence, so the discriminator's delay does not cut
+    // into the last whole signal.
+    audio->insert(audio->end(), 1680, 0.0F);
+
+    auto decoder = decode::SitorBDecoder::create(decode::SitorConfig{});
+    REQUIRE(decoder.has_value());
+    std::vector<decode::SitorCharacter> got;
+    decoder->process(*audio, got);
+    INFO("before flush: \"" << text_of(got) << "\"");
+    CHECK(text_of(got) == "\r\nABCDEF");
+    for (const auto& c : got) {
+        CHECK_FALSE(c.single_copy);
+    }
+
+    const std::size_t decided = got.size();
+    const std::uint64_t dx_lost = decoder->stats().dx_mutilated;
+    decoder->flush(got);
+    INFO("after flush: \"" << text_of(got) << "\"");
+    CHECK(text_of(got) == "\r\nABCDEF#H");
+    REQUIRE(got.size() == decided + 2);
+    for (std::size_t i = decided; i < got.size(); ++i) {
+        CHECK(got[i].single_copy);
+        CHECK_FALSE(got[i].from_rx);
+        CHECK(got[i].position > got[i - 1].position);
+    }
+    CHECK(got[decided].mutilated);
+    CHECK_FALSE(got[decided + 1].mutilated);
+    CHECK(decoder->stats().dx_mutilated == dx_lost + 1);
+    CHECK_FALSE(decoder->phased());
+
+    // Stand-by afterwards, so nothing is handed over twice.
+    decoder->flush(got);
+    CHECK(got.size() == decided + 2);
+}
+
+TEST_CASE("flush after a transmission that ended on its idle signals appends nothing",
+          "[decode][sitor]") {
+    auto codes = siggen::ita2_encode_text(kText);
+    REQUIRE(codes.has_value());
+    auto audio = siggen::sitor_b_render(siggen::SitorModConfig{}, *codes);
+    REQUIRE(audio.has_value());
+    auto decoder = decode::SitorBDecoder::create(decode::SitorConfig{});
+    REQUIRE(decoder.has_value());
+    std::vector<decode::SitorCharacter> got;
+    decoder->process(*audio, got);
+    const std::size_t decided = got.size();
+    decoder->flush(got);
+    CHECK(got.size() == decided);
+    CHECK(text_of(got) == "\r\n" + utf8(kText));
+}
+
 TEST_CASE("a noise burst never prints a wrong character", "[decode][sitor]") {
     // Clause 4.2 spaces the copies 280 ms apart, so a burst shorter than
     // that can take at most one copy of any character, and the other copy

@@ -1246,3 +1246,10 @@ commit: "Decide QPSK31's held-back bits when the stream ends"
 instead: Psk31::flush decides the bits the Viterbi decoder held back and the
     PSK adapter's flush calls it before handing over the line; the symbols
     still in SymbolSync's last window are the part a flush cannot reach.
+
+phrase: is still held by sitor_b.h, which has no flush
+retired: 2026-09-23
+commit: "Decide SITOR-B characters from one copy when the stream ends"
+instead: SitorBDecoder::flush decides each DX copy still waiting for its RX
+    copy under clause 4.3 and marks it single_copy; the SITOR-B adapter's
+    flush calls it and counts them in the line's single_copy field.
