@@ -68,6 +68,7 @@ revenant_apply_warnings(revenant_rpc_client)
 
 add_library(revenant_rpc_server STATIC
     convert.cpp
+    listen.cpp
     server.cpp
 )
 
@@ -76,6 +77,13 @@ target_link_libraries(revenant_rpc_server
         revenant_rpc_client
         revenant_core
 )
+
+# listen.cpp calls Winsock directly to bind the port with SO_EXCLUSIVEADDRUSE,
+# which kj's own listen() does not. A Windows SDK import library, on the terms
+# the four above are.
+if(WIN32)
+    target_link_libraries(revenant_rpc_server PRIVATE ws2_32)
+endif()
 
 revenant_apply_warnings(revenant_rpc_server)
 

@@ -304,6 +304,7 @@
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/rpc/convert.h"
+#include "core/rpc/listen.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
 
@@ -2066,10 +2067,16 @@ void ServerImpl::serve(ServerOptions options) {
         // loop goes, so the ordering here is not style.
         auto io = kj::setupAsyncIo();
 
-        auto address = io.provider->getNetwork()
-                           .parseAddress(options.bind_address.c_str(), options.port)
-                           .wait(io.waitScope);
-        auto listener = address->listen();
+        // Not kj's own parseAddress and listen(), which set SO_REUSEADDR and
+        // on Windows let a second server bind this port beside the first.
+        // core/rpc/listen.h has the measurement.
+        auto exclusive =
+            listen_exclusive(*io.lowLevelProvider, options.bind_address, options.port);
+        if (!exclusive) {
+            announce(std::unexpected(with_context(exclusive.error(), "the RPC server")));
+            return;
+        }
+        auto listener = kj::mv(*exclusive);
 
         // Ephemeral when ServerOptions::port was zero, which is what the test
         // suite needs and why this is read back rather than echoed.

@@ -1145,6 +1145,45 @@ TEST_CASE("one engine serves one server, and is free again when it stops", "[gpu
     CHECK((*again)->port() != 0);
 }
 
+TEST_CASE("a second server cannot bind a port the first is listening on", "[gpu][rpc][m1]") {
+    REVENANT_NEEDS_GPU();
+
+    // kj's own listen() sets SO_REUSEADDR, which on Windows lets a second
+    // socket bind a port another is listening on, and before core/rpc/listen.h
+    // this create succeeded and both servers reported the same port. Two
+    // engines are needed because one engine refuses a second server on other
+    // grounds, which the case above covers and which would make this pass for
+    // the wrong reason.
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+    const std::uint16_t taken = harness.port();
+    REQUIRE(taken != 0);
+
+    engine::EngineConfig config;
+    config.gpu_index = -1;
+    config.channels = kChannels;
+    config.ring_seconds = 0.25;
+    auto other = engine::Engine::create(config);
+    INFO(test::message_of(other));
+    REQUIRE(other.has_value());
+
+    const rpc::Token token = test::test_token();
+    rpc::ServerOptions options;
+    options.port = taken;
+    options.token.assign(token.begin(), token.end());
+
+    auto second = rpc::Server::create(**other, options);
+    REQUIRE_FALSE(second.has_value());
+    INFO(second.error().message);
+    CHECK(second.error().message.find(std::format("127.0.0.1:{}", taken)) != std::string::npos);
+    CHECK(second.error().message.find("WSAEADDRINUSE") != std::string::npos);
+
+    // And the first is still the one answering.
+    auto info = harness.client().info();
+    INFO(test::message_of(info));
+    CHECK(info.has_value());
+}
+
 TEST_CASE("connect refuses what cannot be a connection", "[rpc][m1]") {
     const rpc::Token token = test::test_token();
 
