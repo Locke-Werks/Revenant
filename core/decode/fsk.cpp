@@ -120,10 +120,15 @@ Expected<LevelDiscriminator> LevelDiscriminator::create(const LevelDiscriminator
     if (!(config.tracking_bits >= 1.0)) {
         return fail("the level tracker needs at least one bit to average over");
     }
+    if (!(config.click_limit_levels == 0.0 || config.click_limit_levels > 1.0)) {
+        return fail("the level discriminator's limit must be zero, for none, or above one level");
+    }
 
     LevelDiscriminator d;
+    d.limit_levels_ = config.click_limit_levels;
     d.window_ = window_for(config.rate, config.symbol_rate);
     d.alpha_ = config.symbol_rate / (config.tracking_bits * static_cast<double>(config.rate));
+    d.settle_samples_ = static_cast<std::uint64_t>(std::ceil(1.0 / d.alpha_));
     d.reset();
     return d;
 }
@@ -144,7 +149,14 @@ void LevelDiscriminator::process(ConstRealSpan in, std::vector<float>& soft) {
     const double scale = 1.0 / static_cast<double>(window_);
 
     for (const float sample : in) {
-        const double x = static_cast<double>(sample);
+        double x = static_cast<double>(sample);
+        // Only once the trackers have had their own time constant to settle:
+        // the level starts from the first sample's share of an empty boxcar,
+        // and a limit drawn from it would hold the level down while it grew.
+        if (limit_levels_ > 0.0 && count_ >= settle_samples_ && level_ > 0.0) {
+            const double reach = limit_levels_ * level_;
+            x = std::clamp(x, mean_ - reach, mean_ + reach);
+        }
         sum_ += x - ring_[ring_pos_];
         ring_[ring_pos_] = x;
         ring_pos_ = (ring_pos_ + 1 == window_) ? 0 : ring_pos_ + 1;

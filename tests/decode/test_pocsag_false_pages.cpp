@@ -32,6 +32,12 @@
 // The 512 and 2400 bit/s decoders reported nothing from this audio before
 // or after. Noise alone, 40 hours: 8.1 pages an hour before, none after,
 // with either rule on its own also giving none.
+//
+// Later the same day core/decode/fsk.h's level discriminator began limiting
+// the discriminator's clicks, and with both rules on, whole pages at 8 dB
+// went from 113 to 206 of 240, and 218 with a budget of two. False pages at
+// 1200 bit/s: 1 at 6 dB, 5 at 5 dB with 2 clean, 1 at 4 dB, none at 8 and
+// 12 dB.
 
 #include <catch2/catch_test_macros.hpp>
 

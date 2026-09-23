@@ -153,6 +153,15 @@ struct LevelDiscriminatorConfig {
     // transmitter that keys up off frequency. 64 bits is two POCSAG code
     // words.
     double tracking_bits = 64.0;
+
+    // Where the input is limited before the boxcar, in multiples of the
+    // tracked level either side of the tracked mean; zero leaves it
+    // unlimited. See the class comment. An engineering choice, measured on
+    // the bench's POCSAG trials at 1200 bit/s, pages lost of 4096 at 8 dB in
+    // 2500 Hz: 1996 unlimited, 412 at 2.0, and between 435 and 579 at every
+    // other limit tried from 1.5 to 3.0. The level sits a little under the
+    // deviation, so 2.0 is a little under twice it.
+    double click_limit_levels = 2.0;
 };
 
 // For audio that is already the data waveform. A one-bit boxcar, the matched
@@ -165,6 +174,20 @@ struct LevelDiscriminatorConfig {
 // offset on the audio, which is why the mean is removed rather than assumed
 // zero: a receiver 1 kHz off a 4.5 kHz deviation signal otherwise slices a
 // fifth of the way up one eye.
+//
+// WHY THE INPUT IS LIMITED
+//
+// Below its threshold an FM discriminator clicks: the noise carries the phase
+// once round the origin, and the output spikes by a whole cycle's worth of
+// frequency within a few samples. A one-bit boxcar spreads that cycle over the
+// bit, where it is a quarter of POCSAG's 4.5 kHz deviation at 1200 bit/s and
+// half of it at 2400, so a click beside a noisy bit flips it, and a few
+// together make a code word the BCH code cannot correct. No legitimate input
+// goes further from the mean than the deviation, so everything past a margin
+// beyond the tracked level is a click or the noise, and is cut before the
+// boxcar sees it. Of the 7 pages in 8192 the bench lost at 10 and 11 dB at
+// 1200 bit/s, 5 were a message code word with three or more bits wrong and 2
+// an address with two; limited, none are lost.
 class LevelDiscriminator {
 public:
     LevelDiscriminator() = default;
@@ -192,6 +215,8 @@ private:
     double mean_ = 0.0;
     double level_ = 0.0;
     bool primed_ = false;
+    double limit_levels_ = 0.0;
+    std::uint64_t settle_samples_ = 0;
 };
 
 // ---------------------------------------------------------------------------
