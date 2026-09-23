@@ -1938,6 +1938,239 @@ not name: a finer grid buys narrower fine filters and lowers
 decision for when this is built, against measurements rather than against
 this paragraph.
 
+### The probe receiver, built and measured
+
+Built 2026-09-23. `core/engine/probe.h` is the pool, `core/detect/tier_two.h`
+decides which tracks it looks at, and `revenant-cli --detect` prints what it
+found in a last column.
+
+**What a probe is.** `Demod::Raw` built through the fine stage: the graph sets
+`VrxStageRequest::fine_stage_complex_tap` for a `VrxRole::Probe` receiver and
+the stage factory builds a `DemodStage` for it instead of declining it to the
+raw tap. That is the factory decision the section above left open, and it
+needed no kernel: `core/shaders/vrx_demod.comp` already has a Raw passthrough,
+bit-exact against its twin in `tests/reference/test_vrx.cpp`. An ordinary Raw
+receiver keeps the raw tap. A probe is left out of `vrx_ids`, every public
+receiver method refuses its id, and `set_source_center` cancels what it is
+collecting rather than carrying it across the retune.
+
+**The numbers, each a choice.**
+
+- Pool: `EngineConfig::probe_receivers`, four in `revenant-cli`
+  (`--detect-probes`), at most sixteen. A receiver once built is kept, so the
+  next probe in its bucket is a retune.
+- Buckets: 1500 S/s times a power of two, up to 192000. A probe runs at the
+  smallest bucket at least four times the track's occupied bandwidth and at
+  least 12000 S/s, and never above the grid's channel rate.
+- Passband: half the bucket, centred. That is the widest band whose
+  demodulation rate is exactly the bucket, and because the residual never
+  exceeds a quarter of the channel rate, `place()` never clamps it, the tap
+  count never moves, and a retune inside a bucket is always legal.
+  `tests/engine/test_engine_probe.cpp` walks every bucket across a whole
+  channel spacing and finds no clamp. So the pool is one probe per bucket, as
+  the section above predicted, and not narrow, medium and wide.
+- Dwell: two seconds, and never fewer than the characteriser's 16384 samples.
+  12000 S/s is the lowest bucket that holds that many in two seconds. On a grid
+  whose channels run slower, the 3000 S/s of a 96 kS/s source over 64 channels,
+  the probe runs at the channel rate and the dwell stretches to 5.46 s.
+- Schedule: oldest unclassified first, and not round robin, which would spend
+  the pool on tracks already answered. A Live track never probed goes first,
+  oldest birth first; one whose answer could not drive anything waits ten
+  seconds and then queues behind every new one; one with a family is not
+  probed again. Held and Merged tracks are skipped: one has no transmission and
+  the other is inside another track's band.
+
+**What the track carries.** `Track::classification` is the family of the most
+recent probe `characterise::may_drive_detection` accepted, with its
+`classification_confidence` and `symbol_rate_hz`. `Track::last_probe` holds
+every answer, refused or not, and `Track::probes` counts them.
+`Detector::record_probe` is the only writer, and nothing the detector decides
+reads any of it: `tests/detect/test_detector.cpp` runs two detectors on
+bit-identical frames, tells one what probes found, and every track's id, state,
+centre, width, confidence and margin come out the same in both.
+
+#### What it costs
+
+On the device, per probe per 65536-sample source block, from
+`bench throughput --demod raw`, which times a probe since this change, on the
+RTX 4090:
+
+| grid | probe | per block | per second of source |
+| --- | --- | --- | --- |
+| 2.4 MS/s, 64 channels | 12000 S/s | 10.7 us | 0.39 ms |
+| 2.4 MS/s, 64 channels | 48000 S/s | 7.8 us | 0.29 ms |
+| 2.4 MS/s, 8 channels | 192000 S/s | 9.1 us | 0.33 ms |
+| 20 MS/s, 64 channels | 12000 S/s | 16.5 us | 5.0 ms |
+| 96 kS/s, 64 channels | 3000 S/s | 5.8 us | 0.0085 ms |
+| 96 kS/s, 16 channels | 12000 S/s | 6.8 us | 0.010 ms |
+
+An NFM receiver on the first grid costs 9.2 us a block on the same rig. Four
+probes cost four times one to within 1.3 percent, so the cost is linear in the
+pool size. The pool is paid whether or not a probe is collecting, because a
+kept receiver is dispatched every block: four at the floor bucket on the
+shipped 2.4 MS/s grid is 1.6 ms of GPU a second.
+
+On the host, `characterise()` runs on the pool's own worker thread: 12 to 17 ms
+an extract at 12000 S/s, 31 ms at 24000, 58 to 85 ms at 48000 and 6.7 ms on the
+3000 S/s HF grid. Across the bus a probe is eight bytes a sample, 96 KB/s at the
+floor bucket; `core/engine/engine.h` carries the amendment to its promise.
+
+**A probe counts stream samples and is placed on the wall clock.** The worker
+places receivers and notices a full capture on a 10 ms poll. An unthrottled
+file source on this machine moved a twelve second synthetic scene through the
+GPU in 20 ms, so every probe was placed after the stream it was meant to read
+had gone. The tests run at four times realtime, and `revenant-cli` says so
+when a file is unthrottled.
+
+#### One probe per emitter, at its own centre and width
+
+`probe survey: one probe per emitter` in `tests/engine/test_engine_probe.cpp`,
+hidden: ten slots 50 kHz apart on a 600 kS/s source over 16 channels, one
+emitter of each family plus an empty slot, three seeds at each SNR in the
+emitter's own occupied bandwidth. Correct, wrong and unknown, where a call
+`may_drive_detection` refuses counts as unknown:
+
+| family | right answer | 30 dB | 20 dB | 10 dB | 5 dB |
+| --- | --- | --- | --- | --- | --- |
+| cw | carrier | 3/0/0 | 2/0/1 | 0/0/3 | 0/0/3 |
+| am | carrier | 3/0/0 | 3/0/0 | 3/0/0 | 0/3/0 |
+| nfm | analogue FM | 2/1/0 | 3/0/0 | 0/3/0 | 0/3/0 |
+| usb | unknown | 0/3/0 | 0/3/0 | 0/3/0 | 0/3/0 |
+| lsb | unknown | 0/3/0 | 0/3/0 | 0/3/0 | 0/3/0 |
+| fsk2 | FSK | 3/0/0 | 3/0/0 | 2/0/1 | 0/0/3 |
+| bpsk | PSK | 3/0/0 | 3/0/0 | 3/0/0 | 0/3/0 |
+| qpsk | PSK | 3/0/0 | 3/0/0 | 3/0/0 | 0/2/1 |
+| ofdm | OFDM | 3/0/0 | 3/0/0 | 3/0/0 | 3/0/0 |
+| empty | unknown | 0/0/3 | 0/0/3 | 0/0/3 | 0/0/3 |
+
+**The empty slot is unknown twelve times in twelve**, through the real fine
+stage, which is the test the section on narrowing asked for.
+
+At 20 dB and above everything the characteriser has a family for is named
+correctly, BPSK and QPSK with order 2 and 4 and 1199.7 to 1200.1 baud against
+1200. **Two-tone SSB is wrong at every level**: PSK of order 2 at 1200.1 baud and
+confidence 1.00. 1200 Hz is the gap between its tones, 700 and 1900 Hz; two
+tones square to a line at their difference, which the symbol-rate detector reads
+as a clock, and the M-th power law lights at exponent two. Its spectral
+concentration reads 0.50 against 0.06 for real BPSK in the same run, and nothing
+in the PSK branch reads concentration. Below 20 dB NFM goes to PSK at 1000 baud,
+its modulating tone, by the same mechanism; at 5 dB AM does too, and BPSK and
+QPSK come back OFDM at 0.77 to 0.82, the cyclic-prefix bar "The OFDM branch
+still fires on noise" records as the owner's to choose.
+
+#### What the detector hands it, which is the harder table
+
+`probe survey: tier two across the synthetic families`, hidden: the same scenes
+at 30, 20 and 10 dB, the detector running on the engine's frames and tier two
+probing its tracks with a pool of four. Every track alive at the end of each
+scene, scored against the emitter whose band it sits in:
+
+| family | tracks | probed | correct | wrong | unknown |
+| --- | --- | --- | --- | --- | --- |
+| cw | 3 | 3 | 3 | 0 | 0 |
+| am | 21 | 21 | 21 | 0 | 0 |
+| nfm | 57 | 57 | 0 | 57 | 0 |
+| usb | 18 | 18 | 0 | 18 | 0 |
+| lsb | 18 | 15 | 0 | 15 | 0 |
+| fsk2 | 60 | 15 | 1 | 8 | 6 |
+| bpsk | 9 | 3 | 3 | 0 | 0 |
+| qpsk | 9 | 3 | 3 | 0 | 0 |
+| ofdm | 9 | 3 | 3 | 0 | 0 |
+| empty | 0 | 0 | 0 | 0 | 0 |
+
+**Every NFM track is wrong, and the probe is not what is wrong.** The detector
+reports NFM as its Bessel comb, one track per line 146 to 183 Hz wide, and a
+probe sized to a line is a 12000 S/s extract centred on one sideband of an
+11 kHz signal. It sees an off-centre fragment and names PSK or FSK at 1000 or
+2000 baud, the modulating tone and its double. The same emitter probed at its
+own centre and width is named correctly, in the table above. The FSK tones do
+the same thing from the other side: each wandering tone is its own short track
+and reads as a carrier. What was measured is that "What separates AM from SSB
+from CW lives in the relationship between the lines" holds for tier two as well
+as tier one.
+
+**Time to first classification**, over the same runs: 5.2 to 6.1 s from a
+track's birth on average, 2.4 s at best, which is the birth rule plus one dwell,
+and 9.7 s at worst. From the start of the scene to the first family on any of an
+emitter's tracks: 3.5 s for the carriers and AM, 4.3 s for NFM, 8.2 to 8.3 s for
+SSB and BPSK, and 10.5 s for QPSK and OFDM. The spread is the queue: sixteen to
+twenty tracks are born within a decision of each other, the oldest-first order
+breaks the tie by id, ids run up in frequency, and a pool of four takes five
+rounds of two seconds to reach the top of the span.
+
+#### Real HF, through the 24-bit path
+
+The six recordings in `docs/recordings.md`, read natively as cs24, the first
+120 s of each at four times realtime, default thresholds, pool of four, once on
+the 64 channels `revenant-cli` pins and once with `--channels 16`, which is
+what `--channels 0` chooses with a centre given:
+
+    revenant-cli "file:///C:/Users/vexam/projects/SDR Recordings/KF4FIC_wideband_14000_14350kHz_20170821_1603UT.wav?center=14175000" \
+        --detect --channels 16 --duration 120 --pace 4
+
+| band, hour | grid | born | characterised | too wide | lost with the track | answers named | first family |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 40 m 1359 | 64 | 22 | 17 | 5 | 9 | carrier 8 | 8.0 s |
+| 40 m 1501 | 64 | 13 | 8 | 5 | 4 | carrier 4 | 8.0 s |
+| 40 m 1603 | 64 | 28 | 18 | 9 | 6 | carrier 11, psk 1 (0) | 8.1 s |
+| 20 m 1359 | 64 | 5 | 2 | 14 | 1 | carrier 1 | 8.2 s |
+| 20 m 1501 | 64 | 45 | 29 | 28 | 19 | carrier 8, psk 2 (0) | 12.0 s |
+| 20 m 1603 | 64 | 91 | 52 | 27 | 18 | carrier 27, psk 3 (0), fsk 1, unknown 3 | 10.4 s |
+| 40 m 1359 | 16 | 16 | 15 | 2 | 0 | carrier 6, ofdm 5, psk 2 (1), unknown 2 | 5.0 s |
+| 40 m 1501 | 16 | 13 | 9 | 15 | 0 | carrier 7, unknown 2 | 5.6 s |
+| 40 m 1603 | 16 | 23 | 20 | 6 | 0 | carrier 14, psk 3 (2), unknown 3 | 4.8 s |
+| 20 m 1359 | 16 | 10 | 3 | 10 | 0 | carrier 3 | 4.1 s |
+| 20 m 1501 | 16 | 33 | 25 | 22 | 0 | carrier 15, psk 9 (2), unknown 1 | 7.1 s |
+| 20 m 1603 | 16 | 59 | 48 | 19 | 0 | carrier 31, psk 12 (3), unknown 5 | 4.8 s |
+
+"Too wide" and "characterised" count probes, so a track retried after ten
+seconds counts again. "Lost with the track" is an answer that came back for a
+track the detector had already dropped. The family counts are every answer the
+probes gave over the run, with the number the detector was allowed to report in
+brackets where that differs; the first-family column is the mean from a track's
+birth to its first reported family.
+
+**Nothing here is scored.** There is no ground truth for these recordings, so
+there is no correct or wrong column. What can be read off:
+
+- **Carriers are most of what is named**, 59 of 69 answers on the 64-channel
+  grid and 76 of 120 on the 16-channel one, which is what "What the two
+  measurements agree about" found by hand on the same bands.
+- **The PSK calls on HF are mostly refused.** None of the six on the
+  64-channel grid carried a symbol rate, so all six were flagged and held back;
+  on the 16-channel grid 8 of 26 carried one and were reported.
+- **OFDM five times on 40 m at 1359 UT**, on one grid and not the other. That is
+  the cyclic-prefix bar this document already records as firing on noise and as
+  the owner's to choose; nothing here was done about it.
+- **The 64-channel grid costs tier two most of its answers.** Its 3000 S/s
+  channels hold a 5.46 s dwell and nothing wider than 750 Hz, and 57 of 126
+  characterised probes came back after their track had gone. At 16 channels
+  every dwell is 2 s, none were lost, and the first family arrived in 4.1 to
+  7.1 s against 8.0 to 12.0 s.
+
+#### What is left for the owner
+
+Three things this lane measured and did not decide, each with the options:
+
+1. **Two-tone SSB reads as confident PSK and may drive detection.** A consistency
+   test in the PSK branch between the symbol rate and the spectrum, since a
+   linear modulation at 1200 baud cannot hold half its power in three 8 Hz bins;
+   or a tone-pair check that attributes a cyclic line at the spacing of the two
+   strongest spectral lines to the tones; or leaving it, because voice SSB is not
+   two tones and has not been measured. Each is a change to `core/characterise`.
+2. **Line-spectrum emitters are probed line by line.** Probe what
+   `detect::LineGrouper` groups rather than single tracks, which needs the gap
+   nobody has chosen; or refuse, in tier two, a family whose symbol rate is wider
+   than the track it was measured on, which would have refused every wrong NFM
+   and SSB call in the second table (1000 to 2000 baud on 146 to 183 Hz tracks),
+   would not touch the FSK tones read as carriers, and would not catch SSB probed
+   at its own 2.7 kHz width; or leave the unit a track, as the task that built it
+   asked.
+3. **The HF grid revenant-cli pins is a poor one for probes.** At 64 channels a
+   96 kS/s source runs 3000 S/s channels, so nothing wider than 750 Hz can be
+   probed and a dwell is 5.46 s; `--channels 0` gives 16 channels and 12000 S/s
+   at a coarser 5.86 Hz a bin.
+
 ### Confidence, and "unknown" as a real answer
 
 The confidence threshold is the operator's, alongside the detection threshold.
