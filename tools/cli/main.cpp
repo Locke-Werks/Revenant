@@ -71,6 +71,7 @@
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/groups.h"
+#include "core/detect/tier_two.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
 #include "core/dsp/vrx_reference.h"
@@ -481,6 +482,12 @@ struct Options {
     // sweep that survives it.
     double detect_occupied = 0.0;
 
+    // Probe receivers for tier two, which --detect turns on: the engine
+    // places them on live tracks, characterises what they collect, and the
+    // table prints the answer per track. Zero switches tier two off and costs
+    // nothing; see core/engine/probe.h for what four cost.
+    std::uint32_t detect_probes = 4;
+
     // Absolute hertz to characterise. A raw receiver is placed there and its
     // complex baseband is handed to core/characterise.
     //
@@ -625,6 +632,19 @@ void print_usage()
         "                      neither says a track is real.\n"
         "                      Turns the spectrum stage on by itself, so it needs\n"
         "                      neither --vrx nor --spectrum.\n"
+        "                      The last column is tier two: the engine puts a probe\n"
+        "                      receiver on each live track, oldest unclassified first,\n"
+        "                      collects two seconds of its baseband and characterises it.\n"
+        "                      It reads family, symbol rate and confidence, or \"unknown\"\n"
+        "                      when a probe ran and named nothing, or \"-\" before one has.\n"
+        "                      A family the characteriser itself refuses to let drive\n"
+        "                      detection is shown in brackets and changes nothing.\n"
+        "                      A PROBE COUNTS STREAM SECONDS AND IS PLACED ON WALL ONES, so\n"
+        "                      an unthrottled file outruns it; give a file --pace or\n"
+        "                      --realtime when the last column matters.\n"
+        "  --detect-probes <n> Probe receivers for tier two, default 4, 0 for none.\n"
+        "                      Each is a receiver the GPU runs on every block, whether it\n"
+        "                      is collecting or not.\n"
         "  --characterise <hz> Ask what modulation is at this frequency. Places a raw\n"
         "                      receiver there, collects one coarse channel of complex\n"
         "                      baseband and hands it to core/characterise, which answers\n"
@@ -993,6 +1013,24 @@ void print_usage()
                 return fail("--detect-split-gap takes a whole number of bins from 1 to 65535");
             }
             options.detect_split_gap = static_cast<std::uint32_t>(*bins);
+            options.detect = true;
+            continue;
+        }
+
+        if (arg == "--detect-probes") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto count = parse_integer(*text, arg);
+            if (!count) {
+                return std::unexpected(count.error());
+            }
+            if (*count < 0 || *count > static_cast<std::int64_t>(engine::kMaxProbeReceivers)) {
+                return fail(std::format("--detect-probes takes 0 to {} receivers",
+                                        engine::kMaxProbeReceivers));
+            }
+            options.detect_probes = static_cast<std::uint32_t>(*count);
             options.detect = true;
             continue;
         }
@@ -1851,6 +1889,24 @@ public:
         std::uint32_t state;
         std::uint32_t channel;
 
+        // Tier two, off the track: the family the detector reports with its
+        // symbol rate and confidence, how many probes have answered, and the
+        // most recent answer whether or not it was allowed to drive anything.
+        // Families as detect::Classification's value, so the block stays
+        // trivially copyable for the ring.
+        std::uint32_t tier_family;
+        double tier_confidence;
+        double tier_symbol_rate;
+        std::uint32_t tier_probes;
+        std::uint32_t tier_last_family;
+        double tier_last_confidence;
+        double tier_last_symbol_rate;
+
+        // Where the pool is with this track when no answer is on it yet:
+        // kTierIdle, kTierProbing, or one plus the engine::ProbeStatus the
+        // last probe ended with.
+        std::uint32_t tier_status;
+
         // How many tracks cleared the confidence bar at the decision this
         // block came from, which is not the number of rows in it once more
         // clear it than a block can carry. Written identically into every
@@ -1912,9 +1968,11 @@ public:
 
     // group_gap is zero for no grouping, which is every run that did not ask
     // for --detect-groups.
+    // probes is the engine whose pool tier two submits to, or null for no
+    // tier two, which is every run with --detect-probes 0.
     [[nodiscard]] static Expected<std::unique_ptr<DetectView>> create(
         const detect::DetectorConfig& config, const engine::SpectrumGeometry& geometry,
-        Hertz group_gap)
+        Hertz group_gap, engine::Engine* probes)
     {
         auto detector = detect::Detector::create(config, geometry);
         if (!detector) {
@@ -1924,6 +1982,16 @@ public:
         std::unique_ptr<DetectView> view(new (std::nothrow) DetectView());
         if (view == nullptr) {
             return fail("could not allocate the track list");
+        }
+
+        if (probes != nullptr) {
+            auto tier_two =
+                detect::TierTwo::create(detect::TierTwoConfig{.source_rate = config.source_rate});
+            if (!tier_two) {
+                return std::unexpected(with_context(tier_two.error(), "tier two"));
+            }
+            view->tier_two_ = std::move(*tier_two);
+            view->probes_ = probes;
         }
 
         if (group_gap > 0) {
@@ -1985,6 +2053,16 @@ public:
         decisions_.fetch_add(1, std::memory_order_relaxed);
         const detect::FrontEndObservation front_end = front_end_.observation();
 
+        // Tier two, here and nowhere else, because the pool wants one thread
+        // submitting and taking and this is the thread that owns the tracks.
+        // A refusal is counted rather than returned: a sink error ends the
+        // run, and a full request ring is not a reason to stop listening.
+        if (tier_two_.has_value()) {
+            if (auto stepped = tier_two_->step(*detector_, *probes_); !stepped) {
+                tier_two_errors_.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
         // The bar is counted past the point the block fills up. A full block
         // is the common case on a broadcast band: the RTL-SDR at 98.1 MHz put
         // 64 rows, which is kRows exactly, in every table of a five second
@@ -2017,6 +2095,14 @@ public:
                 .silent_seconds = seconds_of(track.silent_samples()),
                 .state = static_cast<std::uint32_t>(track.state),
                 .channel = track.channel_valid ? track.channel : 0xFFFF'FFFFU,
+                .tier_family = static_cast<std::uint32_t>(track.classification),
+                .tier_confidence = track.classification_confidence,
+                .tier_symbol_rate = track.symbol_rate_hz,
+                .tier_probes = track.probes,
+                .tier_last_family = static_cast<std::uint32_t>(track.last_probe.family),
+                .tier_last_confidence = track.last_probe.confidence,
+                .tier_last_symbol_rate = track.last_probe.symbol_rate_hz,
+                .tier_status = tier_status(track.id),
             };
             ++used;
         }
@@ -2098,6 +2184,42 @@ public:
     }
 
     [[nodiscard]] const detect::DetectorStats& stats() const { return detector_->stats(); }
+
+    static constexpr std::uint32_t kTierIdle = 0;
+    static constexpr std::uint32_t kTierProbing = 0xFFFF'FFFFU;
+
+    // Tier two's own counters, or null when it is off. Read after the engine
+    // has stopped, the same as stats() above.
+    [[nodiscard]] const detect::TierTwoStats* tier_two_stats() const
+    {
+        return tier_two_.has_value() ? &tier_two_->stats() : nullptr;
+    }
+    [[nodiscard]] bool tier_two() const { return tier_two_.has_value(); }
+    [[nodiscard]] std::uint64_t tier_two_errors() const
+    {
+        return tier_two_errors_.load(std::memory_order_relaxed);
+    }
+
+    // The live tracks at the end of the run, with everything tier two left
+    // on them. After the engine has stopped only.
+    [[nodiscard]] std::span<const detect::Track> final_tracks() const
+    {
+        return detector_->tracks();
+    }
+
+    // Row::tier_status for one track. The completion thread while running,
+    // any thread once the engine has stopped.
+    [[nodiscard]] std::uint32_t tier_status(std::uint64_t track_id) const
+    {
+        if (!tier_two_.has_value()) {
+            return kTierIdle;
+        }
+        if (tier_two_->probing(track_id)) {
+            return kTierProbing;
+        }
+        const auto last = tier_two_->last_status(track_id);
+        return last ? static_cast<std::uint32_t>(*last) + 1U : kTierIdle;
+    }
 
     // Read after the engine has stopped, the same as stats() above.
     [[nodiscard]] const detect::LineGrouper* grouper() const
@@ -2185,6 +2307,9 @@ private:
     // Completion thread only, beside the detector whose arrays they read.
     detect::FrontEndMonitor front_end_;
     std::optional<detect::LineGrouper> grouper_;
+    std::optional<detect::TierTwo> tier_two_;
+    engine::Engine* probes_ = nullptr;
+    std::atomic<std::uint64_t> tier_two_errors_{0};
     std::unique_ptr<engine::SpscRing<Snapshot>> ring_;
     SampleRate rate_ = 0;
 
@@ -2262,7 +2387,53 @@ struct CharacteriseCollector {
 // One track, as a line. Frequencies to the hertz, because a detection an
 // operator is about to click is a frequency they may have to type somewhere
 // else.
-[[nodiscard]] std::string track_line(const DetectView::Row& row)
+// A tier-two family with what came with it: "psk 1200 Bd 0.99", "carrier
+// 0.87". The symbol rate only when one was found, because a zero there would
+// read as a measurement of zero.
+[[nodiscard]] std::string family_text(std::uint32_t family, double symbol_rate_hz,
+                                      double confidence)
+{
+    std::string text = detect::classification_name(static_cast<detect::Classification>(family));
+    if (symbol_rate_hz > 0.0) {
+        text += std::format(" {:.0f} Bd", symbol_rate_hz);
+    }
+    text += std::format(" {:.2f}", confidence);
+    return text;
+}
+
+// The tier-two column. Three states that look alike in a lazier table and
+// are not alike: "-" is a track no probe has reached yet, "unknown" is one a
+// probe reached and could name nothing on, and a family in brackets is one
+// the characteriser named and refused to let drive anything, which the
+// detector kept and did not report. Before any answer, "probing" is one a
+// receiver is collecting for now, and "too wide" is one wider than any probe
+// this grid's channels can carry, which on the 3000 S/s channels of a 96 kS/s
+// source over 64 is anything past 750 Hz.
+[[nodiscard]] std::string tier_two_text(const DetectView::Row& row)
+{
+    if (row.tier_probes == 0) {
+        if (row.tier_status == DetectView::kTierProbing) {
+            return "probing";
+        }
+        if (row.tier_status != DetectView::kTierIdle) {
+            return engine::probe_status_name(
+                static_cast<engine::ProbeStatus>(row.tier_status - 1U));
+        }
+        return "-";
+    }
+    if (row.tier_family != 0) {
+        return family_text(row.tier_family, row.tier_symbol_rate, row.tier_confidence);
+    }
+    if (row.tier_last_family != 0) {
+        return "(" +
+               family_text(row.tier_last_family, row.tier_last_symbol_rate,
+                           row.tier_last_confidence) +
+               ", refused)";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string track_line(const DetectView::Row& row, bool tier_two)
 {
     std::string channel = "  -";
     if (row.channel != 0xFFFF'FFFFU) {
@@ -2270,18 +2441,20 @@ struct CharacteriseCollector {
     }
     std::string held;
     if (row.silent_seconds > 0.0) {
-        held = std::format(" +{:.1f}s", row.silent_seconds);
+        held = std::format("+{:.1f}s", row.silent_seconds);
     }
     const std::string concentration =
         row.shape_measured ? std::format("{:>5.2f}", row.concentration) : std::string("    -");
     const std::string balance =
         row.shape_measured ? std::format("{:>5.2f}", row.balance) : std::string("    -");
     return std::format(
-        "  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.2f}  {}  {}  {:>6.1f}s  ch {}{}",
+        "  #{:<4} {:<7}{:>16}  {:>11}  {:>7.1f} dB  {:>5.2f}  {:>6.2f}  {}  {}  {:>6.1f}s  ch {}  "
+        "{:<6}  {}",
         row.id, detect::track_state_name(static_cast<detect::TrackState>(row.state)),
         format_hz(static_cast<Hertz>(std::llround(row.center_hz))),
         format_hz(static_cast<Hertz>(std::llround(row.bandwidth_hz))), row.snr_db, row.confidence,
-        row.margin, concentration, balance, row.age_seconds, channel, held);
+        row.margin, concentration, balance, row.age_seconds, channel, held,
+        tier_two ? tier_two_text(row) : std::string{});
 }
 
 // The groups core/detect/groups.h is following, one line per group.
@@ -2359,11 +2532,12 @@ struct CharacteriseCollector {
 // Printed with each table rather than once at startup, because the table
 // refreshes in place and a legend that scrolled away an hour ago is not a
 // legend.
-[[nodiscard]] std::string track_header()
+[[nodiscard]] std::string track_header(bool tier_two)
 {
-    return std::format("  {:<5}{:<7}{:>16}  {:>11}  {:>10}  {:>5}  {:>6}  {:>6}  {:>5}  {:>7}  {}",
-                       "#id", "state", "centre", "bandwidth", "snr", "conf", "margin", "conc",
-                       "bal", "age", "ch");
+    return std::format(
+        "  {:<5}{:<7}{:>16}  {:>11}  {:>10}  {:>5}  {:>6}  {:>6}  {:>5}  {:>7}  {:<6}  {:<6}  {}",
+        "#id", "state", "centre", "bandwidth", "snr", "conf", "margin", "conc", "bal", "age", "ch",
+        "held", tier_two ? "tier two" : "");
 }
 
 [[nodiscard]] std::string level_bar(double dbfs)
@@ -3071,6 +3245,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // rate.
     config.pace = options.pace >= 0.0 ? options.pace : (options.play.empty() ? 0.0 : 1.0);
 
+    // Before the engine is created, because the pool is built with the graph.
+    config.probe_receivers = options.detect ? options.detect_probes : 0;
+
     auto made = engine::Engine::create(config);
     if (!made) {
         return std::unexpected(with_context(made.error(), "creating the engine"));
@@ -3151,7 +3328,8 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             detect_config.occupied_power_fraction = options.detect_occupied;
         }
 
-        auto view = DetectView::create(detect_config, geometry, options.detect_groups);
+        auto view = DetectView::create(detect_config, geometry, options.detect_groups,
+                                       options.detect_probes > 0 ? &eng : nullptr);
         if (!view) {
             return std::unexpected(view.error());
         }
@@ -3177,6 +3355,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                      "a threshold calibrated against an average cannot be applied before there "
                      "is one",
                      detect_config.average_seconds);
+        if (options.detect_probes == 0) {
+            std::println("  tier two        off, --detect-probes 0");
+        } else {
+            const auto floor = engine::probe_shape(1, eng.info().channel_rate);
+            std::println("  tier two        {} probe receivers, oldest unclassified live track "
+                         "first; {}",
+                         options.detect_probes,
+                         floor ? std::format("{:.1f} s of baseband at {} S/s or more per probe",
+                                             floor->seconds, floor->rate)
+                               : floor.error().message);
+            if (config.pace == 0.0 &&
+                eng.source_capabilities().flow != source::FlowControl::Paced) {
+                std::println("                  this source is unthrottled and will outrun the "
+                             "probes; --pace 1 or --realtime lets them keep up");
+            }
+        }
     }
 
     std::println("");
@@ -3830,10 +4024,10 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                              source_seconds, over_bar, over_bar == 1 ? "" : "s",
                              options.detect_threshold_db, options.detect_confidence, capped);
                 if (!rows.empty()) {
-                    std::println("{}", track_header());
+                    std::println("{}", track_header(detector->tier_two()));
                 }
                 for (const DetectView::Row& row : rows) {
-                    std::println("{}", track_line(row));
+                    std::println("{}", track_line(row, detector->tier_two()));
                 }
                 if (detector->grouping()) {
                     const auto groups = track_groups(detector->group_rows());
@@ -4441,6 +4635,89 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                          ? 100.0 * detector->microseconds_per_frame() * 1.0e-6 *
                                static_cast<double>(detector->frames()) / source_seconds
                          : 0.0);
+
+        // Tier two's run, in three parts: what the pool did, what came of
+        // it, and what the tracks alive at the end were left saying.
+        if (const detect::TierTwoStats* tier = detector->tier_two_stats(); tier != nullptr) {
+            const engine::ProbeStats pool = eng.probe_stats();
+            std::println("tier two  {} probes submitted, {} characterised, {} too wide, {} "
+                         "unplaced, {} cancelled, {} failed",
+                         tier->submitted, pool.characterised, pool.too_wide, pool.unplaced,
+                         pool.cancelled, pool.failed);
+            std::println("  receivers       {} of {} built, {} probes built one and {} retuned "
+                         "one in place, characterise {:.1f} ms per extract",
+                         pool.receivers, pool.size, pool.builds, pool.retunes,
+                         pool.characterised == 0
+                             ? 0.0
+                             : pool.characterise_ms_total /
+                                   static_cast<double>(pool.characterised));
+            std::println("  answers         {} recorded on a track, {} named a family the "
+                         "detector reports, {} refused by characterise::may_drive_detection, "
+                         "{} came back for a track that had gone",
+                         tier->recorded, tier->accepted, tier->refused_by_characterise,
+                         tier->orphaned);
+            // Every answer over the run by what it named, and in brackets how
+            // many of those the detector was allowed to report, because the
+            // tracks alive at the end are a small and late part of it.
+            std::string by_family;
+            for (std::size_t i = 0; i < detect::kClassificationCount; ++i) {
+                if (tier->named[i] == 0) {
+                    continue;
+                }
+                by_family += std::format(
+                    "{}{} {}", by_family.empty() ? "" : ", ",
+                    detect::classification_name(static_cast<detect::Classification>(i)),
+                    tier->named[i]);
+                if (i != 0 && tier->accepted_as[i] != tier->named[i]) {
+                    by_family += std::format(" ({} reported)", tier->accepted_as[i]);
+                }
+            }
+            if (!by_family.empty()) {
+                std::println("  named           {}", by_family);
+            }
+            if (tier->first_classifications > 0) {
+                std::println("  first family    {} tracks, {:.2f} s after birth on average, "
+                             "{:.2f} s at best and {:.2f} s at worst",
+                             tier->first_classifications,
+                             tier->first_classification_seconds_total /
+                                 static_cast<double>(tier->first_classifications),
+                             tier->first_classification_seconds_min,
+                             tier->first_classification_seconds_max);
+            }
+            if (detector->tier_two_errors() != 0) {
+                std::println("  REFUSED         {} submissions the pool had no room for",
+                             detector->tier_two_errors());
+            }
+
+            // What the tracks alive at the end say, one line each for the
+            // ones a probe reached. The table above samples an instant the
+            // display thread picked; this is the state the run ended in.
+            std::size_t unprobed = 0;
+            std::size_t alive = 0;
+            for (const detect::Track& track : detector->final_tracks()) {
+                ++alive;
+                if (track.probes == 0) {
+                    ++unprobed;
+                }
+            }
+            std::println("  at the end      {} tracks, {} never reached by a probe", alive,
+                         unprobed);
+            for (const detect::Track& track : detector->final_tracks()) {
+                DetectView::Row row{};
+                row.tier_status = detector->tier_status(track.id);
+                row.tier_family = static_cast<std::uint32_t>(track.classification);
+                row.tier_confidence = track.classification_confidence;
+                row.tier_symbol_rate = track.symbol_rate_hz;
+                row.tier_probes = track.probes;
+                row.tier_last_family = static_cast<std::uint32_t>(track.last_probe.family);
+                row.tier_last_confidence = track.last_probe.confidence;
+                row.tier_last_symbol_rate = track.last_probe.symbol_rate_hz;
+                std::println("    #{:<5} {:>16}  {:>11}  {:>6.1f} dB  {} probe{}  {}", track.id,
+                             format_hz(track.center), format_hz(track.bandwidth),
+                             track.snr_2500_db, track.probes, track.probes == 1 ? " " : "s",
+                             tier_two_text(row));
+            }
+        }
     }
 
     bool any_counter = false;
