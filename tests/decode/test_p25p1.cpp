@@ -751,6 +751,56 @@ TEST_CASE("a header data unit round trips through C4FM with no errors", "[decode
     CHECK(second.header->talkgroup_id == 0x02A7);
 }
 
+TEST_CASE("a header split across two calls is held until it has arrived", "[decode][p25]") {
+    // The round trip above feeds the whole capture in one call, which is the
+    // one blocking in which a data unit can never straddle a call. The engine
+    // hands a receiver's stream over one block at a time, and until
+    // 2026-09-22 a Header Data Unit whose sync and NID were in one call and
+    // whose body was in the next came back with no header and was never
+    // tried again. The split below lands in the middle of the first header.
+    siggen::P25HeaderMessage message;
+    message.network_access_code = 0x293;
+    message.header = sample_header(false);
+
+    auto dibits = siggen::p25_header_message_dibits(message);
+    REQUIRE(dibits.has_value());
+    std::vector<std::uint8_t> stream = *dibits;
+    stream.insert(stream.end(), dibits->begin(), dibits->end());
+
+    siggen::P25ModConfig mod;
+    mod.rate = kRate;
+    auto samples = siggen::p25_render_dibits(mod, stream);
+    REQUIRE(samples.has_value());
+
+    decode::P25Config config;
+    config.rate = kRate;
+    auto decoder = decode::P25Phase1::create(config);
+    REQUIRE(decoder.has_value());
+
+    // Ten samples a symbol at 48000, so symbol 200 of the 396 in the header.
+    const std::size_t split = 200 * static_cast<std::size_t>(kRate / 4'800);
+    REQUIRE(split < samples->size());
+    const std::span<const dsp::Complex32> all(*samples);
+
+    std::vector<decode::P25Frame> frames;
+    REQUIRE(decoder->process(all.first(split), frames).has_value());
+    CHECK(frames.empty());
+    REQUIRE(decoder->process(all.subspan(split), frames).has_value());
+
+    INFO("frames recovered: " << frames.size());
+    REQUIRE_FALSE(frames.empty());
+    CHECK(frames.front().nid.duid == static_cast<std::uint8_t>(P25Duid::HeaderDataUnit));
+    REQUIRE(frames.front().header.has_value());
+    CHECK(frames.front().header->talkgroup_id == 0x02A7);
+
+    // Reported once, not once without a header and again with one.
+    std::size_t headers = 0;
+    for (const decode::P25Frame& frame : frames) {
+        headers += frame.nid.duid == static_cast<std::uint8_t>(P25Duid::HeaderDataUnit) ? 1U : 0U;
+    }
+    CHECK(headers == 2);
+}
+
 TEST_CASE("an encrypted header is identified and its payload is left alone", "[decode][p25]") {
     // docs/modes.md: where a frame is encrypted, say so on the status surface
     // and stop. The talkgroup and the network are in clear either way, which
