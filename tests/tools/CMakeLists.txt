@@ -63,6 +63,51 @@ if(TARGET bench)
         PASS_REGULAR_EXPRESSION "\"decoded_count\": 8,"
     )
 
+    # Every decoder subject in tools/bench/mode_subjects.h, run small: two
+    # points, four trials each, so a subject cannot rot between nightly runs.
+    # The high point is well above the mode's crossing and every trial there
+    # must decode; the low point is on the curve's slope and must show errors,
+    # which is what proves the noise is reaching the decoder. No rate is
+    # asserted: the curve belongs to the nightly, which compares it against
+    # tests/baselines/ber-vs-snr-<mode>.json. Measured on 2026-09-23: every
+    # entry under a second on the RTX 4090 workstation.
+    set(bench_mode_smoke
+        "rtty:-6:2"
+        "ax25:8:16"
+        "pocsag-512:6:12"
+        "pocsag-1200:8:14"
+        "pocsag-2400:10:16"
+        "sitor-b:-5:2"
+        "navtex:-4:1"
+        "psk31:-10:-2"
+        "psk63:-7:0"
+        "qpsk31:-10:-2"
+        "cw:-8:6"
+        "m17:16:22"
+        "p25p1:16:26"
+        "dstar:16:24"
+        "tetra:18:26"
+    )
+    foreach(entry IN LISTS bench_mode_smoke)
+        string(REPLACE ":" ";" parts "${entry}")
+        list(GET parts 0 mode)
+        list(GET parts 1 low)
+        list(GET parts 2 high)
+        math(EXPR step "${high} - ${low}")
+        add_test(
+            NAME bench_sweeps_${mode}
+            COMMAND bench sweep --mode ${mode}
+                    --snr-start ${low} --snr-stop ${high} --snr-step ${step}
+                    --trials 4 --seed 7 --quiet
+        )
+        set_tests_properties(bench_sweeps_${mode} PROPERTIES
+            LABELS "tools"
+            TIMEOUT 600
+            PASS_REGULAR_EXPRESSION "\"decoded_count\": 4,[\r\n ]+\"snr_db\": ${high}\\.000000"
+            FAIL_REGULAR_EXPRESSION "\"points\": \\[[\r\n ]+{[\r\n ]+\"ber\": 0\\.000000000000e\\+00"
+        )
+    endforeach()
+
     # The throughput command, run small, as a smoke test and nothing more.
     #
     # There is no performance threshold here and there must not be one. Every
