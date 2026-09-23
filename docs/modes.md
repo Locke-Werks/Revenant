@@ -1084,6 +1084,22 @@ discriminator's clicks make symbols wrong with full confidence.
 the round trips, at 48 and 24 kHz, 250 Hz off frequency and with the
 discriminator inverted.
 
+Noise alone started M17 transmissions until 2026-09-23: over the wire, two
+LSFs, a BERT burst and two packet bursts in 2.5 s, and through a 12.5 kHz
+channel at decode level 1615 LSFs and 9808 frames an hour, none of them real.
+`tests/decode/test_m17_noise.cpp` has the measurement and three rules now hold
+it to none in two hours. An LSF or BERT burst starts a transmission only behind
+32 symbols of the 1.4.1 preamble rather than eight. A transmission is tracked
+only through the bursts clause 2.4 lets it carry: after an LSF, stream or
+packet bursts, one mode to a transmission, and the end marker, and never BERT,
+which is two symbols from a stream burst and was where noise kept a false
+transmission alive; after a BERT preamble, BERT and the end marker. And a
+stream joined late needs a second frame whose Frame Number is one more than
+the first's. At 12 dB in 9 kHz, twelve transmissions of 50 frames gave 596
+payloads and 11 LSFs right against 592 and 11 before, and at 14 dB all 600 and
+12 before and after. At 10 dB, 482 payloads against 487: a transmission lost
+mid-stream now needs two good frames in a row to be joined again.
+
 Not done, and why. Codec 2 voice in the stream payload is not decoded; the
 digital voice table above covers it. Packet and BERT frames are recognised by
 their sync bursts and not decoded. BERT's PRBS9 receiver in Appendix G was read
