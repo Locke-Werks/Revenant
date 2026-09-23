@@ -32,11 +32,23 @@ ColumnLayout {
             font.bold: true
         }
 
-        Label {
-            text: (engineLink.receiverCenterHz / 1.0e6).toFixed(6) + " MHz"
-            color: Theme.ink
-            font.pixelSize: Theme.sizeTitle
-            font.bold: true
+        // The receiver's own dial, in the receiver's colour. Its limits are
+        // the span, because a receiver outside the span is one the engine
+        // removes. A step is a move by hand, so it goes through tuneReceiver
+        // and not the detection entry point: there is no measurement behind
+        // where the operator wheeled it to.
+        FrequencyDial {
+            value: engineLink.receiverCenterHz
+            low: engineLink.spanLowHz
+            high: engineLink.spanHighHz
+            tint: Theme.receiverColours[0]
+            pixelSize: 20
+            onStepped: (hz) => engineLink.tuneReceiver(hz, "")
+            onTyped: (text) => {
+                const hz = engineLink.parseHz(text)
+                if (hz > 0)
+                    engineLink.tuneReceiver(hz, "")
+            }
         }
 
         // The mode, as the eight buttons an operator actually

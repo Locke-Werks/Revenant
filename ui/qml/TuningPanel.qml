@@ -77,42 +77,22 @@ ColumnLayout {
             font.bold: true
         }
 
-        RTextField {
-            id: tuneField
+        // THE DIAL, BOUND TO WHERE THE RADIO IS. The text box it replaced
+        // was seeded from sourceCenterHz and deliberately not bound, because
+        // a binding rewrote the box under an operator halfway through
+        // typing every time a retune landed. The dial has no such problem:
+        // the digits are a reading and typing happens in an editor of its
+        // own that opens empty, so the reading can follow the radio.
+        FrequencyDial {
+            id: tuneDial
 
-            Layout.preferredWidth: 150
             enabled: engineLink.sourceCanRetune
-            font.pixelSize: Theme.sizeTitle
-            placeholderText: "95.1 or 95.1M"
-            selectByMouse: true
-
-            // Seeded from where the radio is, not bound. A binding
-            // would rewrite the box under an operator who is halfway
-            // through typing, every time a retune landed.
-            //
-            // AND NOT ONLY AT Component.onCompleted, because the
-            // window comes up before the engine does: the ordinary
-            // case is a client started first, or started while the
-            // engine is restarting, and at that moment sourceCenterHz
-            // is zero. So the seed is retried on the tuning signal,
-            // and ONLY while the box is empty, which is what keeps it
-            // from overwriting anything typed.
-            Component.onCompleted: tuneField.seed()
-
-            function seed() {
-                if (tuneField.text.length === 0 && engineLink.sourceCenterHz > 0)
-                    tuneField.text = (engineLink.sourceCenterHz / 1.0e6).toFixed(6)
-            }
-
-            Connections {
-                target: engineLink
-                function onSourceTuningChanged() { tuneField.seed() }
-            }
-
-            onAccepted: {
-                if (engineLink.tuneSource(tuneField.text))
-                    tuneField.selectAll()
-            }
+            value: engineLink.sourceCenterHz
+            low: engineLink.sourceTuneLowHz
+            high: engineLink.sourceTuneHighHz
+            placeholder: "95.1 or 95.1M"
+            onStepped: (hz) => engineLink.tuneSourceHz(hz)
+            onTyped: (text) => engineLink.tuneSource(text)
         }
 
         // What the text resolves to, before it is sent. Red when it
@@ -120,11 +100,11 @@ ColumnLayout {
         // pressing return does nothing useful.
         Label {
             Layout.minimumWidth: 0
-            visible: tuneField.enabled && tuneField.text.length > 0
-            text: engineLink.tuneTextValid(tuneField.text)
-                  ? "→ " + engineLink.previewTune(tuneField.text)
+            visible: tuneDial.editing && tuneDial.editText.length > 0
+            text: engineLink.tuneTextValid(tuneDial.editText)
+                  ? "→ " + engineLink.previewTune(tuneDial.editText)
                   : "not a frequency"
-            color: engineLink.tuneTextValid(tuneField.text)
+            color: engineLink.tuneTextValid(tuneDial.editText)
                    ? Theme.inkDim : Theme.inkBad
             font.pixelSize: Theme.sizeBody
             elide: Text.ElideRight
@@ -159,11 +139,7 @@ ColumnLayout {
                     anchors.margins: -3
                     enabled: engineLink.sourceCanRetune
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        engineLink.tuneSourceHz(parent.modelData.hz)
-                        tuneField.text =
-                            (parent.modelData.hz / 1.0e6).toFixed(6)
-                    }
+                    onClicked: engineLink.tuneSourceHz(parent.modelData.hz)
                 }
             }
         }
