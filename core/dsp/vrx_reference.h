@@ -879,7 +879,7 @@ struct Passband {
 // the planner builds a filter for are one piece of arithmetic rather than
 // two copies of it.
 //
-// The three digital voice modes round up in steps of complex_tap_rate_step
+// The four digital voice modes round up in steps of complex_tap_rate_step
 // rather than of the audio rate, so for them `audio_rate` is checked and
 // otherwise not read: a P25 receiver lands on 48000 and a TETRA one on 72000
 // whatever audio rate the engine was configured with. plan_vrx calls this; so does vrx_shape_for, which is
@@ -1077,7 +1077,7 @@ struct VrxPlan {
     // the four complex taps. The raw tap is not a demodulator: it hands out
     // complex baseband at the receiver's bandwidth, so decimating it to 48 kHz
     // would throw away most of what it exists to expose, and its output rate
-    // is the demodulation rate. The three digital voice modes are the same
+    // is the demodulation rate. The four digital voice modes are the same
     // shape, at the rate complex_tap_rate_step names for each. This is the
     // rate that belongs in an AudioChunk, and it is the rate the indices
     // passed to demod_block are counted in.

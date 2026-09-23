@@ -1022,7 +1022,7 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
         case engine::Demod::Lsb: return Passband{-params.bandwidth, 0};
     }
 
-    return fail(std::format("resolve_passband: demodulator {} is not one of the eleven",
+    return fail(std::format("resolve_passband: demodulator {} is not one of the twelve",
                             static_cast<std::uint32_t>(params.demod)));
 }
 
@@ -1261,7 +1261,7 @@ Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame) {
             // a fallback.
             return floor_rate;
 
-        // The three digital modes are complex taps, so nothing detects them
+        // The four digital modes are complex taps, so nothing detects them
         // here and the reach term would be the whole story, except that the
         // thing on the other end of the tap has a floor of its own. Each
         // decoder in core/decode refuses fewer than two samples per symbol,
@@ -1405,8 +1405,8 @@ SampleRate complex_tap_rate_step(std::uint32_t mode) {
 
 float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation) {
     // The same exhaustive-switch guard as its two neighbours above, for the
-    // same reason: unity is correct for nine of the eleven modes and is
-    // therefore what a twelfth would silently inherit. The two discriminator
+    // same reason: unity is correct for ten of the twelve modes and is
+    // therefore what a thirteenth would silently inherit. The two discriminator
     // cases break out to the scaling below; a value that is no enumerator at
     // all falls through with them and is caught by the deviation test, since
     // fm_deviation returns zero for it.

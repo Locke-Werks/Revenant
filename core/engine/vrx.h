@@ -749,7 +749,7 @@ struct VrxPlacement {
 // than a different signal", and the answer it gave, false, was wrong for the
 // reason this paragraph now gives.
 //
-// No default case. A twelfth demodulator has to answer this question here
+// No default case. A thirteenth demodulator has to answer this question here
 // rather than inherit an answer, which is the same rule
 // dsp::default_passband states for its own table.
 [[nodiscard]] constexpr bool clamp_breaks_demodulator(Demod mode) {

@@ -197,7 +197,7 @@ struct StageOutput {
 
     // Whether a pair of floats is one complex sample rather than two audio
     // channels. The graph's own raw tap sets it, and so does a DemodStage
-    // for the three digital voice modes, which hand out complex baseband
+    // for the four digital voice modes, which hand out complex baseband
     // too. WHAT THIS USED TO SAY: "Only the graph's own raw tap sets it",
     // true until those modes got a fine stage on 2026-09-22.
     //
