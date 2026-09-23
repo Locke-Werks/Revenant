@@ -31,8 +31,10 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -101,6 +103,45 @@ struct P25HeaderMessage {
 // exactly as a real transmitter does.
 [[nodiscard]] Expected<std::vector<std::uint8_t>> p25_header_message_dibits(
     const P25HeaderMessage& message);
+
+// A voice message as clause 5.1 and Figure 5-2 lay it out: an optional
+// header, then LDU1 and LDU2 alternating, nine voice frames each, then a
+// simple terminator.
+struct P25VoiceMessage {
+    std::uint16_t network_access_code = 0x293;
+
+    // Sent first when present. Clause 5.1 has every voice message begin with
+    // one; leaving it out is how a test stands in for a receiver that tuned
+    // in after it went by.
+    std::optional<decode::P25Header> header;
+
+    // Clause 5.5, the 72 Link Control bits, most significant first, sent in
+    // every LDU1. Raw octets so a test builds them from Figure 5-6 itself.
+    std::array<std::uint8_t, 9> link_control{};
+
+    // Clause 5.4, sent in every LDU2.
+    std::array<std::uint8_t, 9> message_indicator{};
+    std::uint8_t algorithm_id = decode::kP25AlgidUnencrypted;
+    std::uint16_t key_id = 0;
+
+    // IMBE channel frames, 144 bits each, one bit per byte in the Table 5-1
+    // order that imbe_pack_frame produces. A whole number of LDUs: clause
+    // 8.2.3 has a transmitter finish the LDU it is in by encoding silence,
+    // and this one has no IMBE encoder to encode silence with, so it asks the
+    // caller for complete units instead of inventing a frame.
+    std::vector<std::array<std::uint8_t, decode::kP25VoiceFrameBits>> voice;
+
+    // Clause 5.6, two octets per LDU in order. Zero where this runs short.
+    std::vector<std::uint8_t> low_speed_data;
+};
+
+// Every dibit of a voice message in transmission order, status symbols
+// included, with every code word the clauses specify computed in full: the
+// header's (36,20,17) and the LDUs' (24,12,13) and (24,16,9) Reed-Solomon
+// parity, the Golay and Hamming inner codes, and the (16,8,5) low speed data
+// parity.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> p25_voice_message_dibits(
+    const P25VoiceMessage& message);
 
 // ---------------------------------------------------------------------------
 // D-STAR DV, GMSK

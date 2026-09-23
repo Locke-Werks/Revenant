@@ -146,6 +146,162 @@ Expected<std::vector<std::uint8_t>> place_status_symbols(
     return out;
 }
 
+// Table 8-1, the frame sync word, then the clause 8.5 Network Identifier.
+Status append_sync_and_nid(std::vector<std::uint8_t>& information, std::uint16_t nac,
+                           decode::P25Duid duid) {
+    for (std::size_t i = 0; i < decode::kP25FrameSyncSymbols; ++i) {
+        const auto shift = static_cast<unsigned>(decode::kP25FrameSyncBits - 2 - 2 * i);
+        information.push_back(static_cast<std::uint8_t>((decode::kP25FrameSync >> shift) & 0x3ULL));
+    }
+    std::array<std::uint8_t, decode::kP25NidBits> nid{};
+    if (auto status = decode::p25_nid_encode(nac, static_cast<std::uint8_t>(duid), nid); !status) {
+        return std::unexpected(with_context(status.error(), "encoding the P25 Network Identifier"));
+    }
+    for (std::size_t i = 0; i < decode::kP25NidSymbols; ++i) {
+        information.push_back(static_cast<std::uint8_t>((nid[2 * i] << 1U) | nid[2 * i + 1]));
+    }
+    return {};
+}
+
+// A code word of `symbols` dibits, most significant first, which is how every
+// code word in the clause 10 annexes goes out.
+void append_word(std::vector<std::uint8_t>& information, std::uint32_t word, std::size_t symbols) {
+    for (std::size_t s = 0; s < symbols; ++s) {
+        const auto shift = static_cast<unsigned>(2 * (symbols - 1 - s));
+        information.push_back(static_cast<std::uint8_t>((word >> shift) & 0x3U));
+    }
+}
+
+// Clauses 5.2, 5.4 and 5.5: the fields concatenated most significant bit
+// first and cut into 6-bit hexbits.
+std::vector<std::uint8_t> octets_to_hexbits(std::span<const std::uint8_t> octets) {
+    std::vector<std::uint8_t> hexbits(octets.size() * 8 / 6, 0);
+    for (std::size_t bit = 0; bit < hexbits.size() * 6; ++bit) {
+        const std::uint8_t value =
+            static_cast<std::uint8_t>((octets[bit / 8] >> (7U - bit % 8)) & 1U);
+        hexbits[bit / 6] = static_cast<std::uint8_t>((hexbits[bit / 6] << 1U) | value);
+    }
+    return hexbits;
+}
+
+// The clause 10.2 Header Data Unit, status symbols included.
+Expected<std::vector<std::uint8_t>> header_data_unit(std::uint16_t nac,
+                                                    const decode::P25Header& header) {
+    std::vector<std::uint8_t> information;
+    information.reserve(decode::kP25HduTotalSymbols);
+    if (auto status = append_sync_and_nid(information, nac, decode::P25Duid::HeaderDataUnit);
+        !status) {
+        return std::unexpected(status.error());
+    }
+
+    // Clause 5.2: MI, MFID, ALGID, KID and TGID, 120 bits in 20 hexbits,
+    // through the (36,20,17) Reed-Solomon code and then each of the 36
+    // hexbits through the (18,6,8) shortened Golay code.
+    std::array<std::uint8_t, 15> fields{};
+    std::copy(header.message_indicator.begin(), header.message_indicator.end(), fields.begin());
+    fields[9] = header.manufacturer_id;
+    fields[10] = header.algorithm_id;
+    fields[11] = static_cast<std::uint8_t>(header.key_id >> 8U);
+    fields[12] = static_cast<std::uint8_t>(header.key_id & 0xFFU);
+    fields[13] = static_cast<std::uint8_t>(header.talkgroup_id >> 8U);
+    fields[14] = static_cast<std::uint8_t>(header.talkgroup_id & 0xFFU);
+
+    auto codeword = decode::p25_rs_encode(decode::kP25RsHeader, octets_to_hexbits(fields));
+    if (!codeword) {
+        return std::unexpected(with_context(codeword.error(), "encoding the P25 header word"));
+    }
+    for (const std::uint8_t hexbit : *codeword) {
+        append_word(information, decode::p25_golay18_encode(hexbit),
+                    decode::kP25HduSymbolsPerGolayWord);
+    }
+
+    // The five null symbols the clause 10.2 annex ends with, at symbols 390
+    // through 394, each the dibit 00.
+    information.insert(information.end(), decode::kP25HduNullSymbols,
+                       static_cast<std::uint8_t>(0b00));
+
+    auto unit = place_status_symbols(information, decode::kP25HduTotalSymbols);
+    if (!unit) {
+        return std::unexpected(with_context(unit.error(), "laying out the P25 header data unit"));
+    }
+    return unit;
+}
+
+// Table 8-4 gives %0011 as the terminator without subsequent Link Control,
+// and the clause 10.5 annex makes it the frame sync, the Network Identifier,
+// fourteen nulls and two status symbols, 72 symbols in all.
+Expected<std::vector<std::uint8_t>> simple_terminator(std::uint16_t nac) {
+    std::vector<std::uint8_t> information;
+    information.reserve(decode::kP25SimpleTerminatorSymbols);
+    if (auto status =
+            append_sync_and_nid(information, nac, decode::P25Duid::TerminatorWithoutLinkControl);
+        !status) {
+        return std::unexpected(status.error());
+    }
+    information.insert(information.end(), decode::kP25SimpleTerminatorNullSymbols,
+                       static_cast<std::uint8_t>(0b00));
+    auto unit = place_status_symbols(information, decode::kP25SimpleTerminatorSymbols);
+    if (!unit) {
+        return std::unexpected(with_context(unit.error(), "laying out the P25 simple terminator"));
+    }
+    return unit;
+}
+
+// One clause 10.3 or 10.4 Logical Link Data Unit. `words` is the 24-hexbit
+// Reed-Solomon code word the unit carries, Link Control in an LDU1 and
+// encryption sync in an LDU2; the layout is the same for both.
+Expected<std::vector<std::uint8_t>> logical_link_data_unit(
+    std::uint16_t nac, decode::P25Duid duid,
+    std::span<const std::array<std::uint8_t, decode::kP25VoiceFrameBits>> voice,
+    std::span<const std::uint8_t> words, std::array<std::uint8_t, 2> low_speed_data) {
+    constexpr decode::P25LduLayout kLayout = decode::p25_ldu_layout();
+
+    std::vector<std::uint8_t> information;
+    information.reserve(decode::kP25LduInformationSymbols);
+    if (auto status = append_sync_and_nid(information, nac, duid); !status) {
+        return std::unexpected(status.error());
+    }
+
+    std::size_t word = 0;
+    std::size_t frame = 0;
+    // Walk the unit in transmission order, emitting whichever field the
+    // layout puts at the current position.
+    while (information.size() < decode::kP25LduInformationSymbols) {
+        const std::size_t at = information.size();
+        if (frame < voice.size() && at == kLayout.voice[frame]) {
+            // Clause 5.3.1, Table 5-1: Bit 1 then Bit 0 of each dibit.
+            for (std::size_t s = 0; s < decode::kP25VoiceFrameSymbols; ++s) {
+                information.push_back(static_cast<std::uint8_t>(
+                    ((voice[frame][2 * s] & 1U) << 1U) | (voice[frame][2 * s + 1] & 1U)));
+            }
+            ++frame;
+        } else if (word < words.size() && at == kLayout.hamming[word]) {
+            // Clause 5.8: each hexbit through the (10,6,3) shortened Hamming
+            // code.
+            append_word(information, decode::p25_hamming10_encode(words[word]),
+                        decode::kP25HammingWordSymbols);
+            ++word;
+        } else if (at == kLayout.low_speed_data) {
+            // Clause 5.6: each octet through the (16,8,5) cyclic code.
+            for (const std::uint8_t octet : low_speed_data) {
+                append_word(information, decode::p25_lsd_encode(octet),
+                            decode::kP25LsdWordSymbols);
+            }
+        } else {
+            return fail(std::format(
+                "the LDU layout names no field at information symbol {}, so "
+                "core/decode/p25p1.h's p25_ldu_layout does not tile the unit",
+                at));
+        }
+    }
+
+    auto unit = place_status_symbols(information, decode::kP25LduSymbols);
+    if (!unit) {
+        return std::unexpected(with_context(unit.error(), "laying out a P25 LDU"));
+    }
+    return unit;
+}
+
 std::vector<std::uint8_t> pseudorandom_bits(std::size_t count, std::uint64_t seed) {
     std::mt19937_64 engine(seed);
     std::vector<std::uint8_t> out(count, 0);
@@ -162,122 +318,98 @@ std::vector<std::uint8_t> pseudorandom_bits(std::size_t count, std::uint64_t see
 // ---------------------------------------------------------------------------
 
 Expected<std::vector<std::uint8_t>> p25_header_message_dibits(const P25HeaderMessage& message) {
-    // The information dibits, in the clause 10.2 order, before the clause 8.4
-    // status symbols are interleaved in.
-    std::vector<std::uint8_t> information;
-    information.reserve(decode::kP25HduTotalSymbols);
-
-    // Table 8-1, the frame sync word.
-    for (std::size_t i = 0; i < decode::kP25FrameSyncSymbols; ++i) {
-        const auto shift = static_cast<unsigned>(decode::kP25FrameSyncBits - 2 - 2 * i);
-        information.push_back(
-            static_cast<std::uint8_t>((decode::kP25FrameSync >> shift) & 0x3ULL));
-    }
-
-    // Clause 8.5, the Network Identifier.
-    std::array<std::uint8_t, decode::kP25NidBits> nid{};
-    if (auto status = decode::p25_nid_encode(
-            message.network_access_code,
-            static_cast<std::uint8_t>(decode::P25Duid::HeaderDataUnit), nid);
-        !status) {
-        return std::unexpected(with_context(status.error(), "encoding the P25 Network Identifier"));
-    }
-    for (std::size_t i = 0; i < decode::kP25NidSymbols; ++i) {
-        information.push_back(static_cast<std::uint8_t>((nid[2 * i] << 1U) | nid[2 * i + 1]));
-    }
-
-    // Clause 10.2's header fields, packed into 20 hexbits, then the 16
-    // Reed-Solomon parity hexbits.
-    //
-    // The Reed-Solomon (36,20,17) parity is not computed. It is systematic, so
-    // the decoder in core/decode/p25p1.cpp reads the fields out of the first
-    // 20 hexbits and never consults the parity, and synthesising a correct
-    // parity would need a GF(2^6) encoder this lane did not build. The
-    // transmitter fills those hexbits with zero, which makes the burst
-    // decodable by this project and not by a radio. The test says so rather
-    // than the burst pretending to be conformant.
-    std::array<std::uint8_t, 120> field_bits{};
-    std::size_t cursor = 0;
-    const auto push = [&](std::uint64_t value, std::size_t count) {
-        for (std::size_t i = 0; i < count; ++i) {
-            field_bits[cursor++] =
-                static_cast<std::uint8_t>((value >> (count - 1 - i)) & 1ULL);
-        }
-    };
-    for (const std::uint8_t byte : message.header.message_indicator) {
-        push(byte, 8);
-    }
-    push(message.header.manufacturer_id, 8);
-    push(message.header.algorithm_id, 8);
-    push(message.header.key_id, 16);
-    push(message.header.talkgroup_id, 16);
-
-    std::array<std::uint8_t, decode::kP25HduGolayWords> hexbits{};
-    for (std::size_t i = 0; i < 20; ++i) {
-        std::uint8_t value = 0;
-        for (std::size_t b = 0; b < 6; ++b) {
-            value = static_cast<std::uint8_t>((value << 1U) | field_bits[i * 6 + b]);
-        }
-        hexbits[i] = value;
-    }
-
-    for (const std::uint8_t hexbit : hexbits) {
-        const std::uint32_t code_word = decode::p25_golay18_encode(hexbit);
-        for (std::size_t s = 0; s < decode::kP25HduSymbolsPerGolayWord; ++s) {
-            const auto shift =
-                static_cast<unsigned>(2 * (decode::kP25HduSymbolsPerGolayWord - 1 - s));
-            information.push_back(static_cast<std::uint8_t>((code_word >> shift) & 0x3U));
-        }
-    }
-
-    // The five null symbols the clause 10.2 annex ends with, at symbols 390
-    // through 394, each the dibit 00.
-    information.insert(information.end(), decode::kP25HduNullSymbols,
-                       static_cast<std::uint8_t>(0b00));
-
-    auto unit = place_status_symbols(information, decode::kP25HduTotalSymbols);
+    auto unit = header_data_unit(message.network_access_code, message.header);
     if (!unit) {
-        return std::unexpected(with_context(unit.error(), "laying out the P25 header data unit"));
+        return std::unexpected(unit.error());
     }
 
     // A simple terminator after the header, so the transmission ends the way
-    // clause 8 says a message does rather than stopping mid-symbol. Table 8-4
-    // gives %0011 as the terminator without subsequent Link Control, and the
-    // clause 10.5 annex makes it the frame sync, the Network Identifier,
-    // fourteen nulls and two status symbols, 72 symbols in all.
-    std::vector<std::uint8_t> terminator_information;
-    terminator_information.reserve(decode::kP25SimpleTerminatorSymbols);
-    for (std::size_t i = 0; i < decode::kP25FrameSyncSymbols; ++i) {
-        const auto shift = static_cast<unsigned>(decode::kP25FrameSyncBits - 2 - 2 * i);
-        terminator_information.push_back(
-            static_cast<std::uint8_t>((decode::kP25FrameSync >> shift) & 0x3ULL));
-    }
-    std::array<std::uint8_t, decode::kP25NidBits> terminator_nid{};
-    if (auto status = decode::p25_nid_encode(
-            message.network_access_code,
-            static_cast<std::uint8_t>(decode::P25Duid::TerminatorWithoutLinkControl),
-            terminator_nid);
-        !status) {
-        return std::unexpected(
-            with_context(status.error(), "encoding the P25 terminator Network Identifier"));
-    }
-    for (std::size_t i = 0; i < decode::kP25NidSymbols; ++i) {
-        terminator_information.push_back(static_cast<std::uint8_t>(
-            (terminator_nid[2 * i] << 1U) | terminator_nid[2 * i + 1]));
-    }
-    terminator_information.insert(terminator_information.end(),
-                                  decode::kP25SimpleTerminatorNullSymbols,
-                                  static_cast<std::uint8_t>(0b00));
-
-    auto terminator =
-        place_status_symbols(terminator_information, decode::kP25SimpleTerminatorSymbols);
+    // clause 8 says a message does rather than stopping mid-symbol.
+    auto terminator = simple_terminator(message.network_access_code);
     if (!terminator) {
-        return std::unexpected(
-            with_context(terminator.error(), "laying out the P25 simple terminator"));
+        return std::unexpected(terminator.error());
     }
-
     unit->insert(unit->end(), terminator->begin(), terminator->end());
     return *unit;
+}
+
+Expected<std::vector<std::uint8_t>> p25_voice_message_dibits(const P25VoiceMessage& message) {
+    if (message.voice.empty() || message.voice.size() % decode::kP25VoiceFramesPerLdu != 0) {
+        return fail(std::format(
+            "a P25 voice message carries its voice nine frames to an LDU (TIA-102.BAAA-A "
+            "clause 8.2.2); got {} frames. This transmitter has no IMBE encoder to fill the "
+            "last LDU with the silence clause 8.2.3 asks for, so hand it whole LDUs",
+            message.voice.size()));
+    }
+    for (std::size_t f = 0; f < message.voice.size(); ++f) {
+        for (const std::uint8_t bit : message.voice[f]) {
+            if (bit > 1) {
+                return fail(std::format(
+                    "voice frame {} holds the value {}; the frames are one bit per byte",
+                    f, static_cast<unsigned>(bit)));
+            }
+        }
+    }
+
+    std::vector<std::uint8_t> out;
+    if (message.header) {
+        auto unit = header_data_unit(message.network_access_code, *message.header);
+        if (!unit) {
+            return std::unexpected(unit.error());
+        }
+        out.insert(out.end(), unit->begin(), unit->end());
+    }
+
+    // Clause 5.5: the 72 Link Control bits in 12 hexbits, through the
+    // (24,12,13) code.
+    auto link_control = decode::p25_rs_encode(decode::kP25RsLinkControl,
+                                              octets_to_hexbits(message.link_control));
+    if (!link_control) {
+        return std::unexpected(with_context(link_control.error(), "encoding the Link Control word"));
+    }
+
+    // Clause 5.4: MI, ALGID and KID, 96 bits in 16 hexbits, through the
+    // (24,16,9) code.
+    std::array<std::uint8_t, 12> sync_fields{};
+    std::copy(message.message_indicator.begin(), message.message_indicator.end(),
+              sync_fields.begin());
+    sync_fields[9] = message.algorithm_id;
+    sync_fields[10] = static_cast<std::uint8_t>(message.key_id >> 8U);
+    sync_fields[11] = static_cast<std::uint8_t>(message.key_id & 0xFFU);
+    auto encryption_sync =
+        decode::p25_rs_encode(decode::kP25RsEncryptionSync, octets_to_hexbits(sync_fields));
+    if (!encryption_sync) {
+        return std::unexpected(
+            with_context(encryption_sync.error(), "encoding the encryption sync word"));
+    }
+
+    const std::size_t units = message.voice.size() / decode::kP25VoiceFramesPerLdu;
+    for (std::size_t u = 0; u < units; ++u) {
+        // Clause 8.2.2: LDU1 and LDU2 alternate, LDU1 first.
+        const bool first = u % 2 == 0;
+        std::array<std::uint8_t, 2> lsd{};
+        for (std::size_t i = 0; i < lsd.size(); ++i) {
+            const std::size_t index = u * lsd.size() + i;
+            lsd[i] = index < message.low_speed_data.size() ? message.low_speed_data[index] : 0;
+        }
+        auto unit = logical_link_data_unit(
+            message.network_access_code,
+            first ? decode::P25Duid::LogicalLinkDataUnit1 : decode::P25Duid::LogicalLinkDataUnit2,
+            std::span(message.voice).subspan(u * decode::kP25VoiceFramesPerLdu,
+                                             decode::kP25VoiceFramesPerLdu),
+            first ? *link_control : *encryption_sync, lsd);
+        if (!unit) {
+            return std::unexpected(unit.error());
+        }
+        out.insert(out.end(), unit->begin(), unit->end());
+    }
+
+    auto terminator = simple_terminator(message.network_access_code);
+    if (!terminator) {
+        return std::unexpected(terminator.error());
+    }
+    out.insert(out.end(), terminator->begin(), terminator->end());
+    return out;
 }
 
 Expected<std::vector<Complex32>> p25_render_dibits(const P25ModConfig& config,

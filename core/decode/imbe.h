@@ -7,7 +7,10 @@
 // approved 23 December 2003, which reprints Digital Voice Systems' "Project 25
 // Vocoder Description" version 1.3 of 1 November 1995. Sections 6 through 9
 // and 11 are the decode side and all of them are implemented here. The encode
-// side, sections 5 and 10, is not: nothing in this project transmits P25.
+// side, sections 5 and 10, is not: nothing in this project analyses speech
+// into IMBE parameters. The P25 transmitter in core/dsp/synth/dv_mod.cpp
+// carries frames a caller has already built, and the tests build theirs from
+// chosen quantizer values through imbe_pack_frame below.
 //
 // Every clause number below is TIA-102.BABA's own. Equation numbers are the
 // numbers printed in the document, so (46) here is equation (46) there.

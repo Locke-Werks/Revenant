@@ -36,8 +36,9 @@ find_package(rtlsdr CONFIG REQUIRED)
 # citing its clause. The three mode files then contain their standards and
 # little else, which is what makes them checkable against those standards.
 #
-# All three stop at the bits. Voice is a separate seam: P25's is imbe.cpp,
-# D-STAR's is AMBE with no published algorithm, and TETRA's is ACELP and
+# D-STAR and TETRA stop at the bits. P25 goes through to audio: p25p1.cpp
+# cuts the IMBE frames out of each LDU and hands them to imbe.cpp. D-STAR's
+# voice is AMBE with no published algorithm, and TETRA's is ACELP and
 # unimplemented. docs/modes.md has the scope and the reasoning, including why
 # DMR is absent from a list naming its three neighbours.
 #
