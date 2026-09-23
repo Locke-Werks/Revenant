@@ -939,7 +939,18 @@ bool EngineLink::recreate_receiver(const rpc::VrxParams& params, std::uint64_t k
 
     auto added = client_->add_vrx(params);
     if (!added) {
-        note_receiver_fault(QString::fromStdString(added.error().message));
+        const QString why = QString::fromStdString(added.error().message);
+        note_receiver_fault(why);
+
+        // And on the strip, which otherwise reads "opening" for a receiver
+        // the engine has already said it will not make. Posted every time,
+        // unlike the fault, so a second refusal in the same words still
+        // lands after a settle cleared the first.
+        HeldReport refused;
+        refused.key = key;
+        refused.refused = true;
+        refused.why = why;
+        post_held_reports({refused});
         return false;
     }
     live_receiver_id_ = *added;
@@ -1239,8 +1250,7 @@ void EngineLink::adopt_receiver_status()
         if (one.key != 0 && one.key == pane_key_) {
             have_id = true;
             id = one.id;
-        } else if (RackEntry* entry = rack_.find(one.key); entry != nullptr) {
-            entry->engine_id = one.id;
+        } else if (rack_.settle(one.key, one.id)) {
             rack_moved = true;
         }
     }
@@ -1263,9 +1273,7 @@ void EngineLink::adopt_receiver_status()
         }
     }
     if (have_id) {
-        if (RackEntry* entry = rack_.find(pane_key_); entry != nullptr) {
-            entry->engine_id = id;
-        }
+        static_cast<void>(rack_.settle(pane_key_, id));
         if (id == 0) {
             // A focus the supervisor could not complete, because the held
             // receiver had gone by the time it came to it. The strip goes

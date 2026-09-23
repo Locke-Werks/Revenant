@@ -3225,12 +3225,15 @@ private:
     std::vector<HeldVrx> held_;
 
     // What the supervisor learned about held receivers, for the Qt thread.
+    // Also the pane's refused adds: those are the one report about the
+    // pane's own entry, because the strip is where a refusal is shown.
     struct HeldReport {
         std::uint64_t key = 0;
         qulonglong id = 0;
         bool has_status = false;
         rpc::VrxStatus status;
         bool gone = false;
+        bool refused = false;
         QString why;
     };
     std::vector<HeldReport> handover_held_;  // guarded by receiver_mutex_

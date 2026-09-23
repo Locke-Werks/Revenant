@@ -128,7 +128,7 @@ Rectangle {
             widest: "0000.000000 MHz"
             horizontalAlignment: Text.AlignLeft
             text: (strip.entry.frequencyHz / 1.0e6).toFixed(6) + " MHz"
-            color: strip.entry.pending ? Theme.inkDim : Theme.ink
+            color: strip.entry.pending || strip.entry.refused ? Theme.inkDim : Theme.ink
             font.pixelSize: 15
         }
 
@@ -150,7 +150,28 @@ Rectangle {
                 }
             }
 
+            // A REFUSAL REPLACES THE LEVEL. The engine said it will not make
+            // this receiver, so there is no level to wait for, and "opening"
+            // would be waiting for good. The chip names it, the engine's
+            // sentence is its hover, and remove is beside it because that
+            // or a retune is all there is to do.
+            StatusChip {
+                visible: strip.entry.refused
+                label: "refused"
+                detail: strip.entry.refusal
+            }
+
+            RButton {
+                visible: strip.entry.refused
+                flat: true
+                text: "remove"
+                ink: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                onClicked: engineLink.removeRackReceiver(strip.entry.key)
+            }
+
             Readout {
+                visible: !strip.entry.refused
                 widest: "no level yet"
                 text: strip.entry.pending ? "opening"
                       : UiRules.meterHasReading(strip.entry.levelDbfs)

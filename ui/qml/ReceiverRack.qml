@@ -22,7 +22,8 @@ ColumnLayout {
     readonly property var blank: ({
         "key": 0, "slot": 0, "colour": "#000000", "label": "", "mode": "",
         "frequencyHz": 0, "lowHz": 0, "highHz": 0, "levelDbfs": -200,
-        "focused": false, "pending": true, "muted": false, "solo": false,
+        "focused": false, "pending": true, "refused": false, "refusal": "",
+        "muted": false, "solo": false,
         "heard": false, "gain": 0, "gainText": ""
     })
 

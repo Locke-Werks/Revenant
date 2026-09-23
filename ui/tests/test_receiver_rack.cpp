@@ -16,9 +16,12 @@
 using Catch::Approx;
 using revenant::ui::classify_span_click;
 using revenant::ui::kMaxReceivers;
+using revenant::ui::kRackRefusedFallback;
+using revenant::ui::rack_entry_state;
 using revenant::ui::rack_gain_amplitude;
 using revenant::ui::rack_gain_text;
 using revenant::ui::RackBand;
+using revenant::ui::RackEntryState;
 using revenant::ui::receiver_under;
 using revenant::ui::ReceiverRack;
 using revenant::ui::SpanClick;
@@ -102,6 +105,46 @@ TEST_CASE("next and previous wrap around the rack")
     CHECK(rack.neighbour(1) == a);
     CHECK_FALSE(rack.focus(999));
     CHECK(rack.focused() == c);
+}
+
+// Rejects a refused receiver left reading "opening", which is a strip waiting
+// for a receiver the engine has already said it will not make. And rejects a
+// refusal that outlives the id that answers it, or that a rebuild's old id
+// hides.
+TEST_CASE("a refused receiver says so until an id answers it")
+{
+    ReceiverRack rack;
+    const auto a = *rack.add();
+    CHECK(rack_entry_state(*rack.find(a)) == RackEntryState::Opening);
+
+    REQUIRE(rack.refuse(a, "the source is not running"));
+    CHECK(rack_entry_state(*rack.find(a)) == RackEntryState::Refused);
+    CHECK(rack.find(a)->refusal == "the source is not running");
+
+    // Zero is not an id, so the refusal stands.
+    REQUIRE(rack.settle(a, 0));
+    CHECK(rack_entry_state(*rack.find(a)) == RackEntryState::Refused);
+
+    REQUIRE(rack.settle(a, 17));
+    CHECK(rack_entry_state(*rack.find(a)) == RackEntryState::Live);
+    CHECK(rack.find(a)->refusal.empty());
+
+    // A rebuild removes before it adds, so a refused rebuild leaves nothing
+    // behind the strip and the id it held must not keep it reading live.
+    REQUIRE(rack.refuse(a, ""));
+    CHECK(rack_entry_state(*rack.find(a)) == RackEntryState::Refused);
+    CHECK(rack.find(a)->engine_id == 0);
+    CHECK(rack.find(a)->refusal == kRackRefusedFallback);
+
+    // A new engine is asked again, so the old one's refusal goes.
+    rack.forget_engine_ids();
+    CHECK(rack_entry_state(*rack.find(a)) == RackEntryState::Opening);
+
+    // Removal is still the way out, and a key the rack does not hold is
+    // neither refused nor settled.
+    rack.remove(a);
+    CHECK_FALSE(rack.refuse(a, "late"));
+    CHECK_FALSE(rack.settle(a, 3));
 }
 
 // Rejects a solo that adds to other solos, and a mute that outranks a solo.

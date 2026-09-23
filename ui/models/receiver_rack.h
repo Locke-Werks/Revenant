@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace revenant::ui {
@@ -56,7 +57,39 @@ struct RackEntry {
 
     // Where the strip's gain control sits, 0 to 1. See rack_gain_amplitude.
     double gain = 1.0;
+
+    // The engine's sentence when it refused to make this receiver, verbatim,
+    // and empty otherwise. Held until an id arrives, because a retune that is
+    // refused in the same words is not reported twice and would otherwise
+    // put the strip back to opening for good.
+    std::string refusal;
 };
+
+// What a strip says about its receiver's existence on the engine.
+enum class RackEntryState : std::uint8_t {
+    // Asked for and not yet answered.
+    Opening,
+
+    // Asked for and refused: there is nothing on the engine behind the strip,
+    // and nothing will appear until the operator asks again or removes it.
+    Refused,
+
+    // The engine answered with an id.
+    Live,
+};
+
+[[nodiscard]] inline RackEntryState rack_entry_state(const RackEntry& entry)
+{
+    if (entry.engine_id != 0) {
+        return RackEntryState::Live;
+    }
+    return entry.refusal.empty() ? RackEntryState::Opening : RackEntryState::Refused;
+}
+
+// Said when the engine refused without saying why, so the chip always has a
+// sentence behind it.
+inline constexpr const char* kRackRefusedFallback =
+    "the engine refused to make this receiver and gave no reason";
 
 class ReceiverRack {
 public:
@@ -171,12 +204,46 @@ public:
     }
 
     // The engine that issued every id has gone. The entries stay, because a
-    // reconnection puts their receivers back.
+    // reconnection puts their receivers back. A refusal goes too: it was that
+    // engine's, and the reconnection asks the new one again.
     void forget_engine_ids()
     {
         for (RackEntry& e : entries_) {
             e.engine_id = 0;
+            e.refusal.clear();
         }
+    }
+
+    // The engine made the entry's receiver, or rebuilt it, under this id, or
+    // under zero when the receiver has gone. Only a real id answers a
+    // refusal; zero leaves it standing, since nothing was made. Answers
+    // whether the entry is held.
+    bool settle(std::uint64_t key, std::uint64_t engine_id)
+    {
+        RackEntry* entry = find(key);
+        if (entry == nullptr) {
+            return false;
+        }
+        entry->engine_id = engine_id;
+        if (engine_id != 0) {
+            entry->refusal.clear();
+        }
+        return true;
+    }
+
+    // The engine refused to make the entry's receiver. Whatever id the entry
+    // held is gone with it, since a rebuild removes before it adds, so the
+    // strip stops claiming a receiver the engine no longer has. Answers
+    // whether the entry is held.
+    bool refuse(std::uint64_t key, std::string why)
+    {
+        RackEntry* entry = find(key);
+        if (entry == nullptr) {
+            return false;
+        }
+        entry->engine_id = 0;
+        entry->refusal = why.empty() ? std::string{kRackRefusedFallback} : std::move(why);
+        return true;
     }
 
     // Solo on one entry is exclusive, as on a console's solo-in-place with

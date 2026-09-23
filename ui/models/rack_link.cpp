@@ -180,7 +180,9 @@ QVariantList EngineLink::rackEntries() const
             {QStringLiteral("mode"), mode},
             {QStringLiteral("levelDbfs"), level},
             {QStringLiteral("focused"), focused},
-            {QStringLiteral("pending"), entry.engine_id == 0},
+            {QStringLiteral("pending"), rack_entry_state(entry) == RackEntryState::Opening},
+            {QStringLiteral("refused"), rack_entry_state(entry) == RackEntryState::Refused},
+            {QStringLiteral("refusal"), QString::fromStdString(entry.refusal)},
             {QStringLiteral("muted"), entry.muted},
             {QStringLiteral("solo"), entry.solo},
             {QStringLiteral("heard"), rack_.heard(entry.key)},
@@ -611,6 +613,14 @@ void EngineLink::adopt_held_reports()
     bool changed = false;
     bool membership = false;
     for (const HeldReport& report : reports) {
+        // Ahead of the pane test, because a refused add is the pane's own: a
+        // held one that is refused goes, below. The strip keeps the sentence
+        // and offers remove, rather than reading "opening" for good.
+        if (report.refused) {
+            changed = rack_.refuse(report.key, report.why.toStdString()) || changed;
+            continue;
+        }
+
         RackEntry* entry = rack_.find(report.key);
         if (entry == nullptr || report.key == pane_key_) {
             continue;
@@ -635,7 +645,7 @@ void EngineLink::adopt_held_reports()
         }
 
         if (report.id != 0) {
-            entry->engine_id = report.id;
+            static_cast<void>(rack_.settle(report.key, report.id));
         }
         if (report.has_status) {
             if (HeldView* view = held_view(report.key); view != nullptr) {
