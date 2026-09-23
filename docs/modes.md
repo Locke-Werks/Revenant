@@ -374,7 +374,7 @@ pictures.
 
 | Mode | Numbers | Specification | Effort |
 | --- | --- | --- | --- |
-| POCSAG | 2-FSK, +/-4.5 kHz, 512/1200/2400 bit/s, 576-bit preamble, batches of 8 frames x 2 codewords, sync 0x7CD215D8, BCH(31,21) plus parity | ITU-R M.584-2 (11/1997), free | Small |
+| POCSAG | 2-FSK, +/-4.5 kHz, 512/1200/2400 bit/s, 576-bit preamble, batches of 8 frames x 2 codewords, sync 0x7CD215D8, BCH(31,21) plus parity | ITU-R M.584-2 (11/1997), free, for the code and format. The 512 and 1200 bit/s rates, the polarity and the deviation are ITU-R M.539-3 clause 4.3, withdrawn in 2007; 2400 bit/s is practice. Done, see below | Small |
 | FLEX | 2-FSK and 4-FSK, 1600 or 3200 sym/s giving 1600/3200/6400 bit/s, 1.875 s frames, 128 frames per 4-minute cycle, (31,21) BCH interleaved | ARIB STD-T43 (unverified: English edition not located, obtainability from outside Japan unconfirmed). Motorola's own specification was never public and there is no TIA or ETSI equivalent | Medium |
 | ERMES | 4-PAM/FM, 3125 baud, 6250 bit/s, 25 kHz, 16 channels in 169.4 to 169.8 MHz, (30,18) cyclic coding | ETSI ETS 300 133-4, free | Medium |
 | RDS2 | Three further 1187.5 bit/s biphase BPSK streams on 66.5, 71.25 and 76 kHz beside the existing 57 kHz stream; same 26-bit blocks and offset words. Carries station logos and larger ODA payloads, so it is an image path as well as a text one | IEC 62106-1, -2 and -3, purchasable (unverified: the current part split) | Small |
@@ -830,6 +830,7 @@ transition-tracking bit clock, which SITOR-B, NAVTEX and DSC can reuse.
 | RTTY | `core/decode/rtty.cpp` | ITU-T S.1 (03/93) clauses 3, 4.1 to 4.5 and Tables 1 and 2 for ITA2; ITU-T S.3 (11/88) clauses 1.3 and 1.4 and Table 1 for the 7.5-unit character | Characters with the sample index of their start element, letters and figures case tracked, a decision margin per character, and counts of framing errors and false starts |
 | AX.25 over 1200 baud AFSK | `core/decode/ax25.cpp` | AX.25 v2.2 (TAPR, July 1998) clauses 3, 3.1, 3.4, 3.6 to 3.10, 3.12 and 4.2.1; the modem from Finnegan and Benson, "Clarifying the Amateur Bell 202 Modem", TAPR DCC 2014, sections 2 and 3.2 | Frames whose FCS checks, with destination, source and up to eight repeaters, the control field and its frame kind, the PID and the information field, and the sample indices of the first and last bit; counts of candidates, FCS failures and malformed frames |
 | APRS | `core/decode/aprs.cpp` | APRS Protocol Reference 1.0.1 (29 August 2000) chapters 5, 6, 7, 8, 9, 10, 14 and 16 | Position reports uncompressed and compressed with timestamp, ambiguity, symbol, course, speed, altitude and range; status with timestamp or Maidenhead locator; messages, acknowledgements and rejections with their numbers; Mic-E position, message type, course, speed, telemetry, status text and altitude |
+| POCSAG | `core/decode/pocsag.cpp` | ITU-R M.584-2 Annex 1 clauses 1.1 to 1.4, 2.1, 2.2 and 2.5.1 with Tables 1 to 3; ITU-R M.539-3 clause 4.3 for the rates and polarity | Pages with the 21-bit identity, function bits, numeric or alphanumeric text per the function bits and the raw message bits for the two function values M.584 gives no format, the sample index of the address codeword, the bits BCH corrected and the codewords it could not, and whether the sync arrived inverted |
 
 RTTY's 45.45 baud, 170 Hz shift and 2125 Hz mark are practice rather than
 anything S.1 or S.3 states, and all three are parameters along with the
@@ -866,6 +867,23 @@ objects, items, weather, telemetry reports, queries and third-party traffic are
 recognised and refused by name; data extensions other than course and speed
 stay in the comment; and the WB2OSZ 1.2 revision was not read, so what it adds
 arrives as comment text.
+
+POCSAG is measured in `tests/decode/test_pocsag.cpp` at all three rates, at
+48 and 22.05 kHz, in both polarities, and through a complex-baseband FSK
+signal, a channel filter and the FM discriminator in `core/decode/dv_phy.cpp`
+rather than from ideal audio alone. Through `add_awgn` at 1200 bit/s over 40
+pages of 15 codewords: no page lost at 20 dB in 2500 Hz, including tuned 1 kHz
+off; none lost at 12 dB, where the raw bit error rate is 0.00019; 0.40 lost at
+8 dB, where the raw bit error rate is 0.023 and BCH corrected 584 bits and
+failed on one codeword in thirty; all lost at 4 dB, below the discriminator's
+threshold. The code corrects every one and two bit error and refuses every
+three bit error, checked exhaustively on twelve code words. Checking Tables 1
+and 2 against clause 1.4 found that M.584-2 misprints the idle codeword: Table 2
+is one bit from a code word, although clause 1.3.4 calls it a valid address
+codeword, and the decoder uses the code word. What it does not reach: one rate
+per decoder instance, so a receiver scanning all three runs three; no message
+format for function bits 01 and 10, which M.584 does not define; and FLEX,
+which is blocked on its document.
 
 ## What would change the list
 
