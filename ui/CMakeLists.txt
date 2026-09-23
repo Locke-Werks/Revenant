@@ -199,6 +199,10 @@ qt_add_executable(revenant_ui
     models/receiver_link.cpp
     models/receiver_palette.h
     models/receiver_rack.h
+    models/recent_recordings.h
+    models/recording_header.h
+    models/recording_plan.h
+    models/recording_status.h
     models/source_link.cpp
     models/window_raise.h
     render/colour_map.h
@@ -513,6 +517,14 @@ endif()
 # CHIRP's (models/memory_import.h), against sample files in tests/data/memories.
 # A memory list is kept for years; a reader that drops an entry or reads a
 # frequency a few hertz off produces a list that looks complete.
+# It covers the recording section of the picker: the header read that has to
+# agree with core/source/file_source.cpp about every container it opens and
+# every file it refuses (models/recording_header.h), the URI and the reasons an
+# open is not offered yet (models/recording_plan.h), the recent list
+# (models/recent_recordings.h) and the playing strip's position and pace
+# (models/recording_status.h). A preview that disagreed with the engine would
+# show one file and open another, which looks correct until the frequencies
+# are read.
 #
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
@@ -595,6 +607,10 @@ if(REVENANT_UI_TESTS)
             tests/test_receiver_palette.cpp
             tests/test_receiver_rack.cpp
             tests/test_receiver_scroll.cpp
+            tests/test_recent_recordings.cpp
+            tests/test_recording_header.cpp
+            tests/test_recording_plan.cpp
+            tests/test_recording_status.cpp
             tests/test_ruler.cpp
             tests/test_scroll_tune.cpp
             tests/test_source_choice.cpp
