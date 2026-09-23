@@ -124,27 +124,71 @@ a grid against the new one and serves the same session, and
 started again. The process does not restart, which is what it used to take.
 
 What exists: the Vulkan context and allocator, the shader build, the polyphase
-channelizer, seven demodulators and a raw complex tap, the per-receiver fine
+channelizer, seven demodulators and a raw complex tap, three digital voice
+modes that hand their decoder filtered complex baseband, the per-receiver fine
 stage, audio egress to WAV and to the sound card, a synthetic wideband source,
-a file source, an RTL-SDR backend, the full-span spectrum with a waterfall in
-the terminal, auto-scaling measured on the device, the per-receiver passband
-spectrum, the wideband detector, the RDS and RBDS decoder, the Cap'n Proto
-session that carries all of it to another process, the Qt client that draws it
-and plays its audio, and the conformance suite that diffs every GPU kernel
-against a scalar twin and demands identical bits. A few of those tests skip
-without an RTL-SDR plugged in. `ui/` is a separate CMake project with a suite
-of its own, and CI configures, builds and runs both trees. The counts move
-with nearly every commit, so they are dated rather than kept current: on
-2026-09-22 `ctest -N` listed 590 tests in the engine tree and 141 in `ui/`.
+a file source that reads 8, 16, 24 and 32-bit IQ, the 24-bit WAV the HF
+recordings arrived as among them, and converts each on the GPU, an
+RTL-SDR backend, the full-span spectrum with a waterfall in the terminal,
+auto-scaling measured on the device, the per-receiver passband spectrum drawn
+from a display tap beside each receiver, the wideband detector, the RDS and
+RBDS decoder, the Cap'n Proto session that carries all of it to another
+process, the Qt client that draws it and plays its audio, and the conformance
+suite that diffs every GPU kernel against a scalar twin and demands identical
+bits. A few of those tests skip without an RTL-SDR plugged in. `ui/` is a
+separate CMake project with a suite of its own, and CI configures, builds and
+runs both trees. The counts move with nearly every commit, so they are dated
+rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
+engine tree and 334 in `ui/`.
 
-What does not: a decoder on a live signal, other than RDS. P25 Phase 1, D-STAR
-and TETRA are written as far as their framing, and P25's IMBE voice beside
-them, each checked by a round trip through a transmitter written from the same
-clauses. Nothing in the engine or the command line runs them on a receiver
-yet: their demodulator modes hand out a raw tap and nothing reads it.
-`docs/modes.md` is the scoped list and says where each one stops. Nothing saves
-a set of receivers across a restart; that one is in `docs/rpc.md` with what it
-would take and what the gap costs meanwhile.
+Thirteen decoders run on a live receiver, in the engine, from
+`revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
+P25 Phase 1, D-STAR, TETRA and M17 on complex baseband, and RTTY, SITOR-B,
+NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, and POCSAG on receiver
+audio. RDS runs beside them on every wfm receiver that asks, and now reports
+programme type names, TMC and emergency warning groups as well as the text.
+Each is written from its specification and checked by a round trip through a
+transmitter written from the same clauses; `docs/modes.md` says where each one
+stops, and [docs/sensitivity.md](docs/sensitivity.md) has what each needs in
+white noise, read off a committed curve, rather than a copy of that table
+here. P25's IMBE voice decodes to audio in `core/decode` and is not served:
+the wire, and so the client, carry each P25 data unit's NAC and DUID and the
+header's fields, and none of the voice.
+
+The client has had its first design pass. The main window is the span, a
+frequency ruler between the spectrum and the waterfall, and a top bar with a
+per-digit frequency dial and a band menu backed by a cited band table. The
+receivers have a window of their own: a rack of up to eight receivers, each
+with a strip, a level, a gain, mute and solo, their audio mixed, and the
+focused one's dial, mode, fine-tuning display, AFT, auto filter, RDS and a
+decode log of what its decoders report. Every action has a key, one table
+decides them all, and a command palette on Ctrl+K lists every action and
+band. `docs/ui-spectrum.md` has each of those and what it measured.
+
+A receiver belongs to the session that made it, and goes when that session
+ends unless it was added with `keep`, which is what a headless recorder asks
+for. `revenant-engine` listens on port 17690 by default, which is where
+`revenant-ui` looks, and binds it exclusively. The engine also places probe
+receivers of its own on detections, to name a signal's family; they are
+internal, nothing on the wire can add or see one, and `docs/detection.md` has
+what they get right and wrong.
+
+What does not. Nothing stores the band: `core/capture` holds a placeholder and
+no code, so there is no rolling capture, and search over stored captures, the
+reason the design exists, has nothing to search yet. The engine runs one radio
+at a time. Nothing saves a set of receivers across a restart; that one is in
+`docs/rpc.md` with what it would take and what the gap costs meanwhile. P25
+voice does not reach the client, for the reason above. RDS2's three extra
+subcarriers are not implemented, and RDS-TMC is recognised, counted and kept
+raw but not decoded into events and locations, because the field positions are
+in clauses of ISO 14819-1 nobody here has read; `docs/modes.md` has both.
+
+This paragraph used to read "What does not: a decoder on a live signal, other
+than RDS." and went on to say that nothing in the engine or the command line
+ran P25, D-STAR or TETRA on a receiver, "their demodulator modes hand out a raw
+tap and nothing reads it". Thirteen decoders now run on a live receiver and
+over the wire, those three among them, so a reader who took it at its word
+would not have looked for any of them.
 
 This paragraph used to read "What does not: every decoder but RDS.
 `docs/modes.md` is the scoped list and none of the rest of it is written." The
@@ -228,12 +272,25 @@ by design and because it has to be: the engine is built against the static C
 runtime and ships as one self-contained signed binary, and Qt is not.
 `docs/rpc.md` has the reasoning and the alternatives that were rejected.
 
+Measured against what M2 was set to deliver: the QML shell exists, and so do
+AM, FM and SSB demodulation and audio out. It asked for one receiver and the
+client holds eight. What it does not have is a measurement. M2 asks for the
+spectrum and waterfall at monitor refresh and closes when the render pipeline
+holds its frame budget at full target load, and nothing has measured the
+client's frame time, at full load or at any load, so neither can be claimed.
+That measurement is what M2 lacks.
+
 **M3 is the first public release.** Until then the layout moves and there are
 no binaries. The repository is public because the licence made it the
 straightforward way to satisfy the source obligation, not because anything
 here is finished.
 
-**M4 and beyond:** the decoders, and search over stored captures.
+**M4 and beyond:** the rolling capture and search over it, more than one radio
+at a time, and the modes `docs/modes.md` lists as not done.
+
+This line used to read "M4 and beyond: the decoders, and search over stored
+captures." Thirteen decoders arrived during M2, so the line pointed a reader
+past work that had already landed.
 
 ## Requirements
 
@@ -375,6 +432,8 @@ will comfortably outlast them.
 - [docs/clean-room.md](docs/clean-room.md), the licensing position
 - [docs/snr-convention.md](docs/snr-convention.md), how SNR is reported and why it
   matters that everyone means the same thing by it
+- [docs/sensitivity.md](docs/sensitivity.md), each decoder's sensitivity in white
+  noise, read off its committed curve, and what each figure does not cover
 - [docs/fft.md](docs/fft.md), why the FFT is written here rather than taken from
   a library, with the measurements that decided it
 - [docs/ci.md](docs/ci.md), why the GPU jobs are self-hosted, what the matrix covers and
@@ -383,14 +442,20 @@ will comfortably outlast them.
   needs and which are out of reach
 - [docs/rpc.md](docs/rpc.md), why the client is a second process, what crosses
   the wire and what does not
-- [docs/ui-spectrum.md](docs/ui-spectrum.md), how the spectrum and waterfall scale
-  themselves and why the fine-tuning display transforms a different stream
+- [docs/ui-spectrum.md](docs/ui-spectrum.md), the client: its windows, keys and
+  receiver rack, how the spectrum and waterfall scale themselves, why the
+  fine-tuning display transforms a different stream, AFT, the auto filter and
+  the decode log
 - [docs/detection.md](docs/detection.md), wideband detection and click-to-tune, and
   why the detection spectrum is built per channel rather than across the span
 - [docs/rtlsdr-provenance.md](docs/rtlsdr-provenance.md), what the RTL2832U
   datasheet does and does not specify, and why that settled the licence
 - [docs/rds-first-decode.md](docs/rds-first-decode.md), the first decode of a
   signal nobody here generated, what it establishes and why it is not yet a test
+- [docs/recordings.md](docs/recordings.md), the real IQ on the development
+  machine, how the engine reads it and what it is not yet good for
+- [docs/packaging.md](docs/packaging.md), the installer that carries both
+  programs and what goes into it
 - [CONTRIBUTING.md](CONTRIBUTING.md), how to contribute and the provenance rules
 - [CLA.md](CLA.md), the contributor agreement and why it exists
 

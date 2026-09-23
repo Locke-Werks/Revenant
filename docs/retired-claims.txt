@@ -1401,3 +1401,18 @@ instead: CW's speed weights the mean dot and the mean element space equally.
     Averaged over 40 transmissions at -8 dB it reads 20.13 WPM for 20 and
     34.27 for 35, where pooling read 19.36 and 32.75. tests/decode/test_cw.cpp
     holds the average to 1.5 per cent.
+
+phrase: What does not: a decoder on a live signal, other than RDS
+phrase: their demodulator modes hand out a raw tap and nothing reads it
+retired: 2026-09-23
+commit: "Bring the README's status up to what the engine and client do now"
+instead: Thirteen decoders run on a live receiver, from revenant-cli --decode
+    and over the wire through Session.subscribeDecoded, P25, D-STAR and TETRA
+    among them. docs/rpc.md lists them; P25 voice is decoded and not served.
+
+phrase: M4 and beyond: the decoders, and search over stored captures
+retired: 2026-09-23
+commit: "Bring the README's status up to what the engine and client do now"
+instead: The decoders arrived during M2. M4 and beyond is the rolling capture,
+    search over it, more than one radio, and what docs/modes.md lists as not
+    done.
