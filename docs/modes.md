@@ -805,6 +805,40 @@ at decode level when baseband DC and noise are both present before it and
 through that engine case's 2.304 MS/s grid, and the cause is not
 established.
 
+**D-STAR and TETRA decode the same however their input is blocked**, since
+2026-09-23. Neither had been measured for it. `DStar::process` restarted its
+discriminator and receive filter at every call, took the call's mean as the
+carrier offset and divided by the call's peak; `Tetra::process` restarted its
+matched filter. Both now carry that state (`FmDiscriminator`, `RealFir` and a
+new `ComplexFir` in `core/decode/dv_phy.h`), D-STAR fits each frame sync's 15
+known bits for the offset and the deviation before slicing and refits on every
+clause 4.1.2 d resynchronisation signal, and both number what they find from
+the start of the stream. `tests/decode/test_dstar_blocking.cpp` and
+`test_tetra_blocking.cpp` decode one capture each, a carrier 350 Hz off with
+baseband DC and noise at 20 dB, whole and in seven or eight blockings down to
+one sample a call, and hold every blocking identical to the whole capture.
+Before: D-STAR's three transmissions gave 0 to 3 headers and 0 to 161 of 90
+voice frames depending on the blocking, none at one sample a call; TETRA's 36
+bursts gave 4 verified at 1024-sample calls and 28 at 4096. Now all three
+headers, all 90 frames and all 36 bursts in every blocking. D-STAR also slices
+a carrier 1000 Hz off with every frame whole.
+
+Two D-STAR faults came out of the same measurement. The clause 4.1.2 h last
+frame was looked for 40 bits past where the clause puts its tail, so no
+transmission ever ended and a whole capture's first header took every later
+transmission's bits as its voice: whole, that capture gave one header of
+three. And a transmission was reported once, as its header decoded, with only
+the voice frames already buffered. A transmission now arrives in pieces set by
+its own structure, the header with the first superframe of 21 voice frames and
+a piece per superframe after it, and closes on the last frame, or when a frame
+where clause 4.1.2 c puts the resynchronisation signal does not carry it, or on
+`flush()`. The bit error rates did not move: D-STAR 0 at 30 dB and 0.0563615
+at 2 dB over 11994 bits, and through the engine's fine stage 0 and 14 of 5982;
+TETRA 0 at 30 dB and 0.0275206 at 2 dB over the 18 of 24 bursts found; all
+identical before and after. Those cases read `DStar::last_bits()`, which still
+slices a call's bits at that call's mean, because a stream of random bits has
+no frame sync to fit; `dstar.h` says so at the declaration.
+
 The transmitter computes every parity the clauses specify, so its header and
 LDUs are what a radio expects to receive. What it lacks is an IMBE encoder:
 it carries frames a caller has built, the tests build theirs from chosen
