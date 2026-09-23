@@ -653,10 +653,22 @@ phrase: So the files as delivered are unreadable by this engine
 phrase: The engine cannot read the files either, because they are 24-bit
 phrase: are 24-bit, so nothing in this project can open them
 retired: 2026-09-22
-commit: 42e346e
+commit: 8a5979e
 instead: The engine reads 24-bit PCM natively as cs24.
     core/shaders/convert_cs24_cf32.comp widens it on the GPU during upload, six
     bytes a sample read from two 32-bit words, and its output is bit-identical
     to scripts/wav24_to_float32.py. The KF4FIC recordings open as delivered,
     with center= in the URI because the files carry no centre frequency. See
     docs/recordings.md.
+
+phrase: The request above is already met at 4096 points; 16384 is what the rate
+    can afford
+phrase: on an HF grid at 1.9 Hz per bin it splits every RTTY signal
+retired: 2026-09-22
+commit: 5f6cd06
+instead: No transform above dsp::kMaxSpectrumTransform, 2048 points, exists in
+    this engine. Engine::open_source meets an HF resolution request by raising
+    the channel count: 2 MS/s at 7.1 MHz opens on 256 channels at 7.63 Hz per
+    bin, and 96 kS/s with center= set opens on 16 at 5.86 Hz. The same claim
+    survives in core/detect/detector.h on split_gap_bins and belongs to that
+    file's owner.

@@ -203,10 +203,19 @@ struct ResolutionRequest {
 // cheap. Bin width and frame rate are the same number in this geometry: a
 // coarse channel's stream runs at 2 * rate / channels and a transform of N
 // points over it produces one frame per N samples, so both come out at
-// 2 * rate / (channels * N). On a 1 MS/s HF recording over 64 channels a
-// 16384-point transform is 1.9 Hz per bin at 1.9 frames per second, which is
+// 2 * rate / (channels * N). N is capped at dsp::kMaxSpectrumTransform, 2048,
+// so the request is met by raising the channel count, which Engine::open_source
+// does when the caller named none. A 2 MS/s capture at 7.1 MHz goes from the
+// 8 channels engine::default_channel_count gives it to 256, 7.63 Hz per bin at
+// 7.63 frames per second, which is 114 frames inside a 15-second FT8
+// transmission. A 96 kS/s recording goes from 2 channels to 16, 5.86 Hz.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "On a 1 MS/s HF recording over 64 channels
+// a 16384-point transform is 1.9 Hz per bin at 1.9 frames per second, which is
 // 28 frames inside a 15-second FT8 transmission. The request above is already
-// met at 4096 points; 16384 is what the rate can afford.
+// met at 4096 points; 16384 is what the rate can afford." No transform above
+// 2048 points exists in this engine, so neither the 16384 nor the 4096 is a
+// grid anything here can build.
 //
 // THE BOUNDARY is 30 MHz, the top of ITU-R V.431-8 band 7. The test is the
 // span's low edge rather than its centre, so a capture straddling the top of
@@ -323,12 +332,17 @@ struct SourceCapabilities {
     // retune later. Wiring it up means the engine re-asking on retune, which
     // is the same lane as the choosing.
     //
-    // ONE CONSTANT DOWNSTREAM DOES NOT FOLLOW THE GRID, and a finer transform
-    // is what makes that reachable: detect::DetectorConfig::split_gap_bins is
-    // eight bins whose justification is a frequency, so on an HF grid at 1.9 Hz
-    // per bin it splits every RTTY signal into its two tones. Its own note
-    // carries the arithmetic and why neither a bin count nor a frequency is
-    // right for both bands.
+    // ONE CONSTANT DOWNSTREAM DOES NOT FOLLOW THE GRID, and a finer grid is
+    // what makes that reachable: detect::DetectorConfig::split_gap_bins is
+    // eight bins whose justification is a frequency, so on an HF grid at 7.6 Hz
+    // per bin, RTTY's 170 Hz shift is 22 bins and eight is a gap its two tones
+    // clear. Its own note carries the arithmetic and why neither a bin count
+    // nor a frequency is right for both bands.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "a finer transform is what makes that
+    // reachable ... on an HF grid at 1.9 Hz per bin it splits every RTTY
+    // signal into its two tones". The grid gets finer through the channel
+    // count, and 1.9 Hz was the 16384-point transform that does not exist.
     ResolutionRequest resolution;
 
     [[nodiscard]] bool supports_rate(dsp::SampleRate rate) const;
