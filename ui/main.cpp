@@ -9,6 +9,7 @@
 // USAGE
 //
 //   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
+//               [--receiver FREQ:MODE] [--decode NAME] [--grab-receivers FILE]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -17,6 +18,15 @@
 // developer's machine leaves their remembered engine and windows alone. The
 // engine need not be running: a window waiting for one is a state the QML
 // has to draw too.
+//
+// --receiver opens a receiver at FREQ in MODE once a source is open that
+// reaches it, FREQ in the frequency box's grammar with bare numbers in hertz,
+// "14005000:usb" or "145.005M:nfm". --decode names a decoder to attach to it,
+// or auto, and switches decoding on. --grab-receivers writes the receiver
+// window to FILE as a PNG when a smoke run ends. Together they drive and
+// photograph the decode section with nobody at the mouse, which is what they
+// are for: a window on the offscreen platform takes no input from, and puts
+// nothing on, the desktop it runs beside.
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
@@ -47,6 +57,8 @@
 
 #include <QFont>
 #include <QGuiApplication>
+#include <QImage>
+#include <QQuickWindow>
 #include <QObject>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
@@ -62,6 +74,7 @@
 
 #include "audio/audio_player.h"
 #include "models/engine_link.h"
+#include "models/frequency_entry.h"
 #include "models/settings.h"
 
 // main() is at global scope, unlike everything it constructs. An alias
@@ -332,6 +345,9 @@ int main(int argc, char* argv[])
     }
     std::uint32_t every_nth = kDefaultEveryNth;
     std::uint32_t smoke_seconds = 0;
+    QString startup_receiver;
+    QString startup_decoder;
+    QString grab_receivers;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
@@ -344,6 +360,18 @@ int main(int argc, char* argv[])
             }
             continue;
         }
+        if (args[i] == QStringLiteral("--receiver") && i + 1 < args.size()) {
+            startup_receiver = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--decode") && i + 1 < args.size()) {
+            startup_decoder = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--grab-receivers") && i + 1 < args.size()) {
+            grab_receivers = args[++i];
+            continue;
+        }
         if (args[i] == QStringLiteral("--smoke-seconds")) {
             const std::string value = i + 1 < args.size() ? args[++i].toStdString() : "";
             if (!parse_u32(value, smoke_seconds) || smoke_seconds == 0) {
@@ -353,6 +381,28 @@ int main(int argc, char* argv[])
             continue;
         }
         positional.append(args[i]);
+    }
+
+    // FREQ:MODE, split at the last colon so a frequency never has to avoid
+    // one. The mode is checked by EngineLink against its own list when it is
+    // placed, and refused there in the receiver's fault line.
+    double startup_hz = 0.0;
+    QString startup_mode;
+    if (!startup_receiver.isEmpty()) {
+        const qsizetype colon = startup_receiver.lastIndexOf(QLatin1Char(':'));
+        const QString frequency = colon < 0 ? startup_receiver : startup_receiver.left(colon);
+        startup_mode = colon < 0 ? QString() : startup_receiver.mid(colon + 1);
+        const auto parsed = revenant::ui::parse_frequency(frequency.toStdString(),
+                                                          revenant::ui::BareNumber::Hertz);
+        if (!parsed.has_value()) {
+            std::fputs("--receiver wants FREQ:MODE, as 14005000:usb or 145.005M:nfm\n", stderr);
+            return 2;
+        }
+        startup_hz = static_cast<double>(parsed->hertz);
+    }
+    if (!grab_receivers.isEmpty() && !smoke) {
+        std::fputs("--grab-receivers needs --smoke-seconds, which is the run it ends\n", stderr);
+        return 2;
     }
 
     if (!positional.isEmpty()) {
@@ -391,6 +441,9 @@ int main(int argc, char* argv[])
     // waiting for. Starting the engine second is a supported order, and so
     // is stopping and restarting it under a running window.
     link.start(address, port, every_nth);
+    if (!startup_receiver.isEmpty()) {
+        link.setStartupReceiver(startup_hz, startup_mode, startup_decoder);
+    }
 
     // DECLARED AFTER THE LINK ON PURPOSE, so it is destroyed BEFORE it.
     //
@@ -427,7 +480,31 @@ int main(int argc, char* argv[])
     }
 
     if (smoke) {
-        QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app, [] {
+        // The receiver window is shown for a grab, since nothing else in a
+        // smoke run shows it, and grabbed as the run ends so what it holds is
+        // what the whole run decoded.
+        QQuickWindow* receivers = nullptr;
+        if (!grab_receivers.isEmpty()) {
+            if (auto* root = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
+                receivers = root->findChild<QQuickWindow*>(QStringLiteral("vrxWindow"));
+            }
+            if (receivers == nullptr) {
+                std::fputs("--grab-receivers: this build of the QML has no receiver window\n",
+                           stderr);
+                return 1;
+            }
+            receivers->setVisible(true);
+        }
+        QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app, [receivers, grab_receivers] {
+            if (receivers != nullptr) {
+                const QImage shot = receivers->grabWindow();
+                if (shot.isNull() || !shot.save(grab_receivers)) {
+                    std::fprintf(stderr, "--grab-receivers: could not write %s\n",
+                                 qPrintable(grab_receivers));
+                    QCoreApplication::exit(1);
+                    return;
+                }
+            }
             QCoreApplication::exit(0);
         });
         const int code = QGuiApplication::exec();
