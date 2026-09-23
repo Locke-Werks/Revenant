@@ -182,6 +182,21 @@ qt_add_qml_module(revenant_ui
         qml/Main.qml
 )
 
+# qmlcachegen's output, which compiles each QML file to C++ and is ours no more
+# than the capnp schema's is. It inlines Qt's own headers into code paths the
+# compiler can prove are dead, and MSVC reports C4702 from inside qmetatype.h,
+# qvariant.h and qjsengine.h for them. Nothing in this tree can fix that, and
+# with REVENANT_WERROR on it stopped the build at Main_qml.cpp before this was
+# here. Scoped to the generated files by path, so the hand-written sources keep
+# the warning.
+if(MSVC)
+    get_target_property(revenant_ui_all_sources revenant_ui SOURCES)
+    set(revenant_qmlcache_sources ${revenant_ui_all_sources})
+    list(FILTER revenant_qmlcache_sources INCLUDE REGEX "/[.]rcc/qmlcache/")
+    set_source_files_properties(${revenant_qmlcache_sources}
+        PROPERTIES COMPILE_OPTIONS "/wd4702")
+endif()
+
 # Neither of these is ours and neither passes /W4. Scoped to the files rather
 # than relaxed on the target, so the hand-written sources stay at the house
 # level. The generated schema has no Q_OBJECT in it and client.cpp knows
