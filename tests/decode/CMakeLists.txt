@@ -117,6 +117,7 @@ add_executable(revenant_decode_tests
     ../support/no_modal_dialogs.cpp
     test_aprs.cpp
     test_ax25.cpp
+    test_cw.cpp
     test_dstar.cpp
     test_imbe.cpp
     test_navtex.cpp

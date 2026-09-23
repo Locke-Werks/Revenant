@@ -64,6 +64,7 @@ add_library(revenant_core STATIC
     characterise/transform.cpp
     decode/aprs.cpp
     decode/ax25.cpp
+    decode/cw.cpp
     decode/dstar.cpp
     decode/dv_codes.cpp
     decode/dv_phy.cpp
@@ -95,6 +96,7 @@ add_library(revenant_core STATIC
     dsp/spectrum_reference.cpp
     dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
+    dsp/synth/cw_mod.cpp
     dsp/synth/dv_mod.cpp
     dsp/synth/fsk_mod.cpp
     dsp/synth/modulators.cpp
