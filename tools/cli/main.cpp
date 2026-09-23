@@ -80,6 +80,7 @@
 #include "core/engine/vrx.h"
 #include "core/engine/wav_writer.h"
 #include "core/error.h"
+#include "core/rpc/decoders.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
 
@@ -96,6 +97,7 @@ namespace decode = revenant::decode;
 namespace detect = revenant::detect;
 namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
+namespace rpc = revenant::rpc;
 namespace source = revenant::source;
 
 using dsp::Hertz;
@@ -510,6 +512,12 @@ struct Options {
     // Music" there and "Classic Rock" here.
     decode::Region rds_region = decode::Region::kRbds;
 
+    // Decoders to attach to the --vrx receivers, by registry name, repeatable.
+    // "auto" is the decoder named after each receiver's mode. These are the
+    // same adapters revenant-engine serves over subscribeDecoded, from
+    // core/rpc/decoders.h, run here in-process.
+    std::vector<std::string> decode;
+
     bool list = false;
     bool list_audio = false;
     bool quiet = false;
@@ -573,6 +581,15 @@ void print_usage()
         "                      type table and whether a PI code is read back as a call\n"
         "                      sign. The two PTY tables agree on four of thirty-two\n"
         "                      entries, so the wrong one mislabels almost everything.\n"
+        "  --decode <name>     Attach a decoder to every --vrx receiver whose output it\n"
+        "                      reads, and print each message it recovers as it arrives:\n"
+        "                      the time in the receiver's stream, the receiver number,\n"
+        "                      the decoder, the kind of message and one line of text.\n"
+        "                      Repeatable. auto attaches the decoder named after each\n"
+        "                      receiver's mode. The decoders are p25p1, dstar and tetra\n"
+        "                      and read a --vrx in the mode of the same name, such as\n"
+        "                      --vrx 453.1M:p25p1 --decode auto. Nothing is decrypted:\n"
+        "                      an encrypted P25 call is reported as encrypted.\n"
         "\n"
         "Watching:\n"
         "  --spectrum[=<n>]    Draw an ASCII waterfall of the whole span, one row per\n"
@@ -1079,6 +1096,20 @@ void print_usage()
                 return std::unexpected(spec.error());
             }
             options.rds.push_back(*spec);
+            continue;
+        }
+
+        if (arg == "--decode") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (*text != "auto" && rpc::find_decoder(*text) == nullptr) {
+                return fail(std::format("--decode '{}' names no decoder. There are {}, and auto "
+                                        "picks the one named after each receiver's mode",
+                                        *text, rpc::decoder_names()));
+            }
+            options.decode.push_back(*text);
             continue;
         }
 
@@ -2256,6 +2287,12 @@ struct Receiver {
     SampleRate rate = 0;
     std::uint32_t channels = 1;
     std::string record_path;
+
+    // Whether the egress has a path for this receiver. A receiver with no
+    // --record and no --play has none, which --decode makes an ordinary case:
+    // its output goes to a decoder and nowhere else, and asking the egress to
+    // close a path it never opened fails the run on the way out.
+    bool has_egress = false;
 };
 
 // Monitor ids come from above anything the graph issues, which allocates from
@@ -2553,6 +2590,120 @@ void print_rds(double source_seconds, const RdsStation& station, const RdsSnapsh
                  snap.groups_decoded == 1 ? "" : "s", blocks, blocks == 1 ? "" : "s",
                  snap.blocks_good, snap.blocks_corrected, snap.blocks_dropped, bler,
                  snap.sync_losses, snap.sync_losses == 1 ? "" : "s");
+}
+
+// ---------------------------------------------------------------------------
+// Event decoders on --vrx receivers
+// ---------------------------------------------------------------------------
+
+// Messages one decoder may hold between two status intervals before it drops
+// the oldest. The printing thread drains them every interval, 500 ms by
+// default, and P25 produces a data unit every 180 ms during a call, so this is
+// minutes of margin; the count of any dropped is printed rather than hidden.
+constexpr std::size_t kDecodePending = 1'024;
+
+// One decoder from core/rpc/decoders.h attached to one receiver.
+//
+// The sink runs on the engine's completion thread and the printing happens on
+// the main thread, which is the arrangement RdsStation has and for its reason:
+// a terminal write inside the sink would put console latency in front of
+// every other consumer of the completion thread. The sink decodes and queues;
+// the main thread prints.
+struct DecodeTap {
+    std::size_t number = 0;
+    const rpc::DecoderSpec* spec = nullptr;
+
+    std::mutex lock;
+    std::unique_ptr<rpc::ChunkDecoder> decoder;
+    std::vector<rpc::DecodedMessage> pending;
+    std::uint64_t produced = 0;
+    std::uint64_t dropped = 0;
+    std::uint32_t rate = 0;
+
+    // Why the decoder stopped, empty while it has not. Terminal, on the
+    // argument core/rpc/decoders.h makes for every adapter refusal.
+    std::string fault;
+    bool fault_printed = false;
+};
+
+// Engine completion thread, with tap.lock held.
+void decode_tap_chunk(DecodeTap& tap, const engine::AudioChunk& chunk)
+{
+    if (!tap.fault.empty()) {
+        return;
+    }
+    const rpc::DecoderChunk in{
+        .samples = chunk.samples,
+        .channels = chunk.channels,
+        .rate = chunk.rate,
+        .start = chunk.start,
+    };
+    if (in.frames() == 0) {
+        return;
+    }
+
+    // Built at the rate the first chunk carries rather than at a rate taken
+    // from the placement, because a digital voice receiver's fine stage and a
+    // raw tap deliver at different rates and only the chunk says which.
+    if (tap.decoder == nullptr) {
+        auto made = tap.spec->make(chunk.rate);
+        if (!made) {
+            tap.fault = made.error().message;
+            return;
+        }
+        tap.decoder = std::move(*made);
+        tap.rate = static_cast<std::uint32_t>(chunk.rate);
+    }
+
+    std::vector<rpc::DecodedMessage> recovered;
+    if (auto consumed = tap.decoder->consume(in, recovered); !consumed) {
+        tap.fault = consumed.error().message;
+        return;
+    }
+    for (rpc::DecodedMessage& message : recovered) {
+        message.sequence = tap.produced++;
+        if (tap.pending.size() >= kDecodePending) {
+            tap.pending.erase(tap.pending.begin());
+            ++tap.dropped;
+        }
+        tap.pending.push_back(std::move(message));
+    }
+}
+
+// Main thread. Prints and clears what the decoder queued.
+//
+// The time is the message's own, where its receiver's stream says it
+// completed: DecodedMessage::end_sample over its rate. That stream starts with
+// the receiver, which on this command line is when the run starts, so it reads
+// as time into the run and is exact rather than the interval it was printed
+// in. Returns whether the decoder has faulted, so the summary can say so.
+bool print_decoded(DecodeTap& tap)
+{
+    std::vector<rpc::DecodedMessage> ready;
+    std::string fault;
+    bool newly_faulted = false;
+    {
+        const std::lock_guard<std::mutex> held(tap.lock);
+        ready.swap(tap.pending);
+        fault = tap.fault;
+        if (!tap.fault.empty() && !tap.fault_printed) {
+            tap.fault_printed = true;
+            newly_faulted = true;
+        }
+    }
+
+    for (const rpc::DecodedMessage& message : ready) {
+        const double seconds =
+            message.sample_rate == 0
+                ? 0.0
+                : static_cast<double>(message.end_sample) / static_cast<double>(message.sample_rate);
+        std::println("{:8.2f}s  vrx {}  {} {}  {}", seconds, tap.number, message.decoder,
+                     message.kind, message.text);
+    }
+    if (newly_faulted) {
+        std::println("          vrx {}  {} STOPPED: {}", tap.number, tap.spec->name, fault);
+    }
+    return !fault.empty();
 }
 
 [[nodiscard]] std::string iso8601_now()
@@ -3134,6 +3285,70 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         stations.push_back(std::move(station));
     }
 
+    // The event decoders, on the --vrx receivers, each attached before a
+    // sample moves. A name attaches to every receiver whose output it reads;
+    // auto attaches the decoder named after each receiver's mode. A request
+    // that matches no receiver is refused, because a run that prints nothing
+    // looks exactly like a band with nothing on it.
+    std::vector<std::shared_ptr<DecodeTap>> decode_taps;
+    for (const std::string& name : options.decode) {
+        std::size_t attached = 0;
+        for (std::size_t i = 0; i < receivers.size(); ++i) {
+            const Demod mode = receivers[i].spec.demod;
+            const rpc::DecoderSpec* spec =
+                name == "auto" ? rpc::find_decoder(engine::demod_name(mode))
+                               : rpc::find_decoder(name);
+            if (spec == nullptr) {
+                continue;
+            }
+            const bool complex_tap = engine::is_complex_tap(mode);
+            if ((spec->input == rpc::DecoderInput::ComplexBaseband) != complex_tap) {
+                continue;
+            }
+
+            auto tap = std::make_shared<DecodeTap>();
+            tap->number = i + 1;
+            tap->spec = spec;
+
+            // attach and not set, for the reason the RDS decoder gives above:
+            // a recording or a loudspeaker on the same receiver keeps its
+            // samples. Nothing detaches, because these live for the run.
+            if (auto wired = eng.attach_audio_sink(
+                    receivers[i].id,
+                    [tap](const engine::AudioChunk& chunk) -> Status {
+                        const std::lock_guard<std::mutex> held(tap->lock);
+                        decode_tap_chunk(*tap, chunk);
+                        return {};
+                    });
+                !wired) {
+                return std::unexpected(with_context(
+                    wired.error(),
+                    std::format("attaching the {} decoder to receiver {}", spec->name, i + 1)));
+            }
+            std::println("  decode          {} on receiver {}", spec->name, i + 1);
+            decode_taps.push_back(std::move(tap));
+            ++attached;
+        }
+        if (attached == 0) {
+            std::string why;
+            if (name == "auto") {
+                why = std::format("No --vrx is in a mode a decoder is named after; the decoders "
+                                  "are {}.",
+                                  rpc::decoder_names());
+            } else {
+                const bool wants_complex =
+                    rpc::find_decoder(name)->input == rpc::DecoderInput::ComplexBaseband;
+                why = std::format(
+                    "The {} decoder reads {}, and no --vrx produces it.", name,
+                    wants_complex ? "complex baseband, which the raw, p25p1, dstar and tetra "
+                                    "modes produce"
+                                  : "audio, which every mode but raw, p25p1, dstar and tetra "
+                                    "produces");
+            }
+            return fail(std::format("--decode {} matched no receiver. {}", name, why));
+        }
+    }
+
     if (!options.record.empty()) {
         for (std::size_t i = 0; i < receivers.size(); ++i) {
             auto path = record_path_for(options, i + 1, receivers[i].spec);
@@ -3237,6 +3452,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             return std::unexpected(with_context(
                 added.error(), std::format("registering egress for receiver {}", i + 1)));
         }
+        receiver.has_egress = true;
 
         if (secondary_backend != nullptr) {
             engine::AudioStreamInfo monitor_info = info;
@@ -3511,6 +3727,13 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 print_rds(source_seconds, *station, snapshot_rds(*station));
             }
 
+            // Decoded messages, one line each as they arrived since the last
+            // interval, under the same rule and also printed under --quiet.
+            for (const std::shared_ptr<DecodeTap>& tap : decode_taps) {
+                status_line.erase();
+                static_cast<void>(print_decoded(*tap));
+            }
+
             if (options.quiet) {
                 continue;
             }
@@ -3672,6 +3895,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // Removing the receiver is what closes it, and the file size below is only
     // the truth once it has.
     for (const Receiver& receiver : receivers) {
+        if (!receiver.has_egress) {
+            continue;
+        }
         if (auto removed = egress.remove_receiver(receiver.id); !removed && outcome) {
             outcome = std::unexpected(
                 with_context(removed.error(), "closing a receiver's audio destination"));
@@ -4132,6 +4358,33 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         }
     }
 
+    // The decoders' last messages, which the final flush may have produced
+    // after the last interval printed, and one line each saying how many there
+    // were in all. The engine has stopped, so no lock is contended.
+    for (const std::shared_ptr<DecodeTap>& tap : decode_taps) {
+        const bool faulted = print_decoded(*tap);
+        std::uint64_t produced = 0;
+        std::uint64_t dropped = 0;
+        std::uint32_t decoded_rate = 0;
+        {
+            const std::lock_guard<std::mutex> held(tap->lock);
+            produced = tap->produced;
+            dropped = tap->dropped;
+            decoded_rate = tap->rate;
+        }
+        std::println("");
+        std::println("decode {} on vrx {}  {} message{} at {} S/s", tap->spec->name, tap->number,
+                     produced, produced == 1 ? "" : "s", decoded_rate);
+        if (dropped != 0) {
+            any_counter = true;
+            std::println("  DROPPED         {} messages not printed because the queue was full",
+                         dropped);
+        }
+        if (faulted) {
+            any_counter = true;
+        }
+    }
+
     std::println("");
     if (any_counter) {
         std::println("Counters above in capitals are not zero. Audio was lost, filled or "
@@ -4210,11 +4463,14 @@ int main(int argc, char** argv)
                      *options->spectrum_ceiling_db, *options->spectrum_floor_db);
         return 2;
     }
+    // --decode is a destination for a receiver's output as much as a file or
+    // a loudspeaker is: a P25 receiver decoded and printed is the whole of
+    // what somebody running it wanted.
     if (!options->receivers.empty() && options->record.empty() && options->play.empty() &&
-        !options->spectrum) {
+        !options->spectrum && options->decode.empty()) {
         std::println(stderr,
-                     "revenant-cli: nothing to do with the audio. Pass --record, --play, or "
-                     "both.");
+                     "revenant-cli: nothing to do with the audio. Pass --record, --play, "
+                     "--decode, or any of them together.");
         return 2;
     }
     for (const std::size_t which : options->play) {
