@@ -13,9 +13,12 @@ facts about this machine rather than about Qt.
 | | |
 | --- | --- |
 | `installer.toml` | The Forge config at the repository root. Product identity, install directory, preflights, the one option and the shortcuts |
-| `scripts/stage-payload.ps1` | Assembles the payload directory out of the two build trees |
-| `package` job in `.github/workflows/ci.yml` | Unsigned installer on every build, as an artifact |
-| `release` job in the same file | Signed installer on a `v*` tag, published to the release |
+| `scripts/stage-payload.ps1` | Assembles the payload directory out of the two build trees, licence material included |
+| `scripts/generate_notices.py` | Writes each program's third-party notices from the tree that built it |
+| `scripts/corresponding_source.py` | Records which copyleft sources went into the engine, then fetches, checks and zips them |
+| `licenses/` | The LGPL texts and the SPDX licence texts the notices need, with where each came from in `generate_notices.py` |
+| `package` job in `.github/workflows/ci.yml` | Unsigned installer and the corresponding-source archive on every build, as artifacts |
+| `release` job in the same file | Signed installer and the corresponding-source archive on a `v*` tag, published to the release together |
 
 ## Reproducing it locally
 
@@ -68,6 +71,35 @@ preflights.
 | --- | --- | --- |
 | `revenant-engine.exe` and `LICENSE.txt` | 2 | 6.2 MB |
 | `revenant-ui.exe` and the Qt runtime it needs | 133 | 63.2 MB |
+| Notices and licence texts, below | 4 | 0.2 MB |
+
+The last row was added on 2026-09-22 and the counts above it were measured the
+day before, so the payload is now 139 files. Staging both halves that day wrote
+139 and `lwforge inspect` listed all four licence members in the container.
+
+### The licence material
+
+| Member | From | For |
+| --- | --- | --- |
+| `LICENSE.txt` | `LICENSE`, byte for byte the FSF's GPL-3.0 text | Revenant, both programs |
+| `THIRD-PARTY-NOTICES-engine.txt` | `generate_notices.py engine`, over `build/ci/vcpkg_installed/x64-windows-static` | Every port linked into the engine, with its licence verbatim, the LGPL-2.1 section 6 notice for libusb, the GPL note for rtlsdr, and pthreads4w's upstream `NOTICE` |
+| `THIRD-PARTY-NOTICES-client.txt` | `generate_notices.py client`, over the client's vcpkg tree, Qt's `sbom/*.spdx.json` and the FFmpeg DLLs themselves | capnproto, Qt 6.8.3 under LGPL-3.0 with the 55 distinct bundled components its SPDX documents attribute in the four modules shipped, FFmpeg as the DLLs report it, the Visual C++ runtime, and an appendix with every licence text those name |
+| `licenses/LGPL-2.1.txt` | gnu.org, 2026-09-22 | libusb, FFmpeg |
+| `licenses/LGPL-3.0.txt` | gnu.org, 2026-09-22 | Qt |
+
+Two notices files rather than one because the halves are staged by different
+CI jobs on different checkouts, and each can only describe the tree it has.
+
+The FFmpeg paragraph is measured, not copied from Qt's documentation. The
+generator loads the five DLLs and asks each for its licence, and asks
+`avcodec` for its configure line: "LGPL version 2.1 or later" from all five,
+version 7.1, configured with `--enable-shared --disable-static` and no
+`--enable-gpl`.
+
+The generator fails rather than writing a file with a hole in it: a port with
+no `copyright` or no `vcpkg.spdx.json`, a Qt attribution whose SPDX identifier
+has no text under `licenses/spdx/`, and pthreads moving off the version its
+`NOTICE` was taken from all stop the stage, naming the thing that is missing.
 
 ### One directory, not two
 
@@ -190,10 +222,14 @@ carries the reasoning for each of these inline; the summary:
   `BUILTIN\Administrators`, which is the failure `as = "user"` exists for and
   which is better avoided than handled.
 
-`upgrade_code` is deliberately absent from `installer.toml`. It is fixed
-forever the first time an installer carrying it reaches anybody, and nothing
-has been released, so leaving it out costs only exit code 1618 when two
-installers race. It has to be chosen before the first release.
+`upgrade_code` is `d4be342a-9c6c-4c6b-9fd7-848637a79967`, generated on
+2026-09-22 before any release and never to change. It keys the stub's
+single-instance mutex, so two Revenant installers of any version refuse to run
+at once rather than racing over one directory, and a different value in a later
+installer would make it a stranger to every earlier one.
+
+This paragraph used to say `upgrade_code` is deliberately absent from
+`installer.toml` and has to be chosen before the first release; it has been.
 
 ## Signing
 
@@ -235,33 +271,59 @@ not commit the generated file; `guards` fails the build if it appears.
 
 Nothing has been signed yet. The `release` job has never run.
 
-## What the container does not carry yet
+## The corresponding sources
 
-These block the first release. They do not block the per-build artifact, which
-is a test that the packaging works and is not distribution.
+`docs/clean-room.md` decided on 2026-09-20 that LGPL-2.1 section 6d and
+GPL-3.0 section 6d are both discharged by offering the binary and the sources
+from the same designated place. The release page is that place, so the
+`release` job publishes `Revenant-<version>-corresponding-source.zip` in the
+same `gh release create` as the installer:
 
-1. **A third-party notices file.** `docs/clean-room.md` requires one as a
-   payload member beside the binaries, not a link, and four of the linked
-   licences ask for one in different words. It does not exist. Both inputs are
-   on disk and neither needs writing by hand:
-   `build/ci/vcpkg_installed/x64-windows-static/share/<port>/copyright` holds
-   each engine dependency's licence text verbatim with `vcpkg.spdx.json` beside
-   it, and `C:/Qt/6.8.3/msvc2022_64/sbom/*.spdx.json` holds Qt's own package
-   list, 130 packages for qtbase alone, which is the Harfbuzz, FreeType and
-   PCRE2 attribution `windeployqt` does not generate.
-2. **The verbatim LGPL texts.** Qt is LGPL-3.0 and libusb is
-   LGPL-2.1-or-later, and both sections ask for the licence text to travel with
-   the work. `LICENSE` in this repository is GPL-3.0 and is the only licence
-   text in the tree.
-3. **The corresponding sources as a release artefact.** `docs/clean-room.md`
-   decided on 2026-09-20 that LGPL-2.1 section 6d and GPL-3.0 section 6d are
-   both discharged by offering the binary and the sources from the same
-   designated place. A release carrying only `Revenant-Setup.exe` is not that.
-   What it owes: libusb v1.0.29 upstream, the vcpkg rtlsdr port's three
-   patches, and Revenant's own source archive.
+- `revenant-<version>-source.zip`, `git archive` of the tagged commit.
+- `upstream/libusb-libusb-v1.0.29.tar.gz` and
+  `upstream/rtlsdr-rtl-sdr-v2.0.2.tar.gz`, the archives vcpkg built from.
+- `vcpkg-port-libusb/` and `vcpkg-port-rtlsdr/`, each port's recipe from the
+  vcpkg git tree it was built from. rtlsdr's includes `dependencies.diff`,
+  `library-linkage.diff` and `tools.diff`; libusb's has no patches.
+- `SOURCES.txt`, saying what each piece is and how it was checked.
 
-Point 2 is also the one thing the Qt dynamic link buys and could lose. Shipping
-Qt as DLLs beside the executable is the LGPL-3.0 section 4d(1) route and
+rtlsdr's upstream archive is beyond the decision record's list of libusb's
+source, the three patches and Revenant's own archive. It is there because the
+patches are changes to that base and are not the source of anything without it.
+
+The engine job writes `sources.json` from its own vcpkg tree: each copyleft
+port's upstream SHA512 and the SHA256 of every file in its recipe, all read
+from `vcpkg.spdx.json`. The `package` and `release` jobs download the pieces
+and refuse any byte that does not match. The `package` job builds the archive
+on every run and keeps it as the `corresponding-source` artifact, so the first
+tag is not its first outing. Built locally on 2026-09-22 against the `dev`
+tree: 3.0 MB, and every upstream and recipe hash matched.
+
+## What the first release still owes
+
+**The sources of Qt and FFmpeg.** The client payload conveys Qt 6.8.3 and
+FFmpeg 7.1 as DLLs, which is conveying their object code, and LGPL-3.0 and
+LGPL-2.1 each ask for the corresponding source to be offered with it. The
+notices say where each is published upstream, which is the weaker promise
+`docs/clean-room.md` describes, a promise about somebody else's hosting. The
+corresponding-source archive does not carry either: Qt's source is hundreds of
+megabytes per module and both are built by The Qt Company rather than here.
+Whether to carry them, or offer them from a mirror this project controls, is a
+decision nobody has made, and it comes due at the first tag.
+
+**The first run of the `release` job.** It has never run, and the corresponding
+source step in it is the same command the `package` job runs on every build.
+
+Keeping Qt as DLLs is the one thing here that could be lost by accident.
+Shipping Qt beside the executable is the LGPL-3.0 section 4d(1) route and
 discharges the relink obligation without a relink package. Anything that stops
 a replaced `Qt6Core.dll` being picked up, a static Qt among them, gives that
 away and puts the obligation back.
+
+WHAT THIS SECTION USED TO SAY. It was headed "What the container does not
+carry yet" and listed three things blocking the first release: a third-party
+notices file, which "does not exist"; the verbatim LGPL texts, with `LICENSE`
+"the only licence text in the tree"; and the corresponding sources as a release
+artefact. All three were built on 2026-09-22 and are described above. It did
+not list the Qt and FFmpeg sources, which were owed the whole time.
+

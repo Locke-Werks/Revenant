@@ -588,8 +588,10 @@ compatible either way.
 **Qt, which the engine does not link and the UI does.** `ui/` is a separate
 CMake project against the dynamic triplet, requiring Qt6 6.8 or newer, and it
 links `Qt6::Core`, `Qt6::Gui`, `Qt6::Quick` and `Qt6::QuickControls2`. The open
-source Qt is LGPL-3.0. Three things follow and none of them is settled, because
-nothing packages the UI yet:
+source Qt is LGPL-3.0. Three things follow. This sentence used to say none of
+them is settled because nothing packages the UI yet; `scripts/stage-payload.ps1`
+has packaged it since 2026-09-21, and how each of the three is met is at the
+end of the list below it.
 
 - The dynamic link is the LGPL-3.0 section 4d(1) route, and DLLs beside the
   executable satisfy it without a relink package, which is the position this
@@ -604,26 +606,37 @@ nothing packages the UI yet:
   generate that attribution, so a notices file built only from the vcpkg tree
   would miss the entire Qt subtree.
 
+As packaged on 2026-09-22: Qt ships as DLLs beside `revenant-ui.exe`, so the
+first holds as long as that layout does. `licenses/LGPL-3.0.txt` and
+`LICENSE.txt` are payload members, which is the second.
+`THIRD-PARTY-NOTICES-client.txt` is generated from Qt's own SPDX documents and
+attributes every bundled component in the four modules shipped, which is the
+third. docs/packaging.md has the detail.
+
 ### What is actually still open
 
 The relink obligation is not the open item. These are.
 
-1. **There is no notices file.** Checked: no `NOTICE`, no `THIRD-PARTY-NOTICES`,
-   nothing of that shape at the root or under `docs/`. Four of the linked
-   licences ask for one, in different words.
-2. **There is no published Corresponding Source for the dependencies as built.**
-   The repository publishes Revenant's own source and a pinned vcpkg manifest.
-   A manifest is a recipe: it names upstream tags and a registry commit, which
-   is a strong argument for section 6d's "equivalent access from the same place"
-   and is not the same act as offering the source. The rtlsdr port's three
-   patches are the concrete case, because they are modifications to GPL source
-   that are in the binary and are not in this tree.
-3. **Nothing has been distributed, so nothing is in breach.** The distinction
+1. **Nothing has been distributed, so nothing is in breach.** The distinction
    the licence section above draws holds: these obligations attach to handing a
    binary to somebody. Today the repository ships source and no binaries. The
    deadline is the first release, not now.
-4. **The UI's Qt obligations are unexamined beyond the paragraph above**, and
-   they have their own packaging step that does not exist yet.
+2. **The Qt and FFmpeg sources.** The client payload conveys Qt 6.8.3 and
+   FFmpeg 7.1 as DLLs, and both LGPLs ask for their source to be offered with
+   the object code. The corresponding-source archive does not carry either,
+   and the notices point at where each is published upstream, which is the
+   weaker promise the section below describes. Undecided, and due at the first
+   tag.
+
+WHAT THIS LIST USED TO SAY. Two of its items were "There is no notices file"
+and "There is no published Corresponding Source for the dependencies as
+built", and a third said the UI's Qt obligations were unexamined, with a
+packaging step that did not exist yet. On 2026-09-22 `scripts/generate_notices.py`
+began writing a notices file per program into the payload, and
+`scripts/corresponding_source.py` began building the archive the `release` job
+publishes beside the installer, with libusb's upstream source, rtlsdr's
+upstream source and its port's three patches, and Revenant's own. The Qt and
+FFmpeg sources above were missing from the list the whole time.
 
 ### What a release has to carry
 

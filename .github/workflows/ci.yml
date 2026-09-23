@@ -226,6 +226,17 @@ jobs:
           python3 scripts/check_modal_dialogs.py --self-test
           python3 scripts/check_modal_dialogs.py
 
+      - name: The release licence scripts still report what they should
+        shell: bash
+        run: |
+          # generate_notices.py and corresponding_source.py do their real work
+          # where the build trees are, on the workstation and in the package
+          # job. Their self-tests need neither, so they run here, where a
+          # broken script is found before anything compiles rather than at the
+          # staging step forty minutes in.
+          python3 scripts/generate_notices.py --self-test
+          python3 scripts/corresponding_source.py --self-test
+
   # The conformance suite diffs GPU compute kernels against CPU reference
   # implementations. A hosted runner has no discrete GPU, so it cannot execute
   # the one thing this project's correctness argument rests on. The runner is a
@@ -363,6 +374,27 @@ jobs:
         with:
           name: payload-engine
           path: dist/engine
+          if-no-files-found: error
+          retention-days: 7
+
+      # Which copyleft sources went into this engine, with the hashes the
+      # build recorded. Only this tree's vcpkg.spdx.json files know, and the
+      # package and release jobs that fetch the sources run elsewhere, so the
+      # record crosses as an artifact. scripts/corresponding_source.py has the
+      # rest.
+      - name: Record the corresponding sources
+        shell: pwsh
+        run: |
+          python scripts/corresponding_source.py manifest `
+            --vcpkg build/ci/vcpkg_installed/x64-windows-static `
+            --out dist/source-manifest/sources.json
+          if ($LASTEXITCODE -ne 0) { throw "corresponding_source.py manifest exited $LASTEXITCODE" }
+
+      - name: Upload the source manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-manifest
+          path: dist/source-manifest
           if-no-files-found: error
           retention-days: 7
 
@@ -601,6 +633,20 @@ jobs:
             throw "installer.toml says $toml and cmake/RevenantVersion.cmake says $expected"
           }
 
+      # The two halves stage their own licence material, and a half staged by
+      # an older script would arrive without it and forge without complaint.
+      # This is the one place both halves are together, so it is where their
+      # absence fails. docs/packaging.md lists what each file is for.
+      - name: The payload carries its licences
+        shell: pwsh
+        run: |
+          $wanted = 'LICENSE.txt', 'THIRD-PARTY-NOTICES-engine.txt',
+                    'THIRD-PARTY-NOTICES-client.txt', 'licenses/LGPL-2.1.txt',
+                    'licenses/LGPL-3.0.txt'
+          $missing = @($wanted | Where-Object { -not (Test-Path "dist/stage/$_") })
+          if ($missing.Count -gt 0) { throw "the payload is missing: $($missing -join ', ')" }
+          $wanted | ForEach-Object { "{0,-34} {1,8} bytes" -f $_, (Get-Item "dist/stage/$_").Length }
+
       # Forge is public, so the workflow's own token reads its releases. gh
       # refuses to run with no GH_TOKEN at all and says so before it reaches
       # the network, which reads as a permissions failure and is not one.
@@ -616,6 +662,33 @@ jobs:
             "$name : $($sig.Status)"
             if ($sig.Status -ne 'Valid') { throw "tools/$name is $($sig.Status)" }
           }
+
+      # The same archive the release job publishes, built on every run so the
+      # first tag is not the first time it has been tried. Every download is
+      # checked against the hash the engine's build recorded, so a green step
+      # here means the sources this commit would publish are the sources of
+      # the binary it built. The token lifts the API's anonymous rate limit.
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-manifest
+          path: dist/source-manifest
+
+      - name: Assemble the corresponding source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/corresponding_source.py bundle `
+            --manifest dist/source-manifest/sources.json --out dist/source
+          if ($LASTEXITCODE -ne 0) { throw "corresponding_source.py bundle exited $LASTEXITCODE" }
+
+      - name: Upload the corresponding source
+        uses: actions/upload-artifact@v4
+        with:
+          name: corresponding-source
+          path: dist/source/*.zip
+          if-no-files-found: error
+          retention-days: 14
 
       # --dev, because the payload arriving here was never signed. Without it
       # lwforge refuses the unsigned stub, and with an unsigned payload the
@@ -698,6 +771,25 @@ jobs:
         with:
           name: payload-client
           path: dist/stage
+
+      # Both notices files send a reader to releases/tag/v<version> for the
+      # sources, with the version taken from cmake/RevenantVersion.cmake. A
+      # tag that disagrees would publish notices pointing at a release that is
+      # not this one. Checked before anything is signed, so a wrong tag costs
+      # a minute rather than a signing run.
+      - name: The tag is the version the notices name
+        shell: pwsh
+        run: |
+          $cmake = Get-Content cmake/RevenantVersion.cmake -Raw
+          $version = @('MAJOR', 'MINOR', 'PATCH' | ForEach-Object {
+            [regex]::Match($cmake, "REVENANT_VERSION_$_ (\d+)").Groups[1].Value }) -join '.'
+          if ("${{ github.ref_name }}" -ne "v$version") {
+            throw "the tag is ${{ github.ref_name }} and cmake/RevenantVersion.cmake says v$version"
+          }
+          $missing = @('LICENSE.txt', 'THIRD-PARTY-NOTICES-engine.txt', 'THIRD-PARTY-NOTICES-client.txt',
+                       'licenses/LGPL-2.1.txt', 'licenses/LGPL-3.0.txt' |
+                       Where-Object { -not (Test-Path "dist/stage/$_") })
+          if ($missing.Count -gt 0) { throw "the payload is missing: $($missing -join ', ')" }
 
       # signing/signing.env is the one place the endpoint, the account and the
       # certificate profile are written down, and the reason it exists is that
@@ -822,19 +914,38 @@ jobs:
             throw "the signed installer cannot read its own container"
           }
 
-      # THIS STEP IS NOT YET COMPLETE AND THE GAP IS A LICENCE ONE, NOT A
-      # PACKAGING ONE. Revenant is GPL-3.0-or-later and links libusb under
-      # LGPL-2.1-or-later. docs/clean-room.md decided on 2026-09-20 that both
-      # obligations are discharged by section 6d, which is the binary and the
-      # corresponding sources offered from the same designated place. A
-      # release carrying only the installer is not that. What is missing is
-      # listed in docs/packaging.md under "What the container does not carry
-      # yet", and the first tag is when it comes due.
+      - uses: actions/download-artifact@v4
+        with:
+          name: source-manifest
+          path: dist/source-manifest
+
+      # docs/clean-room.md decided on 2026-09-20 that Revenant's GPL-3.0 and
+      # libusb's LGPL-2.1 obligations are both met by section 6d: the binary
+      # and its corresponding sources offered from the same place. This
+      # archive is the sources half, built from the tagged commit and checked
+      # byte for byte against the hashes the engine's build recorded, and it
+      # is published in the same act as the installer. The package job builds
+      # the same archive on every run, so this is not its first outing.
+      #
+      # It does not carry the Qt or FFmpeg sources, whose DLLs the installer
+      # also conveys. docs/packaging.md keeps that on the list of what the
+      # first release owes.
+      - name: Assemble the corresponding source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/corresponding_source.py bundle `
+            --manifest dist/source-manifest/sources.json --out dist/source --ref "${{ github.sha }}"
+          if ($LASTEXITCODE -ne 0) { throw "corresponding_source.py bundle exited $LASTEXITCODE" }
+
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/Revenant-Setup.exe `
+          $source = Get-ChildItem dist/source -Filter '*-corresponding-source.zip' | Select-Object -First 1
+          if (-not $source) { throw "no corresponding-source archive to publish beside the installer" }
+          gh release create "${{ github.ref_name }}" dist/Revenant-Setup.exe $source.FullName `
             --repo "${{ github.repository }}" `
             --title "Revenant ${{ github.ref_name }}"

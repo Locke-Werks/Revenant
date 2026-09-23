@@ -533,3 +533,22 @@ instead: They run both kernels: vrx_fine mixes, filters and resamples to 48000,
     48000 or 72000 S/s, and vrx_demod's complex passthrough hands the result
     out. docs/modes.md has the table and tests/engine/test_engine_dv.cpp the
     measured comparison with the raw tap they used to get.
+phrase: It does not produce a third-party notices file. There is not one yet.
+phrase: There is no notices file. Checked: no NOTICE, no THIRD-PARTY-NOTICES
+phrase: LICENSE in this repository is GPL-3.0 and is the only licence text in the tree
+phrase: none of them is settled, because nothing packages the UI yet
+retired: 2026-09-22
+commit: 9182842
+instead: scripts/stage-payload.ps1 runs scripts/generate_notices.py for each
+    half it stages, so the payload carries THIRD-PARTY-NOTICES-engine.txt and
+    THIRD-PARTY-NOTICES-client.txt beside LICENSE.txt, plus the FSF's LGPL-2.1
+    and LGPL-3.0 texts under licenses/. docs/packaging.md lists what each
+    covers.
+
+phrase: upgrade_code is deliberately absent from installer.toml
+phrase: UPGRADE_CODE IS DELIBERATELY ABSENT AND HAS TO BE CHOSEN ONCE
+retired: 2026-09-22
+commit: b4236bd
+instead: installer.toml sets upgrade_code = "d4be342a-9c6c-4c6b-9fd7-848637a79967",
+    chosen before any release and never to change: it keys the stub's
+    single-instance mutex across every version.
