@@ -109,11 +109,13 @@ struct EngineInfo {
     bool ring_clamped = false;
     std::string ring_clamp_reason;
 
-    // Capture seconds delivered per wall second, over the whole run. 1.0 is
-    // realtime, above is a replay running faster than the recording was
-    // made, below is the source falling behind. ZERO IS NOT MEASURED,
-    // which is what info() answers before the run starts, and is not a
-    // stalled source.
+    // Capture seconds delivered per wall second, over the last
+    // realtime_window_seconds. 1.0 is realtime, above is a replay running
+    // faster than the recording was made, below is the source falling
+    // behind. ZERO IS NOT MEASURED, which is what info() answers before the
+    // run starts, and is not a stalled source. A pause the engine made to
+    // retune or change a gain is not charged to the source; see
+    // core/engine/pacing_window.h.
     //
     // Read it with source_paced_by: a factor of 0.5 is a fault when the
     // pace is zero and is the setting when the pace is 0.5. A client saying
@@ -142,6 +144,11 @@ struct EngineInfo {
     // from one radio lined up against a spectrum frame from another, with the
     // arithmetic consistent throughout.
     std::uint64_t source_epoch = 0;
+
+    // The wall seconds realtime_factor covers. Zero from an engine built
+    // before the factor was windowed, whose factor is a mean over the whole
+    // run and cannot say whether the source is behind now.
+    double realtime_window_seconds = 0.0;
 };
 
 // Whether the front end can be pointed somewhere else, and where.

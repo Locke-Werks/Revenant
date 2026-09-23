@@ -1052,10 +1052,11 @@ no dongle is attached.
 
 ### Whether the source is keeping up
 
-`EngineInfo` carries `realtimeFactor` and `sourcePacedBy`.
+`EngineInfo` carries `realtimeFactor`, `sourcePacedBy` and
+`realtimeWindowSeconds`.
 
 The first is capture seconds delivered per wall second, measured over the
-whole run. A synthetic source asked for 20 MS/s generates about 0.20 of
+last two seconds, which the third states. A synthetic source asked for 20 MS/s generates about 0.20 of
 realtime on the host this was written on, so everything downstream starves
 and audio arrives in fragments. Before this pair existed the only
 client-visible symptom was an audio queue that kept running dry, which is
@@ -1072,11 +1073,42 @@ replay.
 
 Zero in the factor means **not measured**, which is a third state and not a
 stalled source: it is what `info()` answers between opening the source and
-starting the run. It is also a lifetime mean rather than an instantaneous
-reading, for the reason `RdsHealth` carries no `blockErrorRate`: a source
-that struggled for ten seconds and has been fine since reads low forever. A
-client that wants the rate now differences two polls against
-`SourceStats::samplesDelivered`.
+starting the run. A source that has stopped producing reads lower from the
+moment its next block is late, down to two blocks over the window, and never
+as zero.
+
+**A pause the engine made is not charged to the source.** An RTL-SDR stops
+its transfers around every retune and gain change, about 330 ms each on an
+R820T, and counts the samples the device produced meanwhile as lost so the
+index stays on the device's clock. `Engine::set_source_center`,
+`set_source_gain` and `set_source_gain_auto` add what the source lost inside
+the call to the delivered count the factor is taken from, because those
+samples were never late; `SourceStats::samplesLost` still counts every one.
+A stall nobody asked for, a consumer too slow to drain the device for one,
+pulls the factor down and leaves the window two seconds after it ends.
+`core/engine/pacing_window.h` has the rule, and
+`tests/engine/test_pacing_window.cpp` drives an RTL-SDR-shaped pause through
+it both ways.
+
+Measured on 2026-09-23 through the real engine on the RTX 4090, in
+`tests/engine/test_engine_pacing.cpp`: a synthetic scene at 2 MS/s paced at
+realtime, wrapped so that a retune throws its blocks away for 330 ms and
+counts them lost the way the dongle does, polled every 50 ms. Steady, the
+factor read 0.9986 to 1.0013 over three runs. Across five retunes 700 ms
+apart, polls inside the pauses included, it read 0.9954 to 1.0125. The same
+330 ms pause with no control call behind it pulled it to 0.838, and it was
+back above 0.99 1.70 s after the pause ended.
+
+WHAT THIS PARAGRAPH USED TO SAY, before 2026-09-23: "It is also a lifetime
+mean rather than an instantaneous reading, for the reason `RdsHealth` carries
+no `blockErrorRate`: a source that struggled for ten seconds and has been fine
+since reads low forever." The first sentence of the section said "measured
+over the whole run". Each retune took a third of a second out of that mean for
+good, so after a few tunes the client called the RTL-SDR behind while its
+audio was not: after N retunes in T seconds the factor was (T - 0.33 N) / T.
+
+An engine built before the window sends `realtimeWindowSeconds` as zero, and
+the client does not call a source behind on that engine's lifetime mean.
 
 ### A clamped passband says so in words, and an FM one is refused instead
 

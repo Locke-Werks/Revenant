@@ -611,17 +611,30 @@ struct SourceRetune {
 // The number existed before this struct did, in revenant-engine's own status
 // line as "x 0.20", printed to a terminal a GUI operator never sees.
 struct SourcePacing {
-    // Capture seconds delivered per wall second. 1.0 is realtime, above 1.0
-    // is a recording being replayed faster than it was made, and below 1.0
-    // is the source falling behind.
+    // Capture seconds delivered per wall second over the last
+    // window_seconds. 1.0 is realtime, above 1.0 is a recording being
+    // replayed faster than it was made, and below 1.0 is the source falling
+    // behind.
+    //
+    // OVER A WINDOW, AND A PAUSE THE ENGINE CAUSED IS NOT CHARGED TO IT.
+    // core/engine/pacing_window.h has both and the measurement behind them:
+    // the samples an RTL-SDR loses while its transfers are stopped for a
+    // retune or a gain change count as delivered here, because they were
+    // never late, and SourceStats::samples_lost still counts them as lost.
+    // A stall nobody asked for pulls the factor down and leaves it within
+    // kPacingWindowSeconds of ending.
     //
     // ZERO MEANS NOT MEASURED, which is a third state and not a stalled
     // source. Nothing has been measured until the stream has started and at
     // least one block has been delivered, so zero is what info() answers
-    // between open_source and run(). A source that has genuinely stopped
-    // producing reports a factor that decays towards zero without reaching
-    // it, because the elapsed time keeps growing while the sample count does
-    // not.
+    // between open_source and run(). A source that has stopped producing
+    // reads lower from the moment its next block is more than a block's time
+    // late, down to two blocks over the window, and never as zero.
+    //
+    // WHAT THIS COMMENT USED TO SAY, when the factor was taken over the whole
+    // run: "A source that has genuinely stopped producing reports a factor
+    // that decays towards zero without reaching it, because the elapsed time
+    // keeps growing while the sample count does not."
     double realtime_factor = 0.0;
 
     // EngineConfig::pace, echoed. Zero is unthrottled.
@@ -639,11 +652,21 @@ struct SourcePacing {
     // the ring refusing samples rather than the source being slow.
     bool demand = false;
 
-    // What the factor was computed from, so a client can say how long it has
-    // been averaging over rather than presenting a lifetime mean as an
-    // instantaneous reading. Both are since run() started.
+    // Since run() started, both of them. The factor is not computed from
+    // these any more; they are the run's totals, which a headless host
+    // reads to wait out a start-up before it warns.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "What the factor was computed from, so a
+    // client can say how long it has been averaging over rather than
+    // presenting a lifetime mean as an instantaneous reading." That is
+    // window_seconds now.
     double elapsed_seconds = 0.0;
     dsp::SampleIndex samples_delivered = 0;
+
+    // The wall seconds realtime_factor covers: kPacingWindowSeconds, plus up
+    // to a tenth of a second and one block's time, and the whole run while
+    // the run is younger. Zero before run(). See core/engine/pacing_window.h.
+    double window_seconds = 0.0;
 };
 
 // One receiver's audio, handed to the caller on the host.

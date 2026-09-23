@@ -85,6 +85,12 @@
 # centre label, handed over through engine::open_built_source, because every
 # backend that runs without hardware refuses a retune and is right to.
 
+# test_pacing_window.cpp needs neither a GPU nor a radio. It drives the realtime
+# factor's window through an RTL-SDR-shaped pause on a simulated clock.
+# test_engine_pacing.cpp needs a GPU: it runs the same pause through the real
+# engine, on a synthetic scene wrapped so that tune() and a stall throw its
+# blocks away for 330 ms the way the dongle's control transfers do.
+
 # test_channel_ring.cpp needs a GPU. It is the channel ring's depth against a
 # receiver's display tap with frames in flight counted: one case builds the
 # stage directly, as test_vrx_reanchor.cpp does, and one runs a stationary tone
@@ -101,10 +107,12 @@ add_executable(revenant_engine_tests
     test_channel_ring.cpp
     test_engine.cpp
     test_engine_dv.cpp
+    test_engine_pacing.cpp
     test_engine_passband.cpp
     test_engine_probe.cpp
     test_engine_retune.cpp
     test_engine_spectrum.cpp
+    test_pacing_window.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp
     test_signal_meter.cpp

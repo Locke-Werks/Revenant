@@ -900,7 +900,7 @@ TEST_CASE("a source that cannot retune refuses in its own words", "[gpu][engine]
     CHECK(eng.info().source_center == 0);
 }
 
-TEST_CASE("the realtime factor is measured over the run and frozen when it ends",
+TEST_CASE("the realtime factor is measured over a window and frozen when it ends",
           "[gpu][engine][m1]") {
     REVENANT_NEEDS_GPU();
 
@@ -933,10 +933,16 @@ TEST_CASE("the realtime factor is measured over the run and frozen when it ends"
     REQUIRE(eng.run().has_value());
 
     const engine::SourcePacing done = eng.source_pacing();
-    INFO("factor " << done.realtime_factor << " over " << done.elapsed_seconds << " s");
+    INFO("factor " << done.realtime_factor << " over " << done.window_seconds << " s of "
+                   << done.elapsed_seconds << " s");
     CHECK(done.realtime_factor > 0.0);
     CHECK(done.elapsed_seconds > 0.0);
     CHECK(done.samples_delivered >= 240'000);
+
+    // The window is the last two seconds of the run, or the whole of a
+    // shorter one, and it is stated.
+    CHECK(done.window_seconds > 0.0);
+    CHECK(done.window_seconds <= done.elapsed_seconds);
 
     // Frozen at what the run achieved rather than decaying against a clock
     // that keeps going. A finished replay reading as a dying source is the
@@ -945,6 +951,7 @@ TEST_CASE("the realtime factor is measured over the run and frozen when it ends"
     const engine::SourcePacing later = eng.source_pacing();
     CHECK(later.realtime_factor == done.realtime_factor);
     CHECK(later.elapsed_seconds == done.elapsed_seconds);
+    CHECK(later.window_seconds == done.window_seconds);
 }
 
 TEST_CASE("a source closes and another opens on the same engine", "[gpu][engine][m2]") {

@@ -284,7 +284,8 @@ struct EngineInfo {
     ringClamped @9 :Bool;
     ringClampReason @10 :Text;
 
-    # Capture seconds delivered per wall second, measured over the whole run.
+    # Capture seconds delivered per wall second, measured over the last
+    # realtimeWindowSeconds.
     #
     # THE DIAGNOSIS NOBODY COULD MAKE. A synthetic source asked for 20 MS/s
     # generates about 0.20 of realtime on the host this was written on, so
@@ -302,15 +303,26 @@ struct EngineInfo {
     #
     # ZERO MEANS NOT MEASURED, which is a third state and not a stalled
     # source. It is what info() answers between opening the source and
-    # starting the run. A source that has genuinely stopped producing reports
-    # a factor decaying towards zero without arriving, because the elapsed
-    # time keeps growing while the sample count does not.
+    # starting the run. A source that has stopped producing reads lower from
+    # the moment its next block is late, down to two blocks over the window,
+    # and never as zero.
     #
-    # A LIFETIME MEAN AND NOT AN INSTANTANEOUS READING, for the reason
-    # RdsHealth gives for carrying no blockErrorRate: it is computed from the
-    # whole run, so a source that struggled for the first ten seconds and has
-    # been fine since reads low forever. A client that wants the rate now
-    # differences two polls against sourceStats' sample count.
+    # THE SOURCE'S RATE NOW, NOT SINCE THE RUN BEGAN, and a pause the engine
+    # made is not charged to it. An RTL-SDR stops its transfers for about
+    # 330 ms around every retune and gain change and counts what the device
+    # produced meanwhile as lost. Those samples count as delivered here,
+    # because they were never late; sourceStats' samplesLost still carries
+    # them. core/engine/pacing_window.h has the rule and the window's length.
+    #
+    # WHAT THIS COMMENT USED TO SAY, before 2026-09-23: "A LIFETIME MEAN AND
+    # NOT AN INSTANTANEOUS READING, for the reason RdsHealth gives for
+    # carrying no blockErrorRate: it is computed from the whole run, so a
+    # source that struggled for the first ten seconds and has been fine since
+    # reads low forever." Each retune took a third of a second out of that
+    # mean for good, so a client read the source as behind after a few tunes
+    # while the audio was not. And "A source that has genuinely stopped
+    # producing reports a factor decaying towards zero without arriving,
+    # because the elapsed time keeps growing while the sample count does not."
     realtimeFactor @11 :Float64;
 
     # The --pace setting the engine was started with, as a multiple of
@@ -360,6 +372,14 @@ struct EngineInfo {
     # which is the truthful answer to "which stream were those indices in":
     # that one, and it has ended. Monotonic and never reused.
     sourceEpoch @13 :UInt64;
+
+    # The wall seconds realtimeFactor was measured over: two, plus up to a
+    # tenth and one block's time, and the whole run while the run is younger
+    # than that. Zero from
+    # an engine that measured over the whole run instead, which is every
+    # engine built before this field, and a client should not call a source
+    # behind now on a lifetime mean.
+    realtimeWindowSeconds @14 :Float64;
 }
 
 # What a source can be pointed at. An ENVELOPE and not a promise, on exactly

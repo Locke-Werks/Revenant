@@ -346,6 +346,7 @@ struct PromiseValue<kj::Promise<T>> {
     // other raises an alarm on every deliberate half-speed replay.
     out.realtime_factor = in.getRealtimeFactor();
     out.source_paced_by = in.getSourcePacedBy();
+    out.realtime_window_seconds = in.getRealtimeWindowSeconds();
 
     // The only other field here that moves while a connection stays up, and
     // the one a client has to read on every poll rather than at connect. See

@@ -54,6 +54,7 @@
 #include "core/dsp/spectrum_reference.h"
 #include "core/engine/graph.h"
 #include "core/engine/open_built_source.h"
+#include "core/engine/pacing_window.h"
 #include "core/engine/ring_consumer.h"
 #include "core/engine/scheduler.h"
 #include "core/engine/vrx_stage.h"
@@ -100,6 +101,13 @@ constexpr std::chrono::milliseconds kCloseStopTimeout{5000};
 constexpr std::uint32_t kFirstProbeId = 0x8000'0000U;
 
 [[nodiscard]] bool is_probe_id(VrxId id) { return id.value >= kFirstProbeId; }
+
+// steady_clock in nanoseconds, the one clock the pacing measurement reads.
+[[nodiscard]] std::int64_t steady_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 [[nodiscard]] Status refuse_probe_id(VrxId id, const char* where) {
     return fail(std::format(
@@ -679,7 +687,7 @@ public:
         // frequency is measured against and the line below overwrites it.
         const dsp::Hertz was = info_.source_center;
 
-        auto landed = source_->tune(center);
+        auto landed = excusing_pause([&] { return source_->tune(center); });
         if (!landed) {
             return std::unexpected(with_context(landed.error(), "Engine::set_source_center"));
         }
@@ -861,7 +869,7 @@ public:
         // is no epoch to bump and no receiver to re-place: a consumer
         // accumulating state about a transmitter is still hearing the same
         // transmitter, louder or quieter.
-        auto landed = source_->set_gain(stage, db);
+        auto landed = excusing_pause([&] { return source_->set_gain(stage, db); });
         if (!landed) {
             return std::unexpected(with_context(landed.error(), "Engine::set_source_gain"));
         }
@@ -873,7 +881,7 @@ public:
             return fail("Engine::set_source_gain_auto before a source is open: there is no front "
                         "end to hand to an AGC");
         }
-        auto applied = source_->set_gain_auto(stage, on);
+        auto applied = excusing_pause([&] { return source_->set_gain_auto(stage, on); });
         if (!applied) {
             return std::unexpected(with_context(applied.error(), "Engine::set_source_gain_auto"));
         }
@@ -902,11 +910,7 @@ public:
         // achieved, and letting it fall towards zero afterwards would make
         // a completed file look like a source that died.
         const std::int64_t ended = stream_stop_ns_.load(std::memory_order_acquire);
-        const std::int64_t now =
-            ended != 0 ? ended
-                       : std::chrono::duration_cast<std::chrono::nanoseconds>(
-                             std::chrono::steady_clock::now().time_since_epoch())
-                             .count();
+        const std::int64_t now = ended != 0 ? ended : steady_now_ns();
         if (now <= started) {
             return out;
         }
@@ -915,10 +919,52 @@ public:
         if (info_.source_rate <= 0 || out.elapsed_seconds <= 0.0) {
             return out;
         }
-        const double capture_seconds = static_cast<double>(out.samples_delivered) /
-                                       static_cast<double>(info_.source_rate);
-        out.realtime_factor = capture_seconds / out.elapsed_seconds;
+
+        // Over the last window rather than the whole run, with the samples a
+        // control pause cost the source counted in. core/engine/pacing_window.h
+        // has why: a lifetime mean charged every retune's 330 ms to the
+        // source for the rest of the run.
+        const std::scoped_lock pacing(pacing_lock_);
+        const PacingReading measured = pacing_window_.read(
+            PacingSample{.at_ns = now, .delivered = out.samples_delivered}, info_.source_rate);
+        out.realtime_factor = measured.factor;
+        out.window_seconds = measured.window_seconds;
         return out;
+    }
+
+    // A control call on the source, with whatever the source counted as lost
+    // while it ran excused from the pacing factor, and the factor held where
+    // it was while the call runs. An RTL-SDR stops its transfers around every
+    // control transfer and counts the samples the device made meanwhile as
+    // lost; those are the engine's own doing and not the source falling
+    // behind. SourceStats::samples_lost still carries them.
+    //
+    // Counted whether the call succeeded or not, because the RTL-SDR pauses
+    // either way. The source's own counter and not source_stats(), which
+    // folds in the graph's losses, and those are never the pause's.
+    template <typename Call>
+    [[nodiscard]] auto excusing_pause(Call&& call) -> decltype(call()) {
+        const std::uint64_t lost_before = source_->stats().samples_lost;
+        {
+            const std::scoped_lock pacing(pacing_lock_);
+            pacing_window_.pause_begun(steady_now_ns());
+        }
+        auto result = call();
+        const std::uint64_t lost_after = source_->stats().samples_lost;
+        {
+            const std::scoped_lock pacing(pacing_lock_);
+            pacing_window_.pause_ended(lost_after > lost_before ? lost_after - lost_before : 0);
+        }
+        return result;
+    }
+
+    // What run()'s control loop sees on each pass. The window keeps the
+    // passes that see the delivered count move.
+    void offer_pacing(std::int64_t now_ns) {
+        const PacingSample sample{.at_ns = now_ns,
+                                  .delivered = source_->stats().samples_delivered};
+        const std::scoped_lock pacing(pacing_lock_);
+        pacing_window_.offer(sample);
     }
 
     [[nodiscard]] Expected<VrxId> add_vrx(const VrxParams& params) override {
@@ -1092,11 +1138,14 @@ public:
         // Before the source starts, so the elapsed time includes whatever
         // the first block cost to produce. Measuring from the first block
         // instead would hide exactly the startup a slow source spends.
+        const std::int64_t start_ns = steady_now_ns();
+        {
+            const std::scoped_lock pacing(pacing_lock_);
+            pacing_window_.start(PacingSample{.at_ns = start_ns,
+                                              .delivered = source_->stats().samples_delivered});
+        }
         stream_stop_ns_.store(0, std::memory_order_release);
-        stream_start_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now().time_since_epoch())
-                                   .count(),
-                               std::memory_order_release);
+        stream_start_ns_.store(start_ns, std::memory_order_release);
 
         source::StreamOptions options;
         options.block_samples = block_samples_;
@@ -1122,6 +1171,11 @@ public:
             std::unique_lock lock(run_lock_);
             while (!stop_requested_.load(std::memory_order_acquire) && source_->running()) {
                 run_signal_.wait_for(lock, kRunPollInterval);
+
+                // The pacing window sees arrivals from here, because this
+                // thread exists for exactly the length of the stream and
+                // passes every 2 ms, which is how closely an arrival is timed.
+                offer_pacing(steady_now_ns());
             }
         }
 
@@ -1130,10 +1184,11 @@ public:
         // way.
         Status ended = source_->stop();
         Status flushed = graph_->flush();
-        stream_stop_ns_.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                  std::chrono::steady_clock::now().time_since_epoch())
-                                  .count(),
-                              std::memory_order_release);
+        // The last arrival offered at the instant the factor freezes at, so
+        // a block delivered after the loop's last pass is in it.
+        const std::int64_t stop_ns = steady_now_ns();
+        offer_pacing(stop_ns);
+        stream_stop_ns_.store(stop_ns, std::memory_order_release);
         running_.store(false, std::memory_order_release);
 
         // AFTER the store and not before it, because close_source is parked on
@@ -1262,6 +1317,13 @@ private:
     // any clock at all.
     std::atomic<std::int64_t> stream_start_ns_{0};
     std::atomic<std::int64_t> stream_stop_ns_{0};
+
+    // The realtime factor's window: see core/engine/pacing_window.h. run()'s
+    // control loop offers to it, a control call marks a pause in it and
+    // source_pacing() reads it, and the lock is between those alone. The
+    // delivery thread never takes it.
+    mutable std::mutex pacing_lock_;
+    PacingWindow pacing_window_;
 
     // Control plane only. run() parks on it and stop() wakes it; the sample
     // path never touches either.

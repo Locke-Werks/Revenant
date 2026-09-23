@@ -440,6 +440,7 @@ void write_engine_info(schema::EngineInfo::Builder out, const engine::EngineInfo
     out.setRealtimeFactor(pacing.realtime_factor);
     out.setSourcePacedBy(pacing.paced_by);
     out.setSourceEpoch(in.source_epoch);
+    out.setRealtimeWindowSeconds(pacing.window_seconds);
 }
 
 void write_source_stats(schema::SourceStats::Builder out, const source::SourceStats& in,
