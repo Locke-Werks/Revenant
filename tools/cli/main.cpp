@@ -4304,6 +4304,27 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                              answer->envelope.normalised_power_variance,
                              answer->envelope.peak_to_average_db,
                              answer->spectral_concentration);
+                // Found or not, because the OFDM guard bar is a multiple of
+                // the searched lags' median and the ratio is the number that
+                // says how near a refusal came to being an OFDM call.
+                std::println("  cyclic prefix   {:.4f} against a median of {:.4f} over the "
+                             "searched lags, {:.1f} times it{}",
+                             answer->ofdm.correlation, answer->ofdm.floor_ratio,
+                             answer->ofdm.floor_ratio > 0.0
+                                 ? answer->ofdm.correlation / answer->ofdm.floor_ratio
+                                 : 0.0,
+                             answer->ofdm.found ? ", taken as a guard interval" : "");
+                if (answer->psk_without_symbol_rate) {
+                    std::println("  flagged         PSK with no symbol rate: confidence held to "
+                                 "{:.2f}, and it may not drive detection",
+                                 characterise::kPskWithoutRateConfidence);
+                }
+                if (answer->psk_carrier_outside_band) {
+                    std::println("  set aside       the power law's carrier sat on {:.2f} of the "
+                                 "occupied band's median power, where the band has fallen "
+                                 "away, so no PSK call was made",
+                                 answer->psk_carrier_level);
+                }
                 if (!answer->refusal.empty()) {
                     // Printed even when a family WAS found, because the
                     // refusals are how a reader checks the decision rather
