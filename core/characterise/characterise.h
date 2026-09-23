@@ -147,8 +147,15 @@ struct CharacteriseConfig {
     // modulation index also concentrates its power in a residual carrier,
     // and the Bessel function that governs it puts 3 percent there at an
     // index of 5, which is ordinary land mobile FM, so the threshold is
-    // nowhere near it. What reaches 0.5 is a carrier that is not modulated
-    // at all.
+    // nowhere near it at that index. Voice is not at that index: its RMS
+    // deviation is a fraction of its peak, and a carrier modulated by it keeps
+    // most of its power, so it does reach 0.5. The branch then reads the
+    // sidebands and the envelope, which is am_sideband_share below, and names
+    // AM, low-index FM or a bare carrier.
+    //
+    // WHAT THE LAST SENTENCE USED TO SAY: "What reaches 0.5 is a carrier that
+    // is not modulated at all." Voice-shaped NFM at 2.5 kHz peak deviation in
+    // tools/siggen's labelled scene reached 0.58 to 0.60.
     double carrier_concentration = 0.5;
 
     // Normalised envelope power variance below which the waveform is
@@ -274,13 +281,19 @@ struct CharacteriseConfig {
     // puts its sidebands inside about 100 Hz of the carrier, and speech on an
     // AM carrier starts at 300 Hz. tests/characterise/test_consistency.cpp
     // measures AM, a keyed carrier and a bare one at 30, 20 and 10 dB in
-    // 2500 Hz, at 12000 S/s: AM at index 0.8 puts 0.24 to 0.28 of its excess in
-    // sidebands mirroring to 0.81 to 0.998; the keyed and bare carriers put
-    // 0.062 at most there, mirroring to 0.34 at most. At 10 dB the carriers'
-    // noise clears the share bar, so the symmetry bar is the one doing the
-    // work there, by a factor of 2.4 either side of it.
+    // 2500 Hz, at 12000 S/s: AM at index 0.8 on a full-scale tone puts 0.24 to
+    // 0.28 of its excess in sidebands mirroring to 0.81 to 0.998, and on
+    // speech-shaped audio at an RMS of 0.3 only 0.054 to 0.107, mirroring to
+    // 0.53 to 0.98; the keyed and bare carriers put nothing there at 20 and
+    // 30 dB and 0.062 at most at 10, mirroring to 0.34 at most. So the share
+    // bar is low, 0.02, and the symmetry bar does the separating at low SNR,
+    // where noise lifts both populations' share alike.
+    //
+    // WHAT THE SHARE BAR USED TO BE: 0.05, measured only against a full-scale
+    // tone. Speech-shaped AM sat on it at 0.054, and the AM emitter in
+    // tools/siggen's labelled scene fell under it and was labelled CW.
     double am_sideband_min_offset_hz = 150.0;
-    double am_sideband_share = 0.05;
+    double am_sideband_share = 0.02;
     double am_sideband_symmetry = 0.5;
 
     // Transform length for the averaged spectrum, or zero to let
@@ -370,6 +383,22 @@ struct Characterisation {
     double sideband_share = -1.0;
     double sideband_symmetry = -1.0;
     bool double_sideband = false;
+
+    // The same mirrored sidebands on a constant envelope, which is FM at a
+    // low index rather than AM, since AM's sidebands are its envelope. The
+    // family is then AnalogueFm at a half, not Unmodulated: voice on
+    // narrowband FM keeps most of its power in its carrier and reaches the
+    // carrier bar. Measured in tests/characterise/test_consistency.cpp, three
+    // tones at 30, 20 and 15 dB in 2500 Hz: FM at an index under a half reads
+    // its envelope variance net of noise at 0.001 to 0.031, the same audio as
+    // AM at 0.26 to 0.30, either side of the 0.05 constant_envelope_variance
+    // bar that decides between them.
+    bool low_index_fm = false;
+
+    // The envelope's normalised power variance less what the extract's own
+    // noise accounts for, on an Unmodulated call only; see characterise.cpp.
+    // Zero elsewhere.
+    double envelope_variance_net = 0.0;
 
     // True when nothing at all was established: no family and no frame
     // period either. A frame period without a family is still a finding,

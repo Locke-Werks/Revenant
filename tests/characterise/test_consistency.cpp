@@ -17,8 +17,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 #include <print>
 #include <utility>
 #include <vector>
@@ -206,9 +208,36 @@ TEST_CASE("an AM carrier reads double sideband and a keyed or bare one does not"
         const auto bare_result =
             run(in_noise(bare, level, kSeed + 500 + static_cast<std::uint64_t>(level)));
 
+        // AM carrying something shaped like speech rather than a test tone:
+        // twelve tones from 300 to 2950 Hz at fixed random phases, at an RMS
+        // of 0.3, which is where speech sits against a full-scale peak. Its
+        // sidebands hold far less of the power than a full-scale tone's.
+        std::vector<float> speech(kSamples, 0.0F);
+        for (int tone = 0; tone < 12; ++tone) {
+            const double hz = 300.0 + 240.0 * tone + 10.0;
+            const double phase = 0.7 * tone * tone;
+            for (std::size_t n = 0; n < kSamples; ++n) {
+                speech[n] += static_cast<float>(
+                    std::sin(2.0 * std::numbers::pi * hz * static_cast<double>(n) / kRate + phase));
+            }
+        }
+        double speech_power = 0.0;
+        for (const float sample : speech) {
+            speech_power += static_cast<double>(sample) * sample;
+        }
+        const auto speech_scale =
+            static_cast<float>(0.3 / std::sqrt(speech_power / static_cast<double>(kSamples)));
+        for (float& sample : speech) {
+            sample *= speech_scale;
+        }
+        auto voice_made = siggen::generate_am(common, am, kSamples, speech);
+        REQUIRE(voice_made.has_value());
+        const auto voice_result = run(
+            in_noise(voice_made->samples, level, kSeed + 800 + static_cast<std::uint64_t>(level)));
+
         for (const auto& [label, result] :
-             {std::pair{"am", &am_result}, std::pair{"cw", &cw_result},
-              std::pair{"carrier", &bare_result}}) {
+             {std::pair{"am", &am_result}, std::pair{"am voice", &voice_result},
+              std::pair{"cw", &cw_result}, std::pair{"carrier", &bare_result}}) {
             std::println("  {:<8} {:>5.1f} dB  {:<20} sidebands {:.3f} of the excess, symmetry "
                          "{:.3f}, double sideband {}",
                          label, level, characterise::modulation_family_name(result->family),
@@ -218,7 +247,66 @@ TEST_CASE("an AM carrier reads double sideband and a keyed or bare one does not"
         INFO(level << " dB");
         CHECK(am_result.family == ModulationFamily::Unmodulated);
         CHECK(am_result.double_sideband);
+        CHECK(voice_result.double_sideband);
         CHECK_FALSE(cw_result.double_sideband);
         CHECK_FALSE(bare_result.double_sideband);
+    }
+}
+
+// REJECTS: a carrier call on FM whose index is low enough to leave most of
+// the power in the carrier, which is voice on narrowband FM, and an AM call
+// on it, which is what the mirrored sidebands alone would say. The envelope
+// is what separates the two: AM's sidebands are its envelope.
+TEST_CASE("low-index FM is FM, and the same audio as AM is AM", "[characterise]")
+{
+    // Three tones at a tenth of full scale each, which with 2.5 kHz of
+    // deviation per unit puts the index under half on every one of them.
+    std::vector<float> audio(kSamples);
+    for (std::size_t n = 0; n < kSamples; ++n) {
+        const double t = static_cast<double>(n) / static_cast<double>(kRate);
+        audio[n] = static_cast<float>(0.1 * std::sin(2.0 * std::numbers::pi * 500.0 * t) +
+                                      0.1 * std::sin(2.0 * std::numbers::pi * 1100.0 * t) +
+                                      0.1 * std::sin(2.0 * std::numbers::pi * 2300.0 * t));
+    }
+    for (const double level : {30.0, 20.0, 15.0}) {
+        siggen::ModulatorConfig common;
+        common.rate = kRate;
+        common.seed = kSeed + 6;
+        siggen::NfmParams nfm;
+        nfm.deviation = 2500;
+        auto fm_made = siggen::generate_nfm(common, nfm, kSamples, audio);
+        REQUIRE(fm_made.has_value());
+        const auto fm_result =
+            run(in_noise(fm_made->samples, level, kSeed + 600 + static_cast<std::uint64_t>(level)));
+
+        // The same three tones three times louder for the AM emitter: at a
+        // tenth of full scale each, index 0.8 puts under a percent of the
+        // excess in its sidebands, which is a carrier by any measure.
+        std::vector<float> louder(audio);
+        for (float& sample : louder) {
+            sample *= 3.0F;
+        }
+        siggen::AmParams am;
+        am.modulation_index = 0.8;
+        auto am_made = siggen::generate_am(common, am, kSamples, louder);
+        REQUIRE(am_made.has_value());
+        const auto am_result =
+            run(in_noise(am_made->samples, level, kSeed + 700 + static_cast<std::uint64_t>(level)));
+
+        for (const auto& [label, result] :
+             {std::pair{"fm", &fm_result}, std::pair{"am", &am_result}}) {
+            std::println("  {:<3} {:>5.1f} dB  {:<20} concentration {:.3f}, sidebands {:.3f}, "
+                         "symmetry {:.3f}, envelope variance {:.4f}, net of noise {:.4f}",
+                         label, level, characterise::modulation_family_name(result->family),
+                         result->spectral_concentration, result->sideband_share,
+                         result->sideband_symmetry, result->envelope.normalised_power_variance,
+                         result->envelope_variance_net);
+        }
+        INFO(level << " dB: " << fm_result.summary);
+        CHECK(fm_result.family == ModulationFamily::AnalogueFm);
+        CHECK(fm_result.low_index_fm);
+        CHECK_FALSE(fm_result.double_sideband);
+        CHECK(am_result.double_sideband);
+        CHECK_FALSE(am_result.low_index_fm);
     }
 }

@@ -71,6 +71,7 @@
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/groups.h"
+#include "core/detect/label.h"
 #include "core/detect/tier_two.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
@@ -4758,10 +4759,14 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 row.tier_last_confidence = track.last_probe.confidence;
                 row.tier_last_symbol_rate = track.last_probe.symbol_rate_hz;
                 row.tier_protocol = static_cast<std::uint32_t>(track.protocol);
-                std::println("    #{:<5} {:>16}  {:>11}  {:>6.1f} dB  {} probe{}  {}", track.id,
+                // The label a client's bracket prints, core/detect/label.h.
+                const detect::TrackLabel label = detect::label_track(track);
+                std::println("    #{:<5} {:>16}  {:>11}  {:>6.1f} dB  {} probe{}  {}{}", track.id,
                              format_hz(track.center), format_hz(track.bandwidth),
                              track.snr_2500_db, track.probes, track.probes == 1 ? " " : "s",
-                             tier_two_text(row));
+                             tier_two_text(row),
+                             label.name.empty() ? std::string()
+                                                : std::format("  [label {}]", label.name));
             }
         }
     }

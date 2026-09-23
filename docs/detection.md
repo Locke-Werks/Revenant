@@ -2346,8 +2346,14 @@ verified. A steady carrier: not CW.
 **The HF modes need five seconds and get them.** Two seconds held one PSK31
 character of the six its row needs and three CW characters of four, and
 SITOR-B spends 2.24 s phasing before its first character. A detection no wider
-than 600 Hz now collects five seconds, the characteriser still reads the first
-two, and its first family arrives three seconds later than it did.
+than a kilohertz now collects five seconds, the characteriser still reads the
+first two, and its first family arrives three seconds later than it did.
+
+WHAT THE LAST SENTENCE USED TO SAY: "A detection no wider than 600 Hz now
+collects five seconds". On the labelled scene below, at 131.8 Hz a bin, the
+detector measured keyed CW 659 Hz wide and RTTY 791 Hz, so neither got the
+longer dwell and CW was not even tried; the bar and the CW and RTTY rows'
+widths moved to a kilohertz together.
 
 **RTTY needs its characters read cleanly, not only framed.** A SITOR-B signal
 at 100 baud on the same 170 Hz shift framed 28 and 31 characters at RTTY's
@@ -2361,6 +2367,47 @@ verified 13 characters on the RTTY extract. So the rows run in order of how
 hard their check is to satisfy by accident and the first to verify wins: codes
 over fields first, SITOR-B's constant-ratio code, RTTY's framing, PSK31's
 Varicode, and CW's Morse table last.
+
+### The labelled scene, end to end
+
+`siggen labelled` renders one emitter of each kind the labels name, from each
+protocol's own transmitter, onto one 2.16 MS/s capture at 25 dB in 2500 Hz
+each; `tools/siggen/labelled.h` has the offsets. Through `revenant-cli
+--detect --channels 16`, 40 s at twice realtime, pool of four, 131.8 Hz a bin,
+the label each emitter's tracks ended with:
+
+| emitter | tracks | label | right |
+| --- | --- | --- | --- |
+| AM, speech-shaped | 3 | AM on the carrier, CW on each sideband | carrier only |
+| NFM, speech-shaped | 3 | NFM, NFM, one still probing | yes |
+| CW at 20 WPM | 1 | CW, Morse verified | yes |
+| BPSK at 2400 baud | 1 | BPSK | yes |
+| P25 | 1 | P25 | yes |
+| D-STAR | 1 | D-STAR | yes |
+| TETRA | 1 | TETRA, over a family call of OFDM | yes |
+| M17 | 1 | M17 | yes |
+| AX.25 | 1 | AX.25 | yes |
+| RTTY | 1 | RTTY | yes |
+| USB, speech-shaped | 1 | BPSK, from PSK at 2293 baud and 0.68 | **no** |
+
+**Two wrong labels and what they are.** The AM emitter's sidebands are
+separate tracks, and a probe centred on one sees the carrier 1.5 kHz off with
+one sideband beside it, which is a carrier: the problem "And the lines as a set
+do separate them" describes, unsolved here. And speech-shaped USB is called PSK
+at 2293 baud. Where the symbol-rate detector found that line in band-limited
+noise has not been established; a corner at the band's edge, of the kind the
+empty-channel gate reads, is the first suspect and is a guess. Neither rule of
+2026-09-23 reaches it, because the rate is under the band's width and there are
+no two tones. Voice SSB is the case "What is left for the
+owner" said had not been measured; this is the measurement, and it is wrong.
+
+Three things the scene changed on the way, each recorded where it lives:
+speech-shaped NFM keeps most of its power in its carrier and read as a carrier
+until the carrier branch learned to read low-index FM off a constant envelope
+(`Characterisation::low_index_fm`); speech-shaped AM's sidebands hold about
+5 percent of its power and fell under the double-sideband share bar until it
+came down to 0.02; and TETRA's continuous bursts came back OFDM on one run,
+which used to rule the TETRA row out.
 
 ## Click to tune
 

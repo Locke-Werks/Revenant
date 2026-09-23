@@ -5,7 +5,7 @@
 # synthesizer and the channel simulator are engine components rather than
 # tooling, and core cannot depend on tools. This is the front end over them.
 
-add_executable(siggen main.cpp)
+add_executable(siggen main.cpp labelled.cpp)
 
 # revenant_bench for the bench trials: `siggen rtty` and the rest write a trial
 # through tools/bench's own generators, so the file is what the sweep fed its

@@ -113,8 +113,11 @@ inline constexpr double kProbeDwellSeconds = 2.0;
 // taken at two seconds. What this costs is time: a narrow track's first family
 // arrives three seconds later, and a probe on one holds its receiver that much
 // longer.
+//
+// A kilohertz, which is where core/identify's widest narrow row, RTTY and CW
+// on a coarse grid, stops; see identify::plausible.
 inline constexpr double kProbeIdentifyDwellSeconds = 5.0;
-inline constexpr dsp::Hertz kProbeIdentifyNarrowHz = 600;
+inline constexpr dsp::Hertz kProbeIdentifyNarrowHz = 1'000;
 
 // The lowest bucket whose stated dwell holds the characteriser's sample floor:
 // 16384 samples in two seconds is 8192 S/s, and the bucket above that is

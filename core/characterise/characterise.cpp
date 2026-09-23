@@ -332,8 +332,31 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
         const Sidebands sides = sidebands(*spectrum, out.band, config.am_sideband_min_offset_hz);
         out.sideband_share = sides.share;
         out.sideband_symmetry = sides.symmetry;
-        out.double_sideband = sides.share >= config.am_sideband_share &&
+        const bool mirrored = sides.share >= config.am_sideband_share &&
                               sides.symmetry >= config.am_sideband_symmetry;
+
+        // Mirrored sidebands on a constant envelope are frequency modulation
+        // at a low index, not AM: AM's sidebands are its envelope. Voice on
+        // narrowband FM keeps most of its power in the carrier, so it
+        // reaches the concentration bar above and would otherwise be called a
+        // carrier. See CharacteriseConfig::am_sideband_share.
+        //
+        // The envelope is judged net of what the extract's own noise puts on
+        // it, which the plain constant_envelope test is not: a constant
+        // envelope of power S in complex Gaussian noise of power N reads a
+        // normalised power variance of (2SN + N^2) / (S + N)^2, and the
+        // spectrum's floor is N, because a Welch bin reads the per-sample
+        // variance of white noise. Without the correction low-index FM at
+        // 20 dB in 2500 Hz read 0.089, over the 0.05 bar, and was called AM.
+        const double noise = out.band.found ? out.band.noise_floor : 0.0;
+        const double signal = std::max(out.envelope.mean_power - noise, 0.0);
+        const double total = signal + noise;
+        const double from_noise =
+            total > 0.0 ? (2.0 * signal * noise + noise * noise) / (total * total) : 0.0;
+        out.envelope_variance_net = out.envelope.normalised_power_variance - from_noise;
+        const bool flat = out.envelope_variance_net < config.constant_envelope_variance;
+        out.double_sideband = mirrored && !flat;
+        out.low_index_fm = mirrored && flat;
         out.summary = std::format(
             "an unmodulated carrier: {:.1f} percent of the extract's power is in three adjacent "
             "bins at {}, and its instantaneous frequency spans {}",
@@ -344,6 +367,23 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
                 ", with {:.1f} percent of the band's excess power in sidebands that mirror each "
                 "other to {:.2f} about it, which is double sideband",
                 100.0 * out.sideband_share, out.sideband_symmetry);
+        }
+        if (out.low_index_fm) {
+            // Held to a half for the reason the AnalogueFm branch below is:
+            // an elimination, and a continuous-phase digital mode at a low
+            // index would read the same.
+            out.family = ModulationFamily::AnalogueFm;
+            out.family_confidence = 0.5;
+            query.family = ModulationFamily::AnalogueFm;
+            out.candidates = match_protocols(query);
+            out.summary = std::format(
+                "frequency modulation at a low index: {:.1f} percent of the extract's power is "
+                "in the carrier at {}, the envelope is constant, and {:.1f} percent sits in "
+                "sidebands mirroring to {:.2f} about it, which an unmodulated carrier does not "
+                "have and AM would carry on its envelope{}",
+                100.0 * out.spectral_concentration, hertz(out.band.centre_hz),
+                100.0 * out.sideband_share, out.sideband_symmetry,
+                candidate_clause(out.candidates));
         }
     } else if (out.ofdm.found) {
         // Before the tone test, because an OFDM waveform's instantaneous

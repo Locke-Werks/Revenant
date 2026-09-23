@@ -413,29 +413,35 @@ const char* protocol_name(Protocol protocol) {
 // THE PLAUSIBILITY TABLE. Widths are the detection's occupied bandwidth, and
 // each window is the protocol's channel with room either side for the
 // detector's 99 percent trim and for a signal measured at low SNR. A family
-// the characteriser named rules a row out only where the physics does: a
-// constant-envelope FSK mode is never an unmodulated carrier or OFDM, and
-// TETRA's pi/4-DQPSK is never constant envelope. Unknown rules nothing out.
+// the characteriser named rules a row out only where the physics does and
+// the call can be trusted: a constant-envelope FSK mode is never an
+// unmodulated carrier, and TETRA's pi/4-DQPSK is never constant envelope. An
+// OFDM call rules nothing out, for the reason given below. Unknown rules
+// nothing out.
 bool plausible(Protocol protocol, const IdentifyHints& hints, dsp::SampleRate rate) {
     const double width = hints.occupied_hz;
     const ModulationFamily family = hints.family;
     const auto within = [width](double low, double high) { return width >= low && width <= high; };
-    const bool not_line_or_ofdm =
-        !family_is(family, {ModulationFamily::Unmodulated, ModulationFamily::Ofdm});
+    // OFDM does not rule a row out, because the characteriser's cyclic-prefix
+    // bar fires on repeated structure that is not OFDM: TETRA's continuous
+    // synchronisation bursts in tools/siggen's labelled scene came back OFDM
+    // at 0.51 on one run and PSK at 18000 baud on the next.
+    const bool not_a_line = !family_is(family, {ModulationFamily::Unmodulated});
 
     switch (protocol) {
         case Protocol::P25Phase1:
         case Protocol::M17:
         case Protocol::Dmr:
             // 4800 symbols a second of 4FSK in a 12.5 kHz channel.
-            return rate >= 9600 && within(4000.0, 16000.0) && not_line_or_ofdm;
+            return rate >= 9600 && within(4000.0, 16000.0) && not_a_line;
         case Protocol::DStar:
             // 4800 bit/s GMSK in a 6.25 kHz channel.
-            return rate >= 9600 && within(2500.0, 10000.0) && not_line_or_ofdm;
+            return rate >= 9600 && within(2500.0, 10000.0) && not_a_line;
         case Protocol::Tetra:
             // 18 ksym/s pi/4-DQPSK in 25 kHz.
             return rate >= 36000 && within(12000.0, 30000.0) &&
-                   family_is(family, {ModulationFamily::Unknown, ModulationFamily::Psk});
+                   family_is(family, {ModulationFamily::Unknown, ModulationFamily::Psk,
+                                      ModulationFamily::Ofdm});
         case Protocol::Pocsag:
         case Protocol::Ax25:
             // Direct FSK, and AFSK on an FM carrier, in 12.5 to 25 kHz.
@@ -444,16 +450,23 @@ bool plausible(Protocol protocol, const IdentifyHints& hints, dsp::SampleRate ra
                                       ModulationFamily::AnalogueFm});
         case Protocol::Rtty:
         case Protocol::SitorB:
-            // 170 Hz shift at 45.45 or 100 baud.
-            return within(100.0, 600.0) &&
-                   family_is(family, {ModulationFamily::Unknown, ModulationFamily::Fsk});
+            // 170 Hz shift at 45.45 or 100 baud. Up to a kilohertz, because a
+            // detector on a coarse grid measures it wider: 791 Hz at 131.8 Hz
+            // a bin in tools/siggen's labelled scene. And analogue FM is
+            // admitted, because the characteriser calls a two-tone FSK signal
+            // whose tones it cannot separate exactly that, and says so.
+            return within(100.0, 1000.0) &&
+                   family_is(family, {ModulationFamily::Unknown, ModulationFamily::Fsk,
+                                      ModulationFamily::AnalogueFm});
         case Protocol::Psk31:
-            // 31.25 or 62.5 baud BPSK, under 150 Hz.
-            return width <= 150.0 &&
+            // 31.25 or 62.5 baud BPSK, a few hundred hertz at most on a
+            // coarse grid.
+            return width <= 300.0 &&
                    family_is(family, {ModulationFamily::Unknown, ModulationFamily::Psk});
         case Protocol::Cw:
-            // A keyed carrier.
-            return width <= 300.0 &&
+            // A keyed carrier, measured 659 Hz wide at 131.8 Hz a bin in the
+            // labelled scene for the reason RTTY is.
+            return width <= 1000.0 &&
                    family_is(family, {ModulationFamily::Unknown, ModulationFamily::Unmodulated});
         case Protocol::Rds:
             // A broadcast FM carrier, 100 kHz and up.
