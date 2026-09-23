@@ -552,3 +552,14 @@ commit: b4236bd
 instead: installer.toml sets upgrade_code = "d4be342a-9c6c-4c6b-9fd7-848637a79967",
     chosen before any release and never to change: it keys the stub's
     single-instance mutex across every version.
+
+
+phrase: There is no published Corresponding Source for the dependencies as built
+phrase: THIS STEP IS NOT YET COMPLETE AND THE GAP IS A LICENCE ONE
+retired: 2026-09-22
+commit: 1a8b5f4
+instead: The release job publishes Revenant-<version>-corresponding-source.zip
+    beside the installer: Revenant at the tag, libusb and rtlsdr upstream, and
+    each port's vcpkg recipe with rtlsdr's three patches, every byte checked
+    against the hashes the engine's build recorded. The Qt and FFmpeg sources
+    are not in it and are still owed; docs/packaging.md says so.
