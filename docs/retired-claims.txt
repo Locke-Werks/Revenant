@@ -1550,3 +1550,10 @@ commit: "Hold the audio ring between the engine's clock and the card's"
 instead: AudioMix reads every stream up to 500 ppm off its nominal step under
     DriftTrim's loop on the lead's lag behind its arrivals, which holds the
     ring between the engine's clock and the card's. ui/audio/drift_trim.h.
+
+phrase: every kernel under core/shaders/, fourteen of them by the end of 2026-09-23
+retired: 2026-09-23
+commit: "Blank impulses, notch tones and reduce noise on the device"
+instead: Seventeen kernels under core/shaders carry layout(local_size_x_id = 0) in;
+    noise_blank.comp, noise_line.comp and noise_spectral.comp, the noise
+    mitigation stages, are the fifteenth to the seventeenth.

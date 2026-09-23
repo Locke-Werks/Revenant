@@ -59,6 +59,7 @@ add_executable(revenant_reference_tests
     reference/test_denormal_mode.cpp
     reference/test_divergence.cpp
     reference/test_iq_correction.cpp
+    reference/test_noise.cpp
     reference/test_pfb.cpp
     reference/test_spectrum.cpp
     reference/test_spectrum_levels.cpp

@@ -48,6 +48,7 @@
 #include <string>
 #include <string_view>
 
+#include "core/dsp/noise_reference.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/vrx_reference.h"
 
@@ -246,6 +247,14 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
             "frequency is relative to the source's tuned centre, not absolute; subtract "
             "EngineInfo::source_center from an absolute frequency before passing it",
             params.center, nyquist));
+    }
+
+    // The noise fields, here because this is the one function add_vrx and
+    // set_vrx_params both call before anything is queued. A stage that found
+    // a bad figure at retune would be refusing on the recording thread,
+    // where nobody hears it; see dsp::validate_noise_request.
+    if (const Status noise = dsp::validate_noise_request(params); !noise) {
+        return std::unexpected(with_context(noise.error(), "place"));
     }
 
     // The passband the request resolves to, before anything is known about

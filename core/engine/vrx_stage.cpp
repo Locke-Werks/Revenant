@@ -95,6 +95,7 @@
 #include "core/dsp/types.h"
 #include "core/dsp/vrx_reference.h"
 #include "core/engine/graph.h"
+#include "core/engine/noise_stage.h"
 #include "core/engine/record_util.h"
 #include "core/engine/vrx.h"
 #include "core/gpu/buffer.h"
@@ -424,6 +425,11 @@ private:
     dsp::SampleIndex first_output_ = 0;
     dsp::SampleIndex next_output_ = 0;
     dsp::SampleIndex next_audio_ = 0;
+
+    // The noise blanker, notch and noise reduction, for a receiver that
+    // produces audio; null for the complex taps. core/engine/noise_stage.h
+    // has the three points it is called from.
+    std::unique_ptr<NoiseChain> noise_;
 };
 
 Expected<std::unique_ptr<VrxStage>> DemodStage::create(const VrxStageRequest& request) {
@@ -572,7 +578,37 @@ Status DemodStage::build(const VrxStageRequest& request) {
         display_output_.group_delay_channel_samples = display_.group_delay_channel_samples;
     }
 
-    return build_descriptors(request.channel_ring);
+    if (auto built = build_descriptors(request.channel_ring); !built) {
+        return built;
+    }
+
+    if (!produces_audio(request.params.demod)) {
+        return {};
+    }
+    std::vector<VkBuffer> audio(audio_.size());
+    for (std::size_t i = 0; i < audio_.size(); ++i) {
+        audio[i] = audio_[i].handle();
+    }
+    NoiseChainRequest chain;
+    chain.context = context_;
+    chain.frames_in_flight = frames_in_flight_;
+    chain.local_size_x = local_size_x_;
+    chain.channel_rate = plan_.channel_rate;
+    chain.channel_ring = request.channel_ring;
+    chain.channel_ring_mask = channel_ring_mask_;
+    chain.max_fine_span = static_cast<std::uint32_t>(blocks) + plan_.fine.taps + 1U;
+    chain.fine_layout = fine_pipeline_.descriptor_layout();
+    chain.fine_taps = taps_.handle();
+    chain.nco = nco_->handle();
+    chain.fine_ring = fine_ring_.handle();
+    chain.audio = audio;
+    chain.max_audio = max_audio_;
+    auto noise = NoiseChain::create(chain, params, plan_);
+    if (!noise) {
+        return std::unexpected(noise.error());
+    }
+    noise_ = std::move(*noise);
+    return {};
 }
 
 Status DemodStage::build_display(const VrxStageRequest& request, std::uint64_t blocks) {
@@ -1003,7 +1039,14 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     const std::uint32_t frame = record.frame_index;
 
     if (!started_) {
-        anchor_to(record.first_block);
+        // With the blanker on from the start, the first reference window has
+        // to be channel samples rather than the ring's clear value, or the
+        // first samples of the stream all stand out against it and are
+        // blanked. Starting that much later costs a fraction of a
+        // millisecond once.
+        const std::uint32_t settle =
+            (noise_ != nullptr && noise_->blanking()) ? noise_->blanker_reach() : 0U;
+        anchor_to(record.first_block + settle);
         started_ = true;
     }
 
@@ -1052,8 +1095,35 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     // --- the fine stage -----------------------------------------------------
 
     const dsp::SampleIndex newest = record.first_block + record.block_count - 1U;
+
+    // What the fine stage reads: the channel ring, or with the blanker on
+    // this receiver's blanked copy of its channel, which trails the channel
+    // by the blanker's lead. core/engine/noise_stage.h.
+    VkDescriptorSet fine_set = fine_set_;
+    std::uint32_t fine_base = chan_base_;
+    std::uint32_t fine_chan_mask = channel_ring_mask_;
+    dsp::SampleIndex fine_newest = newest;
+    if (noise_ != nullptr && noise_->blanking()) {
+        auto next = dsp::fine_block(plan_, 0U, channel_ring_mask_, fine_mask_, next_output_, 1U);
+        if (!next) {
+            return std::unexpected(with_context(next.error(), "receiver blanker"));
+        }
+        auto source =
+            noise_->record_blanker(record.commands, chan_base_, newest, next->oldest_input);
+        if (!source) {
+            return std::unexpected(with_context(source.error(), "receiver blanker"));
+        }
+        out.dispatches += source->dispatches;
+        if (source->blanked) {
+            fine_set = source->set;
+            fine_base = 0U;
+            fine_chan_mask = source->chan_mask;
+            fine_newest = source->newest;
+        }
+    }
+
     const dsp::SampleIndex limit =
-        highest_output_for(newest, plan_.channel_rate, plan_.demod_rate);
+        highest_output_for(fine_newest, plan_.channel_rate, plan_.demod_rate);
 
     std::uint32_t count = 0;
     if (limit >= next_output_) {
@@ -1063,7 +1133,7 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     }
 
     if (count > 0) {
-        auto block = dsp::fine_block(plan_, chan_base_, channel_ring_mask_, fine_mask_,
+        auto block = dsp::fine_block(plan_, fine_base, fine_chan_mask, fine_mask_,
                                      next_output_, count);
         if (!block) {
             return std::unexpected(with_context(block.error(), "receiver fine block"));
@@ -1121,13 +1191,16 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
             // nothing.
             const dsp::SampleIndex resumed_from = next_audio_;
             anchor_to(record.first_block);
+            if (noise_ != nullptr) {
+                noise_->restart_blanker();
+            }
             out.reanchors = 1;
             out.reanchor_frames_skipped =
                 next_audio_ > resumed_from ? next_audio_ - resumed_from : 0;
             return out;
         }
 
-        record_dispatch(record.commands, fine_pipeline_, fine_set_,
+        record_dispatch(record.commands, fine_pipeline_, fine_set,
                         std::as_bytes(std::span<const dsp::VrxFineParams>(&block->params, 1)),
                         group_count(count, local_size_x_));
         next_output_ += count;
@@ -1194,6 +1267,18 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     record_dispatch(record.commands, demod_pipeline_, demod_sets_[frame],
                     std::as_bytes(std::span<const dsp::VrxDemodParams>(&block->params, 1)),
                     group_count(audio_count, local_size_x_));
+
+    // The notch and the noise reduction rewrite the audio in place, between
+    // the demodulator's write and the copy out, so the barrier below fences
+    // whichever wrote last.
+    if (noise_ != nullptr) {
+        auto post = noise_->record_audio(record.commands, frame, audio_count);
+        if (!post) {
+            return std::unexpected(with_context(post.error(), "receiver audio stages"));
+        }
+        out.dispatches += *post;
+    }
+
     record_barrier(record.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                    VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                    VK_ACCESS_TRANSFER_READ_BIT);
@@ -1311,6 +1396,16 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
     // audio would carry the damage rather than a refusal.
     if (const Status sized = fine_taps_match_config(next); !sized) {
         return std::unexpected(with_context(sized.error(), "receiver retune"));
+    }
+
+    // The noise fields ride the same retune, as push constants the chain
+    // builds from them. Asked before the display below commits anything, so
+    // a refusal leaves the receiver exactly as it was.
+    if (noise_ != nullptr) {
+        const bool channel_moved = placement.channel != plan_.placement.channel;
+        if (auto noise = noise_->retune(resolved, next, channel_moved); !noise) {
+            return std::unexpected(with_context(noise.error(), "receiver retune"));
+        }
     }
 
     // The display tap follows the tuning. Its pipeline, its table's length

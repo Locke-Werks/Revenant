@@ -1,0 +1,236 @@
+// Spectral noise reduction on one receiver's demodulated audio, in place.
+//
+// Short-time power subtraction with over-subtraction and a spectral floor
+// (Boll, IEEE Trans. ASSP 27(2), 1979; Berouti, Schwartz and Makhoul,
+// ICASSP 1979), a noise floor from continuous minimum tracking (Doblinger,
+// EUROSPEECH 1995), and 50 percent overlap-add with a square-root Hann window
+// (Allen, IEEE Trans. ASSP 25(3), 1977). None of them was opened for this
+// work; core/dsp/noise_reference.h states the design, the recursions and the
+// figures. No GPL implementation was read, fetched or consulted while writing
+// this file.
+//
+// ONE WORKGROUP, A FRAME AT A TIME. A frame of kFrame samples is taken every
+// kHop = kFrame / 2 inputs. Within a frame the work is parallel twice over:
+// each invocation owns bins k, k + width, ... for the forward transform and
+// the gain, and samples t, t + width, ... for the inverse. Each of those is a
+// sum in ascending index order computed by exactly one invocation, so the
+// result does not depend on the workgroup size, and the twin in core/dsp/
+// noise_reference.cpp, reference_spectral, is bit-identical at any size.
+//
+// The transform is a direct DFT against a table the host designed in double
+// and rounded once. At kFrame 512 that is 131072 multiply-adds each way per
+// frame, 94 frames a second at 48 kS/s: nothing, on a device, and one fixed
+// operation sequence, which a fast transform's butterflies would make much
+// harder to transcribe exactly.
+//
+// LATENCY is one frame. The audio buffer is rewritten in place with the
+// output queue of the hop in progress, which is the synthesis of inputs one
+// frame older. Each position is read and then written by the same invocation,
+// so in place is safe without a barrier between the two.
+//
+// STATE is carried between dispatches in a buffer, laid out as core/dsp/
+// noise_reference.h documents, and held in workgroup memory for the length of
+// the dispatch: at kFrame 512 the working set is ten kilobytes, which is why
+// 512 is the ceiling.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(constant_id = 1) const uint kFrame = 512u;
+
+const uint kHop = kFrame / 2u;
+const uint kBins = kHop + 1u;
+const uint kMask = kFrame - 1u;
+
+const uint kStateHistory = 2u;
+const uint kStateTail = kStateHistory + kFrame;
+const uint kStateQueue = kStateTail + kHop;
+const uint kStateSmoothed = kStateQueue + kHop;
+const uint kStateMinimum = kStateSmoothed + kBins;
+
+const uint kCos = 0u;
+const uint kSin = kFrame;
+const uint kAnalysis = 2u * kFrame;
+const uint kSynthesis = 3u * kFrame;
+
+layout(std430, binding = 0) buffer Audio {
+    float values[];
+} audio;
+
+layout(std430, binding = 1) readonly buffer Tables {
+    float values[];
+} tables;
+
+layout(std430, binding = 2) buffer State {
+    float values[];
+} state;
+
+layout(push_constant) uniform Params {
+    uint count;
+    float smoothing;
+    float smoothing_complement;
+    float gamma;
+    float beta;
+    float rise;
+    float bias;
+    float alpha;
+    float floor_gain;
+    float eps;
+} params;
+
+shared float hist[kFrame];
+shared float work[kFrame];
+shared float tail[kHop];
+shared float queue[kHop];
+shared float smoothed[kBins];
+shared float minimum[kBins];
+shared float y_real[kBins];
+shared float y_imag[kBins];
+
+// 1 / value for value > 0, the sequence core/shaders/vrx_demod.comp and
+// det_recip in core/dsp/vrx_reference.cpp define.
+float det_recip(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x7EF311C3u - bits);
+
+    precise float r1 = seed * (2.0 - value * seed);
+    precise float r2 = r1 * (2.0 - value * r1);
+    precise float r3 = r2 * (2.0 - value * r2);
+    precise float r4 = r3 * (2.0 - value * r3);
+    return r4;
+}
+
+void main() {
+    const uint id = gl_LocalInvocationID.x;
+    const uint width = gl_WorkGroupSize.x;
+
+    for (uint i = id; i < kFrame; i += width) {
+        hist[i] = state.values[kStateHistory + i];
+    }
+    for (uint i = id; i < kHop; i += width) {
+        tail[i] = state.values[kStateTail + i];
+        queue[i] = state.values[kStateQueue + i];
+    }
+    for (uint i = id; i < kBins; i += width) {
+        smoothed[i] = state.values[kStateSmoothed + i];
+        minimum[i] = state.values[kStateMinimum + i];
+    }
+    uint phase = uint(state.values[0]);
+    float seen = state.values[1];
+    barrier();
+
+    uint s = 0u;
+    while (s < params.count) {
+        const uint length = min(kHop - phase, params.count - s);
+        for (uint i = id; i < length; i += width) {
+            const float x = audio.values[s + i];
+            hist[kHop + phase + i] = x;
+            audio.values[s + i] = queue[phase + i];
+        }
+        phase += length;
+        s += length;
+        barrier();
+        if (phase != kHop) {
+            continue;
+        }
+
+        for (uint t = id; t < kFrame; t += width) {
+            precise float windowed = hist[t] * tables.values[kAnalysis + t];
+            work[t] = windowed;
+        }
+        barrier();
+
+        for (uint k = id; k < kBins; k += width) {
+            precise float re = 0.0;
+            precise float im = 0.0;
+            for (uint t = 0u; t < kFrame; ++t) {
+                const uint at = (k * t) & kMask;
+                precise float xc = work[t] * tables.values[kCos + at];
+                re = re + xc;
+                precise float xs = work[t] * tables.values[kSin + at];
+                im = im - xs;
+            }
+            precise float rr = re * re;
+            precise float ii = im * im;
+            precise float power = rr + ii;
+
+            precise float level = power;
+            precise float floor_power = power;
+            if (seen != 0.0) {
+                const float previous = smoothed[k];
+                precise float kept = params.smoothing * previous;
+                precise float fresh = params.smoothing_complement * power;
+                level = kept + fresh;
+                const float held = minimum[k];
+                if (held < level) {
+                    precise float decayed = params.gamma * held;
+                    precise float lagged = params.beta * previous;
+                    precise float lift = level - lagged;
+                    precise float risen = params.rise * lift;
+                    floor_power = decayed + risen;
+                } else {
+                    floor_power = level;
+                }
+            }
+            smoothed[k] = level;
+            minimum[k] = floor_power;
+
+            precise float noise = params.bias * floor_power;
+            precise float ratio = noise * det_recip(level + params.eps);
+            precise float cut = params.alpha * ratio;
+            precise float gain = 1.0 - cut;
+            gain = max(gain, params.floor_gain);
+            precise float yr = gain * re;
+            precise float yi = gain * im;
+            y_real[k] = yr;
+            y_imag[k] = yi;
+        }
+        barrier();
+
+        for (uint t = id; t < kFrame; t += width) {
+            precise float acc = 0.0;
+            for (uint k = 1u; k < kHop; ++k) {
+                const uint at = (k * t) & kMask;
+                precise float a = y_real[k] * tables.values[kCos + at];
+                precise float b = y_imag[k] * tables.values[kSin + at];
+                precise float term = a - b;
+                acc = acc + term;
+            }
+            const float nyquist = ((t & 1u) != 0u) ? -y_real[kHop] : y_real[kHop];
+            precise float doubled = 2.0 * acc;
+            precise float sum = y_real[0] + nyquist;
+            sum = sum + doubled;
+            precise float synthesised = sum * tables.values[kSynthesis + t];
+            work[t] = synthesised;
+        }
+        barrier();
+
+        for (uint t = id; t < kHop; t += width) {
+            precise float added = tail[t] + work[t];
+            queue[t] = added;
+            tail[t] = work[kHop + t];
+            hist[t] = hist[kHop + t];
+        }
+        barrier();
+
+        phase = 0u;
+        seen = min(seen + 1.0, 2.0);
+    }
+
+    for (uint i = id; i < kFrame; i += width) {
+        state.values[kStateHistory + i] = hist[i];
+    }
+    for (uint i = id; i < kHop; i += width) {
+        state.values[kStateTail + i] = tail[i];
+        state.values[kStateQueue + i] = queue[i];
+    }
+    for (uint i = id; i < kBins; i += width) {
+        state.values[kStateSmoothed + i] = smoothed[i];
+        state.values[kStateMinimum + i] = minimum[i];
+    }
+    if (id == 0u) {
+        state.values[0] = float(phase);
+        state.values[1] = seen;
+    }
+}

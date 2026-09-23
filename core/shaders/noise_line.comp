@@ -1,0 +1,210 @@
+// The manual notch and the automatic notch, on one receiver's demodulated
+// audio, in place.
+//
+// The notch is a second-order section read off its pole-zero geometry,
+// Oppenheim and Schafer, "Discrete-Time Signal Processing", chapter 5. The
+// automatic notch is the adaptive line enhancer of Widrow et al., "Adaptive
+// Noise Cancelling: Principles and Applications", Proc. IEEE 63(12), 1975,
+// updated by normalized LMS with leakage as in Haykin, "Adaptive Filter
+// Theory". Neither document was opened for this work; core/dsp/
+// noise_reference.h states the design and the figures. No GPL implementation
+// was read, fetched or consulted while writing this file.
+//
+// A RECURSION, SO ONE SAMPLE AT A TIME. Every output depends on the one
+// before it, through the section's feedback and through the weights, so the
+// samples are walked in order by one workgroup of kLanes invocations. What is
+// parallel is the predictor's 128 taps within a sample: lane l owns taps l,
+// l + kLanes and so on, sums its own share in ascending order into workgroup
+// memory, and after a barrier every lane adds the kLanes partial sums in
+// ascending lane order and so holds the same total. The section's arithmetic
+// is repeated identically in every lane rather than broadcast, which costs
+// five multiplies and saves a barrier.
+//
+// The pipeline's local size is kLanes, set by the host, so no scheduling
+// choice can change how the sums are grouped. Invocations beyond kLanes, if a
+// caller specialised a larger size, take part in the barriers and nothing
+// else.
+//
+// STATE is carried between dispatches in a buffer, because an adaptive filter
+// that forgot its weights every block would never adapt. Its layout is in
+// core/dsp/noise_reference.h beside the twin, reference_line, which is
+// bit-identical: the same section order, the same lane split, the same
+// Newton reciprocal as core/shaders/vrx_demod.comp.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(constant_id = 1) const uint kLanes = 32u;
+layout(constant_id = 2) const uint kTaps = 128u;
+layout(constant_id = 3) const uint kHistory = 2048u;
+
+const uint kPerLane = kTaps / kLanes;
+
+const uint kFlagNotch = 1u;
+const uint kFlagAle = 2u;
+
+const uint kStatePosition = 4u;
+const uint kStateWeights = 8u;
+const uint kStateHistory = kStateWeights + kTaps;
+
+// Audio, one float per sample, read and rewritten in place.
+layout(std430, binding = 0) buffer Audio {
+    float values[];
+} audio;
+
+layout(std430, binding = 1) buffer State {
+    float values[];
+} state;
+
+layout(push_constant) uniform Params {
+    uint count;
+    uint flags;
+    uint stride;
+    uint delay;
+    float b0;
+    float b1;
+    float b2;
+    float a1;
+    float a2;
+    float mu;
+    float leak;
+    float eps;
+} params;
+
+shared float history[kHistory];
+shared float part_y[kLanes];
+shared float part_p[kLanes];
+
+// 1 / value for value > 0. The same seed and the same four Newton steps as
+// core/shaders/vrx_demod.comp and det_recip in core/dsp/vrx_reference.cpp,
+// copied rather than shared because GLSL has no include here; the twin calls
+// that one function, so a copy that drifted would fail the diff.
+float det_recip(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x7EF311C3u - bits);
+
+    precise float r1 = seed * (2.0 - value * seed);
+    precise float r2 = r1 * (2.0 - value * r1);
+    precise float r3 = r2 * (2.0 - value * r2);
+    precise float r4 = r3 * (2.0 - value * r3);
+    return r4;
+}
+
+void main() {
+    const uint lane = gl_LocalInvocationID.x;
+    const uint width = gl_WorkGroupSize.x;
+    const bool is_lane = lane < kLanes;
+    const bool notch = (params.flags & kFlagNotch) != 0u;
+    const bool ale = (params.flags & kFlagAle) != 0u;
+    const uint history_mask = kHistory - 1u;
+
+    if (ale) {
+        for (uint i = lane; i < kHistory; i += width) {
+            history[i] = state.values[kStateHistory + i];
+        }
+    }
+
+    float w[kPerLane];
+    for (uint j = 0u; j < kPerLane; ++j) {
+        w[j] = is_lane ? state.values[kStateWeights + lane + j * kLanes] : 0.0;
+    }
+    float r[kPerLane];
+
+    float x1 = state.values[0];
+    float x2 = state.values[1];
+    float y1 = state.values[2];
+    float y2 = state.values[3];
+    uint position = uint(state.values[kStatePosition]);
+
+    barrier();
+
+    for (uint n = 0u; n < params.count; ++n) {
+        const float x = audio.values[n];
+        float v = x;
+        if (notch) {
+            precise float t0 = params.b0 * x;
+            precise float t1 = params.b1 * x1;
+            precise float t2 = params.b2 * x2;
+            precise float t3 = params.a1 * y1;
+            precise float t4 = params.a2 * y2;
+            precise float acc = t0 + t1;
+            acc = acc + t2;
+            acc = acc - t3;
+            acc = acc - t4;
+            x2 = x1;
+            x1 = x;
+            y2 = y1;
+            y1 = acc;
+            v = acc;
+        }
+
+        float out_value = v;
+        if (ale) {
+            precise float py = 0.0;
+            precise float pp = 0.0;
+            for (uint j = 0u; j < kPerLane; ++j) {
+                const uint k = lane + j * kLanes;
+                const uint at = (position - params.delay - k * params.stride) & history_mask;
+                r[j] = history[at];
+                precise float wy = w[j] * r[j];
+                py = py + wy;
+                precise float rr = r[j] * r[j];
+                pp = pp + rr;
+            }
+            if (is_lane) {
+                part_y[lane] = py;
+                part_p[lane] = pp;
+            }
+            barrier();
+
+            precise float y = 0.0;
+            precise float p = 0.0;
+            for (uint l = 0u; l < kLanes; ++l) {
+                y = y + part_y[l];
+                p = p + part_p[l];
+            }
+            precise float e = v - y;
+            precise float g = params.mu * det_recip(p + params.eps);
+            precise float ge = g * e;
+            for (uint j = 0u; j < kPerLane; ++j) {
+                precise float kept = params.leak * w[j];
+                precise float step = ge * r[j];
+                w[j] = kept + step;
+            }
+            out_value = e;
+
+            // Every lane has read this sample's history and its partial sums,
+            // so lane 0 may now overwrite both for the next.
+            barrier();
+            if (lane == 0u) {
+                history[position & history_mask] = v;
+            }
+        }
+        if (lane == 0u) {
+            audio.values[n] = out_value;
+        }
+        if (ale) {
+            barrier();
+        }
+        position = position + 1u;
+    }
+
+    if (is_lane) {
+        for (uint j = 0u; j < kPerLane; ++j) {
+            state.values[kStateWeights + lane + j * kLanes] = w[j];
+        }
+    }
+    if (lane == 0u) {
+        state.values[0] = x1;
+        state.values[1] = x2;
+        state.values[2] = y1;
+        state.values[3] = y2;
+        state.values[kStatePosition] = float(position & history_mask);
+    }
+    if (ale) {
+        for (uint i = lane; i < kHistory; i += width) {
+            state.values[kStateHistory + i] = history[i];
+        }
+    }
+}

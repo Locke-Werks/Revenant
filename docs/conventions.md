@@ -172,7 +172,7 @@ One kernel per file, under `core/shaders/`, named for what it does.
 
 Workgroup size is a specialization constant. Never hardcoded, never a `#define`
 patched at build time. One line, and it is the same line in every kernel under
-`core/shaders/`, fourteen of them by the end of 2026-09-23:
+`core/shaders/`, seventeen of them by the end of 2026-09-23:
 
 ```glsl
 layout(local_size_x_id = 0) in;
@@ -190,6 +190,13 @@ eleven kernels under `core/shaders/`". The twelfth, `convert_cs24_cf32.comp`,
 arrived with "Widen 24-bit samples on the device, reading each from two words"
 and carries the same line. The count is dated now rather than stated, because
 it is the part that goes stale; the rule is the part a reader acts on.
+
+AND WHAT IT SAID AFTER THAT: "the same line in every kernel under
+`core/shaders/`, fourteen of them by the end of 2026-09-23". The three noise
+mitigation kernels, `noise_blank.comp`, `noise_line.comp` and
+`noise_spectral.comp`, made it seventeen the same day and carry the same line.
+The host specializes `noise_line.comp` at its own lane count, because there the
+size is part of the arithmetic, and `core/engine/noise_stage.cpp` says why.
 
 Id 0 is reserved for the workgroup size and nothing else. A kernel's own
 specialization constants start at 1, which is why every one of them reads

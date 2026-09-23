@@ -68,4 +68,11 @@ namespace revenant::gpu::shaders {
 [[nodiscard]] std::span<const std::uint32_t> iq_moments();
 [[nodiscard]] std::span<const std::uint32_t> iq_correct();
 
+// The three noise mitigation kernels, each off by default on a receiver.
+// Twins in core/dsp/noise_reference.h: reference_blank_detect and
+// reference_blank_apply, reference_line, reference_spectral.
+[[nodiscard]] std::span<const std::uint32_t> noise_blank();
+[[nodiscard]] std::span<const std::uint32_t> noise_line();
+[[nodiscard]] std::span<const std::uint32_t> noise_spectral();
+
 }  // namespace revenant::gpu::shaders

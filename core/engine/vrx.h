@@ -606,6 +606,47 @@ struct VrxParams {
 
     // CW only. The offset the carrier is translated to so it is audible.
     dsp::Hertz cw_pitch = 700;
+
+    // Noise mitigation, three stages, each off by default. What each one
+    // does, where it runs and the measured figures are in docs/noise.md;
+    // the arithmetic is in core/dsp/noise_reference.h. engine::place refuses
+    // a value out of range, or a stage the mode does not offer, with a
+    // sentence naming both, so a request is either applied or answered.
+    //
+    // They are tuning and not shape: turning any of them on or off, or
+    // moving any figure, is a push constant on the running receiver and
+    // never a remove and an add.
+
+    // The impulse blanker, on the receiver's coarse channel ahead of its
+    // filter. Offered on every mode that produces audio. The threshold is
+    // how far above the running background power a sample must stand to be
+    // blanked, in [3, 40] dB.
+    bool nb_enabled = false;
+    double nb_threshold_db = 12.0;
+
+    // The manual notch, at signed hertz from `center` in the same frame as
+    // passband_low and passband_high, so a display draws it where the
+    // interference is. Offered on AM, USB, LSB, DSB and CW, the modes whose
+    // audio frequency follows from where a signal sits; a notch outside the
+    // granted passband is kept but notches nothing, because the filter has
+    // already removed what it would have cut. Depth in [3, 80] dB, width in
+    // [10, 2000] Hz.
+    bool notch_enabled = false;
+    dsp::Hertz notch_hz = 1'000;
+    double notch_depth_db = 40.0;
+    dsp::Hertz notch_width_hz = 100;
+
+    // The automatic notch, an adaptive line enhancer that removes steady
+    // tones from the audio. Offered on AM, USB, LSB and DSB. REFUSED ON CW,
+    // where the steady tone is the signal.
+    bool auto_notch_enabled = false;
+
+    // Spectral noise reduction on the audio, with one strength control in
+    // [0, 1]. Offered on every mode that produces audio; a stereo WFM
+    // receiver runs without it, since a noise floor per channel would move
+    // the stereo image.
+    bool nr_enabled = false;
+    double nr_strength = 0.5;
 };
 
 // How a receiver was actually placed on the grid, which the caller needs to

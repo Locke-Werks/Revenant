@@ -107,6 +107,7 @@ add_library(revenant_core STATIC
     dsp/denormal_mode.cpp
     dsp/front_end_correction.cpp
     dsp/front_end_correction_reference.cpp
+    dsp/noise_reference.cpp
     dsp/pfb_branch_reference.cpp
     dsp/pfb_design.cpp
     dsp/pfb_fft_reference.cpp
@@ -128,6 +129,7 @@ add_library(revenant_core STATIC
     engine/device_ring.cpp
     engine/engine.cpp
     engine/graph.cpp
+    engine/noise_stage.cpp
     engine/probe.cpp
     engine/scheduler.cpp
     engine/spectrum_scale.cpp
@@ -193,6 +195,9 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_demod.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_moments.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_correct.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_blank.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_line.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_spectral.comp"
 )
 
 revenant_apply_warnings(revenant_core)

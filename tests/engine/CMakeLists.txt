@@ -117,6 +117,12 @@ add_executable(revenant_lock_holder
 target_link_libraries(revenant_lock_holder PRIVATE revenant_device_lock)
 revenant_apply_warnings(revenant_lock_holder)
 
+# test_engine_noise.cpp is the noise blanker, the notches and the noise
+# reduction on real receivers. It needs a GPU because all three are kernels
+# on the device, and it is where docs/noise.md's figures come from: a
+# synthetic SSB voice under impulses, a whistle and white noise, measured with
+# each stage off and on.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -129,6 +135,7 @@ add_executable(revenant_engine_tests
     test_device_lock.cpp
     test_engine.cpp
     test_engine_dv.cpp
+    test_engine_noise.cpp
     test_engine_pacing.cpp
     test_engine_passband.cpp
     test_engine_probe.cpp

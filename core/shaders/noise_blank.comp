@@ -1,0 +1,110 @@
+// The impulse blanker, on one receiver's coarse channel at the channel rate,
+// ahead of core/shaders/vrx_fine.comp.
+//
+// Designed from the detection-by-threshold principle in S. V. Vaseghi,
+// "Advanced Digital Signal Processing and Noise Reduction", Wiley, the
+// chapter "Impulsive Noise: Modelling, Detection and Removal", which was not
+// opened for this work; core/dsp/noise_reference.h states the design, the
+// figures and why this runs before the channel filter rather than after it.
+// No GPL implementation was read, fetched or consulted while writing this
+// file.
+//
+// Two passes selected by kPass, the way vrx_demod.comp selects a mode:
+//
+//   detect  flags[o] = 1 when this sample's energy times the window length
+//           exceeds the threshold times the energy of the kWindow samples
+//           ending kGuard samples before it. Written as a comparison of two
+//           products so there is no division, which Vulkan permits to be
+//           2.5 ULP out and which no twin could referee.
+//
+//   apply   blanked[o] = 0 when any flag in [o - kHang, o + kLead] is set,
+//           and the channel sample otherwise.
+//
+// Both rings this writes are this receiver's own, indexed by the absolute
+// channel sample index under their own mask. The fine stage then reads the
+// blanked ring with chan_base zero and that mask, and nothing else changes.
+//
+// No state is carried: every output is a pure function of the channel ring
+// and, for apply, of flags that are themselves a pure function of it. The
+// CPU twins are reference_blank_detect and reference_blank_apply in
+// core/dsp/noise_reference.cpp, bit-identical: the same squares, the same
+// oldest-first sum, the same two products compared.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(constant_id = 1) const uint kPass = 0u;
+layout(constant_id = 2) const uint kWindow = 64u;
+layout(constant_id = 3) const uint kGuard = 11u;
+layout(constant_id = 4) const uint kHang = 9u;
+layout(constant_id = 5) const uint kLead = 9u;
+
+const uint kPassDetect = 0u;
+
+layout(std430, binding = 0) readonly buffer ChannelRing {
+    vec2 values[];
+} chan;
+
+// Read and written: the detect pass writes it and the apply pass reads it,
+// and one binding layout serves both pipelines.
+layout(std430, binding = 1) buffer Flags {
+    float values[];
+} flags;
+
+layout(std430, binding = 2) writeonly buffer Blanked {
+    vec2 values[];
+} blanked;
+
+// Two rings with two masks: the channel ring the channelizer wrote, and this
+// receiver's own flag and blanked rings, which are far shorter. The host hands
+// over the first sample's offset in each. core/dsp/noise_reference.h,
+// BlankerParams, says why they differ.
+layout(push_constant) uniform Params {
+    uint chan_base;
+    uint chan_mask;
+    uint chan_first;
+    uint out_mask;
+    uint out_first;
+    uint count;
+
+    // A power ratio, 10^(dB/10) rounded on the host.
+    float threshold;
+} params;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= params.count) {
+        return;
+    }
+    const uint c = (params.chan_first + i) & params.chan_mask;
+    const uint o = (params.out_first + i) & params.out_mask;
+
+    if (kPass == kPassDetect) {
+        const vec2 s = chan.values[params.chan_base + c];
+        precise float p = s.x * s.x + s.y * s.y;
+
+        // Oldest first. The unsigned subtraction wraps and the mask brings it
+        // back into the ring, which is correct because the ring's length
+        // divides 2^32.
+        precise float sum = 0.0;
+        for (uint m = 0u; m < kWindow; ++m) {
+            const uint at = (c - kGuard - kWindow + m) & params.chan_mask;
+            const vec2 r = chan.values[params.chan_base + at];
+            precise float q = r.x * r.x + r.y * r.y;
+            sum = sum + q;
+        }
+        precise float lhs = p * float(kWindow);
+        precise float rhs = params.threshold * sum;
+        flags.values[o] = (sum > 0.0 && lhs > rhs) ? 1.0 : 0.0;
+        return;
+    }
+
+    bool hit = false;
+    for (uint m = 0u; m <= kHang + kLead; ++m) {
+        if (flags.values[(o - kHang + m) & params.out_mask] != 0.0) {
+            hit = true;
+        }
+    }
+    blanked.values[o] = hit ? vec2(0.0) : chan.values[params.chan_base + c];
+}

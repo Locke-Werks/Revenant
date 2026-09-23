@@ -18,6 +18,9 @@
 #include "shaders/vrx_demod_comp.h"
 #include "shaders/iq_moments_comp.h"
 #include "shaders/iq_correct_comp.h"
+#include "shaders/noise_blank_comp.h"
+#include "shaders/noise_line_comp.h"
+#include "shaders/noise_spectral_comp.h"
 
 namespace revenant::gpu::shaders {
 
@@ -80,6 +83,19 @@ std::span<const std::uint32_t> iq_moments() {
 
 std::span<const std::uint32_t> iq_correct() {
     return std::span<const std::uint32_t>(iq_correct_comp_spv, std::size(iq_correct_comp_spv));
+}
+
+std::span<const std::uint32_t> noise_blank() {
+    return std::span<const std::uint32_t>(noise_blank_comp_spv, std::size(noise_blank_comp_spv));
+}
+
+std::span<const std::uint32_t> noise_line() {
+    return std::span<const std::uint32_t>(noise_line_comp_spv, std::size(noise_line_comp_spv));
+}
+
+std::span<const std::uint32_t> noise_spectral() {
+    return std::span<const std::uint32_t>(noise_spectral_comp_spv,
+                                          std::size(noise_spectral_comp_spv));
 }
 
 }  // namespace revenant::gpu::shaders
