@@ -1285,7 +1285,11 @@ Expected<SampleFormat> sample_format_from_name(std::string_view name)
     if (name == "cf32") {
         return SampleFormat::Cf32;
     }
-    return fail(std::format("unknown sample format '{}', expected cu8, cs8, cs16 or cf32", name));
+    if (name == "cs24") {
+        return SampleFormat::Cs24;
+    }
+    return fail(std::format("unknown sample format '{}', expected cu8, cs8, cs16, cs24 or cf32",
+                            name));
 }
 
 Expected<SampleFormat> sample_format_from_extension(std::string_view path)
@@ -1294,7 +1298,7 @@ Expected<SampleFormat> sample_format_from_extension(std::string_view path)
     if (dot == std::string_view::npos || dot + 1 >= path.size()) {
         return fail(std::format(
             "'{}' has no extension to infer a sample format from, so the URI has to say "
-            "format=cu8, cs8, cs16 or cf32",
+            "format=cu8, cs8, cs16, cs24 or cf32",
             path));
     }
 
@@ -1304,8 +1308,8 @@ Expected<SampleFormat> sample_format_from_extension(std::string_view path)
         return known;
     }
     return fail(std::format(
-        "'{}' does not name a sample format, so the URI has to say format=cu8, cs8, cs16 or "
-        "cf32 rather than leaving it to be guessed from the extension",
+        "'{}' does not name a sample format, so the URI has to say format=cu8, cs8, cs16, cs24 "
+        "or cf32 rather than leaving it to be guessed from the extension",
         extension));
 }
 
@@ -1920,14 +1924,18 @@ Expected<RecordingMetadata> read_wav_metadata(const std::string& path)
         sample_format = SampleFormat::Cu8;
     } else if (format.tag == kFormatPcm && format.bits == 16) {
         sample_format = SampleFormat::Cs16;
+    } else if (format.tag == kFormatPcm && format.bits == 24) {
+        // What HF recorders write. Three bytes a component, packed, which is
+        // cs24 exactly; core/shaders/convert_cs24_cf32.comp widens it on the
+        // device like the other three, so this is no host pass.
+        sample_format = SampleFormat::Cs24;
     } else if (format.tag == kFormatFloat && format.bits == 32) {
         sample_format = SampleFormat::Cf32;
     } else {
         return fail(std::format(
             "'{}' declares format tag {} at {} bits per sample, which is not one this backend "
-            "reads. It takes 8-bit and 16-bit PCM and 32-bit IEEE float, which are the widths "
-            "the upload kernels convert. 24-bit, which some HF recorders write, needs a "
-            "conversion pass this engine deliberately does not do on the host.",
+            "reads. It takes 8-bit, 16-bit and 24-bit PCM and 32-bit IEEE float, which are the "
+            "widths the upload kernels convert.",
             path, format.tag, format.bits));
     }
 

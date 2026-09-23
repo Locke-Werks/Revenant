@@ -406,6 +406,7 @@ enum SampleFormat {
     cs8 @1;
     cs16 @2;
     cf32 @3;
+    cs24 @4;
 }
 
 struct SourceDescriptor {

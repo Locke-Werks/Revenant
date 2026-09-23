@@ -164,6 +164,8 @@ static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CS16) ==
               static_cast<std::uint16_t>(SampleFormat::Cs16));
 static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CF32) ==
               static_cast<std::uint16_t>(SampleFormat::Cf32));
+static_assert(static_cast<std::uint16_t>(schema::SampleFormat::CS24) ==
+              static_cast<std::uint16_t>(SampleFormat::Cs24));
 
 static_assert(static_cast<std::uint16_t>(schema::FlowControl::PACED) ==
               static_cast<std::uint16_t>(FlowControl::Paced));
@@ -385,7 +387,7 @@ struct PromiseValue<kj::Promise<T>> {
     // one, so a client that guesses Demand shows a number that may mean nothing
     // and one that guessed Paced would hide a number that means everything.
     const auto format = static_cast<std::uint16_t>(in.getNativeFormat());
-    out.native_format = format <= static_cast<std::uint16_t>(SampleFormat::Cf32)
+    out.native_format = format < static_cast<std::uint16_t>(SampleFormat::Unknown)
                             ? static_cast<SampleFormat>(format)
                             : SampleFormat::Unknown;
     out.bits_per_component = in.getBitsPerComponent();

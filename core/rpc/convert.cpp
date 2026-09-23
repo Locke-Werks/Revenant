@@ -313,6 +313,8 @@ void write_device(schema::DeviceInfo::Builder out, const gpu::DeviceInfo& in) {
             return schema::SampleFormat::CS16;
         case source::SampleFormat::Cf32:
             return schema::SampleFormat::CF32;
+        case source::SampleFormat::Cs24:
+            return schema::SampleFormat::CS24;
     }
     return schema::SampleFormat::CF32;
 }

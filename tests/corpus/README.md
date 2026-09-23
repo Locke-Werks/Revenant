@@ -47,5 +47,9 @@ across the 2017 eclipse, 40 m and 20 m, 96 kS/s.
 
 It is not a corpus entry and this directory stays empty. There is no sidecar,
 no checksum, no retrieval URL and no ground-truth record, which are the four
-things an entry is. The engine cannot read the files either, because they are
-24-bit. Both of those are in that document.
+things an entry is. That document has the detail, and how the engine reads
+them.
+
+WHAT THIS PARAGRAPH USED TO SAY: "The engine cannot read the files either,
+because they are 24-bit." It reads them natively now, through the cs24 upload
+kernel.

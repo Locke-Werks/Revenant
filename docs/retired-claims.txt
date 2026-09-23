@@ -647,3 +647,16 @@ commit: "Remove the placeholders from directories that have their contents"
 instead: The placeholder is deleted. docs/rpc.md quotes what it said, that
     frames to a local client pass by shared GPU texture handle, and still calls
     that a deferred optimisation.
+
+phrase: needs a conversion pass this engine deliberately does not do on the host
+phrase: So the files as delivered are unreadable by this engine
+phrase: The engine cannot read the files either, because they are 24-bit
+phrase: are 24-bit, so nothing in this project can open them
+retired: 2026-09-22
+commit: 42e346e
+instead: The engine reads 24-bit PCM natively as cs24.
+    core/shaders/convert_cs24_cf32.comp widens it on the GPU during upload, six
+    bytes a sample read from two 32-bit words, and its output is bit-identical
+    to scripts/wav24_to_float32.py. The KF4FIC recordings open as delivered,
+    with center= in the URI because the files carry no centre frequency. See
+    docs/recordings.md.

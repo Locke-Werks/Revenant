@@ -1,9 +1,13 @@
 # Convert a 24-bit PCM WAV to 32-bit float, optionally taking an excerpt.
 #
-# WHY THIS EXISTS. core/source/file_source.cpp reads 8-bit and 16-bit PCM and
-# 32-bit float, and declines 24-bit because the host conversion pass it would
-# need is the one the upload kernels exist to avoid. The HF recordings in
-# docs/recordings.md are 24-bit, so nothing in this project can open them.
+# WHY THIS EXISTS. It was written when the engine declined 24-bit PCM, to make
+# the HF recordings in docs/recordings.md readable at all. The engine now reads
+# them natively through core/shaders/convert_cs24_cf32.comp, and its output is
+# bit-identical to this script's, so what remains of its use is making a small
+# float32 excerpt to hand to something outside this project.
+#
+# WHAT THIS COMMENT USED TO SAY: "The HF recordings in docs/recordings.md are
+# 24-bit, so nothing in this project can open them."
 #
 # This does the conversion once, offline, where a host pass costs nothing that
 # matters. It is not part of the engine and is not on any sample path.

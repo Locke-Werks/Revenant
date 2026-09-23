@@ -227,6 +227,10 @@ struct WavPlan {
     bool override_data_size = false;
     std::uint32_t data_size = 0;
 
+    // WAVE_FORMAT_EXTENSIBLE, a 40-byte fmt chunk with format_tag as the first
+    // two bytes of the subformat GUID. What the 24-bit HF recorders write.
+    bool extensible = false;
+
     std::vector<std::byte> payload;
 };
 
@@ -243,13 +247,27 @@ struct WavPlan {
     }
 
     body.tag("fmt ");
-    body.u32(16);
-    body.u16(plan.format_tag);
+    body.u32(plan.extensible ? 40 : 16);
+    body.u16(plan.extensible ? std::uint16_t{0xFFFE} : plan.format_tag);
     body.u16(plan.channels);
     body.u32(plan.rate);
     body.u32(plan.rate * plan.channels * (plan.bits / 8u));
     body.u16(static_cast<std::uint16_t>(plan.channels * (plan.bits / 8u)));
     body.u16(plan.bits);
+    if (plan.extensible) {
+        body.u16(22);         // cbSize
+        body.u16(plan.bits);  // valid bits per sample
+        body.u32(0x3);        // channel mask, front left and right
+        // KSDATAFORMAT_SUBTYPE_PCM or _IEEE_FLOAT: the tag, then the fixed
+        // tail 0000-0010-8000-00AA00389B71.
+        body.u32(plan.format_tag);
+        body.u16(0x0000);
+        body.u16(0x0010);
+        const std::uint8_t tail[8] = {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71};
+        for (std::uint8_t byte : tail) {
+            body.u8(byte);
+        }
+    }
 
     if (plan.with_auxi) {
         body.tag("auxi");
@@ -1161,6 +1179,116 @@ TEST_CASE("a channel count that is not two is refused", "[source][wav]") {
     REQUIRE_FALSE(opened.has_value());
     INFO(opened.error().message);
     CHECK(opened.error().message.find("1 channel") != std::string::npos);
+}
+
+TEST_CASE("a 24-bit extensible WAV opens as cs24 and delivers its bytes untouched",
+          "[source][wav][hf]") {
+    // The layout of the KF4FIC HF recordings in docs/recordings.md: a 40-byte
+    // WAVE_FORMAT_EXTENSIBLE fmt chunk, PCM subformat, two channels at 24
+    // bits, no auxi, 96 kS/s. Those files were refused until the cs24 kernel
+    // existed, because the only other way to read them was a host pass.
+    //
+    // REJECTS: a reader that converts on the host, which would deliver
+    // eight-byte floats where the block says six-byte codes; one that reads
+    // 24-bit as 32 and walks off the frame stride; and one that drops the odd
+    // sample count's final frame.
+    const ScratchDir scratch("wav_cs24");
+    const auto path = scratch.path("hf24.wav");
+
+    constexpr std::size_t kSamples = 1'001;
+    std::vector<std::byte> payload(kSamples * 6);
+    for (std::size_t i = 0; i < payload.size(); ++i) {
+        // Every byte distinguishable from its neighbours, and a high bit set on
+        // many of them, so a reordered or sign-mangled byte cannot hide.
+        payload[i] = static_cast<std::byte>(static_cast<std::uint8_t>((i * 151U + 7U) & 0xFFU));
+    }
+
+    WavPlan plan;
+    plan.extensible = true;
+    plan.format_tag = 1;
+    plan.bits = 24;
+    plan.rate = 96'000;
+    plan.payload = payload;
+    ScratchDir::write(path, render_wav(plan));
+
+    auto opened = source::open_source(ScratchDir::uri(path, "center=7150000"));
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    const auto& caps = (*opened)->capabilities();
+    CHECK(caps.native_format == source::SampleFormat::Cs24);
+    CHECK(caps.bits_per_component == 24);
+    CHECK(source::bytes_per_sample(caps.native_format) == 6);
+    CHECK(caps.length_samples == kSamples);
+    CHECK((*opened)->center() == 7'150'000);
+
+    // The file has no centre of its own, so without center= the HF request
+    // could not be stated. With it, the span reaches HF and says so.
+    CHECK(caps.resolution.stated());
+    CHECK(caps.resolution.narrowest_signal_hz == 31);
+
+    std::vector<std::byte> delivered;
+    bool every_block_cs24 = true;
+    source::StreamOptions options;
+    options.block_samples = 97;  // prime, so the final block is short and odd
+    const auto started =
+        (*opened)->start(options, [&](const source::SourceBlock& block) -> Status {
+            every_block_cs24 = every_block_cs24 && block.format == source::SampleFormat::Cs24 &&
+                               block.bytes.size() == block.sample_count * 6;
+            delivered.insert(delivered.end(), block.bytes.begin(), block.bytes.end());
+            return {};
+        });
+    REQUIRE(started.has_value());
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while ((*opened)->running() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto stopped = (*opened)->stop();
+    INFO(test::message_of(stopped));
+    CHECK(stopped.has_value());
+
+    CHECK(every_block_cs24);
+    REQUIRE(delivered.size() == payload.size());
+    CHECK(delivered == payload);
+}
+
+TEST_CASE("a 24-bit WAV that is not a whole number of frames is refused", "[source][wav]") {
+    // Three stray bytes is half a frame at six bytes a sample. The generic
+    // whole-sample check has to hold at a width that is not a power of two.
+    const ScratchDir scratch("wav_cs24_ragged");
+    const auto path = scratch.path("ragged24.wav");
+
+    WavPlan plan;
+    plan.extensible = true;
+    plan.format_tag = 1;
+    plan.bits = 24;
+    plan.rate = 96'000;
+    plan.payload.assign(100 * 6 + 3, std::byte{0x11});
+    ScratchDir::write(path, render_wav(plan));
+
+    const auto opened = source::open_source(ScratchDir::uri(path, "center=7150000"));
+    REQUIRE_FALSE(opened.has_value());
+    INFO(opened.error().message);
+    CHECK(opened.error().message.find("whole number of cs24 samples") != std::string::npos);
+}
+
+TEST_CASE("a raw cs24 file is named by its extension or by format=", "[source]") {
+    const ScratchDir scratch("raw_cs24");
+    const auto path = scratch.path("plain.cs24");
+    ScratchDir::write(path, std::vector<std::byte>(600, std::byte{0x40}));
+
+    auto by_extension = source::open_source(ScratchDir::uri(path, "rate=96000"));
+    INFO(test::message_of(by_extension));
+    REQUIRE(by_extension.has_value());
+    CHECK((*by_extension)->capabilities().native_format == source::SampleFormat::Cs24);
+    CHECK((*by_extension)->capabilities().length_samples == 100);
+
+    const auto other = scratch.path("plain.iq");
+    ScratchDir::write(other, std::vector<std::byte>(600, std::byte{0x40}));
+    auto by_name = source::open_source(ScratchDir::uri(other, "rate=96000&format=cs24"));
+    INFO(test::message_of(by_name));
+    REQUIRE(by_name.has_value());
+    CHECK((*by_name)->capabilities().native_format == source::SampleFormat::Cs24);
 }
 
 // ---------------------------------------------------------------------------

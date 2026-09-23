@@ -25,6 +25,11 @@ enum class SampleFormat : std::uint8_t {
     Cs8,   // signed 8-bit I/Q
     Cs16,  // signed 16-bit I/Q
     Cf32,  // float32 I/Q, the engine's canonical form
+
+    // signed 24-bit I/Q, packed three bytes a component with no padding. What
+    // HF recorders write as 24-bit PCM WAV. Appended rather than placed by
+    // width, because the ordinal is on the wire.
+    Cs24,
 };
 
 [[nodiscard]] constexpr std::size_t bytes_per_sample(SampleFormat format) {
@@ -36,6 +41,8 @@ enum class SampleFormat : std::uint8_t {
             return 4;
         case SampleFormat::Cf32:
             return 8;
+        case SampleFormat::Cs24:
+            return 6;
     }
     return 0;
 }
@@ -46,6 +53,7 @@ enum class SampleFormat : std::uint8_t {
         case SampleFormat::Cs8: return "cs8";
         case SampleFormat::Cs16: return "cs16";
         case SampleFormat::Cf32: return "cf32";
+        case SampleFormat::Cs24: return "cs24";
     }
     return "unknown";
 }

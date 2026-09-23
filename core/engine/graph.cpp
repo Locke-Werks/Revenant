@@ -226,6 +226,7 @@ constexpr std::uint32_t kComplexBytes = 8;
         case source::SampleFormat::Cu8: return gpu::shaders::convert_cu8_cf32();
         case source::SampleFormat::Cs8: return gpu::shaders::convert_cs8_cf32();
         case source::SampleFormat::Cs16: return gpu::shaders::convert_cs16_cf32();
+        case source::SampleFormat::Cs24: return gpu::shaders::convert_cs24_cf32();
         case source::SampleFormat::Cf32: break;
     }
     return {};

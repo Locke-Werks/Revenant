@@ -73,37 +73,60 @@ ground-truth record would have to be built and dated rather than stated once.
 The honest position is that these make the measurement possible and do not make
 it cheap.
 
-## What stops them being used today
+## How the engine reads them
 
-The engine refuses them, and the refusal was written before they arrived.
-Measured on 2026-09-22 with `revenant-cli`:
+Natively, as delivered. `core/source/file_source.cpp` resolves a 24-bit PCM fmt
+chunk to `cs24`, six bytes a sample, and `core/shaders/convert_cs24_cf32.comp`
+widens it to Complex32 on the GPU as the upload's convert stage, beside the cu8,
+cs8 and cs16 kernels. No host pass and no copy on disk.
 
-    'KF4FIC_wideband_7000_7300kHz_20170821_1359UT.wav' declares format tag 1
-    at 24 bits per sample, which is not one this backend reads. It takes 8-bit
-    and 16-bit PCM and 32-bit IEEE float, which are the widths the upload
-    kernels convert. 24-bit, which some HF recorders write, needs a conversion
-    pass this engine deliberately does not do on the host.
+The file carries no centre frequency, so the URI has to:
 
-`core/source/file_source.cpp` parses the extensible header correctly, resolves
-the subformat to PCM and then declines the width. The refusal names this exact
-case, so this is a known gap rather than a surprise.
+    revenant-cli "file:///C:/Users/vexam/projects/SDR Recordings/KF4FIC_wideband_14000_14350kHz_20170821_1603UT.wav?center=14175000" --detect
 
-Three ways out. The first is taken, for excerpts, and the section below is it:
+Without `center=` the stream sits at 0 Hz and `source::resolution_for_span`
+returns an unstated request. `--channels 0` then takes the engine's default of
+2 channels at 96 kS/s, 46.875 Hz per bin; with `center=14175000` the same run
+is widened to 16 channels and 5.859 Hz, and says so. `revenant-cli` pins 64
+channels unless told otherwise, which at 96 kS/s is 1.465 Hz per bin whatever
+the centre, and every run below uses that.
 
-- **Convert once, offline.** Turn the file into 32-bit float, which the backend
-  already reads. `scripts/wav24_to_float32.py` does that and takes an excerpt
-  while it is there. Whole files cost 4/3 of the size, about 2.9 GB each and
-  17 GB in total, and nothing has needed that yet.
-- **Read 24-bit on the host.** The smallest change in this repository and the
-  one the comment argues against: the host pass it needs is the one the upload
-  kernels exist to avoid.
-- **Convert on the GPU.** A third upload kernel beside cu8, cs16 and cf32.
-  24-bit is three bytes a sample and does not divide into a 32-bit lane
-  cleanly, which is why it is not already there.
+**`center=` is an assumption here, not a measurement.** Neither the file nor the
+dataset's Zenodo record (10.5281/zenodo.846442) states where the receiver was
+tuned, and the filename names a band three times wider than the capture. The
+runs below pass the midpoint of the filename's band, 7150000 and 14175000, so
+that the absolute frequencies they print are consistent with each other. Read
+them as offsets from centre: the offsets are measured, the centre is not.
 
-So the files as delivered are unreadable by this engine and an excerpt of one
-is not, which is worth saying plainly because they look like they should just
-open.
+**The kernel's output is the float excerpts' samples, bit for bit.** Six bytes do
+not divide a 32-bit lane, so the kernel reads each sample from two words; the
+scale is 2^-23 and a 24-bit code fits a float's significand, so nothing rounds.
+`scripts/wav24_to_float32.py` divides by 2^23 in double and rounds a value that
+needs no rounding, so the two paths hold the same floats. Checked on
+2026-09-22 by cutting the same 5,760,000 frames the excerpts hold (from frame
+57,600,000) out of the originals as bytes, unconverted, and running both through
+`revenant-cli --detect` with default thresholds on the RTX 4090:
+
+| window | cf32 excerpt | cs24, native | snapshots at a common source time |
+| --- | --- | --- | --- |
+| 40 m 1359, 600 to 660 s | 31 born, 28 dropped, 15 merges, 1 split | the same | 7 of 7 identical |
+| 20 m 1603, 600 to 660 s | 55 born, 45 dropped, 39 merges, 12 splits | the same | 4 of 4 identical |
+
+Both ran 86 decisions over 87 frames. The track tables are printed on a
+wall-clock interval, so the two runs sample different source times after the
+first few; every table taken at the same source second is identical line for
+line. Converting the cut bytes separately in numpy and comparing against the
+excerpt's floats matched all 11,520,000 values in both windows bit for bit.
+
+WHAT THIS SECTION USED TO SAY, under the heading "What stops them being used
+today": "The engine refuses them, and the refusal was written before they
+arrived", quoting the refusal "24-bit, which some HF recorders write, needs a
+conversion pass this engine deliberately does not do on the host", and ending
+"So the files as delivered are unreadable by this engine and an excerpt of one
+is not". It listed three ways out: convert offline, which the section below
+took for excerpts; read 24-bit on the host, which the upload kernels exist to
+avoid; and "a third upload kernel beside cu8, cs16 and cf32". The third is
+the one taken.
 
 ## Making one readable, and the first real HF run
 

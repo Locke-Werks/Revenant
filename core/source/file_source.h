@@ -228,7 +228,7 @@ struct FileSourceConfig {
     double ppm_uncertainty = 0.0;
 };
 
-// Maps "cu8", "cs8", "cs16", "cf32" onto the enum. Lives here rather than in
+// Maps "cu8", "cs8", "cs16", "cs24", "cf32" onto the enum. Lives here rather than in
 // the frozen capabilities.h because the file backend is the only thing that
 // takes a sample format from text.
 [[nodiscard]] Expected<SampleFormat> sample_format_from_name(std::string_view name);

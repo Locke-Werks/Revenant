@@ -194,9 +194,11 @@ struct GainStage {
 // Who sets the pace, which decides how realtime_factor is read.
 enum class FlowControl : std::uint8_t { Paced, Demand };
 
-// What the device puts on the bus. The first four mirror
+// What the device puts on the bus. Every value before Unknown mirrors
 // revenant::source::SampleFormat and the schema's SampleFormat, ordinal for
-// ordinal, and client.cpp static_asserts each one.
+// ordinal, and client.cpp static_asserts each one. Cs24 went in ahead of
+// Unknown rather than after it, because Unknown has no wire ordinal and the
+// known values have to keep matching the schema's.
 //
 // Unknown IS THIS SIDE'S ONLY AND HAS NO ORDINAL ON THE WIRE. A Cap'n Proto
 // enum field may legally hold a value the reader's schema has never heard of,
@@ -204,10 +206,10 @@ enum class FlowControl : std::uint8_t { Paced, Demand };
 // descriptor read cannot refuse the way read_demod does: describing a list of
 // sources is not all or nothing, and one dongle reporting a format this build
 // does not know must not hide the backends that cannot fail. So an ordinal past
-// Cf32 lands here rather than being clamped onto one of the four, because the
-// label is what a picker prints and "cf32" about an unknown format is a lie a
-// reader would act on.
-enum class SampleFormat : std::uint8_t { Cu8, Cs8, Cs16, Cf32, Unknown };
+// Cs24 lands here rather than being clamped onto one of the known values,
+// because the label is what a picker prints and "cf32" about an unknown format
+// is a lie a reader would act on.
+enum class SampleFormat : std::uint8_t { Cu8, Cs8, Cs16, Cf32, Cs24, Unknown };
 
 [[nodiscard]] constexpr const char* sample_format_name(SampleFormat format) {
     switch (format) {
@@ -219,6 +221,8 @@ enum class SampleFormat : std::uint8_t { Cu8, Cs8, Cs16, Cf32, Unknown };
             return "cs16";
         case SampleFormat::Cf32:
             return "cf32";
+        case SampleFormat::Cs24:
+            return "cs24";
         case SampleFormat::Unknown:
             break;
     }
