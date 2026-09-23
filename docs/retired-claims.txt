@@ -1100,6 +1100,7 @@ commit: "Add a pool of probe receivers the engine places for itself"
 instead: core/engine/probe.h calls characterise() on its probe receivers'
     extracts, on the pool's own worker thread. The library is still pure and
     knows nothing of the engine; the family stays off the wire.
+
 phrase: Track::classification exists and nothing fills it
 phrase: Track::classification is the seam nothing fills
 phrase: Track::classification as a deliberate seam that nothing fills
