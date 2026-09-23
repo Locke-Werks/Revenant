@@ -1532,3 +1532,21 @@ commit: "Keep serving when a recording a client opened runs out"
 instead: revenant-engine exits when the source its command line opened runs
     out. A source a client opened that runs out stays open, and the engine
     waits for the client to close it or open another.
+
+phrase: receiver on a 48000 S/s card reaches the card bit for bit
+phrase: a single receiver at an ordinary level reaches the card bit for bit
+phrase: 93 dB down; equal rates are a copy
+retired: 2026-09-23
+commit: "Hold the audio ring between the engine's clock and the card's"
+instead: A receiver at the card's rate is copied only while the drift trim is
+    exactly zero, and read through the resampler's kernel otherwise, which is
+    from a few seconds after its stream starts. ui/audio/drift_trim.h.
+
+phrase: nothing here disciplines one to the other
+phrase: Correcting it means resampling by a fraction of a percent
+phrase: the measurement loop a drift correction would need
+retired: 2026-09-23
+commit: "Hold the audio ring between the engine's clock and the card's"
+instead: AudioMix reads every stream up to 500 ppm off its nominal step under
+    DriftTrim's loop on the lead's lag behind its arrivals, which holds the
+    ring between the engine's clock and the card's. ui/audio/drift_trim.h.

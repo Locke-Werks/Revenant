@@ -59,32 +59,33 @@
 // dropout nobody can trace. Picking the sink's depth off the request rather
 // than the grant would reintroduce exactly that.
 //
-// THE RING FILLS OR EMPTIES SLOWLY AND THAT IS NOT A FAULT
+// THE TWO CLOCKS, AND THE LOOP THAT HOLDS THE RING BETWEEN THEM
 //
-// The engine's audio clock and the sound card's are two different clocks
-// and nothing here disciplines one to the other. Measured 2026-09-20
-// against a synthetic wideband source at pace 1.00, seed 4242, on an
-// nfm receiver at 48 kHz: the ring's depth rose from 23 ms to 42 ms over
-// 64 seconds, so the engine was about 0.03 percent fast, and the starve
-// count grew by 82 frames in that minute against 2891 accumulated in the
-// first second while the sink was opening.
+// The engine's audio clock and the sound card's are two different clocks.
+// Measured 2026-09-20 against a synthetic wideband source at pace 1.00, seed
+// 4242, on an nfm receiver at 48 kHz: the ring's depth rose from 23 ms to
+// 42 ms over 64 seconds, so the engine was about 0.03 percent fast, and the
+// starve count grew by 82 frames in that minute against 2891 accumulated in
+// the first second while the sink was opening. Left alone, a drift that way
+// fills the ring in about ten minutes and then loses about one chunk every
+// nine; a drift the other way starves at the same rate.
 //
-// Extrapolated, a drift that way fills the ring in about ten minutes and
-// then loses about one chunk every nine, which is what AudioRing's front
-// eviction and its overrun counter exist for. A drift the other way starves
-// at the same rate. Neither is corrected. Correcting it means resampling by
-// a fraction of a percent under a loop that measures the drift, and the
-// alternative of dropping or repeating whole chunks is audible in a way the
-// drift is not. What is provided instead is that both counters are on
-// screen, so a display that is quietly losing a chunk every few minutes says
-// so. When the lead's ring does evict, AudioMix moves every stream up past
-// the hole together, so the receivers stay aligned across it.
+// Since 2026-09-23 AudioMix reads every stream a few hundred ppm at most off
+// its nominal step, chosen by DriftTrim's loop on the lead's lag behind its
+// arrivals, which holds the ring where it settled; audio/drift_trim.h has
+// the loop and what it measured. RingSource hands the mix the pull's
+// steady-clock reading for that, the same clock EngineLink stamps each chunk's
+// arrival with. The overrun and starve counters stay, for a drift past the
+// loop's 500 ppm clamp and for everything that is not drift. When the lead's
+// ring does evict, AudioMix moves every stream up past the hole together, so
+// the receivers stay aligned across it.
 //
-// WHAT THE SECOND SENTENCE BEFORE THIS USED TO SAY: that correcting the
-// drift "means resampling by a fraction of a percent, which is a DSP stage
-// this process is not the place for". The process resamples every stream to
-// the device's rate since 2026-09-23; what it still does not have is the
-// measurement loop a drift correction would need.
+// WHAT THIS PARAGRAPH USED TO SAY, under the heading THE RING FILLS OR
+// EMPTIES SLOWLY AND THAT IS NOT A FAULT: "nothing here disciplines one to
+// the other", and "Neither is corrected. Correcting it means resampling by a
+// fraction of a percent under a loop that measures the drift", followed by a
+// retraction ending "what it still does not have is the measurement loop a
+// drift correction would need." That loop is DriftTrim.
 
 #pragma once
 
@@ -162,6 +163,12 @@ public:
         return alignments_.load(std::memory_order_relaxed);
     }
 
+    // The mix's clock trim after the last pull, in ppm. See
+    // AudioMix::drift.
+    [[nodiscard]] double drift_trim_ppm() const {
+        return drift_trim_ppm_.load(std::memory_order_relaxed);
+    }
+
 protected:
     qint64 readData(char* data, qint64 maxlen) override;
 
@@ -188,6 +195,7 @@ private:
     std::atomic<FrameSource> last_source_{FrameSource::idle};
     std::atomic<std::uint64_t> limited_pulls_{0};
     std::atomic<std::uint64_t> alignments_{0};
+    std::atomic<double> drift_trim_ppm_{0.0};
 };
 
 class AudioPlayer : public QObject {

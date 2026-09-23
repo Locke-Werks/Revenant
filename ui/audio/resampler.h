@@ -34,9 +34,17 @@
 //
 // WHAT IT COSTS. 2 * half_width multiplies a channel per output frame. From
 // 171000 to 48000 that is 224, about 10.8 million a second for a mono
-// receiver, on the sound card's pull thread. From 8000 up to 48000 it is 64.
-// Equal rates with no cutoff asked for are a copy, so the ordinary case of a
-// 48000 S/s receiver on a 48000 S/s card reaches the card bit for bit.
+// receiver, on the sound card's pull thread. From 8000 up to 48000 it is 64,
+// and 48000 to 48000 under the default kernel is 64 too. Equal rates with no
+// cutoff asked for are a copy unless EqualRates::interpolate is passed.
+//
+// WHAT THE SENTENCE BEFORE THIS USED TO SAY: "Equal rates with no cutoff
+// asked for are a copy, so the ordinary case of a 48000 S/s receiver on a
+// 48000 S/s card reaches the card bit for bit." AudioMix trims every stream's
+// step to hold the lead ring's fill since 2026-09-23, see audio/drift_trim.h,
+// so a 48000 S/s receiver reaches a 48000 S/s card through the kernel once
+// the trim moves off zero, which it does within seconds of the stream
+// starting.
 
 #pragma once
 
@@ -45,6 +53,12 @@
 #include <vector>
 
 namespace revenant::ui {
+
+// What configure does with equal rates and nothing asked of the filter: a
+// copy, or the default kernel. AudioMix asks for the kernel, because its drift
+// trim reads a stream a few hundred ppm off its nominal step, which a copy
+// cannot do; it still copies while the trim is exactly zero.
+enum class EqualRates : std::uint8_t { copy, interpolate };
 
 class Resampler {
 public:
@@ -60,7 +74,7 @@ public:
     // A cutoff above the default's is clamped to it: nothing here may pass a
     // frequency the slower of the two rates cannot carry.
     void configure(std::uint32_t in_rate, std::uint32_t out_rate, double cutoff_hz = 0.0,
-                   double transition_hz = 0.0);
+                   double transition_hz = 0.0, EqualRates equal = EqualRates::copy);
 
     [[nodiscard]] std::uint32_t in_rate() const { return in_rate_; }
     [[nodiscard]] std::uint32_t out_rate() const { return out_rate_; }

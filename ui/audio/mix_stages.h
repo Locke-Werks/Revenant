@@ -132,7 +132,14 @@ private:
 // drops at once to whatever the loudest frame needs and recovers over
 // kReleaseMs, so a burst is turned down rather than squared off. Below the
 // threshold with the gain recovered it multiplies by exactly one, so a
-// single receiver at an ordinary level reaches the card bit for bit.
+// single receiver at an ordinary level leaves it exactly as the resampler
+// handed it over.
+//
+// WHAT THE SENTENCE BEFORE THIS USED TO SAY: "so a single receiver at an
+// ordinary level reaches the card bit for bit". The drift trim reads a
+// receiver at the card's rate through the resampler's kernel once the trim
+// moves off zero, since 2026-09-23, so what reaches the card is the kernel's
+// output; audio/drift_trim.h.
 class SoftLimiter {
 public:
     // -1 dBFS.

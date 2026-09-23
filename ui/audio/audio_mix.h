@@ -36,6 +36,15 @@
 // from the same instant when the lead's audio arrives. A lead that is instead
 // behind a hole in its own ring, its frames evicted before they were played,
 // is moved up to what is there.
+//
+// DRIFT. The engine's clock and the card's are not the same clock, so a
+// stream read at exactly its nominal rate fills or drains its ring by the
+// difference, until the ring evicts or the lead starves. Every stream is read
+// at DriftTrim::ratio() times its nominal step, a few hundred ppm either way
+// at most, chosen by a slow loop on the lead's fill; audio/drift_trim.h has
+// the loop and why it is inaudible. A stream at the device's rate is copied
+// while that ratio is exactly one and read through the resampler's kernel
+// otherwise.
 
 #pragma once
 
@@ -45,6 +54,7 @@
 #include <vector>
 
 #include "audio/audio_ring.h"
+#include "audio/drift_trim.h"
 #include "audio/mix_stages.h"
 #include "audio/resampler.h"
 
@@ -89,6 +99,28 @@ struct MixPull {
 
     // The limiter turned something down.
     bool limited = false;
+
+    // The lead's buffered audio after this pull, in seconds of its stream:
+    // its ring's newest index less the playhead.
+    double fill_seconds = 0.0;
+
+    // What DriftTrim was handed: the lead's lag behind its arrivals when the
+    // pull was timed and the lead anchored, and fill_seconds otherwise.
+    //
+    // WHY NOT THE FILL ALONE. Audio arrives a chunk at a time, 27 ms of it
+    // at the shipped block size, and the card takes it 10 ms at a time, so
+    // the fill read at a pull is a sawtooth that deep with the arrivals'
+    // jitter on its phase, and what is left of it after DriftTrim's average
+    // reaches the trim. The lag is the pull's clock reading less the arrival
+    // anchor, less the playhead's stream time: the same quantity measured
+    // against the anchor's line through the earliest arrivals rather than
+    // against the last chunk that happened to land, and it has no sawtooth.
+    // Measured on ten simulated minutes of an engine 100 ppm slow in
+    // ui/tests/test_drift_trim.cpp: holding the fill, the trim wandered
+    // 28 ppm either side of the drift after three minutes and the averaged
+    // level 1.5 ms; holding the lag, 5 ppm and 1.3 ms.
+    double lag_seconds = 0.0;
+    bool timed = false;
 };
 
 class AudioMix {
@@ -115,18 +147,38 @@ public:
 
     // Fills `frames` frames of `out`, interleaved at out_channels(), from
     // `rings`, one per slot and as many as control.strips has.
+    //
+    // now_ns is the pull's own reading of the clock AudioRing::write's
+    // arrivals were taken on, or AudioRing::kNoArrival. With it, and an
+    // arrival anchor on the lead, the drift loop holds the lead's lag behind
+    // its arrivals rather than its ring's fill; see lag_seconds.
     MixPull pull(std::span<AudioRing* const> rings, const MixControl& control, float* out,
-                 std::size_t frames);
+                 std::size_t frames, std::int64_t now_ns = AudioRing::kNoArrival);
 
     // Times a stream was moved to where the lead puts it, since this mix
     // was made. The first placement of each stream is not counted.
     [[nodiscard]] std::uint64_t alignments() const { return alignments_; }
+
+    // The loop holding the lead's fill against the two clocks' drift. Every
+    // stream is read at drift().ratio() times its nominal step, the lead
+    // and the streams aligned to it alike, since they all come off the
+    // engine's one clock. See audio/drift_trim.h.
+    [[nodiscard]] const DriftTrim& drift() const { return drift_; }
+
+    // Off reads every stream at its nominal step, as the mix did before the
+    // loop, and is there so a test can show what the loop is holding back.
+    void set_drift_correction(bool on) { correct_drift_ = on; }
 
 private:
     struct Stream {
         RingFormat format;
         bool multiplex = false;
         bool level = false;
+
+        // At the device's rate with nothing asked of the filter, so it is
+        // copied while the trim is exactly zero and read through the kernel
+        // otherwise. See copying().
+        bool copyable = false;
         Resampler resampler;
         LevelAgc agc;
         Deemphasis deemphasis;
@@ -149,12 +201,19 @@ private:
     // Rebuilds the stream's state when its format or treatment changed.
     void prepare(Stream& stream, RingFormat format, bool multiplex, bool level);
 
-    // Reads `count` output frames of the stream into stream.rendered.
-    // Answers the lead's source.
-    FrameSource render(Stream& stream, AudioRing& ring, std::size_t count);
+    // Reads `count` output frames of the stream into stream.rendered, at
+    // `ratio` times its nominal step. Answers the lead's source.
+    FrameSource render(Stream& stream, AudioRing& ring, std::size_t count, double ratio);
 
     // Moves the stream to `position` and forgets what it had read.
-    void place(Stream& stream, double position);
+    void place(Stream& stream, double position, double ratio);
+
+    // Whether this pull copies the stream frame for frame: at the device's
+    // rate, untrimmed, on a whole frame.
+    [[nodiscard]] static bool copying(const Stream& stream, double ratio);
+
+    // Input frames per output frame this pull.
+    [[nodiscard]] static double step_of(const Stream& stream, double ratio);
 
     std::uint32_t out_rate_;
     int out_channels_;
@@ -162,6 +221,11 @@ private:
     std::vector<float> sum_;
     SoftLimiter limiter_;
     std::uint64_t alignments_ = 0;
+
+    DriftTrim drift_;
+    bool correct_drift_ = true;
+    int last_lead_ = -1;
+    bool last_timed_ = false;
 };
 
 }  // namespace revenant::ui

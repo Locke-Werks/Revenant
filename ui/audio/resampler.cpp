@@ -29,7 +29,7 @@ constexpr double kStopFraction = 0.50;
 }  // namespace
 
 void Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate, double cutoff_hz,
-                          double transition_hz)
+                          double transition_hz, EqualRates equal)
 {
     in_rate_ = in_rate;
     out_rate_ = out_rate;
@@ -42,7 +42,7 @@ void Resampler::configure(std::uint32_t in_rate, std::uint32_t out_rate, double 
         return;
     }
     step_ = static_cast<double>(in_rate) / static_cast<double>(out_rate);
-    passthrough_ = in_rate == out_rate && cutoff_hz <= 0.0;
+    passthrough_ = in_rate == out_rate && cutoff_hz <= 0.0 && equal == EqualRates::copy;
     if (passthrough_) {
         return;
     }

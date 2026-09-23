@@ -1,6 +1,7 @@
 #include "audio/audio_player.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -100,7 +101,14 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
                                .wfm = (wfm & bit) != 0};
     }
     const MixControl control{link_.mixLeadSlot(), slots_};
-    const MixPull pulled = mix_.pull(rings_, control, mixed_.data(), frames);
+
+    // The steady clock, because it is the one EngineLink stamps each chunk's
+    // arrival with; the drift loop reads the lead's lag as this less the
+    // lead's arrival anchor. See MixPull::lag_seconds.
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch());
+    const MixPull pulled = mix_.pull(rings_, control, mixed_.data(), frames,
+                                     static_cast<std::int64_t>(now.count()));
 
     last_source_.store(pulled.lead < 0 ? FrameSource::idle : pulled.lead_source,
                        std::memory_order_relaxed);
@@ -108,6 +116,7 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
         limited_pulls_.fetch_add(1, std::memory_order_relaxed);
     }
     alignments_.store(mix_.alignments(), std::memory_order_relaxed);
+    drift_trim_ppm_.store(mix_.drift().trim() * 1e6, std::memory_order_relaxed);
 
     // Out in the sink's own sample format. The limiter holds the mix under
     // -1 dBFS, so the integer conversions below clip nothing.

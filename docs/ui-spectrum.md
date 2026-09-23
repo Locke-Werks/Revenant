@@ -242,11 +242,12 @@ with cases in `ui/tests/test_audio_mix.cpp`, `test_resampler.cpp` and
 - Every receiver is resampled to the device's rate by a Kaiser-windowed sinc,
   flat to 0.42 of the lower rate and 80 dB down from its Nyquist, and a mono
   one is put on every output channel. From 171000 to 48000 a 20 kHz tone came
-  through within 5.2e-5 of its value and a 30 kHz one 93 dB down; equal rates
-  are a copy. A wfm receiver RDS has raised to 171000 S/s hands out the
-  multiplex, so it is filtered to 15 kHz, 85 dB down at the pilot, and
-  de-emphasised at 75 us: the station in mono, which the RDS section's chip
-  says.
+  through within 5.2e-5 of its value and a 30 kHz one 93 dB down. A receiver
+  at the device's rate is copied while the clock trim below is exactly zero
+  and goes through the same kernel otherwise. A wfm receiver RDS has raised
+  to 171000 S/s hands out the multiplex, so it is filtered to 15 kHz, 85 dB
+  down at the pilot, and de-emphasised at 75 us: the station in mono, which
+  the RDS section's chip says.
 - Receivers are aligned. The focused one leads and is read from its oldest
   frame and never past its newest, holding the whole mix when it runs out;
   every other receiver is read at the index that falls at the lead's instant.
@@ -256,6 +257,21 @@ with cases in `ui/tests/test_audio_mix.cpp`, `test_resampler.cpp` and
   two anchors is the offset between their timelines. A receiver more than
   5 ms from where the lead puts it is moved there, and audio that arrives
   after its instant has been played is skipped rather than played late.
+- The engine's clock and the card's are held together by a clock trim,
+  `ui/audio/drift_trim.h`. Every receiver is read up to 500 ppm off its
+  nominal rate, 0.87 cent, chosen by a proportional and integral loop with
+  both roots at 30 s on the lead's lag behind its arrivals: the pull's
+  steady-clock reading less the ring's arrival anchor, less the playhead. The
+  level held is the one measured over the first 2 s, measured again when the
+  lead changes, is moved past a hole or starves. The trim moves at most 2 ppm
+  per 100 ms, and the playhead stays continuous across a change, so there is
+  no pitch step and no click. On ten simulated minutes of an engine 100 ppm
+  fast and 100 ppm slow of the card, `ui/tests/test_drift_trim.cpp`, with
+  27 ms chunks arriving up to 4 ms late and a P25 receiver beside the lead,
+  the averaged lag stayed within 1.3 ms of where it locked, the trim within
+  9 ppm of the drift after three minutes, and no frame was starved, evicted,
+  skipped or realigned after the lock; at the nominal rate the same engines
+  ran the level 59 ms over or starved the lead.
 - Amplitude-detected receivers, am, usb, lsb, dsb and cw, are levelled by an
   AGC with VrxParams' own 10 ms attack and 500 ms decay, holding the peak at
   -12 dBFS with at most 70 dB of gain. Their demodulators hand out audio in
@@ -278,6 +294,10 @@ loud receivers can exceed full scale and the device clips." The first is what
 killed the audio when RDS raised the focused receiver to 171000 S/s, since the
 sink was opened at the focused receiver's format and the device refused it, and
 it also left every mono receiver out of the mix under a focused stereo one.
+
+WHAT THE FIRST POINT USED TO SAY, until the clock trim: "a 30 kHz one 93 dB
+down; equal rates are a copy." A receiver at the device's rate is read a few
+ppm off its nominal step once the trim moves off zero, which a copy cannot do.
 
 **The colours** are `ui/models/receiver_palette.h`: eight, one per slot, the
 same on the strip, the marker on both displays, the ruler's band and the

@@ -158,6 +158,7 @@ qt_add_executable(revenant_ui
     audio/audio_player.h
     audio/audio_ring.cpp
     audio/audio_ring.h
+    audio/drift_trim.h
     audio/mix_stages.h
     audio/resampler.cpp
     audio/resampler.h
@@ -446,7 +447,8 @@ endif()
 # It covers AudioMix and what it is built from: the resampler's accuracy and
 # stopband, the alignment of receivers whose indices share no origin, the
 # level AGC for the amplitude-detected modes, the multiplex's de-emphasis and
-# the soft limiter on the sum.
+# the soft limiter on the sum, and the drift trim that holds the lead ring's
+# fill against an engine clock off the card's, over ten simulated minutes.
 #
 # It covers plan_history_resize, which is the waterfall's ring arithmetic
 # across a height change: which wrapped index a kept row comes from, how
@@ -581,6 +583,7 @@ if(REVENANT_UI_TESTS)
             tests/test_aft.cpp
             tests/test_audio_mix.cpp
             tests/test_audio_ring.cpp
+            tests/test_drift_trim.cpp
             tests/test_mix_stages.cpp
             tests/test_resampler.cpp
             tests/test_auto_filter.cpp
