@@ -35,6 +35,7 @@
 #include <vector>
 
 #include "core/decode/ax25.h"
+#include "core/decode/pocsag.h"
 #include "core/decode/rtty.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -143,5 +144,67 @@ struct Ax25FrameSpec {
 // information.
 [[nodiscard]] Expected<std::vector<float>> ax25_render(
     const Ax25ModConfig& config, std::span<const std::vector<std::uint8_t>> frames);
+
+// ---------------------------------------------------------------------------
+// POCSAG
+// ---------------------------------------------------------------------------
+
+struct PocsagPageSpec {
+    // M.584-2 clause 1.3.2: 21 bits, the low 3 selecting the frame.
+    std::uint32_t identity = 0;
+    std::uint8_t function = decode::kPocsagFunctionAlphanumeric;
+
+    // Message bits in transmission order, one per byte, padded by the
+    // transmitter to whole codewords. Empty for an address-only page.
+    std::vector<std::uint8_t> message_bits;
+};
+
+// Clause 2.1: numeric text to 4-bit characters, bit 1 first, padded with
+// spaces to a whole codeword. Fails on a character Table 3 does not hold.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> pocsag_numeric_bits(std::string_view text);
+
+// Clause 2.2: text to 7-bit characters, bit 1 first, padded with null bits to
+// a whole codeword. Fails on a character above 0x7F.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> pocsag_alphanumeric_bits(std::string_view text);
+
+// The codeword stream for a transmission after the preamble, following
+// clause 1.2: each address codeword in the frame its identity selects, idle
+// codewords wherever there is nothing to send, message codewords straight
+// after their address and across batch boundaries, at least one idle
+// codeword between messages, an idle codeword last, and the synchronization
+// codeword at the head of every batch.
+[[nodiscard]] std::vector<std::uint32_t> pocsag_codewords(std::span<const PocsagPageSpec> pages);
+
+// Clause 1.1's preamble of reversals, 576 bits starting with a one, then the
+// codeword stream most significant bit first per clause 1.3.
+[[nodiscard]] std::vector<std::uint8_t> pocsag_bits(std::span<const PocsagPageSpec> pages);
+
+struct PocsagModConfig {
+    SampleRate rate = 48000;
+    double bit_rate = decode::kPocsag1200;
+
+    // M.539-3 clause 4.3: plus and minus 4.5 kHz in a 25 kHz channel.
+    double deviation_hz = 4500.0;
+
+    double amplitude = 1.0;
+
+    // Complements the output, as a receiver with the other discriminator
+    // sense would deliver it.
+    bool invert = false;
+
+    // Fractional error of the transmitter's bit clock.
+    double bit_rate_error = 0.0;
+};
+
+// The audio an ideal FM receiver would make: M.539-3 clause 4.3's positive
+// shift for binary 0 as a positive level, rectangular bits.
+[[nodiscard]] Expected<std::vector<float>> pocsag_render_audio(const PocsagModConfig& config,
+                                                               std::span<const std::uint8_t> bits);
+
+// The RF signal itself as complex baseband: continuous-phase FSK at plus and
+// minus deviation_hz. For putting noise where a receiver meets it, before the
+// FM discriminator rather than after.
+[[nodiscard]] Expected<std::vector<dsp::Complex32>> pocsag_render_baseband(
+    const PocsagModConfig& config, std::span<const std::uint8_t> bits);
 
 }  // namespace revenant::siggen

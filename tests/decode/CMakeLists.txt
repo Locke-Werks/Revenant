@@ -121,6 +121,7 @@ add_executable(revenant_decode_tests
     test_imbe.cpp
     test_p25p1.cpp
     test_p25p1_voice.cpp
+    test_pocsag.cpp
     test_rds_bits.cpp
     test_rds_groups.cpp
     test_rtty.cpp

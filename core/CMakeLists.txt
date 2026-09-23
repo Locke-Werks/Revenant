@@ -70,6 +70,7 @@ add_library(revenant_core STATIC
     decode/fsk.cpp
     decode/imbe.cpp
     decode/p25p1.cpp
+    decode/pocsag.cpp
     decode/rds_bits.cpp
     decode/rds_groups.cpp
     decode/rtty.cpp

@@ -203,4 +203,189 @@ Expected<std::vector<float>> ax25_render(const Ax25ModConfig& config,
     return afsk_render_bits(config, bits);
 }
 
+// ---------------------------------------------------------------------------
+// POCSAG
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::size_t kPocsagMessageBits = 20;
+
+void pad_to_codeword(std::vector<std::uint8_t>& bits, std::span<const std::uint8_t> filler) {
+    std::size_t f = 0;
+    while (bits.size() % kPocsagMessageBits != 0) {
+        bits.push_back(filler[f % filler.size()]);
+        ++f;
+    }
+}
+
+}  // namespace
+
+Expected<std::vector<std::uint8_t>> pocsag_numeric_bits(std::string_view text) {
+    std::vector<std::uint8_t> bits;
+    const auto push = [&bits](unsigned v) {
+        for (unsigned b = 0; b < 4; ++b) {
+            bits.push_back(static_cast<std::uint8_t>((v >> b) & 1U));
+        }
+    };
+    for (const char c : text) {
+        // M.584-2 Table 3.
+        unsigned v = 0;
+        if (c >= '0' && c <= '9') {
+            v = static_cast<unsigned>(c - '0');
+        } else if (c == 'U') {
+            v = 0xB;
+        } else if (c == ' ') {
+            v = 0xC;
+        } else if (c == '-') {
+            v = 0xD;
+        } else if (c == ']') {
+            v = 0xE;
+        } else if (c == '[') {
+            v = 0xF;
+        } else {
+            return fail("a character in the text is not in M.584-2 Table 3");
+        }
+        push(v);
+    }
+    // Clause 2.1: fill with spaces, 1100 sent bit 1 first.
+    const std::uint8_t space[] = {0, 0, 1, 1};
+    pad_to_codeword(bits, space);
+    return bits;
+}
+
+Expected<std::vector<std::uint8_t>> pocsag_alphanumeric_bits(std::string_view text) {
+    std::vector<std::uint8_t> bits;
+    for (const char c : text) {
+        const auto v = static_cast<unsigned char>(c);
+        if (v > 0x7F) {
+            return fail("International Alphabet No. 5 is seven bits");
+        }
+        for (unsigned b = 0; b < 7; ++b) {
+            bits.push_back(static_cast<std::uint8_t>((v >> b) & 1U));
+        }
+    }
+    const std::uint8_t null[] = {0};
+    pad_to_codeword(bits, null);
+    return bits;
+}
+
+std::vector<std::uint32_t> pocsag_codewords(std::span<const PocsagPageSpec> pages) {
+    std::vector<std::uint32_t> slots;
+    const auto frame_of_next = [&slots] { return (slots.size() % decode::kPocsagCodewordsPerBatch) / 2; };
+
+    for (std::size_t p = 0; p < pages.size(); ++p) {
+        const PocsagPageSpec& page = pages[p];
+        if (p > 0) {
+            // Clause 1.2: at least one address or idle codeword between the
+            // end of one message and the next message's address.
+            slots.push_back(decode::kPocsagIdle);
+        }
+        const std::size_t frame = page.identity & 0x7U;
+        while (frame_of_next() != frame) {
+            slots.push_back(decode::kPocsagIdle);
+        }
+        // Clause 1.3.2: flag 0, 18 address bits, 2 function bits.
+        const std::uint32_t address = (((page.identity >> 3U) & 0x3FFFFU) << 2U) |
+                                      (page.function & 0x3U);
+        slots.push_back(decode::pocsag_encode(address));
+        // Clause 1.3.3: flag 1, 20 message bits.
+        for (std::size_t i = 0; i + kPocsagMessageBits <= page.message_bits.size();
+             i += kPocsagMessageBits) {
+            std::uint32_t payload = 0;
+            for (std::size_t k = 0; k < kPocsagMessageBits; ++k) {
+                payload = (payload << 1U) | (page.message_bits[i + k] & 1U);
+            }
+            slots.push_back(decode::pocsag_encode((1U << 20U) | payload));
+        }
+    }
+    // Clause 1.2: the last codeword should be idle, and the batch completes.
+    slots.push_back(decode::kPocsagIdle);
+    while (slots.size() % decode::kPocsagCodewordsPerBatch != 0) {
+        slots.push_back(decode::kPocsagIdle);
+    }
+
+    std::vector<std::uint32_t> words;
+    for (std::size_t i = 0; i < slots.size(); ++i) {
+        if (i % decode::kPocsagCodewordsPerBatch == 0) {
+            words.push_back(decode::kPocsagSync);
+        }
+        words.push_back(slots[i]);
+    }
+    return words;
+}
+
+std::vector<std::uint8_t> pocsag_bits(std::span<const PocsagPageSpec> pages) {
+    std::vector<std::uint8_t> bits;
+    // Clause 1.1: "101010... repeated for a period of at least 576 bits".
+    for (std::size_t i = 0; i < decode::kPocsagPreambleBits; ++i) {
+        bits.push_back(static_cast<std::uint8_t>((i % 2 == 0) ? 1U : 0U));
+    }
+    for (const std::uint32_t word : pocsag_codewords(pages)) {
+        for (unsigned b = 0; b < decode::kPocsagCodewordBits; ++b) {
+            bits.push_back(static_cast<std::uint8_t>((word >> (31U - b)) & 1U));
+        }
+    }
+    return bits;
+}
+
+namespace {
+
+Status check_pocsag(const PocsagModConfig& config) {
+    if (config.rate <= 0 || !(config.bit_rate > 0.0) ||
+        config.bit_rate * 2.0 > static_cast<double>(config.rate)) {
+        return fail("POCSAG needs a bit rate between zero and half the sample rate");
+    }
+    return {};
+}
+
+// M.539-3 clause 4.3: binary 0 is the positive shift.
+double pocsag_level(std::uint8_t bit, bool invert) {
+    const double level = (bit == 0U) ? 1.0 : -1.0;
+    return invert ? -level : level;
+}
+
+}  // namespace
+
+Expected<std::vector<float>> pocsag_render_audio(const PocsagModConfig& config,
+                                                 std::span<const std::uint8_t> bits) {
+    if (auto ok = check_pocsag(config); !ok) {
+        return std::unexpected(ok.error());
+    }
+    const double samples_per_bit =
+        static_cast<double>(config.rate) / (config.bit_rate * (1.0 + config.bit_rate_error));
+    const auto count =
+        static_cast<std::size_t>(std::ceil(static_cast<double>(bits.size()) * samples_per_bit));
+    std::vector<float> out(count);
+    for (std::size_t n = 0; n < count; ++n) {
+        const auto k = std::min(bits.size() - 1,
+                                static_cast<std::size_t>(static_cast<double>(n) / samples_per_bit));
+        out[n] = static_cast<float>(config.amplitude * pocsag_level(bits[k], config.invert));
+    }
+    return out;
+}
+
+Expected<std::vector<dsp::Complex32>> pocsag_render_baseband(const PocsagModConfig& config,
+                                                             std::span<const std::uint8_t> bits) {
+    if (auto ok = check_pocsag(config); !ok) {
+        return std::unexpected(ok.error());
+    }
+    const double samples_per_bit =
+        static_cast<double>(config.rate) / (config.bit_rate * (1.0 + config.bit_rate_error));
+    const auto count =
+        static_cast<std::size_t>(std::ceil(static_cast<double>(bits.size()) * samples_per_bit));
+    std::vector<dsp::Complex32> out(count);
+    double phase = 0.0;
+    for (std::size_t n = 0; n < count; ++n) {
+        const auto k = std::min(bits.size() - 1,
+                                static_cast<std::size_t>(static_cast<double>(n) / samples_per_bit));
+        out[n] = dsp::Complex32(static_cast<float>(config.amplitude * std::cos(phase)),
+                                static_cast<float>(config.amplitude * std::sin(phase)));
+        phase = std::fmod(phase + kTwoPi * config.deviation_hz * pocsag_level(bits[k], config.invert) /
+                                      static_cast<double>(config.rate),
+                          kTwoPi);
+    }
+    return out;
+}
+
 }  // namespace revenant::siggen
