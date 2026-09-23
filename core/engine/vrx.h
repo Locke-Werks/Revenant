@@ -725,10 +725,15 @@ struct VrxPlacement {
 //
 // Two fields and not one because they come from different stages and
 // either can be absent. core/detect publishes an occupied bandwidth per
-// track and always has one; core/characterise reads complex baseband and is
-// not wired into the engine at all, so `family` is Unknown on every path
-// that exists today and is here so that the path which does run it has
-// somewhere to put the answer rather than a second decision rule.
+// track and always has one. core/characterise runs inside the engine now, on
+// the probe pool's receivers (core/engine/probe.h), and what it finds stays on
+// detect::Track and goes nowhere near the wire, so `family` is still Unknown
+// on every path that reaches this struct: click-to-tune works from what a
+// client was sent. It is here so that a path which does carry a family has
+// somewhere to put it rather than a second decision rule.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "core/characterise reads complex baseband
+// and is not wired into the engine at all".
 struct SignalEvidence {
     // Occupied bandwidth in hertz, as detect::Track measures it. Zero or
     // negative means nothing was measured.

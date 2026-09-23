@@ -1080,9 +1080,14 @@ evening.
 the detector measured and, when a `characterise::ModulationFamily` is known,
 that too; `core/engine/vrx_place.cpp` carries the derivation and the list of
 what the rule gets wrong, which is long and starts with AM. Nothing on the
-wire carries a family yet, because `core/characterise` reads complex
-baseband and is not wired into the engine, so a client working from
-`Detection` alone uses the width. `ui/models/receiver_match.h` is the Qt
+wire carries a family, so a client working from `Detection` alone uses the
+width. The engine does characterise detections now, on probe receivers of its
+own (`core/engine/probe.h`), and the answer stays on the detector's track:
+`docs/detection.md` settled that nothing goes on the wire as a family.
+
+WHAT THE SECOND SENTENCE USED TO SAY: "Nothing on the wire carries a family
+yet, because `core/characterise` reads complex baseband and is not wired into
+the engine". `ui/models/receiver_match.h` is the Qt
 client's copy of the width half, on the same terms as `kDemodNames`: the
 client links no part of the engine.
 

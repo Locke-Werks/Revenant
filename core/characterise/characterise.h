@@ -24,20 +24,25 @@
 // word repeats, and a probe is the part of a waveform that cannot be
 // encrypted without making it useless as a probe.
 //
-// NOT WIRED INTO THE ENGINE, DELIBERATELY
+// A PURE LIBRARY, WHICH THE ENGINE CALLS AND WHICH CALLS NOTHING BACK
 //
-// This is a pure library over a span of complex samples with a stated rate.
-// In the engine an extract would arrive through a receiver and
-// Engine::attach_audio_sink, which is the seam core/decode/rds_bits.h
-// already uses, and docs/detection.md's "what a probe receiver actually is"
-// section works out what that costs: a real DemodStage rather than the raw
-// tap, because a raw coarse channel is 112 times the bandwidth of a
-// narrowband signal and puts the classifier 20 dB down.
+// This is a library over a span of complex samples with a stated rate. The
+// engine's probe pool, core/engine/probe.h, is where an extract arrives from a
+// receiver: Demod::Raw built through the fine stage, so the extract is mixed
+// to DC and filtered near the signal rather than being a raw coarse channel
+// 112 times too wide. The pool calls characterise() on its own worker thread
+// and nothing here knows it exists.
 //
-// None of that is here. Keeping the stage pure means every estimator in it
-// is testable against core/dsp/synth with no device, no graph and no
-// scheduler, which is what the cases in tests/characterise do, and the
-// wiring is cheaper later for the seam being a span rather than a stage.
+// Keeping the stage pure means every estimator in it is testable against
+// core/dsp/synth with no device, no graph and no scheduler, which is what the
+// cases in tests/characterise do, and the wiring was cheaper for the seam
+// being a span rather than a stage.
+//
+// WHAT THIS BLOCK USED TO SAY, under the heading "NOT WIRED INTO THE ENGINE,
+// DELIBERATELY": "In the engine an extract would arrive through a receiver
+// and Engine::attach_audio_sink" and "None of that is here." The extract does
+// not arrive through attach_audio_sink, because a probe is not a receiver any
+// client can see, and it is here now.
 //
 // WHAT IT REFUSES, AND WHY THAT IS THE POINT
 //

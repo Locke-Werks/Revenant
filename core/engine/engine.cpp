@@ -93,6 +93,20 @@ constexpr std::chrono::milliseconds kCloseStopTimeout{5000};
     return channels > 1 ? channels / 2 : 1;
 }
 
+// Where probe receivers' ids start. add_vrx counts up from one and refuses to
+// reach this, so the two spaces cannot meet and a probe's id is recognisable
+// from the number alone: every public receiver method refuses one.
+constexpr std::uint32_t kFirstProbeId = 0x8000'0000U;
+
+[[nodiscard]] bool is_probe_id(VrxId id) { return id.value >= kFirstProbeId; }
+
+[[nodiscard]] Status refuse_probe_id(VrxId id, const char* where) {
+    return fail(std::format(
+        "{}: {} is one of the engine's own probe receivers, which core/engine/probe.h keeps "
+        "out of vrx_ids and off every public receiver method",
+        where, id.value));
+}
+
 class EngineImpl final : public Engine {
 public:
     EngineImpl() = default;
@@ -103,7 +117,11 @@ public:
         // completion thread calls into the receivers' sinks, and the ring
         // outlives both. Destroying them in declaration order would take the
         // graph out from under a source thread that has not joined.
+        //
+        // The probe pool goes before the graph, because its worker calls the
+        // graph's control plane and its destructor removes its receivers.
         source_.reset();
+        probes_.reset();
         graph_.reset();
         scheduler_.reset();
     }
@@ -374,6 +392,24 @@ public:
             return std::unexpected(with_context(prepared.error(), "Engine::open_source"));
         }
 
+        // Built with the graph and not on first use, so a probe refused for
+        // want of a pool is refused at submit rather than half way through a
+        // run, and so the worker exists before anything is submitted to it.
+        if (config_.probe_receivers > 0) {
+            ProbePoolConfig probe_config;
+            probe_config.size = std::min(config_.probe_receivers, kMaxProbeReceivers);
+            probe_config.grid = grid;
+            probe_config.source_rate = rate;
+            probe_config.channel_rate = graph_->geometry().channel_rate;
+            probe_config.first_id = kFirstProbeId;
+            auto pool = ProbePool::create(*graph_, probe_config);
+            if (!pool) {
+                graph_.reset();
+                return std::unexpected(with_context(pool.error(), "Engine::open_source"));
+            }
+            probes_ = std::move(*pool);
+        }
+
         source_ = std::move(source);
         capabilities_ = source_->capabilities();
         block_samples_ = block_samples;
@@ -513,6 +549,7 @@ public:
         // the receivers' sinks, and the ring outlives both. ring_ is reset here
         // and not in the destructor because there the member order does it.
         source_.reset();
+        probes_.reset();
         graph_.reset();
         ring_.reset();
 
@@ -674,6 +711,15 @@ public:
         SourceRetune out;
         out.center = *landed;
 
+        // Probes are not carried along or removed: every one still collecting
+        // is ended, because the baseband it has so far came from the old
+        // front-end centre and the rest would come from the new one. The
+        // detections they were placed on are the old centre's too, and
+        // whoever submitted them drops those tracks when this returns.
+        if (probes_ != nullptr) {
+            probes_->cancel_all();
+        }
+
         if (graph_ != nullptr) {
             const dsp::Hertz moved = *landed - was;
             const dsp::Hertz half_span = static_cast<dsp::Hertz>(info_.source_rate / 2);
@@ -812,6 +858,10 @@ public:
         }
 
         const VrxId id{next_id_.fetch_add(1, std::memory_order_relaxed)};
+        if (is_probe_id(id)) {
+            return fail("Engine::add_vrx has issued every receiver id below the probe "
+                        "receivers' range and will not issue one inside it");
+        }
         auto added = graph_->add_vrx(id, params, *placement);
         if (!added) {
             return std::unexpected(added.error());
@@ -823,12 +873,18 @@ public:
         if (graph_ == nullptr) {
             return fail("Engine::remove_vrx before a source is open");
         }
+        if (is_probe_id(id)) {
+            return refuse_probe_id(id, "Engine::remove_vrx");
+        }
         return graph_->remove_vrx(id);
     }
 
     [[nodiscard]] Status set_vrx_params(VrxId id, const VrxParams& params) override {
         if (graph_ == nullptr) {
             return fail("Engine::set_vrx_params before a source is open");
+        }
+        if (is_probe_id(id)) {
+            return refuse_probe_id(id, "Engine::set_vrx_params");
         }
         auto placement = place(info_.grid, info_.source_rate, params);
         if (!placement) {
@@ -841,6 +897,9 @@ public:
         if (graph_ == nullptr) {
             return fail("Engine::vrx_status before a source is open");
         }
+        if (is_probe_id(id)) {
+            return std::unexpected(refuse_probe_id(id, "Engine::vrx_status").error());
+        }
         return graph_->vrx_status(id);
     }
 
@@ -851,6 +910,9 @@ public:
     [[nodiscard]] Status set_audio_sink(VrxId id, AudioSink sink) override {
         if (graph_ == nullptr) {
             return fail("Engine::set_audio_sink before a source is open");
+        }
+        if (is_probe_id(id)) {
+            return refuse_probe_id(id, "Engine::set_audio_sink");
         }
         return graph_->set_audio_sink(id, std::move(sink));
     }
@@ -882,7 +944,29 @@ public:
                         "it sizes every receiver's display ring, and a ring cannot be grown "
                         "while a command buffer names it");
         }
+        if (is_probe_id(id)) {
+            return refuse_probe_id(id, "Engine::set_passband_sink");
+        }
         return graph_->set_passband_sink(id, std::move(sink));
+    }
+
+    [[nodiscard]] Status submit_probe(const ProbeRequest& request) override {
+        if (probes_ == nullptr) {
+            return fail(graph_ == nullptr
+                            ? "Engine::submit_probe before a source is open: a probe is placed "
+                              "on the grid, and there is no grid until the source's rate is known"
+                            : "this engine was created with EngineConfig::probe_receivers at "
+                              "zero, so it has no probe pool");
+        }
+        return probes_->submit(request);
+    }
+
+    [[nodiscard]] std::size_t take_probe_outcomes(std::span<ProbeOutcome> out) override {
+        return probes_ == nullptr ? 0 : probes_->take(out);
+    }
+
+    [[nodiscard]] ProbeStats probe_stats() const override {
+        return probes_ == nullptr ? ProbeStats{} : probes_->stats();
     }
 
     [[nodiscard]] Status run() override {
@@ -1073,6 +1157,10 @@ private:
     // destroyed first: the graph's frames reference the ring's buffer.
     std::unique_ptr<DeviceRing> ring_;
     std::unique_ptr<Graph> graph_;
+
+    // After graph_, so the default member order also destroys it first; the
+    // destructor and close_source reset it explicitly before the graph anyway.
+    std::unique_ptr<ProbePool> probes_;
     std::unique_ptr<source::Source> source_;
     source::SourceCapabilities capabilities_{};
     dsp::PrototypeFilter prototype_{};

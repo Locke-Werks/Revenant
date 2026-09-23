@@ -111,6 +111,7 @@ add_library(revenant_core STATIC
     engine/device_ring.cpp
     engine/engine.cpp
     engine/graph.cpp
+    engine/probe.cpp
     engine/scheduler.cpp
     engine/spectrum_scale.cpp
     engine/vrx_place.cpp

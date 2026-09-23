@@ -1092,3 +1092,11 @@ retired: 2026-09-23
 commit: "Put each decoder's receiver modes on the wire"
 instead: DecoderInfo::modes carries the whole list of modes a decoder reads,
     never empty for "any"; the descriptions still say them in words.
+
+phrase: NOT WIRED INTO THE ENGINE, DELIBERATELY
+phrase: core/characterise reads complex baseband and is not wired into the engine
+retired: 2026-09-23
+commit: "Add a pool of probe receivers the engine places for itself"
+instead: core/engine/probe.h calls characterise() on its probe receivers'
+    extracts, on the pool's own worker thread. The library is still pure and
+    knows nothing of the engine; the family stays off the wire.

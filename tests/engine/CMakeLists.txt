@@ -73,15 +73,23 @@
 # refereed here where a failure names the property rather than a subscription
 # that went quiet.
 
+# test_engine_probe.cpp is tier two through the engine: the probe pool's
+# receivers on emitters of known modulation, and on an empty slot. It needs a
+# GPU because a probe is a fine stage on the device. It borrows
+# tests/characterise/signal_lab.cpp for the OFDM burst, which nothing in
+# core/dsp/synth renders, rather than keeping a second copy of it here.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
+    ../characterise/signal_lab.cpp
     test_audio_egress.cpp
     test_audio_fanout.cpp
     test_audio_wasapi.cpp
     test_engine.cpp
     test_engine_dv.cpp
     test_engine_passband.cpp
+    test_engine_probe.cpp
     test_engine_spectrum.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp

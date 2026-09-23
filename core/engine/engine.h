@@ -82,6 +82,29 @@
 // PCM, decoded symbols, detection metadata, and bounded spectral reductions
 // of the span and of a receiver's own passband. A fourth thing crossing
 // amends this block again rather than arriving quietly.
+//
+// AND THE FOURTH THING IS A PROBE'S BASEBAND, WHICH THIS PARAGRAPH IS THE
+// AMENDMENT FOR
+//
+// core/engine/probe.h places receivers of its own on detections and brings
+// their complex baseband home for core/characterise, because that library is
+// host code and tier two of docs/detection.md is a question only complex
+// baseband answers. It is bounded the way the other two reductions are: by a
+// count and a rate the engine sets, not by the source. A probe runs at one of
+// the rates in kProbeRates, eight bytes a sample, so the floor bucket of
+// 12000 S/s is 96 KB/s and the top one of 192000 S/s is 1.5 MB/s, and there
+// are at most EngineConfig::probe_receivers of them, never more than
+// kMaxProbeReceivers. Four at the floor bucket is 384 KB/s against the
+// 160 MB/s the cf32 stream costs going out.
+//
+// It is paid whether or not a probe is collecting, because an idle probe is a
+// receiver the graph still records and reads back every block: the pool keeps
+// them so a retune is a push constant rather than a rebuild. Zero
+// probe_receivers is none of it, which is the default.
+//
+// So: samples cross once, and what comes back is audio PCM, decoded symbols,
+// detection metadata, the two bounded spectral reductions, and a bounded
+// number of probes' complex baseband at their own bounded rates.
 
 #pragma once
 
@@ -103,6 +126,7 @@
 #include "core/dsp/pfb.h"
 #include "core/dsp/types.h"
 #include "core/engine/device_ring.h"
+#include "core/engine/probe.h"
 #include "core/engine/vrx.h"
 #include "core/error.h"
 #include "core/gpu/context.h"
@@ -211,6 +235,18 @@ struct EngineConfig {
     // "two window tables, and room in every receiver's fine ring". The pane
     // transformed the fine stream, which is after the receiver's own filter.
     std::uint32_t passband_transform = 0;
+
+    // Probe receivers, for tier two of docs/detection.md: receivers the
+    // engine places on detections for itself and characterises. Zero, the
+    // default, builds no pool, and then submit_probe is refused.
+    //
+    // A standing cost rather than a per-probe one. core/engine/probe.h keeps
+    // every receiver it has built so the next probe in the same rate bucket
+    // is a retune, and a receiver the graph holds is recorded and read back
+    // on every block whether or not it is collecting. The top of this file
+    // has the bus arithmetic and docs/detection.md the measured GPU cost.
+    // Clamped to kMaxProbeReceivers.
+    std::uint32_t probe_receivers = 0;
 };
 
 // The widest receiver a grid is expected to be able to carry, anywhere on it.
@@ -1458,6 +1494,26 @@ public:
     // reason about two numbers the source has never heard of.
     [[nodiscard]] virtual GraphConditions graph_conditions() const = 0;
 
+    // Tier two: put a probe receiver on a detection, collect its baseband and
+    // characterise it. core/engine/probe.h has the pool, the buckets and the
+    // dwell.
+    //
+    // ONE THREAD SUBMITS AND ONE TAKES, through lock-free rings, which is what
+    // lets the caller be the completion thread a spectrum sink runs on.
+    // detect::TierTwo is the caller in this tree and does both from there.
+    //
+    // A probe is not a receiver anybody else can see. It is not in vrx_ids,
+    // it is never rebased by set_source_center, which cancels it instead, and
+    // every receiver method here refuses its id. What it finds comes back as
+    // a ProbeOutcome to whoever submitted it and goes nowhere else: nothing
+    // puts a family on the wire, as docs/detection.md settled.
+    //
+    // Virtual with a refusal rather than pure, so an Engine written before the
+    // pool, tests/rpc/retunable_engine.h among them, has none and says so.
+    [[nodiscard]] virtual Status submit_probe(const ProbeRequest& request);
+    [[nodiscard]] virtual std::size_t take_probe_outcomes(std::span<ProbeOutcome> out);
+    [[nodiscard]] virtual ProbeStats probe_stats() const;
+
 protected:
     Engine() = default;
 
@@ -1489,6 +1545,15 @@ private:
     std::mutex audio_fanout_lock_;
     std::map<std::uint32_t, std::shared_ptr<AudioFanout>> audio_fanouts_;
 };
+
+inline Status Engine::submit_probe(const ProbeRequest&) {
+    return fail("this engine has no probe pool. EngineConfig::probe_receivers was zero, or the "
+                "engine was written before core/engine/probe.h existed");
+}
+
+inline std::size_t Engine::take_probe_outcomes(std::span<ProbeOutcome>) { return 0; }
+
+inline ProbeStats Engine::probe_stats() const { return {}; }
 
 inline void Engine::drop_audio_fanouts() {
     const std::scoped_lock held(audio_fanout_lock_);

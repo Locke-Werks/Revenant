@@ -574,6 +574,12 @@ Status DeviceRig::build_receivers() {
         request.local_size_x = local_size_x_;
         request.audio_rate = options_.audio_rate;
 
+        // A raw receiver here is measured as a probe: the fine stage and the
+        // Raw passthrough core/engine/probe.h runs, which is the only Raw
+        // that has a stage to time. The graph's own raw tap is a buffer copy
+        // and never reaches a factory.
+        request.fine_stage_complex_tap = options_.demod == engine::Demod::Raw;
+
         auto stage = factory(request);
         if (!stage) {
             return std::unexpected(
