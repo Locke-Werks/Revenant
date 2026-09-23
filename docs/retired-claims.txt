@@ -1158,3 +1158,12 @@ commit: "Carry RDS groups 5A to 9A and announced ODA groups raw"
 instead: One case in tests/decode/test_rds_groups.cpp runs its groups through
     core/dsp/synth/rds_mod.h and core/decode/rds_bits.h; every other case
     feeds bits straight to the decoder.
+
+phrase: RDS2 reuses all four on three more subcarriers
+phrase: RDS2 is in the included list above and is the cheapest new capability
+phrase: beside the existing 57 kHz stream; same 26-bit blocks and offset words
+retired: 2026-09-23
+commit: "Write up the raw RDS groups, TMC's limits and what RDS2 needs"
+instead: IEC 62106-1:2018's preview confirms the four subcarriers and a group
+    type C; modulation, blocks and offset words on the new streams are
+    unverified, and the engine's audio filter cuts the new streams off.

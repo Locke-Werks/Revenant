@@ -292,7 +292,7 @@ Excluded.
 | HFDL | 1440 Hz subcarrier, 1800 sym/s, BPSK/QPSK/8PSK giving 300 to 1800 bit/s, 32 s TDMA frame of 13 slots | ARINC 635-4, purchasable from SAE ITC | Large |
 | ADS-C and FANS-1/A | No physical layer of its own; rides ACARS, HFDL, VDL2 or satellite | ARINC 622, purchasable, plus ICAO Doc 9880 | Medium |
 | ASTERIX | Not a radio mode. Octet-aligned records with an FSPEC bitmap | EUROCONTROL SPEC-0149, free. Category 021 v2.7 (July 2025) for ADS-B target reports | Small |
-| RDS-TMC (ALERT-C) | No new physical layer. Group 8A on the 57 kHz subcarrier already decoded | EN ISO 14819-1 through -4, purchasable from ISO and CEN | Small |
+| RDS-TMC (ALERT-C) | No new physical layer. Group 8A on the 57 kHz subcarrier, attributed and counted raw today; see the RDS entry under what is done | EN ISO 14819-1 through -4, purchasable from ISO and CEN. Only the free preview of 14819-1:2021 has been read, which stops at clause 3.2 | Small once clauses 7 and 9 of 14819-1 are in hand |
 | DSRC / ITS-G5 | 5.850 to 5.925 GHz, 10 MHz OFDM, 52 used subcarriers, 8 us symbol, 3 to 27 Mbit/s; BSMs at 10 Hz | IEEE 802.11-2020 free through IEEE GET; SAE J2735 purchasable; ETSI EN 302 663 free | Large |
 
 **RDS-TMC decodes cheaply and the location tables do not.** The message carries
@@ -377,7 +377,7 @@ pictures.
 | POCSAG | 2-FSK, +/-4.5 kHz, 512/1200/2400 bit/s, 576-bit preamble, batches of 8 frames x 2 codewords, sync 0x7CD215D8, BCH(31,21) plus parity | ITU-R M.584-2 (11/1997), free, for the code and format. The 512 and 1200 bit/s rates, the polarity and the deviation are ITU-R M.539-3 clause 4.3, withdrawn in 2007; 2400 bit/s is practice. Done, see below | Small |
 | FLEX | 2-FSK and 4-FSK, 1600 or 3200 sym/s giving 1600/3200/6400 bit/s, 1.875 s frames, 128 frames per 4-minute cycle, (31,21) BCH interleaved | ARIB STD-T43 (unverified: English edition not located, obtainability from outside Japan unconfirmed). Motorola's own specification was never public and there is no TIA or ETSI equivalent | Medium |
 | ERMES | 4-PAM/FM, 3125 baud, 6250 bit/s, 25 kHz, 16 channels in 169.4 to 169.8 MHz, (30,18) cyclic coding | ETSI ETS 300 133-4, free | Medium |
-| RDS2 | Three further 1187.5 bit/s biphase BPSK streams on 66.5, 71.25 and 76 kHz beside the existing 57 kHz stream; same 26-bit blocks and offset words. Carries station logos and larger ODA payloads, so it is an image path as well as a text one | IEC 62106-1, -2 and -3, purchasable (unverified: the current part split) | Small |
+| RDS2 | Up to three further data-streams on 66.5, 71.25 and 76 kHz beside the 57 kHz stream, locked to it, and 61.75 kHz not used (IEC 62106-1:2018 clauses 4.2 and 4.3, read in the free preview). The 1187.5 bit/s biphase modulation, the 26-bit blocks and the offset words on the new streams are unverified: clauses 4.4 to 6 and Annex A are past the end of the preview. Carries station logos and larger ODA payloads, so it is an image path as well as a text one | IEC 62106-1:2018, "Part 1: Modulation characteristics and baseband coding", purchasable; the parts carrying group type C and the file transfer are not identified yet | Medium. See the RDS entry under what is done for why it is not small |
 | DAB multiplex, FIC and data services | COFDM pi/4-DQPSK; Mode I is 1536 carriers at 1 kHz spacing, 1.536 MHz, 1246 us symbol, 76 symbols per 96 ms frame, 2.4 Mbit/s gross | ETSI EN 300 401 V2.1.1, free, with TS 101 756, TS 101 499 (MOT SlideShow), TS 102 979 (Journaline) and TS 102 818 | Large |
 | DAB audio (Layer II) | 48 kHz MPEG-1 or 24 kHz MPEG-2 LSF Layer II, 32 to 384 kbit/s, 24 ms frames with ScF-CRC and trailing X-PAD | ISO/IEC 11172-3 and 13818-3, purchasable; the DAB framing is restated in EN 300 401 clause 5, free | Medium |
 | Wireless M-Bus | Mode S 32.768 kbit/s Manchester 2-FSK at 868.3 MHz; Mode T 66.667 kbit/s 3-of-6 at 868.95; Mode C 100 kbit/s NRZ; Mode N 4-GFSK at 169.4 MHz | EN 13757-4, purchasable (unverified: 2025 versus 2019 edition). OMS Specification Volume 2 is free and restates much of the frame detail | Medium |
@@ -861,7 +861,8 @@ recovered 57 kHz subcarrier to a differentially decoded bitstream, implementing
 EN 50067:1998 clauses 1.1 through 1.7 in full with no deviation.
 `core/decode/rds_groups.cpp` is the baseband coding and group layer, written
 from EN 50067:1998, NRSC-4-B (April 2011), NRSC-4 (April 1998) and Kopitz and
-Marks.
+Marks, and for the TMC attribution alone the free preview of ISO 14819-1:2021
+and the RDS Forum's ODA register as NRSC publishes it (2020-07-14).
 
 EN 50067 is cited rather than IEC 62106 because it is the text somebody opened.
 Clause numbering moved on the way into the IEC series: EN 50067 clause 3.1.5.1
@@ -870,9 +871,69 @@ the physical layer is region dependent, because NRSC-4 clauses 1.1 through 1.7
 are word for word identical to EN 50067's. One demodulator serves both regions
 and the RDS/RBDS split does not begin until the group layer.
 
-RDS2 is in the included list above and is the cheapest new capability here, for
-the same reason: the demodulator, the block synchroniser, the offset words and
-the CRC already work, and RDS2 reuses all four on three more subcarriers.
+What the group layer does with each group type. 0A and 0B, 1A, 2A and 2B, 3A,
+4A, 10A, 14A, 14B and 15B are decoded into fields. 5A and 5B (transparent data
+channels, with the channel address), 6A and 6B (in-house, which clause 3.1.5.9
+says consumer receivers should ignore), 7A (radio paging, with the Annex M
+Table M.2 header and nothing past it), 8A (TMC) and 9A (emergency warning) are
+counted and their payloads kept raw, because EN 50067 defines none of those
+payloads past the block 2 header. Any group Table 6 lets an Open Data
+Application take is attributed to the application a 3A group announced on it,
+counted and kept raw on that announcement, and a nonzero AID takes the group
+from its Table 3 feature, as clause 3.1.5.4 says. 1B and 15A are dropped.
+Programme type name segments carry a correction mark on the same rule as PS
+and RadioText.
+
+**RDS-TMC is attributed, counted and confirmed, and not decoded.** EN 50067
+clause 3.1.5.12 says 8A's 37 bits "are defined by CEN". The only text of ISO
+14819-1 read here is the free preview of the 2021 edition, which reaches
+clause 3.2: it gives the widths of the five basic fields (event 11 bits,
+location 16, direction and extent 4, duration 3, diversion 1) and no
+positions, which are clauses 7.2, 7.4, 7.5 and 9.3 to 9.5. So there is no event
+code, location code, extent, direction, duration or diversion bit in the
+output, single-group and multi-group messages are not told apart, and neither
+is system or tuning information. What there is: the service recognised by the
+three ALERT-C AIDs in the RDS Forum register (0x0D45 testing, 0xCD46, 0xCD47),
+TMC identification from type 1A variant 1 kept raw, and every distinct 37-bit
+payload kept once with its reception count, confirmed on a second identical
+reception per the preview's Introduction 0.3. The raw location code, which
+the RDS-TMC note under the aeronautical and vehicle table says to emit, is
+somewhere in those
+bits and is not picked out, because which 16 bits it is was not in any
+document read. Buying ISO
+14819-1 is what turns this into the small job the table says.
+
+**RDS2 is not the cheapest new capability here, and nothing of it is
+implemented.** The free preview of IEC 62106-1:2018 confirms the four
+subcarriers and their frequencies (clause 4.3), that streams 1 to 3 are locked
+to stream 0 (clause 4.2), and, in clause 3.3.2, a group type C "referenced by
+a header byte and 7 data bytes", which is not a shape rds_groups.cpp parses.
+Everything a demodulator needs is past the end of the preview: subcarrier
+phase and level (4.4, 4.5), the modulation and clock (4.6, 4.7), differential
+coding and shaping on the new streams (4.8, 4.9), the symbol phase shifts
+between streams (4.10), the baseband coding and cross-stream block sync
+(5.1 to 5.3), the transmission options (6) and the offset words in Annex A.
+The logo and file transfer are in other parts of the series, not identified.
+
+What it would take, with the document: rds_bits.h fixes its subcarrier at
+57000 Hz, the third harmonic of the pilot, so it would need the subcarrier as a
+parameter (66.5, 71.25 and 76 kHz are 3.5, 3.75 and 4 times 19 kHz) and one
+instance per stream on the same composite. The composite rate is not the
+obstacle: 171000 S/s reaches 85.5 kHz, and the highest stream's edge is 78375
+Hz if the new streams keep stream 0's 2375 Hz shaping, which is clause 4.9 and
+unverified. The
+engine's audio filter is: tests/rpc/test_rpc_rds.cpp puts its passband edge at
+68400 Hz for the 171000 tap, which cuts 71.25 and 76 kHz off entirely and 66.5
+kHz in part, so the WFM receiver path in core/engine would have to widen
+first. The group layer would need group type C beside A and B.
+
+WHAT THIS PARAGRAPH USED TO SAY: "RDS2 is in the included list above and is
+the cheapest new capability here, for the same reason: the demodulator, the
+block synchroniser, the offset words and the CRC already work, and RDS2 reuses
+all four on three more subcarriers." Its table row said "same 26-bit blocks
+and offset words" and put the effort at small. None of that was read in a
+document, the audio filter was not counted, and group type C was not known
+about.
 
 **Two-level FSK text and data, from receiver audio.** Pure libraries over a
 span of real audio at the receiver's audio rate, the way RDS reads the WFM
@@ -1163,7 +1224,8 @@ legacy conclusion rests on Motorola's 1990 to 1995 filing era, not a docket
 check.
 
 **Editions and revisions to confirm at purchase or implementation time.**
-EN 13757-4, 2025 versus 2019. The IEC 62106 part split. RTCA DO-185B versus
+EN 13757-4, 2025 versus 2019. The IEC 62106 part split past part 1, which is
+"Modulation characteristics and baseband coding" in the 2018 edition. RTCA DO-185B versus
 -185C. C/S T.001 and C/S T.018 issue and revision. IS-QZSS-PNT revision. The
 GOES-R HRIT/EMWIN product specification revision. The IMO International
 SafetyNET Manual edition. Whether the current revisions of MIL-STD-188-181
