@@ -1936,19 +1936,37 @@ public:
             return to_exception(status.error());
         }
 
-        // The raw tap, refused here rather than by the engine, because the
-        // engine would happily install a sink on it. RawTapStage hands back
-        // interleaved complex I/Q at the coarse channel rate; a client
-        // playing that as two-channel PCM plays noise at the wrong speed, and
-        // the rate is tens of times what this design was costed at.
-        if (!engine::produces_audio(status->params.demod)) {
+        // A complex tap, refused here rather than by the engine, because the
+        // engine would happily install a sink on it. A client playing
+        // interleaved I/Q as two-channel PCM plays noise at the wrong speed.
+        //
+        // BY MODE, because the four taps are not one path. The raw tap is
+        // RawTapStage, one coarse channel at the channel rate, tens of times
+        // what this design was costed at. The three digital voice modes went
+        // through the fine stage on 2026-09-22 and come out mixed to DC and
+        // resampled to the rate their decoder was built for, which
+        // VrxStatus::demod_rate states; that stream has a reader, which is
+        // subscribeDecoded. WHAT THIS REFUSAL USED TO SAY for all four: "is
+        // a raw tap ... at the coarse channel rate", which named the wrong
+        // path and the wrong rate for three of them.
+        const engine::Demod mode = status->params.demod;
+        if (!engine::produces_audio(mode)) {
+            if (mode == engine::Demod::Raw) {
+                return to_exception(Error{std::format(
+                    "receiver {} is a raw tap, so there is no audio on it to subscribe to. The "
+                    "raw tap is interleaved complex I/Q at the coarse channel rate, {} S/s, "
+                    "rather than demodulated audio; an I/Q subscription is a separate method "
+                    "that does not exist yet, and serving it through this one is the only "
+                    "thing that would make it look like one",
+                    id->value, status->placement.channel_rate)});
+            }
             return to_exception(Error{std::format(
-                "receiver {} is a raw tap, so there is no audio on it to subscribe to. The raw "
-                "tap is interleaved complex I/Q at the coarse channel rate rather than "
-                "demodulated audio; an I/Q subscription is a separate method that does not "
-                "exist yet, and serving it through this one is the only thing that would make "
-                "it look like one",
-                id->value)});
+                "receiver {} is {}, which hands out complex baseband mixed to DC at {} S/s for "
+                "a decoder rather than audio, so there is nothing on it to listen to. "
+                "subscribeDecoded reads it: the {} decoder is attached to that receiver by "
+                "passing an empty decoder name",
+                id->value, engine::demod_name(mode), status->demod_rate,
+                engine::demod_name(mode))});
         }
 
         const std::uint32_t granted = grant_audio_buffer_millis(request.getBufferMillis());

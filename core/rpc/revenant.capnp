@@ -2569,6 +2569,12 @@ interface Session {
     # times the 1.5 Mbit/s this design was costed at. An I/Q subscription is a
     # separate method that does not exist yet, and putting it behind this name
     # is the only thing that would make it look like one.
+    #
+    # The three digital voice modes are refused as well, in words of their
+    # own. Since 2026-09-22 they are not raw taps: they go through the fine
+    # stage and come out as complex baseband mixed to DC at their decoder's
+    # rate, which VrxStatus::demodRate states, and subscribeDecoded is what
+    # reads that stream. The refusal names the rate and points there.
     subscribeAudio @13 (vrx :UInt64, receiver :AudioReceiver,
                         bufferMillis :UInt32)
         -> (subscription :AudioSubscription, bufferMillisGranted :UInt32);

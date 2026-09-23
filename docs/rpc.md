@@ -428,6 +428,15 @@ as two-channel PCM renders as noise at the wrong speed, at tens of times the
 rate this design was costed at. An I/Q subscription is a separate method that
 does not exist.
 
+The three digital voice modes are refused too, in their own words. They left
+the raw tap for the fine stage on 2026-09-22 and hand out complex baseband
+mixed to DC at the rate their decoder was built for, 48000 S/s for P25 and
+D-STAR and 72000 for TETRA, which `VrxStatus::demodRate` states. Until this
+change the refusal called every one of them "a raw tap" at "the coarse channel
+rate", which named the wrong path and the wrong rate for three of the four. It
+now names the mode and the rate and points at `subscribeDecoded`, which is
+what reads that stream.
+
 ### RDS is served, per receiver, off the audio fan-out
 
 This section used to be headed "RDS is still declared, allocated, refused" and

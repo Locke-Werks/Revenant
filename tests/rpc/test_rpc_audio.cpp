@@ -402,6 +402,39 @@ TEST_CASE("subscribeAudio refuses a raw tap", "[gpu][rpc][audio]") {
     CHECK(ids->size() == 1);
 }
 
+TEST_CASE("subscribeAudio refuses a digital voice receiver and names its reader",
+          "[gpu][rpc][audio]") {
+    REVENANT_NEEDS_GPU();
+
+    // The three digital voice modes left the raw tap for a fine stage on
+    // 2026-09-22, so the raw tap's refusal no longer describes them. What they
+    // hand out is complex baseband at the rate their decoder was built for,
+    // and the refusal says so and points at the method that reads it.
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    rpc::VrxParams params = nfm_receiver();
+    params.demod = rpc::Demod::P25p1;
+    params.bandwidth = 12'500;
+    auto vrx = harness.client().add_vrx(params);
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto status = harness.client().vrx_status(*vrx);
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto refused = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find("raw tap") == std::string::npos);
+    CHECK(refused.error().message.find("p25p1") != std::string::npos);
+    CHECK(refused.error().message.find("subscribeDecoded") != std::string::npos);
+    CHECK(refused.error().message.find(std::format("{} S/s", status->demod_rate)) !=
+          std::string::npos);
+}
+
 // --- the stream itself, plus the depth clamp --------------------------------
 
 TEST_CASE("audio streams as contiguous float32 PCM and reports the depth it granted",
