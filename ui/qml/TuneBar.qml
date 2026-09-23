@@ -21,6 +21,12 @@ import QtQuick.Layouts
 import Revenant
 
 RowLayout {
+    id: tuneBar
+
+    // The dial, for the tuning keys in Commands.qml, and the digit they step.
+    readonly property alias dial: tuneDial
+    property int keyDigit: -1
+
     spacing: 8
     visible: engineLink.connected
 
@@ -41,6 +47,7 @@ RowLayout {
         id: tuneDial
 
         enabled: engineLink.sourceCanRetune
+        keyDigit: tuneBar.keyDigit
         value: engineLink.sourceCenterHz
         low: engineLink.sourceTuneLowHz
         high: engineLink.sourceTuneHighHz

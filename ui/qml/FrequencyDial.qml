@@ -57,6 +57,11 @@ Item {
     // The digit under the pointer, counted from the hertz digit, or -1.
     property int activeDigit: -1
 
+    // The digit the tuning keys step, or -1 on a dial they do not reach. It
+    // carries a faint mark while the pointer is elsewhere, so the keys say
+    // which digit they will move before one is pressed.
+    property int keyDigit: -1
+
     // Wheel travel not yet spent on a notch, for touchpads that send a
     // fraction of one at a time.
     property real wheelCarry: 0
@@ -120,6 +125,8 @@ Item {
                 // Counted from the hertz digit, which is what the rules take.
                 readonly property int place: dial.digits - 1 - index
                 readonly property bool active: dial.activeDigit === place && dial.enabled
+                readonly property bool keyed: dial.keyDigit === place && dial.activeDigit < 0
+                                              && dial.enabled && !dial.editing
                 readonly property bool leading: place >= dial.significant
 
                 Text {
@@ -140,9 +147,9 @@ Item {
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
-                        height: 2
-                        color: dial.tint
-                        visible: cell.active
+                        height: cell.active ? 2 : 1
+                        color: cell.active ? dial.tint : Theme.inkDim
+                        visible: cell.active || cell.keyed
                     }
 
                     MouseArea {

@@ -31,6 +31,35 @@ Window {
     color: Theme.background
     transientParent: null
 
+    // Commands.qml, which this window's palette runs its entries through.
+    property var commands: null
+
+    // What the keys reach into here.
+    readonly property alias receiverDial: detail.dial
+    readonly property alias passband: detail.passband
+    readonly property alias commandPalette: commandPalette
+    readonly property alias keyMapView: keyMapView
+
+    // Closes the window when it is open, and opens it and puts it in front
+    // when it is not: the top bar's "receivers" button and its key.
+    function toggle() {
+        if (receivers.visible) {
+            receivers.close()
+        } else {
+            receivers.show()
+            receivers.raise()
+        }
+    }
+
+    CommandPalette {
+        id: commandPalette
+        commands: receivers.commands
+    }
+
+    KeyMapView {
+        id: keyMapView
+    }
+
     RowLayout {
         anchors.fill: parent
         anchors.margins: 12
@@ -61,6 +90,7 @@ Window {
             spacing: 10
 
             ReceiverDetail {
+                id: detail
                 Layout.fillWidth: true
                 Layout.minimumWidth: 0
                 Layout.fillHeight: true

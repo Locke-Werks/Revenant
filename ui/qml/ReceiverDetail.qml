@@ -38,6 +38,11 @@ ColumnLayout {
     readonly property color tint: Theme.receiverColours[0]
     property bool expanded: false
 
+    // The receiver's dial and the filter display, for the keys in
+    // Commands.qml.
+    readonly property alias dial: receiverDial
+    readonly property alias passband: passband
+
     spacing: 6
     visible: engineLink.receiverId > 0
 
@@ -52,6 +57,7 @@ ColumnLayout {
         // and not the detection entry point: there is no measurement behind
         // where the operator wheeled it to.
         FrequencyDial {
+            id: receiverDial
             value: engineLink.receiverCenterHz
             low: engineLink.spanLowHz
             high: engineLink.spanHighHz
@@ -288,6 +294,17 @@ ColumnLayout {
             link: engineLink
         }
 
+        // The keys are on the edges while the display has focus, and an
+        // arrow key does something different with and without it, so the
+        // display says which with an outline in the accent.
+        Rectangle {
+            anchors.fill: parent
+            visible: passband.activeFocus
+            color: "transparent"
+            border.width: 1
+            border.color: Theme.accent
+        }
+
         Plate {
             anchors.left: parent.left
             anchors.bottom: parent.bottom
@@ -389,8 +406,11 @@ ColumnLayout {
 
         Label {
             Layout.minimumWidth: 0
-            text: "drag an edge, shift-drag to widen both, [ ] \\ select, "
-                  + "arrows move, up and down widen, home resets, the wheel tunes"
+            // The keys by name from the table, so this line cannot teach a key
+            // the display no longer takes.
+            text: "drag an edge, shift-drag to widen both, the wheel tunes, "
+                  + KeyMap.keysText("filter.keys") + " puts the keys on the edges, "
+                  + KeyMap.keysText("keymap.open") + " lists them"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
             elide: Text.ElideRight

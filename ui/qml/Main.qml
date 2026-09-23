@@ -20,7 +20,9 @@
 // appears under the bar only while something is wrong. The last click is a
 // card over the waterfall. The receiver's controls, its fine-tuning display,
 // RDS and audio are the receiver window, which is a second top-level window
-// made here so both share one engine link and one selection.
+// made here so both share one engine link and one selection. Every key in
+// both windows is Commands.qml, made here for the same reason, and the
+// command palette and the key map it opens hang over whichever is in front.
 //
 // Until 2026-09-22 this was a column of twenty-odd rows over a spectrum that
 // got the height left over, and before that one file of 2792 lines. Each
@@ -56,6 +58,27 @@ ApplicationWindow {
 
     VrxWindow {
         id: receiverWindow
+        commands: keyCommands
+    }
+
+    // Every key, and what each one does. See Commands.qml.
+    Commands {
+        id: keyCommands
+        mainWindow: window
+        receiverWindow: receiverWindow
+        topBar: topBar
+        spanView: spanView
+        mainPalette: commandPalette
+        mainKeyMap: keyMapView
+    }
+
+    CommandPalette {
+        id: commandPalette
+        commands: keyCommands
+    }
+
+    KeyMapView {
+        id: keyMapView
     }
 
     ColumnLayout {
@@ -63,8 +86,10 @@ ApplicationWindow {
         spacing: 0
 
         TopBar {
+            id: topBar
             Layout.fillWidth: true
             receiverWindow: receiverWindow
+            tuneDigit: keyCommands.tuneDigit
         }
 
         NoticeBanner {
@@ -76,6 +101,7 @@ ApplicationWindow {
             Layout.fillHeight: true
 
             SpanView {
+                id: spanView
                 anchors.fill: parent
                 anchors.margins: 6
                 selection: tuneSelection

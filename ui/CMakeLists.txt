@@ -234,6 +234,10 @@ qt_add_qml_module(revenant_ui
         qml/ReceiverRack.qml
         qml/ReceiverStrip.qml
         qml/VrxWindow.qml
+        qml/Commands.qml
+        qml/CommandPalette.qml
+        qml/KeyMapView.qml
+        qml/controls/KeyChip.qml
         qml/controls/Popover.qml
         qml/controls/Readout.qml
         qml/controls/StatusChip.qml

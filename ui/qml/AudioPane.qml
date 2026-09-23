@@ -113,9 +113,22 @@ ColumnLayout {
             // Seeded once rather than bound, because a binding to
             // audioPlayer.volume is broken by the first drag
             // anyway and a half-live binding is worse than none.
-            // This control is the only writer.
             Component.onCompleted: value = audioPlayer.volume
             onMoved: audioPlayer.volume = value
+
+            // WHAT THE COMMENT ABOVE USED TO SAY, in full: "a binding to
+            // audioPlayer.volume is broken by the first drag anyway and a
+            // half-live binding is worse than none. This control is the
+            // only writer." The volume keys write it too, so a change that
+            // did not come from this handle moves it here, except while the
+            // handle is held, when it is the operator's.
+            Connections {
+                target: audioPlayer
+                function onVolumeChanged() {
+                    if (!volumeSlider.pressed)
+                        volumeSlider.value = audioPlayer.volume
+                }
+            }
         }
 
         Label {

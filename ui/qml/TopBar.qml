@@ -23,6 +23,25 @@ Rectangle {
     // again after it was closed.
     property var receiverWindow: null
 
+    // The radio's dial and the digit the tuning keys step, for Commands.qml.
+    readonly property alias tuneDial: tuneBar.dial
+    property int tuneDigit: -1
+
+    // Opens one of the bar's panels by name, or closes it if it is open, the
+    // way its button does. The keys reach the panels through this.
+    function togglePanel(name) {
+        const panel = name === "radio" ? radioPanel
+                    : name === "detections" ? detectionsPanel
+                    : name === "bookmarks" ? marksPanel
+                    : null
+        if (panel === null)
+            return
+        if (panel.opened)
+            panel.close()
+        else
+            panel.open()
+    }
+
     readonly property var status: UiRules.status({
         "connected": engineLink.connected,
         "engineRunning": engineLink.engineRunning,
@@ -57,7 +76,9 @@ Rectangle {
         spacing: 12
 
         TuneBar {
+            id: tuneBar
             Layout.minimumWidth: 0
+            keyDigit: bar.tuneDigit
         }
 
         // While there is no engine the tuning controls are hidden, and the
@@ -129,14 +150,8 @@ Rectangle {
             ink: Theme.inkDim
             tint: Theme.receiverColours[0]
             onClicked: {
-                if (bar.receiverWindow === null)
-                    return
-                if (bar.receiverWindow.visible) {
-                    bar.receiverWindow.close()
-                } else {
-                    bar.receiverWindow.show()
-                    bar.receiverWindow.raise()
-                }
+                if (bar.receiverWindow !== null)
+                    bar.receiverWindow.toggle()
             }
         }
 

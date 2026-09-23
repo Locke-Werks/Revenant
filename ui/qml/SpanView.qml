@@ -29,6 +29,11 @@ ColumnLayout {
                                     && engineLink.spectrumEnabled
                                     && engineLink.framesReceived > 0
 
+    // The ends as drawn, which is where the pin keys pin them, the same as
+    // the pin buttons beside them.
+    readonly property double drawFloorDb: spectrum.drawFloorDb
+    readonly property double drawCeilingDb: spectrum.drawCeilingDb
+
     Layout.fillWidth: true
     Layout.fillHeight: true
 
