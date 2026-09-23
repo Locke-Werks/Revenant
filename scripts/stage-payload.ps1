@@ -32,8 +32,20 @@
     release job in .github/workflows/ci.yml signs this directory between
     staging and forging.
 
-    It does not produce a third-party notices file. There is not one yet.
-    docs/packaging.md says what it has to contain and where the inputs are.
+    WHAT IT ADDS BESIDE THE BINARIES
+
+    The licence material each half owes, generated from the tree that built
+    that half so it cannot describe a different build. The engine half gets
+    LICENSE.txt, THIRD-PARTY-NOTICES-engine.txt from its static vcpkg tree,
+    and licenses/LGPL-2.1.txt for libusb. The client half gets
+    THIRD-PARTY-NOTICES-client.txt from its dynamic vcpkg tree, Qt's SPDX
+    documents and the FFmpeg libraries' own report of their licence, plus
+    licenses/LGPL-3.0.txt for Qt and licenses/LGPL-2.1.txt for FFmpeg.
+    scripts/generate_notices.py writes the notices and says what it refuses.
+
+    This paragraph used to say the script does not produce a third-party
+    notices file because there was not one yet. That was true until
+    2026-09-22.
 
 .PARAMETER Only
     Which half to stage. CI builds the two halves in two jobs on two separate
@@ -66,6 +78,45 @@ function Resolve-Under($path) {
 $outDir = Resolve-Under $Out
 $engineDir = Resolve-Under $EngineBuildDir
 $deployDir = Resolve-Under $UiDeployDir
+
+# The triplets are the ones the two CMakePresets.json files pin, and the Qt
+# prefix is read from ui/CMakePresets.json rather than repeated here, so a Qt
+# upgrade is one edit and the notices follow it.
+$engineVcpkg = Join-Path $engineDir "vcpkg_installed/x64-windows-static"
+$clientVcpkg = Join-Path (Split-Path -Parent $deployDir) "vcpkg_installed/x64-windows"
+$uiPresets = Get-Content -Raw (Join-Path $root "ui/CMakePresets.json") | ConvertFrom-Json
+$qtPrefix = ($uiPresets.configurePresets | Where-Object name -eq "base").cacheVariables.CMAKE_PREFIX_PATH
+
+function Invoke-Notices {
+    param([string[]]$Arguments)
+    # py first: the launcher is what a python.org install puts on PATH, and a
+    # bare python can be the Microsoft Store stub that opens a window instead.
+    $python = Get-Command py -ErrorAction SilentlyContinue
+    $prefix = @("-3")
+    if (-not $python) {
+        $python = Get-Command python -ErrorAction SilentlyContinue
+        $prefix = @()
+    }
+    if (-not $python) {
+        throw "no Python 3 on PATH, and scripts/generate_notices.py writes the notices " +
+              "every payload carries. Install Python 3 rather than staging without them."
+    }
+    & $python.Source @prefix (Join-Path $root "scripts/generate_notices.py") @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "scripts/generate_notices.py exited $LASTEXITCODE; its message above names what is missing."
+    }
+}
+
+function Copy-Licence {
+    param([string]$Name)
+    $source = Join-Path $root "licenses/$Name"
+    if (-not (Test-Path -LiteralPath $source)) {
+        throw "licenses/$Name is missing from the repository."
+    }
+    $destination = Join-Path $outDir "licenses"
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    Copy-Item -LiteralPath $source -Destination (Join-Path $destination $Name) -Force
+}
 
 # ---------------------------------------------------------------------------
 # What the client half carries
@@ -234,6 +285,10 @@ if ($Only -in @("both", "engine")) {
         throw "LICENSE is missing from the repository root."
     }
     Copy-Item -LiteralPath $license -Destination (Join-Path $outDir "LICENSE.txt") -Force
+
+    Invoke-Notices @("engine", "--vcpkg", $engineVcpkg,
+                     "--out", (Join-Path $outDir "THIRD-PARTY-NOTICES-engine.txt"))
+    Copy-Licence "LGPL-2.1.txt"
 }
 
 if ($Only -in @("both", "client")) {
@@ -249,6 +304,12 @@ if ($Only -in @("both", "client")) {
     foreach ($module in $qmlModules) {
         Copy-Tree -From $module -RelativeTo $deployDir -Into $outDir
     }
+
+    Invoke-Notices @("client", "--vcpkg", $clientVcpkg, "--qt", $qtPrefix,
+                     "--deploy", $deployDir,
+                     "--out", (Join-Path $outDir "THIRD-PARTY-NOTICES-client.txt"))
+    Copy-Licence "LGPL-3.0.txt"
+    Copy-Licence "LGPL-2.1.txt"
 }
 
 # A PDB in a payload is a file the customer cannot use and the container has
