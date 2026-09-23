@@ -493,6 +493,7 @@ if(REVENANT_UI_TESTS)
             audio/audio_ring.cpp
             tests/test_aft.cpp
             tests/test_audio_ring.cpp
+            tests/test_auto_filter.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
             tests/test_colour_map.cpp
