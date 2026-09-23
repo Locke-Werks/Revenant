@@ -1488,3 +1488,11 @@ instead: revenant-ui --frame-stats measures it and scripts/frame-budget.ps1
     runs the full target load. At 120 Hz on 2026-09-23 the main window missed
     the budget on 20.9% of frames with both windows open; docs/ui-spectrum.md,
     "Frame budget", has the numbers.
+
+phrase: A second process gets the same answer: a revenant-cli started on rtlsdr://0
+retired: 2026-09-23
+commit: "Take a machine-wide lock before opening an RTL-SDR"
+instead: A second Revenant process waits up to five seconds for the lock
+    Global\Revenant.RtlSdr and is refused naming it, without reaching
+    rtlsdr_open. Only a second open inside one process still gets librtlsdr's
+    -3.

@@ -110,9 +110,11 @@
 #include "core/dsp/synth/wideband.h"
 #include "core/engine/engine.h"
 #include "core/engine/spectrum_scale.h"
+#include "core/source/device_lock.h"
 #include "core/source/rtlsdr_source.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/dongle_lock.h"
 #include "tests/support/temp_path.h"
 
 using namespace revenant;
@@ -1072,7 +1074,7 @@ TEST_CASE("one pass's central half puts a tone in the bin the passband axis name
 }
 
 TEST_CASE("a passband over a real radio shows the station above the corners",
-          "[.][gpu][engine][passband][rtlsdr]") {
+          "[.][gpu][engine][passband][rtlsdr][dongle]") {
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
 
@@ -1100,10 +1102,7 @@ TEST_CASE("a passband over a real radio shows the station above the corners",
     // What it reports instead, with no threshold, is the level inside the
     // receiver's band against the level in the corners, which on a strong
     // station is the station's own spectral shape.
-    auto attached = source::enumerate_rtlsdr_devices();
-    if (!attached.has_value() || attached->empty()) {
-        SKIP("no RTL-SDR is attached to this machine");
-    }
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // Sixteen channels rather than sixty-four, because at 2.4 MS/s a
     // 64-channel grid gives a 37.5 kHz spacing and the widest receiver that

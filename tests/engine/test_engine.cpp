@@ -33,9 +33,11 @@
 
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
+#include "core/source/device_lock.h"
 #include "core/source/registry.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/dongle_lock.h"
 #include "tests/support/tone_measure.h"
 #include "tests/support/temp_path.h"
 
@@ -1307,8 +1309,9 @@ TEST_CASE("a VHF source keeps the transform the caller chose", "[gpu][engine][m2
 }
 
 TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
-          "[gpu][engine][m2][device]") {
+          "[gpu][engine][m2][device][dongle]") {
     REVENANT_NEEDS_GPU();
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE PICKER'S EXACT PATH, minus the RPC and the window: an engine already
     // streaming something else, a close, an open onto a live dongle, the graph

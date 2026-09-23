@@ -1,6 +1,52 @@
 find_package(Catch2 3 CONFIG REQUIRED)
 include(Catch)
 
+# Registers a Catch2 target's cases with ctest, with the ones that open the
+# RTL-SDR kept apart. Every case tagged [dongle] gets the ctest label dongle as
+# well as the target's own, and RESOURCE_LOCK rtlsdr, so:
+#
+#   ctest never runs two dongle cases at once, even under -j, and
+#   `ctest -LE dongle` leaves every one of them out, which is what the
+#   hand-typed `-E 'dongle|rtlsdr|RTL|...'` patterns were reaching for.
+#
+# RESOURCE_LOCK only orders cases within one ctest run. Two runs, or a run and
+# an engine somebody is using, are ordered by the machine-wide lock the cases
+# take through tests/support/dongle_lock.h.
+#
+# TWO DISCOVERIES OVER ONE BINARY because ctest properties are per case and
+# catch_discover_tests applies one set to everything it finds. The two labels
+# are set by a hook included after the discovered list rather than through
+# PROPERTIES, because a two-element LABELS list there means escaping a
+# semicolon through three layers of argument passing inside
+# catch_discover_tests, and the hook has nothing to escape. Hidden cases are
+# left out of the dongle
+# discovery by ~[.], as they are out of the ordinary one, so the probes and the
+# contender stay run-by-name only.
+function(revenant_discover_tests target label)
+    catch_discover_tests(${target}
+        TEST_SPEC "~[dongle]"
+        PROPERTIES
+            LABELS "${label}"
+            TIMEOUT 300
+    )
+    catch_discover_tests(${target}
+        TEST_SPEC "[dongle]~[.]"
+        TEST_LIST ${target}_dongle_cases
+        PROPERTIES
+            LABELS "${label}"
+            RESOURCE_LOCK rtlsdr
+            TIMEOUT 300
+    )
+    set(hook "${CMAKE_CURRENT_BINARY_DIR}/${target}_dongle_labels.cmake")
+    file(WRITE "${hook}"
+        "if(${target}_dongle_cases)\n"
+        "  set_tests_properties(\${${target}_dongle_cases}\n"
+        "    PROPERTIES LABELS \"${label};dongle\")\n"
+        "endif()\n"
+    )
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${hook}")
+endfunction()
+
 # The reference diff suite. This is the target CI cares about most: it is what
 # stands between a kernel that computes the wrong thing and six months of
 # confident garbage.

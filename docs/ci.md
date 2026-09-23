@@ -128,6 +128,63 @@ be a number somebody has to keep raising. `scripts/build.ps1` does not pass the 
 person running it reads `No tests were found!!!` on their own screen, which is the case
 the flag is not for.
 
+### The dongle, which the runner shares with its owner
+
+The runner is also the owner's development machine, and it has one RTL-SDR. On the
+night of 2026-09-22 `build-and-test` failed over and over with `usb_open error -3`
+while a local process held the dongle: a test, a `revenant-cli rtlsdr://`, or a
+client whose device picker called `listSources`, which opens each radio to describe
+it. librtlsdr refusing the second opener was the only arbitration there was, and a
+refusal after the fact says nothing about who holds the device or whether waiting
+would help.
+
+Every path that opens a dongle now takes one machine-wide lock first, a named mutex
+called `Global\Revenant.RtlSdr`, and holds it for as long as the device is open:
+`open_rtlsdr_source` until the source is destroyed, which for an engine is until the
+stream closes, `describe_rtlsdr_source` for the moment it takes to read the tuner,
+and `tools/devicespike` until it exits. `core/source/device_lock.h` has the
+mechanism and `core/source/rtlsdr_lock.h` the name and the wait. What each path does
+when another process holds it:
+
+| Path | Waits | Then |
+| --- | --- | --- |
+| A describe, which `listSources` and `--list` reach | not at all | the row reads "in use by another Revenant process" and the listing moves on |
+| An open, `openSource`, `revenant-cli`, `revenant-engine` | 5 s | fails naming the lock and saying another process holds the dongle |
+| A `dongle` test case | 60 s, or 2 s for ten minutes after one timed out | skips with that reason |
+
+**Global, not Local.** The runner's service is in session 0 and the owner's engine
+is in a desktop session, and `Local\` is one namespace per session, so a `Local\`
+lock would serialise neither against the other. The mutex's security descriptor
+lets every account wait on and release it and nothing more, because the service
+account and the owner's account both have to open an object whichever of them
+created it.
+
+**A process that dies holding it does not keep the dongle.** Windows releases an
+abandoned mutex to the next waiter with `WAIT_ABANDONED`, which counts as acquired,
+and when nobody else had the mutex open it goes with the dead process and the next
+opener creates it afresh.
+The mutex is owned by a thread kept for that purpose rather than by whichever thread
+opened the source, because a mutex belongs to a thread, and a source is usually
+destroyed on a different one from the one that opened it.
+
+**Holders in one process share it.** It arbitrates between processes. A second open
+in the same process still reaches `rtlsdr_open` and is refused there, as
+`tests/engine/test_rtlsdr_source.cpp` pins.
+
+**In ctest**, every case that opens the dongle is tagged `[dongle]`, carries the
+label `dongle` beside its suite's, and shares `RESOURCE_LOCK rtlsdr`, so no two run
+at once even under `-j`. `-LE dongle` runs everything else. A case that skips
+because the radio was busy exits with Catch2's skip code, which
+`catch_discover_tests` registers as `SKIP_RETURN_CODE 4`, so ctest lists it as
+`Skipped` under "The following tests did not run" rather than among the failures.
+A busy radio is a fact about the machine, not about the code. The cost is the one
+CONTRIBUTING.md names for every skip, that a skip is not a pass: a green run with
+dongle skips in it did not test the backend.
+
+`tests/engine/test_device_lock.cpp` covers the lock without a radio: acquire,
+contention with a second process, the timeout, release on destruction, a holder
+that is killed, and a test double standing in for the device open.
+
 ## The `ui` job, and why it is a job rather than a step
 
 `ui/` is a second CMake project. Qt 6.8.3 is built against the dynamic CRT and the

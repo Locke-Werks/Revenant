@@ -97,6 +97,26 @@
 # through the engine with no spectrum stage to make the ring larger than the
 # tap alone asks for.
 
+# test_device_lock.cpp is the machine-wide device lock, and needs neither a
+# GPU nor a radio. It contends with revenant_lock_holder, a second process
+# built beside it, because the lock arbitrates between processes and shares
+# itself between the threads of one, so a second thread would prove nothing.
+# Every name it takes is a stand-in of its own under Global\, never the
+# RTL-SDR's.
+#
+# THE DONGLE CASES. Every case that opens the RTL-SDR is tagged [dongle] and
+# begins with tests/support/dongle_lock.h's hold_the_dongle(), and
+# revenant_discover_tests in tests/CMakeLists.txt registers them under the
+# ctest label dongle with RESOURCE_LOCK rtlsdr. `ctest -LE dongle` runs
+# everything else.
+
+add_executable(revenant_lock_holder
+    ../support/no_modal_dialogs.cpp
+    lock_holder.cpp
+)
+target_link_libraries(revenant_lock_holder PRIVATE revenant_device_lock)
+revenant_apply_warnings(revenant_lock_holder)
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -105,6 +125,7 @@ add_executable(revenant_engine_tests
     test_audio_fanout.cpp
     test_audio_wasapi.cpp
     test_channel_ring.cpp
+    test_device_lock.cpp
     test_engine.cpp
     test_engine_dv.cpp
     test_engine_pacing.cpp
@@ -128,11 +149,12 @@ target_link_libraries(revenant_engine_tests PRIVATE
 )
 target_include_directories(revenant_engine_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 
+add_dependencies(revenant_engine_tests revenant_lock_holder)
+target_compile_definitions(revenant_engine_tests PRIVATE
+    REVENANT_LOCK_HOLDER_PATH="$<TARGET_FILE:revenant_lock_holder>"
+)
+
 revenant_apply_warnings(revenant_engine_tests)
 revenant_apply_reference_fp(revenant_engine_tests)
 
-catch_discover_tests(revenant_engine_tests
-    PROPERTIES
-        LABELS "engine"
-        TIMEOUT 300
-)
+revenant_discover_tests(revenant_engine_tests engine)

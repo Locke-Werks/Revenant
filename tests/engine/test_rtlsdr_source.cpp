@@ -13,6 +13,13 @@
 // stream of nothing reported as success. That last one is the case that
 // earns its keep. A source that opens, starts, delivers the right number of
 // zero bytes and stops passes every structural assertion there is.
+//
+// EVERY CASE THAT OPENS THE DONGLE IS TAGGED [dongle] AND HOLDS THE LOCK.
+// tests/support/dongle_lock.h's hold_the_dongle() takes the machine-wide lock
+// the backend takes, for the whole case, and skips with the reason when another
+// Revenant process has the radio. tests/engine/CMakeLists.txt registers the
+// [dongle] cases under the ctest label dongle with a RESOURCE_LOCK, so ctest
+// never runs two at once and `ctest -LE dongle` leaves them all out.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -24,6 +31,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,8 +39,11 @@
 #include <rtl-sdr.h>
 
 #include "core/dsp/types.h"
+#include "core/source/device_lock.h"
 #include "core/source/registry.h"
+#include "core/source/rtlsdr_lock.h"
 #include "core/source/rtlsdr_source.h"
+#include "tests/support/dongle_lock.h"
 
 using namespace revenant;
 
@@ -222,10 +233,19 @@ TEST_CASE("opening an index that is not there fails with a clear message",
     }
 }
 
-TEST_CASE("a serial that no dongle carries fails by name", "[source][rtlsdr]") {
+TEST_CASE("a serial that no dongle carries fails by name", "[source][rtlsdr][dongle]") {
     // The leading zeros are what make this a serial rather than an index.
     // That rule is the whole of the ambiguity in rtlsdr://<body>, so it is
     // checked rather than assumed.
+    //
+    // A [dongle] case although it opens nothing it keeps: looking a serial up
+    // opens every attached dongle to read its string descriptors. With none
+    // attached it still runs, because "nothing is attached" is a message worth
+    // checking too.
+    std::optional<source::DeviceLock> radio_lock;
+    if (a_dongle_is_attached()) {
+        radio_lock = test::hold_the_dongle();
+    }
     auto opened = source::open_source("rtlsdr://0000deadbeef");
     REQUIRE_FALSE(opened.has_value());
     INFO(opened.error().message);
@@ -267,10 +287,8 @@ TEST_CASE("every enumerated source has a usable uri and a name", "[source][rtlsd
 // The device
 // ---------------------------------------------------------------------------
 
-TEST_CASE("an attached dongle describes itself honestly", "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("an attached dongle describes itself honestly", "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M");
     if (!opened) {
@@ -313,10 +331,8 @@ TEST_CASE("an attached dongle describes itself honestly", "[source][rtlsdr][devi
     CHECK(sought.error().message.find("Paced") != std::string::npos);
 }
 
-TEST_CASE("tuning reports where the tuner landed", "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("tuning reports where the tuner landed", "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // Opened somewhere else, so tune() below is a real retune rather than a
     // readback of where the URI already put it. Opened with a frequency at
@@ -352,10 +368,8 @@ TEST_CASE("tuning reports where the tuner landed", "[source][rtlsdr][device]") {
     INFO(impossible.error().message);
 }
 
-TEST_CASE("a manual gain snaps to a step the tuner has", "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("a manual gain snaps to a step the tuner has", "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M");
     if (!opened) {
@@ -392,10 +406,8 @@ TEST_CASE("a manual gain snaps to a step the tuner has", "[source][rtlsdr][devic
 }
 
 TEST_CASE("a streaming dongle takes a gain change and the automatic mode",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE CASE ABOVE SETS GAIN ON A DONGLE THAT IS NOT STREAMING, which is the
     // same blind spot the retune had: rtlsdr_set_tuner_gain_mode and
@@ -497,10 +509,8 @@ TEST_CASE("a streaming dongle takes a gain change and the automatic mode",
 }
 
 TEST_CASE("a dongle streams, stops cleanly and its counters add up",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     constexpr dsp::SampleRate kRate = 2'400'000;
     constexpr std::uint64_t kWanted = 300'000;
@@ -605,7 +615,7 @@ TEST_CASE("a dongle streams, stops cleanly and its counters add up",
 }
 
 TEST_CASE("a consumer that cannot keep up loses samples and is told exactly which",
-          "[source][rtlsdr][device]") {
+          "[source][rtlsdr][device][dongle]") {
     // The Paced contract, exercised rather than reasoned about. Every other
     // device case here runs with a sink that returns instantly and therefore
     // never touches the loss path at all, which means the loss path is the
@@ -617,9 +627,7 @@ TEST_CASE("a consumer that cannot keep up loses samples and is told exactly whic
     // within about a tenth of a second and stays full. What is being checked
     // is not that samples were lost, it is that the ones that survived are
     // still correctly placed in the stream afterwards.
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20");
     if (!opened) {
@@ -669,13 +677,11 @@ TEST_CASE("a consumer that cannot keep up loses samples and is told exactly whic
 }
 
 TEST_CASE("a dongle delivers signal rather than a stream of nothing",
-          "[source][rtlsdr][device]") {
+          "[source][rtlsdr][device][dongle]") {
     // The case that catches the failure every structural assertion misses.
     // A backend that opens, starts, hands over the right number of zero bytes
     // and stops passes everything above this.
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20");
     if (!opened) {
@@ -728,10 +734,8 @@ TEST_CASE("a dongle delivers signal rather than a stream of nothing",
 }
 
 TEST_CASE("describing every device first does not stop the dongle tuning after",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE SEQUENCE A DEVICE PICKER PRODUCES, IN ONE PROCESS, which is what
     // separates this from every other case in this file.
@@ -786,10 +790,8 @@ TEST_CASE("describing every device first does not stop the dongle tuning after",
     CHECK((*opened)->center() == *landed);
 }
 
-TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE ONE ARRANGEMENT NOTHING IN THIS SUITE EVER EXERCISED, and the one
     // every retune from a client actually takes.
@@ -929,10 +931,8 @@ TEST_CASE("a streaming dongle can still be tuned", "[source][rtlsdr][device]") {
 }
 
 TEST_CASE("describing every device while one is streaming does not wedge its tuner",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE SEQUENCE THAT BROKE TUNING IN THE WINDOW, and the only one of the
     // four candidate shapes that is not already covered above.
@@ -1008,10 +1008,8 @@ TEST_CASE("describing every device while one is streaming does not wedge its tun
 }
 
 TEST_CASE("a dongle described, then opened, then streamed can still be tuned",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE ENGINE'S ACTUAL ORDER, which none of the three cases above is.
     //
@@ -1095,10 +1093,8 @@ TEST_CASE("a dongle described, then opened, then streamed can still be tuned",
 }
 
 TEST_CASE("a dongle opened at the bottom of its range can still be tuned away",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE STATE THE PICKER PUT THE RADIO IN, read off the window on 2026-09-21:
     // the composed URI was "rtlsdr://0?freq=24000000&gain=0" and a tune to
@@ -1154,10 +1150,8 @@ TEST_CASE("a dongle opened at the bottom of its range can still be tuned away",
 }
 
 TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE ONLY CASE IN THIS FILE THAT OPENS AN rtlsdr FOR REAL WITHOUT freq=.
     //
@@ -1219,19 +1213,21 @@ TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
 }
 
 TEST_CASE("a dongle already held is refused by name and its holder keeps streaming",
-          "[source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+          "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE CONTENTION CI WAS SUSPECTED OF, from a second handle in this process.
-    // A second process gets the same answer: a revenant-cli started on
-    // rtlsdr://0 while this suite held it printed "usb_open error -3" and was
-    // refused with LIBUSB_ERROR_ACCESS, and the holder's retune passed. So a
-    // second opener is refused at rtlsdr_open and never reaches the device the
-    // first one is using, and what this pins is that the refusal arrives as an
-    // Error naming the index and the call, not as a crash, and that the holder
-    // is untouched by it.
+    // Holders in one process share the machine-wide lock, so a second open
+    // here still reaches rtlsdr_open and is refused there, and what this pins
+    // is that the refusal arrives as an Error naming the index and the call,
+    // not as a crash, and that the holder is untouched by it.
+    //
+    // A SECOND PROCESS NO LONGER GETS THE SAME ANSWER. It waits kRtlSdrOpenWait
+    // for the lock and is refused naming the lock, and never reaches
+    // rtlsdr_open. WHAT THIS PARAGRAPH USED TO SAY: "A second process gets the
+    // same answer: a revenant-cli started on rtlsdr://0 while this suite held
+    // it printed "usb_open error -3" and was refused with LIBUSB_ERROR_ACCESS".
+    // True of that run, before the lock existed.
     auto holder = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
     if (!holder) {
         SKIP("the dongle could not be opened, so something else holds it: " +
@@ -1291,10 +1287,9 @@ TEST_CASE("a dongle already held is refused by name and its holder keeps streami
     REQUIRE(stopped.has_value());
 }
 
-TEST_CASE("a dongle streaming for minutes can still be tuned", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("a dongle streaming for minutes can still be tuned",
+          "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // HIDDEN, AND NAMED TO RUN, because what it measures is a threshold rather
     // than a yes or no and REVENANT_PROBE_DELAY_MS is what moves it. Every
@@ -1353,10 +1348,9 @@ TEST_CASE("a dongle streaming for minutes can still be tuned", "[.probe][source]
     REQUIRE(radio.stop().has_value());
 }
 
-TEST_CASE("librtlsdr on its own retunes a streaming dongle", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("librtlsdr on its own retunes a streaming dongle",
+          "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // REVENANT IS NOT IN THIS ONE. Nothing here goes through RtlSdrSource: it is
     // rtlsdr_open, set the centre, set the rate, reset the buffer, read_async on
@@ -1422,10 +1416,9 @@ TEST_CASE("librtlsdr on its own retunes a streaming dongle", "[.probe][source][r
     rtlsdr_close(device);
 }
 
-TEST_CASE("librtlsdr retunes a dongle whose stream is paused", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("librtlsdr retunes a dongle whose stream is paused",
+          "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE WORKAROUND, PROVED BEFORE IT IS BUILT. Cancel the async read, join,
     // retune, reset the buffer, read again, several times over, because the
@@ -1500,10 +1493,9 @@ TEST_CASE("librtlsdr retunes a dongle whose stream is paused", "[.probe][source]
     rtlsdr_close(device);
 }
 
-TEST_CASE("librtlsdr retunes from inside its own callback", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("librtlsdr retunes from inside its own callback",
+          "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // WHICH FIX IS AVAILABLE, and the difference between the two is large enough
     // to be worth one probe.
@@ -1572,10 +1564,8 @@ TEST_CASE("librtlsdr retunes from inside its own callback", "[.probe][source][rt
     rtlsdr_close(device);
 }
 
-TEST_CASE("librtlsdr survives a second cancel", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("librtlsdr survives a second cancel", "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // WHETHER A SECOND rtlsdr_cancel_async IS DANGEROUS, which the backend's
     // comments used to assert. Measured 2026-09-23: 0 then -2 in four rounds
@@ -1615,10 +1605,8 @@ TEST_CASE("librtlsdr survives a second cancel", "[.probe][source][rtlsdr][device
     rtlsdr_close(device);
 }
 
-TEST_CASE("librtlsdr keeps up with synchronous reads", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("librtlsdr keeps up with synchronous reads", "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // WHETHER rtlsdr_read_sync COULD REPLACE read_async, which would take the
     // cancel out of the picture and the teardown fault with it. It cannot. The
@@ -1707,10 +1695,9 @@ TEST_CASE("librtlsdr keeps up with synchronous reads", "[.probe][source][rtlsdr]
     rtlsdr_close(device);
 }
 
-TEST_CASE("a streaming dongle takes control calls back to back", "[.probe][source][rtlsdr][device]") {
-    if (!a_dongle_is_attached()) {
-        SKIP(kNoDongle);
-    }
+TEST_CASE("a streaming dongle takes control calls back to back",
+          "[.probe][source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
 
     // THE REPRODUCER FOR THE CI SEGFAULTS OF 2026-09-23. Every control call on
     // a streaming dongle cancels the transfers and restarts them, and about
@@ -1775,7 +1762,10 @@ TEST_CASE("a streaming dongle takes control calls back to back", "[.probe][sourc
                 << "; " << collected.samples << " samples");
 }
 
-TEST_CASE("a second process contends for the dongle", "[.contender][source][rtlsdr][device]") {
+TEST_CASE("a second process contends for the dongle",
+          "[.contender][source][rtlsdr][device][dongle]") {
+    // Not hold_the_dongle(): this case is the other process, and what it does
+    // about the lock is the thing being watched.
     if (!a_dongle_is_attached()) {
         SKIP(kNoDongle);
     }
@@ -1786,9 +1776,12 @@ TEST_CASE("a second process contends for the dongle", "[.contender][source][rtls
     // itself, or a CLI started on the same index. REVENANT_CONTEND_MODE picks
     // which:
     //
-    //   poke   enumerate, open, close, as fast as possible, for the duration.
-    //          Every open is expected to fail while the other process holds the
-    //          device, and one that succeeds is closed at once.
+    //   poke   enumerate, then ask for the machine-wide lock without waiting
+    //          and open and close the dongle only when it was granted, as fast
+    //          as possible, for the duration. That is what a device picker's
+    //          describe does since the lock arrived. Every attempt is expected
+    //          to be refused by the lock while the other process holds the
+    //          device, before librtlsdr is reached at all.
     //   hold   open, configure and stream for the duration, then close.
     //
     // REVENANT_CONTEND_SECONDS sets the duration, ten by default.
@@ -1817,13 +1810,19 @@ TEST_CASE("a second process contends for the dongle", "[.contender][source][rtls
     }
 
     int opens = 0;
+    int locked_out = 0;
     int refused = 0;
     int granted = 0;
     while (std::chrono::steady_clock::now() < until) {
         static_cast<void>(source::enumerate_rtlsdr_devices());
+        ++opens;
+        auto lock = source::lock_for_probe(source::rtlsdr_lock_policy());
+        if (!lock) {
+            ++locked_out;
+            continue;
+        }
         rtlsdr_dev_t* device = nullptr;
         const int rc = rtlsdr_open(&device, 0);
-        ++opens;
         if (rc == 0 && device != nullptr) {
             ++granted;
             rtlsdr_close(device);
@@ -1831,6 +1830,7 @@ TEST_CASE("a second process contends for the dongle", "[.contender][source][rtls
             ++refused;
         }
     }
-    WARN("poked the dongle " << opens << " times: " << refused << " refused, " << granted
-                             << " granted");
+    WARN("poked the dongle " << opens << " times: " << locked_out
+                             << " refused by the lock before librtlsdr, " << refused
+                             << " refused by rtlsdr_open, " << granted << " granted");
 }

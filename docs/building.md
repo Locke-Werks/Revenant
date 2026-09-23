@@ -63,6 +63,33 @@ Studio.
 late: by then a header is included somewhere quiet and the dependency is
 structural. CI runs this on every push.
 
+### Running the suite while the radio is in use
+
+The cases that open the RTL-SDR are labelled `dongle`, so one flag leaves them
+out:
+
+```powershell
+ctest --preset ci -LE dongle      # everything that does not open the dongle
+ctest --preset ci -L dongle       # only the ones that do
+```
+
+That replaces the `-E 'dongle|rtlsdr|RTL|consumer that cannot keep up|describing every device'`
+pattern people had been typing, which matched by name. On 2026-09-23 it let
+through four cases that open the dongle, "tuning reports where the tuner
+landed", "a manual gain snaps to a step the tuner has" and the two source
+listing cases in `tests/rpc/test_rpc_session.cpp`, and it dropped four that open
+nothing, three URI cases and "a recording states the grid it needs and a dongle
+does not".
+
+ctest never runs two `dongle` cases at once, even with `-j`: they share
+`RESOURCE_LOCK rtlsdr`. Across processes every opener takes the machine-wide
+lock `Global\Revenant.RtlSdr` first, the engine included, so a case started
+while an engine or a `revenant-cli` is streaming waits up to a minute for the
+radio and then skips saying another Revenant process holds it. After one such
+skip the rest wait two seconds each for ten minutes, so a run against a busy
+radio is not twenty minutes of waiting. `REVENANT_DONGLE_WAIT_S` sets the wait
+in seconds, 0 included. docs/ci.md has why it is built this way.
+
 ## Two traps, both of which have cost time
 
 **Outside an x64 Native Tools prompt, CMake with the Ninja generator finds the

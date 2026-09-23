@@ -51,11 +51,9 @@ if(TARGET revenant_rpc_server)
     revenant_apply_warnings(revenant_rpc_tests)
     revenant_apply_reference_fp(revenant_rpc_tests)
 
-    catch_discover_tests(revenant_rpc_tests
-        PROPERTIES
-            LABELS "rpc"
-            TIMEOUT 300
-    )
+    # The two listing cases in test_rpc_session.cpp open the dongle, so they
+    # carry [dongle]; see revenant_discover_tests in tests/CMakeLists.txt.
+    revenant_discover_tests(revenant_rpc_tests rpc)
 else()
     message(STATUS "revenant_rpc_server is not present yet, skipping the RPC tests")
 endif()

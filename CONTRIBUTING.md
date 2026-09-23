@@ -97,6 +97,20 @@ Hardware tests skip when the hardware is absent, so a machine with no radio
 and no sound card still runs a green suite. A skip is not a pass: if you
 changed something a skipped test covers, find a way to run it.
 
+The cases that open the RTL-SDR carry the ctest label `dongle`. To run
+everything else while you are using the radio:
+
+```
+ctest --preset ci -LE dongle
+```
+
+and `-L dongle` for only those. They also skip rather than fail when another
+Revenant process holds the dongle, after waiting up to a minute for it to come
+free, because every opener takes one machine-wide lock first;
+docs/ci.md has the detail. A skip for that reason is the machine being busy,
+and the same rule applies: if your change is in the RTL-SDR backend, run them
+with the radio free.
+
 ## Commits and pull requests
 
 Imperative mood, concise subject line, body when the change needs explaining.

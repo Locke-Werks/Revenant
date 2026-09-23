@@ -44,10 +44,12 @@
 #include "core/rpc/client.h"
 #include "core/rpc/server.h"
 #include "core/rpc/types.h"
+#include "core/source/device_lock.h"
 #include "core/source/registry.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/rpc_fixture.h"
+#include "tests/support/dongle_lock.h"
 
 using namespace revenant;
 using test::Harness;
@@ -823,8 +825,15 @@ TEST_CASE("an engine failure reaches the client carrying the engine's own words"
     CHECK(truncated.error().message.find("4294967297") != std::string::npos);
 }
 
-TEST_CASE("the source listing crosses whole, backend for backend", "[gpu][rpc][m1]") {
+TEST_CASE("the source listing crosses whole, backend for backend", "[gpu][rpc][m1][dongle]") {
     REVENANT_NEEDS_GPU();
+
+    // [dongle] because describing an attached dongle opens it, so ctest keeps
+    // this apart from the cases that stream from one. It does not hold the
+    // lock itself and does not skip when another process has the radio: both
+    // listings then report the dongle in use without opening it, which the
+    // comparison below already allows for, and the synthetic and file rows are
+    // still compared in full.
 
     Harness harness;
     bring_up(harness, HarnessOptions{});
@@ -1007,7 +1016,7 @@ TEST_CASE("the source listing crosses whole, backend for backend", "[gpu][rpc][m
 }
 
 TEST_CASE("an unavailable backend arrives with its reason rather than omitted",
-          "[gpu][rpc][m1]") {
+          "[gpu][rpc][m1][dongle]") {
     REVENANT_NEEDS_GPU();
 
     // A backend that enumerates and will not open is the case this exists
@@ -1033,7 +1042,16 @@ TEST_CASE("an unavailable backend arrives with its reason rather than omitted",
              "unavailable without unplugging one");
     }
 
-    auto held = source::open_source(dongle);
+    // The machine-wide lock for the whole case, so the open below and the
+    // listing's describe share it in this process: the describe then reaches
+    // rtlsdr_open and is refused by librtlsdr, which is the reason this case
+    // wants to see carried. Skips when another process has the radio.
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
+
+    // With a centre, because a tunable dongle opened without one is refused
+    // rather than left at DC. With the bare enumerated URI this case skipped
+    // on the dongle, which is how it ran on 2026-09-23 before this changed.
+    auto held = source::open_source(dongle + "?freq=98.1M&rate=2400000&gain=20");
     if (!held) {
         SKIP("the dongle could not be opened, so it cannot be made busy: " +
              held.error().message);
