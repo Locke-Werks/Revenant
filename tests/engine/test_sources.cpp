@@ -27,6 +27,7 @@
 #include "core/source/file_source.h"
 #include "core/source/registry.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 
@@ -36,8 +37,8 @@ namespace {
 class ScratchCapture {
 public:
     explicit ScratchCapture(std::size_t samples) {
-        path_ = std::filesystem::temp_directory_path() /
-                ("revenant_test_capture_" + std::to_string(samples) + ".cf32");
+        path_ = test::unique_temp_path("revenant_test_capture_" + std::to_string(samples),
+                                       ".cf32");
 
         std::vector<dsp::Complex32> data(samples);
         for (std::size_t i = 0; i < samples; ++i) {

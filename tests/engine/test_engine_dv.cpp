@@ -68,6 +68,7 @@
 #include "core/engine/vrx.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 
@@ -266,14 +267,10 @@ struct Captured {
 [[nodiscard]] Captured through_engine(std::span<const dsp::Complex32> capture,
                                       engine::Demod mode, const std::string& tag,
                                       std::uint32_t block_samples = 0) {
-    // Unique per run as well as per case. %TEMP% is shared by every build of
-    // this tree on the machine, and two runs writing one fixed name is how
-    // tests/rpc/test_rpc_rds.cpp's end-to-end case fails when two checkouts
-    // test at once.
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    // Unique per run as well as per case, for the reason
+    // tests/support/temp_path.h gives.
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() /
-        std::format("revenant_test_dv_{}_{}.cf32", tag, stamp);
+        test::unique_temp_path(std::format("revenant_test_dv_{}", tag), ".cf32");
     {
         std::FILE* file = std::fopen(path.string().c_str(), "wb");
         REQUIRE(file != nullptr);

@@ -74,6 +74,7 @@
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/decoded_log.h"
 #include "tests/rpc/rpc_fixture.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 using test::ending;
@@ -535,9 +536,8 @@ public:
 
     explicit CaptureFile(const Capture& capture)
         : CaptureFile(capture,
-                      std::filesystem::temp_directory_path() /
-                          std::format("revenant-decode-audio-{}-{}.cf32", capture.tag,
-                                      std::chrono::steady_clock::now().time_since_epoch().count()),
+                      test::unique_temp_path(
+                          std::format("revenant-decode-audio-{}", capture.tag), ".cf32"),
                       false) {}
 
     CaptureFile(const CaptureFile&) = delete;

@@ -37,6 +37,7 @@
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/support/tone_measure.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 using Catch::Approx;
@@ -1179,8 +1180,7 @@ TEST_CASE("an HF recording gets the finer grid its content needs", "[gpu][engine
     // detector does on a grid that coarse is worse than missing the signal: it
     // fires, and publishes a centre it cannot place inside the signal and a
     // width that is the bin's rather than the signal's.
-    const std::filesystem::path path =
-        std::filesystem::temp_directory_path() / "revenant_test_hf_grid.cf32";
+    const std::filesystem::path path = test::unique_temp_path("revenant_test_hf_grid", ".cf32");
 
     // Enough samples to open and size a ring against, and no more. Nothing
     // here runs the stream; the assertion is about the geometry the open

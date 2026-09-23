@@ -65,6 +65,7 @@
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/decoded_log.h"
 #include "tests/rpc/rpc_fixture.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 using test::Harness;
@@ -243,14 +244,11 @@ constexpr std::size_t kTetraBursts = 18;
 // ---------------------------------------------------------------------------
 
 // A cf32 file the case owns and removes. Named for the case and for the run,
-// because %TEMP% is shared by every checkout of this tree on the machine and
-// tests/engine/test_engine_dv.cpp records two runs colliding on a fixed name.
+// for the reason tests/support/temp_path.h gives.
 class CaptureFile {
 public:
     explicit CaptureFile(std::string_view tag)
-        : path_(std::filesystem::temp_directory_path() /
-                std::format("revenant-decode-{}-{}.cf32", tag,
-                            std::chrono::steady_clock::now().time_since_epoch().count())) {}
+        : path_(test::unique_temp_path(std::format("revenant-decode-{}", tag), ".cf32")) {}
 
     CaptureFile(const CaptureFile&) = delete;
     CaptureFile& operator=(const CaptureFile&) = delete;

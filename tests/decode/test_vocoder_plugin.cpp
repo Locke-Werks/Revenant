@@ -45,6 +45,7 @@
 #include "core/decode/vocoder.h"
 #include "core/decode/vocoder_abi.h"
 #include "core/decode/vocoder_plugin.h"
+#include "tests/support/temp_path.h"
 
 // Written by CMake, holding the full path of each fixture DLL. See
 // tests/decode/CMakeLists.txt.
@@ -80,14 +81,17 @@ constexpr std::uint32_t kFixtureRate = 8000;
 }
 
 // One directory per case, emptied first, so a case cannot inherit a DLL a
-// previous case installed. Named rather than randomised: a failed run leaves
-// the directory behind under a name that says which case made it.
+// previous case installed. Named for the case, so a failed run leaves the
+// directory behind under a name that says which case made it, and made unique
+// by tests/support/temp_path.h, because a second checkout running the same
+// case would otherwise empty the directory this one was loading from. Until
+// 2026-09-23 it was revenant_vocoder_plugin_tests/<case> for every checkout on
+// the machine.
 [[nodiscard]] std::filesystem::path case_directory(const std::string& name)
 {
     std::error_code ec;
     const std::filesystem::path dir =
-        std::filesystem::temp_directory_path(ec) / "revenant_vocoder_plugin_tests" / name;
-    REQUIRE_FALSE(ec);
+        revenant::test::unique_temp_path("revenant_vocoder_plugin_tests-" + name);
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir, ec);
     REQUIRE_FALSE(ec);

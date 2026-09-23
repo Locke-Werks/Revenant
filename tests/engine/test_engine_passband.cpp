@@ -113,6 +113,7 @@
 #include "core/source/rtlsdr_source.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 using Catch::Approx;
@@ -1319,10 +1320,8 @@ struct Neighbourhood {
 };
 
 [[nodiscard]] Neighbourhood measure_neighbourhood() {
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path path =
-        std::filesystem::temp_directory_path() /
-        std::format("revenant_test_passband_hood_{}.cf32", stamp);
+        test::unique_temp_path("revenant_test_passband_hood", ".cf32");
 
     {
         std::mt19937_64 generator(kHoodSeed);

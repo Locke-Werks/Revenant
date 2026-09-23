@@ -138,6 +138,7 @@
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/rpc_fixture.h"
+#include "tests/support/temp_path.h"
 
 using namespace revenant;
 using test::Harness;
@@ -399,15 +400,19 @@ constexpr int kNoTrafficAnnouncement = -1;
     return spec;
 }
 
-// A file the test owns and removes, named for the case that wrote it so two
-// cases running at once on one machine cannot collide. Catch2's ctest
-// integration runs each TEST_CASE as its own process, so that is the
-// ordinary arrangement rather than the exception.
+// A file the test owns and removes, named for the case that wrote it and made
+// unique by tests/support/temp_path.h. Catch2's ctest integration runs each
+// TEST_CASE as its own process, and several checkouts of this tree run their
+// suites on one machine at once.
+//
+// WHAT THIS COMMENT USED TO SAY: "named for the case that wrote it so two
+// cases running at once on one machine cannot collide". Two different cases
+// could not; the same case run by two checkouts could, and did, since both
+// wrote revenant-rds-<case>.cf32.
 class StationFile {
 public:
     explicit StationFile(std::string_view tag)
-        : path_(std::filesystem::temp_directory_path() /
-                std::format("revenant-rds-{}.cf32", tag)) {}
+        : path_(test::unique_temp_path(std::format("revenant-rds-{}", tag), ".cf32")) {}
 
     StationFile(const StationFile&) = delete;
     StationFile& operator=(const StationFile&) = delete;
