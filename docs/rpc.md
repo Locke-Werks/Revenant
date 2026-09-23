@@ -608,7 +608,7 @@ through it as of 2026-09-22, each one adapter and one registry row in
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
 | `p25p1` | NAC and DUID of every data unit; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband: a `p25p1` receiver, or any complex tap |
-| `dstar` | The radio header's four callsigns, suffix and flags | Complex baseband: a `dstar` receiver, or any complex tap |
+| `dstar` | The radio header's four callsigns, suffix and flags, then one message per superframe of voice frames | Complex baseband: a `dstar` receiver, or any complex tap |
 | `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband: a `tetra` receiver, or any complex tap |
 | `m17` | Each link setup whose CRC checked: callsigns, type, encrypted flag; each stream's end; end of transmission | Complex baseband of a `p25p1` receiver, 48000 S/s in its 12.5 kHz channel, or a `raw` tap |
 | `rtty` | Lines of ITA2 text, 45.45 baud, 170 Hz shift, mark on 2125 Hz | Audio of a `usb` or `lsb` receiver; the sideband sets the polarity |
@@ -798,6 +798,20 @@ remains. The decoder's output is now identical in every blocking down to one
 sample per call, and this route recovers six of six at both block sizes.
 `docs/modes.md` has the measurements. D-STAR and TETRA still restart their
 state per call and have not been measured for it.
+
+**The D-STAR adapter reports a transmission a superframe at a time.** `DStar`
+hands a transmission over in the pieces its own structure sets, the header with
+the first 21 voice frames and a piece per superframe after it, and the adapter
+sends one message per piece: `header` for the first, `superframe` for each after
+it, with the frame count, the running total, `ended` on the piece the clause
+4.1.2 h last frame closed, and `my` and `ur` repeated so a superframe can be
+placed without its header. Before 2026-09-23 it sent the header alone, with
+`voice_frames` counting whatever had arrived in the same call, and dropped every
+superframe after the first. A transmission still open when its receiver goes is
+flushed: the server asks the decoder for what it holds, sends that and anything
+still queued ahead of `ended()`, and flags the piece `flushed`. `revenant-cli
+--decode` flushes every decoder when the run ends. The fifty-frame transmission
+in `tests/rpc/test_rpc_decode.cpp` arrives as pieces of 21, 21 and 8.
 
 ### The front end can be pointed somewhere else
 

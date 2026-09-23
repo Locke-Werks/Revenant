@@ -2735,6 +2735,19 @@ struct DecodeTap {
     bool fault_printed = false;
 };
 
+// tap.lock held. Numbers what a decoder produced and queues it for printing.
+void queue_decoded(DecodeTap& tap, std::vector<rpc::DecodedMessage>& recovered)
+{
+    for (rpc::DecodedMessage& message : recovered) {
+        message.sequence = tap.produced++;
+        if (tap.pending.size() >= kDecodePending) {
+            tap.pending.erase(tap.pending.begin());
+            ++tap.dropped;
+        }
+        tap.pending.push_back(std::move(message));
+    }
+}
+
 // Engine completion thread, with tap.lock held.
 void decode_tap_chunk(DecodeTap& tap, const engine::AudioChunk& chunk)
 {
@@ -2769,14 +2782,20 @@ void decode_tap_chunk(DecodeTap& tap, const engine::AudioChunk& chunk)
         tap.fault = consumed.error().message;
         return;
     }
-    for (rpc::DecodedMessage& message : recovered) {
-        message.sequence = tap.produced++;
-        if (tap.pending.size() >= kDecodePending) {
-            tap.pending.erase(tap.pending.begin());
-            ++tap.dropped;
-        }
-        tap.pending.push_back(std::move(message));
+    queue_decoded(tap, recovered);
+}
+
+// Main thread, once the engine has stopped: the end of the stream, which a
+// decoder holding a message open needs to be told. Not after a fault.
+void flush_decode_tap(DecodeTap& tap)
+{
+    const std::lock_guard<std::mutex> held(tap.lock);
+    if (tap.decoder == nullptr || !tap.fault.empty()) {
+        return;
     }
+    std::vector<rpc::DecodedMessage> recovered;
+    tap.decoder->flush(recovered);
+    queue_decoded(tap, recovered);
 }
 
 // Main thread. Prints and clears what the decoder queued.
@@ -4546,6 +4565,14 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     // The decoders' last messages, which the final flush may have produced
     // after the last interval printed, and one line each saying how many there
     // were in all. The engine has stopped, so no lock is contended.
+    //
+    // The stream has ended, so a decoder holding a message open is told so
+    // first and hands over what it recovered of it: a D-STAR transmission
+    // the file stopped inside of would otherwise lose every frame since its
+    // last superframe.
+    for (const std::shared_ptr<DecodeTap>& tap : decode_taps) {
+        flush_decode_tap(*tap);
+    }
     for (const std::shared_ptr<DecodeTap>& tap : decode_taps) {
         const bool faulted = print_decoded(*tap);
         std::uint64_t produced = 0;

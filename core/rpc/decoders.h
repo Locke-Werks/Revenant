@@ -144,6 +144,13 @@ struct DecoderChunk {
 // an adapter refuses are shape, a channel count or a rate it was not built for,
 // and core/engine refuses a retune that changes either. reset discards
 // everything accumulated about the transmitter, for a retune.
+//
+// flush is for the end of the stream, when the receiver goes or the run
+// finishes: it appends what a decoder holding a message open has recovered of
+// it, rather than let it go with the decoder. The D-STAR adapter takes it,
+// for a transmission handed over one superframe at a time. POCSAG, CW and
+// NAVTEX have a flush of their own in core/decode that their adapters do not
+// call yet, so they take the default here, which appends nothing.
 class ChunkDecoder {
 public:
     ChunkDecoder() = default;
@@ -156,6 +163,7 @@ public:
 
     [[nodiscard]] virtual Status consume(const DecoderChunk& chunk,
                                          std::vector<DecodedMessage>& out) = 0;
+    virtual void flush(std::vector<DecodedMessage>&) {}
     virtual void reset() = 0;
 };
 
@@ -606,10 +614,30 @@ private:
 // D-STAR DV
 // ---------------------------------------------------------------------------
 //
-// One message per transmission whose frame sync and radio header were
-// recovered, core/decode/dstar.h's DStarTransmission. kind is "header".
+// One message per superframe, the pieces core/decode/dstar.h's DStar hands a
+// transmission over in: the 21 voice frames from one clause 4.1.2 c
+// resynchronisation signal to the next, or fewer when the transmission closed
+// sooner. kind is "header" for the first piece, which carries the radio
+// header, and "superframe" for every piece after it.
 //
-// Callsign fields are text because JARL Ver 7.0 clause 4.1.1 f through j
+// Every message:
+//   superframe           int    0 for the header's piece, counting up by one
+//   voice_frames         int    voice frames in this piece, 21 unless the
+//                               transmission closed inside it
+//   voice_frames_total   int    voice frames in the transmission so far
+//   ended                flag   the clause 4.1.2 h last frame closed it here
+//   flushed              flag   the stream ended with the transmission still
+//                               open, and this is what it had recovered
+//   sync_score           real   the first frame sync's
+//   inverted             flag
+//
+// A transmission is closed by the piece with `ended` or `flushed`, or by one
+// with fewer than 21 voice frames: that is a resynchronisation signal missing
+// where clause 4.1.2 c puts one, the receiver losing the carrier. A
+// transmission lost exactly on a superframe boundary sends nothing more, since
+// the decoder has no frames to hand over; the next header is the only sign.
+//
+// The header adds, as text because JARL Ver 7.0 clause 4.1.1 f through j
 // makes them ASCII, trailing padding removed by the decoder:
 //   my                   text   own callsign 1 (自局コールサイン1)
 //   my_suffix            text   own callsign 2, four characters
@@ -620,15 +648,24 @@ private:
 //   data, via_repeater, interrupted, control, emergency
 //                        flag   clause 4.1.1 c, flag 1 bits 7 to 3
 //   response             int    flag 1 bits 2 to 0
-//   fcs_valid            flag   the P_FCS checked. A header that failed it is
-//                               still reported, so the callsigns may be wrong
-//   sync_score           real
-//   inverted             flag
-//   voice_frames         int    voice frames recovered by the time the header
-//                               was reported, which is those already buffered
-//   ended                flag   the clause 4.1.2 h last frame was seen too
+//   fcs_valid            flag   true on every header this decoder reports
 //
-// The voice payload is AMBE and is never rendered; docs/modes.md has why.
+// A superframe repeats my and ur from its header, so a client that joined
+// after the header, or dropped it from a full queue, can still say whose it is.
+//
+// WHAT THIS LIST USED TO SAY. fcs_valid read "the P_FCS checked. A header that
+// failed it is still reported, so the callsigns may be wrong". It never was:
+// core/decode/dstar.cpp refuses a header whose P_FCS does not check and goes
+// on searching, and did from the commit that added it. The field stays on the
+// wire and is always true. voice_frames read "voice frames recovered by the
+// time the header was reported, which is those already buffered", which was
+// the block length's answer rather than the transmission's; the decoder has
+// handed over one superframe at a time since 2026-09-23, and every superframe
+// after the first was dropped here until this adapter reported them.
+//
+// The voice payload is AMBE and is never rendered; docs/modes.md has why. Each
+// frame's 24-bit data slot is not reported either: clause 4.1.2 e leaves its
+// content to the user, as core/decode/dstar.h says, and nothing here parses it.
 class DStarDecoder final : public ChunkDecoder {
 public:
     static constexpr std::string_view kName = "dstar";
@@ -656,14 +693,77 @@ public:
         if (auto processed = decoder_.process(iq_, transmissions_); !processed) {
             return processed;
         }
+        last_end_ = chunk.start + chunk.frames();
 
-        for (const decode::DStarTransmission& transmission : transmissions_) {
-            if (!transmission.header.has_value()) {
-                continue;
-            }
-            using namespace decoders_detail;
-            const decode::DStarHeader& header = *transmission.header;
-            DecodedMessage message = stamped(kName, "header", chunk);
+        for (const decode::DStarTransmission& piece : transmissions_) {
+            report(piece, chunk, false, out);
+        }
+        return {};
+    }
+
+    // What a transmission still open has recovered, stamped at the end of the
+    // last chunk, since no chunk completed it.
+    void flush(std::vector<DecodedMessage>& out) override {
+        transmissions_.clear();
+        decoder_.flush(transmissions_);
+        const DecoderChunk at_end{.samples = {}, .channels = 2, .rate = rate_, .start = last_end_};
+        for (const decode::DStarTransmission& piece : transmissions_) {
+            report(piece, at_end, true, out);
+        }
+    }
+
+    void reset() override {
+        decoder_.reset();
+        open_.reset();
+    }
+
+private:
+    // The transmission the pieces belong to, which the decoder identifies by
+    // the bit its frame sync started at. Every piece carries its first
+    // piece's first_bit, so a piece that does not match is from a
+    // transmission whose header this adapter never saw.
+    struct Open {
+        std::size_t first_bit = 0;
+        std::string my;
+        std::string ur;
+        std::int64_t superframes = 0;
+        std::int64_t voice_frames = 0;
+    };
+
+    DStarDecoder(dsp::SampleRate rate, decode::DStar decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    void report(const decode::DStarTransmission& piece, const DecoderChunk& chunk, bool flushed,
+                std::vector<DecodedMessage>& out) {
+        using namespace decoders_detail;
+
+        if (piece.header.has_value()) {
+            open_ = Open{.first_bit = piece.first_bit,
+                         .my = piece.header->own_callsign,
+                         .ur = piece.header->companion};
+        } else if (!open_.has_value() || open_->first_bit != piece.first_bit) {
+            open_ = Open{.first_bit = piece.first_bit};
+            // Numbered from one rather than zero: it is not the header's.
+            open_->superframes = 1;
+        }
+
+        const std::int64_t index = open_->superframes++;
+        const auto frames = static_cast<std::int64_t>(piece.frames.size());
+        open_->voice_frames += frames;
+
+        DecodedMessage message =
+            stamped(kName, piece.header.has_value() ? "header" : "superframe", chunk);
+        message.fields.push_back(integer_field("superframe", index));
+        message.fields.push_back(integer_field("voice_frames", frames));
+        message.fields.push_back(integer_field("voice_frames_total", open_->voice_frames));
+        message.fields.push_back(flag_field("ended", piece.ended));
+        message.fields.push_back(flag_field("flushed", flushed));
+        message.fields.push_back(real_field("sync_score", piece.sync_score));
+        message.fields.push_back(flag_field("inverted", piece.inverted));
+
+        const char* closing = piece.ended ? ", ended" : flushed ? ", stream ended" : "";
+        if (piece.header.has_value()) {
+            const decode::DStarHeader& header = *piece.header;
             message.fields.push_back(text_field("my", header.own_callsign));
             message.fields.push_back(text_field("my_suffix", header.own_suffix));
             message.fields.push_back(text_field("ur", header.companion));
@@ -679,32 +779,36 @@ public:
             message.fields.push_back(flag_field("emergency", header.flags.emergency));
             message.fields.push_back(integer_field("response", header.flags.response));
             message.fields.push_back(flag_field("fcs_valid", header.fcs_valid));
-            message.fields.push_back(real_field("sync_score", transmission.sync_score));
-            message.fields.push_back(flag_field("inverted", transmission.inverted));
-            message.fields.push_back(integer_field(
-                "voice_frames", static_cast<std::int64_t>(transmission.frames.size())));
-            message.fields.push_back(flag_field("ended", transmission.ended));
 
-            message.text = std::format("MY {}{}{} UR {} RPT1 {} RPT2 {}{}", header.own_callsign,
-                                       header.own_suffix.empty() ? "" : "/", header.own_suffix,
-                                       header.companion, header.departure_repeater,
-                                       header.destination_repeater,
-                                       header.fcs_valid ? "" : " (FCS failed)");
-            out.push_back(std::move(message));
+            message.text = std::format("MY {}{}{} UR {} RPT1 {} RPT2 {}, {} voice frames{}",
+                                       header.own_callsign, header.own_suffix.empty() ? "" : "/",
+                                       header.own_suffix, header.companion,
+                                       header.departure_repeater, header.destination_repeater,
+                                       frames, closing);
+        } else {
+            if (!open_->my.empty() || !open_->ur.empty()) {
+                message.fields.push_back(text_field("my", open_->my));
+                message.fields.push_back(text_field("ur", open_->ur));
+            }
+            message.text = std::format("MY {} superframe {}, {} voice frames, {} in all{}",
+                                       open_->my.empty() ? "?" : open_->my, index, frames,
+                                       open_->voice_frames, closing);
         }
-        return {};
+        out.push_back(std::move(message));
+
+        // Closed here, so the next piece is a new transmission's.
+        if (piece.ended || flushed || frames < static_cast<std::int64_t>(
+                                                  decode::kDStarResyncInterval)) {
+            open_.reset();
+        }
     }
-
-    void reset() override { decoder_.reset(); }
-
-private:
-    DStarDecoder(dsp::SampleRate rate, decode::DStar decoder)
-        : rate_(rate), decoder_(std::move(decoder)) {}
 
     dsp::SampleRate rate_;
     decode::DStar decoder_;
     std::vector<dsp::Complex32> iq_;
     std::vector<decode::DStarTransmission> transmissions_;
+    std::optional<Open> open_;
+    dsp::SampleIndex last_end_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -1280,9 +1384,13 @@ private:
 //   began_sample         int    receiver-stream index of the address codeword
 //
 // A PAGE STILL OPEN WHEN THE AUDIO STOPS IS NOT REPORTED. PocsagDecoder::flush
-// exists for the end of a capture, and nothing on this seam says the stream
-// has ended: a receiver goes on delivering noise, which ends the page on the
-// loss of sync a few codewords later.
+// exists for the end of a capture, and this adapter does not override
+// ChunkDecoder::flush to call it. While the receiver lives it does not need
+// to: the receiver goes on delivering noise, which ends the page on the loss
+// of sync a few codewords later.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "nothing on this seam says the stream has
+// ended". ChunkDecoder::flush says so since 2026-09-23, for D-STAR first.
 class PocsagChunkDecoder final : public ChunkDecoder {
 public:
     static constexpr std::string_view kName = "pocsag";
@@ -2195,7 +2303,8 @@ private:
          "Header Data Unit's talkgroup, algorithm, key and encrypted flag",
          &P25p1Decoder::make, {}},
         {DStarDecoder::kName, DecoderInput::ComplexBaseband,
-         "D-STAR DV radio header, JARL Ver 7.0: the four callsigns, the suffix and the flags",
+         "D-STAR DV, JARL Ver 7.0: the radio header's four callsigns, suffix and flags, then "
+         "one message per superframe of voice frames",
          &DStarDecoder::make, {}},
         {TetraDecoder::kName, DecoderInput::ComplexBaseband,
          "TETRA V+D synchronisation bursts, EN 300 392-2: colour code, MCC, MNC, timeslot and "

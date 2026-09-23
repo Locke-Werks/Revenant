@@ -260,8 +260,10 @@ public:
         std::filesystem::remove(path_, ignored);
     }
 
-    // Quiet, then the transmission moved up to kCarrierHz, then quiet.
-    [[nodiscard]] Status write(std::span<const dsp::Complex32> signal) {
+    // Quiet, then the transmission moved up to kCarrierHz, then quiet unless
+    // the case wants the file to stop inside the transmission.
+    [[nodiscard]] Status write(std::span<const dsp::Complex32> signal,
+                               bool trailing_quiet = true) {
         const auto quiet =
             static_cast<std::size_t>(kQuietSeconds * static_cast<double>(kFileRate));
         std::vector<dsp::Complex32> all(quiet, dsp::Complex32{});
@@ -277,7 +279,9 @@ public:
                 std::complex<double>(signal[n]) * std::polar(1.0, angle);
             all.emplace_back(static_cast<float>(moved.real()), static_cast<float>(moved.imag()));
         }
-        all.insert(all.end(), quiet, dsp::Complex32{});
+        if (trailing_quiet) {
+            all.insert(all.end(), quiet, dsp::Complex32{});
+        }
         samples_ = all.size();
 
         std::ofstream out(path_, std::ios::binary | std::ios::trunc);
@@ -670,9 +674,32 @@ TEST_CASE("a D-STAR header crosses the wire as a decoded message", "[gpu][rpc][d
 
     run_to_completion(harness, file);
 
-    const auto seen = wait_for(*log, [](const auto& got) { return !got.empty(); });
-    INFO(std::format("{} messages arrived", seen.size()));
-    REQUIRE_FALSE(seen.empty());
+    // THE WHOLE TRANSMISSION, a superframe at a time. 50 voice frames with the
+    // resynchronisation signal at 0, 21 and 42 are three pieces of 21, 21 and
+    // 8, the last closed by the clause 4.1.2 h last frame. Until 2026-09-23
+    // the adapter reported the header's piece and dropped the other two.
+    const auto seen = wait_for(*log, [](const auto& got) { return got.size() >= 3; });
+    std::string arrived;
+    for (const rpc::DecodedMessage& message : seen) {
+        arrived += std::format("\n  #{} {} {}", message.sequence, message.kind, message.text);
+    }
+    INFO(std::format("{} messages arrived:{}", seen.size(), arrived));
+    REQUIRE(seen.size() == 3);
+
+    constexpr std::array<std::int64_t, 3> kFrames = {21, 21, 8};
+    std::int64_t total = 0;
+    for (std::size_t i = 0; i < seen.size(); ++i) {
+        const rpc::DecodedMessage& piece = seen[i];
+        total += kFrames[i];
+        CHECK(piece.kind == (i == 0 ? "header" : "superframe"));
+        CHECK(integer_of(piece, "superframe") == static_cast<std::int64_t>(i));
+        CHECK(integer_of(piece, "voice_frames") == kFrames[i]);
+        CHECK(integer_of(piece, "voice_frames_total") == total);
+        CHECK(flag_of(piece, "ended") == (i + 1 == seen.size()));
+        CHECK_FALSE(flag_of(piece, "flushed"));
+        CHECK(text_of(piece, "my") == "JA1RL");
+        CHECK(text_of(piece, "ur") == "CQCQCQ");
+    }
 
     const rpc::DecodedMessage& header = seen.front();
     CHECK(header.decoder == "dstar");
@@ -696,6 +723,73 @@ TEST_CASE("a D-STAR header crosses the wire as a decoded message", "[gpu][rpc][d
     WARN(std::format("dstar: {} chunks discarded by the retune fence before the first chunk of "
                      "the new tuning",
                      stats->chunks_discarded));
+}
+
+TEST_CASE("a D-STAR transmission still open when its receiver goes is reported before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // The same transmission cut off about two thirds of the way through, with
+    // no quiet after it, so the file stops inside the second superframe and
+    // neither the last frame nor a missing resynchronisation signal closes it.
+    auto signal = dstar_transmission();
+    INFO(test::message_of(signal));
+    REQUIRE(signal.has_value());
+    const std::size_t cut = signal->size() * 2 / 3;
+    CaptureFile file("dstar-cut");
+    REQUIRE(file.write(std::span<const dsp::Complex32>(*signal).first(cut), false).has_value());
+
+    Harness harness;
+    bring_up(harness, file);
+
+    auto vrx = harness.client().add_vrx(on_the_carrier(rpc::Demod::Dstar));
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<MessageLog>();
+    REQUIRE(harness.client().subscribe_decoded(*vrx, "dstar", into(log), ending(log)).has_value());
+
+    run_to_completion(harness, file);
+
+    // The header's superframe, and nothing after it: the frames since are
+    // held by the decoder, waiting for a boundary that is not coming.
+    const auto before = wait_for(*log, [](const auto& got) { return !got.empty(); });
+    REQUIRE(before.size() == 1);
+    CHECK(before.front().kind == "header");
+    CHECK(integer_of(before.front(), "voice_frames") == 21);
+    CHECK_FALSE(flag_of(before.front(), "ended"));
+
+    REQUIRE(harness.client().remove_vrx(*vrx).has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!log->ended() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    INFO(log->reason());
+    REQUIRE(log->ended());
+    CHECK(log->reason() == "the receiver was removed");
+
+    // DELIVERED AHEAD OF ended(), which the client forgets the subscription
+    // on, so a message that arrived after it would not be in the log at all.
+    const auto after = log->messages();
+    std::string arrived;
+    for (const rpc::DecodedMessage& message : after) {
+        arrived += std::format("\n  #{} {} {}", message.sequence, message.kind, message.text);
+    }
+    INFO(std::format("{} messages arrived:{}", after.size(), arrived));
+    REQUIRE(after.size() == 2);
+    const rpc::DecodedMessage& tail = after.back();
+    CHECK(tail.kind == "superframe");
+    CHECK(integer_of(tail, "superframe") == 1);
+    CHECK(flag_of(tail, "flushed"));
+    CHECK_FALSE(flag_of(tail, "ended"));
+    CHECK(text_of(tail, "my") == "JA1RL");
+    const std::int64_t held = integer_of(tail, "voice_frames");
+    WARN(std::format("dstar: {} voice frames after the header's superframe handed over by flush",
+                     held));
+    CHECK(held > 0);
+    CHECK(held < 21);
+    CHECK(integer_of(tail, "voice_frames_total") == 21 + held);
 }
 
 TEST_CASE("TETRA synchronisation bursts cross the wire as decoded messages",

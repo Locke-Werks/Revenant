@@ -1258,8 +1258,13 @@ private:
 
     void drain_decoded();
     void pump_decoded(const std::shared_ptr<DecodedNode>& node);
+    void send_decoded_backlog(const std::shared_ptr<DecodedNode>& node);
     void send_decoded_ended(const std::shared_ptr<DecodedNode>& node, kj::StringPtr reason);
     void end_decode_route(const std::shared_ptr<DecodeRoute>& route, kj::StringPtr reason);
+
+    // route.lock held. Stamps what the decoder left in route.scratch with the
+    // receiver and the decoder's sequence and queues it on every node.
+    void enqueue_decoded(DecodeRoute& route);
 
     void taskFailed(kj::Exception&&) override {
         // Every send already carries its own error handler, which ends the
@@ -4198,7 +4203,11 @@ void ServerImpl::on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& 
     if (route.scratch.empty()) {
         return;
     }
+    enqueue_decoded(route);
+    wake_loop();
+}
 
+void ServerImpl::enqueue_decoded(DecodeRoute& route) {
     for (DecodedMessage& message : route.scratch) {
         message.vrx = route.vrx.value;
         message.sequence = route.sequence++;
@@ -4215,7 +4224,6 @@ void ServerImpl::on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& 
             node->queue.push_back(message);
         }
     }
-    wake_loop();
 }
 
 Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
@@ -4312,14 +4320,56 @@ void ServerImpl::end_decode_route(const std::shared_ptr<DecodeRoute>& route,
     std::vector<std::shared_ptr<DecodedNode>> nodes;
     {
         const std::scoped_lock held(route->lock);
+
+        // The receiver has gone, so its stream has ended, and a decoder
+        // holding a message open says what it recovered of it. D-STAR is the
+        // one that holds one: a transmission comes over a superframe at a
+        // time, and the frames since the last boundary would otherwise go
+        // with the decoder. Not after a fault, which stopped the decoder on
+        // a chunk it refused.
+        if (route->decoder != nullptr && route->fault.empty()) {
+            route->scratch.clear();
+            route->decoder->flush(route->scratch);
+            enqueue_decoded(*route);
+        }
         nodes = route->nodes;
     }
     for (const auto& node : nodes) {
         // Never for a cancel the client asked for.
         if (!node->cancelled) {
+            send_decoded_backlog(node);
             send_decoded_ended(node, reason);
         }
         end_decoded(node);
+    }
+}
+
+void ServerImpl::send_decoded_backlog(const std::shared_ptr<DecodedNode>& node) {
+    if (sends_ == nullptr) {
+        return;
+    }
+
+    // Everything queued goes now, ahead of ended() on the same capability,
+    // which Cap'n Proto delivers in the order it was sent. pump_decoded's
+    // one-in-flight limit is the wire's pacing for a live stream and there is
+    // no stream left to pace; left to it, what was still queued when the
+    // receiver went would be dropped with the node, which is what happened to
+    // it before 2026-09-23.
+    std::deque<DecodedMessage> backlog;
+    std::uint64_t dropped_before = 0;
+    {
+        const std::scoped_lock held(node->lock);
+        backlog.swap(node->queue);
+        dropped_before = node->dropped_before;
+        node->dropped_before = 0;
+        node->messages_sent += backlog.size();
+    }
+    for (DecodedMessage& message : backlog) {
+        message.dropped_before = dropped_before;
+        dropped_before = 0;
+        auto request = node->receiver.messageRequest();
+        write_decoded_message(request.initMessage(), message);
+        sends_->add(request.send().ignoreResult().catch_([](kj::Exception&&) {}));
     }
 }
 
