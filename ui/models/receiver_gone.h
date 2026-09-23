@@ -101,10 +101,16 @@ namespace revenant::ui {
 }
 
 // The sentence when the ENGINE said the retune removed the receiver, which
-// Session.setSourceCenter now does: its answer lists every receiver the move
-// left outside the span, with the frequency each was on. Nothing here is
-// inferred, so the cause is stated outright and the frequency is the engine's
-// rather than the one this window recorded at tune time.
+// Session.setSourceCenter now does: its answer lists every receiver the retune
+// removed, with the frequency each was on. Nothing here is inferred, so the
+// cause is stated outright and the frequency is the engine's rather than the
+// one this window recorded at tune time.
+//
+// ONE CAUSE THIS SENTENCE DOES NOT COVER. Since 2026-09-23 the engine also
+// removes a receiver that is still inside the span when its new place in a
+// channel needs a filter the graph will not swap in place. "Moved off" is then
+// not the reason, and the wire's RetuneRemoval carries no reason field yet to
+// tell this window so; engine::RetuneRemoval::reason has the sentence.
 [[nodiscard]] inline std::string receiver_retuned_away_sentence(std::int64_t frequency_hz)
 {
     if (frequency_hz == 0) {

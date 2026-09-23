@@ -79,6 +79,12 @@
 # tests/characterise/signal_lab.cpp for the OFDM burst, which nothing in
 # core/dsp/synth renders, rather than keeping a second copy of it here.
 
+# test_engine_retune.cpp is a front-end retune through the real engine with no
+# radio. It needs a GPU because the receivers it moves are fine stages on the
+# device. The source is a synthetic scene wrapped so that tune() moves its
+# centre label, handed over through engine::open_built_source, because every
+# backend that runs without hardware refuses a retune and is right to.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -90,6 +96,7 @@ add_executable(revenant_engine_tests
     test_engine_dv.cpp
     test_engine_passband.cpp
     test_engine_probe.cpp
+    test_engine_retune.cpp
     test_engine_spectrum.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp

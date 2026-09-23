@@ -1199,3 +1199,13 @@ commit: "Hold the complex decoders to their own mode or a raw tap under a cap"
 instead: p25p1, dstar and tetra read their own mode or raw, m17 reads p25p1 or
     raw, and a raw tap above kRawTapRateCap, 192000 S/s, is refused naming
     the mode to use instead.
+
+phrase: because its centre fell outside the new span
+phrase: every receiver the move left outside the span
+retired: 2026-09-23
+commit: "Remove a receiver a retune would leave on the wrong frequency"
+instead: A retune also removes a receiver still inside the span when its new
+    place in a channel needs a different filter, which the graph will not swap
+    into a running receiver. engine::RetuneRemoval::reason says which cause
+    applied; tests/engine/test_engine_retune.cpp has five 10 kHz AM receivers
+    on 256 channels over 2 MS/s removed that way by a 3500 Hz move.

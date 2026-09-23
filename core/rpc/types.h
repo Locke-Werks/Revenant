@@ -167,9 +167,10 @@ struct RetuneRemoval {
 };
 
 // What Session.setSourceCenter answers: the centre the device took, and every
-// receiver the move left outside the span. The server has already ended each
-// removed receiver's audio and decoder subscriptions with a reason naming the
-// retune by the time this arrives.
+// receiver the retune removed, whether its centre fell outside the span or its
+// new place in a channel needed a different filter. The server has already
+// ended each removed receiver's audio and decoder subscriptions with the
+// engine's reason by the time this arrives.
 struct SourceRetune {
     std::int64_t granted_hz = 0;
     std::vector<RetuneRemoval> removed;

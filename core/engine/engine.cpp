@@ -727,7 +727,10 @@ public:
         // A failure to re-place is treated the same as being out of range,
         // because it is: place() refuses a receiver the new grid cannot carry,
         // and leaving it registered on a placement that no longer describes it
-        // would be a receiver producing audio from the wrong channel.
+        // would be a receiver producing audio from the wrong channel. The same
+        // goes for a re-place the graph refuses because the new place needs a
+        // different filter; the note on that branch below says how it is
+        // reached.
         SourceRetune out;
         out.center = *landed;
 
@@ -759,28 +762,78 @@ public:
                 const bool reachable =
                     repinned.center >= -half_span && repinned.center <= half_span;
 
-                auto placement = reachable
-                                     ? place(info_.grid, info_.source_rate, repinned)
-                                     : Expected<VrxPlacement>{std::unexpected(
-                                           Error{"the receiver's centre is outside the new span"})};
-                if (!placement) {
-                    // Reported in the answer rather than as a failure, for
-                    // the reason the block above gives: the device has
-                    // already moved. Only a removal that took is reported. A
-                    // refusal means the graph no longer held the receiver,
-                    // so whoever removed it has already accounted for it.
-                    if (graph_->remove_vrx(id)) {
-                        out.removed.push_back(
-                            RetuneRemoval{.id = id, .frequency = was + status->params.center});
-                    }
+                const dsp::Hertz frequency = was + status->params.center;
+                std::string reason;
+                if (!reachable) {
+                    reason = std::format(
+                        "the front end was retuned to {} Hz, which leaves this receiver's centre "
+                        "at {} Hz outside the span, so the engine removed it",
+                        *landed, frequency);
+                } else if (auto placement = place(info_.grid, info_.source_rate, repinned);
+                           !placement) {
+                    reason = std::format(
+                        "the front end was retuned to {} Hz and the receiver at {} Hz could not "
+                        "be placed on the grid from there, so the engine removed it: {}",
+                        *landed, frequency, placement.error().message);
+                } else if (auto held = graph_->set_vrx_params(id, repinned, *placement); !held) {
+                    // THE REFUSAL THAT USED TO BE DISCARDED. Re-queued even
+                    // when the offset did not change, which is the epoch bump
+                    // the declaration argues for, and the graph refuses a
+                    // re-queue that changes the receiver's shape. That is
+                    // reachable for every mode place() narrows rather than
+                    // refuses: AM, DSB, the sidebands and CW get
+                    // channel_rate - 2|residual| of passband, a retune by
+                    // anything but a multiple of the channel spacing moves the
+                    // residual, and the fine filter is designed from the
+                    // narrowed width. Measured on 256 channels over 2 MS/s
+                    // (tests/engine/test_engine_retune.cpp): a 10 kHz AM
+                    // receiver on a channel centre, retuned by 3500 Hz, is
+                    // granted -4312 to 4312 Hz from its new place and its fine
+                    // filter goes from 17 taps to 20. Five of the nine
+                    // receivers in that case were refused this way; DSB, USB,
+                    // CW and an AM receiver whose grant did not move kept
+                    // their shape and came along.
+                    //
+                    // Discarding that left the receiver registered on its OLD
+                    // offset, which after the retune is `moved` hertz from
+                    // where the operator put it, with nothing in the answer
+                    // saying so. That is the ride-along the rebase above
+                    // exists to end.
+                    //
+                    // REMOVED, NOT REBUILT, because the graph cannot rebuild
+                    // a receiver under the same id: describe_shape_change says
+                    // a new shape is a remove and an add, the audio and
+                    // passband sinks live on the recording thread's slot, and
+                    // a new slot starts its audio index and display sequence
+                    // from zero while the completion thread may still be
+                    // delivering the old one's frames. A client that wants the
+                    // receiver back adds one at the frequency in this entry.
+                    // The reason carries the graph's own sentence, which ends
+                    // "a remove and an add", the phrase ui/models/
+                    // receiver_link.cpp matches on a refused set_vrx_params.
+                    // The wire's RetuneRemoval carries no reason yet, so what
+                    // reaches a client today is the server handing this to
+                    // the receiver's subscribers as the reason they ended.
+                    reason = std::format(
+                        "the front end was retuned to {} Hz, which puts the receiver at {} Hz in "
+                        "a different place in its channel and so needs a different filter: {}. "
+                        "The engine removed it rather than leave it {} Hz from where it was put",
+                        *landed, frequency, held.error().message, moved);
+                }
+
+                if (reason.empty()) {
                     continue;
                 }
 
-                // Re-queued rather than left alone even when the offset did not
-                // change, which is the epoch bump the declaration argues for:
-                // every sample after this boundary came from a different
-                // front-end centre.
-                static_cast<void>(graph_->set_vrx_params(id, repinned, *placement));
+                // Reported in the answer rather than as a failure, for the
+                // reason the block above gives: the device has already moved.
+                // Only a removal that took is reported. A refusal means the
+                // graph no longer held the receiver, so whoever removed it has
+                // already accounted for it.
+                if (graph_->remove_vrx(id)) {
+                    out.removed.push_back(RetuneRemoval{
+                        .id = id, .frequency = frequency, .reason = std::move(reason)});
+                }
             }
         }
 

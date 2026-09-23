@@ -371,8 +371,10 @@ struct TuneRange {
     stepHz @2 :Int64;
 }
 
-# One receiver Session::setSourceCenter removed because its centre fell outside
-# the new span.
+# One receiver Session::setSourceCenter removed: its centre fell outside the new
+# span, or its new place in a channel needed a filter the engine will not swap
+# into a running receiver. The server ends the receiver's subscriptions with the
+# engine's sentence saying which; this struct does not carry it.
 struct RetuneRemoval {
     vrx @0 :UInt64;
 

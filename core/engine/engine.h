@@ -119,6 +119,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -535,8 +536,14 @@ struct SourceTuning {
     dsp::Hertz high = 0;
 };
 
-// One receiver a front-end retune took away, because its centre fell outside
-// the new span.
+// One receiver a front-end retune took away.
+//
+// WHAT THIS USED TO SAY: "because its centre fell outside the new span". That
+// was the only cause the engine reported, and not the only one there was. A
+// receiver whose centre stays inside the span can still need a different
+// filter from its new place in a channel, which the graph refuses to apply in
+// place, and until 2026-09-23 that refusal was discarded and the receiver left
+// on its old offset. It is removed now and reported here like the other.
 struct RetuneRemoval {
     VrxId id;
 
@@ -544,6 +551,12 @@ struct RetuneRemoval {
     // its baseband offset, read before the tune. This is the number an
     // operator would recognise, where the id is one only a client holds.
     dsp::Hertz frequency = 0;
+
+    // Why, in a sentence that names the new source centre and this frequency:
+    // outside the span, refused by place() on the new grid, or refused by the
+    // graph because the new place needs a different filter. The last quotes
+    // the graph's own refusal, which ends "a remove and an add".
+    std::string reason;
 };
 
 // What Engine::set_source_center did.
@@ -1277,8 +1290,16 @@ public:
     // receiver left half over the edge keeps running and sounds wrong, and both
     // the passband highlight and the client's own fit sentence already say so.
     //
+    // A receiver still inside the span is removed too when its new place in a
+    // channel needs a different filter. AM, DSB, the sidebands and CW are
+    // narrowed to what their channel carries from where they sit in it, a
+    // retune by anything but a multiple of the channel spacing moves where
+    // that is, and the graph will not swap a running receiver's filter shape.
+    // Leaving it on its old offset instead would put it as far from its
+    // frequency as the front end moved.
+    //
     // The answer carries the centre the device took and every receiver the
-    // retune removed, with the frequency each was on. The retune succeeded,
+    // retune removed, with the frequency each was on and why. The retune succeeded,
     // and a receiver that could not come along is not a failed retune, so a
     // removal is reported beside the success rather than as a failure.
     //

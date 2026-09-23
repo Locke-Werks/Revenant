@@ -2068,11 +2068,17 @@ public:
         auto removed = context.getResults().initRemoved(
             static_cast<unsigned int>(landed->removed.size()));
         for (unsigned int i = 0; i < removed.size(); ++i) {
+            // The engine's own sentence, because the span is no longer the
+            // only cause: a receiver still inside it is removed when its new
+            // place in a channel needs a filter the graph will not swap in
+            // place, and saying "outside the span" then would be false.
             const engine::RetuneRemoval& gone = landed->removed[i];
-            const std::string reason = std::format(
-                "the front end was retuned to {} Hz, which leaves this receiver's centre at {} "
-                "Hz outside the span, so the engine removed it",
-                landed->center, gone.frequency);
+            const std::string reason =
+                !gone.reason.empty()
+                    ? gone.reason
+                    : std::format("the front end was retuned to {} Hz and the engine removed the "
+                                  "receiver at {} Hz",
+                                  landed->center, gone.frequency);
             owner_.after_vrx_removed(gone.id, kj::StringPtr(reason.c_str()));
 
             removed[i].setVrx(gone.id.value);
