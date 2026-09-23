@@ -320,6 +320,10 @@ QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNo
         QSGImageNode* image = window()->createImageNode();
         image->setOwnsTexture(false);
         image->setFiltering(QSGTexture::Nearest);
+
+        // A texture before it joins the tree; see the same line in
+        // render/waterfall_item.cpp for the software renderer crash.
+        image->setTexture(node->textures.front());
         node->tiles->appendChildNode(image);
     }
     while (static_cast<std::size_t>(node->tiles->childCount()) > runs.size()) {

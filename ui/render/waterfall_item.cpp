@@ -759,6 +759,13 @@ QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* 
         // filtering here would smear a one-bin carrier into something that
         // reads as bandwidth.
         image->setFiltering(QSGTexture::Nearest);
+
+        // A texture before it joins the tree, though the loop below sets the
+        // right one. Appending tells the renderer about the node at once,
+        // and the software scene graph, which the offscreen platform uses,
+        // reads the texture then and crashed on a null one; the hardware
+        // renderer waits for the next sync and never noticed.
+        image->setTexture(node->textures.front());
         node->tiles->appendChildNode(image);
     }
     while (static_cast<std::size_t>(node->tiles->childCount()) > runs.size()) {
