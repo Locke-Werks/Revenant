@@ -40,6 +40,17 @@
 // caller hands back what it was told last time. That keeps the function
 // pure, which is what lets a test drive the whole trajectory rather than
 // one point on it.
+//
+// BEHIND NOW, OR NOT AT ALL
+//
+// The engine's factor was a mean over the whole run until 2026-09-23, and
+// an RTL-SDR stops for about 330 ms around every retune, so on the owner's
+// dongle the line came up after a few tunes and never went away while the
+// audio was fine. The engine now measures the last two seconds, with its own
+// retune pauses excused, and says so in realtimeWindowSeconds; see
+// core/engine/pacing_window.h. The sentence names that window, and a factor
+// that comes with no window is an old engine's lifetime mean, which is
+// WholeRun and says nothing rather than calling a source behind that is not.
 
 #pragma once
 
@@ -72,6 +83,13 @@ struct PacingSample {
     double realtime_factor = 0.0;
     bool carried = false;
 
+    // The wall seconds the factor covers, EngineInfo's
+    // realtimeWindowSeconds: about two, from an engine that measures the
+    // source as it is now. Zero from one that measured over the whole run,
+    // which charged every RTL-SDR retune's 330 ms pause to the source for
+    // good and cannot say whether it is behind now.
+    double window_seconds = 0.0;
+
     // The --pace setting the source was started with, 0 for unthrottled.
     double paced_by = 0.0;
 
@@ -88,6 +106,12 @@ enum class PacingVerdict : std::uint8_t {
 
     // It carries it and has not measured yet, or the engine is stopped.
     Unmeasured,
+
+    // It carries only a mean over the whole run, which says nothing about
+    // now: a source that stalled a minute ago, or an RTL-SDR retuned a dozen
+    // times, reads low on it for good. No line, rather than a fault that
+    // is not there.
+    WholeRun,
 
     // Unthrottled and keeping up.
     Realtime,
@@ -115,6 +139,9 @@ enum class PacingVerdict : std::uint8_t {
     }
     if (!sample.engine_running || !(sample.realtime_factor > 0.0)) {
         return PacingVerdict::Unmeasured;
+    }
+    if (!(sample.window_seconds > 0.0)) {
+        return PacingVerdict::WholeRun;
     }
 
     // Against the pace that was asked for, which is 1.0 when nobody asked
@@ -165,6 +192,14 @@ namespace detail {
     return out;
 }
 
+// One decimal and an s, for the window a factor covers: "2.0 s".
+[[nodiscard]] inline std::string seconds_text(double value)
+{
+    const double magnitude = value < 0.0 ? 0.0 : value;
+    const auto tenths = static_cast<std::int64_t>(magnitude * 10.0 + 0.5);
+    return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + " s";
+}
+
 }  // namespace detail
 
 // The sentence, or empty when there is nothing to say.
@@ -184,13 +219,15 @@ namespace detail {
     switch (verdict) {
         case PacingVerdict::NotCarried:
         case PacingVerdict::Unmeasured:
+        case PacingVerdict::WholeRun:
         case PacingVerdict::Realtime:
             return {};
 
         case PacingVerdict::Behind:
-            return "the source is behind: capture is running at " +
-                   detail::factor_text(sample.realtime_factor) +
-                   " realtime, so the gaps are upstream of the audio path.";
+            return "the source is behind: capture ran at " +
+                   detail::factor_text(sample.realtime_factor) + " realtime over the last " +
+                   detail::seconds_text(sample.window_seconds) +
+                   ", so the gaps are upstream of the audio path.";
 
         case PacingVerdict::Ahead:
             return "capture is running at " + detail::factor_text(sample.realtime_factor) +
@@ -202,8 +239,9 @@ namespace detail {
 
         case PacingVerdict::PacedAndBehind:
             return "the source is behind: it was paced at " +
-                   detail::factor_text(sample.paced_by) + " and is running at " +
-                   detail::factor_text(sample.realtime_factor) +
+                   detail::factor_text(sample.paced_by) + " and ran at " +
+                   detail::factor_text(sample.realtime_factor) + " over the last " +
+                   detail::seconds_text(sample.window_seconds) +
                    ", so the gaps are upstream of the audio path.";
     }
     return {};

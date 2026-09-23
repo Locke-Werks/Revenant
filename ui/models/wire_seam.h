@@ -176,6 +176,20 @@ template <typename I = rpc::EngineInfo>
     }
 }
 
+// The seconds the factor above covers. Zero, or nothing on a wire without the
+// field, is an engine that measured over the whole run, whose factor cannot
+// say whether the source is behind now.
+template <typename I = rpc::EngineInfo>
+[[nodiscard]] std::optional<double> seam_realtime_window_seconds(const I& info)
+{
+    if constexpr (requires { info.realtime_window_seconds; }) {
+        return static_cast<double>(info.realtime_window_seconds);
+    } else {
+        static_cast<void>(info);
+        return std::nullopt;
+    }
+}
+
 // The --pace setting, 0 for unthrottled.
 template <typename I = rpc::EngineInfo>
 [[nodiscard]] double seam_source_paced_by(const I& info)

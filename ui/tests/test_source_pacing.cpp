@@ -29,6 +29,7 @@ namespace {
     PacingSample sample;
     sample.realtime_factor = factor;
     sample.carried = true;
+    sample.window_seconds = 2.0;
     sample.paced_by = paced;
     sample.engine_running = true;
     return sample;
@@ -56,8 +57,53 @@ TEST_CASE("the bench case is called behind and says where to look", "[pacing]")
     CHECK(pacing_is_fault(verdict));
 
     const std::string text = pacing_sentence(verdict, sample);
-    CHECK(text == "the source is behind: capture is running at 0.20x realtime, "
+    CHECK(text == "the source is behind: capture ran at 0.20x realtime over the last 2.0 s, "
                   "so the gaps are upstream of the audio path.");
+}
+
+// Rejects a client that calls a source behind on a mean over the whole run,
+// which is what an engine built before realtimeWindowSeconds sends. On the
+// owner's RTL-SDR that mean lost a third of a second for every retune and
+// never got it back, so "source behind" came up after a few tunes and stayed
+// while the audio was fine. The line is for a source that is behind now.
+TEST_CASE("a mean over the whole run is not called behind", "[pacing]")
+{
+    PacingSample sample = running(0.83);
+    sample.window_seconds = 0.0;
+
+    const PacingVerdict verdict = fresh(sample);
+    CHECK(verdict == PacingVerdict::WholeRun);
+    CHECK_FALSE(pacing_is_fault(verdict));
+    CHECK(pacing_sentence(verdict, sample).empty());
+
+    // Including one that was showing behind when the engine behind it
+    // changed.
+    CHECK(classify_pacing(sample, PacingVerdict::Behind) == PacingVerdict::WholeRun);
+}
+
+// Rejects a sentence that states a rate with no span, which an operator
+// reads as the rate now whatever it was measured over.
+TEST_CASE("the behind sentence names the window it was measured over", "[pacing]")
+{
+    PacingSample sample = running(0.84);
+    sample.window_seconds = 2.1;
+    CHECK(pacing_sentence(fresh(sample), sample).find("over the last 2.1 s") !=
+          std::string::npos);
+}
+
+// A stall the engine did not ask for, read once a second the way the client
+// polls it: two seconds of the dip and then the engine's window has passed
+// it. Rejects a verdict that holds on after the figure has come back, which
+// is the lifetime mean's failure moved into the client.
+TEST_CASE("a stall's line goes when the window has passed it", "[pacing]")
+{
+    PacingVerdict verdict = PacingVerdict::Realtime;
+    for (const double factor : {1.0, 0.84, 0.85}) {
+        verdict = classify_pacing(running(factor), verdict);
+    }
+    CHECK(verdict == PacingVerdict::Behind);
+    verdict = classify_pacing(running(0.9995), verdict);
+    CHECK(verdict == PacingVerdict::Realtime);
 }
 
 TEST_CASE("an engine with no such field says nothing at all", "[pacing]")
@@ -133,8 +179,8 @@ TEST_CASE("a paced source can still be behind its own pace", "[pacing]")
     CHECK(verdict == PacingVerdict::PacedAndBehind);
     CHECK(pacing_is_fault(verdict));
     CHECK(pacing_sentence(verdict, sample) ==
-          "the source is behind: it was paced at 0.50x and is running at 0.20x, "
-          "so the gaps are upstream of the audio path.");
+          "the source is behind: it was paced at 0.50x and ran at 0.20x over the last "
+          "2.0 s, so the gaps are upstream of the audio path.");
 
     // And one holding its pace within the band is not.
     CHECK(fresh(running(0.495, 0.50)) == PacingVerdict::Paced);

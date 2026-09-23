@@ -321,6 +321,7 @@ void EngineLink::poll_source_pacing(bool engine_running)
     PacingSample sample;
     sample.carried = true;
     sample.realtime_factor = seam_realtime_factor(*info).value_or(0.0);
+    sample.window_seconds = seam_realtime_window_seconds(*info).value_or(0.0);
     sample.paced_by = seam_source_paced_by(*info);
     // Passed in rather than read off the handover. The running flag lives
     // under state_mutex_ and belongs to the connection hand-off; the one
@@ -337,6 +338,7 @@ void EngineLink::poll_source_pacing(bool engine_running)
     // doing it twice would make the rule the test drives not the rule the
     // window runs.
     if (sample.realtime_factor == posted_pacing_.realtime_factor &&
+        sample.window_seconds == posted_pacing_.window_seconds &&
         sample.paced_by == posted_pacing_.paced_by &&
         sample.carried == posted_pacing_.carried &&
         sample.engine_running == posted_pacing_.engine_running) {
