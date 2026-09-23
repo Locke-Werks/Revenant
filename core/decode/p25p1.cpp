@@ -55,6 +55,13 @@ double p25_receive_response(double hertz, const void* /*context*/) {
     return sinc * 0.5 * (1.0 + std::cos(kPi * t));
 }
 
+// The smallest sync word gain, against the nominal deviation, that is taken as
+// P25. An engineering choice: below a tenth of Table 9-1's deviation the
+// division that restores the levels multiplies the noise by more than ten,
+// and nothing a real transmitter does puts it there. What arrives that weak is
+// a correlation on something else.
+constexpr double kMinimumSyncGain = 0.1;
+
 // Nearest of the four Table 9-1 levels.
 std::uint8_t slice_dibit(float value) {
     const double v = static_cast<double>(value);
@@ -309,6 +316,17 @@ Expected<P25Phase1> P25Phase1::create(const P25Config& config) {
                                             "designing the clause 9.6 integrate and dump filter"));
     }
 
+    auto filter = RealFir::create(std::move(*taps));
+    if (!filter) {
+        return std::unexpected(with_context(filter.error(), "building the P25 receive filter"));
+    }
+
+    auto discriminator = FmDiscriminator::create(config.rate);
+    if (!discriminator) {
+        return std::unexpected(
+            with_context(discriminator.error(), "building the P25 frequency detector"));
+    }
+
     SymbolSyncConfig sync_config;
     sync_config.rate = config.rate;
     sync_config.symbol_rate = kP25SymbolRate;
@@ -320,20 +338,26 @@ Expected<P25Phase1> P25Phase1::create(const P25Config& config) {
 
     P25Phase1 decoder;
     decoder.config_ = config;
-    decoder.filter_taps_ = std::move(*taps);
+    decoder.discriminator_ = *discriminator;
+    decoder.filter_ = std::move(*filter);
     decoder.sync_ = std::move(*sync);
     return decoder;
 }
 
 void P25Phase1::reset() {
+    discriminator_.reset();
+    filter_.reset();
     sync_.reset();
     symbols_.clear();
     last_symbols_.clear();
     consumed_ = 0;
+    trimmed_ = 0;
+    wait_until_ = 0;
 }
 
 Expected<P25Phase1::Outcome> P25Phase1::decode_at(std::size_t offset, bool inverted,
-                                                  double score, P25Frame& out) const {
+                                                  double score, P25Frame& out,
+                                                  std::size_t& wait_until) const {
     // The shortest data unit that carries a NID is the sync word plus the NID
     // plus the status symbol that falls inside them.
     const std::size_t minimum = kP25FrameSyncSymbols + kP25NidSymbols + 1;
@@ -341,13 +365,28 @@ Expected<P25Phase1::Outcome> P25Phase1::decode_at(std::size_t offset, bool inver
         return fail("not enough symbols for a Network Identifier");
     }
 
+    // The carrier offset and the deviation, measured on this data unit's own
+    // sync word. A carrier offset reaches here as a constant added to every
+    // symbol and a deviation error as a scale, and the sync word's 24 symbols
+    // are known, so fitting a line from what was sent to what arrived gives
+    // both before a single unknown symbol is sliced. An inverted
+    // discriminator comes out as a negative gain, which the division below
+    // undoes along with the rest.
+    const std::array<float, kP25FrameSyncSymbols> pattern = p25_frame_sync_pattern();
+    auto fit = fit_levels(symbols_, pattern, offset);
+    if (!fit) {
+        return std::unexpected(with_context(fit.error(), "measuring the sync word's levels"));
+    }
+    if (!(std::abs(fit->gain) > kMinimumSyncGain)) {
+        return fail(std::format("a sync word at gain {} carries no usable deviation", fit->gain));
+    }
+    const LevelFit levels = *fit;
+
     const auto read_dibits = [&](std::size_t count) {
         std::vector<float> raw(symbols_.begin() + static_cast<std::ptrdiff_t>(offset),
                                symbols_.begin() + static_cast<std::ptrdiff_t>(offset + count));
-        if (inverted) {
-            for (float& value : raw) {
-                value = -value;
-            }
+        for (float& value : raw) {
+            value = static_cast<float>((static_cast<double>(value) - levels.level) / levels.gain);
         }
         const std::vector<float> information = p25_strip_status_symbols(raw);
         std::vector<std::uint8_t> dibits;
@@ -376,6 +415,7 @@ Expected<P25Phase1::Outcome> P25Phase1::decode_at(std::size_t offset, bool inver
     // and whole rather than reported short and then stepped over.
     const std::size_t unit = p25_data_unit_symbols(nid->duid);
     if (unit != 0 && offset + unit > symbols_.size()) {
+        wait_until = trimmed_ + offset + unit;
         return Outcome::NeedMore;
     }
     // A packet data unit sizes itself from a header this file does not
@@ -388,9 +428,11 @@ Expected<P25Phase1::Outcome> P25Phase1::decode_at(std::size_t offset, bool inver
     out.nid.network_access_code = nid->nac;
     out.nid.duid = nid->duid;
     out.nid.corrected_bits = nid->corrected_bits;
-    out.first_symbol = offset;
+    out.first_symbol = trimmed_ + offset;
     out.sync_score = score;
     out.inverted = inverted;
+    out.carrier_offset_hz = levels.level * kP25DeviationPerSymbolUnitHz;
+    out.deviation_ratio = std::abs(levels.gain);
 
     const auto type = static_cast<P25Duid>(nid->duid);
     if (type == P25Duid::LogicalLinkDataUnit1 || type == P25Duid::LogicalLinkDataUnit2) {
@@ -465,36 +507,35 @@ Status P25Phase1::process(ConstComplexSpan samples, std::vector<P25Frame>& out) 
         return {};
     }
 
-    discriminated_.assign(samples.size(), 0.0F);
-    if (auto status = fm_discriminate(samples, discriminated_, config_.rate); !status) {
+    // Every stage from here to the symbols carries its state across calls, so
+    // the symbols a stream produces do not depend on how it was blocked. Until
+    // 2026-09-22 the first two did not: each call restarted the discriminator
+    // against 1+0i and the filter from zeros, and subtracted the call's own
+    // mean as its carrier offset. tests/decode/test_p25p1_blocking.cpp has
+    // what each of the three cost.
+    discriminated_.resize(samples.size());
+    if (auto status = discriminator_.process(samples, discriminated_); !status) {
         return std::unexpected(with_context(status.error(), "P25 frequency discrimination"));
     }
 
-    filtered_.assign(discriminated_.size(), 0.0F);
-    if (auto status = filter_real(discriminated_, filter_taps_, filtered_); !status) {
+    filtered_.resize(discriminated_.size());
+    if (auto status = filter_.process(discriminated_, filtered_); !status) {
         return std::unexpected(with_context(status.error(), "P25 receive filtering"));
     }
 
-    // A carrier offset appears as a constant in the discriminator output, so
-    // removing the block's mean is the automatic frequency control every C4FM
-    // receiver needs. Over a whole data unit the four symbol levels are close
-    // to balanced, which is what makes the mean an estimate of the offset
-    // rather than of the data.
-    double mean = 0.0;
-    for (const float value : filtered_) {
-        mean += static_cast<double>(value);
-    }
-    mean /= static_cast<double>(filtered_.size());
-
     // Scale so a Table 9-1 symbol comes out at its symbol-column value.
+    //
+    // No carrier offset is removed here. It reaches the symbols as a constant,
+    // the sync search below is blind to a constant, and decode_at measures it
+    // on each data unit's own sync word before slicing anything.
     const auto scale = static_cast<float>(1.0 / kP25DeviationPerSymbolUnitHz);
-    std::vector<Complex32> shaped(filtered_.size());
+    shaped_.resize(filtered_.size());
     for (std::size_t i = 0; i < filtered_.size(); ++i) {
-        shaped[i] = Complex32{(filtered_[i] - static_cast<float>(mean)) * scale, 0.0F};
+        shaped_[i] = Complex32{filtered_[i] * scale, 0.0F};
     }
 
     recovered_.clear();
-    sync_.process(shaped, recovered_);
+    sync_.process(shaped_, recovered_);
     for (const RecoveredSymbol& symbol : recovered_) {
         symbols_.push_back(symbol.value.real());
     }
@@ -503,16 +544,23 @@ Status P25Phase1::process(ConstComplexSpan samples, std::vector<P25Frame>& out) 
     const std::array<float, kP25FrameSyncSymbols> pattern = p25_frame_sync_pattern();
     const std::size_t minimum = kP25FrameSyncSymbols + kP25NidSymbols + 1;
 
+    // A data unit already found and waiting for the rest of its symbols is
+    // not decoded again until they are all here. The answer could not change
+    // before then, and the NID decode it would repeat searches all 65536 code
+    // words. Fed one sample a call, the 2.4 s capture in
+    // tests/decode/test_p25p1_blocking.cpp took 16.2 s repeating it and takes
+    // 36 ms without, in the ci preset's build.
     std::size_t position = consumed_;
-    while (position + minimum <= symbols_.size()) {
-        const double score = correlation_at(symbols_, pattern, position);
+    const bool waiting = trimmed_ + symbols_.size() < wait_until_;
+    while (!waiting && position + minimum <= symbols_.size()) {
+        const double score = centred_correlation_at(symbols_, pattern, position);
         if (std::abs(score) < config_.sync_threshold) {
             ++position;
             continue;
         }
 
         P25Frame frame;
-        auto outcome = decode_at(position, score < 0.0, score, frame);
+        auto outcome = decode_at(position, score < 0.0, score, frame, wait_until_);
         if (!outcome) {
             // The loop condition already guarantees a NID's worth of symbols,
             // so this is a decode that cannot succeed here however long it
@@ -545,6 +593,7 @@ Status P25Phase1::process(ConstComplexSpan samples, std::vector<P25Frame>& out) 
         const std::size_t drop = consumed_ - keep;
         symbols_.erase(symbols_.begin(), symbols_.begin() + static_cast<std::ptrdiff_t>(drop));
         consumed_ -= drop;
+        trimmed_ += drop;
     }
     return {};
 }

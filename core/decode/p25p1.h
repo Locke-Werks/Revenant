@@ -371,15 +371,31 @@ struct P25Frame {
     // its (16,8,5) code word was within the two errors the code corrects.
     std::array<std::optional<std::uint8_t>, kP25LduLsdOctets> low_speed_data{};
 
-    // Index into the symbol run at which this frame's sync word starts.
+    // The recovered symbol at which this frame's sync word starts, counted
+    // from the first symbol of the stream since create() or reset(), however
+    // many process() calls it took to get there.
+    //
+    // WHAT THIS USED TO SAY, until 2026-09-22: "Index into the symbol run at
+    // which this frame's sync word starts." The run was the decoder's own
+    // buffer, trimmed as the stream goes by, so the same frame had a
+    // different number under a different blocking.
     std::size_t first_symbol = 0;
 
-    // Normalised correlation the sync word scored, and whether it matched
-    // inverted. An inverted match means the discriminator polarity is
-    // reversed, which depends on which sideband the tuner landed on and is
-    // corrected here rather than reported as a failure.
+    // Centred correlation the sync word scored (dv_phy.h,
+    // centred_correlation_at), and whether it matched inverted. An inverted
+    // match means the discriminator polarity is reversed, which depends on
+    // which sideband the tuner landed on and is corrected here rather than
+    // reported as a failure.
     double sync_score = 0.0;
     bool inverted = false;
+
+    // What the sync word said about the carrier, measured by fitting its 24
+    // known symbols (dv_phy.h, fit_levels) and used to slice everything after
+    // it: the offset of the carrier from DC as the discriminator sees it, and
+    // the deviation against Table 9-1's nominal, 1.0 for a transmitter on
+    // specification.
+    double carrier_offset_hz = 0.0;
+    double deviation_ratio = 1.0;
 
     // Every information dibit of the data unit after the status symbols are
     // removed, including the sync word and the NID, one dibit per byte in the
@@ -450,23 +466,33 @@ class P25Phase1 {
     // named a data unit longer than the symbols held so far.
     enum class Outcome : std::uint8_t { Complete, NeedMore };
 
+    // On NeedMore, `wait_until` is set to the stream symbol count at which the
+    // data unit will be whole.
     [[nodiscard]] Expected<Outcome> decode_at(std::size_t offset, bool inverted, double score,
-                                              P25Frame& out) const;
+                                              P25Frame& out, std::size_t& wait_until) const;
 
     P25Config config_{};
-    std::vector<float> filter_taps_;
+    FmDiscriminator discriminator_{};
+    RealFir filter_{};
     SymbolSync sync_{};
 
     // Soft symbols carried across calls, with everything before the last
-    // possible frame start trimmed off.
+    // possible frame start trimmed off, and how many have been trimmed, so a
+    // frame's position can be given from the start of the stream.
     std::vector<float> symbols_;
     std::vector<float> last_symbols_;
     std::size_t consumed_ = 0;
+    std::size_t trimmed_ = 0;
+
+    // The stream symbol count before which the data unit at consumed_ cannot
+    // be whole, or zero when none is waiting.
+    std::size_t wait_until_ = 0;
 
     // Scratch, kept so the hot path does not allocate per block.
     std::vector<RecoveredSymbol> recovered_;
     std::vector<float> discriminated_;
     std::vector<float> filtered_;
+    std::vector<Complex32> shaped_;
 };
 
 // The frame sync word as soft symbol values, for a correlator. Table 8-1 read
