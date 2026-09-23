@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <utility>
 
 #include <QHoverEvent>
@@ -16,6 +17,9 @@
 #include <QSGGeometryNode>
 #include <QSGNode>
 #include <QSGRectangleNode>
+
+#include "models/key_actions.h"
+#include "models/key_map.h"
 
 namespace revenant::ui {
 namespace {
@@ -910,6 +914,32 @@ void PassbandItem::wheelEvent(QWheelEvent* event)
     event->accept();
 }
 
+// The keys are models/key_actions.h's, looked up there rather than written
+// here, so the key map, the palette and this display cannot disagree about
+// them. The steps the key map prints are that header's, and these must be the
+// same numbers or it prints a step the keys do not take.
+static_assert(kPassbandStepHz == kFilterKeyStepHz);
+static_assert(kPassbandCoarseStepHz == kFilterKeyCoarseStepHz);
+static_assert(kPassbandFineStepHz == kFilterKeyFineStepHz);
+
+bool PassbandItem::event(QEvent* event)
+{
+    // A key this display uses is claimed before the window's shortcuts see
+    // it, so a shortcut can never take a key out from under the display that
+    // has focus. The table's own test keeps the two sets apart; this is what
+    // makes the display win if they ever meet.
+    if (event->type() == QEvent::ShortcutOverride) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        if (link_ != nullptr && link_->receiverId() != 0 &&
+            find_key(KeyContext::Filter, key_chord(key->key(), key->modifiers())).action !=
+                nullptr) {
+            key->accept();
+            return true;
+        }
+    }
+    return QQuickItem::event(event);
+}
+
 void PassbandItem::keyPressEvent(QKeyEvent* event)
 {
     if (link_ == nullptr || link_->receiverId() == 0) {
@@ -917,34 +947,40 @@ void PassbandItem::keyPressEvent(QKeyEvent* event)
         return;
     }
 
+    const KeyHit hit = find_key(KeyContext::Filter, key_chord(event->key(), event->modifiers()));
+    const auto command = hit.action != nullptr ? passband_command(hit.action->id) : std::nullopt;
+    if (!command) {
+        event->ignore();
+        return;
+    }
+
     // One keystroke is one call, with no throttle. They are far too rare to
     // need one, and a throttle would swallow the last of a held repeat,
     // which is the keystroke the operator was watching for.
-    const int step = event->modifiers().testFlag(Qt::ShiftModifier)  ? kPassbandCoarseStepHz
-                     : event->modifiers().testFlag(Qt::ControlModifier)
-                         ? kPassbandFineStepHz
-                         : kPassbandStepHz;
+    int step = kPassbandStepHz;
+    switch (hit.scale) {
+        case KeyScale::Normal: step = kPassbandStepHz; break;
+        case KeyScale::Coarse: step = kPassbandCoarseStepHz; break;
+        case KeyScale::Fine: step = kPassbandFineStepHz; break;
+    }
 
-    switch (event->key()) {
-        case Qt::Key_BracketLeft: setSelectedEdge(QStringLiteral("low")); break;
-        case Qt::Key_BracketRight: setSelectedEdge(QStringLiteral("high")); break;
-        case Qt::Key_Backslash: setSelectedEdge(QStringLiteral("both")); break;
+    switch (*command) {
+        case PassbandCommand::SelectLow: setSelectedEdge(QStringLiteral("low")); break;
+        case PassbandCommand::SelectHigh: setSelectedEdge(QStringLiteral("high")); break;
+        case PassbandCommand::SelectBoth: setSelectedEdge(QStringLiteral("both")); break;
 
-        case Qt::Key_Left: nudgeSelectedEdge(-step); break;
-        case Qt::Key_Right: nudgeSelectedEdge(step); break;
+        case PassbandCommand::MoveDown: nudgeSelectedEdge(-step); break;
+        case PassbandCommand::MoveUp: nudgeSelectedEdge(step); break;
 
-        case Qt::Key_Up:
-        case Qt::Key_Down: {
-            // Widen and narrow symmetrically, whatever the selection. The
-            // two arrows that do not move an edge sideways are the obvious
-            // place for the gesture an AM or NFM operator reaches for most.
-            widenPassband(event->key() == Qt::Key_Up ? step : -step);
-            break;
-        }
+        // Widen and narrow symmetrically, whatever the selection. The two
+        // arrows that do not move an edge sideways are the obvious place for
+        // the gesture an AM or NFM operator reaches for most.
+        case PassbandCommand::Widen: widenPassband(step); break;
+        case PassbandCommand::Narrow: widenPassband(-step); break;
 
-        case Qt::Key_Home: resetPassband(); break;
+        case PassbandCommand::Reset: resetPassband(); break;
 
-        case Qt::Key_Escape:
+        case PassbandCommand::Cancel:
             if (grab_ != PassbandGrab::None) {
                 // Cancels the drag and puts back what it started from. The
                 // gesture is undone rather than merely stopped, which is
@@ -961,8 +997,6 @@ void PassbandItem::keyPressEvent(QKeyEvent* event)
                 update();
             }
             break;
-
-        default: event->ignore(); return;
     }
 
     event->accept();

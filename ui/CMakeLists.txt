@@ -167,6 +167,7 @@ qt_add_executable(revenant_ui
     models/band_plan.h
     models/frequency_dial.h
     models/key_actions.h
+    models/key_map.h
     models/key_steps.h
     models/level_meter.h
     models/mode_choice.h

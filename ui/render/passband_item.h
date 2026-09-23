@@ -197,6 +197,10 @@ protected:
     void hoverLeaveEvent(QHoverEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
 
+    // Claims the display's own keys before the window's shortcuts see them.
+    // See models/key_actions.h for which keys those are.
+    bool event(QEvent* event) override;
+
     // The wheel moves the receiver, one round step a notch; see
     // EngineLink::takeReceiverScroll and models/receiver_scroll.h. Either
     // axis, vertical first, the way the span displays resolve it.
