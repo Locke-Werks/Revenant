@@ -196,6 +196,50 @@ constexpr dsp::Hertz kRtl2832XtalHz = 28'800'000;
     return std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch).count();
 }
 
+// A librtlsdr return code, with libusb's name for it where it has one.
+//
+// librtlsdr hands back the code of the libusb call that failed, so -9 at a
+// retune is libusb's LIBUSB_ERROR_PIPE, a stalled control transfer, and -3 at
+// an open is LIBUSB_ERROR_ACCESS, the device held by another process. The
+// values are the ones libusb.h publishes. Some librtlsdr calls also return
+// small negatives of their own, -1 for no device and -2 for a call made in the
+// wrong state, and those collide with libusb's -1 and -2, so the name is given
+// as what libusb would mean rather than as a certainty.
+[[nodiscard]] std::string rc_text(int rc)
+{
+    std::string_view name;
+    switch (rc) {
+        case -1: name = "LIBUSB_ERROR_IO"; break;
+        case -2: name = "LIBUSB_ERROR_INVALID_PARAM"; break;
+        case -3: name = "LIBUSB_ERROR_ACCESS"; break;
+        case -4: name = "LIBUSB_ERROR_NO_DEVICE"; break;
+        case -5: name = "LIBUSB_ERROR_NOT_FOUND"; break;
+        case -6: name = "LIBUSB_ERROR_BUSY"; break;
+        case -7: name = "LIBUSB_ERROR_TIMEOUT"; break;
+        case -8: name = "LIBUSB_ERROR_OVERFLOW"; break;
+        case -9: name = "LIBUSB_ERROR_PIPE"; break;
+        case -10: name = "LIBUSB_ERROR_INTERRUPTED"; break;
+        case -11: name = "LIBUSB_ERROR_NO_MEM"; break;
+        case -12: name = "LIBUSB_ERROR_NOT_SUPPORTED"; break;
+        case -99: name = "LIBUSB_ERROR_OTHER"; break;
+        default: break;
+    }
+    if (name.empty()) {
+        return std::format("{}", rc);
+    }
+    return std::format("{} ({} if libusb produced it)", rc, name);
+}
+
+// Said when a control transfer was retried, so a refusal after a pause reads
+// as the last of several rather than as the first.
+[[nodiscard]] std::string attempts_text(int attempts)
+{
+    if (attempts <= 1) {
+        return {};
+    }
+    return std::format(" on each of {} attempts", attempts);
+}
+
 [[nodiscard]] std::string rate_ranges_text()
 {
     return std::format("{} to {} S/s and {} to {} S/s", kRtlSdrLowRateMin, kRtlSdrLowRateMax,
@@ -379,8 +423,9 @@ private:
             "one by position instead.",
             config.serial, attached));
     }
-    return fail(std::format("librtlsdr could not look up the serial '{}' (it returned {})",
-                            config.serial, found),
+    return fail(std::format("librtlsdr could not look up the serial '{}': "
+                            "rtlsdr_get_index_by_serial returned {}",
+                            config.serial, rc_text(found)),
                 found);
 }
 
@@ -390,10 +435,10 @@ private:
     const int rc = rtlsdr_open(&handle, index);
     if (rc != 0 || handle == nullptr) {
         return fail(std::format(
-            "could not open the RTL-SDR at index {}: librtlsdr returned {}. A device that "
+            "could not open the RTL-SDR at index {}: rtlsdr_open returned {}. A device that "
             "enumerates and will not open is almost always held by another program, or has an "
             "interface that libwdi has not bound to WinUSB.",
-            index, rc),
+            index, rc_text(rc)),
             rc);
     }
     return Device(handle);
@@ -559,6 +604,19 @@ public:
     [[nodiscard]] ClockQuality clock() const override;
 
 private:
+    // Every failure that leaves through a public call names the device, so a
+    // refusal read in a log or a window says which dongle refused as well as
+    // which librtlsdr call did. The steps below name the call; this names the
+    // radio, once, at the edge.
+    template <typename T>
+    [[nodiscard]] Expected<T> named(Expected<T> result) const
+    {
+        if (!result) {
+            return std::unexpected(with_context(std::move(result.error()), caps_.display_name));
+        }
+        return result;
+    }
+
     static void usb_callback(unsigned char* buffer, std::uint32_t bytes, void* context);
 
     void on_transfer(const std::uint8_t* data, std::uint32_t bytes);
@@ -622,8 +680,8 @@ private:
             flush_failed = Error{
                 std::format("the device's sample buffer could not be flushed after a control "
                             "change, so the stream resumes with up to a buffer of samples "
-                            "digitised before it: librtlsdr returned {}",
-                            rc),
+                            "digitised before it: rtlsdr_reset_buffer returned {}",
+                            rc_text(rc)),
                 rc};
         }
 
@@ -792,10 +850,8 @@ Expected<dsp::Hertz> RtlSdrSource::tune(dsp::Hertz center)
     // cases, which is where the numbers above come from and how a later
     // librtlsdr, or a dongle that does not have this problem, gets checked
     // rather than assumed.
-    if (running_.load(std::memory_order_acquire)) {
-        return retune_streaming_locked(center);
-    }
-    return tune_locked(center, 1);
+    return named(running_.load(std::memory_order_acquire) ? retune_streaming_locked(center)
+                                                          : tune_locked(center, 1));
 }
 
 // One attempt for a dongle that is not streaming and several for one that has
@@ -815,7 +871,9 @@ Expected<dsp::Hertz> RtlSdrSource::tune_locked(dsp::Hertz center, int attempts)
         }
     }
     if (rc != 0) {
-        return fail(std::format("the tuner refused {} Hz: librtlsdr returned {}", center, rc), rc);
+        return fail(std::format("the tuner refused {} Hz: rtlsdr_set_center_freq returned {}{}",
+                                center, rc_text(rc), attempts_text(attempts)),
+                    rc);
     }
 
     // Read back rather than echoed, and what comes back is the device's own
@@ -941,7 +999,10 @@ Expected<dsp::SampleRate> RtlSdrSource::set_sample_rate(dsp::SampleRate rate)
 
     if (const int rc = rtlsdr_set_sample_rate(device_.get(), static_cast<std::uint32_t>(rate));
         rc != 0) {
-        return fail(std::format("the device refused {} S/s: librtlsdr returned {}", rate, rc), rc);
+        return fail(std::format("{}: the device refused {} S/s: rtlsdr_set_sample_rate "
+                                "returned {}",
+                                caps_.display_name, rate, rc_text(rc)),
+                    rc);
     }
 
     // The RTL2832U resamples with a fractional divider off a 28.8 MHz
@@ -949,9 +1010,9 @@ Expected<dsp::SampleRate> RtlSdrSource::set_sample_rate(dsp::SampleRate rate)
     // What comes back is what the samples were actually taken at.
     const std::uint32_t achieved = rtlsdr_get_sample_rate(device_.get());
     if (achieved == 0) {
-        return fail(std::format("the device reported a sample rate of zero after being set to {} "
-                                "S/s, which rtl-sdr.h documents as its error return",
-                                rate));
+        return fail(std::format("{}: the device reported a sample rate of zero after being set "
+                                "to {} S/s, which rtl-sdr.h documents as its error return",
+                                caps_.display_name, rate));
     }
 
     rate_ = static_cast<dsp::SampleRate>(achieved);
@@ -982,10 +1043,10 @@ Expected<double> RtlSdrSource::set_gain(std::string_view stage, double db)
     // gives: these are the same I2C-repeater transfers a retune uses and the
     // platform stalls them the same way.
     if (running_.load(std::memory_order_acquire)) {
-        return with_transfers_paused(
-            [this, db] { return set_gain_locked(db, kRetunePipeRetries); });
+        return named(with_transfers_paused(
+            [this, db] { return set_gain_locked(db, kRetunePipeRetries); }));
     }
-    return set_gain_locked(db, 1);
+    return named(set_gain_locked(db, 1));
 }
 
 Expected<double> RtlSdrSource::set_gain_locked(double db, int attempts)
@@ -1001,9 +1062,9 @@ Expected<double> RtlSdrSource::set_gain_locked(double db, int attempts)
         }
     }
     if (mode_rc != 0) {
-        return fail(std::format("could not put the tuner into manual gain mode: librtlsdr "
-                                "returned {}",
-                                mode_rc),
+        return fail(std::format("could not put the tuner into manual gain mode: "
+                                "rtlsdr_set_tuner_gain_mode returned {}{}",
+                                rc_text(mode_rc), attempts_text(attempts)),
                     mode_rc);
     }
 
@@ -1015,8 +1076,10 @@ Expected<double> RtlSdrSource::set_gain_locked(double db, int attempts)
         }
     }
     if (gain_rc != 0) {
-        return fail(std::format("the tuner refused a gain of {} dB: librtlsdr returned {}",
-                                static_cast<double>(landed) / 10.0, gain_rc),
+        return fail(std::format("the tuner refused a gain of {} dB: rtlsdr_set_tuner_gain "
+                                "returned {}{}",
+                                static_cast<double>(landed) / 10.0, rc_text(gain_rc),
+                                attempts_text(attempts)),
                     gain_rc);
     }
 
@@ -1045,10 +1108,10 @@ Status RtlSdrSource::set_gain_auto(std::string_view stage, bool on)
     // same class of transfer as a retune, and it was going straight at a
     // streaming dongle: see with_transfers_paused.
     if (running_.load(std::memory_order_acquire)) {
-        return with_transfers_paused(
-            [this, on] { return set_gain_auto_locked(on, kRetunePipeRetries); });
+        return named(with_transfers_paused(
+            [this, on] { return set_gain_auto_locked(on, kRetunePipeRetries); }));
     }
-    return set_gain_auto_locked(on, 1);
+    return named(set_gain_auto_locked(on, 1));
 }
 
 Status RtlSdrSource::set_gain_auto_locked(bool on, int attempts)
@@ -1063,8 +1126,10 @@ Status RtlSdrSource::set_gain_auto_locked(bool on, int attempts)
         }
     }
     if (rc != 0) {
-        return fail(std::format("could not switch the tuner to {} gain: librtlsdr returned {}",
-                                on ? "automatic" : "manual", rc),
+        return fail(std::format("could not switch the tuner to {} gain: "
+                                "rtlsdr_set_tuner_gain_mode returned {}{}",
+                                on ? "automatic" : "manual", rc_text(rc),
+                                attempts_text(attempts)),
                     rc);
     }
     return {};
@@ -1163,9 +1228,9 @@ Status RtlSdrSource::start(const StreamOptions& options, BlockSink sink)
     // the setup took, and the anchor below would be attached to samples that
     // were digitised before it was read.
     if (const int rc = rtlsdr_reset_buffer(device_.get()); rc != 0) {
-        return fail(std::format("could not reset the device's sample buffer: librtlsdr returned "
-                                "{}",
-                                rc),
+        return fail(std::format("{}: could not reset the device's sample buffer: "
+                                "rtlsdr_reset_buffer returned {}",
+                                caps_.display_name, rc_text(rc)),
                     rc);
     }
 
@@ -1220,7 +1285,7 @@ Status RtlSdrSource::stop()
 
     std::scoped_lock errors(error_lock_);
     if (has_stop_error_) {
-        return std::unexpected(stop_error_);
+        return std::unexpected(with_context(stop_error_, caps_.display_name));
     }
     return {};
 }
@@ -1590,9 +1655,9 @@ struct Applied {
     if (rtlsdr_get_direct_sampling(device) != static_cast<int>(config.direct)) {
         if (const int rc = rtlsdr_set_direct_sampling(device, static_cast<int>(config.direct));
             rc != 0) {
-            return fail(std::format("the device refused direct sampling mode {}: librtlsdr "
-                                    "returned {}",
-                                    static_cast<int>(config.direct), rc),
+            return fail(std::format("the device refused direct sampling mode {}: "
+                                    "rtlsdr_set_direct_sampling returned {}",
+                                    static_cast<int>(config.direct), rc_text(rc)),
                         rc);
         }
     }
@@ -1651,16 +1716,16 @@ struct Applied {
         if (const int rc =
                 rtlsdr_set_center_freq(device, static_cast<std::uint32_t>(config.center_hz));
             rc != 0) {
-            return fail(std::format("the tuner refused {} Hz: librtlsdr returned {}",
-                                    config.center_hz, rc),
+            return fail(std::format("the tuner refused {} Hz: rtlsdr_set_center_freq returned {}",
+                                    config.center_hz, rc_text(rc)),
                         rc);
         }
     }
 
     if (const int rc = rtlsdr_set_sample_rate(device, static_cast<std::uint32_t>(config.rate));
         rc != 0) {
-        return fail(std::format("the device refused {} S/s: librtlsdr returned {}", config.rate,
-                                rc),
+        return fail(std::format("the device refused {} S/s: rtlsdr_set_sample_rate returned {}",
+                                config.rate, rc_text(rc)),
                     rc);
     }
 
@@ -1670,9 +1735,9 @@ struct Applied {
         // is the requested state, so it is not a failure.
         const int rc = rtlsdr_set_freq_correction(device, config.ppm);
         if (rc != 0 && rc != -2) {
-            return fail(std::format("the device refused a correction of {} ppm: librtlsdr "
-                                    "returned {}",
-                                    config.ppm, rc),
+            return fail(std::format("the device refused a correction of {} ppm: "
+                                    "rtlsdr_set_freq_correction returned {}",
+                                    config.ppm, rc_text(rc)),
                         rc);
         }
     }
@@ -1684,19 +1749,19 @@ struct Applied {
     if (config.offset_tuning) {
         if (const int rc = rtlsdr_set_offset_tuning(device, 1); rc != 0) {
             return fail(std::format(
-                "this dongle's tuner does not support offset tuning: librtlsdr returned {}. "
-                "Offset tuning moves the tuner off the wanted frequency to get the ADC's DC "
-                "spike out of the passband, and only a zero-IF tuner such as the E4000 has that "
-                "problem to solve.",
-                rc),
+                "this dongle's tuner does not support offset tuning: rtlsdr_set_offset_tuning "
+                "returned {}. Offset tuning moves the tuner off the wanted frequency to get the "
+                "ADC's DC spike out of the passband, and only a zero-IF tuner such as the E4000 "
+                "has that problem to solve.",
+                rc_text(rc)),
                 rc);
         }
     }
 
     if (const int rc = rtlsdr_set_agc_mode(device, config.digital_agc ? 1 : 0); rc != 0) {
-        return fail(std::format("the device refused to turn its digital AGC {}: librtlsdr "
-                                "returned {}",
-                                config.digital_agc ? "on" : "off", rc),
+        return fail(std::format("the device refused to turn its digital AGC {}: "
+                                "rtlsdr_set_agc_mode returned {}",
+                                config.digital_agc ? "on" : "off", rc_text(rc)),
                     rc);
     }
 
@@ -1706,17 +1771,17 @@ struct Applied {
     // exist. See the header for why the assertion matters more than the
     // value.
     if (const int rc = rtlsdr_set_bias_tee(device, config.bias_tee ? 1 : 0); rc != 0) {
-        return fail(std::format("the device refused to turn its bias tee {}: librtlsdr returned "
-                                "{}",
-                                config.bias_tee ? "on" : "off", rc),
+        return fail(std::format("the device refused to turn its bias tee {}: "
+                                "rtlsdr_set_bias_tee returned {}",
+                                config.bias_tee ? "on" : "off", rc_text(rc)),
                     rc);
     }
 
     if (config.gain_auto) {
         if (const int rc = rtlsdr_set_tuner_gain_mode(device, 0); rc != 0) {
-            return fail(std::format("the device refused automatic tuner gain: librtlsdr returned "
-                                    "{}",
-                                    rc),
+            return fail(std::format("the device refused automatic tuner gain: "
+                                    "rtlsdr_set_tuner_gain_mode returned {}",
+                                    rc_text(rc)),
                         rc);
         }
     } else {
@@ -1727,14 +1792,15 @@ struct Applied {
         const auto wanted = static_cast<int>(std::llround(config.gain_db * 10.0));
         const int landed = nearest_step(gain_steps, wanted);
         if (const int rc = rtlsdr_set_tuner_gain_mode(device, 1); rc != 0) {
-            return fail(std::format("could not put the tuner into manual gain mode: librtlsdr "
-                                    "returned {}",
-                                    rc),
+            return fail(std::format("could not put the tuner into manual gain mode: "
+                                    "rtlsdr_set_tuner_gain_mode returned {}",
+                                    rc_text(rc)),
                         rc);
         }
         if (const int rc = rtlsdr_set_tuner_gain(device, landed); rc != 0) {
-            return fail(std::format("the tuner refused a gain of {} dB: librtlsdr returned {}",
-                                    static_cast<double>(landed) / 10.0, rc),
+            return fail(std::format("the tuner refused a gain of {} dB: rtlsdr_set_tuner_gain "
+                                    "returned {}",
+                                    static_cast<double>(landed) / 10.0, rc_text(rc)),
                         rc);
         }
     }
