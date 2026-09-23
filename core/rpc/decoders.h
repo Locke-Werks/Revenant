@@ -2055,7 +2055,52 @@ public:
         if (auto processed = decoder_.process(chunk.samples, characters_); !processed) {
             return processed;
         }
+        take(chunk, out);
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
+            emit(chunk, decoders_detail::LineEnd::Idle, out);
+        }
+        return {};
+    }
 
+    // What psk31.h still holds, then the line in progress. psk31.h's flush
+    // decides the bits QPSK31's Viterbi decoder was holding back, at least
+    // Psk31Config::decision_delay_bits, so the characters they complete join
+    // the line before it goes. A Varicode character whose two closing zeros
+    // never arrived is not among them, and nor are the symbols its timing
+    // recovery still holds; psk31.h says why.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "What psk31.h still holds is not handed
+    // over, because it offers no flush".
+    void flush(std::vector<DecodedMessage>& out) override {
+        characters_.clear();
+        decoder_.flush(characters_);
+        const DecoderChunk at_end = end_.at_end();
+        take(at_end, out);
+        emit(at_end, decoders_detail::LineEnd::StreamEnd, out);
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        line_.clear();
+        unrecognised_ = 0;
+    }
+
+private:
+    PskChunkDecoder(const decode::Psk31Config& config, decode::Psk31 decoder)
+        : config_(config), decoder_(std::move(decoder)) {}
+
+    // Ten characters of ten bits, a Varicode character of middling length
+    // and its two-zero gap, at the mode's symbol rate: 3.2 s of PSK31.
+    [[nodiscard]] std::uint64_t idle_samples() const {
+        return static_cast<std::uint64_t>(decoders_detail::kIdleCharacters * 10.0 *
+                                          static_cast<double>(config_.rate) /
+                                          decode::psk31_symbol_rate(Mode));
+    }
+
+    // characters_ into the line, closing it where a character says to. The
+    // messages a close produces are stamped with `chunk`.
+    void take(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
         using decoders_detail::LineEnd;
         for (const decode::Psk31Character& c : characters_) {
             const std::uint64_t at = base_.at(c.first_sample);
@@ -2079,38 +2124,6 @@ public:
                 emit(chunk, LineEnd::Length, out);
             }
         }
-        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
-            emit(chunk, LineEnd::Idle, out);
-        }
-        return {};
-    }
-
-    // The line in progress. What psk31.h still holds is not handed over,
-    // because it offers no flush: a Varicode character waits for the two
-    // zeros that end it, which a transmitter's idle supplies, and QPSK31's
-    // Viterbi decoder holds Psk31Config::decision_delay_bits back, which a
-    // stream cut off mid-character loses.
-    void flush(std::vector<DecodedMessage>& out) override {
-        emit(end_.at_end(), decoders_detail::LineEnd::StreamEnd, out);
-    }
-
-    void reset() override {
-        decoder_.reset();
-        base_.reset();
-        line_.clear();
-        unrecognised_ = 0;
-    }
-
-private:
-    PskChunkDecoder(const decode::Psk31Config& config, decode::Psk31 decoder)
-        : config_(config), decoder_(std::move(decoder)) {}
-
-    // Ten characters of ten bits, a Varicode character of middling length
-    // and its two-zero gap, at the mode's symbol rate: 3.2 s of PSK31.
-    [[nodiscard]] std::uint64_t idle_samples() const {
-        return static_cast<std::uint64_t>(decoders_detail::kIdleCharacters * 10.0 *
-                                          static_cast<double>(config_.rate) /
-                                          decode::psk31_symbol_rate(Mode));
     }
 
     void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,

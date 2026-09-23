@@ -495,6 +495,70 @@ TEST_CASE("the PSK31 receiver does not depend on how its input is blocked",
     CHECK(whole.text == text);
 }
 
+TEST_CASE("flush hands over what QPSK31's Viterbi decoder held when the stream stopped",
+          "[decode][psk31]") {
+    // A transmission cut off a few symbols after its last character. The
+    // Viterbi decoder holds decision_delay_bits and up to kViterbiCommitBits
+    // more undecided, so without flush the tail of the text goes with it.
+    // Clean audio, so every bit flush decides is the bit sent.
+    const std::string text = "the end of a stream";
+    siggen::Psk31ModConfig mod;
+    mod.tone_hz = 1004;
+    mod.mode = decode::Psk31Mode::Qpsk31;
+    mod.postamble_symbols = 40;
+    const std::vector<float> audio = render(mod, text, 0.0, 0, false);
+
+    decode::Psk31Config config;
+    config.mode = decode::Psk31Mode::Qpsk31;
+    auto decoder = decode::Psk31::create(config);
+    REQUIRE(decoder.has_value());
+    std::vector<decode::Psk31Character> characters;
+    REQUIRE(decoder->process(audio, characters).has_value());
+    std::string before;
+    for (const auto& c : characters) {
+        before.push_back(static_cast<char>(c.ascii));
+    }
+    INFO("before flush: '" << before << "'");
+    REQUIRE(before.size() < text.size());
+    CHECK(text.starts_with(before));
+
+    const std::size_t held = characters.size();
+    decoder->flush(characters);
+    std::string after;
+    for (const auto& c : characters) {
+        after.push_back(static_cast<char>(c.ascii));
+    }
+    INFO("after flush: '" << after << "', " << decoder->last_bits().size() << " bits committed");
+    CHECK(after == text);
+    CHECK(!decoder->last_bits().empty());
+    for (std::size_t i = held; i < characters.size(); ++i) {
+        CHECK(characters[i].recognised);
+        CHECK(characters[i].first_sample > characters[held - 1].first_sample);
+    }
+
+    // Nothing is held twice.
+    decoder->flush(characters);
+    CHECK(characters.size() == text.size());
+    CHECK(decoder->last_bits().empty());
+}
+
+TEST_CASE("flush on a binary PSK stream appends nothing", "[decode][psk31]") {
+    const std::string text = "binary holds no bits";
+    siggen::Psk31ModConfig mod;
+    mod.tone_hz = 1004;
+    mod.postamble_symbols = 40;
+    const std::vector<float> audio = render(mod, text, 0.0, 0, false);
+
+    auto decoder = decode::Psk31::create(decode::Psk31Config{});
+    REQUIRE(decoder.has_value());
+    std::vector<decode::Psk31Character> characters;
+    REQUIRE(decoder->process(audio, characters).has_value());
+    const std::size_t before = characters.size();
+    decoder->flush(characters);
+    CHECK(characters.size() == before);
+    CHECK(decoder->last_bits().empty());
+}
+
 TEST_CASE("the PSK31 matched filter's output is pinned bit for bit", "[decode][psk31]") {
     // The matched filter used to erase the front of its history once per
     // sample and now trims it once per call. That changed the bookkeeping and

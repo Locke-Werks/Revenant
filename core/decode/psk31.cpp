@@ -250,6 +250,12 @@ Status Psk31::process(ConstRealSpan audio, std::vector<Psk31Character>& out) {
     return {};
 }
 
+void Psk31::flush(std::vector<Psk31Character>& out) {
+    last_bits_.clear();
+    last_bit_samples_.clear();
+    run_viterbi(true, out);
+}
+
 void Psk31::run_symbols(std::span<const Complex32> baseband, std::vector<Psk31Character>& out) {
     const double out_rate = static_cast<double>(front_.output_rate());
     const std::size_t taps = matched_.size();

@@ -520,11 +520,14 @@ const std::vector<std::string> kPskLines = {"CQ DE N0CALL", "TEST 73"};
 [[nodiscard]] Expected<Capture> psk_capture(decode::Psk31Mode mode, bool upper,
                                             double snr_2500_db,
                                             std::string_view text = kPskText,
-                                            double tail_seconds = kTailSeconds) {
+                                            double tail_seconds = kTailSeconds,
+                                            std::size_t postamble_symbols =
+                                                siggen::Psk31ModConfig{}.postamble_symbols) {
     siggen::Psk31ModConfig mod;
     mod.rate = kFileRate;
     mod.tone_hz = decode::Psk31Config{}.centre_hz;
     mod.mode = mode;
+    mod.postamble_symbols = postamble_symbols;
     auto bits = siggen::psk31_message_bits(mod, text);
     if (!bits) {
         return std::unexpected(bits.error());
@@ -1629,6 +1632,30 @@ TEST_CASE("a PSK31 line still open when its receiver goes arrives before ended",
     CHECK(text_of(flushed, "ended") == "stream_end");
     CHECK(flushed.text == "LAST LINE");
     WARN(std::format("psk31 flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a QPSK31 line cut off in its carrier tail arrives whole before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // Forty symbols of tail rather than 64, 1.28 s: past the timing recovery's
+    // window of 32, so every symbol of the text leaves it, and short enough
+    // that the Viterbi decoder is still holding the last character's bits
+    // when the file stops. psk31.h's flush decides them; before the adapter
+    // called it, this line arrived without its last character.
+    auto capture = psk_capture(decode::Psk31Mode::Qpsk31, true, kHighSnrDb,
+                               "\r\nCQ DE N0CALL\r\nLAST LINE", kCutTailSeconds, 40);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "qpsk31");
+    CHECK(has_line_starting(removed.before, "CQ DE N0CALL"));
+    CHECK_FALSE(has_line_starting(removed.before, "LAST"));
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "qpsk31");
+    CHECK(text_of(flushed, "ended") == "stream_end");
+    CHECK(flushed.text == "LAST LINE");
+    WARN(std::format("qpsk31 flushed \"{}\"", flushed.text));
 }
 
 TEST_CASE("a CW line still open when its receiver goes arrives before ended",

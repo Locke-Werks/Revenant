@@ -202,6 +202,20 @@ class Psk31 {
     // carries across calls, and the result does not depend on the blocking.
     [[nodiscard]] Status process(ConstRealSpan audio, std::vector<Psk31Character>& out);
 
+    // For the end of the stream: appends every character the bits still held
+    // back complete. QPSK31's Viterbi decoder holds at least
+    // Psk31Config::decision_delay_bits undecided behind the newest symbol, and
+    // flush decides them along the best path to wherever the trellis stopped,
+    // which is all that is left to go on when no later symbol will arrive.
+    // The binary modes hold nothing there and append nothing.
+    //
+    // What it cannot hand over: a Varicode character whose two closing zeros
+    // were never sent, and the symbols still inside the timing recovery's
+    // last window, up to psk31.cpp's kTimingWindowSymbols of them, which
+    // core/decode/dv_phy.h's SymbolSync offers no way to release. last_bits() afterwards is what this
+    // committed. A second call finds nothing held and appends nothing.
+    void flush(std::vector<Psk31Character>& out);
+
     // True once the coarse frequency estimate has been made.
     [[nodiscard]] bool acquired() const { return acquired_; }
 

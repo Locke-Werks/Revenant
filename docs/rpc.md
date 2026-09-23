@@ -857,7 +857,8 @@ Every other adapter that holds something is flushed the same way. POCSAG hands
 over a page whose closing idle codeword the stream cut short and NAVTEX a
 message still waiting for its `NNNN`, both flagged `flushed`; RTTY, SITOR-B,
 the PSK modes and CW hand over the line they were gathering, CW with the
-character being keyed, and `ended` reads `stream_end`. A flushed message is
+character being keyed and QPSK31 with the characters its Viterbi decoder was
+still holding back, and `ended` reads `stream_end`. A flushed message is
 stamped where the last chunk ended, with no length, since no chunk completed
 it. `tests/rpc/test_rpc_decode_audio.cpp` removes a receiver on each of them
 with its last page, message or line still open and reads it arriving ahead of
