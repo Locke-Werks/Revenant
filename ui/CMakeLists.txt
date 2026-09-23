@@ -170,6 +170,7 @@ qt_add_executable(revenant_ui
     models/key_steps.h
     models/level_meter.h
     models/mode_choice.h
+    models/palette_match.h
     models/receiver_scroll.h
     models/status_summary.h
     models/ruler.h
@@ -462,7 +463,8 @@ endif()
 # It covers the keyboard: the one table of actions and their keys
 # (models/key_actions.h), which it holds to having no two actions on one key
 # and to matching the key map in docs/ui-spectrum.md, the steps the keys take
-# (models/key_steps.h). A dead key is what a conflict looks like, since Qt
+# (models/key_steps.h), and the command palette's matching and ranking
+# (models/palette_match.h). A dead key is what a conflict looks like, since Qt
 # runs neither of two shortcuts on one sequence, and nothing on screen says so.
 #
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
@@ -521,6 +523,7 @@ if(REVENANT_UI_TESTS)
             tests/test_key_actions.cpp
             tests/test_key_steps.cpp
             tests/test_mode_choice.cpp
+            tests/test_palette_match.cpp
             tests/test_frequency_dial.cpp
             tests/test_frequency_entry.cpp
             tests/test_gain_control.cpp
