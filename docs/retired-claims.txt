@@ -689,7 +689,7 @@ instead: The six KF4FIC files are 13:59 to 17:05 UT, one continuous recording
 
 phrase: asking for PSK31 at four bins across gets a 16384-point transform
 retired: 2026-09-22
-commit: 0935e63
+commit: e4ff536
 instead: dsp::kMaxSpectrumTransform is 2048 and the shipped default is already
     there, so no longer transform exists to be chosen. HF resolution comes from
     the channel count: 1.465 Hz per bin on the 96 kS/s recordings at the 64
@@ -710,8 +710,16 @@ phrase: It is a display arrangement: nothing on the engine knows about it
 phrase: 3 kHz produce four groups in total
 phrase: And the groups move between runs of the same file
 retired: 2026-09-22
-commit: the change that added core/detect/groups.h
+commit: 711a736
 instead: detect::LineGrouper follows tracks as groups with an id that survives
     between decisions, and revenant-cli --detect-groups prints it. Over the
     six HF excerpts it finds symmetric pairs about ten hertz round six
     carriers, and two runs of one file group identically.
+
+phrase: tier two uses a real demodulator stage, not the raw tap
+retired: 2026-09-22
+commit: b032fbf
+instead: What tier two needs is a complex-output mode routed through the fine
+    stage, which mixes to DC, filters and resamples. P25p1, D-STAR and TETRA
+    take vrx_demod's complex passthrough after vrx_fine; a probe could be Raw
+    routed the same way, and that is a factory decision in core/engine.

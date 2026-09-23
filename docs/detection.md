@@ -1682,12 +1682,26 @@ And the cost the draft worried about is not one a Raw probe pays.
 `DemodStage`, which Raw never reaches; `RawTapStage`'s constructor is four
 assignments and its retune is one.
 
-So the choice has to be made rather than assumed, and it is: **tier two uses a
-real demodulator stage, not the raw tap.** The extract has to be mixed to DC
-and filtered to something near the signal's bandwidth or the classifier is
-working 20 dB down, and only a `DemodStage` does that. Which means the
-construction cost is real after all, and the pool is real, but for a reason
-the draft never stated.
+So the choice has to be made rather than assumed. The extract has to be mixed
+to DC and filtered to something near the signal's bandwidth or the classifier
+is working 20 dB down, and what does that is the fine stage,
+`core/shaders/vrx_fine.comp`, not a demodulator. **Tier two needs a
+complex-output mode routed through the fine stage.** Since 2026-09-22 three
+modes take exactly that path: P25p1, D-STAR and TETRA are `DemodStage`
+receivers whose `vrx_demod` pass hands the fine ring's complex baseband out
+unchanged, mixed to DC, filtered and resampled. A probe is the same thing at a
+classifier's rate, for example `Demod::Raw` routed through the fine stage
+instead of declined to the raw tap, and which mode carries it is a factory
+decision in `core/engine`, not something this document decides. Either way
+the construction cost is real after all, because it is the fine stage's, and
+the pool is real, for a reason the draft never stated.
+
+WHAT THIS PARAGRAPH USED TO SAY: "tier two uses a real demodulator stage, not
+the raw tap. The extract has to be mixed to DC and filtered to something near
+the signal's bandwidth or the classifier is working 20 dB down, and only a
+`DemodStage` does that." The requirement stands. What meets it is the fine
+stage plus a complex passthrough, which the digital voice modes now use, and
+no demodulator has to run.
 
 ### What the pool can and cannot be
 
@@ -1787,7 +1801,11 @@ sizing argument above was written to constrain a stage that did not exist and
 reads differently once it does.
 
 `Demod` gaining the modes this document keeps using as examples. It currently
-holds `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`: no RTTY, no FSK, no PSK. The
+holds `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw` and the three digital voice modes
+appended after them, `P25p1, Dstar, Tetra`: no RTTY, no FSK, no PSK. The
 enumeration is a frozen contract and its value is the demodulator kernel's
 specialization constant, so growing it is a deliberate change rather than an
 edit.
+
+WHAT THIS PARAGRAPH USED TO SAY: "It currently holds `Raw, Am, Nfm, Wfm, Usb,
+Lsb, Dsb, Cw`". The digital voice modes were appended after that was written.
