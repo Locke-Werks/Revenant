@@ -292,6 +292,44 @@ TEST_CASE("an action is enabled only when the window has what it needs")
 
 // Rejects next and previous offered with nothing to move to, which is a key
 // that does nothing, and a second receiver counted without a first.
+// Rejects a noise key enabled on a mode that does not offer its stage, which
+// is a key that does nothing, and one offered with no receiver to act on.
+TEST_CASE("each noise key needs a receiver whose mode offers its stage")
+{
+    KeyState state;
+    state.connected = true;
+    state.source_open = true;
+    const auto have = [&] { return key_have(state); };
+    const KeyAction& blanker = *find_key_action("noise.blanker");
+    const KeyAction& notch = *find_key_action("noise.notch");
+    const KeyAction& auto_notch = *find_key_action("noise.auto_notch");
+    const KeyAction& reduction = *find_key_action("noise.reduction");
+
+    // Offered with no receiver is not offered.
+    state.noise_offered = true;
+    state.notch_offered = true;
+    state.auto_notch_offered = true;
+    CHECK_FALSE(key_action_enabled(blanker, have()));
+    CHECK(key_needs_text(key_missing(blanker.needs, have())) == "needs a receiver");
+
+    // A CW receiver: the blanker, the notch and noise reduction, and not the
+    // automatic notch.
+    state.receiver = true;
+    state.auto_notch_offered = false;
+    CHECK(key_action_enabled(blanker, have()));
+    CHECK(key_action_enabled(notch, have()));
+    CHECK(key_action_enabled(reduction, have()));
+    CHECK_FALSE(key_action_enabled(auto_notch, have()));
+    CHECK(key_needs_text(key_missing(auto_notch.needs, have())) == "not offered on this mode");
+
+    // A complex tap: none of them.
+    state.noise_offered = false;
+    state.notch_offered = false;
+    CHECK_FALSE(key_action_enabled(blanker, have()));
+    CHECK_FALSE(key_action_enabled(notch, have()));
+    CHECK_FALSE(key_action_enabled(reduction, have()));
+}
+
 TEST_CASE("moving the focus needs a second receiver in the rack")
 {
     KeyState state;

@@ -30,7 +30,8 @@ using revenant::ui::rank_palette;
 namespace {
 
 // A window with everything: an engine, a radio that retunes, a receiver in a
-// mode AFT and the auto filter both work on, and a spectrum on screen.
+// mode AFT, the auto filter and every noise stage work on, and a spectrum on
+// screen.
 [[nodiscard]] PaletteState everything()
 {
     KeyState state;
@@ -42,6 +43,9 @@ namespace {
     state.aft_offered = true;
     state.auto_filter_offered = true;
     state.spectrum_drawing = true;
+    state.noise_offered = true;
+    state.notch_offered = true;
+    state.auto_notch_offered = true;
     PaletteState out;
     out.have = key_have(state);
     out.tune_low_hz = 24'000'000;

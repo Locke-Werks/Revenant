@@ -44,7 +44,10 @@ Item {
         "secondReceiver": engineLink.rackCount > 1,
         "aftOffered": engineLink.aftOffered,
         "autoFilterOffered": engineLink.autoFilterOffered,
-        "spectrumDrawing": commands.spanView.drawing
+        "spectrumDrawing": commands.spanView.drawing,
+        "noiseOffered": engineLink.noiseBlankerOffered,
+        "notchOffered": engineLink.notchOffered,
+        "autoNotchOffered": engineLink.autoNotchOffered
     })
 
     readonly property var handlers: ({
@@ -88,6 +91,7 @@ Item {
             engineLink.autoFilterEnabled = !engineLink.autoFilterEnabled
         },
         "receiver.mode": (mode) => engineLink.setReceiverDemod(mode),
+        "receiver.noise": (stage) => engineLink.toggleNoiseStage(stage),
         "filter.widen": (sign) => {
             commands.receiverWindow.passband.widenPassband(Number(sign) * KeyMap.filterStepHz)
         },

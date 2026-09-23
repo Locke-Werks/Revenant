@@ -114,6 +114,9 @@ public:
         in.aft_offered = flag("aftOffered");
         in.auto_filter_offered = flag("autoFilterOffered");
         in.spectrum_drawing = flag("spectrumDrawing");
+        in.noise_offered = flag("noiseOffered");
+        in.notch_offered = flag("notchOffered");
+        in.auto_notch_offered = flag("autoNotchOffered");
         return static_cast<int>(key_have(in));
     }
 

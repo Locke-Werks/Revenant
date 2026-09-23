@@ -120,6 +120,10 @@ are bound.
 | receiver | remove the receiver | `Ctrl+Del` |
 | receiver | turn AFT on or off | `Ctrl+T` |
 | receiver | turn the auto filter on or off | `Ctrl+Shift+F` |
+| noise | turn the noise blanker on or off | `Ctrl+Shift+B` |
+| noise | turn the notch on or off | `Ctrl+Shift+N` |
+| noise | turn the automatic notch on or off | `Ctrl+Shift+A` |
+| noise | turn noise reduction on or off | `Ctrl+Shift+R` |
 | mode | switch the receiver to am | `Alt+1` |
 | mode | switch the receiver to nfm | `Alt+2` |
 | mode | switch the receiver to wfm | `Alt+3` |

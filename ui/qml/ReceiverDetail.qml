@@ -208,6 +208,16 @@ ColumnLayout {
                   ? engineLink.receiverLevelDbfs.toFixed(1) + " dBFS" : ""
         }
 
+        // What noise mitigation is on, while the panel that sets it is
+        // closed. Nothing at all while none is, so a receiver nobody has
+        // asked for noise mitigation on says nothing about it.
+        Label {
+            visible: !detail.expanded && engineLink.noiseSummary.length > 0
+            text: engineLink.noiseSummary
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
         RButton {
             flat: true
             text: detail.expanded ? "filter ▾" : "filter ▸"
@@ -280,6 +290,169 @@ ColumnLayout {
             text: "not parameters the engine offers on a receiver yet"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
+        }
+
+        // Noise mitigation: four stages, each off until ticked, each greyed
+        // out with its reason on a mode that does not offer it. The rules
+        // are models/noise_controls.h's and docs/noise.md says what each one
+        // does to a signal.
+        Label {
+            text: "noise blanker"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            spacing: 8
+            RCheckBox {
+                text: "on"
+                enabled: engineLink.noiseBlankerOffered
+                checked: engineLink.noiseBlanker
+                onToggled: engineLink.noiseBlanker = checked
+            }
+            RSlider {
+                Layout.preferredWidth: 120
+                visible: engineLink.noiseBlankerOffered
+                enabled: engineLink.noiseBlanker
+                from: 3
+                to: 40
+                stepSize: 1
+                value: engineLink.noiseBlankerThresholdDb
+                onMoved: engineLink.noiseBlankerThresholdDb = value
+            }
+            Label {
+                text: engineLink.noiseBlankerOffered
+                      ? engineLink.noiseBlankerThresholdDb.toFixed(0) + " dB over the background"
+                      : engineLink.noiseNote
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Label {
+            text: "notch"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            spacing: 8
+            RCheckBox {
+                text: "on"
+                enabled: engineLink.notchOffered
+                checked: engineLink.notchEnabled
+                onToggled: engineLink.notchEnabled = checked
+            }
+            // Where the notch sits, in the filter display's frame: hertz
+            // from the carrier, across the passband the receiver has.
+            RSlider {
+                Layout.preferredWidth: 160
+                visible: engineLink.notchOffered
+                from: engineLink.receiverPassbandLow
+                to: engineLink.receiverPassbandHigh
+                stepSize: 10
+                value: engineLink.notchHz
+                onMoved: engineLink.notchHz = Math.round(value)
+            }
+            Label {
+                text: engineLink.notchOffered
+                      ? (engineLink.notchAudioHz / 1000).toFixed(2) + " kHz in the audio"
+                      : engineLink.notchNote
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Label {
+            visible: engineLink.notchOffered
+            text: "notch depth, width"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            visible: engineLink.notchOffered
+            spacing: 8
+            RSlider {
+                Layout.preferredWidth: 100
+                from: 3
+                to: 80
+                stepSize: 1
+                value: engineLink.notchDepthDb
+                onMoved: engineLink.notchDepthDb = value
+            }
+            Label {
+                text: engineLink.notchDepthDb.toFixed(0) + " dB"
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+            RSlider {
+                Layout.preferredWidth: 100
+                from: 10
+                to: 2000
+                stepSize: 10
+                value: engineLink.notchWidthHz
+                onMoved: engineLink.notchWidthHz = Math.round(value)
+            }
+            Label {
+                text: engineLink.notchWidthHz + " Hz"
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Label {
+            text: "automatic notch"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            spacing: 8
+            RCheckBox {
+                text: "on"
+                enabled: engineLink.autoNotchOffered
+                checked: engineLink.autoNotch
+                onToggled: engineLink.autoNotch = checked
+            }
+            Label {
+                text: engineLink.autoNotchOffered
+                      ? "removes a steady whistle; costs a voice a little, so off without one"
+                      : engineLink.autoNotchNote
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Label {
+            text: "noise reduction"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            spacing: 8
+            RCheckBox {
+                text: "on"
+                enabled: engineLink.noiseBlankerOffered
+                checked: engineLink.noiseReduction
+                onToggled: engineLink.noiseReduction = checked
+            }
+            RSlider {
+                Layout.preferredWidth: 120
+                visible: engineLink.noiseBlankerOffered
+                enabled: engineLink.noiseReduction
+                from: 0
+                to: 1
+                stepSize: 0.05
+                value: engineLink.noiseReductionStrength
+                onMoved: engineLink.noiseReductionStrength = value
+            }
+            Label {
+                text: engineLink.noiseBlankerOffered
+                      ? "strength " + Math.round(engineLink.noiseReductionStrength * 100) + "%"
+                      : engineLink.noiseNote
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+            }
         }
     }
 

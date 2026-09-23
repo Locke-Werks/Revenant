@@ -41,6 +41,7 @@
 #include <QMetaObject>
 #include <QString>
 
+#include "models/noise_controls.h"
 #include "models/receiver_match.h"
 
 namespace revenant::ui {
@@ -314,6 +315,7 @@ void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
 
         if (*parsed != wanted_.demod) {
             wanted_.demod = *parsed;
+            fit_noise_to_mode(wanted_);
             moved = true;
 
             // A new mode means a new default passband unless the operator
@@ -478,6 +480,13 @@ void EngineLink::setReceiverDemod(const QString& mode)
     }
 
     wanted_.demod = *parsed;
+
+    // The noise settings go with the receiver into its new mode, less any
+    // stage the new mode does not offer: the engine refuses the whole
+    // receiver over one of those, and a mode change that failed over a
+    // setting made on another mode would be the wrong answer.
+    fit_noise_to_mode(wanted_);
+
     if (!edges_touched_) {
         // Unstated, so the engine answers with the mode's own default and
         // the pane reads it back off the placement. This client carries no

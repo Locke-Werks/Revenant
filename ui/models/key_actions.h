@@ -92,6 +92,14 @@ enum KeyNeed : std::uint32_t {
 
     // A second receiver in the rack, which is what moving the focus needs.
     kNeedsSecondReceiver = 1U << 7,
+
+    // A receiver whose mode offers the noise blanker and noise reduction,
+    // which is every mode that produces audio; one that offers the manual
+    // notch; one that offers the automatic notch. models/noise_controls.h
+    // has the table.
+    kNeedsNoise = 1U << 8,
+    kNeedsNotch = 1U << 9,
+    kNeedsAutoNotch = 1U << 10,
 };
 
 struct KeyAction {
@@ -173,6 +181,14 @@ inline constexpr std::array kKeyActions{
               {"Ctrl+T", ""}, KeyContext::Window, kNeedsAft, "receiver.aft", ""},
     KeyAction{"receiver.auto_filter", "turn the auto filter on or off", "receiver", "fit bandwidth automatic",
               {"Ctrl+Shift+F", ""}, KeyContext::Window, kNeedsAutoFilter, "receiver.auto_filter", ""},
+    KeyAction{"noise.blanker", "turn the noise blanker on or off", "noise", "nb impulse ignition clicks",
+              {"Ctrl+Shift+B", ""}, KeyContext::Window, kNeedsNoise, "receiver.noise", "nb"},
+    KeyAction{"noise.notch", "turn the notch on or off", "noise", "manual whistle tone filter",
+              {"Ctrl+Shift+N", ""}, KeyContext::Window, kNeedsNotch, "receiver.noise", "notch"},
+    KeyAction{"noise.auto_notch", "turn the automatic notch on or off", "noise", "anf heterodyne whistle tone",
+              {"Ctrl+Shift+A", ""}, KeyContext::Window, kNeedsAutoNotch, "receiver.noise", "auto_notch"},
+    KeyAction{"noise.reduction", "turn noise reduction on or off", "noise", "nr hiss dsp",
+              {"Ctrl+Shift+R", ""}, KeyContext::Window, kNeedsNoise, "receiver.noise", "nr"},
 
     // The receiver's mode. The eight on the selector's row take Alt and their
     // place on it; the digital three are the palette's. Their order is
@@ -378,7 +394,8 @@ inline constexpr std::array kKeyContexts{
 // be enabled with the bottom missing.
 [[nodiscard]] constexpr std::uint32_t key_needs_expanded(std::uint32_t needs)
 {
-    if ((needs & (kNeedsAft | kNeedsAutoFilter | kNeedsSecondReceiver)) != 0) {
+    if ((needs & (kNeedsAft | kNeedsAutoFilter | kNeedsSecondReceiver | kNeedsNoise |
+                  kNeedsNotch | kNeedsAutoNotch)) != 0) {
         needs |= kNeedsReceiver;
     }
     if ((needs & (kNeedsRetune | kNeedsSpectrum)) != 0) {
@@ -413,6 +430,9 @@ struct KeyState {
     bool aft_offered = false;
     bool auto_filter_offered = false;
     bool spectrum_drawing = false;
+    bool noise_offered = false;
+    bool notch_offered = false;
+    bool auto_notch_offered = false;
 };
 
 [[nodiscard]] constexpr std::uint32_t key_have(const KeyState& state)
@@ -442,6 +462,15 @@ struct KeyState {
         if (state.auto_filter_offered) {
             have |= kNeedsAutoFilter;
         }
+        if (state.noise_offered) {
+            have |= kNeedsNoise;
+        }
+        if (state.notch_offered) {
+            have |= kNeedsNotch;
+        }
+        if (state.auto_notch_offered) {
+            have |= kNeedsAutoNotch;
+        }
     }
     return have;
 }
@@ -468,7 +497,8 @@ struct KeyState {
     if ((missing & kNeedsSecondReceiver) != 0) {
         return "needs a second receiver";
     }
-    if ((missing & (kNeedsAft | kNeedsAutoFilter)) != 0) {
+    if ((missing & (kNeedsAft | kNeedsAutoFilter | kNeedsNoise | kNeedsNotch |
+                    kNeedsAutoNotch)) != 0) {
         return "not offered on this mode";
     }
     return {};

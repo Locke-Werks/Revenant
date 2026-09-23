@@ -1069,6 +1069,43 @@ class EngineLink : public QObject {
     // the audio is not has to admit it.
     Q_PROPERTY(bool receiverPending READ receiverPending NOTIFY receiverChanged)
 
+    // Noise mitigation on the pane's receiver: the blanker, the manual notch,
+    // the automatic notch and noise reduction, each off until switched on.
+    // They are the receiver's own settings on the engine rather than the
+    // window's, so they ride its retunes and its place in the rack, and a
+    // mode change keeps whichever the new mode offers. models/noise_controls.h
+    // has the rules and ui/models/noise_link.cpp the plumbing; the controls
+    // are behind the filter panel's expansion in ReceiverDetail.qml.
+    Q_PROPERTY(bool noiseBlanker READ noiseBlanker WRITE setNoiseBlanker NOTIFY receiverChanged)
+    Q_PROPERTY(double noiseBlankerThresholdDb READ noiseBlankerThresholdDb
+                   WRITE setNoiseBlankerThresholdDb NOTIFY receiverChanged)
+    Q_PROPERTY(bool notchEnabled READ notchEnabled WRITE setNotchEnabled NOTIFY receiverChanged)
+    Q_PROPERTY(int notchHz READ notchHz WRITE setNotchHz NOTIFY receiverChanged)
+    Q_PROPERTY(double notchDepthDb READ notchDepthDb WRITE setNotchDepthDb NOTIFY receiverChanged)
+    Q_PROPERTY(int notchWidthHz READ notchWidthHz WRITE setNotchWidthHz NOTIFY receiverChanged)
+    Q_PROPERTY(bool autoNotch READ autoNotch WRITE setAutoNotch NOTIFY receiverChanged)
+    Q_PROPERTY(bool noiseReduction READ noiseReduction WRITE setNoiseReduction
+                   NOTIFY receiverChanged)
+    Q_PROPERTY(double noiseReductionStrength READ noiseReductionStrength
+                   WRITE setNoiseReductionStrength NOTIFY receiverChanged)
+
+    // Which stages this receiver's mode offers, and a few words on why one
+    // is greyed out. The blanker and noise reduction are offered together.
+    Q_PROPERTY(bool noiseBlankerOffered READ noiseBlankerOffered NOTIFY receiverChanged)
+    Q_PROPERTY(bool notchOffered READ notchOffered NOTIFY receiverChanged)
+    Q_PROPERTY(bool autoNotchOffered READ autoNotchOffered NOTIFY receiverChanged)
+    Q_PROPERTY(QString noiseNote READ noiseNote NOTIFY receiverChanged)
+    Q_PROPERTY(QString notchNote READ notchNote NOTIFY receiverChanged)
+    Q_PROPERTY(QString autoNotchNote READ autoNotchNote NOTIFY receiverChanged)
+
+    // What is on, for the line beside the closed filter panel. Empty while
+    // nothing is.
+    Q_PROPERTY(QString noiseSummary READ noiseSummary NOTIFY receiverChanged)
+
+    // The audio frequency the notch sits on, which is what the operator
+    // hears it as: the same as notchHz on USB and its magnitude elsewhere.
+    Q_PROPERTY(double notchAudioHz READ notchAudioHz NOTIFY receiverChanged)
+
     // ------------------------------------------------------------------
     // The rack: every receiver this window holds. Implemented in
     // ui/models/rack_link.cpp, with the rules in models/receiver_rack.h.
@@ -2057,6 +2094,40 @@ public:
     // deriving one from the signal's width; see tuneReceiverToDetection.
     Q_INVOKABLE void setReceiverDemod(const QString& mode);
 
+    // The noise controls, as models/noise_controls.h rules them. Each setter
+    // clamps to the engine's range and sends a retune in place; a stage the
+    // mode does not offer stays off.
+    [[nodiscard]] bool noiseBlanker() const { return wanted_.nb_enabled; }
+    void setNoiseBlanker(bool on);
+    [[nodiscard]] double noiseBlankerThresholdDb() const { return wanted_.nb_threshold_db; }
+    void setNoiseBlankerThresholdDb(double db);
+    [[nodiscard]] bool notchEnabled() const { return wanted_.notch_enabled; }
+    void setNotchEnabled(bool on);
+    [[nodiscard]] int notchHz() const { return static_cast<int>(wanted_.notch_hz); }
+    void setNotchHz(int hz);
+    [[nodiscard]] double notchDepthDb() const { return wanted_.notch_depth_db; }
+    void setNotchDepthDb(double db);
+    [[nodiscard]] int notchWidthHz() const { return static_cast<int>(wanted_.notch_width_hz); }
+    void setNotchWidthHz(int hz);
+    [[nodiscard]] bool autoNotch() const { return wanted_.auto_notch_enabled; }
+    void setAutoNotch(bool on);
+    [[nodiscard]] bool noiseReduction() const { return wanted_.nr_enabled; }
+    void setNoiseReduction(bool on);
+    [[nodiscard]] double noiseReductionStrength() const { return wanted_.nr_strength; }
+    void setNoiseReductionStrength(double strength);
+    [[nodiscard]] bool noiseBlankerOffered() const;
+    [[nodiscard]] bool notchOffered() const;
+    [[nodiscard]] bool autoNotchOffered() const;
+    [[nodiscard]] QString noiseNote() const;
+    [[nodiscard]] QString notchNote() const;
+    [[nodiscard]] QString autoNotchNote() const;
+    [[nodiscard]] QString noiseSummary() const;
+    [[nodiscard]] double notchAudioHz() const;
+
+    // A key's toggle: "nb", "notch", "auto_notch" or "nr". Does nothing on a
+    // mode that does not offer the stage, which the key table greys out.
+    Q_INVOKABLE void toggleNoiseStage(const QString& stage);
+
     // Moves the passband edges. Signed hertz from the receiver's centre,
     // low strictly below high.
     //
@@ -2959,6 +3030,11 @@ private:
     // center is BASEBAND, the frame VrxParams is in; receiverCenterHz adds
     // the source's centre back for the label.
     rpc::VrxParams wanted_;
+
+    // Applies a change to wanted_'s noise fields and sends it as a retune in
+    // place, or does nothing when there is no receiver or nothing changed.
+    // ui/models/noise_link.cpp.
+    void change_noise(const rpc::VrxParams& next);
     qulonglong receiver_id_ = 0;
 
     // The absolute frequency the pane was last tuned to, kept because it
