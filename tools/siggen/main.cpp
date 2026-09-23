@@ -44,6 +44,8 @@
 #include "core/dsp/synth/rds_mod.h"
 #include "core/dsp/synth/wfm_mod.h"
 #include "core/dsp/synth/wideband.h"
+#include "tools/bench/mode_subjects.h"
+#include "tools/bench/sweep.h"
 
 namespace {
 
@@ -1431,6 +1433,205 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
 }
 
 // ---------------------------------------------------------------------------
+// Bench trials
+// ---------------------------------------------------------------------------
+
+// One trial of a `bench sweep --mode NAME` curve, written to a file: the same
+// payload and the same noise the sweep fed its decoder, through the same
+// generator, because this calls tools/bench's own generator rather than a
+// second copy of the transmitter settings. A point on a curve that looks
+// wrong can be pulled out and looked at, or fed to another decoder.
+//
+// The trial is named either by its seed, or by the sweep that ran it: the
+// sweep's base seed, the point's index and the trial's index, from which
+// tools/bench/sweep.h's trial_seed derives the same seed. --snr is the
+// point's SNR either way, in the mode's own axis, which for every mode here
+// is SNR in 2500 Hz.
+[[nodiscard]] Status run_trial(Options& options, std::string mode_name)
+{
+    if (mode_name.empty()) {
+        auto named = options.text("mode", "");
+        if (!named) {
+            return std::unexpected(named.error());
+        }
+        mode_name = *named;
+        if (mode_name.empty()) {
+            return fail("--mode is required: one of the bench sweep mode names");
+        }
+    }
+    auto mode = revenant::bench::make_mode_subject(mode_name);
+    if (!mode) {
+        return std::unexpected(mode.error());
+    }
+
+    auto out_path = options.text("out", "");
+    auto truth_path = options.text("truth", "");
+    auto snr = options.text("snr", "");
+    auto seed = options.text("seed", "");
+    auto sweep_seed = options.text("sweep-seed", "");
+    auto point = options.text("point", "");
+    auto trial = options.text("trial", "");
+    auto bytes = options.integer("payload-bytes", static_cast<std::int64_t>(mode->default_payload_bytes));
+    auto format = options.text("format", "cf32");
+    auto scale = options.real("scale", 1.0);
+
+    if (!out_path) { return std::unexpected(out_path.error()); }
+    if (!truth_path) { return std::unexpected(truth_path.error()); }
+    if (!snr) { return std::unexpected(snr.error()); }
+    if (!seed) { return std::unexpected(seed.error()); }
+    if (!sweep_seed) { return std::unexpected(sweep_seed.error()); }
+    if (!point) { return std::unexpected(point.error()); }
+    if (!trial) { return std::unexpected(trial.error()); }
+    if (!bytes) { return std::unexpected(bytes.error()); }
+    if (!format) { return std::unexpected(format.error()); }
+    if (!scale) { return std::unexpected(scale.error()); }
+    if (out_path->empty()) { return fail("--out is required"); }
+    if (snr->empty()) { return fail("--snr is required, in the mode's axis: SNR in 2500 Hz"); }
+    if (!std::isfinite(*scale) || *scale <= 0.0) { return fail("--scale must be positive"); }
+
+    double snr_db = 0.0;
+    {
+        const char* begin = snr->data();
+        const char* end = begin + snr->size();
+        const auto parsed = std::from_chars(begin, end, snr_db);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return fail(std::format("--snr '{}' is not a number", *snr));
+        }
+    }
+
+    // Unsigned 64-bit, because a trial seed uses every bit and the signed
+    // integer parse would refuse half of them.
+    const auto unsigned_option = [](std::string_view name, const std::string& text) -> Expected<std::uint64_t> {
+        std::uint64_t value = 0;
+        const char* begin = text.data();
+        const char* end = begin + text.size();
+        const auto parsed = std::from_chars(begin, end, value);
+        if (parsed.ec != std::errc{} || parsed.ptr != end) {
+            return fail(std::format("--{} '{}' is not a non-negative integer", name, text));
+        }
+        return value;
+    };
+
+    const bool by_sweep = !sweep_seed->empty() || !point->empty() || !trial->empty();
+    if (by_sweep && !seed->empty()) {
+        return fail("name the trial by --seed or by --sweep-seed, --point and --trial, not both");
+    }
+    if (by_sweep && (sweep_seed->empty() || point->empty() || trial->empty())) {
+        return fail("--sweep-seed, --point and --trial go together");
+    }
+    if (!by_sweep && seed->empty()) {
+        return fail("--seed is required, or --sweep-seed, --point and --trial");
+    }
+    std::uint64_t trial_seed = 0;
+    std::uint64_t sweep_base = 0;
+    std::uint64_t point_index = 0;
+    std::uint64_t trial_index = 0;
+    if (by_sweep) {
+        auto base_value = unsigned_option("sweep-seed", *sweep_seed);
+        auto point_value = unsigned_option("point", *point);
+        auto trial_value = unsigned_option("trial", *trial);
+        if (!base_value) { return std::unexpected(base_value.error()); }
+        if (!point_value) { return std::unexpected(point_value.error()); }
+        if (!trial_value) { return std::unexpected(trial_value.error()); }
+        sweep_base = *base_value;
+        point_index = *point_value;
+        trial_index = *trial_value;
+        trial_seed = revenant::bench::trial_seed(sweep_base, point_index, trial_index);
+    } else {
+        auto seed_value = unsigned_option("seed", *seed);
+        if (!seed_value) { return std::unexpected(seed_value.error()); }
+        trial_seed = *seed_value;
+    }
+
+    const auto payload_bytes = static_cast<std::size_t>(std::max<std::int64_t>(*bytes, 0));
+    if (payload_bytes < mode->minimum_payload_bytes || payload_bytes % mode->payload_multiple != 0) {
+        return fail(std::format("the {} mode needs --payload-bytes of at least {} in whole units of {}",
+                                mode->mode, mode->minimum_payload_bytes, mode->payload_multiple));
+    }
+
+    auto parsed_format = format_from_name(*format);
+    if (!parsed_format) {
+        return std::unexpected(parsed_format.error());
+    }
+    if (mode->real_audio && *format != "cf32") {
+        return fail(std::format("the {} mode writes real audio as float32; --format is for the complex modes",
+                                mode->mode));
+    }
+
+    if (auto clean = options.reject_unused(); !clean) {
+        return clean;
+    }
+
+    const revenant::bench::TrialInput input =
+        revenant::bench::make_trial_input(mode->generator, payload_bytes, snr_db, trial_seed);
+    if (input.waveform.empty()) {
+        return fail(std::format("the {} generator produced nothing at {} dB", mode->mode, snr_db));
+    }
+
+    auto stream = open_output(*out_path);
+    if (!stream) {
+        return std::unexpected(stream.error());
+    }
+    if (mode->real_audio) {
+        // The harness carries audio in the real part, so the real part is the
+        // audio, written the way the rds subcommand writes its composite.
+        std::vector<float> audio(input.waveform.size());
+        for (std::size_t i = 0; i < audio.size(); ++i) {
+            audio[i] = input.waveform[i].real();
+        }
+        stream->write(reinterpret_cast<const char*>(audio.data()),
+                      static_cast<std::streamsize>(audio.size() * sizeof(float)));
+    } else {
+        Writer writer(*stream, *parsed_format, *scale);
+        if (auto written = writer.consume(ConstComplexSpan(input.waveform)); !written) {
+            return written;
+        }
+    }
+    stream->flush();
+    if (!*stream) {
+        return fail(std::format("failed to write '{}'", *out_path));
+    }
+
+    if (!truth_path->empty()) {
+        std::ofstream truth(*truth_path, std::ios::binary | std::ios::trunc);
+        const std::string text = mode->truth(input.payload);
+        truth.write(text.data(), static_cast<std::streamsize>(text.size()));
+        truth.flush();
+        if (!truth) {
+            return fail(std::format("failed to write '{}'", *truth_path));
+        }
+    }
+
+    std::print("{} bench trial at {} S/s, {}\n", mode->mode, mode->rate,
+               mode->real_audio ? "real float32 audio" : std::format("{} IQ", *format));
+    std::print("  subject           {}\n", mode->subject);
+    std::print("  noise             SNR {:.2f} dB in 2500 Hz\n", snr_db);
+    if (by_sweep) {
+        std::print("  trial             {} of point {} of the sweep with seed {}, trial seed {}\n", trial_index,
+                   point_index, sweep_base, trial_seed);
+    } else {
+        std::print("  trial seed        {}\n", trial_seed);
+    }
+    std::print("  payload           {} bytes\n", payload_bytes);
+    std::print("  samples written   {}\n", input.waveform.size());
+    std::print("  wrote             {}\n", *out_path);
+    if (!truth_path->empty()) {
+        std::print("  truth             {}\n", *truth_path);
+    }
+    return {};
+}
+
+[[nodiscard]] bool is_bench_mode(std::string_view name)
+{
+    for (const std::string_view mode : revenant::bench::mode_subject_names()) {
+        if (mode == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
 
@@ -1446,6 +1647,10 @@ void print_usage()
         "  wfm                                a broadcast FM station carrying RDS\n"
         "  rds                                the RDS composite alone, real float32\n"
         "  dv                                 P25 Phase 1, D-STAR or TETRA, whole\n"
+        "  trial                              one trial of a bench sweep, any mode\n"
+        "  rtty ax25 pocsag-512 pocsag-1200   the same for that mode, by its name\n"
+        "  pocsag-2400 sitor-b navtex psk31\n"
+        "  psk63 qpsk31 m17 p25p1 dstar tetra\n"
         "  wideband                           a populated scene with ground truth\n"
         "  modes                              list the mode names\n"
         "\n"
@@ -1496,6 +1701,18 @@ void print_usage()
         "                    SNR in 2500 Hz. An --algid other than 128 marks the\n"
         "                    header encrypted; nothing is encrypted.\n"
         "\n"
+        "  trial             --mode NAME (any bench sweep mode, cw included)\n"
+        "  and each by name  --out PATH --snr X --seed N\n"
+        "                    or --sweep-seed N --point N --trial N in place of --seed\n"
+        "                    --payload-bytes N (the mode's default) --truth PATH\n"
+        "                    --format F --scale X (complex modes only)\n"
+        "                    Writes exactly what `bench sweep --mode NAME` fed its\n"
+        "                    decoder for that trial, from tools/bench's own\n"
+        "                    generator. --snr is SNR in 2500 Hz. Audio modes are\n"
+        "                    raw float32 at 48000 S/s; the complex ones are IQ.\n"
+        "                    --truth writes what was sent: the text, one line per\n"
+        "                    frame or page, or the bits.\n"
+        "\n"
         "  wideband          --emitters N --bursts N --span-low N --span-high N\n"
         "                    --noise-dbfs X --no-noise --snr-min X --snr-max X\n"
         "                    --min-burst S --max-burst S --modes a,b,c\n"
@@ -1532,6 +1749,14 @@ void print_usage()
     }
     if (command == "dv") {
         return run_dv(*options);
+    }
+    if (command == "trial") {
+        return run_trial(*options, std::string{});
+    }
+    // Every bench mode is its own subcommand as well, except cw, which names
+    // the continuous keyer above; its bench trial is `trial --mode cw`.
+    if (command != "cw" && is_bench_mode(command)) {
+        return run_trial(*options, command);
     }
 
     auto kind = siggen::modulation_from_name(command);
