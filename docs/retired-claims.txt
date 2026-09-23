@@ -704,3 +704,14 @@ instead: The RTX 4090 is the one supported and tested device; the integrated
     Radeon is dropped. The kernel has 48 KiB of shared memory there, 4096
     points, and the spectrum transform is capped at 2048 by the twiddle table
     it shares with the channelizer rather than by any device.
+
+phrase: the detector publishes a flat list of tracks and nothing groups them
+phrase: It is a display arrangement: nothing on the engine knows about it
+phrase: 3 kHz produce four groups in total
+phrase: And the groups move between runs of the same file
+retired: 2026-09-22
+commit: the change that added core/detect/groups.h
+instead: detect::LineGrouper follows tracks as groups with an id that survives
+    between decisions, and revenant-cli --detect-groups prints it. Over the
+    six HF excerpts it finds symmetric pairs about ten hertz round six
+    carriers, and two runs of one file group identically.

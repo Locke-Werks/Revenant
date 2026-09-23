@@ -1523,9 +1523,12 @@ TEST_CASE("shape survey: the same families, resolved", "[.shape-survey]")
 // time rather than dedup by position, which is the tracker's job and is
 // another reason this belongs on a surface rather than in a survey.
 //
-// That is tier one's promise reachable from the spectrum alone, and it needs a
-// surface that does not exist: the detector publishes a flat list of tracks
-// and nothing groups them. See docs/detection.md.
+// That is tier one's promise reachable from the spectrum alone, and the
+// surface it needed is core/detect/groups.h now, which follows the tracks as
+// a set with an id per group. tests/detect/test_groups.cpp pins this same
+// scene against it at the shipped grid. WHAT THIS PARAGRAPH USED TO SAY: "it
+// needs a surface that does not exist: the detector publishes a flat list of
+// tracks and nothing groups them".
 TEST_CASE("shape survey: the lines as a set", "[.shape-survey]")
 {
     constexpr std::uint32_t kFineTransform = 2048;

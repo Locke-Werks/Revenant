@@ -1366,22 +1366,73 @@ a property of any single band. USB and LSB differ by nothing whatever except
 which side their lines sit on, which is exactly the sideband test
 `lower_fraction` was meant to give and has never been shown to give.
 
-So tier one's promise is reachable from the spectrum alone. What it needs is a
-surface that does not exist: the detector publishes a flat list of tracks and
-nothing groups them, and the one thing this survey cannot do, following a line
+So tier one's promise is reachable from the spectrum alone. What it needed was
+a surface that follows the lines as a set, because the detector publishes a
+flat list of tracks, and the one thing this survey cannot do, following a line
 that wanders, is the tracker's job rather than a measurement's. FSK2 is where
 that shows: its tones move, so folding one line seen across forty decisions
 into one entry by position overcounts it at fifty.
 
+That surface is `core/detect/groups.h`, described in the next section. WHAT
+THIS PARAGRAPH USED TO SAY: "What it needs is a surface that does not exist:
+the detector publishes a flat list of tracks and nothing groups them".
+
+#### The surface: a group of tracks with an identity of its own
+
+`detect::LineGrouper` takes `Detector::tracks()` after each decision and chains
+tracks whose centres sit within a stated gap of a neighbour. A chain of two or
+more is a group, and a group keeps its id from one decision to the next by the
+track ids it shares with the previous decision's groups: most shared wins, the
+older group on a tie, so a group that splits leaves its id with the half
+carrying more of its lines. Each group carries its members ascending in
+frequency, each member's offset from the strongest line and spacing from the
+one below, when each member joined, `together_since`, which is the latest join
+and so the decision since which the current set has been whole, and
+`birth_spread`, how far apart the members' own births were. Live and Held
+tracks are grouped, so a line fading inside the tracker's hold stays in its
+group; Merged ones are not, because the track that swallowed one carries the
+same energy and counting both counts one line twice.
+
+It classifies nothing and puts nothing on the wire. The gap is the caller's,
+because no measurement has chosen one.
+
+`tests/detect/test_groups.cpp` runs the family scene through the detector at
+the shipped 36.6 Hz, groups at 3 kHz, and pins what the hand survey above found:
+
+| family | lines | offsets from the strongest line, in hertz |
+| --- | --- | --- |
+| am | 3 | -989, **0**, +1017 |
+| nfm | 15 | -11004 to +3003, a comb, every spacing 989 to 1025 |
+| usb | 2 | -1191, **0** |
+| lsb | 2 | **0**, +1191 |
+| fsk2 | 9 | -1547 to +6371, no pattern: its tones wander |
+| cw, bpsk, qpsk | none | one line, or one filled band |
+
+Five groups formed over 46 decisions and none ended, every one whole for the
+last 4.7 seconds with its lines born in the same decision. The am group holds
+one id from the first decision it had all three lines to the last.
+
+**It cannot tell USB from LSB in general.** Relative to the carrier they differ
+only in which side their lines sit, and a suppressed-carrier signal has no
+carrier in the group to be relative to. They come out mirrored in the table
+because the 1900 Hz tone measures louder than the 700 Hz one in both, so the
+anchor is the outer line each time; two tones of equal level would leave the
+sign to measurement noise.
+
 #### The same view on real air, which is where the question gets asked
 
-`revenant-cli --detect-groups <hz>` brackets tracks sitting within a stated gap
-and prints where they sit relative to the strongest of them. It is a display
-arrangement: nothing on the engine knows about it, no field carries it, and the
-gap is an argument because no measurement has chosen one. A number chosen in
-the CLI would be a classification smuggled in as a layout.
+`revenant-cli --detect-groups <hz>` now prints what `LineGrouper` follows:
+each group's id, how long its current lines have all been in it, how far apart
+their births were, and every line's offset from the strongest with its own age.
+The run summary adds what no single table can: groups formed and ended, joins
+and leaves, and the longest any group held all of its lines.
 
-40 m at 1359 UT, grouping at 300 Hz:
+WHAT THIS SECTION USED TO SAY about the flag: "It is a display arrangement:
+nothing on the engine knows about it, no field carries it". It bracketed rows
+of one snapshot inside the CLI. The first half stopped being true when the
+grouping moved into `core/detect`; no field on the wire carries it still.
+
+What the display-side grouping printed, 40 m at 1359 UT, at 300 Hz:
 
     #45   merged       13.238 kHz         5 Hz     11.7 dB   0.88  0.81  0.88
     #1    live         13.249 kHz        29 Hz     22.3 dB   1.00  0.97  0.41
@@ -1398,24 +1449,69 @@ beside it rather than a carrier and a sideband. A real pair would have aged
 together. That reading is available in the line itself, which is the whole
 reason the age is in it.
 
-**No family pattern has come out of this corpus yet, and that is the result
-rather than a pending one.** All six excerpts at gaps of 300 Hz, 1 kHz and
-3 kHz produce four groups in total, none of them the carrier-with-a-matched-
-pair or the comb the scene shows. The cluster above is the only one that
-persists, and it is a strong line with close neighbours rather than anything
-symmetric.
+That example is the old display's, and #45 would not be grouped now: it is
+Merged, and the surface leaves merged tracks out.
 
-**And the groups move between runs of the same file**, which is a trap worth
-naming before somebody reads two of these tables side by side. On 40 m at 1359
-a gap of 300 Hz grouped three lines and a gap of 1 kHz grouped two, and a wider
-gap cannot group fewer. What changed was the track list: a file source runs as
-fast as the GPU retires it, so the instant the final table is sampled is not
-the same twice, and the population of a live HF band at that instant is not
-either.
+WHAT THE NEXT TWO PARAGRAPHS USED TO SAY, off that snapshot grouping. "All six
+excerpts at gaps of 300 Hz, 1 kHz and 3 kHz produce four groups in total, none
+of them the carrier-with-a-matched-pair or the comb the scene shows." And "And
+the groups move between runs of the same file": on 40 m at 1359 a gap of
+300 Hz grouped three lines and a gap of 1 kHz grouped two, because the instant
+the final table was sampled was not the same twice. Both were true of four
+snapshots and neither survives following every decision.
 
-That is the same limit the survey hit from the other side. Reading a set of
-lines needs those lines to be there together, and following one that fades and
-returns is the tracker's job. A grouping over one snapshot is the cheap half.
+**The same corpus through the surface**, all six excerpts, 55 seconds each,
+default thresholds, the run summary's groups formed and the longest any one
+group held all of its lines:
+
+| band, hour | 300 Hz | 1 kHz | 3 kHz |
+| --- | --- | --- | --- |
+| 40 m 1359 | 7, 9.6 s | 7, 11.6 s | 7, 21.8 s |
+| 40 m 1501 | none | none | none |
+| 40 m 1603 | none | none | none |
+| 20 m 1359 | none | none | 3, 7.5 s |
+| 20 m 1501 | 1, one decision | 2, 2.7 s | 4, 6.8 s |
+| 20 m 1603 | 10, 10.2 s | 11, 10.2 s | 13, 8.9 s |
+
+**The groups no longer move between runs of the same file.** 40 m at 1359 at
+3 kHz, twice: 31 tracks born, 7 groups formed, 6 ended, 15 joins, 19 leaves and
+21.8 s both times. The grouper sees every decision, so the instant a table
+happens to be sampled no longer decides what a group is; the tables printed
+during a run still depend on it.
+
+**Symmetric pairs round six carriers, which the snapshots never showed.** A
+line nine to twelve hertz either side of a carrier, on both bands: at 193 Hz,
+7.192 kHz and 13.250 kHz on 40 m, and at -10.948 kHz, 2.520 kHz and
+8.326 kHz on 20 m. Three of them:
+
+    40 m 1359, 300 Hz   193 Hz        -9 Hz(2.0s)  *0 Hz(40.3s)  +11 Hz(2.0s)
+    20 m 1603, 300 Hz   2.520 kHz    -10 Hz(2.7s)  *0 Hz(3.4s)   +11 Hz(3.4s)
+    20 m 1603, 3 kHz    -10.948 kHz   -9 Hz(6.8s)  *0 Hz(11.6s)  +10 Hz(6.8s)
+
+That is the carrier-with-a-matched-pair shape at a hundredth of the scene's
+spacing, the shape the snapshot grouping said the corpus did not contain.
+**Two of those three pairs arrived after their carrier**, by 38.2 seconds on
+40 m and 4.8 on 20 m, each pair's two lines born in the same decision; the
+third was born within 0.7 seconds of a carrier track that was itself only
+3.4 seconds old.
+
+Six carriers doing the same thing points at the analysis before it points at
+the transmitters, so the detector was checked first: one steady carrier at
+7.19 kHz on the same 1.465 Hz grid, 16 dB in the reference bandwidth and
+nothing else on the span, run for 40 seconds (`groups survey: one steady
+carrier at the HF grid` in `tests/detect/test_groups.cpp`). One track at every
+one of 55 decisions, no second track within 50 Hz at any of them, no group.
+**A steady line does not make the pair.** A carrier that drifts, and the
+ionosphere, are both still open, and no row here is known to be right.
+
+**The longest-held set is a carrier and one line above it**, on 40 m at 1359
+at 3 kHz: 13.249 kHz and a line 1.7 to 1.9 kHz up, whole for 21.2 seconds and
+born 21.8 seconds apart. No comb and no matched pair at a family's spacing
+appears anywhere.
+
+**Reading a set of lines needs those lines to be there together**, and the
+table says how rarely that holds on this corpus: at 300 Hz no set of lines on
+four of the six excerpts stayed whole past a decision or formed at all.
 
 **The three that are resolved separate more sharply than before**: fsk2 at
 0.277 against 0.056 is five to one, where the shipped grid gave four to one. A
