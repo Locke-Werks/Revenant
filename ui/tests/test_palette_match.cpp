@@ -115,7 +115,9 @@ TEST_CASE("the everyday queries find their action first")
     CHECK(top("narrow") == "filter.narrow");
     CHECK(top("aft") == "receiver.aft");
     CHECK(top("key map") == "keymap.open");
-    CHECK(top("bookmark") == "bookmark.save");
+    CHECK(top("bookmark") == "memory.save");
+    CHECK(top("frequency manager") == "panel.memories");
+    CHECK(top("import") == "panel.memories");
     CHECK(top("remove") == "receiver.remove");
     CHECK(top("receiver window") == "window.receivers");
     CHECK(top("pin floor") == "scale.floor");

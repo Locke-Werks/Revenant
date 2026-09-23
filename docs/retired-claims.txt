@@ -1504,3 +1504,18 @@ commit: "Calibrate a device's crystal, DC offset and I/Q imbalance in the engine
 instead: Fourteen kernels under core/shaders carry layout(local_size_x_id = 0) in;
     iq_moments.comp and iq_correct.comp, the front-end correction, are the
     thirteenth and fourteenth.
+
+phrase: the radio, the detection thresholds, the bookmarks, and the status drawer
+phrase: the radio, the detection thresholds and the bookmarks in panels
+retired: 2026-09-23
+commit: "Open a frequency manager from the top bar in place of the bookmark row"
+instead: The top bar's panels are the radio, the detection thresholds and the
+    frequency manager, which replaced the bookmark row; docs/ui-spectrum.md,
+    "Frequency manager".
+
+phrase: Nothing reads kBookmarks at startup except to fill a list
+retired: 2026-09-23
+commit: "Open a frequency manager from the top bar in place of the bookmark row"
+instead: EngineLink still loads bookmarks/list into a list the window no longer
+    shows, and the frequency manager reads it once to migrate it into
+    memories.json; ui/models/settings.h.

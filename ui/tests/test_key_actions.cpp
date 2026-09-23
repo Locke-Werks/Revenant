@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <string>
@@ -44,6 +45,8 @@ using revenant::ui::KeyScale;
 using revenant::ui::KeyState;
 using revenant::ui::kKeyActions;
 using revenant::ui::kModeChoices;
+using revenant::ui::memory_command;
+using revenant::ui::MemoryCommand;
 using revenant::ui::overlay_command;
 using revenant::ui::parse_key_chord;
 using revenant::ui::passband_command;
@@ -129,8 +132,8 @@ TEST_CASE("sequences are compared as keys, not as text")
 // being true together.
 TEST_CASE("no two actions share a key in one context")
 {
-    for (const KeyContext context :
-         {KeyContext::Window, KeyContext::Filter, KeyContext::Overlay}) {
+    for (const KeyContext context : {KeyContext::Window, KeyContext::Filter,
+                                     KeyContext::Overlay, KeyContext::Memories}) {
         std::vector<std::pair<std::string, std::string_view>> seen;
         for (const KeyAction& action : kKeyActions) {
             if (action.context != context) {
@@ -148,11 +151,11 @@ TEST_CASE("no two actions share a key in one context")
     }
 }
 
-// Rejects a window key that the filter display or the overlay also takes.
-// Those two see a key before the window's shortcuts do, so such a key would
-// work from everywhere except the place the operator happened to be, and
-// which place that is changes with every click.
-TEST_CASE("no window key is shadowed by the filter display or the overlay")
+// Rejects a window key that the filter display, the overlay or the frequency
+// manager also takes. Those see a key before the window's shortcuts do, so
+// such a key would work from everywhere except the place the operator
+// happened to be, and which place that is changes with every click.
+TEST_CASE("no window key is shadowed by the filter display, the overlay or the manager")
 {
     for (const KeyAction& window : kKeyActions) {
         if (window.context != KeyContext::Window) {
@@ -162,6 +165,7 @@ TEST_CASE("no window key is shadowed by the filter display or the overlay")
             INFO(window.id << " on " << chord_text(chord));
             CHECK(find_key(KeyContext::Filter, chord).action == nullptr);
             CHECK(find_key(KeyContext::Overlay, chord).action == nullptr);
+            CHECK(find_key(KeyContext::Memories, chord).action == nullptr);
         }
     }
 }
@@ -213,6 +217,7 @@ TEST_CASE("every filter and overlay action has its command")
             case KeyContext::Window: CHECK_FALSE(action.handler.empty()); break;
             case KeyContext::Filter: CHECK(passband_command(action.id).has_value()); break;
             case KeyContext::Overlay: CHECK(overlay_command(action.id).has_value()); break;
+            case KeyContext::Memories: CHECK(memory_command(action.id).has_value()); break;
         }
     }
 }
@@ -350,4 +355,27 @@ TEST_CASE("the key map in docs/ui-spectrum.md is the table's")
     INFO("docs/ui-spectrum.md should carry, between the markers, what this "
          "test wrote to key_map_expected.md in its working directory");
     CHECK(written == expected);
+}
+
+// Rejects the frequency manager's keys drifting from what its panel does with
+// them: Return recalls into the focused receiver and Shift+Return into a new
+// one, which is the one pair an operator has to be able to tell apart without
+// looking, and Ctrl+Z is the undo a delete promises.
+TEST_CASE("the frequency manager's keys name the commands its panel runs")
+{
+    const auto command = [](std::string_view sequence) -> std::optional<MemoryCommand> {
+        const auto hit = find_key(KeyContext::Memories, sequence);
+        return hit.action != nullptr ? memory_command(hit.action->id) : std::nullopt;
+    };
+    CHECK(command("Return") == MemoryCommand::Recall);
+    CHECK(command("Enter") == MemoryCommand::Recall);
+    CHECK(command("Shift+Return") == MemoryCommand::RecallNew);
+    CHECK(command("Del") == MemoryCommand::Delete);
+    CHECK(command("Ctrl+Z") == MemoryCommand::Undo);
+    CHECK(command("Esc") == MemoryCommand::Close);
+    CHECK_FALSE(command("Ctrl+Del").has_value());
+
+    // The window keys that open the manager and save into it.
+    CHECK(find_key(KeyContext::Window, "Ctrl+B").action == find_key_action("panel.memories"));
+    CHECK(find_key(KeyContext::Window, "Ctrl+D").action == find_key_action("memory.save"));
 }

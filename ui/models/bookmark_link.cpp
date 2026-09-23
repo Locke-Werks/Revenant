@@ -25,9 +25,19 @@
 // only place the refusal is visible, which is why abandoning the bookmark lives
 // there too: a retune the radio declined would otherwise leave an entry waiting
 // for a turn that never comes.
+//
+// WHAT OF THIS THE WINDOW STILL CALLS. Since 2026-09-23 the frequency manager
+// (models/frequency_manager.h) holds the list, in its own file, and reaches
+// this file only through recallPlace, which is the recall below with the place
+// passed in and an option to put it in a new receiver. The registry list, save,
+// remove, rename and receiverBookmarked are no longer called from the QML, and
+// the registry value is what the manager migrates from once. They are left in
+// place so the change that brought the manager in touches this class as little
+// as it can; retiring them is its own change.
 
 #include "models/engine_link.h"
 
+#include <cmath>
 #include <utility>
 
 #include <QJsonArray>
@@ -243,7 +253,31 @@ void EngineLink::recallBookmark(int index)
     if (index < 0 || static_cast<std::size_t>(index) >= bookmarks_.size()) {
         return;
     }
-    const Bookmark mark = bookmarks_[static_cast<std::size_t>(index)];
+    const Bookmark& mark = bookmarks_[static_cast<std::size_t>(index)];
+    recallPlace(static_cast<double>(mark.freq_hz), QString::fromStdString(mark.demod),
+                mark.passband_low, mark.passband_high, QString::fromStdString(mark.name), false);
+}
+
+void EngineLink::recallPlace(double absolute_hz, const QString& demod, int low, int high,
+                             const QString& name, bool new_receiver)
+{
+    Bookmark mark;
+    mark.name = name.toStdString();
+    mark.freq_hz = static_cast<std::int64_t>(std::llround(absolute_hz));
+    mark.demod = demod.toStdString();
+    mark.passband_low = low;
+    mark.passband_high = high;
+
+    // Refused before anything moves. add_receiver_at would say the same in
+    // the rack note and add nothing, and the edges applied after it would
+    // then land on the focused receiver, which is not what was asked for.
+    if (new_receiver && rack_.full()) {
+        pending_recall_.reset();
+        bookmark_fault_ = QStringLiteral("the rack is full, so %1 has no receiver to go in")
+                              .arg(QString::fromStdString(bookmark_label(mark)));
+        emit bookmarkFaultChanged();
+        return;
+    }
 
     // The span the DISPLAY is drawing, which is what plan_recall wants and why it
     // takes two doubles rather than a centre and a rate.
@@ -252,15 +286,17 @@ void EngineLink::recallBookmark(int index)
     switch (plan.action) {
     case RecallAction::PlaceHere:
         pending_recall_.reset();
-        place_recall(mark);
-        bookmark_fault_.clear();
-        emit bookmarkFaultChanged();
+        if (place_recall(mark, new_receiver)) {
+            bookmark_fault_.clear();
+            emit bookmarkFaultChanged();
+        }
         return;
 
     case RecallAction::RetuneThenPlace:
         // Held, not placed. See the file header: the radio has not moved when
         // tuneSourceHz returns.
         pending_recall_ = mark;
+        pending_recall_new_ = new_receiver;
         bookmark_fault_ = QStringLiteral("moving the radio to reach %1")
                               .arg(QString::fromStdString(bookmark_label(mark)));
         emit bookmarkFaultChanged();
@@ -288,7 +324,7 @@ void EngineLink::recallBookmark(int index)
     }
 }
 
-void EngineLink::place_recall(const Bookmark& mark)
+bool EngineLink::place_recall(const Bookmark& mark, bool new_receiver)
 {
     // Absolute hertz, and the mode named. tuneReceiver does the subtraction
     // against whatever source_center holds now, which is the whole reason a
@@ -298,7 +334,23 @@ void EngineLink::place_recall(const Bookmark& mark)
     // demod_touched_, and that is correct rather than incidental: a bookmark
     // carries a mode because somebody set one, so a later click on a detection
     // should keep it instead of deriving one from a measured bandwidth.
-    tuneReceiver(static_cast<double>(mark.freq_hz), QString::fromStdString(mark.demod));
+    //
+    // A new receiver goes through add_receiver_at, which parks the focused one
+    // in the rack first and then makes the same tuneReceiver call. The rack
+    // can have filled while a retune was pending, so it is asked again here:
+    // the edges below would otherwise land on the focused receiver.
+    if (new_receiver) {
+        if (rack_.full()) {
+            bookmark_fault_ = QStringLiteral("the rack is full, so %1 has no receiver to go in")
+                                  .arg(QString::fromStdString(bookmark_label(mark)));
+            emit bookmarkFaultChanged();
+            return false;
+        }
+        add_receiver_at(static_cast<double>(mark.freq_hz), QString::fromStdString(mark.demod),
+                        0.0);
+    } else {
+        tuneReceiver(static_cast<double>(mark.freq_hz), QString::fromStdString(mark.demod));
+    }
 
     // The saved edges, if they were ever moved off the mode's default. Both zero
     // means they were not, and the engine has already answered with the default,
@@ -308,6 +360,7 @@ void EngineLink::place_recall(const Bookmark& mark)
     }
 
     note_receiver_bookmarked();
+    return true;
 }
 
 void EngineLink::resolve_pending_recall(bool granted)
@@ -316,7 +369,9 @@ void EngineLink::resolve_pending_recall(bool granted)
         return;
     }
     const Bookmark mark = *pending_recall_;
+    const bool new_receiver = pending_recall_new_;
     pending_recall_.reset();
+    pending_recall_new_ = false;
 
     if (!granted) {
         // The radio declined the move. Said here rather than left to the tune
@@ -341,9 +396,10 @@ void EngineLink::resolve_pending_recall(bool granted)
         return;
     }
 
-    place_recall(mark);
-    bookmark_fault_.clear();
-    emit bookmarkFaultChanged();
+    if (place_recall(mark, new_receiver)) {
+        bookmark_fault_.clear();
+        emit bookmarkFaultChanged();
+    }
 }
 
 }  // namespace revenant::ui

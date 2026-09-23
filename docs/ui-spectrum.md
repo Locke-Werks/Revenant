@@ -22,11 +22,15 @@ backlog as the displays, and a click on it tunes there.
 The top bar carries the front end's frequency dial, a few band shortcuts and
 a grouped band menu, and buttons that open panels over the span for what
 direct manipulation cannot express: the radio, the detection thresholds, the
-bookmarks, and the status drawer behind a pill that names the engine's state
-in a word or two. Faults come forward in a strip under the bar that exists
-only while one does, as chips naming the problem with the full sentence on
-hover. `ui/models/status_summary.h` decides which conditions are faults and
-which are notes that wait in the drawer.
+frequency manager, and the status drawer behind a pill that names the
+engine's state in a word or two. Faults come forward in a strip under the bar
+that exists only while one does, as chips naming the problem with the full
+sentence on hover. `ui/models/status_summary.h` decides which conditions are
+faults and which are notes that wait in the drawer.
+
+WHAT THIS PARAGRAPH USED TO SAY: "the radio, the detection thresholds, the
+bookmarks, and the status drawer". The bookmark row became the frequency
+manager on 2026-09-23; see "Frequency manager" below.
 
 The receiver window holds the receiver rack, one strip per receiver in the
 receiver's colour with a live meter, and the focused receiver's controls: its
@@ -135,8 +139,8 @@ are bound.
 | display | pin or unpin the spectrum ceiling | `Ctrl+]` |
 | panels | open the radio picker | `Ctrl+O` |
 | panels | open the detections panel | `Ctrl+Shift+D` |
-| panels | open the bookmarks | `Ctrl+B` |
-| panels | bookmark the receiver | `Ctrl+D` |
+| panels | open the frequency manager | `Ctrl+B` |
+| panels | save the receiver as a memory | `Ctrl+D` |
 | panels | show or hide the receiver window | `Ctrl+R` |
 | help | open the command palette | `Ctrl+K`, `Ctrl+Shift+P` |
 | help | show the key map | `F1` |
@@ -163,6 +167,20 @@ are bound.
 | palette | previous entry | `Up` |
 | palette | run the chosen entry | `Return`, `Enter` |
 | palette | close | `Esc` |
+
+**in the frequency manager.** While the frequency manager is open. Its search field keeps Del and Ctrl+Z for its own text, and Down moves from the field into the list.
+
+| Group | Action | Keys |
+| --- | --- | --- |
+| memories | next memory | `Down` |
+| memories | previous memory | `Up` |
+| memories | recall to the focused receiver | `Return`, `Enter` |
+| memories | recall into a new receiver | `Shift+Return`, `Shift+Enter` |
+| memories | rename the memory | `F2` |
+| memories | delete the memory | `Del` |
+| memories | undo the last delete | `Ctrl+Z` |
+| memories | search the memories | `Ctrl+F` |
+| memories | close the frequency manager | `Esc` |
 
 <!-- End of the key map. -->
 

@@ -2302,6 +2302,14 @@ public:
     // one that was dropped.
     Q_INVOKABLE void recallBookmark(int index);
 
+    // The same recall for a place the frequency manager holds rather than one
+    // in the list above: same rule, same two turns, same fault string. With
+    // new_receiver it adds a receiver to the rack for the place instead of
+    // moving the focused one, and refuses in bookmarkFault when the rack is
+    // full rather than falling back to moving the focused one.
+    Q_INVOKABLE void recallPlace(double absolute_hz, const QString& demod, int low, int high,
+                                 const QString& name, bool new_receiver);
+
     // ------------------------------------------------------------------
     // The RDS surface. Implemented in ui/models/rds_link.cpp.
     // ------------------------------------------------------------------
@@ -3033,6 +3041,10 @@ private:
     // subtraction in tune_receiver is against the right number.
     std::optional<Bookmark> pending_recall_;
 
+    // Whether that recall goes into a new receiver rather than the focused
+    // one, which the retune does not change and the placement has to know.
+    bool pending_recall_new_ = false;
+
     // Places pending_recall_ now that the front end has moved, or abandons
     // it with a reason if the retune was refused. Called from the source
     // half's adopt, which is where a granted centre reaches the Qt thread.
@@ -3040,8 +3052,10 @@ private:
 
     // Puts the receiver on a bookmark, assuming it has already been found
     // reachable. The one place the two writes happen, so a recall that
-    // needed a retune and one that did not cannot drift apart.
-    void place_recall(const Bookmark& mark);
+    // needed a retune and one that did not cannot drift apart. Answers false,
+    // with bookmarkFault set, when a new receiver was asked for and the rack
+    // is full.
+    bool place_recall(const Bookmark& mark, bool new_receiver = false);
 
     void load_bookmarks();
     void store_bookmarks() const;

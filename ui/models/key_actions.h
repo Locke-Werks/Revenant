@@ -21,9 +21,10 @@
 // argument, and ui/qml/Commands.qml holds the one table from handler to call.
 // A smoke run asks that table which handlers it lacks and fails on any, so a
 // row added here without a handler there is a red run rather than a key that
-// silently does nothing. The filter display's keys and the overlay's keys are
-// handled in C++ and in the overlay, through passband_command and
-// overlay_command below, whose coverage the tests assert.
+// silently does nothing. The filter display's keys, the overlay's keys and the
+// frequency manager's are handled in C++, in the overlay and in the manager's
+// panel, through passband_command, overlay_command and memory_command below,
+// whose coverage the tests assert.
 //
 // WHAT IS NOT HERE, AND WHY.
 //
@@ -55,10 +56,12 @@ namespace revenant::ui {
 // field keeps the keys it types with. Filter keys work while the filter
 // display has focus, after a click on it or the window key that puts them
 // there. Overlay keys work while the command palette or the key map is open.
+// Memory keys work while the frequency manager is open and has focus.
 enum class KeyContext {
     Window,
     Filter,
     Overlay,
+    Memories,
 };
 
 // What an action needs before it can do anything, as bits. An action is
@@ -227,10 +230,11 @@ inline constexpr std::array kKeyActions{
               {"Ctrl+O", ""}, KeyContext::Window, kNeedsEngine, "panel.open", "radio"},
     KeyAction{"panel.detections", "open the detections panel", "panels", "thresholds detector",
               {"Ctrl+Shift+D", ""}, KeyContext::Window, kNeedsSpectrum, "panel.open", "detections"},
-    KeyAction{"panel.bookmarks", "open the bookmarks", "panels", "marks memories saved",
-              {"Ctrl+B", ""}, KeyContext::Window, kNeedsEngine, "panel.open", "bookmarks"},
-    KeyAction{"bookmark.save", "bookmark the receiver", "panels", "save mark memory",
-              {"Ctrl+D", ""}, KeyContext::Window, kNeedsReceiver, "bookmark.save", ""},
+    KeyAction{"panel.memories", "open the frequency manager", "panels",
+              "bookmarks marks memories channels saved scan import export chirp sdr",
+              {"Ctrl+B", ""}, KeyContext::Window, kNeedsNothing, "panel.open", "memories"},
+    KeyAction{"memory.save", "save the receiver as a memory", "panels", "bookmark mark memory store",
+              {"Ctrl+D", ""}, KeyContext::Window, kNeedsReceiver, "memory.save", ""},
     KeyAction{"window.receivers", "show or hide the receiver window", "panels", "vfo rack",
               {"Ctrl+R", ""}, KeyContext::Window, kNeedsNothing, "window.receivers", ""},
 
@@ -270,6 +274,27 @@ inline constexpr std::array kKeyActions{
               {"Return", "Enter"}, KeyContext::Overlay, kNeedsNothing, "", ""},
     KeyAction{"overlay.close", "close", "palette", "",
               {"Esc", ""}, KeyContext::Overlay, kNeedsNothing, "", ""},
+
+    // The frequency manager's own keys. Recall wants a receiver's engine and
+    // the rest act on the list alone; the panel greys what cannot run.
+    KeyAction{"memories.next", "next memory", "memories", "",
+              {"Down", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
+    KeyAction{"memories.previous", "previous memory", "memories", "",
+              {"Up", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
+    KeyAction{"memories.recall", "recall to the focused receiver", "memories", "",
+              {"Return", "Enter"}, KeyContext::Memories, kNeedsSource, "", ""},
+    KeyAction{"memories.recall_new", "recall into a new receiver", "memories", "",
+              {"Shift+Return", "Shift+Enter"}, KeyContext::Memories, kNeedsSource, "", ""},
+    KeyAction{"memories.edit", "rename the memory", "memories", "",
+              {"F2", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
+    KeyAction{"memories.delete", "delete the memory", "memories", "",
+              {"Del", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
+    KeyAction{"memories.undo", "undo the last delete", "memories", "",
+              {"Ctrl+Z", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
+    KeyAction{"memories.search", "search the memories", "memories", "",
+              {"Ctrl+F", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
+    KeyAction{"memories.close", "close the frequency manager", "memories", "",
+              {"Esc", ""}, KeyContext::Memories, kNeedsNothing, "", ""},
 };
 // clang-format on
 
@@ -293,6 +318,7 @@ inline constexpr std::array kKeyContexts{
     KeyContextInfo{KeyContext::Window, "anywhere"},
     KeyContextInfo{KeyContext::Filter, "on the filter display"},
     KeyContextInfo{KeyContext::Overlay, "in the palette and the key map"},
+    KeyContextInfo{KeyContext::Memories, "in the frequency manager"},
 };
 
 [[nodiscard]] constexpr std::string_view key_context_name(KeyContext context)
@@ -339,6 +365,9 @@ inline constexpr std::array kKeyContexts{
         }
         case KeyContext::Overlay:
             return "While the command palette or the key map is open.";
+        case KeyContext::Memories:
+            return "While the frequency manager is open. Its search field keeps Del and Ctrl+Z "
+                   "for its own text, and Down moves from the field into the list.";
     }
     return {};
 }
@@ -717,6 +746,43 @@ inline constexpr std::array kOverlayCommands{
 [[nodiscard]] constexpr std::optional<OverlayCommand> overlay_command(std::string_view id)
 {
     for (const auto& named : kOverlayCommands) {
+        if (named.id == id) {
+            return named.command;
+        }
+    }
+    return std::nullopt;
+}
+
+enum class MemoryCommand {
+    Next,
+    Previous,
+    Recall,
+    RecallNew,
+    Edit,
+    Delete,
+    Undo,
+    Search,
+    Close,
+};
+
+inline constexpr std::array kMemoryCommands{
+    NamedCommand<MemoryCommand>{"memories.next", MemoryCommand::Next},
+    NamedCommand<MemoryCommand>{"memories.previous", MemoryCommand::Previous},
+    NamedCommand<MemoryCommand>{"memories.recall", MemoryCommand::Recall},
+    NamedCommand<MemoryCommand>{"memories.recall_new", MemoryCommand::RecallNew},
+    NamedCommand<MemoryCommand>{"memories.edit", MemoryCommand::Edit},
+    NamedCommand<MemoryCommand>{"memories.delete", MemoryCommand::Delete},
+    NamedCommand<MemoryCommand>{"memories.undo", MemoryCommand::Undo},
+    NamedCommand<MemoryCommand>{"memories.search", MemoryCommand::Search},
+    NamedCommand<MemoryCommand>{"memories.close", MemoryCommand::Close},
+};
+
+// The frequency manager's command for one of its actions. models/key_map.h
+// switches on the answer with no default, so a command added here and not
+// named there is a warning the CI build stops on.
+[[nodiscard]] constexpr std::optional<MemoryCommand> memory_command(std::string_view id)
+{
+    for (const auto& named : kMemoryCommands) {
         if (named.id == id) {
             return named.command;
         }

@@ -8,8 +8,8 @@
 // 2026-09-22 were cluttered and confusing, against a design brief of
 // "intuitive but not simple, powerful but not overwhelming". So the rows are
 // now one gesture away instead of always present: the radio, the detection
-// thresholds and the bookmarks in panels, the diagnostics behind the status
-// pill, and faults in a banner that exists only while they do.
+// thresholds and the frequency manager in panels, the diagnostics behind the
+// status pill, and faults in a banner that exists only while they do.
 
 import QtQuick
 import QtQuick.Controls
@@ -32,7 +32,7 @@ Rectangle {
     function togglePanel(name) {
         const panel = name === "radio" ? radioPanel
                     : name === "detections" ? detectionsPanel
-                    : name === "bookmarks" ? marksPanel
+                    : name === "memories" ? memoriesPanel
                     : null
         if (panel === null)
             return
@@ -93,19 +93,30 @@ Rectangle {
 
         Item { Layout.fillWidth: true }
 
+        // The frequency manager. Shown with no engine too: the memories are
+        // a file on this machine, and importing, editing and exporting them
+        // need no radio.
         RButton {
-            id: marksButton
+            id: memoriesButton
             flat: true
-            text: "marks"
+            text: "memories"
             ink: Theme.inkDim
-            visible: engineLink.connected
-            onClicked: marksPanel.opened ? marksPanel.close() : marksPanel.open()
+            onClicked: memoriesPanel.opened ? memoriesPanel.close() : memoriesPanel.open()
 
+            // Wider than the bar's other panels, so it is kept inside the
+            // window's left edge as well as opening leftwards from the button:
+            // the bar starts at the window's edge, so the button's x in the
+            // row plus the row's margin is its distance from that edge.
             Popover {
-                id: marksPanel
-                parent: marksButton
-                BookmarkRow {
-                    Layout.preferredWidth: 640
+                id: memoriesPanel
+                parent: memoriesButton
+                x: Math.max(8 - memoriesButton.x - 12, memoriesButton.width - width)
+                onOpened: memoriesView.opened()
+
+                FrequencyManagerPanel {
+                    id: memoriesView
+                    Layout.preferredWidth: Math.min(900, bar.width - 40)
+                    popover: memoriesPanel
                 }
             }
         }

@@ -171,6 +171,11 @@ qt_add_executable(revenant_ui
     models/decoded_model.h
     models/engine_link.cpp
     models/engine_link.h
+    models/frequency_manager.cpp
+    models/frequency_manager.h
+    models/json_lite.h
+    models/memories.h
+    models/memory_import.h
     models/band_plan.h
     models/frame_stats.h
     models/frequency_dial.h
@@ -230,7 +235,7 @@ qt_add_qml_module(revenant_ui
         qml/TuneSelection.qml
         qml/StatusRow.qml
         qml/SourcePicker.qml
-        qml/BookmarkRow.qml
+        qml/FrequencyManagerPanel.qml
         qml/DetectionControls.qml
         qml/SpanView.qml
         qml/Ruler.qml

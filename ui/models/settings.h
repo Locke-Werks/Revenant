@@ -27,8 +27,17 @@
 // is the automatic restore that claims a band nobody looked at. A bookmark
 // is recalled when an operator picks it, which is them making the claim,
 // and models/bookmarks.h refuses one the open source cannot reach rather
-// than tuning past the end of the span. Nothing reads kBookmarks at
-// startup except to fill a list.
+// than tuning past the end of the span.
+//
+// kBookmarks is read at startup twice now, and neither read tunes anything:
+// EngineLink loads it into a list the window no longer shows, and the
+// frequency manager (models/frequency_manager.h) carries it across into
+// memories.json the first time that file does not exist. The memories live in
+// that file and not here; see models/memories.h for why.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "Nothing reads kBookmarks at startup
+// except to fill a list." True until the frequency manager, which also reads
+// it once to migrate it.
 //
 // The RDS switch is not remembered either, and for a sharper reason: the
 // first poll BUILDS a decoder on the engine, which is shared state on a

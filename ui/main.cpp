@@ -14,8 +14,8 @@
 //   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
 //               [--receiver FREQ:MODE ...] [--decode NAME] [--rds]
 //               [--grab-receivers FILE] [--palette QUERY] [--keymap]
-//               [--grab-main FILE]
-//               [--frame-stats FILE] [--maximise]
+//               [--grab-main FILE] [--frame-stats FILE] [--maximise]
+//               [--memories FILE] [--panel NAME] [--preview-import FILE]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -55,6 +55,12 @@
 // no sound card. --maximise opens the main window maximised, because a smoke
 // run restores no geometry and the frame budget is about the size the span is
 // actually used at, not the QML's default.
+// --memories reads the frequency manager's list from FILE instead of the
+// user's own, and never writes it; a smoke run without it starts with an empty
+// list and no file at all. --panel opens one of the top bar's panels by the
+// name the key table uses, "memories", "radio" or "detections", and
+// --preview-import reads FILE into the frequency manager's import preview.
+// With --grab-main they photograph the frequency manager on sample memories.
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
@@ -107,6 +113,7 @@
 #include "audio/audio_player.h"
 #include "models/engine_link.h"
 #include "models/frequency_entry.h"
+#include "models/frequency_manager.h"
 #include "models/settings.h"
 #include "render/frame_probe.h"
 
@@ -391,6 +398,9 @@ int main(int argc, char* argv[])
     bool keymap_wanted = false;
     QString frame_stats;
     bool maximise = false;
+    QString memories_file;
+    QString open_panel;
+    QString preview_import;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
@@ -426,6 +436,18 @@ int main(int argc, char* argv[])
         if (args[i] == QStringLiteral("--palette") && i + 1 < args.size()) {
             palette_query = args[++i];
             palette_wanted = true;
+            continue;
+        }
+        if (args[i] == QStringLiteral("--memories") && i + 1 < args.size()) {
+            memories_file = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--panel") && i + 1 < args.size()) {
+            open_panel = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--preview-import") && i + 1 < args.size()) {
+            preview_import = args[++i];
             continue;
         }
         if (args[i] == QStringLiteral("--keymap")) {
@@ -479,6 +501,10 @@ int main(int argc, char* argv[])
     }
     if (!grab_main.isEmpty() && !smoke) {
         std::fputs("--grab-main needs --smoke-seconds, which is the run it ends\n", stderr);
+        return 2;
+    }
+    if (!memories_file.isEmpty() && !smoke) {
+        std::fputs("--memories needs --smoke-seconds; a normal run keeps its own list\n", stderr);
         return 2;
     }
     if (palette_wanted && keymap_wanted) {
@@ -563,9 +589,28 @@ int main(int argc, char* argv[])
                          [probe = frame_probe.get()] { probe->finish(); });
     }
 
+    // The memory file: the user's own in a normal run, migrating the old
+    // bookmark list into it the first time. A smoke run reads only what
+    // --memories names and writes nothing, on the rule the usage above gives
+    // for every other setting. Declared after the link, so it is destroyed
+    // first and never holds a reference to a link that has gone.
+    revenant::ui::FrequencyManager::Storage memory_storage;
+    if (smoke) {
+        memory_storage.path = memories_file;
+        memory_storage.writable = false;
+        memory_storage.migrate = false;
+    } else {
+        memory_storage.path = revenant::ui::FrequencyManager::defaultPath();
+    }
+    revenant::ui::FrequencyManager memories(link, memory_storage);
+    if (!preview_import.isEmpty()) {
+        memories.previewImport(preview_import);
+    }
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
+    engine.rootContext()->setContextProperty(QStringLiteral("frequencyManager"), &memories);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
@@ -631,6 +676,10 @@ int main(int argc, char* argv[])
         } else {
             QMetaObject::invokeMethod(commands, "showKeyMap");
         }
+    }
+
+    if (!open_panel.isEmpty() && commands != nullptr) {
+        QMetaObject::invokeMethod(commands, "showPanel", Q_ARG(QVariant, QVariant(open_panel)));
     }
 
     if (smoke) {

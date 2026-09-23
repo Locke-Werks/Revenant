@@ -153,6 +153,34 @@ public:
         return {};
     }
 
+    // The frequency manager's command for a key press: "next", "previous",
+    // "recall", "recallNew", "edit", "delete", "undo", "search", "close", or
+    // empty when the manager does not use that key.
+    [[nodiscard]] Q_INVOKABLE QString memoryCommand(int key, int modifiers) const
+    {
+        const KeyHit hit = find_key(KeyContext::Memories,
+                                    key_chord(key, Qt::KeyboardModifiers(modifiers)));
+        if (hit.action == nullptr) {
+            return {};
+        }
+        const auto command = memory_command(hit.action->id);
+        if (!command) {
+            return {};
+        }
+        switch (*command) {
+            case MemoryCommand::Next: return QStringLiteral("next");
+            case MemoryCommand::Previous: return QStringLiteral("previous");
+            case MemoryCommand::Recall: return QStringLiteral("recall");
+            case MemoryCommand::RecallNew: return QStringLiteral("recallNew");
+            case MemoryCommand::Edit: return QStringLiteral("edit");
+            case MemoryCommand::Delete: return QStringLiteral("delete");
+            case MemoryCommand::Undo: return QStringLiteral("undo");
+            case MemoryCommand::Search: return QStringLiteral("search");
+            case MemoryCommand::Close: return QStringLiteral("close");
+        }
+        return {};
+    }
+
     // The palette's matches for a query, best first. scope is "bands" for
     // the band jump and anything else for everything. accent is the colour
     // the matched letters are drawn in, since the palette is Theme's.

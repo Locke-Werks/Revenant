@@ -119,7 +119,7 @@ Item {
             commands.bringForward(commands.mainWindow)
             commands.topBar.togglePanel(name)
         },
-        "bookmark.save": () => engineLink.saveBookmark(""),
+        "memory.save": () => frequencyManager.addFromReceiver(""),
         "window.receivers": () => commands.receiverWindow.toggle(),
         "palette.open": () => commands.openPalette(""),
         "keymap.open": () => commands.openKeyMap()
@@ -192,6 +192,13 @@ Item {
     function showKeyMap() {
         commands.closeOverlays()
         commands.mainKeyMap.open()
+    }
+
+    // And one of the top bar's panels, for --panel. Not bringForward: a smoke
+    // run's windows are offscreen and there is nothing to raise.
+    function showPanel(name) {
+        commands.closeOverlays()
+        commands.topBar.togglePanel(name)
     }
 
     // One application-wide shortcut per keyed action in the table. Application
