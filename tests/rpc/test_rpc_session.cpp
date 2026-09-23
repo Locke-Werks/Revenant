@@ -847,11 +847,34 @@ TEST_CASE("the source listing crosses whole, backend for backend", "[gpu][rpc][m
     // ones that could, and its reason must not be dropped on the way out: a
     // missing DLL and an unplugged radio are different problems, and a list
     // that omits both looks identical to a list with nothing attached.
+    //
+    // TWO LISTINGS TAKEN AT TWO MOMENTS, AND A DEVICE CAN CHANGE HANDS BETWEEN
+    // THEM. Describing a dongle opens it, so another process holding it, a
+    // second checkout's suite or a capture, makes it unavailable in whichever
+    // listing ran while it was held. On 2026-09-23 this case failed on exactly
+    // that with parallel checkouts on one machine. The listing a client gets
+    // is the server's own and cannot be taken from the snapshot below, so what
+    // is compared is what another process cannot change: the same entries in
+    // the same order, each with its URI and backend, and the whole description
+    // wherever the device's availability agreed. An entry that changed hands
+    // is held only to saying why it could not be described.
     REQUIRE(remote->size() == local->size());
+    std::size_t changed_hands = 0;
     for (std::size_t i = 0; i < local->size(); ++i) {
         INFO("entry " << i << " is " << (*local)[i].uri);
         CHECK((*remote)[i].uri == (*local)[i].uri);
         CHECK((*remote)[i].backend == (*local)[i].backend);
+
+        if ((*remote)[i].available() != (*local)[i].available()) {
+            ++changed_hands;
+            const std::string& reason = (*local)[i].available() ? (*remote)[i].unavailable
+                                                                : (*local)[i].unavailable;
+            INFO("available locally " << (*local)[i].available() << ", over the wire "
+                                      << (*remote)[i].available() << ": " << reason);
+            CHECK_FALSE(reason.empty());
+            continue;
+        }
+
         CHECK((*remote)[i].display_name == (*local)[i].display_name);
         CHECK((*remote)[i].unavailable == (*local)[i].unavailable);
         CHECK((*remote)[i].available() == (*local)[i].available());
@@ -925,6 +948,15 @@ TEST_CASE("the source listing crosses whole, backend for backend", "[gpu][rpc][m
             // device never took.
             CHECK(theirs.steps_db == mine.steps_db);
         }
+    }
+
+    // The synthetic backend is in both listings and nothing can hold it, so
+    // at least one entry is always compared in full.
+    CHECK(changed_hands < local->size());
+    if (changed_hands > 0) {
+        WARN(std::format("{} device{} changed availability between the two listings, so only "
+                         "its URI, backend and reason were compared",
+                         changed_hands, changed_hands == 1 ? "" : "s"));
     }
 
     // AND AT LEAST ONE ENTRY CARRIES SOMETHING, or the loop above proves
