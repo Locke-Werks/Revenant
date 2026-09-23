@@ -258,6 +258,7 @@ double morse_overall_wpm(double character_wpm, double letter_space_s) {
 void MorseTiming::reset() {
     locked_ = false;
     unit_ = 0.0;
+    speed_unit_ = 0.0;
     recent_.clear();
     held_.clear();
     released_ = false;
@@ -270,7 +271,7 @@ void MorseTiming::reset() {
 }
 
 double MorseTiming::wpm() const {
-    return (locked_ && unit_ > 0.0) ? kParisUnitSecondsTimesWpm / unit_ : 0.0;
+    return (locked_ && speed_unit_ > 0.0) ? kParisUnitSecondsTimesWpm / speed_unit_ : 0.0;
 }
 
 double MorseTiming::overall_wpm() const {
@@ -301,6 +302,41 @@ void MorseTiming::estimate_unit() {
         }
     }
     const double mean = sum / static_cast<double>(count);
+
+    // The speed is read from the same cluster with its dots and its spaces
+    // averaged apart and the two means weighted equally, because clause 2
+    // makes both one unit and noise does not leave them so. The threshold
+    // sits above the middle of a noisy carrier's edges, so a dot comes out
+    // short and an element space long by about the same amount, 50.5 and
+    // 69.1 ms for 60 at -8 dB in 2500 Hz, and random text keys more element
+    // spaces than dots, so the pooled mean reads long. Over 40 transmissions
+    // of 186 characters at -8 dB, measured on 2026-09-23, the pooled mean
+    // read 19.36 WPM for 20 and 32.75 for 35, and the equal weighting 20.13
+    // and 34.27. A cluster with only one kind in it, the element spaces of a
+    // run of dashes, is that kind's mean.
+    //
+    // The decoder itself keeps the pooled mean. Decoding against the equal
+    // weighting was tried and cost characters: the bench sweep's 20 WPM
+    // curve got worse at 6 of its 17 points, 0.0592 against 0.0554 at -8 dB,
+    // though 35 WPM improved, 0.0504 against 0.0577 at -8 dB over the 40
+    // transmissions above. Why decoding prefers the pooled mean at 20 WPM
+    // has not been established; the sweep is the case that decides, so the
+    // decode path keeps what it measured best on.
+    double dot_sum = 0.0;
+    double space_sum = 0.0;
+    std::size_t dots = 0;
+    std::size_t spaces = 0;
+    for (const Run& run : recent_) {
+        if (run.seconds <= 2.0 * fifth) {
+            (run.key_down ? dot_sum : space_sum) += run.seconds;
+            ++(run.key_down ? dots : spaces);
+        }
+    }
+    double speed_mean = mean;
+    if (dots > 0 && spaces > 0) {
+        speed_mean = 0.5 * (dot_sum / static_cast<double>(dots) +
+                            space_sum / static_cast<double>(spaces));
+    }
     for (const double v : sorted) {
         if (v >= 2.5 * mean) {
             longer = true;
@@ -335,6 +371,7 @@ void MorseTiming::estimate_unit() {
     const double shortest = unit_for_wpm(config_.max_wpm);
     const double longest = unit_for_wpm(config_.min_wpm);
     unit_ = std::clamp(mean, shortest, longest);
+    speed_unit_ = std::clamp(speed_mean, shortest, longest);
     locked_ = true;
 }
 

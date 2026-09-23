@@ -381,7 +381,7 @@ TEST_CASE("CW round trips at 48 kHz with the tone off centre", "[decode][cw]") {
     INFO("decoded '" << got.text << "' at " << got.wpm << " WPM, offset " << got.offset_hz);
     INFO("as " << got.coded);
     CHECK(got.text == kSample);
-    CHECK(std::abs(got.wpm - 20.0) < 0.6);
+    CHECK(std::abs(got.wpm - 20.0) < 0.05);
     CHECK(std::abs(got.offset_hz - 50.0) < 0.5);
 }
 
@@ -400,7 +400,7 @@ TEST_CASE("CW round trips at 11025 Hz with Farnsworth spacing", "[decode][cw]") 
     INFO("decoded '" << got.text << "' at " << got.wpm << " / " << got.overall_wpm
                      << " WPM, offset " << got.offset_hz);
     CHECK(got.text == kSample);
-    CHECK(std::abs(got.wpm - 18.0) < 0.6);
+    CHECK(std::abs(got.wpm - 18.0) < 0.05);
     CHECK(std::abs(got.overall_wpm - 8.0) < 0.6);
 }
 
@@ -447,11 +447,20 @@ TEST_CASE("the CW decoder falls silent in the noise after a transmission", "[dec
     CHECK(got.text == kSample);
 }
 
+namespace {
+
+const std::string kNoiseText =
+    "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789 " + kSample +
+    " NOW IS THE TIME FOR ALL GOOD MEN TO COME TO THE AID OF THE PARTY";
+
+}  // namespace
+
 TEST_CASE("CW character error rate against noise, measured", "[decode][cw]") {
     struct Point {
         double wpm;
         double snr_db;
         double allowed_character_error_rate;
+        double allowed_wpm_error;
     };
     // Measured on 2026-09-22 over the 186 characters below, signal to noise
     // in 2500 Hz of audio, with this seed:
@@ -460,41 +469,70 @@ TEST_CASE("CW character error rate against noise, measured", "[decode][cw]") {
     //   20 WPM: no errors to -6 dB; CER 0.011 at -8, 0.086 at -10, 0.43 at -12
     //   35 WPM: CER 0.005 at -4 dB, 0.022 at -6, 0.075 at -8, 0.34 at -10
     //
-    // Speed reads slow in noise, 18.3 WPM for 20 at -10 dB, and 19.5 at 0 dB.
-    // On 2026-09-23 this case printed CER 0.10 and 18.25 WPM for 20 at
-    // -10 dB, and 0.054 and 33.3 WPM for 35 at -8 dB.
-    //
-    // Why it reads slow, measured on 2026-09-23 over 40 transmissions of 60
-    // characters at 20 WPM, 60 ms a unit: in noise the mark threshold sits
-    // above the middle of the carrier's edges, so dots come out short and
-    // element spaces long by about the same amount, 50.5 and 69.1 ms at
-    // -8 dB, 55.6 and 64.4 at 0 dB, 58.6 and 61.4 at +10 dB. The one-unit
-    // cluster pools the two, and random text keys more element spaces than
-    // dots, so the pooled unit reads long: 61.5, 60.8 and 60.3 ms. Averaging
-    // the dots' mean with the spaces' would cancel it, since clause 2 makes
-    // both one unit. Not done yet.
+    // On 2026-09-23 this case printed CER 0.10 for 20 WPM at -10 dB and
+    // 0.054 for 35 at -8 dB, and it prints the same with the speed read as
+    // the next case describes, because the runs are still read against the
+    // pooled unit. The speeds it printed moved: 18.25 to 18.69 WPM for 20 at
+    // -10 dB and 33.3 to 34.62 for 35 at -8 dB, with 19.80 and 34.82 at
+    // +10 dB. One transmission's reading wanders, by 0.82 WPM at 20 and
+    // -10 dB and by 2.0 at 35 and -8 dB as a standard deviation over 40, so
+    // the speed bounds here are loose where the noise is and the next case
+    // holds the average. The pooled reading fails the two noisy bounds.
     const Point points[] = {
-        {20.0, 10.0, 0.0},
-        {20.0, -10.0, 0.20},
-        {35.0, 10.0, 0.0},
-        {35.0, -8.0, 0.20},
+        {20.0, 10.0, 0.0, 0.3},
+        {20.0, -10.0, 0.20, 1.5},
+        {35.0, 10.0, 0.0, 0.5},
+        {35.0, -8.0, 0.20, 1.0},
     };
-    const std::string text =
-        "THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789 " + kSample +
-        " NOW IS THE TIME FOR ALL GOOD MEN TO COME TO THE AID OF THE PARTY";
     for (const Point& point : points) {
         siggen::CwModConfig mod;
         mod.tone_hz = 720;
         mod.wpm = point.wpm;
-        const std::vector<float> audio = render(mod, text, point.snr_db, true, 0x5A1ULL);
+        const std::vector<float> audio = render(mod, kNoiseText, point.snr_db, true, 0x5A1ULL);
         decode::CwConfig config;
         const AudioResult got = decode_audio(config, audio, 8192);
-        const double cer = static_cast<double>(edit_distance(text, got.text)) /
-                           static_cast<double>(text.size());
+        const double cer = static_cast<double>(edit_distance(kNoiseText, got.text)) /
+                           static_cast<double>(kNoiseText.size());
         INFO(point.wpm << " WPM at " << point.snr_db << " dB in 2500 Hz: CER " << cer
                        << ", measured " << got.wpm << " WPM, decoded '" << got.text << "'");
         CHECK(cer <= point.allowed_character_error_rate);
+        CHECK(std::abs(got.wpm - point.wpm) < point.allowed_wpm_error);
         WARN("CW " << point.wpm << " WPM at " << point.snr_db << " dB in 2500 Hz: CER " << cer
                    << ", measured " << got.wpm << " WPM");
     }
 }
+
+TEST_CASE("CW reads its speed in noise without leaning slow", "[decode][cw]") {
+    // In noise the mark threshold sits above the middle of the carrier's
+    // edges, so dots come out short and element spaces long by about the
+    // same amount: measured on 2026-09-23 over 40 transmissions of 60
+    // characters at 20 WPM, 60 ms a unit, 50.5 and 69.1 ms at -8 dB, 55.6
+    // and 64.4 at 0 dB, 58.6 and 61.4 at +10 dB. The one-unit cluster pooled
+    // the two, random text keys more element spaces than dots, and the
+    // pooled unit read long: 61.5, 60.8 and 60.3 ms. The speed now weights
+    // the dots' mean and the spaces' equally, as clause 2 makes both one
+    // unit; core/decode/cw.cpp's estimate_unit() has why decoding does not.
+    //
+    // Over 40 transmissions of the text below at -8 dB, the pooled speed
+    // averaged 11.66 WPM for 12 and 19.36 for 20, 2.9 and 3.2 per cent slow,
+    // and the equal weighting 12.02 and 20.13. These eight printed 12.06 and
+    // 20.13 on 2026-09-23. The bound is 1.5 per cent, which the pooled
+    // reading fails by about twice.
+    constexpr int kTransmissions = 8;
+    for (const double wpm : {12.0, 20.0}) {
+        double sum = 0.0;
+        for (int i = 0; i < kTransmissions; ++i) {
+            siggen::CwModConfig mod;
+            mod.tone_hz = 720;
+            mod.wpm = wpm;
+            const std::vector<float> audio =
+                render(mod, kNoiseText, -8.0, true, 0x9000ULL + static_cast<std::uint64_t>(i));
+            sum += decode_audio(decode::CwConfig{}, audio, 8192).wpm;
+        }
+        const double mean = sum / kTransmissions;
+        INFO(wpm << " WPM at -8 dB read " << mean << " on average over " << kTransmissions);
+        CHECK(std::abs(mean - wpm) < 0.015 * wpm);
+        WARN("CW speed " << wpm << " WPM at -8 dB: mean " << mean);
+    }
+}
+

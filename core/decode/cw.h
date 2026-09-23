@@ -218,7 +218,9 @@ class MorseTiming {
     [[nodiscard]] bool locked() const { return locked_; }
     [[nodiscard]] double unit_seconds() const { return unit_; }
 
-    // Character speed, PARIS words per minute.
+    // Character speed, PARIS words per minute, from the mean of the dots
+    // and the mean of the element spaces weighted equally. Not
+    // 1.2 / unit_seconds() in noise, where the pooled unit reads long.
     [[nodiscard]] double wpm() const;
 
     // Overall speed implied by the letter spaces, the ARRL clause 2.2
@@ -250,7 +252,11 @@ class MorseTiming {
 
     MorseTimingConfig config_{};
     bool locked_ = false;
+
+    // The unit the runs are read against, and the one the speed is reported
+    // from. They differ in noise; estimate_unit() says how and why.
     double unit_ = 0.0;
+    double speed_unit_ = 0.0;
 
     // Recent runs of both kinds, which the unit is estimated from.
     std::deque<Run> recent_;
