@@ -26,6 +26,7 @@ using revenant::ui::block_error_rate;
 using revenant::ui::make_rds_view;
 using revenant::ui::RdsState;
 using revenant::ui::render_rds_text;
+using revenant::ui::rds_state_label;
 
 namespace {
 
@@ -344,4 +345,17 @@ TEST_CASE("the PI is shown when no call sign derives from it", "[rds]")
     // And nothing at all before a PI has arrived.
     station.pi_valid = false;
     CHECK(make_rds_view(station, true).identity.empty());
+}
+
+// Every state has a word for the chip, and none of them is the empty string a
+// chip would draw as a blank box.
+TEST_CASE("every RDS state has a chip label", "[rds]")
+{
+    for (const RdsState state : {RdsState::Idle, RdsState::Faulted, RdsState::Retuning,
+                                 RdsState::Unlocked, RdsState::Acquiring, RdsState::Syncing,
+                                 RdsState::Decoding}) {
+        CHECK_FALSE(rds_state_label(state).empty());
+    }
+    CHECK(rds_state_label(RdsState::Unlocked) == "no subcarrier");
+    CHECK(rds_state_label(RdsState::Decoding) == "decoding");
 }

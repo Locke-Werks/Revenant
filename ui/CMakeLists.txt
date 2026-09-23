@@ -162,6 +162,8 @@ qt_add_executable(revenant_ui
     models/engine_link.h
     models/band_plan.h
     models/frequency_dial.h
+    models/level_meter.h
+    models/status_summary.h
     models/ruler.h
     models/ui_rules.h
     models/rds_link.cpp
@@ -471,6 +473,7 @@ if(REVENANT_UI_TESTS)
             tests/test_scroll_tune.cpp
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
+            tests/test_status_summary.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE

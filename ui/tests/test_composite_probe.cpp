@@ -38,6 +38,7 @@ using revenant::ui::demod_makes_composite;
 using revenant::ui::kRdsCompositeRateHz;
 using revenant::ui::kRdsCompositeReachHz;
 using revenant::ui::plan_composite_probe;
+using revenant::ui::rds_offered;
 
 TEST_CASE("the composite rate is three times the subcarrier and 144 bit periods",
           "[composite]")
@@ -240,4 +241,31 @@ TEST_CASE("the narrow-channel refusal names both numbers and the fix",
     CHECK(refusal.find("59.4 kHz") != std::string::npos);
     CHECK(refusal.find("57 kHz") != std::string::npos);
     CHECK(refusal.find("channels") != std::string::npos);
+}
+
+// Rejects offering RDS on any receiver that could be switched into producing a
+// multiplex. The switch on an nfm repeater channel, or on a wfm receiver whose
+// channel cannot pass the subcarrier, is a switch that can only produce a
+// paragraph of refusal, which is what the RDS pane had become.
+TEST_CASE("RDS is offered on a wfm receiver granted enough filter and nowhere else",
+          "[composite]")
+{
+    using revenant::rpc::Demod;
+
+    CHECK(rds_offered(Demod::Wfm, -100'000, 100'000));
+    CHECK(rds_offered(Demod::Wfm, -kRdsCompositeReachHz, kRdsCompositeReachHz));
+
+    // The owner's screenshot: a receiver granted 8 kHz either side.
+    CHECK_FALSE(rds_offered(Demod::Wfm, -8'000, 8'000));
+
+    // Each edge on its own, because the engine fits them separately.
+    CHECK_FALSE(rds_offered(Demod::Wfm, -30'000, 100'000));
+    CHECK_FALSE(rds_offered(Demod::Wfm, -100'000, 30'000));
+
+    // nfm makes a multiplex and is still not offered.
+    CHECK_FALSE(rds_offered(Demod::Nfm, -100'000, 100'000));
+    CHECK_FALSE(rds_offered(Demod::Am, -100'000, 100'000));
+
+    // Not placed yet.
+    CHECK_FALSE(rds_offered(Demod::Wfm, 0, 0));
 }

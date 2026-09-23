@@ -167,7 +167,7 @@ void EngineLink::setRdsRegion(const QString& region)
 // receiver.", so a pane with the RDS switch ON read exactly backwards the
 // moment the engine went away: the window was asking, there was nothing to
 // ask, and the sentence sent the operator to a switch that was already on.
-void EngineLink::clear_rds(const QString& reason)
+void EngineLink::clear_rds(const QString& reason, const QString& label)
 {
     if (rds_polled_vrx_ == 0 && !rds_region_written_) {
         return;
@@ -181,11 +181,12 @@ void EngineLink::clear_rds(const QString& reason)
     // receiver and need not be in the same channel.
     rds_composite_probed_vrx_ = 0;
     rds_composite_refusal_.clear();
+    rds_composite_label_.clear();
 
-    post_rds_fault(reason);
+    post_rds_fault(reason, label);
 }
 
-void EngineLink::post_rds_fault(QString reason)
+void EngineLink::post_rds_fault(QString reason, QString label)
 {
     {
         const std::lock_guard<std::mutex> lock(rds_mutex_);
@@ -193,6 +194,7 @@ void EngineLink::post_rds_fault(QString reason)
         handover_rds_answered_ = false;
         handover_rds_station_ = {};
         handover_rds_fault_ = std::move(reason);
+        handover_rds_label_ = std::move(label);
     }
     QMetaObject::invokeMethod(this, [this] { adopt_rds(); }, Qt::QueuedConnection);
 }
@@ -227,7 +229,7 @@ bool EngineLink::ensure_composite_receiver()
             // Asked already for this receiver and refused. Held rather than
             // asked again, because asking means creating a receiver on the
             // engine and the answer cannot change while the receiver does not.
-            post_rds_fault(rds_composite_refusal_);
+            post_rds_fault(rds_composite_refusal_, rds_composite_label_);
             return false;
         }
 
@@ -241,11 +243,12 @@ bool EngineLink::ensure_composite_receiver()
         // raise_receiver_to_composite does nothing in the first case.
         QMetaObject::invokeMethod(
             this, [this] { raise_receiver_to_composite(); }, Qt::QueuedConnection);
-        post_rds_fault(raising_rate_sentence());
+        post_rds_fault(raising_rate_sentence(), QString(kRdsLabelRaising.data()));
         return false;
     }
     rds_composite_probed_vrx_ = live_receiver_id_;
     rds_composite_refusal_.clear();
+    rds_composite_label_.clear();
 
     // TWO OF THE FOUR CONDITIONS NEED NO ROUND TRIP. The demodulator is a
     // fact about the request and this window holds the request, so asking the
@@ -256,7 +259,8 @@ bool EngineLink::ensure_composite_receiver()
         plan_composite_probe(live, demod_name(live.demod).toStdString());
     if (!probe.worth_asking) {
         rds_composite_refusal_ = QString::fromStdString(probe.refusal);
-        post_rds_fault(rds_composite_refusal_);
+        rds_composite_label_ = QString(kRdsLabelWrongMode.data());
+        post_rds_fault(rds_composite_refusal_, rds_composite_label_);
         return false;
     }
 
@@ -272,7 +276,8 @@ bool EngineLink::ensure_composite_receiver()
     auto added = client_->add_vrx(probe.params);
     if (!added) {
         rds_composite_refusal_ = QString::fromStdString(added.error().message);
-        post_rds_fault(rds_composite_refusal_);
+        rds_composite_label_ = QString(kRdsLabelRateRefused.data());
+        post_rds_fault(rds_composite_refusal_, rds_composite_label_);
         return false;
     }
 
@@ -301,7 +306,8 @@ bool EngineLink::ensure_composite_receiver()
 
     if (!grant_refusal.isEmpty()) {
         rds_composite_refusal_ = grant_refusal;
-        post_rds_fault(rds_composite_refusal_);
+        rds_composite_label_ = QString(kRdsLabelChannelNarrow.data());
+        post_rds_fault(rds_composite_refusal_, rds_composite_label_);
         return false;
     }
 
@@ -313,7 +319,7 @@ bool EngineLink::ensure_composite_receiver()
     // And say what is happening, because the rebuild takes a supervisor pass
     // and the audio breaks during it. Silence there reads as the switch having
     // done nothing at all, which is the state this change exists to end.
-    post_rds_fault(raising_rate_sentence());
+    post_rds_fault(raising_rate_sentence(), QString(kRdsLabelRaising.data()));
     return false;
 }
 
@@ -378,12 +384,14 @@ void EngineLink::poll_rds()
     if (client_ == nullptr) {
         clear_rds(QStringLiteral("no engine is connected, so nothing is decoding RDS. "
                                  "The switch stays on and the decoder is rebuilt when "
-                                 "the connection comes back."));
+                                 "the connection comes back."),
+                  QString(kRdsLabelNoEngine.data()));
         return;
     }
     if (vrx == 0) {
         clear_rds(QStringLiteral("this pane holds no receiver, and the RDS decoder hangs "
-                                 "off one. Tune a receiver and the decoder is built on it."));
+                                 "off one. Tune a receiver and the decoder is built on it."),
+                  QString(kRdsLabelNoReceiver.data()));
         return;
     }
 
@@ -418,7 +426,8 @@ void EngineLink::poll_rds()
     if (!rds_region_written_ || want_rbds != rds_posted_region_rbds_) {
         const auto region = want_rbds ? rpc::RdsRegion::Rbds : rpc::RdsRegion::Rds;
         if (auto set = client_->set_rds_region(vrx, region); !set) {
-            post_rds_fault(QString::fromStdString(set.error().message));
+            post_rds_fault(QString::fromStdString(set.error().message),
+                           QString(kRdsLabelRefused.data()));
             return;
         }
         rds_region_written_ = true;
@@ -445,6 +454,7 @@ void EngineLink::poll_rds()
             handover_rds_station_ = {};
             handover_rds_fault_ = QString::fromStdString(station.error().message);
         }
+        handover_rds_label_.clear();
     }
     QMetaObject::invokeMethod(this, [this] { adopt_rds(); }, Qt::QueuedConnection);
 }
@@ -454,6 +464,7 @@ void EngineLink::adopt_rds()
     rpc::RdsStation station;
     bool answered = false;
     QString fault;
+    QString label;
 
     {
         const std::lock_guard<std::mutex> lock(rds_mutex_);
@@ -464,6 +475,7 @@ void EngineLink::adopt_rds()
         station = std::move(handover_rds_station_);
         answered = handover_rds_answered_;
         fault = handover_rds_fault_;
+        label = handover_rds_label_;
     }
 
     rds_station_ = std::move(station);
@@ -479,6 +491,18 @@ void EngineLink::adopt_rds()
     const RdsView view = make_rds_view(rds_station_, answered, fault.toStdString());
 
     rds_status_ = QString::fromStdString(view.status);
+
+    // A reason known more precisely than the state, when the path that posted
+    // the fault knew one; a failed station read is "refused" rather than the
+    // state's "stopped", because the decoder did not stop, the call failed.
+    if (label.isEmpty() && !fault.isEmpty()) {
+        label = QString(kRdsLabelRefused.data());
+    }
+    const auto state_label = rds_state_label(view.state);
+    rds_label_ = label.isEmpty()
+                     ? QString::fromUtf8(state_label.data(),
+                                         static_cast<qsizetype>(state_label.size()))
+                     : label;
     rds_is_fault_ = view.is_fault;
     rds_decoding_ = view.state == RdsState::Decoding;
     rds_identity_ = QString::fromStdString(view.identity);

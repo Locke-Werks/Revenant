@@ -88,6 +88,30 @@ inline constexpr std::int64_t kRdsCompositeReachHz = 59'375;
     return demod == rpc::Demod::Nfm || demod == rpc::Demod::Wfm;
 }
 
+// Whether the receiver window offers RDS on this receiver at all.
+//
+// PROGRESSIVE DISCLOSURE, decided on 2026-09-22: the RDS section appears only
+// for a receiver that could carry a composite and was granted enough filter to
+// pass the subcarrier. For anything else it is absent, not greyed and not
+// explained, because a switch that can only refuse is a paragraph of refusal
+// waiting to happen, which is what the pane had become.
+//
+// WFM ONLY, where demod_makes_composite also allows nfm. A discriminator on nfm
+// does produce a multiplex, but an nfm receiver is a two-way radio channel with
+// no RDS on it, and offering the switch there would be offering it on every
+// receiver an operator opens on a repeater.
+//
+// A grant of nothing is a receiver the engine has not placed yet, and nothing
+// is offered until it has.
+[[nodiscard]] constexpr bool rds_offered(rpc::Demod demod, std::int64_t granted_low,
+                                         std::int64_t granted_high)
+{
+    if (demod != rpc::Demod::Wfm || granted_high <= granted_low) {
+        return false;
+    }
+    return -granted_low >= kRdsCompositeReachHz && granted_high >= kRdsCompositeReachHz;
+}
+
 // What to do about a switch the operator has just turned on.
 struct CompositeProbe {
     // Ask the engine. False when the window has already answered on its own,

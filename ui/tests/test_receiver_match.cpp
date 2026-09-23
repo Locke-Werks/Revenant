@@ -26,6 +26,7 @@ using revenant::ui::fit_sentence;
 using revenant::ui::format_width;
 using revenant::ui::has_flag;
 using revenant::ui::ReceiverFit;
+using revenant::ui::fit_label;
 
 TEST_CASE("the mode comes from the measured width", "[fit]")
 {
@@ -345,4 +346,23 @@ TEST_CASE("the grant is compared with the request it answered", "[fit]")
     // nothing would read as a bug in the line.
     const ReceiverFit defaulted = fit_from_status(0, 0, -35'500, 35'500, true, 0.0);
     CHECK(fit_sentence(defaulted) == "the channel clamped this filter to 71 kHz.");
+}
+
+// The chip says the same thing the sentence does, in fewer words, and nothing
+// when the sentence says nothing.
+TEST_CASE("the fit chip agrees with the fit sentence", "[fit]")
+{
+    // A filter that fits: no sentence and no chip.
+    const auto fits = fit_from_status(-8'000, 8'000, -8'000, 8'000, false, 12'000.0);
+    CHECK(fit_sentence(fits).empty());
+    CHECK(fit_label(fits).empty());
+
+    // The owner's screenshot: 16 kHz on a 1.5 kHz detection.
+    const auto wide = fit_from_status(-8'000, 8'000, -8'000, 8'000, false, 1'500.0);
+    CHECK_FALSE(fit_sentence(wide).empty());
+    CHECK(fit_label(wide) == "wider than the signal");
+
+    // Narrow and clamped together, which the sentence gives both halves of.
+    const auto both = fit_from_status(-100'000, 100'000, -35'500, 35'500, true, 145'000.0);
+    CHECK(fit_label(both) == "narrower than the signal, clamped");
 }

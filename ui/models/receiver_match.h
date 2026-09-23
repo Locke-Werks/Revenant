@@ -350,4 +350,24 @@ enum class FitFlag : std::uint8_t {
     return out;
 }
 
+// The same conditions as a word or two for a chip on the receiver's display,
+// with fit_sentence as its tooltip. A row of advice under the display was on
+// screen for as long as a receiver was tuned to anything narrower than its
+// filter, which is most of the time on a detection click; the chip says what
+// the mismatch is and the sentence stays one hover away.
+[[nodiscard]] inline std::string fit_label(const ReceiverFit& fit)
+{
+    const std::uint8_t flags = classify_fit(fit);
+    std::string out;
+    if (has_flag(flags, FitFlag::NarrowForSignal)) {
+        out = "narrower than the signal";
+    } else if (has_flag(flags, FitFlag::WideForSignal)) {
+        out = "wider than the signal";
+    }
+    if (has_flag(flags, FitFlag::Clamped)) {
+        out += out.empty() ? "clamped by the channel" : ", clamped";
+    }
+    return out;
+}
+
 }  // namespace revenant::ui

@@ -264,4 +264,41 @@ namespace detail {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// The chip
+// ---------------------------------------------------------------------------
+//
+// The RDS section shows the decoder's state as a short chip and keeps the
+// sentence above for the chip's tooltip. The sentence used to print under the
+// switch at full width, always, and a paragraph for "no subcarrier here" or for
+// a channel the engine sized too narrow was most of what the pane showed. The
+// words are unchanged and one hover away; the chip says which of them applies.
+
+// Why there is no decoder, when the reason is known more precisely than the
+// state says. The fault path carries the engine's or the client's sentence,
+// and these name it in a word or two.
+inline constexpr std::string_view kRdsLabelNoEngine = "no engine";
+inline constexpr std::string_view kRdsLabelNoReceiver = "no receiver";
+inline constexpr std::string_view kRdsLabelWrongMode = "needs nfm or wfm";
+inline constexpr std::string_view kRdsLabelRateRefused = "rate refused";
+inline constexpr std::string_view kRdsLabelChannelNarrow = "channel too narrow";
+inline constexpr std::string_view kRdsLabelRaising = "raising the rate";
+inline constexpr std::string_view kRdsLabelRefused = "refused";
+
+// The chip for a state, when nothing more specific is known.
+[[nodiscard]] constexpr std::string_view rds_state_label(RdsState state)
+{
+    // No default case; see cmake/CompilerFlags.cmake.
+    switch (state) {
+        case RdsState::Idle: return "off";
+        case RdsState::Faulted: return "stopped";
+        case RdsState::Retuning: return "retuning";
+        case RdsState::Unlocked: return "no subcarrier";
+        case RdsState::Acquiring: return "acquiring";
+        case RdsState::Syncing: return "syncing";
+        case RdsState::Decoding: return "decoding";
+    }
+    return "off";
+}
+
 }  // namespace revenant::ui

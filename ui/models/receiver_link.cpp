@@ -178,14 +178,17 @@ void EngineLink::update_receiver_fit()
     // about a receiver that is gone reads as a sentence about the next
     // one.
     QString text;
+    QString label;
     if (receiver_id_ != 0) {
         text = QString::fromStdString(fit_sentence(fit));
+        label = QString::fromStdString(fit_label(fit));
     }
 
-    if (text == receiver_fit_text_) {
+    if (text == receiver_fit_text_ && label == receiver_fit_label_) {
         return;
     }
     receiver_fit_text_ = text;
+    receiver_fit_label_ = label;
     emit receiverFitChanged();
 }
 

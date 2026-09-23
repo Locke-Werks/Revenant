@@ -973,6 +973,10 @@ class EngineLink : public QObject {
     // against would be worse than saying nothing.
     Q_PROPERTY(QString receiverFitText READ receiverFitText NOTIFY receiverFitChanged)
 
+    // The same, as a word or two for a chip on the receiver's display, with
+    // receiverFitText as its tooltip. See fit_label in models/receiver_match.h.
+    Q_PROPERTY(QString receiverFitLabel READ receiverFitLabel NOTIFY receiverFitChanged)
+
     // A width change is drawn and has not been sent, because sending it
     // mid-gesture would break the audio once per pixel. It goes out on
     // release. The readout says so, because a filter that is drawn where
@@ -1130,6 +1134,11 @@ class EngineLink : public QObject {
     // with nothing in it and they need four different actions; see
     // models/rds_view.h.
     Q_PROPERTY(QString rdsStatus READ rdsStatus NOTIFY rdsChanged)
+
+    // rdsStatus in a word or two, for the chip that carries rdsStatus as its
+    // tooltip. The reason when one is known, such as the channel being too
+    // narrow, and the decoder's state otherwise. See models/rds_view.h.
+    Q_PROPERTY(QString rdsLabel READ rdsLabel NOTIFY rdsChanged)
 
     // Whether that sentence is bad news. A decoder that never locked on a
     // band with no RDS is the ordinary answer and is not.
@@ -1700,6 +1709,7 @@ public:
     [[nodiscard]] QString receiverFault() const { return receiver_fault_; }
     [[nodiscard]] bool receiverPending() const { return width_uncommitted_; }
     [[nodiscard]] QString receiverFitText() const { return receiver_fit_text_; }
+    [[nodiscard]] QString receiverFitLabel() const { return receiver_fit_label_; }
 
     // Puts the detail pane on a receiver at this absolute frequency in this
     // mode, adding one if there is none and retuning the one there is.
@@ -1925,6 +1935,7 @@ public:
     void setRdsRegion(const QString& region);
 
     [[nodiscard]] QString rdsStatus() const { return rds_status_; }
+    [[nodiscard]] QString rdsLabel() const { return rds_label_; }
     [[nodiscard]] bool rdsIsFault() const { return rds_is_fault_; }
     [[nodiscard]] bool rdsDecoding() const { return rds_decoding_; }
     [[nodiscard]] QString rdsIdentity() const { return rds_identity_; }
@@ -2416,6 +2427,7 @@ private:
     // entirely; see tuneReceiverToDetection.
     double tuned_detection_bandwidth_ = 0.0;
     QString receiver_fit_text_;
+    QString receiver_fit_label_;
 
     // Qt thread only. The pane's own authoritative copy of the request,
     // which is what the overlay draws and what the supervisor sends. Its
@@ -2915,7 +2927,7 @@ private:
     // going off. The other two leave the pane asking for RDS with nothing
     // to ask, and the sentence has to say so rather than read as the
     // operator's own choice. models/rds_view.h renders it.
-    void clear_rds(const QString& reason = {});
+    void clear_rds(const QString& reason = {}, const QString& label = {});
 
     // Supervisor thread. Hands the Qt thread a sentence about why there is no
     // decoder, with no station behind it. The body of clear_rds, lifted out
@@ -2928,7 +2940,7 @@ private:
     // repeat. The whole RDS surface is posted on every pass for the reason
     // poll_rds gives, and a refusal that stopped being re-posted would be
     // cleared by the next answer that was not a refusal.
-    void post_rds_fault(QString reason);
+    void post_rds_fault(QString reason, QString label = {});
 
     // Supervisor thread, from poll_rds and nowhere else. Whether the pane's
     // receiver is running at the rate a composite needs, and the work to get
@@ -2990,12 +3002,14 @@ private:
     // empty refusal beside a matching id is the probe having said yes.
     qulonglong rds_composite_probed_vrx_ = 0;
     QString rds_composite_refusal_;
+    QString rds_composite_label_;           // supervisor thread, beside the refusal
 
     std::mutex rds_mutex_;
     bool has_rds_handover_ = false;     // guarded by rds_mutex_
     bool handover_rds_answered_ = false;  // guarded by rds_mutex_
     rpc::RdsStation handover_rds_station_;  // guarded by rds_mutex_
     QString handover_rds_fault_;            // guarded by rds_mutex_
+    QString handover_rds_label_;            // guarded by rds_mutex_
 
     // Qt thread only: what the properties above hand out. The station is
     // kept whole rather than flattened, because the flags on it are read
@@ -3006,6 +3020,7 @@ private:
     bool rds_is_fault_ = false;
     bool rds_decoding_ = false;
     QString rds_status_;
+    QString rds_label_;
     QString rds_identity_;
     QString rds_ps_;
     QString rds_radio_text_;
