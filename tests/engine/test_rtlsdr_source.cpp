@@ -1498,3 +1498,266 @@ TEST_CASE("librtlsdr retunes from inside its own callback", "[.probe][source][rt
     usb.join();
     rtlsdr_close(device);
 }
+
+TEST_CASE("librtlsdr survives a second cancel", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // WHETHER A SECOND rtlsdr_cancel_async IS DANGEROUS, which the backend's
+    // comments used to assert. Measured 2026-09-23: 0 then -2 in four rounds
+    // out of four, read_async returning 0 each time, and the retune after it
+    // failing -9 exactly as it does after a single cancel. So on the librtlsdr
+    // this tree links a second call does nothing.
+
+    rtlsdr_dev_t* device = nullptr;
+    REQUIRE(rtlsdr_open(&device, 0) == 0);
+    REQUIRE(device != nullptr);
+    CHECK(rtlsdr_set_center_freq(device, 98'100'000) == 0);
+    CHECK(rtlsdr_set_sample_rate(device, 2'400'000) == 0);
+
+    std::atomic<std::uint64_t> bytes{0};
+    for (int round = 0; round < 4; ++round) {
+        REQUIRE(rtlsdr_reset_buffer(device) == 0);
+        std::atomic<int> read_rc{99};
+        std::thread usb([device, &bytes, &read_rc] {
+            read_rc = rtlsdr_read_async(
+                device,
+                [](unsigned char*, std::uint32_t length, void* ctx) {
+                    static_cast<std::atomic<std::uint64_t>*>(ctx)->fetch_add(
+                        length, std::memory_order_relaxed);
+                },
+                &bytes, 16, 65'536);
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(800));
+        const int first = rtlsdr_cancel_async(device);
+        const int second = rtlsdr_cancel_async(device);
+        usb.join();
+        WARN("round " << round << ": cancel returned " << first << " then " << second
+                      << ", read_async returned " << read_rc.load());
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const int tuned = rtlsdr_set_center_freq(device, round % 2 == 0 ? 96'500'000 : 98'100'000);
+        WARN("round " << round << ": retune after it returned " << tuned);
+    }
+    rtlsdr_close(device);
+}
+
+TEST_CASE("librtlsdr keeps up with synchronous reads", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // WHETHER rtlsdr_read_sync COULD REPLACE read_async, which would take the
+    // cancel out of the picture and the teardown fault with it. It cannot. The
+    // delivered rate is measured between two completions, against nominal:
+    //
+    //   read_async, 16 x 64 KiB, 20 s, twice         -17 and -21 ppm
+    //   read_sync, 256 KiB, 20 s, twice              -17 and -13 ppm
+    //   read_sync, 256 KiB, 10 s                     -143 ppm
+    //   read_sync with 1 ms slept between reads      -126,535 ppm
+    //
+    // The crystal's own offset is about -17. One read in flight leaves the
+    // dongle's own buffer as the only slack, a millisecond away is enough to
+    // lose an eighth of the stream, and none of it is counted anywhere: the
+    // device drops it before the host sees it. That is the loss this engine
+    // refuses to have, so the backend stays on read_async.
+    //
+    // REVENANT_PROBE_MODE is sync or async, REVENANT_PROBE_LEN the read length,
+    // REVENANT_PROBE_GAP_US a pause between sync reads, REVENANT_PROBE_SECONDS
+    // the window.
+    const char* const seconds_env = std::getenv("REVENANT_PROBE_SECONDS");
+    const int seconds = seconds_env == nullptr ? 20 : std::atoi(seconds_env);
+    const char* const mode_env = std::getenv("REVENANT_PROBE_MODE");
+    const std::string mode = mode_env == nullptr ? "sync" : mode_env;
+    const char* const len_env = std::getenv("REVENANT_PROBE_LEN");
+    const int length = len_env == nullptr ? 262'144 : std::atoi(len_env);
+    const char* const gap_env = std::getenv("REVENANT_PROBE_GAP_US");
+    const int gap_us = gap_env == nullptr ? 0 : std::atoi(gap_env);
+
+    rtlsdr_dev_t* device = nullptr;
+    REQUIRE(rtlsdr_open(&device, 0) == 0);
+    CHECK(rtlsdr_set_center_freq(device, 98'100'000) == 0);
+    CHECK(rtlsdr_set_sample_rate(device, 2'400'000) == 0);
+    REQUIRE(rtlsdr_reset_buffer(device) == 0);
+
+    std::atomic<std::uint64_t> bytes{0};
+    std::atomic<bool> stop{false};
+    std::atomic<int> last_rc{0};
+    std::vector<unsigned char> buffer(static_cast<std::size_t>(length));
+    std::thread usb([&] {
+        if (mode == "sync") {
+            while (!stop.load()) {
+                int got = 0;
+                const int rc = rtlsdr_read_sync(device, buffer.data(), length, &got);
+                if (rc != 0) {
+                    last_rc = rc;
+                    break;
+                }
+                bytes.fetch_add(static_cast<std::uint64_t>(got));
+                if (gap_us > 0) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(gap_us));
+                }
+            }
+        } else {
+            last_rc = rtlsdr_read_async(
+                device,
+                [](unsigned char*, std::uint32_t n, void* ctx) {
+                    static_cast<std::atomic<std::uint64_t>*>(ctx)->fetch_add(n);
+                },
+                &bytes, 16, 65'536);
+        }
+    });
+    // Both ends of the window are the moment a read completed, so the count
+    // is not quantised by the read length.
+    const auto wait_for_change = [&bytes] {
+        const std::uint64_t seen = bytes.load();
+        while (bytes.load() == seen) {
+        }
+        return std::pair{bytes.load(), std::chrono::steady_clock::now()};
+    };
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const auto [at_start, window] = wait_for_change();
+    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    const auto [at_stop, window_end] = wait_for_change();
+    const std::uint64_t at_end = at_stop - at_start;
+    const double elapsed = std::chrono::duration<double>(window_end - window).count();
+    stop = true;
+    if (mode != "sync") {
+        static_cast<void>(rtlsdr_cancel_async(device));
+    }
+    usb.join();
+    const double rate = static_cast<double>(at_end) / 2.0 / elapsed;
+    WARN(mode << " reads of " << length << " bytes, " << gap_us << " us between: " << at_end / 2
+              << " samples in " << elapsed << " s, " << rate << " S/s, "
+              << (rate / 2'400'000.0 - 1.0) * 1e6 << " ppm against nominal; last rc "
+              << last_rc.load());
+    rtlsdr_close(device);
+}
+
+TEST_CASE("a streaming dongle takes control calls back to back", "[.probe][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE REPRODUCER FOR THE CI SEGFAULTS OF 2026-09-23. Every control call on
+    // a streaming dongle cancels the transfers and restarts them, and about
+    // one cancel in three hundred comes back from rtlsdr_read_async as -5 with
+    // a transfer still in flight; see run_usb in core/source/rtlsdr_source.cpp.
+    // At the default thirty rounds this rarely shows it. Two hundred rounds,
+    // run five times, showed it in one to three runs of the five, and with full
+    // page heap on the binary (gflags /p /enable <exe> /full) the access to
+    // the freed transfer faults at once instead of corrupting the heap.
+    //
+    // REVENANT_PROBE_ROUNDS sets the rounds, REVENANT_PROBE_STEP_MS the spacing
+    // (round % 7 steps of it), REVENANT_PROBE_BLOCK the block, which sizes the
+    // transfers.
+    const char* const rounds_env = std::getenv("REVENANT_PROBE_ROUNDS");
+    const int rounds = rounds_env == nullptr ? 30 : std::atoi(rounds_env);
+
+    auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+    if (!opened) {
+        SKIP("the dongle could not be opened: " + opened.error().message);
+    }
+    source::Source& radio = **opened;
+    Collected collected;
+    source::StreamOptions options;
+    const char* const block_env = std::getenv("REVENANT_PROBE_BLOCK");
+    options.block_samples =
+        static_cast<std::size_t>(block_env == nullptr ? 32'768 : std::atoi(block_env));
+    REQUIRE(radio.start(options, collecting_sink(collected)).has_value());
+
+    const char* const step_env = std::getenv("REVENANT_PROBE_STEP_MS");
+    const int step_ms = step_env == nullptr ? 20 : std::atoi(step_env);
+
+    int failures = 0;
+    for (int round = 0; round < rounds; ++round) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(step_ms * (round % 7)));
+        Status outcome;
+        switch (round % 3) {
+            case 0: {
+                auto landed = radio.tune(round % 2 == 0 ? 96'500'000 : 98'100'000);
+                if (!landed) {
+                    outcome = std::unexpected(landed.error());
+                }
+                break;
+            }
+            case 1: {
+                auto gain = radio.set_gain("tuner", round % 2 == 0 ? 10.0 : 30.0);
+                if (!gain) {
+                    outcome = std::unexpected(gain.error());
+                }
+                break;
+            }
+            default: outcome = radio.set_gain_auto("tuner", round % 2 == 0); break;
+        }
+        if (!outcome) {
+            ++failures;
+            WARN("round " << round << ": " << outcome.error().message);
+        }
+    }
+    const bool still_running = radio.running();
+    const auto stopped = radio.stop();
+    WARN(rounds << " control calls, " << failures << " refused; running at the end " << still_running
+                << "; stop " << (stopped ? std::string("succeeded") : stopped.error().message)
+                << "; " << collected.samples << " samples");
+}
+
+TEST_CASE("a second process contends for the dongle", "[.contender][source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // NOT A TEST OF ANYTHING ON ITS OWN. Run from a second process while the
+    // first runs a dongle case, it stands in for the other program that holds
+    // or wants the radio: a window's engine asking every device to describe
+    // itself, or a CLI started on the same index. REVENANT_CONTEND_MODE picks
+    // which:
+    //
+    //   poke   enumerate, open, close, as fast as possible, for the duration.
+    //          Every open is expected to fail while the other process holds the
+    //          device, and one that succeeds is closed at once.
+    //   hold   open, configure and stream for the duration, then close.
+    //
+    // REVENANT_CONTEND_SECONDS sets the duration, ten by default.
+    const char* const mode_env = std::getenv("REVENANT_CONTEND_MODE");
+    const std::string mode = mode_env == nullptr ? "poke" : mode_env;
+    const char* const seconds_env = std::getenv("REVENANT_CONTEND_SECONDS");
+    const int seconds = seconds_env == nullptr ? 10 : std::atoi(seconds_env);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+
+    if (mode == "hold") {
+        auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+        if (!opened) {
+            SKIP("could not take the dongle to hold it: " + opened.error().message);
+        }
+        Collected collected;
+        REQUIRE((*opened)->start(source::StreamOptions{}, collecting_sink(collected)).has_value());
+        while (std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        const auto stopped = (*opened)->stop();
+        WARN("held the dongle for " << seconds << " s and collected " << collected.samples
+                                    << " samples; stop "
+                                    << (stopped ? std::string("succeeded")
+                                                : stopped.error().message));
+        return;
+    }
+
+    int opens = 0;
+    int refused = 0;
+    int granted = 0;
+    while (std::chrono::steady_clock::now() < until) {
+        static_cast<void>(source::enumerate_rtlsdr_devices());
+        rtlsdr_dev_t* device = nullptr;
+        const int rc = rtlsdr_open(&device, 0);
+        ++opens;
+        if (rc == 0 && device != nullptr) {
+            ++granted;
+            rtlsdr_close(device);
+        } else {
+            ++refused;
+        }
+    }
+    WARN("poked the dongle " << opens << " times: " << refused << " refused, " << granted
+                             << " granted");
+}

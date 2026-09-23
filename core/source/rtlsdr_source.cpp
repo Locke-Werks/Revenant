@@ -625,7 +625,8 @@ private:
     void run_delivery();
     void note_stream_error(Error error);
     void join_locked();
-    void pause_producer_locked();
+    [[nodiscard]] Status pause_producer_locked();
+    void stop_transfers_locked();
     [[nodiscard]] Status resume_producer_locked();
 
     // EVERY CONTROL TRANSFER TO A STREAMING DONGLE GOES THROUGH HERE.
@@ -668,7 +669,16 @@ private:
         const auto paused_at = std::chrono::steady_clock::now();
         const dsp::SampleIndex before_join = produced_index_;
 
-        pause_producer_locked();
+        // NOT RESTARTED WHEN THE TRANSFERS DID NOT STOP CLEANLY. See run_usb:
+        // a read_async that returns an error while being cancelled may have
+        // freed a transfer libusb still holds, and a restart submits sixteen
+        // more onto the list that freed one is still threaded through. The
+        // stream ends instead, with the reason, and the control change is not
+        // attempted on a device in that state.
+        if (auto paused = pause_producer_locked(); !paused) {
+            return std::unexpected(with_context(
+                paused.error(), "the stream was stopped for a control change and not restarted"));
+        }
 
         // produced_index_ and pending_gap_ are the callback thread's, and the
         // gap accounting below reads and writes both. Safe because the callback
@@ -762,6 +772,11 @@ private:
 
     std::atomic<bool> cancel_requested_{false};
     std::atomic<bool> producer_done_{true};
+
+    // What the last rtlsdr_read_async returned. Written by the USB thread
+    // before it sets producer_done_ and read only after that thread has been
+    // joined.
+    int read_async_rc_ = 0;
 
     std::vector<Slot> slots_{};
     std::atomic<std::uint64_t> slot_head_{0};
@@ -956,8 +971,26 @@ Expected<dsp::Hertz> RtlSdrSource::retune_streaming_locked(dsp::Hertz center)
 // other sign of life intact. So a retune joins usb_thread_ and leaves
 // deliver_thread_ running, draining whatever is already queued and then idling
 // on an empty queue until the transfers come back. run_delivery's exit check is
-// what makes that safe, and retuning_ is what it reads.
-void RtlSdrSource::pause_producer_locked()
+// what makes that safe, and pause_epoch_ is what it reads.
+//
+// Fails when read_async did not come back cleanly, which the caller takes as
+// the end of the stream rather than restarting it. See run_usb for what that
+// return means.
+Status RtlSdrSource::pause_producer_locked()
+{
+    stop_transfers_locked();
+
+    if (read_async_rc_ != 0) {
+        return fail(std::format("rtlsdr_read_async returned {} when its transfers were stopped",
+                                rc_text(read_async_rc_)),
+                    read_async_rc_);
+    }
+    return {};
+}
+
+// Cancels the transfers and joins the USB thread, and does nothing else. Shared
+// by a pause and a stop so the one rule about cancelling lives in one place.
+void RtlSdrSource::stop_transfers_locked()
 {
     cancel_requested_.store(true, std::memory_order_release);
 
@@ -965,9 +998,24 @@ void RtlSdrSource::pause_producer_locked()
         return;
     }
 
-    // Retried and then not again, for the reason join_locked gives at length:
-    // a cancel before read_async is armed does nothing, and a second cancel
-    // after the first was accepted frees transfers underneath libusb.
+    // Retried until it is accepted, and then not again.
+    //
+    // rtlsdr_cancel_async only arms the cancel once rtlsdr_read_async has
+    // reached its running state. Called before that it returns -2 and does
+    // nothing, and read_async then never returns; the window is the few
+    // milliseconds between spawning the thread and libusb's loop being armed,
+    // which is exactly where a stop right after a start or a second control
+    // change right after a first one lands. Measured: with no gap between
+    // control changes, 750 pauses out of 750 needed a second call.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: that retrying past the first acceptance
+    // is dangerous because "a second call arriving while the first cancel is
+    // still draining takes librtlsdr's other branch, which forces the async
+    // state straight to inactive". Not on the librtlsdr this tree links. A
+    // probe calling rtlsdr_cancel_async twice back to back on a streaming
+    // dongle got 0 then -2 in four rounds out of four, and read_async returned
+    // 0 each time. Stopping at the first acceptance is still right, because a
+    // second call has nothing left to do.
     while (!producer_done_.load(std::memory_order_acquire)) {
         if (rtlsdr_cancel_async(device_.get()) == 0) {
             break;
@@ -1308,34 +1356,7 @@ Status RtlSdrSource::stop()
 
 void RtlSdrSource::join_locked()
 {
-    cancel_requested_.store(true, std::memory_order_release);
-
-    if (usb_thread_.joinable()) {
-        // Retried until it is accepted, and then not again.
-        //
-        // rtlsdr_cancel_async only arms the cancel once rtlsdr_read_async has
-        // reached its running state. Called before that it returns -2 and
-        // does nothing, and read_async then never returns; the window is the
-        // few microseconds between spawning the thread and libusb's loop
-        // being armed, which is exactly where a test that starts and
-        // immediately stops lands. So it is retried.
-        //
-        // Retrying past the first acceptance is the bug that this shape
-        // avoids. A second call arriving while the first cancel is still
-        // draining takes librtlsdr's other branch, which forces the async
-        // state straight to inactive: read_async's wait loop then exits with
-        // transfers still submitted and frees them underneath libusb. What
-        // that produces is a control transfer failing during close with a
-        // pipe error, well after the capture, which reads as a device fault
-        // rather than as this.
-        while (!producer_done_.load(std::memory_order_acquire)) {
-            if (rtlsdr_cancel_async(device_.get()) == 0) {
-                break;
-            }
-            std::this_thread::sleep_for(kCancelPoll);
-        }
-        usb_thread_.join();
-    }
+    stop_transfers_locked();
 
     // Joined after the producer, never before. The delivery thread finishes
     // draining once producer_done_ is set, so the queue is empty when this
@@ -1359,7 +1380,13 @@ void RtlSdrSource::join_locked()
     // succeeds, the device reopens cleanly, and it appears on maybe two runs
     // in three. It is also entirely after the last sample, so no capture is
     // affected by it. Opening and closing without streaming never produces
-    // it, which is what pins it to the cancel rather than to anything here.
+    // it.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY after that: "which is what pins it to
+    // the cancel rather than to anything here". The streaming is what it
+    // follows, and the cancel is not needed. On 2026-09-23 a probe that read
+    // with rtlsdr_read_sync, so that no transfer was ever cancelled, printed
+    // the same pair at rtlsdr_close on two runs out of two.
     //
     // It cannot be absorbed by issuing a throwaway transfer first, because
     // every register accessor in librtlsdr prints its own failure: that would
@@ -1465,6 +1492,8 @@ void RtlSdrSource::run_usb()
     const int rc = rtlsdr_read_async(device_.get(), &RtlSdrSource::usb_callback, this,
                                      kTransferCount, transfer_bytes_);
 
+    read_async_rc_ = rc;
+
     if (!cancel_requested_.load(std::memory_order_acquire)) {
         // read_async returning without anybody asking it to means the
         // transfers stopped, which in practice means the dongle was unplugged
@@ -1475,7 +1504,51 @@ void RtlSdrSource::run_usb()
             std::format("the RTL-SDR stopped delivering samples: rtlsdr_read_async returned {} "
                         "without a cancel having been asked for, which usually means the device "
                         "was unplugged or reset",
-                        rc),
+                        rc_text(rc)),
+            rc});
+    } else if (rc != 0) {
+        // AN ERROR FROM A CANCELLED read_async IS THE CRASH IN CI, ARRIVING.
+        //
+        // Measured on 2026-09-23 with full page heap on the test binary and a
+        // probe that makes control changes on a streaming dongle back to back:
+        // 3 of 708 cancelled read_async calls returned -5, LIBUSB_ERROR_NOT_FOUND,
+        // where every other one returned 0, and two of those three processes
+        // died within milliseconds on an access to freed memory. The faulting
+        // frames were libusb's own: once in windows_iocp_thread unlinking a
+        // completed transfer, once in add_to_flying_list under the next
+        // rtlsdr_demod_write_reg, walking libusb's list of transfers in flight.
+        // In both the transfer being touched had been freed. NOT_FOUND is what
+        // libusb_cancel_transfer answers for a transfer already being
+        // cancelled, so read_async is reporting that it cancelled one twice
+        // and returned before its completion arrived, and the transfer it then
+        // freed was still in flight. The two SegFaults in CI on 2026-09-23 fit
+        // it and left no dump to confirm it: one died inside a retune after
+        // its first control transfer, the other after the stop that followed
+        // three retunes.
+        //
+        // HOW OFTEN, without page heap, same probe: 2 of 553 cancels with
+        // sixteen 64 KiB transfers and 2 of 943 with four 256 KiB ones, so the
+        // transfer size is not the lever. A cancel does not stop the
+        // transfers already queued: every one of 518 cancels was followed by
+        // 15 to 56 more completed transfers carrying samples before read_async
+        // returned. Holding the callback 5 ms per transfer after a cancel, to
+        // see whether the teardown was racing the callback, made it worse,
+        // 5 of 89, so this callback stays as short as it is.
+        //
+        // Nothing reachable through rtl-sdr.h stops librtlsdr doing that, and
+        // nothing afterwards can make the device's libusb state safe again.
+        // What this side can do is refuse to build on it: the pause that
+        // asked for the cancel does not restart the transfers, the stream
+        // ends, and the reason reaches whoever stops it. With that in place,
+        // 3 of 518 cancels returned -5 and two of the three processes carried
+        // on with the named error rather than dying; the third still died, so
+        // this narrows the crash and does not close it.
+        note_stream_error(Error{
+            std::format("rtlsdr_read_async returned {} as its transfers were cancelled, where a "
+                        "clean stop returns 0. librtlsdr has returned before libusb finished "
+                        "cancelling a transfer, and the stream has been ended rather than "
+                        "restarted on top of it",
+                        rc_text(rc)),
             rc});
     }
 
