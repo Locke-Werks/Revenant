@@ -707,9 +707,28 @@ just had before either is scheduled.
 
 **P25 Phase 1, D-STAR DV and TETRA V+D, physical layer and framing.** Three
 demodulator modes, `p25p1`, `dstar` and `tetra`, appended to the Demod enum
-after `cw`. They are complex taps rather than kernels: the receiver hands out
-baseband at the channel's width and `core/decode` recovers the symbols on the
-host, which `core/engine/vrx.h` explains at `is_complex_tap`.
+after `cw`. They are complex taps rather than detectors: the receiver's fine
+stage mixes the carrier to DC, filters the mode's channel and resamples to the
+rate its decoder was built at, and the demodulator kernel hands that complex
+baseband out unchanged. `core/decode` recovers the symbols on the host.
+`core/engine/vrx.h` explains the path at `is_complex_tap`.
+
+| Mode | Channel filtered | Delivered at | Samples per symbol |
+| --- | --- | --- | --- |
+| P25 Phase 1 | 12.5 kHz | 48000 S/s | 10 of TIA-102.BAAA-A clause 9.2's 4800 |
+| D-STAR DV | 6 kHz | 48000 S/s | 10 of JARL Ver 7.0 clause 4.1.2 b's 4800 bit/s |
+| TETRA V+D | 25 kHz | 72000 S/s | 4 of EN 300 392-2 clause 5.3's 18000 |
+
+WHAT THIS PARAGRAPH USED TO SAY, until 2026-09-22: "They are complex taps
+rather than kernels: the receiver hands out baseband at the channel's width".
+They were the graph's raw tap then, one coarse channel at the channel rate
+with the carrier wherever the grid's residual left it, and nothing had
+measured what the decoders made of that. `tests/engine/test_engine_dv.cpp`
+does now, on a 2.304 MS/s capture with the carrier 5 kHz off a channel centre,
+at the noise density `tests/decode` uses: at the low signal to noise point
+the fine stage gives P25 a symbol error rate of 0.0069 where the raw tap gave
+0.708, and D-STAR 0.0023 and TETRA 0.0375 where the raw tap did not lock at
+all.
 
 | Mode | File | Document | What comes out |
 | --- | --- | --- | --- |

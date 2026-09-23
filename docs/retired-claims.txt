@@ -525,3 +525,11 @@ commit: "Give the digital voice modes a fine stage"
 instead: p25p1, dstar and tetra are Demod enumerators. demod_for_signal still
     cannot choose one, because neither occupancy nor ModulationFamily names a
     standard.
+
+phrase: They are complex taps rather than kernels
+retired: 2026-09-22
+commit: "Give the digital voice modes a fine stage"
+instead: They run both kernels: vrx_fine mixes, filters and resamples to 48000,
+    48000 or 72000 S/s, and vrx_demod's complex passthrough hands the result
+    out. docs/modes.md has the table and tests/engine/test_engine_dv.cpp the
+    measured comparison with the raw tap they used to get.
