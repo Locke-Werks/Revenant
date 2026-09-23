@@ -27,12 +27,13 @@ ColumnLayout {
     Layout.fillWidth: true
     spacing: 6
 
-    // The same spacing the window's column uses, so the three rows below
-    // sit exactly where they sat when they were three rows of that column.
-    // Shown whenever any of them is: the fault row can outlive the
-    // connection, and an empty wrapper that stayed visible would still
-    // take a gap in the column.
-    visible: engineLink.connected || engineLink.sourceFault.length > 0
+    // IN THE RADIO PANEL, WHICH OPENS OVER THE SPAN FROM THE TOP BAR. It was
+    // three rows at the top of the window's column, always drawn, and it
+    // pushed the spectrum down for a control an operator uses once a
+    // session. The rows and their reasoning are unchanged; the refusal row
+    // is also in the banner under the top bar, so it is seen with this
+    // panel closed.
+    Layout.preferredWidth: 780
 
     RowLayout {
         id: sourceRow
@@ -197,18 +198,12 @@ ColumnLayout {
             // Offered only where the device will do it. Whether it should
             // is the operator's call: README.md has the measurement of what
             // this dongle's own AGC did to the detector's track list.
-            Label {
+            RButton {
                 visible: engineLink.sourceGainHasAuto
+                flat: true
                 text: engineLink.sourceGainAuto ? "manual" : "auto"
-                color: Theme.inkDim
-                font.pixelSize: Theme.sizeBody
-
-                MouseArea {
-                    anchors.fill: parent
-                    anchors.margins: -3
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: engineLink.setSourceGainAuto(!engineLink.sourceGainAuto)
-                }
+                ink: Theme.inkDim
+                onClicked: engineLink.setSourceGainAuto(!engineLink.sourceGainAuto)
             }
 
             Label {
@@ -240,22 +235,38 @@ ColumnLayout {
         }
     }
 
+    // What the front end is doing, under the control that changes it.
+    //
+    // The wording is in models/front_end_note.h with its own cases in
+    // ui/tests, and the measurement is core/detect/front_end.h. This file
+    // chooses the colour and nothing else. The status drawer carries the same
+    // line, and the banner brings it forward while it is a fault.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. It sat under the tune box and began
+    // "HERE AND NOT BESIDE A GAIN CONTROL, because this window has no gain
+    // control: gain is set in the source URI the engine was started with and
+    // nothing in the client can change it", and ended "When a gain control
+    // lands, this row moves to sit under it." The gain slider above had
+    // landed and the row had not moved. It has now.
+    NoticeRow {
+        visible: engineLink.connected && engineLink.frontEndText.length > 0
+        heading: "front end:"
+        headingColor: engineLink.frontEndFault ? Theme.inkBad : Theme.inkDim
+        headingBold: engineLink.frontEndFault
+        body: engineLink.frontEndText
+        bodyColor: engineLink.frontEndFault ? Theme.ink : Theme.inkDim
+        bodyBold: engineLink.frontEndFault
+        lines: 3
+    }
+
     // What the last open or close said when it refused. Its own row rather
     // than beside the button, because a registry refusal names the backends
     // it does know and that sentence is longer than a status strip.
-    RowLayout {
-        Layout.fillWidth: true
-        spacing: 8
+    StatusChip {
         visible: engineLink.sourceFault.length > 0
-
-        Label {
-            Layout.fillWidth: true
-            Layout.minimumWidth: 0
-            text: engineLink.sourceFault
-            color: Theme.inkBad
-            font.pixelSize: Theme.sizeBody
-            wrapMode: Text.WordWrap
-        }
+        label: "radio refused"
+        detail: engineLink.sourceFault
+        ink: Theme.inkBad
     }
 
     ColumnLayout {

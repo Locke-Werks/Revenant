@@ -858,7 +858,7 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
     // moment its rows stop being true.
     //
     // THAT LIST IS THE WHOLE OF WHERE A DESCRIPTOR REACHES THE SCREEN. Nothing
-    // in ui/qml/Main.qml names the source that is OPEN: the identity an
+    // under ui/qml names the source that is OPEN: the identity an
     // operator reads after a switch is the row they picked in the panel, and it
     // is a row from the stale listing. So the listing going stale is not a
     // picker detail, it is the window's only statement about what it is

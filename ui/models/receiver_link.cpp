@@ -232,7 +232,7 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
     // still wins, because that is a caller saying something the detector
     // cannot: QML passes one when the operator picked a mode for this click
     // rather than asking for the signal." A named mode does still win. QML
-    // does not pass one: ui/qml/Main.qml's takeTune is the only call site and
+    // does not pass one: ui/qml/TuneSelection.qml's takeTune is the only call site and
     // passes an empty string on every click, so that escape hatch never
     // carried an operator's choice and never could. The choice arrives
     // through setReceiverDemod, which is why the flag lives on the receiver

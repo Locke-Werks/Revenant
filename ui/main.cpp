@@ -92,6 +92,161 @@ constexpr std::uint32_t kDefaultEveryNth = 1;
     return result.ec == std::errc{} && result.ptr == end;
 }
 
+// Where a window was, and for a window that can be closed without quitting,
+// whether it was open. One of these per top-level window, living in main's
+// frame, which outlives exec() and therefore every lambda that writes it.
+struct RememberedWindow {
+    QRect windowed;
+    QWindow::Visibility visibility = QWindow::Windowed;
+    bool open = true;
+};
+
+struct WindowKeys {
+    QLatin1StringView geometry;
+    QLatin1StringView visibility;
+
+    // Empty for the main window, which is never closed without quitting.
+    QLatin1StringView open;
+};
+
+// WHERE A WINDOW WAS, RESTORED HERE AND NOT IN THE QML.
+//
+// QtCore's QML Settings type would do this in four lines, and it
+// would add a QML module to what windeployqt has to find and to what
+// the Forge installer has to carry. This is the same four lines in
+// C++ against the QSettings the rest of the client already uses, and
+// it keeps every key in ui/models/settings.h where a typo is a
+// compile error.
+//
+// It was written inline for the one window there was, and became a function
+// when the receivers moved into a window of their own on 2026-09-22.
+//
+// THE GEOMETRY IS CHECKED AGAINST A SCREEN BEFORE IT IS APPLIED. A
+// window restored onto a monitor that has since been unplugged comes
+// up off-screen, with no title bar to drag it back by, and the only
+// repair is editing the registry. So a remembered rectangle that
+// intersects no available screen is discarded and the window opens
+// where QML put it.
+void remember_window(QGuiApplication& app, QWindow* window, const QSettings& store,
+                     const WindowKeys& keys, RememberedWindow& remembered)
+{
+    const QRect saved = store.value(keys.geometry).toRect();
+    if (saved.isValid()) {
+        bool on_a_screen = false;
+        for (const QScreen* screen : QGuiApplication::screens()) {
+            if (screen->availableGeometry().intersects(saved)) {
+                on_a_screen = true;
+                break;
+            }
+        }
+        if (on_a_screen) {
+            window->setGeometry(saved);
+        }
+    }
+
+    // Open or closed, for a window that can be one without the other. Open is
+    // the default, so the first launch shows every window there is.
+    if (!keys.open.isEmpty()) {
+        remembered.open = store.value(keys.open, true).toBool();
+        window->setVisible(remembered.open);
+    }
+
+    // Maximised comes back maximised. Without this a window that was
+    // maximised is restored to whatever size it had before it was,
+    // which is not where the operator left it.
+    //
+    // Only these two are honoured. Minimised, hidden and full screen
+    // are all states a window can be left in by something other than
+    // a preference, and coming up in any of them looks like the
+    // client failed to start.
+    const auto visibility = static_cast<QWindow::Visibility>(
+        store.value(keys.visibility, static_cast<int>(QWindow::Windowed)).toInt());
+    if (visibility == QWindow::Maximized && remembered.open) {
+        window->setVisibility(QWindow::Maximized);
+    }
+
+    // CACHED WHILE THE WINDOW IS ALIVE AND WRITTEN ONCE ON THE WAY
+    // OUT, WHICH IS NOT WHERE THIS STARTED.
+    //
+    // The obvious arrangement is to read window->geometry() from
+    // aboutToQuit. Measured on this Qt: it does not work, and it
+    // fails silently. By the time aboutToQuit runs the window has
+    // already been closed, so visibility() is Hidden and geometry()
+    // is not the rectangle anybody left it at. The first version of
+    // this wrote "visibility 0" and no geometry at all, on a window
+    // that had been moved to a new position seconds earlier, and
+    // nothing about that looks wrong until the next launch comes up
+    // in the old place.
+    //
+    // So the last WINDOWED rectangle and the last real visibility are
+    // cached as they change, and the quit handler only writes what
+    // was cached.
+    //
+    // Caching and not writing, because the two settings have opposite
+    // costs. A volume change is one event an operator made and is
+    // written as it happens. A geometry change is a continuous stream
+    // of them during a drag, and writing each would be a registry
+    // write per frame of the resize.
+    //
+    // geometry() and setGeometry() are the pair, deliberately: both
+    // are the CLIENT area. Mixing them with frameGeometry walks the
+    // window down and right by the title bar height on every launch,
+    // because what was saved includes the frame and what is restored
+    // does not.
+    //
+    // Seeded from what was just restored, so a session in which the
+    // operator moves nothing writes back what they left rather than
+    // a default. The visibility in particular has to be seeded here:
+    // setVisibility above already fired visibilityChanged, before
+    // the handler below existed to hear it.
+    remembered.windowed = window->geometry();
+    remembered.visibility =
+        visibility == QWindow::Maximized ? QWindow::Maximized : QWindow::Windowed;
+
+    const auto note_geometry = [window, &remembered] {
+        // A maximised window's geometry is the screen, which is not
+        // where it would go if it were unmaximised, and Qt does not
+        // publish the restore rectangle. So only the windowed
+        // rectangle is ever recorded and the last one survives being
+        // maximised.
+        if (window->visibility() == QWindow::Windowed) {
+            remembered.windowed = window->geometry();
+        }
+    };
+    QObject::connect(window, &QWindow::xChanged, window, note_geometry);
+    QObject::connect(window, &QWindow::yChanged, window, note_geometry);
+    QObject::connect(window, &QWindow::widthChanged, window, note_geometry);
+    QObject::connect(window, &QWindow::heightChanged, window, note_geometry);
+
+    QObject::connect(window, &QWindow::visibilityChanged, window,
+                     [&remembered](QWindow::Visibility now) {
+                         // Only the two states that are a preference.
+                         // Hidden is what a close looks like, and
+                         // minimised and full screen are things that
+                         // happen to a window rather than choices
+                         // about where it lives.
+                         if (now == QWindow::Windowed || now == QWindow::Maximized) {
+                             remembered.visibility = now;
+                         }
+                     });
+
+    // Whether a closable window is open is the one thing a close IS a
+    // preference about, so here Hidden counts.
+    if (!keys.open.isEmpty()) {
+        QObject::connect(window, &QWindow::visibleChanged, window,
+                         [&remembered](bool visible) { remembered.open = visible; });
+    }
+
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, window, [keys, &remembered] {
+        QSettings out;
+        out.setValue(keys.visibility, static_cast<int>(remembered.visibility));
+        out.setValue(keys.geometry, remembered.windowed);
+        if (!keys.open.isEmpty()) {
+            out.setValue(keys.open, remembered.open);
+        }
+    });
+}
+
 }  // namespace
 
 int main(int argc, char* argv[])
@@ -223,129 +378,21 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // WHERE THE WINDOW WAS, RESTORED HERE AND NOT IN THE QML.
-    //
-    // QtCore's QML Settings type would do this in four lines, and it
-    // would add a QML module to what windeployqt has to find and to what
-    // the Forge installer has to carry. This is the same four lines in
-    // C++ against the QSettings the rest of the client already uses, and
-    // it keeps every key in ui/models/settings.h where a typo is a
-    // compile error.
-    //
-    // THE GEOMETRY IS CHECKED AGAINST A SCREEN BEFORE IT IS APPLIED. A
-    // window restored onto a monitor that has since been unplugged comes
-    // up off-screen, with no title bar to drag it back by, and the only
-    // repair is editing the registry. So a remembered rectangle that
-    // intersects no available screen is discarded and the window opens
-    // where QML put it.
+    // Both windows' places, remembered between launches. See remember_window.
+    // The main window is the root object and the receiver window is found by
+    // name inside it; a build of the QML without one is simply not restored.
+    static RememberedWindow main_window;
+    static RememberedWindow receiver_window;
     if (auto* window = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
-        const QRect saved = store.value(settings::kWindowGeometry).toRect();
-        if (saved.isValid()) {
-            bool on_a_screen = false;
-            for (const QScreen* screen : QGuiApplication::screens()) {
-                if (screen->availableGeometry().intersects(saved)) {
-                    on_a_screen = true;
-                    break;
-                }
-            }
-            if (on_a_screen) {
-                window->setGeometry(saved);
-            }
+        remember_window(app, window, store,
+                        WindowKeys{settings::kWindowGeometry, settings::kWindowVisibility, {}},
+                        main_window);
+        if (auto* receivers = window->findChild<QWindow*>(QStringLiteral("vrxWindow"))) {
+            remember_window(app, receivers, store,
+                            WindowKeys{settings::kVrxWindowGeometry,
+                                       settings::kVrxWindowVisibility, settings::kVrxWindowOpen},
+                            receiver_window);
         }
-
-        // Maximised comes back maximised. Without this a window that was
-        // maximised is restored to whatever size it had before it was,
-        // which is not where the operator left it.
-        //
-        // Only these two are honoured. Minimised, hidden and full screen
-        // are all states a window can be left in by something other than
-        // a preference, and coming up in any of them looks like the
-        // client failed to start.
-        const auto visibility = static_cast<QWindow::Visibility>(
-            store.value(settings::kWindowVisibility,
-                        static_cast<int>(QWindow::Windowed))
-                .toInt());
-        if (visibility == QWindow::Maximized) {
-            window->setVisibility(QWindow::Maximized);
-        }
-
-        // CACHED WHILE THE WINDOW IS ALIVE AND WRITTEN ONCE ON THE WAY
-        // OUT, WHICH IS NOT WHERE THIS STARTED.
-        //
-        // The obvious arrangement is to read window->geometry() from
-        // aboutToQuit. Measured on this Qt: it does not work, and it
-        // fails silently. By the time aboutToQuit runs the window has
-        // already been closed, so visibility() is Hidden and geometry()
-        // is not the rectangle anybody left it at. The first version of
-        // this wrote "visibility 0" and no geometry at all, on a window
-        // that had been moved to a new position seconds earlier, and
-        // nothing about that looks wrong until the next launch comes up
-        // in the old place.
-        //
-        // So the last WINDOWED rectangle and the last real visibility are
-        // cached as they change, and the quit handler only writes what
-        // was cached. remembered lives in main's frame, which outlives
-        // exec() and therefore outlives every lambda below it.
-        //
-        // Caching and not writing, because the two settings have opposite
-        // costs. A volume change is one event an operator made and is
-        // written as it happens. A geometry change is a continuous stream
-        // of them during a drag, and writing each would be a registry
-        // write per frame of the resize.
-        //
-        // geometry() and setGeometry() are the pair, deliberately: both
-        // are the CLIENT area. Mixing them with frameGeometry walks the
-        // window down and right by the title bar height on every launch,
-        // because what was saved includes the frame and what is restored
-        // does not.
-        struct Remembered {
-            QRect windowed;
-            QWindow::Visibility visibility = QWindow::Windowed;
-        };
-        static Remembered remembered;
-
-        // Seeded from what was just restored, so a session in which the
-        // operator moves nothing writes back what they left rather than
-        // a default. The visibility in particular has to be seeded here:
-        // setVisibility above already fired visibilityChanged, before
-        // the handler below existed to hear it.
-        remembered.windowed = window->geometry();
-        remembered.visibility =
-            visibility == QWindow::Maximized ? QWindow::Maximized : QWindow::Windowed;
-
-        const auto note_geometry = [window] {
-            // A maximised window's geometry is the screen, which is not
-            // where it would go if it were unmaximised, and Qt does not
-            // publish the restore rectangle. So only the windowed
-            // rectangle is ever recorded and the last one survives being
-            // maximised.
-            if (window->visibility() == QWindow::Windowed) {
-                remembered.windowed = window->geometry();
-            }
-        };
-        QObject::connect(window, &QWindow::xChanged, window, note_geometry);
-        QObject::connect(window, &QWindow::yChanged, window, note_geometry);
-        QObject::connect(window, &QWindow::widthChanged, window, note_geometry);
-        QObject::connect(window, &QWindow::heightChanged, window, note_geometry);
-
-        QObject::connect(window, &QWindow::visibilityChanged, window,
-                         [](QWindow::Visibility now) {
-                             // Only the two states that are a preference.
-                             // Hidden is what a close looks like, and
-                             // minimised and full screen are things that
-                             // happen to a window rather than choices
-                             // about where it lives.
-                             if (now == QWindow::Windowed || now == QWindow::Maximized) {
-                                 remembered.visibility = now;
-                             }
-                         });
-
-        QObject::connect(&app, &QGuiApplication::aboutToQuit, window, [] {
-            QSettings out;
-            out.setValue(settings::kWindowVisibility,
-                         static_cast<int>(remembered.visibility));
-            out.setValue(settings::kWindowGeometry, remembered.windowed);
-        });
     }
 
     return QGuiApplication::exec();

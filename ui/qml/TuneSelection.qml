@@ -23,6 +23,11 @@ QtObject {
     // landed on bare spectrum, which is a frequency and not a track: track
     // ids are issued from one, per core/detect/detector.h.
     property real tunedHz: 0
+
+    // Whether there has been a click since the connection came up. Zero hertz
+    // is a frequency on a synthetic scene centred there, so tunedHz cannot
+    // stand in for this.
+    property bool tuned: false
     property real tunedBandwidthHz: 0
     property var tunedId: 0
     property var selectedDetection: 0
@@ -40,6 +45,7 @@ QtObject {
     // One click, whichever display it came from.
     function takeTune(id, centerHz, bandwidthHz, candidates, rank, exhausted) {
         selection.selectedDetection = id
+        selection.tuned = true
         selection.tunedId = id
         selection.tunedHz = centerHz
         selection.tunedBandwidthHz = bandwidthHz
@@ -75,6 +81,11 @@ QtObject {
         engineLink.tuneReceiverToDetection(centerHz, "", bandwidthHz)
     }
 
+    // Put the readout away without changing the selection.
+    function dismiss() {
+        selection.tuned = false
+    }
+
     // THE SELECTION AND THE READOUT GO WITH THE CONNECTION.
     //
     // EngineLink::adopt clears its detection list on both edges and says
@@ -97,6 +108,7 @@ QtObject {
         target: engineLink
         function onConnectionChanged() {
             selection.selectedDetection = 0
+            selection.tuned = false
             selection.tunedId = 0
             selection.tunedHz = 0
             selection.tunedBandwidthHz = 0

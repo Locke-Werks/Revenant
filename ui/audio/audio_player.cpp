@@ -329,7 +329,7 @@ void AudioPlayer::setVolume(qreal value)
     // THIS REACHES THE REGISTRY IMMEDIATELY. QSettings on Windows is
     // RegSetValueEx per setValue, not a batch flushed at sync, so a
     // temporary here is a registry write and not a buffered one. What
-    // bounds it is the slider: ui/qml/Main.qml gives the volume control
+    // bounds it is the slider: ui/qml/AudioPane.qml gives the volume control
     // a step, so a full-travel drag is at most a hundred distinct values
     // and the fuzzy compare above drops the rest. Without that step a
     // drag would be one write per frame of pointer motion.

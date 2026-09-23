@@ -28,12 +28,18 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Revenant
 
-RowLayout {
-    Layout.fillWidth: true
-    spacing: 10
+GridLayout {
+    // A grid in the detections panel: one row per bar, the label, the
+    // handle and the number in force lined up down three columns. It was one
+    // row across the whole window.
+    columns: 3
+    rowSpacing: 6
+    columnSpacing: 10
     visible: engineLink.connected && engineLink.spectrumEnabled
 
     Label {
+        Layout.row: 0
+        Layout.column: 0
         Layout.minimumWidth: 0
         text: "detections"
         color: Theme.inkTune
@@ -56,6 +62,8 @@ RowLayout {
     // The margin beside a tuned track is the number that answers the
     // question the old label implied. See detectionMargin.
     Label {
+        Layout.row: 1
+        Layout.column: 0
         Layout.minimumWidth: 0
         text: "held for"
         color: Theme.inkDim
@@ -64,6 +72,8 @@ RowLayout {
     }
 
     RSlider {
+        Layout.row: 1
+        Layout.column: 1
         id: confidenceSlider
 
         Layout.preferredWidth: 120
@@ -211,6 +221,8 @@ RowLayout {
     // band of bursty traffic reads as empty. That is worth a label
     // because an empty list is also what a dead band looks like.
     Label {
+        Layout.row: 1
+        Layout.column: 2
         Layout.minimumWidth: 0
         text: (confidenceSlider.bar >= engineLink.maxConfidenceBar
                ? "saturated only"
@@ -237,6 +249,8 @@ RowLayout {
     // looks exactly like a quiet band, so a window coming up with one
     // set would be making a claim about a band it had not looked at.
     Label {
+        Layout.row: 2
+        Layout.column: 0
         Layout.minimumWidth: 0
         text: "stronger than"
         color: Theme.inkDim
@@ -245,6 +259,8 @@ RowLayout {
     }
 
     RSlider {
+        Layout.row: 2
+        Layout.column: 1
         id: marginSlider
 
         Layout.preferredWidth: 120
@@ -273,6 +289,8 @@ RowLayout {
     // exactly a half at it. Saying so stops the first half of the
     // travel reading as a filter that does nothing for no reason.
     Label {
+        Layout.row: 2
+        Layout.column: 2
         Layout.minimumWidth: 0
         text: marginSlider.bar < 0.5
               ? "everything"
@@ -283,6 +301,8 @@ RowLayout {
     }
 
     Label {
+        Layout.row: 3
+        Layout.column: 0
         Layout.minimumWidth: 0
         text: "detect"
         color: Theme.inkDim
@@ -311,6 +331,8 @@ RowLayout {
     // says so rather than moving the handle out from under whoever
     // is holding it.
     RSlider {
+        Layout.row: 3
+        Layout.column: 1
         id: thresholdSlider
 
         Layout.preferredWidth: 120
@@ -327,6 +349,8 @@ RowLayout {
     }
 
     Label {
+        Layout.row: 3
+        Layout.column: 2
         Layout.minimumWidth: 0
         text: engineLink.detectionThresholdDb.toFixed(1)
               + " dB SNR in 2500 Hz in force, engine-wide"
@@ -339,6 +363,9 @@ RowLayout {
     // write on the next poll, so a gap wider than one step that is
     // still there is another client and not this one in flight.
     Label {
+        Layout.row: 4
+        Layout.column: 1
+        Layout.columnSpan: 2
         Layout.minimumWidth: 0
         visible: engineLink.detectionDecisions > 0
                  && Math.abs(engineLink.detectionThresholdDb
@@ -349,13 +376,16 @@ RowLayout {
         elide: Text.ElideRight
     }
 
-    Item { Layout.fillWidth: true }
-
     // Zero decisions is the detector having been built by this
     // client's first poll and not having decided yet, which
     // core/rpc/client.h is explicit is not an empty band.
     Label {
+        Layout.row: 0
+        Layout.column: 1
+        Layout.columnSpan: 2
         Layout.minimumWidth: 0
+        Layout.preferredWidth: 220
+        horizontalAlignment: Text.AlignRight
         text: engineLink.detectionDecisions === 0
               ? "detector starting"
               : engineLink.detectionCount + " of " + engineLink.detectionTotal

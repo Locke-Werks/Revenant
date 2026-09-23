@@ -997,7 +997,7 @@ void EngineLink::setConfidenceBar(double bar)
     // assignment within 1e-12 of the value it holds; measured on Qt 6.8.3
     // and written up on kMaxConfidenceBar.
     //
-    // The slider is no longer what this catches, though. ui/qml/Main.qml's
+    // The slider is no longer what this catches, though. ui/qml/DetectionControls.qml's
     // `bar` expression pins a handle at or past the stop to
     // maxConfidenceBar before writing the property, so the drag path arrives
     // here already inside the range and the clamp is a no-op on it. What is

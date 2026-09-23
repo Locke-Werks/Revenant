@@ -116,10 +116,17 @@ constexpr double kReceiverCentreTickPx = 9.0;
     return colour;
 }
 
-// Megahertz to four places, which is the axis label's own precision in
-// qml/Main.qml, so a box and the tick under it are read in the same units.
-// The exact hertz goes in the window's tune readout, where there is room for
-// it and where somebody is about to act on it.
+// Megahertz to four places, a tenth of a kilohertz, which is enough to find
+// the box on the ruler under the spectrum. The exact hertz goes in the
+// window's click readout, where there is room for it and where somebody is
+// about to act on it.
+//
+// WHAT THIS PARAGRAPH USED TO SAY. It began "Megahertz to four places, which
+// is the axis label's own precision in qml/Main.qml, so a box and the tick
+// under it are read in the same units." The axis is now qml/Ruler.qml, whose
+// labels carry as many decimals as their 1-2-5 step needs and no more, so on
+// a broadcast span they read to a tenth of a megahertz and the two do not
+// share a precision. They share a unit, which is what the reader matches.
 [[nodiscard]] QString box_label(const DetectionBox& box)
 {
     const QString megahertz =
@@ -161,7 +168,9 @@ void paint_label(QPainter& painter, const QString& text, double centre_x, double
     const double plate_height = metrics.height() + 2.0;
 
     // Centred on the box, then pulled back inside the item rather than
-    // clipped, the same rule the axis labels in qml/Main.qml follow.
+    // clipped. The plates in qml/SpanView.qml follow the same rule; the
+    // ruler's labels do not, because a ruler label pulled in lands on its
+    // neighbour, so models/ruler.h drops one that would not fit instead.
     const double x =
         std::clamp(centre_x - plate_width / 2.0, 0.0, std::max(0.0, width_px - plate_width));
 

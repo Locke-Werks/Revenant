@@ -6,6 +6,40 @@ stage on the GPU has to compute per frame, and the fine-tuning display decides
 which stream gets transformed. Discovering either at M2 means rebuilding a
 stage rather than styling a control.
 
+## Where things are
+
+Two top-level windows in one process, since 2026-09-22.
+
+The main window is the span and one strip of chrome. Under a top bar, the
+spectrum, a frequency ruler and the waterfall fill the window, in that order
+and on one horizontal mapping: the ruler's ticks come from `ui/models/ruler.h`,
+1-2-5 steps chosen so no two labels touch at any width, and they are placed by
+the same edge-to-edge stretch the two displays use, so a tick sits over the
+column it names at both ends of the span. The ruler also marks the receiver's
+passband in the receiver's colour, takes the wheel into the same retune
+backlog as the displays, and a click on it tunes there.
+
+The top bar carries the front end's frequency dial, a few band shortcuts and
+a grouped band menu, and buttons that open panels over the span for what
+direct manipulation cannot express: the radio, the detection thresholds, the
+bookmarks, and the status drawer behind a pill that names the engine's state
+in a word or two. Faults come forward in a strip under the bar that exists
+only while one does, as chips naming the problem with the full sentence on
+hover. `ui/models/status_summary.h` decides which conditions are faults and
+which are notes that wait in the drawer.
+
+The receiver window holds the receiver rack, one strip per receiver in the
+receiver's colour with a live meter, and the focused receiver's controls: its
+own dial, its mode, its bandwidth, the fine-tuning display below, RDS and
+audio. RDS is offered only on a wfm receiver granted enough filter to pass the
+subcarrier. Both windows remember where they were, and the top bar's
+"receivers" button brings the second back after it is closed.
+
+A frequency dial steps one digit per wheel notch, with carry and borrow, and
+stops at the source's tuning limits; `ui/models/frequency_dial.h` has the
+arithmetic. The bands are `ui/models/band_plan.h`, which cites the band plans
+its edges came from.
+
 ## Auto-scaling, both ends
 
 The colour map's floor and ceiling both track the signal automatically, over a

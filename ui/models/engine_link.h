@@ -189,7 +189,7 @@ namespace revenant::ui {
 // normally found, so the overlay stopped updating and nothing said why.
 //
 // EngineLink::maxConfidenceBar publishes this so a control can take its
-// maximum from the same constant the clamp uses. ui/qml/Main.qml's
+// maximum from the same constant the clamp uses. ui/qml/DetectionControls.qml's
 // confidence slider binds its `to` to that property, so the engine's rule is
 // written down once. It carried a hardcoded 0.95 until 2026-09-20, which was
 // neither this constant nor anything that would follow it.
@@ -202,7 +202,7 @@ namespace revenant::ui {
 // and 1 - 1e-12 is not. So the slider's RANGE does not keep a refused bar
 // off the wire, and anything relying on `to` for that is relying on nothing.
 //
-// What does keep it off is the `bar` expression in ui/qml/Main.qml, which
+// What does keep it off is the `bar` expression in ui/qml/DetectionControls.qml, which
 // pins any handle position at or past the stop to maxConfidenceBar before
 // the property is ever written. setConfidenceBar's clamp sits behind that
 // as a backstop for a writer that is not the slider.
@@ -258,7 +258,7 @@ namespace revenant::ui {
 // about traffic a client cannot make: the detector's rise, its half life and
 // the band all move it, and two of the three can change under a client that
 // never hears about it. What changed instead is that the control says what
-// it does there. ui/qml/Main.qml prints the stop as a saturation bar rather
+// it does there. ui/qml/DetectionControls.qml prints the stop as a saturation bar rather
 // than as toFixed(2)'s 1.00, which was the one value the engine refuses.
 inline constexpr double kMaxConfidenceBar =
     1.0 - std::numeric_limits<double>::epsilon() / 2.0;
@@ -774,7 +774,7 @@ class EngineLink : public QObject {
     Q_PROPERTY(double detectionThresholdDb READ detectionThresholdDb
                    WRITE setDetectionThresholdDb NOTIFY detectionsChanged)
 
-    // The top of confidenceBar's range, which ui/qml/Main.qml's confidence
+    // The top of confidenceBar's range, which ui/qml/DetectionControls.qml's confidence
     // slider takes as its `to` rather than carrying a copy of. CONSTANT
     // because this is a bound on what core/rpc/server.cpp will answer at
     // all, fixed at compile time and the same for every engine.
@@ -1737,7 +1737,7 @@ public:
     //
     // The passband is still left unstated, so the engine answers with the
     // mode's own default. The measured width is NOT handed over as a
-    // passband, for the reason ui/qml/Main.qml gives at the call site: on
+    // passband, for the reason ui/qml/TuneSelection.qml gives at the call site: on
     // USB the occupied band is entirely above a suppressed carrier, so
     // using it as a width parks the filter in the wrong place.
     //
@@ -1771,7 +1771,7 @@ public:
     // placed by hand.
     //
     // THE OPERATOR'S OWN CHOICE OF MODE ARRIVES HERE, AND TODAY NOWHERE
-    // ELSE: the eight buttons in ui/qml/Main.qml are this method's only
+    // ELSE: the eight mode choices in ui/qml/ReceiverDetail.qml are this method's only
     // caller, and the two tune entry points are passed an empty mode by the
     // only call site either of them has. So this is what sets
     // demod_touched_, and it sets it even when the mode asked for is the one

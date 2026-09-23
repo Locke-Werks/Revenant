@@ -41,11 +41,12 @@ ColumnLayout {
 
     RowLayout {
         Layout.fillWidth: true
+        Layout.minimumWidth: 0
         spacing: 8
 
         Label {
             text: "audio"
-            color: Theme.inkTune
+            color: Theme.inkDim
             font.pixelSize: Theme.sizeTitle
             font.bold: true
         }
@@ -53,18 +54,14 @@ ColumnLayout {
         // The switch. It is what the operator asked for and stays
         // on across a retune, a mode change and a reconnect;
         // audioActive beside it is whether there is a stream.
-        Label {
+        RButton {
+            flat: true
+            checkable: true
+            checked: engineLink.audioWanted
             text: engineLink.audioWanted ? "listening" : "listen"
-            color: engineLink.audioWanted ? Theme.inkTune : Theme.inkDim
-            font.pixelSize: Theme.sizeBody
-            font.bold: engineLink.audioWanted
-
-            MouseArea {
-                anchors.fill: parent
-                anchors.margins: -3
-                cursorShape: Qt.PointingHandCursor
-                onClicked: engineLink.audioWanted = !engineLink.audioWanted
-            }
+            tint: Theme.receiverColours[0]
+            ink: Theme.inkDim
+            onClicked: engineLink.audioWanted = !engineLink.audioWanted
         }
 
         // Which receiver, named rather than assumed. The switch can
@@ -78,18 +75,14 @@ ColumnLayout {
             font.pixelSize: Theme.sizeBody
         }
 
-        Label {
+        RButton {
+            flat: true
+            checkable: true
+            checked: audioPlayer.muted
             text: audioPlayer.muted ? "muted" : "mute"
-            color: audioPlayer.muted ? Theme.inkWarn : Theme.inkDim
-            font.pixelSize: Theme.sizeBody
-            font.bold: audioPlayer.muted
-
-            MouseArea {
-                anchors.fill: parent
-                anchors.margins: -3
-                cursorShape: Qt.PointingHandCursor
-                onClicked: audioPlayer.muted = !audioPlayer.muted
-            }
+            tint: Theme.inkWarn
+            ink: Theme.inkDim
+            onClicked: audioPlayer.muted = !audioPlayer.muted
         }
 
         RSlider {
@@ -169,7 +162,9 @@ ColumnLayout {
         // the player's own. It follows the frames reaching the card
         // and not the newest chunk off the wire, so it is in step
         // with what is audible.
-        Label {
+        Readout {
+            widest: "format mismatch"
+            font.family: Theme.uiFont
             text: audioPlayer.source
             color: audioPlayer.source === "audio" ? Theme.inkTune
                    : audioPlayer.source === "squelched" ? Theme.inkDim
@@ -179,98 +174,94 @@ ColumnLayout {
             font.bold: audioPlayer.source === "audio"
         }
 
-        // The three depths, so the derivation is on screen. The
-        // grant is what the engine holds and what the ring is sized
-        // from; the last figure is the sink's own buffer, which is
-        // the only one of the three that is always latency.
-        Label {
-            visible: engineLink.audioActive
-            text: engineLink.audioGrantedMillis + " ms granted  ·  "
-                  + audioPlayer.bufferedMillis + "/" + audioPlayer.ringMillis
-                  + " ms buffered  ·  " + audioPlayer.sinkMillis + " ms out"
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeSmall
-        }
     }
 
-    // The counters, and only when there is something to say. Split
-    // by cause, because a wire drop, a starved card and a resync
-    // sound alike and have three different fixes.
+    // The three depths, so the derivation is on screen. The
+    // grant is what the engine holds and what the ring is sized
+    // from; the last figure is the sink's own buffer, which is
+    // the only one of the three that is always latency.
+    //
+    // On a line of its own under the controls rather than at the end of
+    // their row: in the receiver window that row is narrower than it was
+    // across the main window, and the depths were the part squeezed out.
     Label {
         Layout.fillWidth: true
+        font.family: Theme.monoFont
         visible: engineLink.audioActive
-                 && (audioPlayer.gapEvents > 0 || audioPlayer.starvedFrames > 0
-                     || audioPlayer.overrunFrames > 0
-                     || engineLink.audioFramesDropped > 0)
-        text: "gaps " + audioPlayer.gapEvents + " ("
-              + audioPlayer.gapWireFrames + " wire, "
-              + audioPlayer.gapUpstreamFrames + " upstream frames, "
-              + audioPlayer.gapFilledFrames + " filled with silence)"
-              + "  ·  resyncs " + audioPlayer.resyncs
-              + "  ·  starved " + audioPlayer.starvedFrames + " frames"
-              + "  ·  overran " + audioPlayer.overrunFrames + " frames"
-              + "  ·  engine dropped " + engineLink.audioFramesDropped
-              + " in " + engineLink.audioDropEvents + " events"
-        color: Theme.inkWarn
-        font.pixelSize: Theme.sizeSmall
-        elide: Text.ElideRight
-    }
-
-    // THE RECEIVER WENT AWAY. This is the sentence the whole ended
-    // callback exists for: audio that simply stops is what a quiet
-    // channel sounds like, so the engine says so and this is where
-    // its words go. inkBad rather than inkWarn because the stream
-    // is over and will not come back on its own.
-    Label {
-        Layout.fillWidth: true
-        visible: engineLink.audioEndedReason.length > 0
-        text: "the audio stopped: " + engineLink.audioEndedReason
-              + ". Tune a receiver and click listen again."
-        color: Theme.inkBad
-        font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
-    }
-
-    // The engine refused the subscription, in its own words.
-    Label {
-        Layout.fillWidth: true
-        visible: engineLink.audioFault.length > 0
-        text: engineLink.audioFault
-        color: Theme.inkWarn
-        font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
-    }
-
-    // The sound card refused, or went away. Kept apart from the
-    // line above it because one is fixed by picking another output
-    // and the other is not.
-    Label {
-        Layout.fillWidth: true
-        visible: audioPlayer.fault.length > 0
-        text: audioPlayer.fault
-        color: Theme.inkWarn
-        font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
-    }
-
-    // Something the player adapted, which is not a fault and is not
-    // coloured as one. Today the only one is a mono stream copied
-    // onto a device that takes no mono, which is the ordinary case
-    // on a machine whose default output is stereo only.
-    Label {
-        Layout.fillWidth: true
-        visible: audioPlayer.note.length > 0
-        text: audioPlayer.note
+        text: engineLink.audioGrantedMillis + " ms granted  ·  "
+              + audioPlayer.bufferedMillis + "/" + audioPlayer.ringMillis
+              + " ms buffered  ·  " + audioPlayer.sinkMillis + " ms out"
         color: Theme.inkDim
         font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
+    }
+
+    // Chips, each naming a problem with its sentence on hover. These were
+    // five rows of text under the controls; the words are unchanged.
+    Flow {
+        Layout.fillWidth: true
+        spacing: 6
+
+        // The counters, and only when there is something to say. Split
+        // by cause, because a wire drop, a starved card and a resync
+        // sound alike and have three different fixes.
+        StatusChip {
+            visible: engineLink.audioActive
+                     && (audioPlayer.gapEvents > 0 || audioPlayer.starvedFrames > 0
+                         || audioPlayer.overrunFrames > 0
+                         || engineLink.audioFramesDropped > 0)
+            label: "dropouts"
+            detail: "gaps " + audioPlayer.gapEvents + " ("
+                  + audioPlayer.gapWireFrames + " wire, "
+                  + audioPlayer.gapUpstreamFrames + " upstream frames, "
+                  + audioPlayer.gapFilledFrames + " filled with silence)"
+                  + "  ·  resyncs " + audioPlayer.resyncs
+                  + "  ·  starved " + audioPlayer.starvedFrames + " frames"
+                  + "  ·  overran " + audioPlayer.overrunFrames + " frames"
+                  + "  ·  engine dropped " + engineLink.audioFramesDropped
+                  + " in " + engineLink.audioDropEvents + " events"
+            ink: Theme.inkWarn
+        }
+
+        // THE RECEIVER WENT AWAY. This is the sentence the whole ended
+        // callback exists for: audio that simply stops is what a quiet
+        // channel sounds like, so the engine says so and this is where
+        // its words go. inkBad rather than inkWarn because the stream
+        // is over and will not come back on its own.
+        StatusChip {
+            visible: engineLink.audioEndedReason.length > 0
+            label: "audio stopped"
+            detail: "the audio stopped: " + engineLink.audioEndedReason
+                  + ". Tune a receiver and click listen again."
+            ink: Theme.inkBad
+        }
+
+        // The engine refused the subscription, in its own words.
+        StatusChip {
+            visible: engineLink.audioFault.length > 0
+            label: "audio refused"
+            detail: engineLink.audioFault
+            ink: Theme.inkWarn
+        }
+
+        // The sound card refused, or went away. Kept apart from the
+        // line above it because one is fixed by picking another output
+        // and the other is not.
+        StatusChip {
+            visible: audioPlayer.fault.length > 0
+            label: "sound card"
+            detail: audioPlayer.fault
+            ink: Theme.inkWarn
+        }
+
+        // Something the player adapted, which is not a fault and is not
+        // coloured as one. Today the only one is a mono stream copied
+        // onto a device that takes no mono, which is the ordinary case
+        // on a machine whose default output is stereo only.
+        StatusChip {
+            visible: audioPlayer.note.length > 0
+            label: "adapted"
+            detail: audioPlayer.note
+            ink: Theme.inkDim
+        }
     }
 }

@@ -25,9 +25,12 @@
 #include <QtQmlIntegration>
 
 #include "models/band_plan.h"
+#include "models/composite_probe.h"
 #include "models/frequency_dial.h"
+#include "models/level_meter.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
+#include "models/status_summary.h"
 
 namespace revenant::ui {
 
@@ -147,6 +150,61 @@ public:
         }
         return band_reachable(kBands[static_cast<std::size_t>(index)], to_hz(tune_low),
                               to_hz(tune_high));
+    }
+
+    // ---------------------------------------------------------------------
+    // The status pill and the receiver meter. See models/status_summary.h
+    // and models/level_meter.h.
+    // ---------------------------------------------------------------------
+
+    // Takes the conditions by name, so a caller that forgets one gets the
+    // default for it rather than an argument out of place. The level comes
+    // back as 0 quiet, 1 note, 2 warn, 3 bad.
+    [[nodiscard]] Q_INVOKABLE QVariantMap status(const QVariantMap& conditions) const
+    {
+        const auto flag = [&](const char* name) {
+            return conditions.value(QLatin1StringView(name)).toBool();
+        };
+        StatusInputs in;
+        in.connected = flag("connected");
+        in.engine_running = flag("engineRunning");
+        in.source_open = flag("sourceOpen");
+        in.source_behind = flag("sourceBehind");
+        in.front_end_fault = flag("frontEndFault");
+        in.detection_fault = flag("detectionFault");
+        in.tune_fault = flag("tuneFault");
+        in.source_fault = flag("sourceFault");
+        in.receiver_gone = flag("receiverGone");
+        in.clamped = flag("clamped");
+        in.stranded = flag("stranded");
+        in.frames_dropped_by_engine =
+            conditions.value(QStringLiteral("framesDroppedByEngine")).toULongLong();
+        in.frame_rate = conditions.value(QStringLiteral("frameRate")).toDouble();
+        const StatusSummary summary = summarise_status(in);
+        return QVariantMap{{QStringLiteral("level"), static_cast<int>(summary.level)},
+                           {QStringLiteral("headline"),
+                            QString::fromStdString(summary.headline)}};
+    }
+
+    [[nodiscard]] Q_INVOKABLE double meterFraction(double dbfs) const
+    {
+        return meter_fraction(dbfs);
+    }
+
+    [[nodiscard]] Q_INVOKABLE bool meterHasReading(double dbfs) const
+    {
+        return meter_has_reading(dbfs);
+    }
+
+    // Whether the receiver window shows its RDS section at all. See
+    // rds_offered in models/composite_probe.h, which only ever offers it on
+    // wfm, so the name is compared against that one mode here.
+    [[nodiscard]] Q_INVOKABLE bool rdsOffered(const QString& demod, double granted_low,
+                                              double granted_high) const
+    {
+        const rpc::Demod mode =
+            demod == QLatin1StringView("wfm") ? rpc::Demod::Wfm : rpc::Demod::Raw;
+        return rds_offered(mode, to_hz(granted_low), to_hz(granted_high));
     }
 
     // The wheel's two axes resolved to one, the way the span displays do it.

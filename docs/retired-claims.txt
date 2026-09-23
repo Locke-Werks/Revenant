@@ -753,3 +753,31 @@ instead: USB and LSB read 0.453 and 0.547 because each of their lines is its own
     four-bin band and mirrored lines mirror, to three places at two grids. That
     is sub-bin placement; lower_fraction has never been shown to measure a
     sideband. core/detect/shape.h and docs/detection.md say so.
+
+phrase: because this window has no gain control
+retired: 2026-09-22
+commit: Move the receivers to their own window and the diagnostics behind the top bar
+instead: The radio panel has had a gain slider since the device picker landed, and
+    the front end's note now sits under it in ui/qml/SourcePicker.qml, as the
+    retired comment promised it would once a gain control existed.
+
+phrase: drag the filter edges below to put the passband where the signal is
+retired: 2026-09-22
+commit: Move the receivers to their own window and the diagnostics behind the top bar
+instead: The filter is dragged in the receiver window, a second top-level window,
+    and the click readout says so. Nothing is below the readout any more; it is a
+    card over the waterfall.
+
+phrase: which is the axis label's own precision in qml/Main.qml
+retired: 2026-09-22
+commit: Move the receivers to their own window and the diagnostics behind the top bar
+instead: The axis is qml/Ruler.qml, whose labels carry as many decimals as their
+    1-2-5 step needs. Detection labels stay at four places of megahertz and share
+    the ruler's unit, not its precision.
+
+phrase: The detail pane opens above this item
+retired: 2026-09-22
+commit: Move the receivers to their own window and the diagnostics behind the top bar
+instead: The receiver's detail is in its own window. What resizes the waterfall in
+    height now is the fault banner under the top bar, which is why keeping the
+    history across a height change still matters.

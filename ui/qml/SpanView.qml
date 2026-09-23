@@ -31,14 +31,18 @@ ColumnLayout {
 
     Layout.fillWidth: true
     Layout.fillHeight: true
-    spacing: 6
+
+    // Flush, so the ruler touches both of the displays it labels.
+    spacing: 0
 
     // ------------------------------------------------------------------
     // The instantaneous spectrum
     // ------------------------------------------------------------------
     Item {
         Layout.fillWidth: true
-        Layout.preferredHeight: Math.round(Window.height * 0.24)
+        // A third of the span, now that the span is the window rather than
+        // whatever a column of rows left of it.
+        Layout.preferredHeight: Math.round(span.height * 0.34)
 
         SpectrumItem {
             id: spectrum

@@ -30,24 +30,38 @@ import Revenant
 ColumnLayout {
     Layout.fillWidth: true
     spacing: 2
-    visible: engineLink.receiverId > 0 || engineLink.rdsWanted
+    // OFFERED ONLY WHERE IT CAN WORK. The section is there for a wfm
+    // receiver whose granted filter passes the 57 kHz subcarrier, and absent
+    // for every other receiver rather than greyed and explained: a switch that
+    // can only refuse is a paragraph of refusal waiting to happen, and that is
+    // what this pane had become. models/composite_probe.h has the rule.
+    //
+    // AND WHEREVER THE SWITCH IS ALREADY ON. It is sticky across a mode change,
+    // so a receiver changed from wfm to nfm with RDS on still has the decoder
+    // asking and the audio still the multiplex. Hiding the switch then would
+    // leave it armed with no way to turn it off, so the section stays, with a
+    // chip saying why nothing is decoding.
+    readonly property bool offered: engineLink.receiverId > 0
+                                    && UiRules.rdsOffered(engineLink.receiverDemod,
+                                                          engineLink.receiverGrantedLow,
+                                                          engineLink.receiverGrantedHigh)
+
+    visible: offered || engineLink.rdsWanted
 
     RowLayout {
         Layout.fillWidth: true
+        Layout.minimumWidth: 0
         spacing: 8
 
-        Label {
+        RButton {
+            flat: true
+            checkable: true
+            checked: engineLink.rdsWanted
             text: "rds"
-            color: engineLink.rdsWanted ? Theme.inkTune : Theme.inkDim
-            font.pixelSize: Theme.sizeTitle
+            tint: Theme.receiverColours[0]
+            ink: Theme.inkDim
             font.bold: true
-
-            MouseArea {
-                anchors.fill: parent
-                anchors.margins: -3
-                cursorShape: Qt.PointingHandCursor
-                onClicked: engineLink.rdsWanted = !engineLink.rdsWanted
-            }
+            onClicked: engineLink.rdsWanted = !engineLink.rdsWanted
         }
 
         // A SETTING AND NEVER AN INFERENCE. core/rpc/types.h and
@@ -61,6 +75,43 @@ ColumnLayout {
             options: ["rds", "rbds"]
             current: engineLink.rdsRegion
             onPicked: (region) => engineLink.rdsRegion = region
+        }
+
+        // ALWAYS PRESENT WHILE THE SWITCH IS ON. This is the chip that
+        // tells a decoder that never locked from a station with no RDS, and a
+        // refused poll from either, in a word or two; the sentence that says
+        // so in full is its tooltip, verbatim. An empty pane cannot tell you
+        // which, which is the whole reason this is not gated on there being
+        // something to show. It used to be that sentence, printed in full
+        // under the switch whatever it said.
+        StatusChip {
+            visible: engineLink.rdsWanted && engineLink.rdsLabel.length > 0
+            label: engineLink.rdsLabel
+            detail: engineLink.rdsStatus
+            ink: engineLink.rdsIsFault ? Theme.inkWarn
+                 : engineLink.rdsDecoding ? Theme.receiverColours[0]
+                 : Theme.inkDim
+        }
+
+        // WHAT THE AUDIO HAS BECOME, and only while somebody is listening
+        // to it. The receiver hands out the 171 kHz composite multiplex
+        // while RDS is on, which is the subcarrier the decoder needs and
+        // is not programme audio, so a listener hears the station replaced
+        // by noise with nothing on screen accounting for it.
+        //
+        // Gated on audioWanted rather than shown whenever the rate is
+        // raised. An operator who is not listening does not need to be
+        // told what the audio sounds like, and the rate is the switch
+        // working rather than a condition to warn about.
+        //
+        // inkWarn, because it is a consequence the operator did not ask
+        // for and has to act on to undo: the fix is the RDS switch, which
+        // puts the receiver back to programme audio on the way off.
+        StatusChip {
+            visible: engineLink.rdsCompositeReceiver && engineLink.audioWanted
+            label: "audio is the multiplex"
+            detail: "the audio on this receiver is the FM multiplex while RDS is "
+                    + "on, not programme audio. Turn rds off to hear the station."
         }
 
         // The station, which is the whole point and is only shown
@@ -123,7 +174,8 @@ ColumnLayout {
         // 1187.5 and the offset is the transmitter's drift within
         // the six hertz clause 1.1 allows, so both are printed to
         // the precision the measurement has.
-        Label {
+        Readout {
+            widest: "0000000 groups  ·  0000.00 bit/s  ·  -000.0 Hz offset"
             visible: engineLink.rdsDecoding
             text: engineLink.rdsGroups + " groups  ·  "
                   + engineLink.rdsBitRateHz.toFixed(2) + " bit/s  ·  "
@@ -150,45 +202,4 @@ ColumnLayout {
         elide: Text.ElideRight
     }
 
-    // ALWAYS PRESENT WHILE THE SWITCH IS ON. This is the sentence
-    // that tells a decoder that never locked from a station with
-    // no RDS, and a refused poll from either. An empty pane cannot
-    // tell you which, which is the whole reason this row is not
-    // gated on there being something to show.
-    Label {
-        Layout.fillWidth: true
-        visible: engineLink.rdsWanted && engineLink.rdsStatus.length > 0
-        text: engineLink.rdsStatus
-        color: engineLink.rdsIsFault ? Theme.inkWarn : Theme.inkDim
-        font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 3
-        elide: Text.ElideRight
-    }
-
-    // WHAT THE AUDIO HAS BECOME, and only while somebody is listening
-    // to it. The receiver hands out the 171 kHz composite multiplex
-    // while RDS is on, which is the subcarrier the decoder needs and
-    // is not programme audio, so a listener hears the station replaced
-    // by noise with nothing on screen accounting for it.
-    //
-    // Gated on audioWanted rather than shown whenever the rate is
-    // raised. An operator who is not listening does not need to be
-    // told what the audio sounds like, and the rate is the switch
-    // working rather than a condition to warn about.
-    //
-    // inkWarn, because it is a consequence the operator did not ask
-    // for and has to act on to undo: the fix is the RDS switch, which
-    // puts the receiver back to programme audio on the way off.
-    Label {
-        Layout.fillWidth: true
-        visible: engineLink.rdsCompositeReceiver && engineLink.audioWanted
-        text: "the audio on this receiver is the FM multiplex while RDS is "
-              + "on, not programme audio. Turn rds off to hear the station."
-        color: Theme.inkWarn
-        font.pixelSize: Theme.sizeSmall
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
-    }
 }

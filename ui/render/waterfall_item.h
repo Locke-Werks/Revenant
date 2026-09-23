@@ -62,8 +62,8 @@
 // bins-per-column argument behind it, and geometryChange called rebuild() on
 // any size change at all. The argument is correct and it is about width
 // alone: a height change moves no row sideways and changes no column's bins.
-// The cost of the overreach was not theoretical. The detail pane opens above
-// this item, which resizes it in height only, so the first click-to-tune
+// The cost of the overreach was not theoretical. The detail pane opened above
+// this item, which resized it in height only, so the first click-to-tune
 // threw away the history the operator had just read to decide what to tune,
 // twice, because the pane's layout settles in a second pass.
 //

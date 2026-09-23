@@ -1,11 +1,14 @@
-// What the last click resolved to.
+// What the last click resolved to, as a card floating over the bottom of the
+// waterfall. It was a row under the audio pane, which on any window shorter
+// than the column was below the bottom edge and never seen.
+//
 // WHAT THIS ROW USED TO SAY
 //
 // Until the passband work it said that receiver control from the
 // window was not built, that EngineLink held no add_vrx, and that a
 // click therefore could not produce a receiver however much it
 // looked as though it should. All three are now false: takeTune
-// above calls tuneReceiver, the detail pane below draws that
+// above calls tuneReceiver, the receiver window draws that
 // receiver's passband, and its filter edges are dragged there. The
 // sentence is recorded rather than deleted because it was the
 // explanation for the whole of this row's shape.
@@ -42,9 +45,14 @@ ColumnLayout {
         return Math.round(hz) + " Hz"
     }
 
-    Layout.fillWidth: true
     spacing: 0
-    visible: readout.selection.tunedHz > 0
+
+    // Whether there has been a click, and not whether it landed above zero
+    // hertz. This read tunedHz > 0, which hid the whole readout for every
+    // click on a synthetic scene: the scene is centred on zero, so half its
+    // span is negative, and the readout's concentration row had never been
+    // seen running.
+    visible: readout.selection.tuned
 
     RowLayout {
         Layout.fillWidth: true
@@ -195,7 +203,8 @@ ColumnLayout {
               ? "the receiver moved here. This is the measured centre of the "
                 + "occupied band, not the mode's logical centre, so it is the "
                 + "carrier for AM and it is wrong for RTTY and SSB: drag the "
-                + "filter edges below to put the passband where the signal is."
+                + "filter edges in the receiver window to put the passband where "
+                + "the signal is."
               : "no detection there, so this is the frequency under the pointer."
         color: Theme.inkDim
         font.pixelSize: Theme.sizeSmall

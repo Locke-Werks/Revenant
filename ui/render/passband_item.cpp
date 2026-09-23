@@ -801,6 +801,18 @@ void PassbandItem::resetPassband()
     update();
 }
 
+void PassbandItem::widenPassband(int step_hz)
+{
+    if (link_ == nullptr || link_->receiverId() == 0 || step_hz == 0) {
+        return;
+    }
+    link_->setReceiverPassband(link_->receiverPassbandLow() - step_hz,
+                               link_->receiverPassbandHigh() + step_hz);
+    rebuildQuads();
+    rebuildReadout();
+    update();
+}
+
 void PassbandItem::keyPressEvent(QKeyEvent* event)
 {
     if (link_ == nullptr || link_->receiverId() == 0) {
@@ -829,12 +841,7 @@ void PassbandItem::keyPressEvent(QKeyEvent* event)
             // Widen and narrow symmetrically, whatever the selection. The
             // two arrows that do not move an edge sideways are the obvious
             // place for the gesture an AM or NFM operator reaches for most.
-            const int by = event->key() == Qt::Key_Up ? step : -step;
-            link_->setReceiverPassband(link_->receiverPassbandLow() - by,
-                                       link_->receiverPassbandHigh() + by);
-            rebuildQuads();
-            rebuildReadout();
-            update();
+            widenPassband(event->key() == Qt::Key_Up ? step : -step);
             break;
         }
 

@@ -158,6 +158,12 @@ public:
     // Puts the mode's default passband back and clears the selection.
     Q_INVOKABLE void resetPassband();
 
+    // Widens both edges by step_hz, or narrows them for a negative step, about
+    // the tuned frequency. The up and down arrows do this; the receiver
+    // window's narrower and wider buttons call it so the arithmetic is in one
+    // place.
+    Q_INVOKABLE void widenPassband(int step_hz);
+
 protected:
     QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
     void geometryChange(const QRectF& new_geometry, const QRectF& old_geometry) override;

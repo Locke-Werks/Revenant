@@ -15,9 +15,15 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Revenant
 
-RowLayout {
+// Two lines in the status drawer: what the device is and what the engine
+// built, then whether frames are arriving. It was one line across the whole
+// window when it was the window's first row.
+GridLayout {
     Layout.fillWidth: true
-    spacing: 18
+    Layout.minimumWidth: 0
+    columns: 2
+    columnSpacing: 18
+    rowSpacing: 4
 
     Label {
         Layout.minimumWidth: 0
@@ -42,8 +48,6 @@ RowLayout {
         elide: Text.ElideRight
     }
 
-    Item { Layout.fillWidth: true }
-
     // WHETHER THE ENGINE IS RUNNING, WHICH IS NOT WHETHER IT IS
     // REACHABLE
     //
@@ -59,8 +63,9 @@ RowLayout {
     // because the pair is the diagnosis: running with 0.0 rows/s is
     // a source that has stopped delivering, stopped with 0.0 is an
     // engine waiting to be started, and both used to look the same.
-    Label {
-        Layout.minimumWidth: 0
+    Readout {
+        horizontalAlignment: Text.AlignLeft
+        widest: "engine stopped  ·  0000.0 rows/s"
         visible: engineLink.connected
         text: engineLink.engineRunning
               ? engineLink.frameRate.toFixed(1) + " rows/s"
@@ -78,8 +83,9 @@ RowLayout {
     // limit; "engine dropped" means the engine had a frame at the
     // rate asked for and threw it away because this client had not
     // answered for the previous one.
-    Label {
-        Layout.minimumWidth: 0
+    Readout {
+        horizontalAlignment: Text.AlignLeft
+        widest: "00000000 frames  ·  00000000 engine dropped  ·  00000000 not drawn"
         visible: engineLink.connected
         text: engineLink.framesReceived + " frames  ·  "
               + engineLink.framesDroppedByEngine + " engine dropped  ·  "

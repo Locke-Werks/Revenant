@@ -66,6 +66,14 @@ inline constexpr QLatin1StringView kConfidenceBar{"detections/confidenceBar"};
 inline constexpr QLatin1StringView kWindowGeometry{"window/geometry"};
 inline constexpr QLatin1StringView kWindowVisibility{"window/visibility"};
 
+// The receiver window, on the same terms, plus whether it was open at all. It
+// is a second top-level window so it can live on another screen, and a window
+// that came back somewhere other than where the operator put it, or came back
+// open after they closed it, would undo the one thing it is separate for.
+inline constexpr QLatin1StringView kVrxWindowGeometry{"vrxWindow/geometry"};
+inline constexpr QLatin1StringView kVrxWindowVisibility{"vrxWindow/visibility"};
+inline constexpr QLatin1StringView kVrxWindowOpen{"vrxWindow/open"};
+
 // The bookmark list, as one JSON array in one value rather than a QSettings
 // array of groups.
 //

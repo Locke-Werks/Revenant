@@ -197,19 +197,26 @@ qt_add_qml_module(revenant_ui
         qml/TuneSelection.qml
         qml/StatusRow.qml
         qml/SourcePicker.qml
-        qml/TuningPanel.qml
-        qml/ReceiverNotices.qml
         qml/BookmarkRow.qml
-        qml/EngineNotices.qml
         qml/DetectionControls.qml
         qml/SpanView.qml
         qml/Ruler.qml
         qml/BandPicker.qml
         qml/FrequencyDial.qml
-        qml/VfoPane.qml
         qml/RdsPane.qml
         qml/AudioPane.qml
         qml/ClickReadout.qml
+        qml/TopBar.qml
+        qml/TuneBar.qml
+        qml/NoticeBanner.qml
+        qml/StatusDrawer.qml
+        qml/ReceiverDetail.qml
+        qml/ReceiverRack.qml
+        qml/ReceiverStrip.qml
+        qml/VrxWindow.qml
+        qml/controls/Popover.qml
+        qml/controls/Readout.qml
+        qml/controls/StatusChip.qml
         qml/controls/RButton.qml
         qml/controls/RCheckBox.qml
         qml/controls/RComboBox.qml
@@ -418,6 +425,14 @@ endif()
 # and the placeholders are the difference between a call sign and half of
 # one. models/rds_view.h includes core/rpc/types.h, which is three standard
 # headers and no Cap'n Proto, so this target stays a test binary.
+#
+# It covers the rules behind the controls added in the design pass of
+# 2026-09-22: what one wheel notch on a dial digit does (models/frequency_dial.h),
+# where the ruler's ticks go and what they say (models/ruler.h), the band table
+# and which bands a device reaches (models/band_plan.h), and how loudly the
+# status pill speaks and how far a receiver's meter reads
+# (models/status_summary.h, models/level_meter.h). Each is the part of its
+# control that can be wrong while still looking right.
 #
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output

@@ -45,10 +45,11 @@ QtObject {
     readonly property color accent: "#45c4b0"
     readonly property color accentDim: "#2a7a6e"
 
-    // Surfaces, from the window up. A panel floats over the span and has to
-    // let the picture through, so it is translucent; a control sits on a
-    // panel and is a step lighter than it.
-    readonly property color panel: "#d90b0f17"
+    // Surfaces, from the window up. A panel floats over the span, and it is
+    // only just translucent: at 85% the detection labels under the status
+    // drawer read through its own text. A control sits on a panel and is a
+    // step lighter than it.
+    readonly property color panel: "#f20b0f17"
     readonly property color panelSolid: "#0b0f17"
     readonly property color control: "#141a24"
     readonly property color controlHover: "#1c2430"

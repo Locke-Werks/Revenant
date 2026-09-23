@@ -28,6 +28,11 @@ RowLayout {
     property int lines: 2
 
     Layout.fillWidth: true
+
+    // A row wraps its sentence to whatever width it is given, so it asks for
+    // none of its own. Without this a long sentence in a panel of fixed width
+    // pushed the panel's contents past its edge instead of wrapping.
+    Layout.minimumWidth: 0
     spacing: 8
 
     Label {

@@ -18,6 +18,10 @@ Button {
 
     property color tint: Theme.accent
 
+    // Where the label sits. Centred for a button; the status pill reads as a
+    // line of text with a dot before it, so it sets this to the left.
+    property int alignment: Text.AlignHCenter
+
     // Ink for a button that is neither checked nor disabled, for the few
     // places a plain action has to say something about its state.
     property color ink: Theme.ink
@@ -38,7 +42,7 @@ Button {
         color: !control.enabled ? Theme.inkOff
                : control.checked ? control.tint
                : control.ink
-        horizontalAlignment: Text.AlignHCenter
+        horizontalAlignment: control.alignment
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
     }

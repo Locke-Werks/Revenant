@@ -192,12 +192,14 @@ void WaterfallItem::geometryChange(const QRectF& newGeometry, const QRectF& oldG
     // about height. Making the item taller or shorter moves no row sideways
     // and changes no column's bins.
     //
-    // It is not a rare gesture either. The detail pane opens and closes
-    // above this item, which resizes it in height alone, and the first
-    // click-to-tune does exactly that: the pane appears, the waterfall
-    // shortens, and the history an operator was reading to decide what to
+    // It was not a rare gesture either. The detail pane opened and closed
+    // above this item, which resized it in height alone, and the first
+    // click-to-tune did exactly that: the pane appeared, the waterfall
+    // shortened, and the history an operator was reading to decide what to
     // tune vanished in the act of tuning it. Twice, because the pane's
-    // own layout settles in a second pass.
+    // own layout settled in a second pass. The pane is in a window of its
+    // own since 2026-09-22; the status banner above the span opens and
+    // closes the same way now, so the case is as ordinary as it was.
     if (wanted.width() == history_.width() && wanted.height() != history_.height()) {
         resizeRows(wanted.height());
     } else if (wanted != history_.size()) {
@@ -454,7 +456,7 @@ void WaterfallItem::placeLabels()
 {
     // A label belongs to the top edge of its rectangle, so it ages down the
     // display with the rows it names. Pulled back inside the item rather
-    // than clipped, the same rule the plates in qml/Main.qml follow.
+    // than clipped, the same rule the plates in qml/SpanView.qml follow.
     const double strip = overlay_label_height();
     const auto place = [&](OverlayLabelItem* item, std::uint64_t id) {
         const auto found = std::find_if(boxes_.begin(), boxes_.end(),
