@@ -655,9 +655,16 @@ tags and the vcpkg registry commit in the notices file and relying on those
 remaining reachable, which is a weaker promise made about somebody else's
 hosting.
 
-**In the shipped artefact.** `res/revenant.rc.in` and `signing/` exist and there
-is no `installer.toml` yet, so the Forge packaging is unwritten. Whenever it is
-written, the notices file is a payload member beside the binary, not a link.
+**In the shipped artefact.** The notices file is a payload member beside the
+binary, not a link. `installer.toml` is the Forge configuration and
+`scripts/stage-payload.ps1` assembles what it packs; docs/packaging.md says what
+the container carries and what it does not yet.
+
+This paragraph used to say "`res/revenant.rc.in` and `signing/` exist and there
+is no `installer.toml` yet, so the Forge packaging is unwritten." That stopped
+being true on 2026-09-21, when the installer configuration and the package and
+release jobs landed, and the sentence went on telling a reader there was nothing
+to check.
 
 ### The relink question is closed, 2026-09-20
 

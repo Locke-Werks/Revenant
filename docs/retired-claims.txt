@@ -415,3 +415,10 @@ instead: P25 Phase 1, D-STAR DV and TETRA V+D are written as far as their
     core/dsp/synth/dv_mod.cpp. What none of them has yet is a live path: their
     demodulator modes hand out a raw tap and nothing in the engine or the
     command line reads it. docs/modes.md under Done says where each one stops.
+
+phrase: there is no installer.toml yet, so the Forge packaging is unwritten
+retired: 2026-09-21
+commit: 0e645f4
+instead: installer.toml is the Forge configuration at the repository root,
+    scripts/stage-payload.ps1 assembles its payload, and the package and
+    release jobs in ci.yml build it. docs/packaging.md says what it carries.
