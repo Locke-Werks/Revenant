@@ -239,7 +239,7 @@ TEST_CASE("every cs24 code converts exactly", "[convert][m1]") {
     CHECK(not_increasing == 0);
 }
 
-TEST_CASE("the cs24 twin unpacks what a byte-at-a-time reader reads", "[convert][m1]") {
+TEST_CASE("the cs24 twin reads the codes a byte-at-a-time reader reads", "[convert][m1]") {
     // The twin reads words and shifts across their boundaries, as the kernel
     // does. This is the check that the shifting names the right bytes, made
     // against a reader that never assembles a word. Both parities of source
