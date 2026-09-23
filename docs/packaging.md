@@ -324,7 +324,10 @@ from `vcpkg.spdx.json`. The `package` and `release` jobs download the pieces
 and refuse any byte that does not match. The `package` job builds the archive
 on every run and keeps it as the `corresponding-source` artifact, so the first
 tag is not its first outing. Built locally on 2026-09-22 against the `dev`
-tree: 3.0 MB, and every upstream and recipe hash matched.
+tree: 3.0 MB, and every upstream and recipe hash matched. Built again on
+2026-09-23 against the `ci` tree with the librtlsdr overlay: 4,372,784
+bytes, and every upstream and recipe hash matched, the seven files of the
+overlay among them.
 
 ## What the first release still owes
 
