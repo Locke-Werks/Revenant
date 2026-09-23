@@ -8,7 +8,11 @@ stage rather than styling a control.
 
 ## Where things are
 
-Two top-level windows in one process, since 2026-09-22.
+One main window, with the receivers docked under the span and able to pop
+out into a second top-level window of their own, since 2026-09-23.
+
+WHAT THIS PARAGRAPH USED TO SAY: "Two top-level windows in one process, since
+2026-09-22." The receivers were only ever the second window then.
 
 The main window is the span and one strip of chrome. Under a top bar, the
 spectrum, a frequency ruler and the waterfall fill the window, in that order
@@ -32,19 +36,47 @@ WHAT THIS PARAGRAPH USED TO SAY: "the radio, the detection thresholds, the
 bookmarks, and the status drawer". The bookmark row became the frequency
 manager on 2026-09-23; see "Frequency manager" below.
 
-The receiver window holds the receiver rack, one strip per receiver in the
-receiver's colour with a live meter, and the focused receiver's controls: its
-own dial, its mode, its bandwidth, the fine-tuning display below with its own
-waterfall under it, RDS, decoding and audio. RDS is offered only on a wfm
+The receivers are one panel, `ui/qml/ReceiverPanel.qml`: the receiver rack,
+one strip per receiver in the receiver's colour with a live meter, and the
+focused receiver's controls: its own dial, its mode, its bandwidth, the
+fine-tuning display below with its own waterfall under it, RDS, decoding and
+audio. RDS is offered only on a wfm
 receiver granted enough filter to pass the subcarrier, and decoding only on a
 receiver whose mode some decoder reads; see "Decoding" below. The passband waterfall keeps its
 history in absolute hertz as the receiver moves, shifting rows by
 `ui/render/history_shift.h`. AFT is a tick box beside the receiver's dial, off
 until ticked; `ui/models/aft.h` carries the loop and the rules below, and it
 drives the same `moveReceiverCentre` path as the wheel. The auto filter
-sits beside it, also off until ticked; see "Auto filter" below. Both windows
-remember where they were, and the top bar's
-"receivers" button brings the second back after it is closed.
+sits beside it, also off until ticked; see "Auto filter" below.
+
+**Docked, or popped out.** The owner's call of 2026-09-23, after a live
+playtest: the panel starts docked in the main window, under the span, behind a
+divider that drags; the rack's "pop out" button or Ctrl+Shift+W moves it into
+the receiver window for a second screen, and "dock", the same key or that
+window's close button moves it back. It is one item moved between the two, so
+the fine-tuning waterfall keeps its history across a pop. Docked, the strip is
+much wider than it is tall, so RDS, decoding and audio take a column of their
+own on its right; in the window they stack under the fine-tuning display as
+they always did. `ui/models/receiver_placement.h` has both rules, with cases
+in `ui/tests/test_receiver_placement.cpp`. The top bar's "receivers" button
+and Ctrl+R hide and show the panel wherever it is.
+
+Where the panel is, whether it is shown and how tall the dock was dragged are
+remembered across runs (`receivers/poppedOut`, `receivers/shown` and
+`receivers/dockHeight` in `ui/models/settings.h`), and the receiver window
+remembers where it was. A smoke run reads and writes none of it and starts
+docked; `--grab-receivers` pops the panel out to photograph the window.
+
+The frame pacer, `ui/render/window_pacer.cpp`, stays installed while the panel
+is docked. Its two-window parts act only on a receiver window that is shown,
+and a hidden one asks for no frames; the half-refresh hold on the main
+window's own requests is a one-window measure, which with the receiver window
+closed cut the engine frames the client replaced from 42.4% to 12.8% (see
+"Before and after" under "Frame budget").
+
+WHAT THE LAST SENTENCE OF THE PARAGRAPH ABOVE USED TO SAY: "Both windows
+remember where they were, and the top bar's "receivers" button brings the
+second back after it is closed."
 
 A frequency dial steps one digit per wheel notch, with carry and borrow, and
 stops at the source's tuning limits; `ui/models/frequency_dial.h` has the
@@ -69,9 +101,9 @@ the ranking, and `ui/tests/test_palette_match.cpp` their cases.
 
 The tuning keys step one digit of the radio's dial, the kilohertz digit
 until Alt and the side arrows move it, and the dial marks that digit faintly
-while the pointer is elsewhere. The filter keys act on the receiver window's
-filter display once it has focus, which a click on it or Ctrl+E gives it and
-an outline in the accent shows.
+while the pointer is elsewhere. The filter keys act on the receivers' filter
+display once it has focus, which a click on it or Ctrl+E gives it and an
+outline in the accent shows, docked or popped out.
 
 One table decides every key. `ui/models/key_actions.h` holds each action's
 id, label, group, keys, where the keys apply, what it needs and the name of
@@ -145,7 +177,8 @@ are bound.
 | panels | open the detections panel | `Ctrl+Shift+D` |
 | panels | open the frequency manager | `Ctrl+B` |
 | panels | save the receiver as a memory | `Ctrl+D` |
-| panels | show or hide the receiver window | `Ctrl+R` |
+| panels | show or hide the receivers | `Ctrl+R` |
+| panels | pop the receivers out or dock them | `Ctrl+Shift+W` |
 | help | open the command palette | `Ctrl+K`, `Ctrl+Shift+P` |
 | help | show the key map | `F1` |
 
@@ -190,10 +223,10 @@ are bound.
 
 ## The receiver rack
 
-The receiver window's left column is a rack of up to eight receivers, one
+The receivers' left column is a rack of up to eight receivers, one
 strip each: its label, its frequency in a fixed-width readout, its mode, a
 live level meter, a gain, mute, solo and remove. One receiver is FOCUSED, and
-it is the one the rest of the receiver window is about: the dial, the mode,
+it is the one the rest of the receivers' panel is about: the dial, the mode,
 the filter, the passband display, decoding and RDS all follow it. The others
 are held: each keeps running on the engine with its own audio and its strip
 shows its frequency, mode and level, but nothing retunes it until it is
@@ -211,7 +244,8 @@ half.
 | click | a strip in the rack | focuses that receiver |
 
 A click on the span that focuses, retunes, opens or adds a receiver also
-brings the receiver window to the front: raised if it is on screen, shown
+brings the receivers forward: shown in the dock if they were hidden there,
+and when they are popped out, their window raised if it is on screen, shown
 if it was closed, restored if it was minimised, and given the keyboard only
 in those last two cases. `ui/models/window_raise.h` has the rule and what
 Windows does with each call, with cases in `ui/tests/test_window_raise.cpp`.
@@ -1423,8 +1457,9 @@ it. A change of receiver does not: what was decoded stays decoded.
 
 **Driven with nobody at the mouse.** `revenant-ui --receiver FREQ:MODE
 --decode NAME` opens a receiver and attaches a decoder once a source reaches
-the frequency, and `--grab-receivers FILE` writes the receiver window to a PNG
-as a `--smoke-seconds` run ends, on the offscreen platform. Measured on
+the frequency, and `--grab-receivers FILE` pops the receivers out and writes
+the receiver window to a PNG as a `--smoke-seconds` run ends, on the offscreen
+platform; `--grab-main FILE` without it photographs them docked. Measured on
 2026-09-23 against revenant-engine on the 30 dB captures
 `tests/rpc/test_rpc_decode_audio.cpp` writes, each behind 4 s of silence and
 played at `--pace 1` through a 4-channel grid at 288000 S/s: rtty on a usb
@@ -1562,6 +1597,14 @@ ephemeral loopback port with a token file of its own, runs the client as a
 smoke run (no sound card, no settings written) that exits on its own, and
 stops the engine. Without `-Visible` it runs offscreen. `-NoReceiverWindow`
 leaves the receiver window closed, which is a control and not the load.
+
+Since the receivers dock in the main window by default, 2026-09-23, the
+script's full load pops them out with `--grab-receivers`, so it measures what
+it always measured, and `-NoReceiverWindow` now leaves them docked: one window,
+but one that draws the fine-tuning display and its waterfall as well as the
+span. Every figure below predates that and was taken with the receivers either
+in their window or not shown at all. The docked arrangement has not been
+through the frame budget yet.
 
 **The windows have to be in front.** A window the script starts opens behind
 whatever is in front, and a window DWM is not composing is paced by nothing:

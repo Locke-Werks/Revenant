@@ -35,6 +35,7 @@
 #include "models/level_meter.h"
 #include "models/mode_choice.h"
 #include "models/receiver_palette.h"
+#include "models/receiver_placement.h"
 #include "models/receiver_rack.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
@@ -270,6 +271,11 @@ public:
         return QString::fromUtf8(kSpanClickHint);
     }
 
+    [[nodiscard]] Q_INVOKABLE QString spanClickHintShort() const
+    {
+        return QString::fromUtf8(kSpanClickHintShort);
+    }
+
     // What the rack says where the strips would be.
     [[nodiscard]] Q_INVOKABLE QString rackEmptyText() const
     {
@@ -341,6 +347,20 @@ public:
                            {QStringLiteral("restore"), plan.restore},
                            {QStringLiteral("raise"), plan.raise},
                            {QStringLiteral("activate"), plan.activate}};
+    }
+
+    // ---------------------------------------------------------------------
+    // Where the receivers are drawn. See models/receiver_placement.h.
+    // ---------------------------------------------------------------------
+
+    [[nodiscard]] Q_INVOKABLE bool receiverPanelSideBySide(double width, double height) const
+    {
+        return receiver_panel_side_by_side(width, height);
+    }
+
+    [[nodiscard]] Q_INVOKABLE double dockHeight(double remembered, double available) const
+    {
+        return dock_height(remembered, available);
     }
 
 private:

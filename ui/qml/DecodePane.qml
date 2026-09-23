@@ -28,130 +28,146 @@ ColumnLayout {
     readonly property bool offered: engineLink.receiverId > 0
                                     && engineLink.decodeChoices.length > 0
 
+    // The log takes the height it is given rather than its own, which is the
+    // docked strip's column beside the receiver. See ReceiverPanel.qml.
+    property bool fills: false
+
+    // Off, and nothing decoded to read back: the switch and the menu are the
+    // whole section. A log box and its counters with nothing in them said
+    // "Decoding is off. Turn it on to fill the log." under a switch that
+    // already said it was off.
+    readonly property bool idle: log.count === 0 && log.droppedLabel.length === 0
+                                 && !engineLink.decodeWanted
+
+    // Taking the height it is given right now, which ReceiverPanel.qml reads
+    // to decide what fills the rest of the column instead.
+    readonly property bool growing: fills && !idle
+
+    // The switch and the menu on one row and the log's own controls on the
+    // next, where one row would not hold both.
+    readonly property bool compact: width < 600
+
     Layout.fillWidth: true
+    Layout.fillHeight: growing
     spacing: 4
     visible: offered
 
-    RowLayout {
+    GridLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
-        spacing: 8
+        columns: pane.compact ? 1 : 2
+        columnSpacing: 8
+        rowSpacing: 4
 
-        RButton {
-            flat: true
-            checkable: true
-            checked: engineLink.decodeWanted
-            text: "decode"
-            tint: Theme.receiverColours[engineLink.focusedSlot]
-            ink: Theme.inkDim
-            font.bold: true
-            onClicked: engineLink.decodeWanted = !engineLink.decodeWanted
-        }
+        RowLayout {
+            Layout.minimumWidth: 0
+            spacing: 8
 
-        RComboBox {
-            id: choice
+            RButton {
+                flat: true
+                checkable: true
+                checked: engineLink.decodeWanted
+                text: "decode"
+                tint: Theme.receiverColours[engineLink.focusedSlot]
+                ink: Theme.inkDim
+                font.bold: true
+                onClicked: engineLink.decodeWanted = !engineLink.decodeWanted
+            }
 
-            Layout.preferredWidth: 110
-            model: engineLink.decodeChoices
-            currentIndex: engineLink.decodeChoices.indexOf(engineLink.decodeChoice)
-            onActivated: (index) => engineLink.decodeChoice = engineLink.decodeChoices[index]
+            RComboBox {
+                id: choice
 
-            HoverHandler { id: choiceHover }
+                Layout.preferredWidth: 110
+                model: engineLink.decodeChoices
+                currentIndex: engineLink.decodeChoices.indexOf(engineLink.decodeChoice)
+                onActivated: (index) => engineLink.decodeChoice = engineLink.decodeChoices[index]
 
-            // The engine's own sentence about the decoder in force, on hover,
-            // drawn as StatusChip draws its detail. Auto has none of its own;
-            // what it attached is named beside the menu.
-            ToolTip {
-                id: choiceTip
+                HoverHandler { id: choiceHover }
 
-                readonly property string sentence:
-                    engineLink.decoderDescription(engineLink.decodeChoice)
-
-                visible: choiceHover.hovered && !choice.popup.visible && sentence.length > 0
-                delay: 400
-                y: choice.height + 4
-                width: Math.min(tipText.implicitWidth + 20, 460)
-                padding: 10
-
-                contentItem: Text {
-                    id: tipText
-                    text: choiceTip.sentence
-                    color: Theme.ink
-                    wrapMode: Text.WordWrap
-                    font.family: Theme.uiFont
-                    font.pixelSize: Theme.sizeBody
+                // The engine's own sentence about the decoder in force, on hover,
+                // drawn as StatusChip draws its detail. Auto has none of its own;
+                // what it attached is named beside the menu.
+                Tip {
+                    visible: choiceHover.hovered && !choice.popup.visible && text.length > 0
+                    delay: 400
+                    y: choice.height + 4
+                    text: engineLink.decoderDescription(engineLink.decodeChoice)
                 }
+            }
 
-                background: Rectangle {
-                    radius: Theme.radius
-                    color: Theme.panelSolid
-                    border.width: 1
-                    border.color: Theme.border
-                }
+            // What is attached right now, which for auto is the answer to "which
+            // ones". Only while the switch is on.
+            Label {
+                visible: engineLink.decodeWanted && engineLink.decodeAttached.length > 0
+                text: engineLink.decodeAttached
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+                Layout.maximumWidth: 220
+            }
+
+            StatusChip {
+                visible: engineLink.decodeLabel.length > 0
+                label: engineLink.decodeLabel
+                detail: engineLink.decodeDetail
+                ink: Theme.inkWarn
+            }
+
+            StatusChip {
+                visible: pane.log.droppedLabel.length > 0
+                label: pane.log.droppedLabel
+                detail: pane.log.droppedDetail
+                ink: Theme.inkDim
             }
         }
 
-        // What is attached right now, which for auto is the answer to "which
-        // ones". Only while the switch is on.
-        Label {
-            visible: engineLink.decodeWanted && engineLink.decodeAttached.length > 0
-            text: engineLink.decodeAttached
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeSmall
-            elide: Text.ElideRight
-            Layout.maximumWidth: 220
-        }
+        RowLayout {
+            visible: !pane.idle
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            spacing: 8
 
-        StatusChip {
-            visible: engineLink.decodeLabel.length > 0
-            label: engineLink.decodeLabel
-            detail: engineLink.decodeDetail
-            ink: Theme.inkWarn
-        }
+            Item { Layout.fillWidth: true }
 
-        StatusChip {
-            visible: pane.log.droppedLabel.length > 0
-            label: pane.log.droppedLabel
-            detail: pane.log.droppedDetail
-            ink: Theme.inkDim
-        }
+            RButton {
+                visible: !logView.follow
+                flat: true
+                text: "newest"
+                ink: Theme.accent
+                onClicked: logView.toTail()
+            }
 
-        Item { Layout.fillWidth: true }
+            Readout {
+                widest: "0000 lines"
+                text: pane.log.count + (pane.log.count === 1 ? " line" : " lines")
+                font.pixelSize: Theme.sizeSmall
+            }
 
-        RButton {
-            visible: !logView.follow
-            flat: true
-            text: "newest"
-            ink: Theme.accent
-            onClicked: logView.toTail()
-        }
+            RButton {
+                flat: true
+                text: "copy all"
+                ink: Theme.inkDim
+                enabled: pane.log.count > 0
+                onClicked: pane.log.copyAll()
+            }
 
-        Readout {
-            widest: "0000 lines"
-            text: pane.log.count + (pane.log.count === 1 ? " line" : " lines")
-            font.pixelSize: Theme.sizeSmall
-        }
-
-        RButton {
-            flat: true
-            text: "copy all"
-            ink: Theme.inkDim
-            enabled: pane.log.count > 0
-            onClicked: pane.log.copyAll()
-        }
-
-        RButton {
-            flat: true
-            text: "clear"
-            ink: Theme.inkDim
-            enabled: pane.log.count > 0 || pane.log.droppedLabel.length > 0
-            onClicked: pane.log.clear()
+            RButton {
+                flat: true
+                text: "clear"
+                ink: Theme.inkDim
+                enabled: pane.log.count > 0 || pane.log.droppedLabel.length > 0
+                onClicked: pane.log.clear()
+            }
         }
     }
 
+    // The log, while there is anything to show in it or decoding is on.
     Rectangle {
+        visible: !pane.idle
         Layout.fillWidth: true
         Layout.minimumWidth: 0
+        Layout.fillHeight: pane.growing
+        Layout.minimumHeight: 72
         Layout.preferredHeight: 176
         radius: Theme.radius
         color: Theme.panelSolid
@@ -162,8 +178,7 @@ ColumnLayout {
         Label {
             anchors.centerIn: parent
             visible: pane.log.count === 0
-            text: engineLink.decodeWanted ? "Nothing decoded yet."
-                                          : "Decoding is off. Turn it on to fill the log."
+            text: engineLink.decodeWanted ? "Nothing decoded yet." : "Decoding is off."
             color: Theme.inkDim
             font.pixelSize: Theme.sizeBody
         }
@@ -189,7 +204,7 @@ ColumnLayout {
             model: pane.log
             boundsBehavior: Flickable.StopAtBounds
             reuseItems: true
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ScrollBar.vertical: RScrollBar {}
 
             onCountChanged: {
                 if (count === 0) {

@@ -27,8 +27,10 @@ import QtQuick.Layouts
 import Revenant
 
 ColumnLayout {
+    id: pane
+
     Layout.fillWidth: true
-    spacing: 2
+    spacing: 4
     // audioWanted is in here and not only receiverId. The switch is
     // sticky across a retune, a mode change and a reconnect, which
     // is what makes listening survive a rebuild, and a sticky
@@ -55,156 +57,183 @@ ColumnLayout {
                 || engineLink.audioFault.length > 0
                 || audioPlayer.fault.length > 0)
 
-    RowLayout {
+    // The switch, the receiver and the level on one row and the output on the
+    // next, where one row would not hold both: the docked strip's column
+    // beside the receiver.
+    readonly property bool compact: width < 700
+
+    GridLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
-        spacing: 8
+        columns: pane.compact ? 1 : 2
+        columnSpacing: 8
+        rowSpacing: 4
 
-        Label {
-            text: "audio"
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeTitle
-            font.bold: true
-        }
+        RowLayout {
+            Layout.minimumWidth: 0
+            spacing: 8
 
-        // The switch. It is what the operator asked for and stays
-        // on across a retune, a mode change and a reconnect;
-        // audioActive beside it is whether there is a stream.
-        RButton {
-            flat: true
-            checkable: true
-            checked: engineLink.audioWanted
-            text: engineLink.audioWanted ? "listening" : "listen"
-            tint: Theme.receiverColours[engineLink.focusedSlot]
-            ink: Theme.inkDim
-            onClicked: engineLink.audioWanted = !engineLink.audioWanted
-        }
+            // The switch, which is also the section's name, as the rds and
+            // decode switches are theirs. It is what the operator asked for and
+            // stays on across a retune, a mode change and a reconnect;
+            // audioActive beside it is whether there is a stream.
+            //
+            // WHAT THIS USED TO BE: an "audio" title in the larger size and a
+            // flat "listen" button beside it that read "listening" while on, the
+            // one section of the three with a title of its own, and a button whose
+            // word changed with the state its colour already showed.
+            RButton {
+                flat: true
+                checkable: true
+                checked: engineLink.audioWanted
+                text: "listen"
+                tint: Theme.receiverColours[engineLink.focusedSlot]
+                ink: Theme.inkDim
+                font.bold: true
+                onClicked: engineLink.audioWanted = !engineLink.audioWanted
+            }
 
-        // Which receiver, named rather than assumed, by the label its
-        // strip carries. The switch can be on with nothing subscribed,
-        // which is the ordinary state before anything is tuned, and the
-        // focused receiver can be the one not heard, muted or soloed away.
-        Label {
-            text: engineLink.audioActive
-                  ? "RX " + (engineLink.focusedSlot + 1)
-                  : !engineLink.audioWanted ? ""
-                  : engineLink.rackCount > 0 ? "focused receiver not heard"
-                  : "no receiver"
-            color: engineLink.audioActive ? Theme.ink : Theme.inkDim
-            font.pixelSize: Theme.sizeBody
-        }
+            // Which receiver, named rather than assumed, by the label its
+            // strip carries. The switch can be on with nothing subscribed,
+            // which is the ordinary state before anything is tuned, and the
+            // focused receiver can be the one not heard, muted or soloed away.
+            Label {
+                text: engineLink.audioActive
+                      ? "RX " + (engineLink.focusedSlot + 1)
+                      : !engineLink.audioWanted ? ""
+                      : engineLink.rackCount > 0 ? "focused receiver not heard"
+                      : "no receiver"
+                color: engineLink.audioActive ? Theme.ink : Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
 
-        RButton {
-            flat: true
-            checkable: true
-            checked: audioPlayer.muted
-            text: audioPlayer.muted ? "muted" : "mute"
-            tint: Theme.inkWarn
-            ink: Theme.inkDim
-            onClicked: audioPlayer.muted = !audioPlayer.muted
-        }
+            RButton {
+                flat: true
+                checkable: true
+                checked: audioPlayer.muted
+                text: "mute"
+                tint: Theme.inkWarn
+                ink: Theme.inkDim
+                onClicked: audioPlayer.muted = !audioPlayer.muted
+            }
 
-        RSlider {
-            id: volumeSlider
+            RSlider {
+                id: volumeSlider
 
-            Layout.preferredWidth: 110
-            from: 0.0
-            to: 1.0
-            enabled: !audioPlayer.muted
+                Layout.preferredWidth: 110
+                from: 0.0
+                to: 1.0
+                enabled: !audioPlayer.muted
 
-            // A step, and it is load-bearing rather than
-            // cosmetic. The volume is persisted on every distinct
-            // value and QSettings on Windows reaches the registry
-            // per setValue, so a continuous slider would be one
-            // registry write per frame of a drag. A hundredth is
-            // below anything audible on a perceptual curve and
-            // bounds a full-travel drag at a hundred writes.
-            stepSize: 0.01
+                // A step, and it is load-bearing rather than
+                // cosmetic. The volume is persisted on every distinct
+                // value and QSettings on Windows reaches the registry
+                // per setValue, so a continuous slider would be one
+                // registry write per frame of a drag. A hundredth is
+                // below anything audible on a perceptual curve and
+                // bounds a full-travel drag at a hundred writes.
+                stepSize: 0.01
 
-            // Seeded once rather than bound, because a binding to
-            // audioPlayer.volume is broken by the first drag
-            // anyway and a half-live binding is worse than none.
-            Component.onCompleted: value = audioPlayer.volume
-            onMoved: audioPlayer.volume = value
+                // Seeded once rather than bound, because a binding to
+                // audioPlayer.volume is broken by the first drag
+                // anyway and a half-live binding is worse than none.
+                Component.onCompleted: value = audioPlayer.volume
+                onMoved: audioPlayer.volume = value
 
-            // WHAT THE COMMENT ABOVE USED TO SAY, in full: "a binding to
-            // audioPlayer.volume is broken by the first drag anyway and a
-            // half-live binding is worse than none. This control is the
-            // only writer." The volume keys write it too, so a change that
-            // did not come from this handle moves it here, except while the
-            // handle is held, when it is the operator's.
-            Connections {
-                target: audioPlayer
-                function onVolumeChanged() {
-                    if (!volumeSlider.pressed)
-                        volumeSlider.value = audioPlayer.volume
+                // WHAT THE COMMENT ABOVE USED TO SAY, in full: "a binding to
+                // audioPlayer.volume is broken by the first drag anyway and a
+                // half-live binding is worse than none. This control is the
+                // only writer." The volume keys write it too, so a change that
+                // did not come from this handle moves it here, except while the
+                // handle is held, when it is the operator's.
+                Connections {
+                    target: audioPlayer
+                    function onVolumeChanged() {
+                        if (!volumeSlider.pressed)
+                            volumeSlider.value = audioPlayer.volume
+                    }
                 }
             }
+
+            // A readout, so the row does not shift as the figure gains a digit.
+            Readout {
+                widest: "100%"
+                text: Math.round(audioPlayer.volume * 100) + "%"
+                color: audioPlayer.muted ? Theme.inkDim : Theme.ink
+            }
         }
 
-        Label {
-            text: Math.round(audioPlayer.volume * 100) + "%"
-            color: audioPlayer.muted ? Theme.inkDim : Theme.ink
-            font.pixelSize: Theme.sizeBody
-        }
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            spacing: 8
 
-        RComboBox {
-            id: deviceBox
+            RComboBox {
+                id: deviceBox
 
-            Layout.preferredWidth: 220
-            model: audioPlayer.devices
-            font.pixelSize: Theme.sizeBody
-            onActivated: audioPlayer.device = currentIndex
+                Layout.preferredWidth: 220
+                Layout.minimumWidth: 120
+                Layout.fillWidth: pane.compact
+                model: audioPlayer.devices
+                font.pixelSize: Theme.sizeBody
+                onActivated: audioPlayer.device = currentIndex
 
-            // NOT currentIndex: audioPlayer.device. ComboBox writes
-            // its own currentIndex when the user picks, and a
-            // direct assignment to a property destroys the binding
-            // on it, so the picker followed audioPlayer.device
-            // exactly until the first selection and never again.
-            // After that, a device pulled out of its socket moved
-            // the property and left the picker showing a device
-            // that has gone.
-            //
-            // A Binding object is the standard answer: it WRITES
-            // the value rather than installing a binding on the
-            // property, so the ComboBox's own assignment does not
-            // destroy it and it reasserts on the next change.
-            Binding {
-                target: deviceBox
-                property: "currentIndex"
-                value: audioPlayer.device
-                restoreMode: Binding.RestoreNone
+                // NOT currentIndex: audioPlayer.device. ComboBox writes
+                // its own currentIndex when the user picks, and a
+                // direct assignment to a property destroys the binding
+                // on it, so the picker followed audioPlayer.device
+                // exactly until the first selection and never again.
+                // After that, a device pulled out of its socket moved
+                // the property and left the picker showing a device
+                // that has gone.
+                //
+                // A Binding object is the standard answer: it WRITES
+                // the value rather than installing a binding on the
+                // property, so the ComboBox's own assignment does not
+                // destroy it and it reasserts on the next change.
+                Binding {
+                    target: deviceBox
+                    property: "currentIndex"
+                    value: audioPlayer.device
+                    restoreMode: Binding.RestoreNone
+                }
+
+                // And a reassert for the case the Binding cannot see:
+                // refresh_devices can rebuild the list without moving
+                // the selection, ComboBox resets currentIndex to 0 on
+                // a model change, and audioPlayer.device has not
+                // changed so nothing above re-fires.
+                onCountChanged: currentIndex = audioPlayer.device
             }
 
-            // And a reassert for the case the Binding cannot see:
-            // refresh_devices can rebuild the list without moving
-            // the selection, ComboBox resets currentIndex to 0 on
-            // a model change, and audioPlayer.device has not
-            // changed so nothing above re-fires.
-            onCountChanged: currentIndex = audioPlayer.device
+            Item {
+                visible: !pane.compact
+                Layout.fillWidth: true
+            }
+
+            // WHAT IS COMING OUT OF THE SPEAKER, in a word. Four of the
+            // five are silence and they are four different things: see
+            // FrameSource in ui/audio/audio_ring.h. It follows the frames
+            // reaching the card and not the newest chunk off the wire, so
+            // it is in step with what is audible. There was a sixth, the
+            // player's own "format mismatch", until the sink opened at the
+            // device's format on 2026-09-23.
+            //
+            // Playing audio is the plain ink in bold. It was the detection
+            // magenta, which everywhere else in the window means a signal the
+            // detector found.
+            Readout {
+                widest: "squelched"
+                font.family: Theme.uiFont
+                text: audioPlayer.source
+                color: audioPlayer.source === "audio" ? Theme.ink
+                       : audioPlayer.source === "squelched" ? Theme.inkDim
+                       : audioPlayer.source === "waiting" ? Theme.inkDim
+                       : Theme.inkWarn
+                font.pixelSize: Theme.sizeBody
+                font.bold: audioPlayer.source === "audio"
+            }
         }
-
-        Item { Layout.fillWidth: true }
-
-        // WHAT IS COMING OUT OF THE SPEAKER, in a word. Four of the
-        // five are silence and they are four different things: see
-        // FrameSource in ui/audio/audio_ring.h. It follows the frames
-        // reaching the card and not the newest chunk off the wire, so
-        // it is in step with what is audible. There was a sixth, the
-        // player's own "format mismatch", until the sink opened at the
-        // device's format on 2026-09-23.
-        Readout {
-            widest: "squelched"
-            font.family: Theme.uiFont
-            text: audioPlayer.source
-            color: audioPlayer.source === "audio" ? Theme.inkTune
-                   : audioPlayer.source === "squelched" ? Theme.inkDim
-                   : audioPlayer.source === "waiting" ? Theme.inkDim
-                   : Theme.inkWarn
-            font.pixelSize: Theme.sizeBody
-            font.bold: audioPlayer.source === "audio"
-        }
-
     }
 
     // The three depths, so the derivation is on screen. The

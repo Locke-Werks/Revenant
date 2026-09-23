@@ -6,7 +6,7 @@
 // NOTHING HERE CHOOSES A KEY. A key is changed in the header and nowhere
 // else, and the header's tests keep two actions off one key. What lives here
 // is only the reach into the running window that a Qt-free table cannot have:
-// the radio's dial, the receiver window's filter display, the panels.
+// the radio's dial, the receivers' filter display, the panels.
 //
 // A HANDLER THE TABLE NAMES AND THIS FILE LACKS IS A FAILED SMOKE RUN.
 // main.cpp calls missingText() as a --smoke-seconds run starts and exits 1 on
@@ -26,6 +26,10 @@ Item {
     // The windows and the parts of them a key reaches into.
     required property var mainWindow
     required property var receiverWindow
+
+    // The receivers' panel, docked or in the receiver window: its dial and its
+    // filter display. See ReceiverPanel.qml.
+    required property var receiverPanel
     required property var topBar
     required property var spanView
     required property var mainPalette
@@ -80,8 +84,8 @@ Item {
         "receiver.next": (step) => engineLink.focusNextReceiver(Number(step)),
         "receiver.solo": () => engineLink.toggleReceiverSolo(engineLink.focusedKey),
         "receiver.type": () => {
-            commands.bringForward(commands.receiverWindow)
-            commands.receiverWindow.receiverDial.edit()
+            commands.focusReceivers()
+            commands.receiverPanel.dial.edit()
         },
         "receiver.remove": () => engineLink.removeReceiver(),
         "receiver.aft": () => {
@@ -93,12 +97,12 @@ Item {
         "receiver.mode": (mode) => engineLink.setReceiverDemod(mode),
         "receiver.noise": (stage) => engineLink.toggleNoiseStage(stage),
         "filter.widen": (sign) => {
-            commands.receiverWindow.passband.widenPassband(Number(sign) * KeyMap.filterStepHz)
+            commands.receiverPanel.passband.widenPassband(Number(sign) * KeyMap.filterStepHz)
         },
-        "filter.default": () => commands.receiverWindow.passband.resetPassband(),
+        "filter.default": () => commands.receiverPanel.passband.resetPassband(),
         "filter.keys": () => {
-            commands.bringForward(commands.receiverWindow)
-            commands.receiverWindow.passband.forceActiveFocus()
+            commands.focusReceivers()
+            commands.receiverPanel.passband.forceActiveFocus()
         },
         "audio.mute": () => {
             audioPlayer.muted = !audioPlayer.muted
@@ -124,7 +128,8 @@ Item {
             commands.topBar.togglePanel(name)
         },
         "memory.save": () => frequencyManager.addFromReceiver(""),
-        "window.receivers": () => commands.receiverWindow.toggle(),
+        "window.receivers": () => commands.mainWindow.toggleReceivers(),
+        "window.pop": () => commands.mainWindow.popReceivers(),
         "palette.open": () => commands.openPalette(""),
         "keymap.open": () => commands.openKeyMap()
     })
@@ -151,10 +156,19 @@ Item {
         target.requestActivate()
     }
 
+    // The receivers shown and the window they are in given the keyboard, for
+    // a key that goes on to type into them.
+    function focusReceivers() {
+        commands.mainWindow.showReceivers(true)
+        if (!receiverPlacement.poppedOut)
+            commands.bringForward(commands.mainWindow)
+    }
+
     // The palette and the key map open over whichever window is in front, so
     // the operator's eyes do not have to go to the other screen for them.
     function receiversInFront() {
-        return commands.receiverWindow.visible && commands.receiverWindow.active
+        return receiverPlacement.poppedOut && commands.receiverWindow.visible
+               && commands.receiverWindow.active
     }
 
     function openPalette(scope) {

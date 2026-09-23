@@ -19,10 +19,6 @@ import Revenant
 Rectangle {
     id: bar
 
-    // The receiver window, so the bar can say whether it is open and open it
-    // again after it was closed.
-    property var receiverWindow: null
-
     // The radio's dial and the digit the tuning keys step, for Commands.qml.
     readonly property alias tuneDial: tuneBar.dial
     property int tuneDigit: -1
@@ -103,6 +99,13 @@ Rectangle {
             ink: Theme.inkDim
             onClicked: memoriesPanel.opened ? memoriesPanel.close() : memoriesPanel.open()
 
+            // Each of the bar's buttons names its key on hover, so the keys
+            // are found where the mouse already is.
+            Tip {
+                visible: parent.hovered && !memoriesPanel.opened
+                text: "the frequency manager  " + KeyMap.keysText("panel.memories")
+            }
+
             // Wider than the bar's other panels, so it is kept inside the
             // window's left edge as well as opening leftwards from the button:
             // the bar starts at the window's edge, so the button's x in the
@@ -129,6 +132,11 @@ Rectangle {
             visible: engineLink.connected && engineLink.spectrumEnabled
             onClicked: detectionsPanel.opened ? detectionsPanel.close() : detectionsPanel.open()
 
+            Tip {
+                visible: parent.hovered && !detectionsPanel.opened
+                text: "the detector's thresholds  " + KeyMap.keysText("panel.detections")
+            }
+
             Popover {
                 id: detectionsPanel
                 parent: detectionsButton
@@ -144,6 +152,11 @@ Rectangle {
             visible: engineLink.connected
             onClicked: radioPanel.opened ? radioPanel.close() : radioPanel.open()
 
+            Tip {
+                visible: parent.hovered && !radioPanel.opened
+                text: "choose a radio or open a recording  " + KeyMap.keysText("panel.radio")
+            }
+
             Popover {
                 id: radioPanel
                 parent: radioButton
@@ -151,18 +164,22 @@ Rectangle {
             }
         }
 
-        // The receiver window. Checked while it is open, and a click brings it
-        // back after it was closed, which is the only way back to it.
+        // The receivers, docked under the span or in their own window.
+        // Checked while they are shown, wherever that is, and a click hides
+        // them or brings them back.
         RButton {
             flat: true
             checkable: true
-            checked: bar.receiverWindow !== null && bar.receiverWindow.visible
+            checked: receiverPlacement.shown
             text: "receivers"
             ink: Theme.inkDim
             tint: Theme.receiverColours[engineLink.focusedSlot]
-            onClicked: {
-                if (bar.receiverWindow !== null)
-                    bar.receiverWindow.toggle()
+            onClicked: receiverPlacement.shown = !receiverPlacement.shown
+
+            Tip {
+                visible: parent.hovered
+                text: (receiverPlacement.shown ? "hide the receivers  " : "show the receivers  ")
+                      + KeyMap.keysText("window.receivers")
             }
         }
 

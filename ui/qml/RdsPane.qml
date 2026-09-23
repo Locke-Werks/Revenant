@@ -37,7 +37,7 @@ ColumnLayout {
     id: rds
 
     Layout.fillWidth: true
-    spacing: 2
+    spacing: 4
     // OFFERED ONLY WHERE IT CAN WORK. The section is there for a wfm
     // receiver whose granted filter passes the 57 kHz subcarrier, and absent
     // for every other receiver rather than greyed and explained: a switch that
@@ -55,6 +55,9 @@ ColumnLayout {
                                                           engineLink.receiverGrantedHigh)
 
     visible: offered || engineLink.rdsWanted
+
+    // Narrow enough that the physical layer's line goes under the station.
+    readonly property bool compact: width < 700
 
     // The decoder belongs to the focused receiver, so its switch and its
     // chips wear that receiver's colour, as the detail and decode sections do.
@@ -196,14 +199,27 @@ ColumnLayout {
         // the six hertz clause 1.1 allows, so both are printed to
         // the precision the measurement has.
         Readout {
-            widest: "0000000 groups  ·  0000.00 bit/s  ·  -000.0 Hz offset"
-            visible: engineLink.rdsDecoding
-            text: engineLink.rdsGroups + " groups  ·  "
-                  + engineLink.rdsBitRateHz.toFixed(2) + " bit/s  ·  "
-                  + engineLink.rdsCarrierOffsetHz.toFixed(1) + " Hz offset"
+            visible: engineLink.rdsDecoding && !rds.compact
+            widest: physical.widest
+            text: physical.text
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
+    }
+
+    // The same line on a row of its own where the one above has no room for
+    // it: the docked strip's column beside the receiver.
+    Readout {
+        id: physical
+
+        Layout.alignment: Qt.AlignRight
+        visible: engineLink.rdsDecoding && rds.compact
+        widest: "0000000 groups  ·  0000.00 bit/s  ·  -000.0 Hz offset"
+        text: engineLink.rdsGroups + " groups  ·  "
+              + engineLink.rdsBitRateHz.toFixed(2) + " bit/s  ·  "
+              + engineLink.rdsCarrierOffsetHz.toFixed(1) + " Hz offset"
+        color: Theme.inkDim
+        font.pixelSize: Theme.sizeSmall
     }
 
     // What the station says it is carrying: the programme type, its name, and

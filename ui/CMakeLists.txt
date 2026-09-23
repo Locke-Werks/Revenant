@@ -203,6 +203,8 @@ qt_add_executable(revenant_ui
     models/rds_link.cpp
     models/receiver_link.cpp
     models/receiver_palette.h
+    models/receiver_placement.h
+    models/receiver_placement_store.h
     models/receiver_rack.h
     models/open_source_link.cpp
     models/pace_link.cpp
@@ -268,6 +270,7 @@ qt_add_qml_module(revenant_ui
         qml/NoticeBanner.qml
         qml/StatusDrawer.qml
         qml/ReceiverDetail.qml
+        qml/ReceiverPanel.qml
         qml/ReceiverRack.qml
         qml/ReceiverStrip.qml
         qml/VrxWindow.qml
@@ -284,6 +287,8 @@ qt_add_qml_module(revenant_ui
         qml/controls/RSegmented.qml
         qml/controls/RSlider.qml
         qml/controls/RTextField.qml
+        qml/controls/RScrollBar.qml
+        qml/controls/Tip.qml
 )
 
 # qmlcachegen's output, which compiles each QML file to C++ and is ours no more
@@ -631,6 +636,7 @@ if(REVENANT_UI_TESTS)
             tests/test_receiver_marker.cpp
             tests/test_receiver_match.cpp
             tests/test_receiver_palette.cpp
+            tests/test_receiver_placement.cpp
             tests/test_receiver_rack.cpp
             tests/test_receiver_scroll.cpp
             tests/test_recent_recordings.cpp

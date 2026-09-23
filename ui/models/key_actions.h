@@ -78,7 +78,7 @@ enum KeyNeed : std::uint32_t {
     // An open source.
     kNeedsSource = 1U << 2,
 
-    // A receiver in the receiver window.
+    // A focused receiver in the rack.
     kNeedsReceiver = 1U << 3,
 
     // A receiver whose mode AFT has a centre to aim at.
@@ -138,7 +138,7 @@ inline constexpr int kFilterKeyCoarseStepHz = 100;
 inline constexpr int kFilterKeyFineStepHz = 1;
 
 // One press of the window's widen and narrow keys, the same hundred hertz the
-// receiver window's two width buttons move.
+// receiver panel's two width buttons move.
 inline constexpr int kFilterWidenStepHz = 100;
 
 // clang-format off
@@ -253,8 +253,11 @@ inline constexpr std::array kKeyActions{
               {"Ctrl+B", ""}, KeyContext::Window, kNeedsNothing, "panel.open", "memories"},
     KeyAction{"memory.save", "save the receiver as a memory", "panels", "bookmark mark memory store",
               {"Ctrl+D", ""}, KeyContext::Window, kNeedsReceiver, "memory.save", ""},
-    KeyAction{"window.receivers", "show or hide the receiver window", "panels", "vfo rack",
+    KeyAction{"window.receivers", "show or hide the receivers", "panels", "vfo rack dock window",
               {"Ctrl+R", ""}, KeyContext::Window, kNeedsNothing, "window.receivers", ""},
+    KeyAction{"window.pop", "pop the receivers out or dock them", "panels",
+              "vfo rack window undock float separate screen", {"Ctrl+Shift+W", ""},
+              KeyContext::Window, kNeedsNothing, "window.pop", ""},
 
     // Finding the rest.
     KeyAction{"palette.open", "open the command palette", "help", "search commands find",

@@ -18,6 +18,11 @@ import Revenant
 ColumnLayout {
     id: rack
 
+    // In the receiver window rather than docked under the span, which decides
+    // what the pop button says. See ReceiverPanel.qml.
+    property bool poppedOut: false
+    signal popToggled()
+
     // An entry with every field a strip reads, for a strip with no receiver.
     readonly property var blank: ({
         "key": 0, "slot": 0, "colour": "#000000", "label": "", "mode": "",
@@ -57,10 +62,29 @@ ColumnLayout {
             ink: Theme.inkDim
             enabled: engineLink.sourceOpen && !engineLink.rackFull
             onClicked: engineLink.addReceiver((engineLink.spanLowHz + engineLink.spanHighHz) / 2, "")
-            ToolTip.visible: hovered
-            ToolTip.delay: 500
-            ToolTip.text: engineLink.rackFull ? "the rack holds eight"
-                                              : "a new receiver on the span centre"
+
+            Tip {
+                visible: parent.hovered
+                text: (engineLink.rackFull ? "the rack holds eight"
+                                           : "a new receiver on the span centre")
+                      + "  " + KeyMap.keysText("receiver.add")
+            }
+        }
+
+        // Out into a window of their own, for a second screen, or back into
+        // the main window. The window's close button docks them as well.
+        RButton {
+            flat: true
+            text: rack.poppedOut ? "dock" : "pop out"
+            ink: Theme.inkDim
+            onClicked: rack.popToggled()
+
+            Tip {
+                visible: parent.hovered
+                text: (rack.poppedOut ? "put the receivers back under the span"
+                                      : "move the receivers into a window of their own")
+                      + "  " + KeyMap.keysText("window.pop")
+            }
         }
     }
 
@@ -94,7 +118,7 @@ ColumnLayout {
         contentHeight: strips.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: RScrollBar {}
 
         ColumnLayout {
             id: strips
@@ -119,11 +143,12 @@ ColumnLayout {
         }
     }
 
-    // Which click does what, where the operator reads about receivers.
+    // Which click does what, where the operator reads about receivers. The
+    // short form; the full sentence is the ruler's tooltip.
     Label {
         Layout.fillWidth: true
         visible: engineLink.rackCount > 0
-        text: UiRules.spanClickHint()
+        text: UiRules.spanClickHintShort()
         color: Theme.inkOff
         font.pixelSize: Theme.sizeSmall
         wrapMode: Text.WordWrap

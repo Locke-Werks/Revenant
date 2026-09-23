@@ -425,6 +425,13 @@ inline constexpr const char* kSpanClickHint =
     "Click the span to tune the focused receiver. Double-click to add a receiver there. "
     "Click inside another receiver's band to focus it.";
 
+// The same rule in the few words the foot of the rack has room for. The rack
+// is shorter docked under the span than it was in a window of its own, and the
+// sentence above took three lines of it; the sentence is still the ruler's
+// tooltip, where the gesture is made.
+inline constexpr const char* kSpanClickHintShort =
+    "Click the span to tune, double-click to add a receiver, click a band to focus it.";
+
 // Said in place of an Add when the rack is full.
 inline constexpr const char* kRackFullText =
     "The rack holds eight receivers, one per colour. Remove one to add another.";

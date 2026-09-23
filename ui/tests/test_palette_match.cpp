@@ -123,7 +123,13 @@ TEST_CASE("the everyday queries find their action first")
     CHECK(top("frequency manager") == "panel.memories");
     CHECK(top("import") == "panel.memories");
     CHECK(top("remove") == "receiver.remove");
-    CHECK(top("receiver window") == "window.receivers");
+    // The receivers are docked in the main window until popped out, so their
+    // window is the pop action's since 2026-09-23. WHAT THIS USED TO READ:
+    // top("receiver window") == "window.receivers", while the receivers were
+    // only ever a window of their own.
+    CHECK(top("receiver window") == "window.pop");
+    CHECK(top("hide receivers") == "window.receivers");
+    CHECK(top("dock") == "window.pop");
     CHECK(top("pin floor") == "scale.floor");
     CHECK(top("ceiling") == "scale.ceiling");
     CHECK(top("page up") == "tune.page_up");

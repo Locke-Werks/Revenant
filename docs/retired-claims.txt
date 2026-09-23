@@ -1727,3 +1727,12 @@ instead: A granted retune moves the span waterfall's stored rows sideways by the
     tune, through render/history_shift.h as the passband waterfall does, and
     only a new engine or a new stream clears them. docs/ui-spectrum.md, "The
     waterfall's history slides with a retune".
+
+phrase: Two top-level windows in one process, since 2026-09-22
+phrase: button brings the second back after it is closed
+phrase: are the receiver window, which is a second top-level window made here
+retired: 2026-09-23
+commit: "Dock the receivers in the main window and pop them out on demand"
+instead: The receivers start docked under the span in the main window and pop
+    out into the receiver window on demand; the top bar's button shows and
+    hides them wherever they are. docs/ui-spectrum.md, "Docked, or popped out".

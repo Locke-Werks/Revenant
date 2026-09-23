@@ -75,13 +75,24 @@ inline constexpr QLatin1StringView kConfidenceBar{"detections/confidenceBar"};
 inline constexpr QLatin1StringView kWindowGeometry{"window/geometry"};
 inline constexpr QLatin1StringView kWindowVisibility{"window/visibility"};
 
-// The receiver window, on the same terms, plus whether it was open at all. It
-// is a second top-level window so it can live on another screen, and a window
-// that came back somewhere other than where the operator put it, or came back
-// open after they closed it, would undo the one thing it is separate for.
+// The receiver window, on the same terms. The receivers pop out into it so
+// they can live on another screen, and a window that came back somewhere
+// other than where the operator put it would undo the one thing it is for.
 inline constexpr QLatin1StringView kVrxWindowGeometry{"vrxWindow/geometry"};
 inline constexpr QLatin1StringView kVrxWindowVisibility{"vrxWindow/visibility"};
-inline constexpr QLatin1StringView kVrxWindowOpen{"vrxWindow/open"};
+
+// Where the receivers are: popped out into that window or docked under the
+// span, whether they are shown at all, and how tall the operator dragged the
+// dock. models/receiver_placement.h has why they start docked, and
+// models/receiver_placement_store.h when each is written.
+//
+// WHAT STOOD HERE BEFORE: kVrxWindowOpen, "vrxWindow/open", whether the
+// receiver window was open, from when the receivers were only ever a window of
+// their own. It is not read any more, so a value an older client left in the
+// registry says nothing to this one, and every operator starts docked.
+inline constexpr QLatin1StringView kReceiversPoppedOut{"receivers/poppedOut"};
+inline constexpr QLatin1StringView kReceiversShown{"receivers/shown"};
+inline constexpr QLatin1StringView kReceiversDockHeight{"receivers/dockHeight"};
 
 // The pins on either end of the span displays' colour map, and the levels
 // they were pinned at. Remembered because the job a pin does, comparing

@@ -1,10 +1,11 @@
 // The focused receiver's controls: its dial, its mode, its filter, and the
 // fine-tuning display the filter is dragged on.
 //
-// This was the VFO pane under the waterfall in the main window. It is the
-// receiver window's now, so it can sit on another screen with the spectrum
-// full-bleed on this one, and its controls carry the receiver's colour so they
-// read as the same thing as its marker on the span and its strip in the rack.
+// This was the VFO pane under the waterfall in the main window, then the
+// receiver window's. It is the receivers panel's now, ReceiverPanel.qml,
+// docked under the span or popped out onto another screen, and its controls
+// carry the receiver's colour so they read as the same thing as its marker on
+// the span and its strip in the rack.
 //
 // The display is the air around the receiver, from the receiver's own
 // display tap with none of its filter in it, and the two rules over it
@@ -37,6 +38,13 @@ ColumnLayout {
 
     readonly property color tint: Theme.receiverColours[engineLink.focusedSlot]
     property bool expanded: false
+
+    // Too narrow for the mode selector and the filter's controls on one row,
+    // which is the popped-out window at its default size and the docked strip
+    // beside RDS, decoding and audio. The mode then has a row to itself.
+    // Measured against the row's own contents: a mode row, the width and its
+    // buttons, the level and the filter toggle come to a little over 800.
+    readonly property bool compact: width < 840
 
     // The receiver's dial and the filter display, for the keys in
     // Commands.qml.
@@ -79,16 +87,28 @@ ColumnLayout {
             enabled: engineLink.aftOffered
             checked: engineLink.aftEnabled
             onToggled: engineLink.aftEnabled = checked
+
+            // The rules, while the chip that carries them is not shown.
+            Tip {
+                visible: parent.hovered && !aftChip.visible
+                text: aftChip.detail
+            }
         }
 
+        // Shown while AFT is on, saying what the loop is doing, or while the
+        // mode rules it out, saying why the box is grey. Not while it is off
+        // and could be on: the empty box already says that. WHAT IT USED TO
+        // DO: stay on screen reading "AFT off" beside the empty box.
         StatusChip {
+            id: aftChip
+
+            visible: !engineLink.aftOffered || engineLink.aftEnabled
             ink: !engineLink.aftEnabled ? Theme.inkDim
                  : engineLink.aftState === "correcting" ? Theme.accent
                  : engineLink.aftState === "holding, signal jumped" ? Theme.inkWarn
                  : Theme.inkDim
             label: !engineLink.aftOffered
                    ? "no AFT on " + UiRules.modeLabel(engineLink.receiverDemod)
-                   : !engineLink.aftEnabled ? "AFT off"
                    : engineLink.aftState
                      + (engineLink.aftHasError
                         ? "  " + (engineLink.aftErrorHz >= 0 ? "+" : "")
@@ -114,9 +134,18 @@ ColumnLayout {
             enabled: engineLink.autoFilterOffered
             checked: engineLink.autoFilterEnabled
             onToggled: engineLink.autoFilterEnabled = checked
+
+            Tip {
+                visible: parent.hovered && !filterChip.visible
+                text: filterChip.detail
+            }
         }
 
+        // On the same terms as AFT's chip.
         StatusChip {
+            id: filterChip
+
+            visible: !engineLink.autoFilterOffered || engineLink.autoFilterEnabled
             ink: !engineLink.autoFilterEnabled ? Theme.inkDim
                  : engineLink.autoFilterState.startsWith("fitted") ? Theme.accent
                  : Theme.inkDim
@@ -144,10 +173,14 @@ ColumnLayout {
         }
     }
 
-    RowLayout {
+    // The mode, then the filter's width and what else is set on it. One row
+    // where there is room and two where there is not; see compact above.
+    GridLayout {
         Layout.fillWidth: true
         Layout.minimumWidth: 0
-        spacing: 12
+        columns: detail.compact ? 1 : 2
+        columnSpacing: 12
+        rowSpacing: 6
 
         // The mode: the eight choices an operator reaches for on every band
         // as a row, and P25, D-STAR, TETRA and DMR behind a "digital" segment at
@@ -166,65 +199,76 @@ ColumnLayout {
             onPicked: (mode) => engineLink.setReceiverDemod(mode)
         }
 
-        // The bandwidth, as a number and two buttons that do what the up and
-        // down arrows do over the display. A hundred hertz a press, the
-        // arrows' shift step, because a press is a coarser gesture than a key
-        // held down.
-        Label {
-            text: "width"
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeBody
-        }
+        RowLayout {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            spacing: 8
 
-        Readout {
-            widest: "0000.00 kHz"
-            text: ((engineLink.receiverPassbandHigh - engineLink.receiverPassbandLow) / 1000)
-                  .toFixed(2) + " kHz"
-            color: Theme.ink
-        }
+            // The bandwidth, as a number and two buttons that do what the up
+            // and down arrows do over the display. A hundred hertz a press,
+            // the arrows' shift step, because a press is a coarser gesture
+            // than a key held down.
+            Label {
+                text: "width"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
 
-        RButton {
-            text: "−"
-            onClicked: passband.widenPassband(-100)
-        }
+            Readout {
+                widest: "0000.00 kHz"
+                text: ((engineLink.receiverPassbandHigh - engineLink.receiverPassbandLow) / 1000)
+                      .toFixed(2) + " kHz"
+                color: Theme.ink
+            }
 
-        RButton {
-            text: "+"
-            onClicked: passband.widenPassband(100)
-        }
+            RButton {
+                implicitWidth: Theme.controlHeight
+                text: "−"
+                onClicked: passband.widenPassband(-100)
+            }
 
-        RButton {
-            flat: true
-            text: "default"
-            ink: Theme.inkDim
-            onClicked: passband.resetPassband()
-        }
+            RButton {
+                implicitWidth: Theme.controlHeight
+                text: "+"
+                onClicked: passband.widenPassband(100)
+            }
 
-        Item { Layout.fillWidth: true }
+            RButton {
+                flat: true
+                text: "default"
+                ink: Theme.inkDim
+                onClicked: passband.resetPassband()
+            }
 
-        Readout {
-            widest: "-000.0 dBFS"
-            text: engineLink.receiverLevelDbfs > -199
-                  ? engineLink.receiverLevelDbfs.toFixed(1) + " dBFS" : ""
-        }
+            Item { Layout.fillWidth: true }
 
-        // What noise mitigation is on, while the panel that sets it is
-        // closed. Nothing at all while none is, so a receiver nobody has
-        // asked for noise mitigation on says nothing about it.
-        Label {
-            visible: !detail.expanded && engineLink.noiseSummary.length > 0
-            text: engineLink.noiseSummary
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeSmall
-        }
+            // What noise mitigation is on, while the panel that sets it is
+            // closed. Nothing at all while none is, so a receiver nobody has
+            // asked for noise mitigation on says nothing about it.
+            Label {
+                Layout.minimumWidth: 0
+                visible: !detail.expanded && engineLink.noiseSummary.length > 0
+                text: engineLink.noiseSummary
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
 
-        RButton {
-            flat: true
-            text: detail.expanded ? "filter ▾" : "filter ▸"
-            ink: Theme.inkDim
-            onClicked: detail.expanded = !detail.expanded
+            RButton {
+                flat: true
+                checkable: true
+                checked: detail.expanded
+                text: detail.expanded ? "filter ▾" : "filter ▸"
+                ink: Theme.inkDim
+                tint: detail.tint
+                onClicked: detail.expanded = !detail.expanded
+            }
         }
     }
+
+    // WHAT THE ROW ABOVE USED TO CARRY AS WELL: the receiver's level in dBFS,
+    // to a tenth. The rack strip beside it shows the same level on its meter
+    // and in figures, so it was said twice a hand's width apart.
 
     // What the filter actually is, one gesture away: the demodulation rate
     // the audio is made at, the channel's limit on an edge, and the engine's
@@ -459,7 +503,10 @@ ColumnLayout {
     Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        Layout.minimumHeight: 140
+
+        // Low enough that the docked strip at its default height holds the
+        // dial, the mode, this and the waterfall under it.
+        Layout.minimumHeight: 96
 
         PassbandItem {
             id: passband
@@ -533,7 +580,7 @@ ColumnLayout {
     Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        Layout.minimumHeight: 80
+        Layout.minimumHeight: 56
 
         PassbandWaterfallItem {
             id: passbandWaterfall
@@ -575,15 +622,20 @@ ColumnLayout {
             elide: Text.ElideRight
         }
 
-        Item { Layout.fillWidth: true }
-
+        // Filling the rest of the row and right-aligned in it, so that when
+        // the row is short it is this that elides and not the readout.
         Label {
+            Layout.fillWidth: true
             Layout.minimumWidth: 0
+            horizontalAlignment: Text.AlignRight
             // The keys by name from the table, so this line cannot teach a key
             // the display no longer takes.
-            text: "drag an edge, shift-drag to widen both, the wheel tunes, "
-                  + KeyMap.keysText("filter.keys") + " puts the keys on the edges, "
-                  + KeyMap.keysText("keymap.open") + " lists them"
+            //
+            // Shorter than it was, "drag an edge, shift-drag to widen both, the
+            // wheel tunes, Ctrl+E puts the keys on the edges, F1 lists them",
+            // which was cut off at the receiver window's own default width.
+            text: "drag an edge  ·  shift-drag both  ·  wheel tunes  ·  "
+                  + KeyMap.keysText("filter.keys") + " for keys"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
             elide: Text.ElideRight

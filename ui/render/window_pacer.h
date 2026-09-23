@@ -43,6 +43,15 @@
 // independent flip, which it does only to a window covering a whole screen
 // with no frame. The receiver window keeps its frame, and is drawn just after
 // the vblank in any case.
+//
+// SINCE 2026-09-23 THE RECEIVERS START DOCKED IN THE MAIN WINDOW and the
+// receiver window is shown only while they are popped out. The pacer stays
+// installed either way. A hidden follower asks for no frames, so the first two
+// of the three things above, which are the receiver window's, do nothing while
+// it is hidden, and the third, the main window's hold, is worth keeping on its
+// own: with the receiver window
+// closed it cut the engine frames the client replaced from 42.4% to 12.8%.
+// ui/main.cpp says the same where it installs this.
 
 #pragma once
 

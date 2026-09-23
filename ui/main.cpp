@@ -34,8 +34,10 @@
 // rack is photographed. --decode names a decoder to attach to the first,
 // or auto, and switches decoding on. --rds switches the RDS section on for
 // the first, which on a wfm one raises it to the composite rate as the switch
-// in the window does. --grab-receivers writes the receiver window to FILE as
-// a PNG when a smoke run ends. Together they drive and photograph the rack and
+// in the window does. --grab-receivers pops the receivers out of the main
+// window, where a smoke run otherwise leaves them docked, and writes the
+// receiver window to FILE as a PNG when the run ends; --grab-main with them
+// docked photographs them in the main window. Together they drive and photograph the rack and
 // the decode and RDS sections with nobody at the mouse, which is what they are
 // for: a window on the offscreen platform takes no input from, and puts
 // nothing on, the desktop it runs beside.
@@ -136,6 +138,7 @@
 #include "models/engine_link.h"
 #include "models/frequency_entry.h"
 #include "models/frequency_manager.h"
+#include "models/receiver_placement_store.h"
 #include "models/recording_link.h"
 #include "models/settings.h"
 #include "render/frame_probe.h"
@@ -653,7 +656,18 @@ int main(int argc, char* argv[])
         std::fprintf(stderr, "%s\n", refused.toLocal8Bit().constData());
     }
 
+    // Where the receivers are, docked or popped out. A smoke run reads and
+    // writes none of it and starts docked, except that --grab-receivers pops
+    // them out, since that is the window it photographs.
+    revenant::ui::ReceiverPlacement placement(!smoke);
+    if (!grab_receivers.isEmpty()) {
+        placement.setPoppedOut(true);
+    }
+    QObject::connect(&app, &QGuiApplication::aboutToQuit, &placement,
+                     [&placement] { placement.writeDockHeight(); });
+
     QQmlApplicationEngine engine;
+    engine.rootContext()->setContextProperty(QStringLiteral("receiverPlacement"), &placement);
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
     engine.rootContext()->setContextProperty(QStringLiteral("frequencyManager"), &memories);
@@ -699,8 +713,17 @@ int main(int argc, char* argv[])
     // wait for vsync hold the one GUI thread through both waits, and the main
     // window missed 16.9% of its frames that way. render/window_pacer.h has
     // the measurements. Here and not later, because the swap interval is read
-    // when the window is first shown, which remember_window and the smoke run
-    // below both do.
+    // when the window is first shown, and the QML shows it only once the
+    // placement below is ready.
+    //
+    // INSTALLED WHETHER OR NOT THE RECEIVERS ARE POPPED OUT, on purpose. While
+    // they are docked the receiver window is hidden and takes no part: a hidden
+    // window asks for no frames, so the pacer never holds or draws it. What
+    // still acts is the half-refresh hold on the main window's own requests,
+    // which is a one-window measure: with the receiver window closed it cut the
+    // engine frames the client replaced from 42.4% to 12.8% over 60 s runs,
+    // docs/ui-spectrum.md, "Before and after". Taking the pacer out while the
+    // receivers are docked would give those back.
     std::unique_ptr<revenant::ui::WindowPacer> pacer;
     if (receiver_window_item != nullptr) {
         if (!revenant::ui::WindowPacer::unthrottle(receiver_window_item)) {
@@ -758,21 +781,20 @@ int main(int argc, char* argv[])
     }
 
     if (smoke) {
-        // The receiver window is shown for a grab, since nothing else in a
-        // smoke run shows it, and grabbed as the run ends so what it holds is
-        // what the whole run decoded.
+        // The receiver window is shown for a grab, with the receivers popped
+        // out into it above, and grabbed as the run ends so what it holds is
+        // what the whole run decoded. A smoke run restores no geometry, so the
+        // window can be shown at once.
         QQuickWindow* receivers = nullptr;
         if (!grab_receivers.isEmpty()) {
-            if (auto* root = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
-                receivers = root->findChild<QQuickWindow*>(QStringLiteral("vrxWindow"));
-            }
+            receivers = receiver_window_item;
             if (receivers == nullptr) {
                 std::fputs("--grab-receivers: this build of the QML has no receiver window\n",
                            stderr);
                 return 1;
             }
-            receivers->setVisible(true);
         }
+        placement.setReady();
         QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app,
                            [receivers, grab_receivers, root_window, grab_main] {
             if (receivers != nullptr) {
@@ -814,6 +836,14 @@ int main(int argc, char* argv[])
     // Both windows' places, remembered between launches. See remember_window.
     // The main window is the root object and the receiver window is found by
     // name inside it; a build of the QML without one is simply not restored.
+    //
+    // WHETHER THE RECEIVER WINDOW IS SHOWN IS NOT DECIDED HERE any more. It is
+    // shown exactly while the receivers are popped out, which is the
+    // placement's to say, and the QML shows it once the placement is ready
+    // below. Its geometry is restored here first so it opens where it was.
+    // A maximised receiver window comes back maximised only when it is coming
+    // back at all. WHAT THIS USED TO READ: the receiver window's WindowKeys
+    // carried settings::kVrxWindowOpen, and this call showed or hid it.
     static RememberedWindow main_window;
     static RememberedWindow receiver_window;
     if (auto* window = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
@@ -821,12 +851,14 @@ int main(int argc, char* argv[])
                         WindowKeys{settings::kWindowGeometry, settings::kWindowVisibility, {}},
                         main_window);
         if (auto* receivers = window->findChild<QWindow*>(QStringLiteral("vrxWindow"))) {
+            receiver_window.open = placement.poppedOut() && placement.shown();
             remember_window(app, receivers, store,
                             WindowKeys{settings::kVrxWindowGeometry,
-                                       settings::kVrxWindowVisibility, settings::kVrxWindowOpen},
+                                       settings::kVrxWindowVisibility, {}},
                             receiver_window);
         }
     }
+    placement.setReady();
 
     const int code = QGuiApplication::exec();
     if (code == 0 && frame_probe != nullptr && !frame_probe->written()) {
