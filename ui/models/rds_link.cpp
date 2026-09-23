@@ -54,6 +54,7 @@
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
 #include "models/composite_probe.h"
+#include "models/rds_services.h"
 #include "models/rds_view.h"
 
 namespace revenant::ui {
@@ -102,6 +103,7 @@ void EngineLink::setRdsWanted(bool wanted)
         rds_rt_segments_ = 0;
         rds_rt_segments_total_ = 0;
         rds_block_error_rate_ = -1.0;
+        adopt_rds_services(false);
 
         // AND THE RECEIVER GOES BACK TO PROGRAMME AUDIO. 171000 is the
         // multiplex, which is not a thing anybody listens to, so a receiver
@@ -514,6 +516,7 @@ void EngineLink::adopt_rds()
     rds_rt_segments_ = view.radio_text.segments_received;
     rds_rt_segments_total_ = view.radio_text.segments_total;
     rds_block_error_rate_ = view.block_error_rate;
+    adopt_rds_services(rds_decoding_);
 
     // The refusal's precedence used to be re-applied here, over the view
     // this function had just built. It is inside make_rds_view now, with
@@ -521,6 +524,41 @@ void EngineLink::adopt_rds()
     // an empty station means and a second precedence rule out here was
     // reachable only through the window.
     emit rdsChanged();
+}
+
+void EngineLink::adopt_rds_services(bool decoding)
+{
+    // Only from a decoding station, on the rule the rest of the section keeps:
+    // a faulted or retuning decoder's fields are frozen or defaults, and a
+    // warning chip drawn from them would be a warning nothing stands behind.
+    const rpc::RdsStation none;
+    const rpc::RdsStation& station = decoding ? rds_station_ : none;
+
+    const RdsPtynView ptyn = make_ptyn_view(station);
+    rds_ptyn_shown_ = !ptyn.empty();
+    rds_ptyn_runs_.clear();
+    for (const RdsRun& run : ptyn.runs) {
+        rds_ptyn_runs_.append(QVariantMap{{QStringLiteral("text"), QString::fromStdString(run.text)},
+                                          {QStringLiteral("corrected"), run.corrected}});
+    }
+    rds_ptyn_note_ = QString::fromStdString(ptyn.note);
+    rds_ptyn_corrected_detail_ = QString::fromStdString(ptyn.corrected_detail);
+
+    const RdsEwsView ews = make_ews_view(station);
+    rds_ews_sent_ = ews.sent;
+    rds_ews_label_ = QString::fromStdString(ews.label);
+    rds_ews_detail_ = QString::fromStdString(ews.detail);
+
+    const RdsTmcView tmc = make_tmc_view(station);
+    rds_tmc_shown_ = tmc.shown;
+    rds_tmc_label_ = QString::fromStdString(tmc.label);
+    rds_tmc_counts_ = QString::fromStdString(tmc.counts);
+    rds_tmc_detail_ = QString::fromStdString(tmc.detail);
+    rds_tmc_payloads_.clear();
+    for (const std::string& line : tmc.payloads) {
+        rds_tmc_payloads_.append(QString::fromStdString(line));
+    }
+    rds_tmc_not_listed_ = static_cast<int>(tmc.payloads_not_listed);
 }
 
 }  // namespace revenant::ui

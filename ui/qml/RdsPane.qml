@@ -107,6 +107,18 @@ ColumnLayout {
         // inkWarn, because it is a consequence the operator did not ask
         // for and has to act on to undo: the fix is the RDS switch, which
         // puts the receiver back to programme audio on the way off.
+        // AN EMERGENCY WARNING GROUP IS SAID IN THE ROW, in the loudest ink,
+        // beside the decoder's own state and ahead of the station's name. EN
+        // 50067 has 9A sent very infrequently unless there is an emergency or
+        // a test, so its arriving at all is the fact; the payload is each
+        // country's own and sits in the detail as hexadecimal only.
+        StatusChip {
+            visible: engineLink.rdsEwsSent
+            label: engineLink.rdsEwsLabel
+            detail: engineLink.rdsEwsDetail
+            ink: Theme.inkBad
+        }
+
         StatusChip {
             visible: engineLink.rdsCompositeReceiver && engineLink.audioWanted
             label: "audio is the multiplex"
@@ -134,14 +146,6 @@ ColumnLayout {
                      : "")
             color: Theme.ink
             font.pixelSize: Theme.sizeTitle
-        }
-
-        Label {
-            visible: engineLink.rdsDecoding
-                     && engineLink.rdsProgrammeType.length > 0
-            text: engineLink.rdsProgrammeType
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeBody
         }
 
         // TP and TA, each behind its own validity flag, because
@@ -185,21 +189,144 @@ ColumnLayout {
         }
     }
 
-    // RadioText on its own row, because it is up to 64 characters
-    // and sharing a row with the call sign would elide one of
-    // them away.
-    Label {
+    // What the station says it is carrying: the programme type, its name, and
+    // the RadioText, on a row of their own, because RadioText is up to 64
+    // characters and sharing a row with the call sign would elide one of them
+    // away. The programme type moved down here beside its name when the name
+    // arrived, which the first row had no room left for.
+    RowLayout {
         Layout.fillWidth: true
+        Layout.minimumWidth: 0
         visible: engineLink.rdsDecoding
-                 && engineLink.rdsRadioText.length > 0
-        text: engineLink.rdsRadioText
-              + (engineLink.rdsRtSegments < engineLink.rdsRtSegmentsTotal
-                 ? "   (" + engineLink.rdsRtSegments + "/"
-                   + engineLink.rdsRtSegmentsTotal + " segments)"
-                 : "")
-        color: Theme.ink
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+                 && (engineLink.rdsProgrammeType.length > 0 || engineLink.rdsPtynShown
+                     || engineLink.rdsRadioText.length > 0)
+        spacing: 8
+
+        Label {
+            visible: engineLink.rdsProgrammeType.length > 0
+            text: engineLink.rdsProgrammeType
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeBody
+        }
+
+        // The programme type name, which refines the PTY beside it, run by
+        // run so a segment that came through a repaired block is drawn in the
+        // warning ink and underlined rather than read as the station's.
+        Row {
+            visible: engineLink.rdsPtynShown
+            spacing: 0
+
+            Label {
+                text: "“"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            Repeater {
+                model: engineLink.rdsPtynRuns
+
+                delegate: Label {
+                    required property var modelData
+
+                    text: modelData.text
+                    color: modelData.corrected ? Theme.inkWarn : Theme.inkDim
+                    font.underline: modelData.corrected
+                    font.pixelSize: Theme.sizeBody
+                }
+            }
+
+            Label {
+                text: "”" + (engineLink.rdsPtynNote.length > 0
+                             ? "  " + engineLink.rdsPtynNote : "")
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+        }
+
+        StatusChip {
+            visible: engineLink.rdsPtynShown && engineLink.rdsPtynCorrectedDetail.length > 0
+            label: "corrected"
+            detail: engineLink.rdsPtynCorrectedDetail
+            ink: Theme.inkWarn
+        }
+
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: engineLink.rdsRadioText.length > 0
+            text: engineLink.rdsRadioText
+                  + (engineLink.rdsRtSegments < engineLink.rdsRtSegmentsTotal
+                     ? "   (" + engineLink.rdsRtSegments + "/"
+                       + engineLink.rdsRtSegmentsTotal + " segments)"
+                     : "")
+            color: Theme.ink
+            font.pixelSize: Theme.sizeBody
+            elide: Text.ElideRight
+        }
     }
 
+    // TMC, only where a service is on air or announced. Counts, and the
+    // confirmed payloads behind a toggle as hexadecimal with no field named,
+    // because the layout of events and locations is not implemented.
+    // models/rds_services.h says which payloads count as confirmed.
+    RowLayout {
+        Layout.fillWidth: true
+        Layout.minimumWidth: 0
+        visible: engineLink.rdsTmcShown
+        spacing: 8
+
+        StatusChip {
+            label: engineLink.rdsTmcLabel
+            detail: engineLink.rdsTmcDetail
+            ink: Theme.receiverColours[0]
+        }
+
+        Readout {
+            visible: engineLink.rdsTmcCounts.length > 0
+            widest: "0000000 groups  ·  000 confirmed  ·  000 heard once"
+            text: engineLink.rdsTmcCounts
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        RButton {
+            id: payloadsToggle
+
+            visible: engineLink.rdsTmcPayloads.length > 0
+            flat: true
+            checkable: true
+            text: "payloads"
+            ink: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Item { Layout.fillWidth: true }
+    }
+
+    Column {
+        Layout.fillWidth: true
+        visible: engineLink.rdsTmcShown && payloadsToggle.checked
+                 && engineLink.rdsTmcPayloads.length > 0
+        spacing: 1
+
+        Repeater {
+            model: engineLink.rdsTmcPayloads
+
+            delegate: Text {
+                required property string modelData
+
+                text: modelData
+                color: Theme.ink
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Text {
+            visible: engineLink.rdsTmcNotListed > 0
+            text: engineLink.rdsTmcNotListed + " more confirmed, not listed"
+            color: Theme.inkDim
+            font.family: Theme.monoFont
+            font.pixelSize: Theme.sizeSmall
+        }
+    }
 }

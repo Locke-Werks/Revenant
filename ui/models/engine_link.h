@@ -1217,6 +1217,32 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool rdsTa READ rdsTa NOTIFY rdsChanged)
     Q_PROPERTY(bool rdsTaValid READ rdsTaValid NOTIFY rdsChanged)
 
+    // The programme type name, the Emergency Warning System and the Traffic
+    // Message Channel, which are marks, counts and raw bits and are drawn as
+    // that. models/rds_services.h decides every word and every rule here.
+    //
+    // rdsPtynRuns is a list of {text, corrected}, cut where a correction's
+    // mark starts or stops, and reads as one name when joined.
+    Q_PROPERTY(bool rdsPtynShown READ rdsPtynShown NOTIFY rdsChanged)
+    Q_PROPERTY(QVariantList rdsPtynRuns READ rdsPtynRuns NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsPtynNote READ rdsPtynNote NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsPtynCorrectedDetail READ rdsPtynCorrectedDetail NOTIFY rdsChanged)
+
+    // ews.groups above zero, and the chip that says so with the payload in
+    // hexadecimal as its detail.
+    Q_PROPERTY(bool rdsEwsSent READ rdsEwsSent NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsEwsLabel READ rdsEwsLabel NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsEwsDetail READ rdsEwsDetail NOTIFY rdsChanged)
+
+    // Whether a TMC service is on air or announced, its counts, and the
+    // confirmed payloads in hexadecimal for the expansion under the row.
+    Q_PROPERTY(bool rdsTmcShown READ rdsTmcShown NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsTmcLabel READ rdsTmcLabel NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsTmcCounts READ rdsTmcCounts NOTIFY rdsChanged)
+    Q_PROPERTY(QString rdsTmcDetail READ rdsTmcDetail NOTIFY rdsChanged)
+    Q_PROPERTY(QStringList rdsTmcPayloads READ rdsTmcPayloads NOTIFY rdsChanged)
+    Q_PROPERTY(int rdsTmcNotListed READ rdsTmcNotListed NOTIFY rdsChanged)
+
     // THE HEALTH, WHICH IS THE HALF THAT SAYS WHETHER TO BELIEVE THE REST.
     // A decoder that is not locked has to look different from a station
     // with no RDS, and an empty pane cannot tell you which.
@@ -2077,6 +2103,19 @@ public:
     [[nodiscard]] bool rdsTpValid() const { return rds_station_.tp_valid; }
     [[nodiscard]] bool rdsTa() const { return rds_station_.ta; }
     [[nodiscard]] bool rdsTaValid() const { return rds_station_.ta_valid; }
+    [[nodiscard]] bool rdsPtynShown() const { return rds_ptyn_shown_; }
+    [[nodiscard]] QVariantList rdsPtynRuns() const { return rds_ptyn_runs_; }
+    [[nodiscard]] QString rdsPtynNote() const { return rds_ptyn_note_; }
+    [[nodiscard]] QString rdsPtynCorrectedDetail() const { return rds_ptyn_corrected_detail_; }
+    [[nodiscard]] bool rdsEwsSent() const { return rds_ews_sent_; }
+    [[nodiscard]] QString rdsEwsLabel() const { return rds_ews_label_; }
+    [[nodiscard]] QString rdsEwsDetail() const { return rds_ews_detail_; }
+    [[nodiscard]] bool rdsTmcShown() const { return rds_tmc_shown_; }
+    [[nodiscard]] QString rdsTmcLabel() const { return rds_tmc_label_; }
+    [[nodiscard]] QString rdsTmcCounts() const { return rds_tmc_counts_; }
+    [[nodiscard]] QString rdsTmcDetail() const { return rds_tmc_detail_; }
+    [[nodiscard]] QStringList rdsTmcPayloads() const { return rds_tmc_payloads_; }
+    [[nodiscard]] int rdsTmcNotListed() const { return rds_tmc_not_listed_; }
     [[nodiscard]] double rdsBlockErrorRate() const { return rds_block_error_rate_; }
     [[nodiscard]] double rdsBitRateHz() const { return rds_station_.health.bit_rate_hz; }
     [[nodiscard]] double rdsCarrierOffsetHz() const {
@@ -3236,6 +3275,24 @@ private:
     int rds_rt_segments_ = 0;
     int rds_rt_segments_total_ = 0;
     double rds_block_error_rate_ = -1.0;
+    bool rds_ptyn_shown_ = false;
+    QVariantList rds_ptyn_runs_;
+    QString rds_ptyn_note_;
+    QString rds_ptyn_corrected_detail_;
+    bool rds_ews_sent_ = false;
+    QString rds_ews_label_;
+    QString rds_ews_detail_;
+    bool rds_tmc_shown_ = false;
+    QString rds_tmc_label_;
+    QString rds_tmc_counts_;
+    QString rds_tmc_detail_;
+    QStringList rds_tmc_payloads_;
+    int rds_tmc_not_listed_ = 0;
+
+    // The station's PTYN, EWS and TMC as the properties above hand them out,
+    // from models/rds_services.h, or all empty when the view is not
+    // decoding. rds_link.cpp.
+    void adopt_rds_services(bool decoding);
 
     // Set by setRdsWanted and setRdsRegion, cleared by the supervisor
     // when it has polled. In the wait predicate, so the first answer
