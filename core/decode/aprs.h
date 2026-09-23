@@ -148,13 +148,13 @@ struct AprsStatus {
 
 // Chapter 10, page 45: the Mic-E message types.
 enum class MicEMessage : std::uint8_t {
-    OffDuty,     // M0
-    EnRoute,     // M1
-    InService,   // M2
-    Returning,   // M3
-    Committed,   // M4
-    Special,     // M5
-    Priority,    // M6
+    OffDuty,    // M0
+    EnRoute,    // M1
+    InService,  // M2
+    Returning,  // M3
+    Committed,  // M4
+    Special,    // M5
+    Priority,   // M6
     Custom0,
     Custom1,
     Custom2,

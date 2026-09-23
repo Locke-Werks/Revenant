@@ -22,15 +22,20 @@ void append_utf8(std::string& out, char32_t c) {
     }
 }
 
-bool line_end(const SitorCharacter& c) { return !c.mutilated && (c.glyph == U'\r' || c.glyph == U'\n'); }
+bool line_end(const SitorCharacter& c) {
+    return !c.mutilated && (c.glyph == U'\r' || c.glyph == U'\n');
+}
 
 bool ends_with(const std::string& s, std::string_view suffix) {
-    return s.size() >= suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+    return s.size() >= suffix.size() &&
+           s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 // Removes the last `n` code points' worth of bytes from a UTF-8 string of
 // which the last `n` characters are known to be ASCII.
-void drop_ascii_tail(std::string& s, std::size_t n) { s.resize(s.size() >= n ? s.size() - n : 0); }
+void drop_ascii_tail(std::string& s, std::size_t n) {
+    s.resize(s.size() >= n ? s.size() - n : 0);
+}
 
 }  // namespace
 
@@ -99,8 +104,8 @@ void NavtexDecoder::on_character(const SitorCharacter& c, std::vector<NavtexMess
     }
 
     // The last four printing characters.
-    const char key = c.mutilated ? kLostMarker
-                                 : (c.glyph < 0x80 ? static_cast<char>(c.glyph) : kLostMarker);
+    const char key =
+        c.mutilated ? kLostMarker : (c.glyph < 0x80 ? static_cast<char>(c.glyph) : kLostMarker);
     tail_.push_back(key);
     tail_positions_.push_back(c.position);
     if (tail_.size() > 4) {

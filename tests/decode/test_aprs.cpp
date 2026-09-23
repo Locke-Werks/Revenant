@@ -21,7 +21,9 @@ using Catch::Approx;
 
 namespace {
 
-std::vector<std::uint8_t> bytes(std::string_view text) { return {text.begin(), text.end()}; }
+std::vector<std::uint8_t> bytes(std::string_view text) {
+    return {text.begin(), text.end()};
+}
 
 decode::AprsPacket parse(std::string_view info, std::string_view destination = "APRS",
                          std::uint8_t ssid = 0) {

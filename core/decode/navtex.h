@@ -82,7 +82,7 @@ struct NavtexConfig {
 };
 
 class NavtexDecoder {
-   public:
+public:
     [[nodiscard]] static Expected<NavtexDecoder> create(const NavtexConfig& config);
 
     // Consumes audio and appends every message whose "NNNN" has arrived, or
@@ -98,7 +98,7 @@ class NavtexDecoder {
 
     void reset();
 
-   private:
+private:
     NavtexDecoder() = default;
 
     void on_character(const SitorCharacter& c, std::vector<NavtexMessage>& out);

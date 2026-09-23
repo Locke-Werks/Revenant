@@ -29,17 +29,31 @@ constexpr char32_t kWhoAreYou = U'\x05';
 constexpr char32_t kAudibleSignal = U'\x07';
 
 constexpr Table1Row kTable1[kIta2Combinations] = {
-    {"ZZAAA", U'A', U'-'},  {"ZAAZZ", U'B', U'?'},  {"AZZZA", U'C', U':'},
+    {"ZZAAA", U'A', U'-'},
+    {"ZAAZZ", U'B', U'?'},
+    {"AZZZA", U'C', U':'},
     {"ZAAZA", U'D', kWhoAreYou},
-    {"ZAAAA", U'E', U'3'},  {"ZAZZA", U'F', kUndefinedFigure},
+    {"ZAAAA", U'E', U'3'},
+    {"ZAZZA", U'F', kUndefinedFigure},
     {"AZAZZ", U'G', kUndefinedFigure},
     {"AAZAZ", U'H', kUndefinedFigure},
-    {"AZZAA", U'I', U'8'},  {"ZZAZA", U'J', kAudibleSignal},
-    {"ZZZZA", U'K', U'('},  {"AZAAZ", U'L', U')'},  {"AAZZZ", U'M', U'.'},
-    {"AAZZA", U'N', U','},  {"AAAZZ", U'O', U'9'},  {"AZZAZ", U'P', U'0'},
-    {"ZZZAZ", U'Q', U'1'},  {"AZAZA", U'R', U'4'},  {"ZAZAA", U'S', U'\''},
-    {"AAAAZ", U'T', U'5'},  {"ZZZAA", U'U', U'7'},  {"AZZZZ", U'V', U'='},
-    {"ZZAAZ", U'W', U'2'},  {"ZAZZZ", U'X', U'/'},  {"ZAZAZ", U'Y', U'6'},
+    {"AZZAA", U'I', U'8'},
+    {"ZZAZA", U'J', kAudibleSignal},
+    {"ZZZZA", U'K', U'('},
+    {"AZAAZ", U'L', U')'},
+    {"AAZZZ", U'M', U'.'},
+    {"AAZZA", U'N', U','},
+    {"AAAZZ", U'O', U'9'},
+    {"AZZAZ", U'P', U'0'},
+    {"ZZZAZ", U'Q', U'1'},
+    {"AZAZA", U'R', U'4'},
+    {"ZAZAA", U'S', U'\''},
+    {"AAAAZ", U'T', U'5'},
+    {"ZZZAA", U'U', U'7'},
+    {"AZZZZ", U'V', U'='},
+    {"ZZAAZ", U'W', U'2'},
+    {"ZAZZZ", U'X', U'/'},
+    {"ZAZAZ", U'Y', U'6'},
     {"ZAAAZ", U'Z', U'+'},
     {"AAAZA", U'\r', U'\r'},  // No. 27, carriage return
     {"AZAAA", U'\n', U'\n'},  // No. 28, line feed
@@ -66,8 +80,7 @@ struct Inverse {
 constexpr Inverse make_inverse() {
     Inverse inverse{};
     for (std::size_t row = 0; row < kIta2Combinations; ++row) {
-        inverse.row_of[units_to_combination(kTable1[row].units)] =
-            static_cast<std::uint8_t>(row);
+        inverse.row_of[units_to_combination(kTable1[row].units)] = static_cast<std::uint8_t>(row);
     }
     return inverse;
 }
@@ -99,9 +112,13 @@ void append_utf8(std::string& out, char32_t c) {
 
 }  // namespace
 
-char32_t ita2_letter(std::uint8_t combination) { return row_for(combination).letter; }
+char32_t ita2_letter(std::uint8_t combination) {
+    return row_for(combination).letter;
+}
 
-char32_t ita2_figure(std::uint8_t combination) { return row_for(combination).figure; }
+char32_t ita2_figure(std::uint8_t combination) {
+    return row_for(combination).figure;
+}
 
 int ita2_combination_number(std::uint8_t combination) {
     return static_cast<int>(kInverse.row_of[combination & 0x1FU]) + 1;
@@ -226,8 +243,9 @@ void RttyDecoder::process(ConstRealSpan audio, std::vector<RttyCharacter>& out) 
     std::uint64_t keep_from = scan_ - 1;
     if (have_edge_) {
         const double earliest = edge_ - reach;
-        keep_from = earliest > 0.0 ? std::min<std::uint64_t>(keep_from, static_cast<std::uint64_t>(earliest))
-                                   : 0;
+        keep_from = earliest > 0.0
+                        ? std::min<std::uint64_t>(keep_from, static_cast<std::uint64_t>(earliest))
+                        : 0;
     }
     if (keep_from > history_start_ &&
         keep_from - history_start_ > static_cast<std::uint64_t>(16.0 * samples_per_unit_)) {
@@ -265,8 +283,8 @@ bool RttyDecoder::frame(std::vector<RttyCharacter>& out) {
         }
         double metric = 0.0;
         for (int k = 0; k < kReadings; ++k) {
-            const double v = static_cast<double>(
-                soft_at(edge_ + offset + (static_cast<double>(k) + 0.5) * spu));
+            const double v =
+                static_cast<double>(soft_at(edge_ + offset + (static_cast<double>(k) + 0.5) * spu));
             if (k == 0) {
                 metric -= v;
             } else if (k == kReadings - 1) {

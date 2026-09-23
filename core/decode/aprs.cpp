@@ -10,13 +10,19 @@ namespace {
 
 using Bytes = std::span<const std::uint8_t>;
 
-bool is_digit(std::uint8_t c) { return c >= '0' && c <= '9'; }
+bool is_digit(std::uint8_t c) {
+    return c >= '0' && c <= '9';
+}
 
 // Chapter 9, page 37: base-91 characters run from "!" to "{", value = code
 // minus 33.
-bool is_base91(std::uint8_t c) { return c >= 33 && c <= 33 + 90; }
+bool is_base91(std::uint8_t c) {
+    return c >= 33 && c <= 33 + 90;
+}
 
-std::string as_text(Bytes b) { return {b.begin(), b.end()}; }
+std::string as_text(Bytes b) {
+    return {b.begin(), b.end()};
+}
 
 // Chapter 6, page 22.
 std::optional<AprsTimestamp> parse_timestamp(Bytes b) {
@@ -45,8 +51,7 @@ std::optional<AprsTimestamp> parse_timestamp(Bytes b) {
             t.minute = two(2);
             t.second = two(4);
             break;
-        default:
-            return std::nullopt;
+        default: return std::nullopt;
     }
     return t;
 }
@@ -316,11 +321,13 @@ Expected<AprsMessage> parse_message(Bytes b) {
 
     // Page 71: an optional "{" and up to five alphanumeric characters.
     const auto brace = text.rfind('{');
-    if (brace != std::string::npos && text.size() - brace - 1 >= 1 && text.size() - brace - 1 <= 5) {
+    if (brace != std::string::npos && text.size() - brace - 1 >= 1 &&
+        text.size() - brace - 1 <= 5) {
         bool alnum = true;
         for (std::size_t i = brace + 1; i < text.size(); ++i) {
             const char c = text[i];
-            alnum = alnum && ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+            alnum = alnum &&
+                    ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
         }
         if (alnum) {
             m.id = text.substr(brace + 1);
@@ -383,9 +390,9 @@ AprsStatus parse_status(Bytes b) {
 
 // Chapter 10, page 44: one destination address character.
 struct MicEDigit {
-    int digit = 0;       // 0-9, or -1 for a space (ambiguity)
-    int message = 0;     // 0, 1 for a standard one, 2 for a custom one
-    bool high = false;   // North, +100, West for bytes 4 to 6
+    int digit = 0;      // 0-9, or -1 for a space (ambiguity)
+    int message = 0;    // 0, 1 for a standard one, 2 for a custom one
+    bool high = false;  // North, +100, West for bytes 4 to 6
 };
 
 std::optional<MicEDigit> mic_e_digit(char c) {
@@ -634,9 +641,7 @@ Expected<AprsPacket> aprs_parse(std::string_view destination_callsign,
             packet.body = std::move(*m);
             return packet;
         }
-        case '>':
-            packet.body = parse_status(rest);
-            return packet;
+        case '>': packet.body = parse_status(rest); return packet;
         case '`':
         case '\'':
         case 0x1C:
@@ -648,8 +653,7 @@ Expected<AprsPacket> aprs_parse(std::string_view destination_callsign,
             packet.body = std::move(*e);
             return packet;
         }
-        default:
-            break;
+        default: break;
     }
 
     // Page 18: "!" may appear anywhere up to the 40th character, after an

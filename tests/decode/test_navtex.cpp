@@ -171,7 +171,8 @@ TEST_CASE("NAVTEX messages against noise, measured", "[decode][navtex]") {
             for (int k = 0; k < 120; ++k) {
                 body.push_back(kPool[engine() % (std::size(kPool) - 1)]);
             }
-            auto codes = siggen::ita2_encode_text(siggen::navtex_text('E', 'A', m + 1, body + U"\r\n"));
+            auto codes =
+                siggen::ita2_encode_text(siggen::navtex_text('E', 'A', m + 1, body + U"\r\n"));
             REQUIRE(codes.has_value());
             auto audio = siggen::sitor_b_render(navtex_mod(), *codes);
             REQUIRE(audio.has_value());
@@ -196,14 +197,15 @@ TEST_CASE("NAVTEX messages against noise, measured", "[decode][navtex]") {
             }
         }
         const double loss = 1.0 - static_cast<double>(received) / kMessages;
-        auto eb_n0 = siggen::reference_bandwidth_to_eb_over_n0_db(p.snr_2500_db, decode::kSitorBaud);
+        auto eb_n0 =
+            siggen::reference_bandwidth_to_eb_over_n0_db(p.snr_2500_db, decode::kSitorBaud);
         REQUIRE(eb_n0.has_value());
         INFO("SNR " << p.snr_2500_db << " dB in 2500 Hz, Eb/N0 " << *eb_n0 << " dB: " << received
                     << " of " << kMessages << " messages exact, " << clean_preambles
                     << " clean preambles");
         CHECK(loss <= p.allowed_loss);
-        WARN("NAVTEX SNR " << p.snr_2500_db << " dB/2500 Hz (Eb/N0 " << *eb_n0 << " dB): "
-                           << received << "/" << kMessages << " exact, " << clean_preambles
-                           << " clean preambles");
+        WARN("NAVTEX SNR " << p.snr_2500_db << " dB/2500 Hz (Eb/N0 " << *eb_n0
+                           << " dB): " << received << "/" << kMessages << " exact, "
+                           << clean_preambles << " clean preambles");
     }
 }

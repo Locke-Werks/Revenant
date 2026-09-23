@@ -79,10 +79,10 @@ Expected<std::array<std::uint8_t, kAx25AddressOctets>> ax25_encode_address(
         const char c = (i < address.callsign.size()) ? address.callsign[i] : ' ';
         out[i] = static_cast<std::uint8_t>(static_cast<unsigned>(c) << 1U);
     }
-    out[6] = static_cast<std::uint8_t>((address.command_or_repeated ? 0x80U : 0U) |
-                                       (static_cast<unsigned>(address.reserved) << 5U) |
-                                       (static_cast<unsigned>(address.ssid) << 1U) |
-                                       (last ? 1U : 0U));
+    out[6] =
+        static_cast<std::uint8_t>((address.command_or_repeated ? 0x80U : 0U) |
+                                  (static_cast<unsigned>(address.reserved) << 5U) |
+                                  (static_cast<unsigned>(address.ssid) << 1U) | (last ? 1U : 0U));
     return out;
 }
 
@@ -305,8 +305,8 @@ void Ax25Decoder::process(ConstRealSpan audio, std::vector<Ax25Frame>& out) {
         ++stats_.candidates;
         const std::size_t n = f.octets.size();
         const auto content = std::span<const std::uint8_t>(f.octets).first(n - 2);
-        const auto received =
-            static_cast<std::uint16_t>(f.octets[n - 2] | (static_cast<unsigned>(f.octets[n - 1]) << 8U));
+        const auto received = static_cast<std::uint16_t>(
+            f.octets[n - 2] | (static_cast<unsigned>(f.octets[n - 1]) << 8U));
         if (ax25_fcs(content) != received) {
             ++stats_.fcs_failures;
             continue;

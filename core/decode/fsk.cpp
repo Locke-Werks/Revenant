@@ -218,8 +218,8 @@ void BitClock::process(ConstRealSpan soft, std::vector<SoftBit>& out) {
         phase_ += step_;
         const auto at = [&](double target) {
             const double u = std::clamp((target - before) / step_, 0.0, 1.0);
-            return std::pair{static_cast<double>(previous_) + u * static_cast<double>(s - previous_),
-                             u};
+            return std::pair{
+                static_cast<double>(previous_) + u * static_cast<double>(s - previous_), u};
         };
 
         if (have_previous_ && !emitted_ && phase_ >= 0.5) {

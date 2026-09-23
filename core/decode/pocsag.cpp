@@ -30,7 +30,9 @@ constexpr std::array<std::uint32_t, 31> make_single_syndromes() {
 
 constexpr std::array<std::uint32_t, 31> kSingleSyndromes = make_single_syndromes();
 
-bool even_parity(std::uint32_t word) { return (std::popcount(word) & 1) == 0; }
+bool even_parity(std::uint32_t word) {
+    return (std::popcount(word) & 1) == 0;
+}
 
 // Table 3, indexed by the 4-bit combination with bit 1 as the least
 // significant, which is how the table's "Bit No.: 4 3 2 1" heading reads.
@@ -44,16 +46,11 @@ std::string numeric_character(unsigned v) {
             // "Spare": no glyph. U+FFFD, the replacement character.
             return std::string{static_cast<char>(0xEF), static_cast<char>(0xBF),
                                static_cast<char>(0xBD)};
-        case 0xB:
-            return "U";
-        case 0xC:
-            return " ";
-        case 0xD:
-            return "-";
-        case 0xE:
-            return "]";
-        default:
-            return "[";
+        case 0xB: return "U";
+        case 0xC: return " ";
+        case 0xD: return "-";
+        case 0xE: return "]";
+        default: return "[";
     }
 }
 

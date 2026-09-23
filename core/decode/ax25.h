@@ -209,11 +209,11 @@ struct HdlcFrame {
 // clause 3.9's minimum long; the FCS is the caller's to check, because a
 // caller measuring a channel wants the frames that failed it as well.
 class HdlcDeframer {
-   public:
+public:
     void push(std::uint8_t bit, SampleIndex sample, std::vector<HdlcFrame>& out);
     void reset();
 
-   private:
+private:
     std::vector<std::uint8_t> bits_;
     SampleIndex first_sample_ = 0;
     int ones_ = 0;
@@ -246,7 +246,7 @@ struct Ax25Stats {
 };
 
 class Ax25Decoder {
-   public:
+public:
     [[nodiscard]] static Expected<Ax25Decoder> create(const Ax25Config& config);
 
     // Consumes audio and appends every frame whose closing flag has arrived
@@ -258,7 +258,7 @@ class Ax25Decoder {
 
     void reset();
 
-   private:
+private:
     Ax25Decoder() = default;
 
     ToneDiscriminator discriminator_{};

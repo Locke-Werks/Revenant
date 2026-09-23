@@ -43,7 +43,14 @@ constexpr const char* kTable1Units[32] = {
 constexpr char32_t kTable1Letters[] = U"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 // The figure column for combinations 1 to 26, with the four the decoder
 // substitutes marked by a zero and checked separately.
-constexpr char32_t kTable1Figures[] = U"-?:\0" U"3\0\0\0" U"8\0()" U".,90" U"14'5" U"7=2/" U"6+";
+constexpr char32_t kTable1Figures[] =
+    U"-?:\0"
+    U"3\0\0\0"
+    U"8\0()"
+    U".,90"
+    U"14'5"
+    U"7=2/"
+    U"6+";
 
 std::uint8_t combination_of(const char* units) {
     std::uint8_t value = 0;
@@ -73,8 +80,8 @@ std::size_t edit_distance(const std::string& a, const std::string& b) {
         row[0] = i;
         for (std::size_t j = 1; j <= b.size(); ++j) {
             const std::size_t above = row[j];
-            row[j] = std::min({row[j] + 1, row[j - 1] + 1,
-                               diagonal + ((a[i - 1] == b[j - 1]) ? 0U : 1U)});
+            row[j] = std::min(
+                {row[j] + 1, row[j - 1] + 1, diagonal + ((a[i - 1] == b[j - 1]) ? 0U : 1U)});
             diagonal = above;
         }
     }
@@ -165,8 +172,9 @@ TEST_CASE("every ITA2 character encodes and decodes to itself", "[decode][rtty]"
         const auto code = decode::ita2_encode(c);
         REQUIRE(code.has_value());
         using Case = decode::Ita2Code::Case;
-        const char32_t back = (code->needs == Case::Figures) ? decode::ita2_figure(code->combination)
-                                                             : decode::ita2_letter(code->combination);
+        const char32_t back = (code->needs == Case::Figures)
+                                  ? decode::ita2_figure(code->combination)
+                                  : decode::ita2_letter(code->combination);
         CHECK(back == c);
     }
     CHECK_FALSE(decode::ita2_encode(U'@').has_value());
@@ -219,7 +227,8 @@ TEST_CASE("RTTY round trips clean at two rates and three parameter sets", "[deco
         // percent of a unit, which is what the edge interpolation buys.
         REQUIRE_FALSE(d.characters.empty());
         const double expected = mod.lead_units * static_cast<double>(c.rate) / c.baud;
-        const double error = std::abs(static_cast<double>(d.characters.front().position) - expected);
+        const double error =
+            std::abs(static_cast<double>(d.characters.front().position) - expected);
         INFO("first start edge reported at " << d.characters.front().position << ", sent at "
                                              << expected);
         CHECK(error < 0.05 * static_cast<double>(c.rate) / c.baud);
@@ -298,8 +307,8 @@ TEST_CASE("RTTY recovers framing after a burst of noise", "[decode][rtty]") {
     // burst ends, which is how long a start-stop receiver may take to fall
     // back into step on continuous text.
     const double samples_per_char = (7.5) * 48'000.0 / 45.45;
-    const auto resume = static_cast<std::uint64_t>(
-        static_cast<double>(burst_start + burst_length) + 3.0 * samples_per_char);
+    const auto resume = static_cast<std::uint64_t>(static_cast<double>(burst_start + burst_length) +
+                                                   3.0 * samples_per_char);
     std::string after;
     for (const auto& c : d.characters) {
         if (c.position >= resume && c.glyph != 0) {
@@ -342,7 +351,8 @@ TEST_CASE("RTTY character error rate against noise, measured", "[decode][rtty]")
     // rate is about twenty times it because a character is seven readings,
     // any one of which loses it, and a lost shift garbles every character
     // until the next one. The allowances sit above the measurements.
-    const Point points[] = {{10.0, 0.0, 0.001}, {-5.0, 0.0, 0.03}, {-8.0, 0.0, 0.3}, {10.0, 10.0, 0.01}};
+    const Point points[] = {
+        {10.0, 0.0, 0.001}, {-5.0, 0.0, 0.03}, {-8.0, 0.0, 0.3}, {10.0, 10.0, 0.01}};
     for (const Point& p : points) {
         siggen::RttyModConfig mod;
         mod.tone_offset_hz = p.tone_offset_hz;
@@ -358,8 +368,8 @@ TEST_CASE("RTTY character error rate against noise, measured", "[decode][rtty]")
         const Decoded d = decode_all(decode::RttyConfig{}, *audio);
         const std::string got = decode::rtty_text(d.characters);
         const std::string sent = utf8(text);
-        const double cer = static_cast<double>(edit_distance(sent, got)) /
-                           static_cast<double>(sent.size());
+        const double cer =
+            static_cast<double>(edit_distance(sent, got)) / static_cast<double>(sent.size());
 
         // The unit error rate of the discriminator alone, read at the
         // instants the transmitter put the unit centres, so the framer's
@@ -388,7 +398,8 @@ TEST_CASE("RTTY character error rate against noise, measured", "[decode][rtty]")
                 ++units;
             }
         }
-        const double unit_error_rate = static_cast<double>(unit_errors) / static_cast<double>(units);
+        const double unit_error_rate =
+            static_cast<double>(unit_errors) / static_cast<double>(units);
 
         INFO("SNR " << p.snr_2500_db << " dB in 2500 Hz, Eb/N0 " << *eb_n0 << " dB, mistuned "
                     << p.tone_offset_hz << " Hz: character error rate " << cer << " over "

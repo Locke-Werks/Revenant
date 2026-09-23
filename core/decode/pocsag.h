@@ -191,7 +191,7 @@ struct PocsagStats {
 };
 
 class PocsagDecoder {
-   public:
+public:
     [[nodiscard]] static Expected<PocsagDecoder> create(const PocsagConfig& config);
 
     // Consumes audio and appends every page whose end has been seen: the
@@ -210,7 +210,7 @@ class PocsagDecoder {
 
     void reset();
 
-   private:
+private:
     PocsagDecoder() = default;
 
     void on_bit(std::uint8_t bit, SampleIndex sample, std::vector<PocsagPage>& out);

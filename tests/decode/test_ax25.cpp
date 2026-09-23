@@ -123,9 +123,8 @@ TEST_CASE("address encoding reproduces AX.25 2.2 Figures 3.4 and 3.7", "[decode]
     // seven bits, gives. Every other octet in Figures 3.4, 3.5, 3.7 and 3.8
     // agrees with that rule, so the rule is followed and A1 and A8 below
     // carry 0x9C where the figure prints 0x98.
-    const std::uint8_t figure_3_4[] = {0x9C, 0x94, 0x6E, 0xA0, 0x40, 0x40, 0xE0,
-                                       0x9C, 0x6E, 0x98, 0x8A, 0x9A, 0x40, 0x61,
-                                       0x3E, 0xF0};
+    const std::uint8_t figure_3_4[] = {0x9C, 0x94, 0x6E, 0xA0, 0x40, 0x40, 0xE0, 0x9C,
+                                       0x6E, 0x98, 0x8A, 0x9A, 0x40, 0x61, 0x3E, 0xF0};
     siggen::Ax25FrameSpec spec;
     spec.destination = address("NJ7P", 0, true);
     spec.source = address("N7LEM", 0, false);
@@ -236,8 +235,8 @@ TEST_CASE("AX.25 decodes through clock error and emphasis tilt", "[decode][ax25]
         double baud_error;
         double tilt_db;
     };
-    const Case cases[] = {{0.005, 0.0}, {-0.005, 0.0}, {0.0, 6.0}, {0.0, -6.0}, {0.0, 10.0},
-                          {0.0, -10.0}};
+    const Case cases[] = {{0.005, 0.0}, {-0.005, 0.0}, {0.0, 6.0},
+                          {0.0, -6.0},  {0.0, 10.0},   {0.0, -10.0}};
     for (const Case& c : cases) {
         INFO("clock error " << c.baud_error << ", space tone " << c.tilt_db << " dB");
         siggen::Ax25ModConfig mod;
@@ -302,8 +301,8 @@ TEST_CASE("AX.25 bit and frame error rates against noise, measured", "[decode][a
         REQUIRE(audio.has_value());
         const double power = mean_power(*audio);
         REQUIRE(siggen::add_real_awgn(*audio, power,
-                                      siggen::NoiseLevel::snr_in_2500_hz_db(p.snr_2500_db),
-                                      48'000, 0xBADC0DEULL)
+                                      siggen::NoiseLevel::snr_in_2500_hz_db(p.snr_2500_db), 48'000,
+                                      0xBADC0DEULL)
                     .has_value());
         const auto got = decode_all(48'000, *audio);
         std::size_t good = 0;
@@ -324,8 +323,8 @@ TEST_CASE("AX.25 bit and frame error rates against noise, measured", "[decode][a
         auto raw = siggen::afsk_render_bits(mod, random_bits);
         REQUIRE(raw.has_value());
         REQUIRE(siggen::add_real_awgn(*raw, mean_power(*raw),
-                                      siggen::NoiseLevel::snr_in_2500_hz_db(p.snr_2500_db),
-                                      48'000, 0x5EEDULL)
+                                      siggen::NoiseLevel::snr_in_2500_hz_db(p.snr_2500_db), 48'000,
+                                      0x5EEDULL)
                     .has_value());
         decode::ToneDiscriminatorConfig tones;
         tones.mark_hz = decode::kBell202MarkHz;
@@ -364,7 +363,8 @@ TEST_CASE("AX.25 bit and frame error rates against noise, measured", "[decode][a
         }
         std::size_t errors = 0;
         std::size_t compared = 0;
-        for (std::size_t i = kSkip; i + best_shift < decoded.size() && i < random_bits.size(); ++i) {
+        for (std::size_t i = kSkip; i + best_shift < decoded.size() && i < random_bits.size();
+             ++i) {
             errors += (decoded[i + best_shift] != random_bits[i]) ? 1U : 0U;
             ++compared;
         }

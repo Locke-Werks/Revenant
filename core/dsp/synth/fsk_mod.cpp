@@ -18,9 +18,9 @@ struct Segment {
 // Continuous-phase two-tone audio from a list of segments. Each sample takes
 // the tone of the segment its own instant falls in, and the phase carries
 // through every change of tone, which is what a keyed oscillator does.
-std::vector<float> render_segments(std::span<const Segment> segments, SampleRate rate,
-                                   double baud, double mark_hz, double space_hz,
-                                   double amplitude, double space_gain = 1.0) {
+std::vector<float> render_segments(std::span<const Segment> segments, SampleRate rate, double baud,
+                                   double mark_hz, double space_hz, double amplitude,
+                                   double space_gain = 1.0) {
     double total_units = 0.0;
     for (const Segment& s : segments) {
         total_units += s.units;
@@ -83,7 +83,8 @@ Expected<std::vector<float>> rtty_render(const RttyModConfig& config,
     const double mark = static_cast<double>(config.mark_hz) + config.tone_offset_hz;
     const double space = config.space_above_mark ? mark + static_cast<double>(config.shift_hz)
                                                  : mark - static_cast<double>(config.shift_hz);
-    if (!(space > 0.0) || !(mark > 0.0) || std::max(mark, space) * 2.0 >= static_cast<double>(config.rate)) {
+    if (!(space > 0.0) || !(mark > 0.0) ||
+        std::max(mark, space) * 2.0 >= static_cast<double>(config.rate)) {
         return fail("RTTY tones must lie between zero and half the sample rate");
     }
     if (!(config.stop_units > 0.0)) {
@@ -272,7 +273,9 @@ Expected<std::vector<std::uint8_t>> pocsag_alphanumeric_bits(std::string_view te
 
 std::vector<std::uint32_t> pocsag_codewords(std::span<const PocsagPageSpec> pages) {
     std::vector<std::uint32_t> slots;
-    const auto frame_of_next = [&slots] { return (slots.size() % decode::kPocsagCodewordsPerBatch) / 2; };
+    const auto frame_of_next = [&slots] {
+        return (slots.size() % decode::kPocsagCodewordsPerBatch) / 2;
+    };
 
     for (std::size_t p = 0; p < pages.size(); ++p) {
         const PocsagPageSpec& page = pages[p];
@@ -286,8 +289,8 @@ std::vector<std::uint32_t> pocsag_codewords(std::span<const PocsagPageSpec> page
             slots.push_back(decode::kPocsagIdle);
         }
         // Clause 1.3.2: flag 0, 18 address bits, 2 function bits.
-        const std::uint32_t address = (((page.identity >> 3U) & 0x3FFFFU) << 2U) |
-                                      (page.function & 0x3U);
+        const std::uint32_t address =
+            (((page.identity >> 3U) & 0x3FFFFU) << 2U) | (page.function & 0x3U);
         slots.push_back(decode::pocsag_encode(address));
         // Clause 1.3.3: flag 1, 20 message bits.
         for (std::size_t i = 0; i + kPocsagMessageBits <= page.message_bits.size();
@@ -457,9 +460,10 @@ Expected<std::vector<dsp::Complex32>> pocsag_render_baseband(const PocsagModConf
                                 static_cast<std::size_t>(static_cast<double>(n) / samples_per_bit));
         out[n] = dsp::Complex32(static_cast<float>(config.amplitude * std::cos(phase)),
                                 static_cast<float>(config.amplitude * std::sin(phase)));
-        phase = std::fmod(phase + kTwoPi * config.deviation_hz * pocsag_level(bits[k], config.invert) /
-                                      static_cast<double>(config.rate),
-                          kTwoPi);
+        phase =
+            std::fmod(phase + kTwoPi * config.deviation_hz * pocsag_level(bits[k], config.invert) /
+                                  static_cast<double>(config.rate),
+                      kTwoPi);
     }
     return out;
 }

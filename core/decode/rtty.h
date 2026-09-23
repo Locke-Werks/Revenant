@@ -190,7 +190,7 @@ struct RttyCharacter {
 };
 
 class RttyDecoder {
-   public:
+public:
     [[nodiscard]] static Expected<RttyDecoder> create(const RttyConfig& config);
 
     // Consumes audio and appends every character whose stop element has
@@ -209,7 +209,7 @@ class RttyDecoder {
 
     void reset();
 
-   private:
+private:
     RttyDecoder() = default;
 
     // Soft value at a fractional absolute index, interpolated. The index

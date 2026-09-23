@@ -110,7 +110,7 @@ struct ToneDiscriminatorConfig {
 // modulo the rate in integers, so it is exact at any distance into a stream
 // and the output does not depend on how the caller blocked the input.
 class ToneDiscriminator {
-   public:
+public:
     ToneDiscriminator() = default;
 
     [[nodiscard]] static Expected<ToneDiscriminator> create(const ToneDiscriminatorConfig& config);
@@ -125,7 +125,7 @@ class ToneDiscriminator {
 
     void reset();
 
-   private:
+private:
     SampleRate rate_ = 0;
     Hertz mark_hz_ = 0;
     Hertz space_hz_ = 0;
@@ -166,7 +166,7 @@ struct LevelDiscriminatorConfig {
 // zero: a receiver 1 kHz off a 4.5 kHz deviation signal otherwise slices a
 // fifth of the way up one eye.
 class LevelDiscriminator {
-   public:
+public:
     LevelDiscriminator() = default;
 
     [[nodiscard]] static Expected<LevelDiscriminator> create(
@@ -180,7 +180,7 @@ class LevelDiscriminator {
 
     void reset();
 
-   private:
+private:
     std::size_t window_ = 0;
     std::vector<double> ring_;
     double sum_ = 0.0;
@@ -263,7 +263,7 @@ struct SoftBit {
 // crossing, so the reading instant lands on the filter output's peak with no
 // correction for the delay needed here.
 class BitClock {
-   public:
+public:
     BitClock() = default;
 
     [[nodiscard]] static Expected<BitClock> create(const BitClockConfig& config);
@@ -276,7 +276,7 @@ class BitClock {
 
     void reset();
 
-   private:
+private:
     BitClockConfig config_{};
     double nominal_step_ = 0.0;
     double step_ = 0.0;

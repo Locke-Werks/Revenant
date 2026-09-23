@@ -177,9 +177,9 @@ TEST_CASE("time diversity recovers what one copy loses", "[decode][sitor]") {
     // is 2 * (phasing_pairs + i); its RX copy is five slots later.
     const auto dx_slot = [&](std::size_t i) { return 2 * (mod.phasing_pairs + i); };
     // Character 2 is the letter shift, so "A" is 3 and "C" is 5.
-    slots[dx_slot(5)] ^= 0x01U;       // "C": DX damaged
-    slots[dx_slot(7) + 5] ^= 0x10U;   // "E": RX damaged
-    slots[dx_slot(9)] ^= 0x02U;       // "G": both damaged
+    slots[dx_slot(5)] ^= 0x01U;      // "C": DX damaged
+    slots[dx_slot(7) + 5] ^= 0x10U;  // "E": RX damaged
+    slots[dx_slot(9)] ^= 0x02U;      // "G": both damaged
     slots[dx_slot(9) + 5] ^= 0x04U;
     auto audio = siggen::sitor_b_render_signals(mod, slots);
     REQUIRE(audio.has_value());
@@ -276,7 +276,8 @@ TEST_CASE("SITOR-B character error rate against noise, measured", "[decode][sito
                                       siggen::NoiseLevel::snr_in_2500_hz_db(p.snr_2500_db), 48'000,
                                       0xD1CEULL)
                     .has_value());
-        auto eb_n0 = siggen::reference_bandwidth_to_eb_over_n0_db(p.snr_2500_db, decode::kSitorBaud);
+        auto eb_n0 =
+            siggen::reference_bandwidth_to_eb_over_n0_db(p.snr_2500_db, decode::kSitorBaud);
         REQUIRE(eb_n0.has_value());
         decode::SitorStats stats;
         const auto got = decode_all(decode::SitorConfig{}, *audio, &stats);
@@ -290,8 +291,8 @@ TEST_CASE("SITOR-B character error rate against noise, measured", "[decode][sito
                     << dx_loss << ", lost in both " << both_loss << ", phasings " << stats.phasings
                     << ", losses of phase " << stats.losses_of_phase);
         CHECK(both_loss <= p.allowed_loss);
-        WARN("SITOR-B SNR " << p.snr_2500_db << " dB/2500 Hz (Eb/N0 " << *eb_n0 << " dB): "
-                            << decided << " decided, DX lost " << dx_loss << ", both lost "
-                            << both_loss);
+        WARN("SITOR-B SNR " << p.snr_2500_db << " dB/2500 Hz (Eb/N0 " << *eb_n0
+                            << " dB): " << decided << " decided, DX lost " << dx_loss
+                            << ", both lost " << both_loss);
     }
 }

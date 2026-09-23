@@ -80,9 +80,9 @@ inline constexpr int kSitorOnesPerSignal = 3;
 // pattern; which it means depends on the position and the phase of the
 // transmission.
 [[nodiscard]] std::uint8_t sitor_signal(const char* by_units);
-inline constexpr std::uint8_t kSitorPhasing1 = 0b1110000;   // BBBBYYY, also idle alpha
-inline constexpr std::uint8_t kSitorPhasing2 = 0b0011001;   // YBBYYBB
-inline constexpr std::uint8_t kSitorIdleBeta = 0b1001100;   // BBYYBBY
+inline constexpr std::uint8_t kSitorPhasing1 = 0b1110000;  // BBBBYYY, also idle alpha
+inline constexpr std::uint8_t kSitorPhasing2 = 0b0011001;  // YBBYYBB
+inline constexpr std::uint8_t kSitorIdleBeta = 0b1001100;  // BBYYBBY
 
 // What a received 7-unit signal is.
 struct SitorSignal {
@@ -175,7 +175,7 @@ struct SitorStats {
 };
 
 class SitorBDecoder {
-   public:
+public:
     [[nodiscard]] static Expected<SitorBDecoder> create(const SitorConfig& config);
 
     // Consumes audio and appends every character decided, which is when its
@@ -188,7 +188,7 @@ class SitorBDecoder {
 
     void reset();
 
-   private:
+private:
     SitorBDecoder() = default;
 
     void on_bit(std::uint8_t bit, SampleIndex sample, std::vector<SitorCharacter>& out);

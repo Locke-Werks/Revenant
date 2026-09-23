@@ -83,7 +83,9 @@ bool is_phasing(std::uint8_t a, std::uint8_t b, std::uint8_t c, std::uint8_t d) 
 
 }  // namespace
 
-std::uint8_t sitor_signal(const char* by_units) { return by_to_signal(by_units); }
+std::uint8_t sitor_signal(const char* by_units) {
+    return by_to_signal(by_units);
+}
 
 SitorSignal sitor_classify(std::uint8_t signal) {
     SitorSignal s;
@@ -105,17 +107,21 @@ SitorSignal sitor_classify(std::uint8_t signal) {
     return s;
 }
 
-std::uint8_t sitor_encode(std::uint8_t combination) { return kLookup.signal_of[combination & 0x1FU]; }
+std::uint8_t sitor_encode(std::uint8_t combination) {
+    return kLookup.signal_of[combination & 0x1FU];
+}
 
 // ---------------------------------------------------------------------------
 // SitorBDecoder
 // ---------------------------------------------------------------------------
 
 Expected<SitorBDecoder> SitorBDecoder::create(const SitorConfig& config) {
-    if (config.shift_hz <= 0 || config.shift_hz % 2 != 0 || config.centre_hz <= config.shift_hz / 2) {
+    if (config.shift_hz <= 0 || config.shift_hz % 2 != 0 ||
+        config.centre_hz <= config.shift_hz / 2) {
         return fail("a SITOR shift must be positive, even, and leave both tones above zero");
     }
-    if (config.mutilation_window == 0 || !(config.mutilation_limit > 0.0 && config.mutilation_limit <= 1.0)) {
+    if (config.mutilation_window == 0 ||
+        !(config.mutilation_limit > 0.0 && config.mutilation_limit <= 1.0)) {
         return fail("the SITOR mutilation window must hold something and the limit lie in (0, 1]");
     }
     // Table 1 note 2: B is the higher emitted frequency and Y the lower. The
@@ -239,7 +245,8 @@ void SitorBDecoder::on_bit(std::uint8_t bit, SampleIndex sample, std::vector<Sit
     }
 }
 
-void SitorBDecoder::on_signal(std::uint8_t signal, SampleIndex sample, std::vector<SitorCharacter>& out) {
+void SitorBDecoder::on_signal(std::uint8_t signal, SampleIndex sample,
+                              std::vector<SitorCharacter>& out) {
     const bool dx = (slot_ % 2) == 0;
     ++slot_;
 
@@ -328,8 +335,8 @@ void SitorBDecoder::on_signal(std::uint8_t signal, SampleIndex sample, std::vect
 
     if (!printing_) {
         // Clause 4.6.4.
-        const bool line_end = !lost && (chosen.combination == kCarriageReturn ||
-                                        chosen.combination == kLineFeed);
+        const bool line_end =
+            !lost && (chosen.combination == kCarriageReturn || chosen.combination == kLineFeed);
         if (config_.wait_for_line_end && !line_end) {
             return;
         }

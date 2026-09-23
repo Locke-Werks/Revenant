@@ -135,8 +135,8 @@ struct Ax25FrameSpec {
 
 // The bits on the air before NRZI: flags, and each frame's octets with its
 // FCS appended, least significant bit first, bit stuffed per clause 3.6.
-[[nodiscard]] std::vector<std::uint8_t> hdlc_bits(
-    std::span<const std::vector<std::uint8_t>> frames, const Ax25ModConfig& config);
+[[nodiscard]] std::vector<std::uint8_t> hdlc_bits(std::span<const std::vector<std::uint8_t>> frames,
+                                                  const Ax25ModConfig& config);
 
 // NRZI then AFSK: a zero changes tone and a one does not.
 [[nodiscard]] Expected<std::vector<float>> afsk_render_bits(const Ax25ModConfig& config,
@@ -247,12 +247,12 @@ struct SitorModConfig {
 
 // Renders slot-ordered signals as FSK audio, bit position 1 first, Y on the
 // lower emitted frequency.
-[[nodiscard]] Expected<std::vector<float>> sitor_b_render_signals(const SitorModConfig& config,
-                                                                  std::span<const std::uint8_t> signals);
+[[nodiscard]] Expected<std::vector<float>> sitor_b_render_signals(
+    const SitorModConfig& config, std::span<const std::uint8_t> signals);
 
 // sitor_b_signals then sitor_b_render_signals.
-[[nodiscard]] Expected<std::vector<float>> sitor_b_render(const SitorModConfig& config,
-                                                          std::span<const std::uint8_t> combinations);
+[[nodiscard]] Expected<std::vector<float>> sitor_b_render(
+    const SitorModConfig& config, std::span<const std::uint8_t> combinations);
 
 // M.540-2 Annex II Figure 1 as text: "ZCZC", a space, B1 B2 B3 B4, carriage
 // return and line feed, the message, "NNNN", carriage return and two line

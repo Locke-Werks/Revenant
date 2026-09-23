@@ -38,8 +38,7 @@ std::uint32_t from_bits(const char* bits) {
 }
 
 std::vector<decode::PocsagPage> decode_audio(const decode::PocsagConfig& config,
-                                             const std::vector<float>& audio,
-                                             std::size_t block = 0,
+                                             const std::vector<float>& audio, std::size_t block = 0,
                                              decode::PocsagStats* stats = nullptr) {
     auto decoder = decode::PocsagDecoder::create(config);
     REQUIRE(decoder.has_value());
@@ -159,7 +158,8 @@ TEST_CASE("Tables 1 and 2 are code words of the clause 1.4 code", "[decode][pocs
 TEST_CASE("the code corrects two errors and never miscorrects three", "[decode][pocsag]") {
     std::mt19937_64 engine(0xB0C5A6ULL);
     for (int trial = 0; trial < 12; ++trial) {
-        const std::uint32_t word = decode::pocsag_encode(static_cast<std::uint32_t>(engine()) & 0x1FFFFFU);
+        const std::uint32_t word =
+            decode::pocsag_encode(static_cast<std::uint32_t>(engine()) & 0x1FFFFFU);
         INFO("code word " << std::hex << word);
         for (unsigned i = 0; i < 32; ++i) {
             const auto one = decode::pocsag_correct(word ^ (1U << i));
@@ -175,7 +175,8 @@ TEST_CASE("the code corrects two errors and never miscorrects three", "[decode][
                     // Distance 6 with the parity bit: three errors sit at
                     // least three from every other code word, so the decoder
                     // must refuse rather than pick one.
-                    const auto three = decode::pocsag_correct(word ^ (1U << i) ^ (1U << j) ^ (1U << k));
+                    const auto three =
+                        decode::pocsag_correct(word ^ (1U << i) ^ (1U << j) ^ (1U << k));
                     if (three.valid) {
                         FAIL("three errors at " << i << ", " << j << ", " << k << " were accepted");
                     }
@@ -210,7 +211,8 @@ TEST_CASE("POCSAG round trips from audio at three rates", "[decode][pocsag]") {
     for (const double bit_rate : {decode::kPocsag512, decode::kPocsag1200, decode::kPocsag2400}) {
         for (const dsp::SampleRate rate : {dsp::SampleRate{48'000}, dsp::SampleRate{22'050}}) {
             for (const bool invert : {false, true}) {
-                INFO(bit_rate << " bit/s at " << rate << " Hz, " << (invert ? "inverted" : "upright"));
+                INFO(bit_rate << " bit/s at " << rate << " Hz, "
+                              << (invert ? "inverted" : "upright"));
                 siggen::PocsagModConfig mod;
                 mod.rate = rate;
                 mod.bit_rate = bit_rate;
@@ -227,10 +229,10 @@ TEST_CASE("POCSAG round trips from audio at three rates", "[decode][pocsag]") {
                 // The first address codeword follows the preamble and one
                 // synchronization codeword; the page reports its first bit.
                 const double samples_per_bit = static_cast<double>(rate) / bit_rate;
-                const double first_slot =
-                    static_cast<double>(decode::kPocsagPreambleBits + 32 + 32 * 2 * (1234567U & 7U));
-                CHECK(std::abs(static_cast<double>(got[0].position) - first_slot * samples_per_bit) <
-                      samples_per_bit);
+                const double first_slot = static_cast<double>(decode::kPocsagPreambleBits + 32 +
+                                                              32 * 2 * (1234567U & 7U));
+                CHECK(std::abs(static_cast<double>(got[0].position) -
+                               first_slot * samples_per_bit) < samples_per_bit);
             }
         }
     }
@@ -290,7 +292,8 @@ TEST_CASE("POCSAG through an FM receiver against noise, measured", "[decode][poc
     // any of which loses it, which is why the page loss is what it is. At
     // 4 dB the discriminator is below its threshold and the loss is total.
     // The allowances sit above the measurements.
-    const Point points[] = {{20.0, 0, 0.0}, {20.0, 1000, 0.0}, {12.0, 0, 0.2}, {8.0, 0, 0.6}, {4.0, 0, 1.0}};
+    const Point points[] = {
+        {20.0, 0, 0.0}, {20.0, 1000, 0.0}, {12.0, 0, 0.2}, {8.0, 0, 0.6}, {4.0, 0, 1.0}};
 
     for (const Point& p : points) {
         siggen::PocsagModConfig mod;
@@ -365,17 +368,19 @@ TEST_CASE("POCSAG through an FM receiver against noise, measured", "[decode][poc
             ++compared;
         }
         const double ber = static_cast<double>(errors) / static_cast<double>(compared);
-        auto eb_n0 = siggen::reference_bandwidth_to_eb_over_n0_db(p.snr_2500_db, decode::kPocsag1200);
+        auto eb_n0 =
+            siggen::reference_bandwidth_to_eb_over_n0_db(p.snr_2500_db, decode::kPocsag1200);
         REQUIRE(eb_n0.has_value());
         const double codeword_loss =
-            stats.codewords == 0 ? 1.0
-                                 : static_cast<double>(stats.uncorrectable) /
-                                       static_cast<double>(stats.codewords);
+            stats.codewords == 0
+                ? 1.0
+                : static_cast<double>(stats.uncorrectable) / static_cast<double>(stats.codewords);
 
         INFO("SNR " << p.snr_2500_db << " dB in 2500 Hz (Eb/N0 " << *eb_n0 << " dB), tuned "
-                    << p.tuning_error_hz << " Hz off: bit error rate " << ber << " over " << compared
-                    << ", " << stats.corrected_bits << " bits corrected, uncorrectable codewords "
-                    << codeword_loss << ", pages lost " << loss);
+                    << p.tuning_error_hz << " Hz off: bit error rate " << ber << " over "
+                    << compared << ", " << stats.corrected_bits
+                    << " bits corrected, uncorrectable codewords " << codeword_loss
+                    << ", pages lost " << loss);
         CHECK(compared > bits.size() / 2);
         CHECK(loss <= p.allowed_page_loss);
         WARN("POCSAG SNR " << p.snr_2500_db << " dB/2500 Hz (Eb/N0 " << *eb_n0 << " dB), offset "
