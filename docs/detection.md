@@ -839,7 +839,7 @@ at 36.6 Hz. A band that narrow cannot have a shape, and `peak_to_mean` is
 pinned near 2.3 by how the window spreads one line whatever produced it. The
 number says something only about bands wide compared with the window.
 
-**WHAT THIS PARAGRAPH USED TO CLAIM ABOUT `lower_fraction`.** It read:
+**WHAT THIS PARAGRAPH USED TO SAY ABOUT `lower_fraction`.** It read:
 "`lower_fraction` does what it was meant to at the one thing it can see here:
 USB reads 0.453 and LSB 0.547, mirrored about a half in the right directions."
 

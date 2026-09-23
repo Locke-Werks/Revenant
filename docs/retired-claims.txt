@@ -744,3 +744,12 @@ instead: Forty and fifty-eight seconds of the same empty 40 m channel search the
     OFDM call is not a lag-count effect. On three synthetic noises the ratio
     grows with lag count as a Rayleigh extreme value does and never passes
     4.48; the real tail is heavier. docs/detection.md has the table.
+
+phrase: lower_fraction does what it was meant to, at the one thing it can see here
+phrase: lower_fraction does what it was meant to at the one thing it can see here
+retired: 2026-09-22
+commit: 06f9f66
+instead: USB and LSB read 0.453 and 0.547 because each of their lines is its own
+    four-bin band and mirrored lines mirror, to three places at two grids. That
+    is sub-bin placement; lower_fraction has never been shown to measure a
+    sideband. core/detect/shape.h and docs/detection.md say so.

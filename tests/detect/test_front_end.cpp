@@ -1278,10 +1278,12 @@ TEST_CASE("shape survey: parents against their own products", "[.shape-survey]")
 // not. A consumer has to check the width before believing the number, and
 // Candidate carries first_bin and last_bin so it can.
 //
-// lower_fraction does what it was meant to, at the one thing it can see here:
-// usb reads 0.453 and lsb 0.547, mirrored about a half and in the right
-// directions. It is a small margin and this is a two-tone test signal rather
-// than speech, but the sign is correct and consistent.
+// usb reads lower_fraction 0.453 and lsb 0.547, mirrored about a half. WHAT
+// THIS PARAGRAPH USED TO SAY: "lower_fraction does what it was meant to, at
+// the one thing it can see here", with the sign called correct and consistent.
+// docs/detection.md retracted that: the two mirror to three places at both
+// grids because each line is its own four-bin band and mirrored lines mirror,
+// which is sub-bin placement and not sideband structure.
 //
 // skirt_fraction rules itself out as an absolute measure in the same table.
 // fsk2 reads 0.432 with a perfectly linear front end, four times what a QPSK
