@@ -477,6 +477,15 @@ int command_compare(const ArgMap& args) {
         std::print(stderr, "bench compare: {}\n", reference.error().message);
         return kExitError;
     }
+
+    // A decoder curve is read at its own mode's error rate unless told
+    // otherwise, so a caller comparing CW, which is read at 0.05, cannot
+    // judge it at 0.01 by leaving the option off.
+    if (!args.has("ber-threshold")) {
+        if (Expected<bench::ModeSubject> mode = bench::make_mode_subject(reference->mode); mode) {
+            options.ber_threshold = mode->threshold;
+        }
+    }
     Expected<bench::Curve> candidate = bench::read_curve_file(args.positional()[1]);
     if (!candidate) {
         std::print(stderr, "bench compare: {}\n", candidate.error().message);
@@ -500,7 +509,8 @@ int command_compare(const ArgMap& args) {
                          point.candidate_ber, point_ratio, point.worsened ? "worse" : "ok");
         }
         if (comparison->has_sensitivity_delta) {
-            std::println("sensitivity at a BER of {:g}: reference {:.3f} dB, candidate {:.3f} dB, delta {:+.3f} dB",
+            std::println("sensitivity at an error rate of {:g}: reference {:.3f} dB, candidate {:.3f} dB, "
+                         "delta {:+.3f} dB",
                          options.ber_threshold, comparison->reference_sensitivity_db,
                          comparison->candidate_sensitivity_db, comparison->sensitivity_delta_db);
         }
@@ -909,8 +919,9 @@ sweep options (validate takes the same set):
                             navtex                               messages
                             p25p1 dstar tetra                    bits
                           Each has its own grid, trial count and payload,
-                          the ones its nightly baseline was made with, used
-                          unless the options above say otherwise
+                          the ones its nightly baseline was made with, and
+                          no early stop, used unless the options above say
+                          otherwise
   --subject NAME          recorded in the curve
   --commit SHA            recorded in the curve        (default unknown)
   --out FILE              write the curve here, otherwise stdout
@@ -921,7 +932,9 @@ validate also takes:
   --sigma N               width of the band around theory         (default 4)
 
 compare options:
-  --ber-threshold X            BER at which sensitivity is measured (default 0.01)
+  --ber-threshold X            error rate at which sensitivity is measured
+                               (default 0.01, or the reference curve's mode's
+                               own rate for a decoder mode: 0.05 for cw)
   --ber-ratio X                per-point worsening factor           (default 1.5)
   --sensitivity-tolerance-db X allowed rightward shift              (default 0.2)
   --quiet                      suppress the per-point table
