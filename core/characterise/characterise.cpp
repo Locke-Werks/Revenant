@@ -153,6 +153,63 @@ struct TonePair {
     return out;
 }
 
+// The double-sideband reading on CharacteriseConfig::am_sideband_share. The
+// carrier is the strongest three-bin window; each bin at least the minimum
+// offset from it, out to the occupied band's farther edge, is paired with its
+// mirror.
+struct Sidebands {
+    double share = -1.0;
+    double symmetry = -1.0;
+};
+
+[[nodiscard]] Sidebands sidebands(const PowerSpectrum& spectrum, const OccupiedBand& band,
+                                  double min_offset_hz)
+{
+    Sidebands out;
+    const std::size_t size = spectrum.bins.size();
+    if (size < 16 || !band.found || !(spectrum.bin_width_hz > 0.0)) {
+        return out;
+    }
+    std::vector<double> excess(size);
+    double total = 0.0;
+    for (std::size_t k = 0; k < size; ++k) {
+        excess[k] = std::max(spectrum.bins[k] - band.noise_floor, 0.0);
+        total += excess[k];
+    }
+    if (!(total > 0.0)) {
+        return out;
+    }
+    std::size_t carrier = 0;
+    double loudest = -1.0;
+    for (std::size_t k = 0; k < size; ++k) {
+        const double here =
+            excess[(k + size - 1) % size] + excess[k] + excess[(k + 1) % size];
+        if (here > loudest) {
+            loudest = here;
+            carrier = k;
+        }
+    }
+    const double carrier_hz = spectrum.frequency_at(static_cast<double>(carrier));
+    const double reach_hz =
+        std::max(std::abs(band.high_hz - carrier_hz), std::abs(carrier_hz - band.low_hz));
+    const auto first = static_cast<std::size_t>(std::ceil(min_offset_hz / spectrum.bin_width_hz));
+    const auto last = std::min(static_cast<std::size_t>(reach_hz / spectrum.bin_width_hz),
+                               size / 2 - 1);
+    double side = 0.0;
+    double smaller = 0.0;
+    double larger = 0.0;
+    for (std::size_t d = first; d <= last; ++d) {
+        const double upper = excess[(carrier + d) % size];
+        const double lower = excess[(carrier + size - d) % size];
+        side += upper + lower;
+        smaller += std::min(upper, lower);
+        larger += std::max(upper, lower);
+    }
+    out.share = side / total;
+    out.symmetry = larger > 0.0 ? smaller / larger : 0.0;
+    return out;
+}
+
 }  // namespace
 
 Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
@@ -269,11 +326,25 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
         // Nothing else can be read off a signal whose energy is one line.
         out.family = ModulationFamily::Unmodulated;
         out.family_confidence = std::clamp(out.spectral_concentration, 0.0, 1.0);
+
+        // Whether the carrier has mirrored sidebands, which is what a label
+        // reads as AM. See CharacteriseConfig::am_sideband_share.
+        const Sidebands sides = sidebands(*spectrum, out.band, config.am_sideband_min_offset_hz);
+        out.sideband_share = sides.share;
+        out.sideband_symmetry = sides.symmetry;
+        out.double_sideband = sides.share >= config.am_sideband_share &&
+                              sides.symmetry >= config.am_sideband_symmetry;
         out.summary = std::format(
             "an unmodulated carrier: {:.1f} percent of the extract's power is in three adjacent "
             "bins at {}, and its instantaneous frequency spans {}",
             100.0 * out.spectral_concentration, hertz(out.band.centre_hz),
             hertz(out.tones.frequency_spread_hz));
+        if (out.double_sideband) {
+            out.summary += std::format(
+                ", with {:.1f} percent of the band's excess power in sidebands that mirror each "
+                "other to {:.2f} about it, which is double sideband",
+                100.0 * out.sideband_share, out.sideband_symmetry);
+        }
     } else if (out.ofdm.found) {
         // Before the tone test, because an OFDM waveform's instantaneous
         // frequency is a mess with no tones in it and would fall through

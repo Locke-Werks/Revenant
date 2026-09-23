@@ -406,6 +406,14 @@ Status Detector::record_probe(std::uint64_t track_id, const ProbeFinding& findin
     const auto apply = [&](Track& track) {
         track.last_probe = stamped;
         ++track.probes;
+
+        // Before the family's gate, because a verified sync does not rest on
+        // the family: see Track::protocol.
+        if (stamped.protocol != identify::Protocol::None) {
+            track.protocol = stamped.protocol;
+            track.protocol_confidence = stamped.protocol_confidence;
+        }
+
         if (!stamped.may_drive_detection) {
             return;
         }
@@ -415,6 +423,9 @@ Status Detector::record_probe(std::uint64_t track_id, const ProbeFinding& findin
         track.classification = stamped.family;
         track.classification_confidence = stamped.confidence;
         track.symbol_rate_hz = stamped.symbol_rate_hz;
+        track.classification_order = stamped.order;
+        track.classification_tones = stamped.tone_count;
+        track.classification_double_sideband = stamped.double_sideband;
     };
 
     bool found = false;

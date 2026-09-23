@@ -20,6 +20,7 @@ add_executable(revenant_characterise_tests
     test_characterise.cpp
     test_consistency.cpp
     test_empty_channel.cpp
+    test_identify.cpp
     test_cyclostationary.cpp
     test_periodicity.cpp
     test_tones.cpp

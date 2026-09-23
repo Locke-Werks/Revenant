@@ -130,6 +130,24 @@ struct Capture {
     return {};
 }
 
+// The most a receiver at this bucket can be asked to collect, which is what its
+// capture buffer is sized to when it is built. A receiver never changes
+// bucket, but within one bucket a narrow detection collects
+// kProbeIdentifyDwellSeconds and a wider one kProbeDwellSeconds, and the
+// buffer cannot grow while the sink can see it. Narrow detections only ever
+// land at the floor bucket or below, since four times kProbeIdentifyNarrowHz is
+// under kProbeFloorRate, so only those buckets pay for the longer buffer.
+[[nodiscard]] std::uint32_t capacity_for(dsp::SampleRate rate) {
+    const double seconds =
+        rate <= kProbeFloorRate ? std::max(kProbeDwellSeconds, kProbeIdentifyDwellSeconds)
+                                : kProbeDwellSeconds;
+    return std::max(static_cast<std::uint32_t>(seconds * static_cast<double>(rate)),
+                    static_cast<std::uint32_t>(characterise::kMinCharacteriseSamples));
+}
+
+static_assert(kProbeRateOverOccupied * kProbeIdentifyNarrowHz <= kProbeFloorRate,
+              "a narrow detection must land at the floor bucket or below");
+
 }  // namespace
 
 const char* probe_status_name(ProbeStatus status) {
@@ -194,9 +212,15 @@ Expected<ProbeShape> probe_shape(dsp::Hertz occupied_hz, dsp::SampleRate channel
     ProbeShape shape;
     shape.rate = chosen;
     shape.bandwidth = chosen / 2;
+    const auto floor = static_cast<std::uint32_t>(characterise::kMinCharacteriseSamples);
     const auto dwell = static_cast<std::uint32_t>(kProbeDwellSeconds * static_cast<double>(chosen));
-    shape.samples = std::max<std::uint32_t>(
-        dwell, static_cast<std::uint32_t>(characterise::kMinCharacteriseSamples));
+    shape.characterise_samples = std::max<std::uint32_t>(dwell, floor);
+    shape.samples = shape.characterise_samples;
+    if (occupied <= kProbeIdentifyNarrowHz) {
+        const auto longer = static_cast<std::uint32_t>(kProbeIdentifyDwellSeconds *
+                                                       static_cast<double>(chosen));
+        shape.samples = std::max(shape.samples, longer);
+    }
     shape.seconds = static_cast<double>(shape.samples) / static_cast<double>(chosen);
     return shape;
 }
@@ -408,7 +432,7 @@ struct ProbePool::Impl {
                 slot.built = false;
                 receivers.fetch_sub(1, std::memory_order_relaxed);
             }
-            if (!build(slot, params, *placement, shape->rate, shape->samples)) {
+            if (!build(slot, params, *placement, shape->rate, capacity_for(shape->rate))) {
                 outcome.status = ProbeStatus::Failed;
                 emit(outcome);
                 return;
@@ -510,9 +534,15 @@ struct ProbePool::Impl {
             // CharacteriseConfig::detection_bandwidth_hz.
             asked.detection_bandwidth_hz = static_cast<double>(slot.request.occupied_hz);
 
+            // The first kProbeDwellSeconds, whatever was collected: a narrow
+            // detection's longer dwell is for identification, and every
+            // measurement of the characteriser was taken at two seconds.
+            const std::uint32_t characterised_length =
+                std::min(capture.filled, slot.shape.characterise_samples);
+
             const auto began = std::chrono::steady_clock::now();
             auto result = characterise::characterise(
-                dsp::ConstComplexSpan(capture.samples.data(), capture.filled), asked);
+                dsp::ConstComplexSpan(capture.samples.data(), characterised_length), asked);
             const auto spent = std::chrono::steady_clock::now() - began;
             const auto micros =
                 std::chrono::duration_cast<std::chrono::microseconds>(spent).count();
@@ -538,6 +568,34 @@ struct ProbePool::Impl {
                 outcome.psk_without_symbol_rate = found.psk_without_symbol_rate;
                 outcome.psk_tone_pair = found.psk_tone_pair;
                 outcome.symbol_rate_exceeds_detection = found.symbol_rate_exceeds_detection;
+                outcome.double_sideband = found.double_sideband;
+
+                // Then the protocols the family and the width make plausible,
+                // over everything collected. A failure here is not the probe's:
+                // the family stands and the protocol stays None.
+                identify::IdentifyHints hints;
+                hints.family = found.family;
+                hints.symbol_rate_hz = outcome.symbol_rate_hz;
+                hints.occupied_hz = static_cast<double>(slot.request.occupied_hz);
+                identify::IdentifyConfig identify_config;
+                identify_config.rate = capture.rate;
+                identify_config.dmr = config.identify_dmr;
+
+                const auto identify_began = std::chrono::steady_clock::now();
+                auto identified = identify::identify(
+                    dsp::ConstComplexSpan(capture.samples.data(), capture.filled), hints,
+                    identify_config);
+                const auto identify_spent = std::chrono::steady_clock::now() - identify_began;
+                outcome.identify_ms =
+                    static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                            identify_spent)
+                                            .count()) /
+                    1000.0;
+                if (identified) {
+                    outcome.protocol = identified->protocol;
+                    outcome.protocol_confidence = identified->confidence;
+                    outcome.protocol_verified = identified->verified;
+                }
             }
         }
 

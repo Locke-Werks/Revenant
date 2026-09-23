@@ -86,6 +86,10 @@ struct TierTwoStats {
     std::array<std::uint64_t, kClassificationCount> named{};
     std::array<std::uint64_t, kClassificationCount> accepted_as{};
 
+    // Recorded answers that verified a protocol, indexed by identify::Protocol.
+    // None is never counted.
+    std::array<std::uint64_t, identify::kProtocolCount> protocols{};
+
     // Seconds from a track's first sighting to the decision its first
     // accepted family was recorded at, over the tracks that got one.
     std::uint64_t first_classifications = 0;

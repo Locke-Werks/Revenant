@@ -259,6 +259,30 @@ struct CharacteriseConfig {
     double tone_pair_third_fraction = 0.25;
     double tone_pair_rate_tolerance = 0.02;
 
+    // THE DOUBLE-SIDEBAND READING on an Unmodulated call, which is what lets a
+    // label say AM rather than CW. It changes no family: the characteriser has
+    // no AM family and an AM carrier is a carrier.
+    //
+    // A carrier with sidebands mirrored about it is double sideband. So the
+    // band's excess power more than am_sideband_min_offset_hz from the carrier
+    // is measured on each side, bin against mirrored bin, and the reading is
+    // taken when that power is at least am_sideband_share of the band's
+    // excess and the two sides agree to am_sideband_symmetry, the sum of the
+    // smaller of each mirrored pair over the sum of the larger.
+    //
+    // The offset keeps a keyed carrier out: keying at 25 WPM with 5 ms edges
+    // puts its sidebands inside about 100 Hz of the carrier, and speech on an
+    // AM carrier starts at 300 Hz. tests/characterise/test_consistency.cpp
+    // measures AM, a keyed carrier and a bare one at 30, 20 and 10 dB in
+    // 2500 Hz, at 12000 S/s: AM at index 0.8 puts 0.24 to 0.28 of its excess in
+    // sidebands mirroring to 0.81 to 0.998; the keyed and bare carriers put
+    // 0.062 at most there, mirroring to 0.34 at most. At 10 dB the carriers'
+    // noise clears the share bar, so the symmetry bar is the one doing the
+    // work there, by a factor of 2.4 either side of it.
+    double am_sideband_min_offset_hz = 150.0;
+    double am_sideband_share = 0.05;
+    double am_sideband_symmetry = 0.5;
+
     // Transform length for the averaged spectrum, or zero to let
     // analysis_segment pick one from the sample count.
     //
@@ -338,6 +362,14 @@ struct Characterisation {
     // Unknown with the reason in the refusal, and symbol_rate keeps the rate
     // that was measured so a reader can see what was refused.
     bool symbol_rate_exceeds_detection = false;
+
+    // CharacteriseConfig::am_sideband_share's reading, on an Unmodulated call
+    // only: the band's excess power away from the carrier as a share of all
+    // of it, how well the two sides mirror each other, and whether both
+    // cleared their bars. Negative shares mean it was not measured.
+    double sideband_share = -1.0;
+    double sideband_symmetry = -1.0;
+    bool double_sideband = false;
 
     // True when nothing at all was established: no family and no frame
     // period either. A frame period without a family is still a finding,

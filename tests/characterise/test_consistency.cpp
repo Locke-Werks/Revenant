@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <print>
+#include <utility>
 #include <vector>
 
 #include "core/characterise/characterise.h"
@@ -171,4 +172,53 @@ TEST_CASE("a symbol rate wider than the detection refuses the family", "[charact
     // the rule has nothing to read and stays out of the way.
     const auto by_hand = run(samples, 0.0);
     CHECK(by_hand.family == ModulationFamily::Psk);
+}
+
+// REJECTS: a label that calls every carrier CW, and one that calls a keyed
+// carrier AM. All three are Unmodulated to the characteriser; the reading
+// that separates them is whether power sits in sidebands mirrored about the
+// carrier, away from where keying puts it.
+TEST_CASE("an AM carrier reads double sideband and a keyed or bare one does not",
+          "[characterise]")
+{
+    const double levels[] = {30.0, 20.0, 10.0};
+    for (const double level : levels) {
+        siggen::ModulatorConfig common;
+        common.rate = kRate;
+        common.seed = kSeed + 5;
+
+        siggen::AmParams am;
+        am.modulation_index = 0.8;
+        am.tone_hz = 1000;
+        auto am_made = siggen::generate_am(common, am, kSamples);
+        REQUIRE(am_made.has_value());
+        const auto am_result =
+            run(in_noise(am_made->samples, level, kSeed + 300 + static_cast<std::uint64_t>(level)));
+
+        siggen::CwParams cw;
+        cw.words_per_minute = 25.0;
+        auto cw_made = siggen::generate_cw(common, cw, kSamples);
+        REQUIRE(cw_made.has_value());
+        const auto cw_result =
+            run(in_noise(cw_made->samples, level, kSeed + 400 + static_cast<std::uint64_t>(level)));
+
+        std::vector<dsp::Complex32> bare(kSamples, dsp::Complex32(1.0F, 0.0F));
+        const auto bare_result =
+            run(in_noise(bare, level, kSeed + 500 + static_cast<std::uint64_t>(level)));
+
+        for (const auto& [label, result] :
+             {std::pair{"am", &am_result}, std::pair{"cw", &cw_result},
+              std::pair{"carrier", &bare_result}}) {
+            std::println("  {:<8} {:>5.1f} dB  {:<20} sidebands {:.3f} of the excess, symmetry "
+                         "{:.3f}, double sideband {}",
+                         label, level, characterise::modulation_family_name(result->family),
+                         result->sideband_share, result->sideband_symmetry,
+                         result->double_sideband);
+        }
+        INFO(level << " dB");
+        CHECK(am_result.family == ModulationFamily::Unmodulated);
+        CHECK(am_result.double_sideband);
+        CHECK_FALSE(cw_result.double_sideband);
+        CHECK_FALSE(bare_result.double_sideband);
+    }
 }

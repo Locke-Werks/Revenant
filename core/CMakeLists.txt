@@ -114,7 +114,9 @@ add_library(revenant_core STATIC
     detect/detector.cpp
     detect/front_end.cpp
     detect/groups.cpp
+    detect/label.cpp
     detect/tier_two.cpp
+    identify/identify.cpp
     dsp/complex_ops.cpp
     dsp/convert.cpp
     dsp/denormal_mode.cpp

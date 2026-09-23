@@ -104,6 +104,7 @@
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
+#include "core/identify/identify.h"
 
 namespace revenant::detect {
 
@@ -218,6 +219,15 @@ struct ProbeFinding {
     // most often refuses on.
     bool may_drive_detection = false;
     bool psk_without_symbol_rate = false;
+
+    // characterise::Characterisation::double_sideband, meaningful on an
+    // Unmodulated family only: the carrier has mirrored sidebands.
+    bool double_sideband = false;
+
+    // core/identify's answer, which stands on verified framing and not on the
+    // family, so it is kept whether or not the family may drive anything.
+    identify::Protocol protocol = identify::Protocol::None;
+    double protocol_confidence = 0.0;
 
     // The decision at which it was recorded. record_probe sets it.
     dsp::SampleIndex at = 0;
@@ -345,6 +355,22 @@ struct Track {
     Classification classification = Classification::Unknown;
     double classification_confidence = 0.0;
     double symbol_rate_hz = 0.0;
+
+    // The same probe's modulation order and tone count, zero where its
+    // family carries none, and its double-sideband reading. A label reads
+    // these to say BPSK rather than PSK, or AM rather than CW.
+    std::uint32_t classification_order = 0;
+    std::uint32_t classification_tones = 0;
+    bool classification_double_sideband = false;
+
+    // The protocol the most recent probe VERIFIED, with its confidence, and
+    // None until one has. core/identify/identify.h claims one only on a sync
+    // its decoder checked, never on modulation, so a verified protocol is
+    // taken whatever the family said. A later probe that verified nothing
+    // leaves it, for the reason the classification is sticky: one dwell that
+    // missed the framing is not evidence the protocol went away.
+    identify::Protocol protocol = identify::Protocol::None;
+    double protocol_confidence = 0.0;
 
     // The decision at which classification was first set, or zero. Against
     // first_seen this is the time to first classification.

@@ -79,6 +79,7 @@
 #include "core/dsp/types.h"
 #include "core/engine/vrx.h"
 #include "core/error.h"
+#include "core/identify/identify.h"
 
 namespace revenant::engine {
 
@@ -90,6 +91,27 @@ inline constexpr std::array<dsp::SampleRate, 8> kProbeRates = {
 
 // Baseband collected per probe, when the bucket allows it.
 inline constexpr double kProbeDwellSeconds = 2.0;
+
+// THE LONGER DWELL FOR NARROW DETECTIONS, which exists for protocol
+// identification and not for the characteriser.
+//
+// core/identify/identify.h claims a protocol only on verified framing, and
+// the narrow HF modes frame slowly. Two seconds of PSK31 is 62 symbols, of
+// which the decoder spends 32 acquiring, which leaves about three characters;
+// two seconds of 25 WPM CW is three or four; SITOR-B spends 2.24 s on its
+// phasing signals before the first character. Measured in
+// tests/characterise/test_identify.cpp at 20 dB in 2500 Hz: PSK31 verified 1
+// character of the 6 its row needs and CW 3 of 4 in two seconds.
+//
+// So a detection no wider than kProbeIdentifyNarrowHz collects
+// kProbeIdentifyDwellSeconds, and the characteriser still reads only the first
+// kProbeDwellSeconds of it: docs/detection.md measured that the extract's
+// length changes the characteriser's answer, and every figure it records was
+// taken at two seconds. What this costs is time: a narrow track's first family
+// arrives three seconds later, and a probe on one holds its receiver that much
+// longer.
+inline constexpr double kProbeIdentifyDwellSeconds = 5.0;
+inline constexpr dsp::Hertz kProbeIdentifyNarrowHz = 600;
 
 // The lowest bucket whose stated dwell holds the characteriser's sample floor:
 // 16384 samples in two seconds is 8192 S/s, and the bucket above that is
@@ -121,10 +143,16 @@ struct ProbeShape {
     dsp::Hertz bandwidth = 0;
 
     // Samples collected, and the seconds that is. Longer than
-    // kProbeDwellSeconds only when the grid's channel rate is under
-    // kProbeFloorRate.
+    // kProbeDwellSeconds when the grid's channel rate is under
+    // kProbeFloorRate, and when the detection is narrow enough for
+    // kProbeIdentifyDwellSeconds.
     std::uint32_t samples = 0;
     double seconds = 0.0;
+
+    // How many of those the characteriser reads, from the front: the stated
+    // dwell, and never fewer than characterise::kMinCharacteriseSamples. The
+    // whole of `samples` goes to protocol identification.
+    std::uint32_t characterise_samples = 0;
 };
 
 // The bucket and dwell for a detection, or a refusal naming why none fits.
@@ -202,6 +230,19 @@ struct ProbeOutcome {
     bool psk_tone_pair;
     bool symbol_rate_exceeds_detection;
 
+    // characterise::Characterisation::double_sideband: an Unmodulated call
+    // whose carrier has mirrored sidebands, which a label reads as AM.
+    bool double_sideband;
+
+    // core/identify's answer over the whole dwell: a protocol claimed on
+    // verified framing, or None. Independent of may_drive_detection, because a
+    // family the characteriser could not settle does not stop a decoder's sync
+    // from checking, and a verified sync is the stronger evidence of the two.
+    identify::Protocol protocol;
+    double protocol_confidence;
+    std::uint32_t protocol_verified;
+    double identify_ms;
+
     // What was asked and what was built for it.
     dsp::Hertz center;
     dsp::Hertz occupied_hz;
@@ -264,6 +305,9 @@ struct ProbePoolConfig {
     // reused, so a stale one names nothing. Engine puts them above every id
     // add_vrx can issue.
     std::uint32_t first_id = 0x8000'0000U;
+
+    // identify::IdentifyConfig::dmr, the one flag the DMR row sits behind.
+    bool identify_dmr = true;
 };
 
 // Owned by the engine, created with the graph and destroyed before it.

@@ -83,6 +83,7 @@
 #include "core/engine/vrx.h"
 #include "core/engine/wav_writer.h"
 #include "core/error.h"
+#include "core/identify/identify.h"
 #include "core/rpc/decoders.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
@@ -100,6 +101,7 @@ namespace decode = revenant::decode;
 namespace detect = revenant::detect;
 namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
+namespace identify = revenant::identify;
 namespace rpc = revenant::rpc;
 namespace source = revenant::source;
 
@@ -1917,6 +1919,10 @@ public:
         double tier_last_confidence;
         double tier_last_symbol_rate;
 
+        // The protocol a probe verified, as identify::Protocol's value, zero
+        // for none.
+        std::uint32_t tier_protocol;
+
         // Where the pool is with this track when no answer is on it yet:
         // kTierIdle, kTierProbing, or one plus the engine::ProbeStatus the
         // last probe ended with.
@@ -2117,6 +2123,7 @@ public:
                 .tier_last_family = static_cast<std::uint32_t>(track.last_probe.family),
                 .tier_last_confidence = track.last_probe.confidence,
                 .tier_last_symbol_rate = track.last_probe.symbol_rate_hz,
+                .tier_protocol = static_cast<std::uint32_t>(track.protocol),
                 .tier_status = tier_status(track.id),
             };
             ++used;
@@ -2436,8 +2443,18 @@ struct CharacteriseCollector {
         }
         return "-";
     }
+    // A verified protocol leads, since it stands on a checked sync and the
+    // family beside it does not.
+    const std::string protocol =
+        row.tier_protocol != 0
+            ? std::string(identify::protocol_name(static_cast<identify::Protocol>(row.tier_protocol))) +
+                  " "
+            : std::string();
     if (row.tier_family != 0) {
-        return family_text(row.tier_family, row.tier_symbol_rate, row.tier_confidence);
+        return protocol + family_text(row.tier_family, row.tier_symbol_rate, row.tier_confidence);
+    }
+    if (!protocol.empty()) {
+        return protocol + "(family unknown)";
     }
     if (row.tier_last_family != 0) {
         return "(" +
@@ -3378,8 +3395,12 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             std::println("  tier two        {} probe receivers, oldest unclassified live track "
                          "first; {}",
                          options.detect_probes,
-                         floor ? std::format("{:.1f} s of baseband at {} S/s or more per probe",
-                                             floor->seconds, floor->rate)
+                         floor ? std::format(
+                                     "{:.1f} s of baseband at {} S/s or more per probe, {:.1f} s "
+                                     "for a detection under {} Hz so a protocol can be identified",
+                                     static_cast<double>(floor->characterise_samples) /
+                                         static_cast<double>(floor->rate),
+                                     floor->rate, floor->seconds, engine::kProbeIdentifyNarrowHz)
                                : floor.error().message);
             if (eng.source_pacing().paced_by == 0.0 &&
                 eng.source_capabilities().flow != source::FlowControl::Paced) {
@@ -4688,6 +4709,17 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             if (!by_family.empty()) {
                 std::println("  named           {}", by_family);
             }
+            std::string by_protocol;
+            for (std::size_t i = 1; i < identify::kProtocolCount; ++i) {
+                if (tier->protocols[i] != 0) {
+                    by_protocol += std::format(
+                        "{}{} {}", by_protocol.empty() ? "" : ", ",
+                        identify::protocol_name(static_cast<identify::Protocol>(i)),
+                        tier->protocols[i]);
+                }
+            }
+            std::println("  protocols       {}",
+                         by_protocol.empty() ? std::string("none verified") : by_protocol);
             if (tier->first_classifications > 0) {
                 std::println("  first family    {} tracks, {:.2f} s after birth on average, "
                              "{:.2f} s at best and {:.2f} s at worst",
@@ -4725,6 +4757,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 row.tier_last_family = static_cast<std::uint32_t>(track.last_probe.family);
                 row.tier_last_confidence = track.last_probe.confidence;
                 row.tier_last_symbol_rate = track.last_probe.symbol_rate_hz;
+                row.tier_protocol = static_cast<std::uint32_t>(track.protocol);
                 std::println("    #{:<5} {:>16}  {:>11}  {:>6.1f} dB  {} probe{}  {}", track.id,
                              format_hz(track.center), format_hz(track.bandwidth),
                              track.snr_2500_db, track.probes, track.probes == 1 ? " " : "s",

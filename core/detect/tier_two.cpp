@@ -93,6 +93,9 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
             finding.concentration = outcome.concentration;
             finding.may_drive_detection = outcome.may_drive_detection;
             finding.psk_without_symbol_rate = outcome.psk_without_symbol_rate;
+            finding.double_sideband = outcome.double_sideband;
+            finding.protocol = outcome.protocol;
+            finding.protocol_confidence = outcome.protocol_confidence;
 
             // Whether this is the track's first family, read before the
             // detector writes it, so the time to first classification is
@@ -112,6 +115,9 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
                 continue;
             }
             ++stats_.recorded;
+            if (finding.protocol != identify::Protocol::None) {
+                ++stats_.protocols[static_cast<std::size_t>(finding.protocol)];
+            }
             const auto family = static_cast<std::size_t>(finding.family);
             ++stats_.named[family];
             if (!finding.may_drive_detection) {
