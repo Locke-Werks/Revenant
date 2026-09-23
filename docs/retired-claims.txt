@@ -672,3 +672,17 @@ instead: No transform above dsp::kMaxSpectrumTransform, 2048 points, exists in
     bin, and 96 kS/s with center= set opens on 16 at 5.86 Hz. The same claim
     survives in core/detect/detector.h on split_gap_bins and belongs to that
     file's owner.
+
+phrase: the total solar eclipse across the United States, and the three times
+    bracket it
+phrase: These three times run from mid-morning toward midday over North America
+phrase: six hours of HF across the 2017 eclipse
+retired: 2026-09-22
+commit: pending
+instead: The six KF4FIC files are 13:59 to 17:05 UT, one continuous recording
+    per band, 07:59 to 11:05 local at a receiver in the Salt Lake valley
+    (Zenodo 10.5281/zenodo.846442). 1359 and 1501 precede the eclipse's first
+    contact anywhere, 15:46:48 UT; the partial phase reached Salt Lake City at
+    16:13 UT and peaked there at 17:33 UT, after the last file ends. The
+    recordings that cross the eclipse are in the Zenodo record and not on this
+    machine. See docs/recordings.md, "What day this is".

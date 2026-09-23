@@ -45,16 +45,45 @@ to be told where they sit.
 300 kHz and 96 kS/s carries 96 kHz. The name is the band that was being
 listened to, not the span that was captured.
 
+## Where they came from
+
+Zenodo record 10.5281/zenodo.846442, "KF4FIC wideband 20m and 40m data for 2017
+Eclipse HF Wideband Recording Experiment", CC BY 4.0. Jonathan Fields, KF4FIC,
+a Flex-6300 receiver on a Butternut HF9V vertical, at 40.548979 N,
+112.272100 W, which is the Salt Lake valley in Utah. The record lists eight
+recordings per band, at 1359, 1501, 1603, 1705, 1807, 1909, 2011 and 2114 UT.
+The first three of each band are the six on this machine. It does not state a
+tuning.
+
 ## What day this is
 
-2017-08-21 is the total solar eclipse across the United States, and the three
-times bracket it: 1359, 1501 and 1603 UT. The pair of bands is the point. HF
-propagation depends on ionisation the sun drives, so the same two bands an hour
-apart across an eclipse is a controlled experiment somebody else already ran.
+2017-08-21 is the total solar eclipse across the United States. The pair of
+bands is the point: HF propagation depends on ionisation the sun drives, so the
+same two bands through the morning of an eclipse is a controlled experiment
+somebody else already ran.
+
+**The six files here run before the eclipse, not across it.** Each is 3726.5
+seconds, so the three start times are one continuous recording per band from
+13:59 to 17:05 UT, which is 07:59 to 11:05 local time at the receiver (MDT,
+UT minus six). The eclipse's first contact anywhere on Earth was 15:46:48 UT
+and first umbral contact 16:48:32 UT; greatest eclipse was 18:26:40 UT. At
+Salt Lake City the partial phase began at 16:13 UT and peaked at magnitude
+0.925 at 17:33 UT (timeanddate.com, to the minute; the receiver is about
+30 km west of the city). So 1359 and 1501 are entirely before the eclipse, and
+1603 starts before it reached Utah and has its last 52 minutes inside the
+partial phase, ending 28 minutes before the maximum. The five later recordings
+in the Zenodo record are the ones that cross it, and they are not on this
+machine.
+
+WHAT THIS SECTION USED TO SAY: "2017-08-21 is the total solar eclipse across
+the United States, and the three times bracket it: 1359, 1501 and 1603 UT", and
+"the same two bands an hour apart across an eclipse". That was read off the
+filenames before the dataset's own record was looked at.
 
 That matters for what these are useful for. They are not a quiet reference
-recording of a band. They are three hours of a band changing, which is harder,
-and better, for anything being asked whether it holds up when conditions move.
+recording of a band. They are three hours of two bands through a morning,
+which moves them, and that is harder, and better, for anything being asked
+whether it holds up when conditions move.
 
 ## What they unblock
 
@@ -67,7 +96,7 @@ none."
 
 Half of that is now false and half is still true. Real HF exists. Ground truth
 does not: nothing in these files says which signals are in them, and the
-eclipse makes the population change under you over the three hours, so a
+population changes under you over the three hours, so a
 ground-truth record would have to be built and dated rather than stated once.
 
 The honest position is that these make the measurement possible and do not make
@@ -241,19 +270,25 @@ spectrum's own fifth and ninety-ninth percentiles barely move: 40 m runs
 to -81.4 and then -106.0 to -81.8. Total band power is the same at both ends.
 What changed is whether there is structure standing above it.
 
-**The parsimonious reading is the ordinary daytime pattern rather than the
-eclipse.** These three times run from mid-morning toward midday over North
-America, and rising solar elevation does two opposite things: it thickens the D
-layer, which absorbs the lower HF bands, and it raises the F layer's maximum
-usable frequency, which is what carries the higher ones. 7 MHz going quiet
-while 14 MHz fills up is what that looks like.
+**The reading is the ordinary daytime pattern, and the eclipse is ruled out by
+the clock.** The three excerpts sit at 14:09, 15:11 and 16:13 UT, which is
+08:09, 09:11 and 10:13 at the receiver, a morning with the sun climbing. Rising
+solar elevation does two opposite things: it thickens the D layer, which
+absorbs the lower HF bands, and it raises the F layer's maximum usable
+frequency, which is what carries the higher ones. 7 MHz going quiet while
+14 MHz fills up is what that looks like. The first two excerpts precede the
+eclipse's first contact anywhere on Earth, 15:46:48 UT. The third is the minute
+the partial phase began at the receiver, 16:13 UT, with the sun not yet
+measurably covered.
 
-**And three samples on one day cannot separate that from the eclipse.** A real
-eclipse result needs a control day at the same times, which these files are
-not. What is honest to claim is narrower and still worth having: the detector's
-track population tracks the ionosphere in the direction physics says it should,
-on data nobody here produced, which is evidence it is measuring the band rather
-than itself.
+WHAT THIS PARAGRAPH USED TO SAY: "These three times run from mid-morning toward
+midday over North America", and after it "three samples on one day cannot
+separate that from the eclipse. A real eclipse result needs a control day at
+the same times". Both were written before the dataset's own record placed the
+receiver in Utah; see "What day this is" above. What stands is the narrower
+claim: the detector's track population tracks the ionosphere in the direction
+physics says it should, on data nobody here produced, which is evidence it is
+measuring the band rather than itself.
 
 ### What a busy band looks like to it
 

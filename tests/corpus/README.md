@@ -43,7 +43,9 @@ Arrives: M5, alongside extraction. Empty until then, on purpose.
 
 Real IQ landed on the development machine on 2026-09-22, before any of the
 machinery above. `docs/recordings.md` records what it is: six hours of HF
-across the 2017 eclipse, 40 m and 20 m, 96 kS/s.
+from the morning of the 2017 eclipse, before it reached the receiver, 40 m and
+20 m, 96 kS/s. That document says what this paragraph used to say, "six hours
+of HF across the 2017 eclipse", and why it was wrong.
 
 It is not a corpus entry and this directory stays empty. There is no sidecar,
 no checksum, no retrieval URL and no ground-truth record, which are the four
