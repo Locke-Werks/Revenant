@@ -155,6 +155,13 @@ saying which block gave up bit-exactness and why.
 
 ## The integrated device, and an anomaly that got less deniable
 
+**This device is no longer supported or tested.** On 2026-09-22 the Radeon
+integrated graphics in the development machine's Ryzen 9 7950X was dropped
+from CI and from support, on the strength of what this section measured.
+Everything below is kept as the record of why. None of it is open work: the
+places that used to end on a next step for chasing this driver now say that
+nobody is chasing it.
+
 While measuring the above, VkFFT's batched transform turned out not to be
 reproducible run to run on the integrated AMD device for transform sizes of
 1024 and below: three consecutive runs of the identical binary on identical
@@ -580,18 +587,21 @@ safety, is untested. The second is the mechanism itself. What is established
 is the class: the fault needs several dispatches in one submission, it lands
 on the first of them, and it corrupts the transform rather than its delivery.
 
-**What this still does not cover, and it is now the short list.**
-`core/engine/graph.cpp` records frame k+1 and submits it while frame k is
-still executing, with no semaphore between them, and `gpustress` fences every
-submission before recording the next. The engine also runs `pfb_fft`, a
-second shared-memory transform, immediately before the spectrum dispatch in
-the same command buffer, and `gpustress` has no `pfb_fft` shape at all.
-Either could raise the rate further and neither is measured. Both are one
-afternoon of work in the same tool.
+**What this does not cover.** `core/engine/graph.cpp` records frame k+1 and
+submits it while frame k is still executing, with no semaphore between them,
+and `gpustress` fences every submission before recording the next. The engine
+also runs `pfb_fft`, a second shared-memory transform, immediately before the
+spectrum dispatch in the same command buffer, and `gpustress` has no `pfb_fft`
+shape at all. Either could raise the rate further and neither is measured.
+
+This paragraph used to end "Both are one afternoon of work in the same tool",
+as the next step. Nobody is taking it: the device is out of support, and on the
+RTX 4090 the same kernel is exact over 3.7 million dispatches.
 
 ### 2026-09-18: the first reading of the spectrum kernel, withdrawn
 
-WHAT THIS SECTION USED TO SAY, kept word for word below this paragraph. It is
+WHAT THIS SECTION USED TO SAY, kept word for word below this paragraph apart
+from its closing next step, which is noted where it stood. It is
 the first account of the spectrum kernel failing on the integrated device,
 written the day the kernel was, and "2026-09-18: the spectrum kernel, and what
 it turned out to be" higher up replaces it. Its conclusion is now false. It
@@ -643,7 +653,8 @@ at uniform control flow, and the butterfly index mapping provably partitions
 the transform: at stage s the pairs (ia, ib) cover 0..M-1 exactly once, so no
 two invocations in a stage touch the same element.
 
-What would settle it: capture a failure with its divergence pattern, run
-VkFFT's own test suite on that device, and report upstream. Until then the
-honest position is that the discrete card is deterministic across hundreds of
-runs and the integrated part has one unexplained event against it.
+This section used to close on a next step for the integrated device, to
+capture a failure, run VkFFT's own suite there and report upstream, and on the
+position that it had one unexplained event against it. The next step was
+removed on 2026-09-22, when the device left support; the second half is the
+count the heading paragraph above corrects.
