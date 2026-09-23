@@ -1,6 +1,0 @@
-Views. Layout and binding only.
-
-No business logic in .qml files, enforced in review. Logic lives in C++ types
-exposed through QAbstractItemModel and Q_PROPERTY.
-
-Arrives: M2.

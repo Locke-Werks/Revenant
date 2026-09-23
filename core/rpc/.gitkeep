@@ -1,6 +1,0 @@
-The Cap'n Proto service the engine exposes.
-
-The engine is headless and the GUI is one client among several. Spectrum frames
-to a local client pass by shared GPU texture handle, not by copy.
-
-Arrives: M1.

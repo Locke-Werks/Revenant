@@ -433,3 +433,20 @@ instead: The spectrum kernel's arithmetic is not the fault: the RTX 4090 is exac
     200,000 single dispatches and far more once dispatches share a command
     buffer. docs/fft.md from "2026-09-19: measured with an instrument" on has
     the tables.
+
+phrase: Spectrum frames to a local client pass by shared GPU texture handle, not by copy
+retired: 2026-09-19
+commit: 7f31ab0
+instead: Spectrum frames cross the Cap'n Proto wire by copy. A shared texture
+    handle for a local client is a deferred optimisation, and docs/rpc.md under
+    "Spectrum frames cross by copy" has the arithmetic that makes deferring it
+    safe.
+
+phrase: Shares the Vulkan device and command buffers with the DSP, so raster data never
+    touches host memory
+retired: 2026-09-19
+commit: 7f31ab0
+instead: The client is a separate process built against the dynamic CRT and
+    links no part of the engine. Spectrum and waterfall are Qt scene graph
+    nodes fed from frames that arrive over a socket, so the raster data is
+    read back to the host and crosses a socket before anything draws it.

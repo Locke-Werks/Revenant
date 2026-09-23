@@ -1,8 +1,0 @@
-The decoder framework and the decoders themselves.
-
-Every decoder is a pure function of sample buffers: no wall clock, no global
-state, no realtime assumption. Retroactive decode and faster-than-realtime
-replay both depend on it. Each states the specification it implements by
-document number, plus any deviation and why.
-
-Arrives: M4, starting with RTTY as the framework shakedown.

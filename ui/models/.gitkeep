@@ -1,5 +1,0 @@
-C++ types exposed to QML.
-
-This is where the logic lives that QML is not allowed to contain.
-
-Arrives: M2.

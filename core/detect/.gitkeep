@@ -1,6 +1,0 @@
-Burst detection, feature extraction and modulation classification.
-
-Layer 1 must never depend on anything here. The moment the receiver needs the
-classifier to function, nothing ships until everything works.
-
-Arrives: M7, the semantic layer.

@@ -1,6 +1,0 @@
-The custom QSGRenderNode for the spectrum and waterfall.
-
-Shares the Vulkan device and command buffers with the DSP, so raster data never
-touches host memory.
-
-Arrives: M2.
