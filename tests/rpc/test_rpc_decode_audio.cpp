@@ -50,6 +50,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -129,11 +130,14 @@ constexpr dsp::Hertz kVhfCentre = 145'000'000;
     return static_cast<std::size_t>(seconds * static_cast<double>(kFileRate));
 }
 
-// The transmission with its silence either side, at the file's rate.
-[[nodiscard]] std::vector<float> padded(std::span<const float> audio) {
+// The transmission with its silence either side, at the file's rate. A
+// shorter tail is for the cases that stop the file before a decoder would
+// have closed what it holds.
+[[nodiscard]] std::vector<float> padded(std::span<const float> audio,
+                                        double tail_seconds = kTailSeconds) {
     std::vector<float> out(seconds_to_samples(kLeadSeconds), 0.0F);
     out.insert(out.end(), audio.begin(), audio.end());
-    out.insert(out.end(), seconds_to_samples(kTailSeconds), 0.0F);
+    out.insert(out.end(), seconds_to_samples(tail_seconds), 0.0F);
     return out;
 }
 
@@ -180,9 +184,10 @@ constexpr dsp::Hertz kVhfCentre = 145'000'000;
 // Complex baseband moved up to the carrier, with silence either side. The
 // phase is reduced exactly in integers so it does not drift with length.
 [[nodiscard]] std::vector<dsp::Complex32> on_the_carrier(std::span<const dsp::Complex32> signal,
-                                                        dsp::Hertz shift_hz = kCarrierHz) {
+                                                        dsp::Hertz shift_hz = kCarrierHz,
+                                                        double tail_seconds = kTailSeconds) {
     std::vector<dsp::Complex32> out(seconds_to_samples(kLeadSeconds), dsp::Complex32{});
-    out.reserve(out.size() + signal.size() + seconds_to_samples(kTailSeconds));
+    out.reserve(out.size() + signal.size() + seconds_to_samples(tail_seconds));
     for (std::size_t n = 0; n < signal.size(); ++n) {
         const std::int64_t turns =
             ((shift_hz % kFileRate + kFileRate) * static_cast<std::int64_t>(n)) % kFileRate;
@@ -192,15 +197,16 @@ constexpr dsp::Hertz kVhfCentre = 145'000'000;
             0.5 * std::complex<double>(signal[n]) * std::polar(1.0, angle);
         out.emplace_back(static_cast<float>(moved.real()), static_cast<float>(moved.imag()));
     }
-    out.insert(out.end(), seconds_to_samples(kTailSeconds), dsp::Complex32{});
+    out.insert(out.end(), seconds_to_samples(tail_seconds), dsp::Complex32{});
     return out;
 }
 
 // Noise over the whole file at snr_2500_db against the power of the
 // transmission alone, which is the part between the two silences.
-[[nodiscard]] Status add_noise(std::vector<dsp::Complex32>& all, double snr_2500_db) {
+[[nodiscard]] Status add_noise(std::vector<dsp::Complex32>& all, double snr_2500_db,
+                               double tail_seconds = kTailSeconds) {
     const std::size_t lead = seconds_to_samples(kLeadSeconds);
-    const std::size_t tail = seconds_to_samples(kTailSeconds);
+    const std::size_t tail = seconds_to_samples(tail_seconds);
     const std::span<const dsp::Complex32> transmission(all.data() + lead,
                                                        all.size() - lead - tail);
     const double power = siggen::mean_power(transmission);
@@ -239,8 +245,10 @@ const std::vector<std::string> kRttyLines = {"CQ DE N0CALL", "RYRY 0123456789 73
 // adapter in core/rpc/decoders.h. The transmitter is told the same thing the
 // adapter will decide, and the radio frequencies come out the same way round
 // in both: mark on the higher one.
-[[nodiscard]] Expected<Capture> rtty_capture(bool upper, double snr_2500_db) {
-    auto codes = siggen::ita2_encode_text(kRttyText);
+[[nodiscard]] Expected<Capture> rtty_capture(bool upper, double snr_2500_db,
+                                             std::u32string_view text = kRttyText,
+                                             double tail_seconds = kTailSeconds) {
+    auto codes = siggen::ita2_encode_text(text);
     if (!codes) {
         return std::unexpected(codes.error());
     }
@@ -252,11 +260,11 @@ const std::vector<std::string> kRttyLines = {"CQ DE N0CALL", "RYRY 0123456789 73
     if (!audio) {
         return std::unexpected(audio.error());
     }
-    auto signal = sideband(padded(*audio), upper);
+    auto signal = sideband(padded(*audio, tail_seconds), upper);
     if (!signal) {
         return std::unexpected(signal.error());
     }
-    if (auto noisy = add_noise(*signal, snr_2500_db); !noisy) {
+    if (auto noisy = add_noise(*signal, snr_2500_db, tail_seconds); !noisy) {
         return std::unexpected(noisy.error());
     }
     return Capture{upper ? "rtty_usb" : "rtty_lsb", std::move(*signal),
@@ -267,8 +275,14 @@ const std::vector<std::string> kRttyLines = {"CQ DE N0CALL", "RYRY 0123456789 73
 const std::u32string kSitorText = U"CQ CQ DE N0CALL\r\nSITOR B TEST 42\r\n";
 const std::vector<std::string> kSitorLines = {"CQ CQ DE N0CALL", "SITOR B TEST 42"};
 
+// `closing_alphas` and `tail_seconds` default to a transmission that ends as
+// clause 4.6.7.1 has it and a file that runs on past it; the flush cases cut
+// both short, so the line is still open when the file stops.
 [[nodiscard]] Expected<Capture> sitor_capture(std::u32string_view text, bool navtex,
-                                              double snr_2500_db) {
+                                              double snr_2500_db,
+                                              std::size_t closing_alphas =
+                                                  siggen::SitorModConfig{}.closing_alphas,
+                                              double tail_seconds = kTailSeconds) {
     auto codes = siggen::ita2_encode_text(text);
     if (!codes) {
         return std::unexpected(codes.error());
@@ -282,15 +296,16 @@ const std::vector<std::string> kSitorLines = {"CQ CQ DE N0CALL", "SITOR B TEST 4
     // seconds Figure 1 asks of a NAVTEX station; the decoder phases on the
     // same signal either way and a shorter capture is a faster case.
     mod.line_end_first = !navtex;
+    mod.closing_alphas = closing_alphas;
     auto audio = siggen::sitor_b_render(mod, *codes);
     if (!audio) {
         return std::unexpected(audio.error());
     }
-    auto signal = sideband(padded(*audio), true);
+    auto signal = sideband(padded(*audio, tail_seconds), true);
     if (!signal) {
         return std::unexpected(signal.error());
     }
-    if (auto noisy = add_noise(*signal, snr_2500_db); !noisy) {
+    if (auto noisy = add_noise(*signal, snr_2500_db, tail_seconds); !noisy) {
         return std::unexpected(noisy.error());
     }
     return Capture{navtex ? "navtex_usb" : "sitor_b_usb", std::move(*signal), rpc::Demod::Usb,
@@ -415,6 +430,63 @@ constexpr std::string_view kSlowText = "SLOW PAGE";
     return Capture{"pocsag_nfm", std::move(signal), rpc::Demod::Nfm, kVhfCentre};
 }
 
+// How far into the codeword after the last page the cut capture stops: most
+// of it, so every bit of the page is well inside the file whatever the
+// receiver's delay, and short of the 32 that would let the decoder read the
+// codeword and close the page itself.
+constexpr std::size_t kPocsagCutBits = 28;
+
+// A tone page and then an alphanumeric one at 1200 bit/s, cut off
+// kPocsagCutBits into the codeword that would have ended the second, with no
+// silence after. The tone page closes on the second page's address; the
+// second is still open when the file stops.
+[[nodiscard]] Expected<Capture> pocsag_cut_capture(double snr_2500_db) {
+    auto alpha = siggen::pocsag_alphanumeric_bits(kAlphaText);
+    if (!alpha) {
+        return std::unexpected(alpha.error());
+    }
+    const std::vector<siggen::PocsagPageSpec> pages = {
+        {kToneRic, 0b01, {}},
+        {kAlphaRic, decode::kPocsagFunctionAlphanumeric, *alpha},
+    };
+    const std::vector<std::uint32_t> words = siggen::pocsag_codewords(pages);
+    std::size_t last = 0;
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        if (words[i] != decode::kPocsagIdle && words[i] != decode::kPocsagSync) {
+            last = i;
+        }
+    }
+    if (last + 1 >= words.size()) {
+        return fail("the POCSAG test transmission has no codeword after its last page");
+    }
+
+    // pocsag_bits' layout, clause 1.1's preamble then the codewords most
+    // significant bit first, stopped part way through the one after `last`.
+    std::vector<std::uint8_t> bits;
+    for (std::size_t i = 0; i < decode::kPocsagPreambleBits; ++i) {
+        bits.push_back(static_cast<std::uint8_t>((i % 2 == 0) ? 1U : 0U));
+    }
+    for (std::size_t w = 0; w <= last + 1; ++w) {
+        const std::size_t count = w <= last ? decode::kPocsagCodewordBits : kPocsagCutBits;
+        for (std::size_t b = 0; b < count; ++b) {
+            bits.push_back(static_cast<std::uint8_t>((words[w] >> (31U - b)) & 1U));
+        }
+    }
+
+    siggen::PocsagModConfig mod;
+    mod.rate = kFileRate;
+    mod.bit_rate = decode::kPocsag1200;
+    auto baseband = siggen::pocsag_render_baseband(mod, bits);
+    if (!baseband) {
+        return std::unexpected(baseband.error());
+    }
+    std::vector<dsp::Complex32> signal = on_the_carrier(*baseband, kCarrierHz, 0.0);
+    if (auto noisy = add_noise(signal, snr_2500_db, 0.0); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"pocsag_cut_nfm", std::move(signal), rpc::Demod::Nfm, kVhfCentre};
+}
+
 // The analytic signal of a tone at an audio frequency is already the upper
 // sideband of a carrier at zero, so moving it up to the carrier is the whole
 // of a USB transmitter.
@@ -427,8 +499,9 @@ constexpr std::string_view kSlowText = "SLOW PAGE";
 // mirrors it, which is what Psk31Config::lower_sideband undoes. Mirroring it
 // here as well would hand the receiver a signal that no station sends.
 [[nodiscard]] std::vector<dsp::Complex32> sideband_from_analytic(
-    std::span<const dsp::Complex32> analytic, dsp::Hertz tone_hz, bool upper) {
-    return on_the_carrier(analytic, upper ? kCarrierHz : kCarrierHz - 2 * tone_hz);
+    std::span<const dsp::Complex32> analytic, dsp::Hertz tone_hz, bool upper,
+    double tail_seconds = kTailSeconds) {
+    return on_the_carrier(analytic, upper ? kCarrierHz : kCarrierHz - 2 * tone_hz, tail_seconds);
 }
 
 // Line ends either side, as for RTTY. The tone is Psk31Config's 1000 Hz.
@@ -445,12 +518,14 @@ const std::vector<std::string> kPskLines = {"CQ DE N0CALL", "TEST 73"};
 }
 
 [[nodiscard]] Expected<Capture> psk_capture(decode::Psk31Mode mode, bool upper,
-                                            double snr_2500_db) {
+                                            double snr_2500_db,
+                                            std::string_view text = kPskText,
+                                            double tail_seconds = kTailSeconds) {
     siggen::Psk31ModConfig mod;
     mod.rate = kFileRate;
     mod.tone_hz = decode::Psk31Config{}.centre_hz;
     mod.mode = mode;
-    auto bits = siggen::psk31_message_bits(mod, kPskText);
+    auto bits = siggen::psk31_message_bits(mod, text);
     if (!bits) {
         return std::unexpected(bits.error());
     }
@@ -458,8 +533,9 @@ const std::vector<std::string> kPskLines = {"CQ DE N0CALL", "TEST 73"};
     if (!analytic) {
         return std::unexpected(analytic.error());
     }
-    std::vector<dsp::Complex32> signal = sideband_from_analytic(*analytic, mod.tone_hz, upper);
-    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+    std::vector<dsp::Complex32> signal =
+        sideband_from_analytic(*analytic, mod.tone_hz, upper, tail_seconds);
+    if (auto noisy = add_noise(signal, snr_2500_db, tail_seconds); !noisy) {
         return std::unexpected(noisy.error());
     }
     return Capture{psk_tag(mode) + (upper ? "_usb" : "_lsb"), std::move(signal),
@@ -472,7 +548,8 @@ const std::vector<std::string> kPskLines = {"CQ DE N0CALL", "TEST 73"};
 const std::string kCwText = "CQ CQ DE N0CALL K";
 constexpr dsp::Hertz kCwToneHz = 700;
 
-[[nodiscard]] Expected<Capture> cw_capture(double snr_2500_db) {
+[[nodiscard]] Expected<Capture> cw_capture(double snr_2500_db,
+                                           double tail_seconds = kTailSeconds) {
     siggen::CwModConfig mod;
     mod.rate = kFileRate;
     mod.tone_hz = kCwToneHz;
@@ -481,8 +558,8 @@ constexpr dsp::Hertz kCwToneHz = 700;
     if (!analytic) {
         return std::unexpected(analytic.error());
     }
-    std::vector<dsp::Complex32> signal = on_the_carrier(*analytic);
-    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+    std::vector<dsp::Complex32> signal = on_the_carrier(*analytic, kCarrierHz, tail_seconds);
+    if (auto noisy = add_noise(signal, snr_2500_db, tail_seconds); !noisy) {
         return std::unexpected(noisy.error());
     }
     return Capture{"cw", std::move(signal), rpc::Demod::Cw, kHfCentre, kCarrierHz + kCwToneHz};
@@ -642,6 +719,107 @@ struct Run {
     INFO(log->reason());
     CHECK_FALSE(log->ended());
     return run;
+}
+
+// What a decoder sent while the engine ran, and what it had sent by the time
+// its receiver was removed and ended() arrived.
+struct Removed {
+    std::vector<rpc::DecodedMessage> before;
+    std::vector<rpc::DecodedMessage> after;
+    std::string reason;
+    bool ended = false;
+};
+
+// run_capture's run, then the receiver removed with the decoder attached.
+// The engine has stopped before the removal, so nothing the receiver heard
+// after `before` was read can have closed what the decoder holds; whatever
+// arrives between the two is what flush handed over.
+[[nodiscard]] Removed run_then_remove(const Capture& capture, std::string_view decoder) {
+    CaptureFile file(capture);
+    const auto written = file.write(capture.samples);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    HarnessOptions options;
+    options.source_uri = file.uri();
+    options.channels = kGridChannels;
+    options.block_samples = kBlockSamples;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    auto vrx = harness.client().add_vrx(
+        rpc::VrxParams{.center = capture.receiver_hz, .bandwidth = 0, .demod = capture.demod});
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<MessageLog>();
+    auto resolved = harness.client().subscribe_decoded(*vrx, decoder, into(log), ending(log));
+    INFO(test::message_of(resolved));
+    REQUIRE(resolved.has_value());
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+    const std::uint64_t blocks = (file.samples() + kBlockSamples - 1) / kBlockSamples;
+    const std::uint64_t seen = harness.wait_for_blocks(blocks, kRunTimeoutMs);
+    INFO(std::format("{} blocks delivered of {}", seen, blocks));
+    CHECK(seen >= blocks);
+    const auto finished = harness.stop_engine();
+    INFO(test::message_of(finished));
+    CHECK(finished.has_value());
+
+    auto stats = harness.client().decoded_stats(*vrx, decoder);
+    INFO(test::message_of(stats));
+    REQUIRE(stats.has_value());
+    const std::uint64_t sent = stats->messages_sent + stats->backlog;
+
+    Removed out;
+    out.before = wait_for(*log, [&](const auto& got) { return got.size() >= sent; });
+    REQUIRE(harness.client().remove_vrx(*vrx).has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!log->ended() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    out.ended = log->ended();
+    out.reason = log->reason();
+    out.after = log->messages();
+    return out;
+}
+
+[[nodiscard]] std::string listed(const std::vector<rpc::DecodedMessage>& messages) {
+    std::string out;
+    for (const rpc::DecodedMessage& message : messages) {
+        out += std::format("\n  #{} {} {}: {}", message.sequence, message.decoder, message.kind,
+                           message.text);
+    }
+    return out;
+}
+
+[[nodiscard]] bool has_line_starting(const std::vector<rpc::DecodedMessage>& messages,
+                                     std::string_view text) {
+    return std::ranges::any_of(messages, [&](const rpc::DecodedMessage& message) {
+        return message.kind == "line" && message.text.starts_with(text);
+    });
+}
+
+// The checks every flush case shares: ended() arrived with the removal's
+// reason, and exactly one message came between the run and it, which is
+// handed back.
+[[nodiscard]] rpc::DecodedMessage the_flushed_one(const Removed& removed) {
+    INFO(removed.reason);
+    REQUIRE(removed.ended);
+    CHECK(removed.reason == "the receiver was removed");
+    INFO(std::format("{} before the removal:{}\n{} by ended():{}", removed.before.size(),
+                     listed(removed.before), removed.after.size(), listed(removed.after)));
+    REQUIRE(removed.after.size() == removed.before.size() + 1);
+    const rpc::DecodedMessage& flushed = removed.after.back();
+    CHECK(flushed.sample_rate == kAudioRate);
+    // Stamped where the stream stopped, with no length: no chunk completed it.
+    CHECK(flushed.end_sample == flushed.start_sample);
+    return flushed;
 }
 
 [[nodiscard]] std::string arrived(const Run& run) {
@@ -1313,6 +1491,162 @@ TEST_CASE("M17 is refused on a receiver whose channel cuts it", "[gpu][rpc][deco
               "the m17 decoder reads the complex baseband of a p25p1 or raw receiver") !=
           std::string::npos);
     CHECK(refused.error().message.find("is dstar") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// The end of the stream
+// ---------------------------------------------------------------------------
+//
+// Each case stops its file with the decoder still holding something: a line
+// with no line end and too little quiet after it for the idle rule, a NAVTEX
+// message with no "NNNN", a page whose closing codeword is cut short. The
+// engine runs to the end and stops, the receiver is removed, and what the
+// decoder held has to arrive ahead of ended(). Before ChunkDecoder::flush was
+// overridden for these adapters it went with the decoder.
+
+namespace {
+
+// Short enough that nothing in the noise after the carrier completes a
+// character, and far inside every line's idle rule: RTTY's 1.65 s, SITOR-B's
+// 1.4 s, PSK31's 3.2 s and CW's 2.1 s at 20 WPM.
+constexpr double kCutTailSeconds = 0.1;
+
+}  // namespace
+
+TEST_CASE("an RTTY line still open when its receiver goes arrives before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // No line end after the last line, and the transmitter's own eight units
+    // of idle mark, 176 ms, are all the quiet there is.
+    auto capture = rtty_capture(true, kHighSnrDb, U"\r\nCQ DE N0CALL\r\nLAST LINE",
+                                kCutTailSeconds);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "rtty");
+    CHECK(has_line_starting(removed.before, "CQ DE N0CALL"));
+    CHECK_FALSE(has_line_starting(removed.before, "LAST LINE"));
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "rtty");
+    CHECK(flushed.kind == "line");
+    CHECK(text_of(flushed, "ended") == "stream_end");
+    CHECK(flushed.text == "LAST LINE");
+    WARN(std::format("rtty flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a SITOR-B line still open when its receiver goes arrives before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // Four closing alphas rather than clause 4.6.7.1's fifteen: 560 ms, which
+    // carries every RX copy out and stays inside the 1.4 s idle rule.
+    auto capture =
+        sitor_capture(U"CQ CQ DE N0CALL\r\nLAST LINE", false, kHighSnrDb, 4, kCutTailSeconds);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "sitor_b");
+    CHECK(has_line_starting(removed.before, "CQ CQ DE N0CALL"));
+    CHECK_FALSE(has_line_starting(removed.before, "LAST LINE"));
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "sitor_b");
+    CHECK(text_of(flushed, "ended") == "stream_end");
+    CHECK(flushed.text == "LAST LINE");
+    CHECK(integer_of(flushed, "lost") == 0);
+    WARN(std::format("sitor_b flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a NAVTEX message with no NNNN when its receiver goes arrives before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // navtex_text's preamble and body without its "NNNN".
+    std::u32string text = U"ZCZC EA07\r\n";
+    text += kNavtexBody;
+    auto capture = sitor_capture(text, true, kHighSnrDb, 4, kCutTailSeconds);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "navtex");
+    CHECK(removed.before.empty());
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "navtex");
+    CHECK(flushed.kind == "incomplete");
+    CHECK(flag_of(flushed, "flushed"));
+    CHECK_FALSE(flag_of(flushed, "complete"));
+    CHECK(text_of(flushed, "area") == "E");
+    CHECK(text_of(flushed, "subject") == "A");
+    CHECK(integer_of(flushed, "serial") == 7);
+    CHECK(flag_of(flushed, "preamble_clean"));
+    CHECK(text_of(flushed, "message").starts_with(kNavtexMessage));
+    CHECK(flushed.text.ends_with("(incomplete, stream ended)"));
+    WARN(std::format("navtex flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a POCSAG page still open when its receiver goes arrives before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = pocsag_cut_capture(kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "pocsag");
+
+    // The tone page closed on the second page's address while the engine ran.
+    REQUIRE(removed.before.size() == 1);
+    CHECK(integer_of(removed.before.front(), "address") == kToneRic);
+    CHECK_FALSE(flag_of(removed.before.front(), "flushed"));
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "pocsag");
+    CHECK(flushed.kind == "alphanumeric");
+    CHECK(flag_of(flushed, "flushed"));
+    CHECK(integer_of(flushed, "address") == kAlphaRic);
+    CHECK(integer_of(flushed, "bit_rate") == 1200);
+    CHECK(integer_of(flushed, "uncorrectable_codewords") == 0);
+    CHECK(text_of(flushed, "message") == kAlphaText);
+    WARN(std::format("pocsag flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a PSK31 line still open when its receiver goes arrives before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // One case for the three PSK modes, which are one adapter. The
+    // transmitter's postamble is 64 symbols, 2.05 s, inside the 3.2 s rule.
+    auto capture = psk_capture(decode::Psk31Mode::Bpsk31, true, kHighSnrDb,
+                               "\r\nCQ DE N0CALL\r\nLAST LINE", kCutTailSeconds);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "psk31");
+    CHECK(has_line_starting(removed.before, "CQ DE N0CALL"));
+    CHECK_FALSE(has_line_starting(removed.before, "LAST LINE"));
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "psk31");
+    CHECK(text_of(flushed, "ended") == "stream_end");
+    CHECK(flushed.text == "LAST LINE");
+    WARN(std::format("psk31 flushed \"{}\"", flushed.text));
+}
+
+TEST_CASE("a CW line still open when its receiver goes arrives before ended",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    // The transmitter's own second of key-up after the last element, and
+    // the file's tenth after that, against the 2.1 s rule.
+    auto capture = cw_capture(kHighSnrDb, kCutTailSeconds);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Removed removed = run_then_remove(*capture, "cw");
+    CHECK(removed.before.empty());
+
+    const rpc::DecodedMessage flushed = the_flushed_one(removed);
+    CHECK(flushed.decoder == "cw");
+    CHECK(text_of(flushed, "ended") == "stream_end");
+    CHECK(flushed.text == kCwText);
+    WARN(std::format("cw flushed \"{}\" at {:.1f} WPM", flushed.text, real_of(flushed, "wpm")));
 }
 
 // ---------------------------------------------------------------------------

@@ -151,10 +151,18 @@ struct DecoderChunk {
 //
 // flush is for the end of the stream, when the receiver goes or the run
 // finishes: it appends what a decoder holding a message open has recovered of
-// it, rather than let it go with the decoder. The D-STAR adapter takes it,
-// for a transmission handed over one superframe at a time. POCSAG, CW and
+// it, rather than let it go with the decoder. Every adapter below that holds
+// something takes it: D-STAR a transmission handed over one superframe at a
+// time, POCSAG a page whose closing codeword the stream cut short, NAVTEX a
+// message still waiting for its "NNNN", CW the character being keyed, and
+// RTTY, SITOR-B, the PSK modes and CW the line they were gathering. P25,
+// TETRA, AX.25 and M17
+// hold nothing a client could read, a partial frame or burst, and take the
+// default here, which appends nothing.
+//
+// WHAT THIS PARAGRAPH USED TO SAY after the D-STAR sentence: "POCSAG, CW and
 // NAVTEX have a flush of their own in core/decode that their adapters do not
-// call yet, so they take the default here, which appends nothing.
+// call yet, so they take the default here, which appends nothing."
 class ChunkDecoder {
 public:
     ChunkDecoder() = default;
@@ -425,6 +433,29 @@ private:
     std::optional<std::uint64_t> base_;
 };
 
+// Where the stream stood when it ended, for what flush hands over.
+//
+// Nothing completed a message a flush recovers, so no chunk's span is its
+// own. It is stamped where the last chunk ended, with no length, as the
+// D-STAR adapter stamps a flushed superframe: the message was still open at
+// that sample, which is the one position the stream can vouch for.
+class StreamEnd {
+public:
+    void observe(const DecoderChunk& chunk) {
+        channels_ = chunk.channels;
+        rate_ = chunk.rate;
+        end_ = chunk.start + chunk.frames();
+    }
+    [[nodiscard]] DecoderChunk at_end() const {
+        return DecoderChunk{.samples = {}, .channels = channels_, .rate = rate_, .start = end_};
+    }
+
+private:
+    std::uint32_t channels_ = 1;
+    dsp::SampleRate rate_ = 0;
+    dsp::SampleIndex end_ = 0;
+};
+
 // Characters gathered into lines, for the two start-stop text modes.
 //
 // A MESSAGE PER CHARACTER WOULD FILL THE QUEUE, which is why this exists.
@@ -432,8 +463,9 @@ private:
 // so a client that stalled for 42 seconds would lose text, and a person reads
 // a line rather than a character. A line ends at a carriage return or line
 // feed, at kMaxLineCharacters, when the transmitter goes quiet for
-// kIdleCharacters character times, or when the decoder has a reason to think
-// what follows is another transmission.
+// kIdleCharacters character times, when the decoder has a reason to think
+// what follows is another transmission, or when the stream ends and
+// ChunkDecoder::flush hands over the line in progress.
 //
 // Both limits are engineering choices and not citations: 80 is a terminal's
 // width, and ten character times is 1.65 s of RTTY and 1.4 s of SITOR-B, long
@@ -500,7 +532,7 @@ private:
 };
 
 // Why a line was handed out, as the "ended" field spells it.
-enum class LineEnd : std::uint8_t { LineEnd, Length, Idle, NewTransmission };
+enum class LineEnd : std::uint8_t { LineEnd, Length, Idle, NewTransmission, StreamEnd };
 
 [[nodiscard]] inline std::string_view line_end_name(LineEnd why) {
     switch (why) {
@@ -508,6 +540,7 @@ enum class LineEnd : std::uint8_t { LineEnd, Length, Idle, NewTransmission };
         case LineEnd::Length: return "length";
         case LineEnd::Idle: return "idle";
         case LineEnd::NewTransmission: return "new_transmission";
+        case LineEnd::StreamEnd: return "stream_end";
     }
     return "unknown";
 }
@@ -990,7 +1023,10 @@ private:
 //                               least one unit was a guess
 //   mean_margin          real
 //   figures              flag   figures case was in force at the end
-//   ended                text   line_end, length or idle; TextLine has why
+//   ended                text   line_end, length, idle or stream_end;
+//                               TextLine has why. stream_end is the line
+//                               flush handed over, stamped where the stream
+//                               stopped
 //   began_sample         int    receiver-stream index of the first character's
 //                               start element, where start_sample is the
 //                               chunk that completed the line
@@ -1023,6 +1059,7 @@ public:
             return shape;
         }
         base_.observe(chunk);
+        end_.observe(chunk);
         characters_.clear();
         decoder_.process(chunk.samples, characters_);
 
@@ -1051,6 +1088,12 @@ public:
             emit(chunk, LineEnd::Idle, out);
         }
         return {};
+    }
+
+    // The line in progress. A character still being framed is not one yet:
+    // it has no stop element, which is what rtty.h hands a character over on.
+    void flush(std::vector<DecodedMessage>& out) override {
+        emit(end_.at_end(), decoders_detail::LineEnd::StreamEnd, out);
     }
 
     void reset() override {
@@ -1108,6 +1151,7 @@ private:
     decode::RttyConfig config_;
     decode::RttyDecoder decoder_;
     decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
     std::vector<decode::RttyCharacter> characters_;
     decoders_detail::TextLine line_;
     float min_margin_ = std::numeric_limits<float>::max();
@@ -1427,15 +1471,25 @@ private:
 //   uncorrectable_codewords int
 //   inverted             flag   the sync codeword arrived complemented
 //   began_sample         int    receiver-stream index of the address codeword
+//   flushed              flag   the stream ended with the page still open,
+//                               and flush handed it over
 //
-// A PAGE STILL OPEN WHEN THE AUDIO STOPS IS NOT REPORTED. PocsagDecoder::flush
-// exists for the end of a capture, and this adapter does not override
-// ChunkDecoder::flush to call it. While the receiver lives it does not need
-// to: the receiver goes on delivering noise, which ends the page on the loss
-// of sync a few codewords later.
+// A PAGE STILL OPEN WHEN THE STREAM ENDS IS REPORTED, by flush, from each of
+// the three decoders that holds one. While the receiver lives nothing needs
+// flushing: it goes on delivering noise, which ends the page on the loss of
+// sync a few codewords later. What flush is for is the page whose closing
+// idle codeword was the last thing the receiver heard: clause 1.2 ends a
+// transmission on one, and the receiver's filter and bit clock delay leave
+// it a few bits short, so without flush the last page of a capture, or of a
+// receiver removed as the transmitter went quiet, went with the decoder.
+// pocsag.h's flush drops a page still held in a batch nothing confirmed, so
+// flush never hands over what the rule against noise paging would refuse.
 //
-// WHAT THIS PARAGRAPH USED TO SAY: "nothing on this seam says the stream has
-// ended". ChunkDecoder::flush says so since 2026-09-23, for D-STAR first.
+// WHAT THIS PARAGRAPH USED TO SAY: "A PAGE STILL OPEN WHEN THE AUDIO STOPS IS
+// NOT REPORTED. PocsagDecoder::flush exists for the end of a capture, and
+// this adapter does not override ChunkDecoder::flush to call it." Before
+// that it said "nothing on this seam says the stream has ended".
+// ChunkDecoder::flush says so since 2026-09-23, for D-STAR first.
 class PocsagChunkDecoder final : public ChunkDecoder {
 public:
     static constexpr std::string_view kName = "pocsag";
@@ -1465,14 +1519,26 @@ public:
             return shape;
         }
         base_.observe(chunk);
+        end_.observe(chunk);
         for (std::size_t i = 0; i < decoders_.size(); ++i) {
             pages_.clear();
             decoders_[i].process(chunk.samples, pages_);
             for (const decode::PocsagPage& page : pages_) {
-                out.push_back(describe(page, static_cast<std::int64_t>(kRates[i]), chunk));
+                out.push_back(describe(page, static_cast<std::int64_t>(kRates[i]), chunk, false));
             }
         }
         return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        const DecoderChunk at_end = end_.at_end();
+        for (std::size_t i = 0; i < decoders_.size(); ++i) {
+            pages_.clear();
+            decoders_[i].flush(pages_);
+            for (const decode::PocsagPage& page : pages_) {
+                out.push_back(describe(page, static_cast<std::int64_t>(kRates[i]), at_end, true));
+            }
+        }
     }
 
     void reset() override {
@@ -1487,7 +1553,7 @@ private:
         : rate_(rate), decoders_(std::move(decoders)) {}
 
     [[nodiscard]] DecodedMessage describe(const decode::PocsagPage& page, std::int64_t bit_rate,
-                                          const DecoderChunk& chunk) const {
+                                          const DecoderChunk& chunk, bool flushed) const {
         using namespace decoders_detail;
         std::string kind = "tone";
         if (!page.message_bits.empty()) {
@@ -1512,6 +1578,7 @@ private:
         message.fields.push_back(flag_field("inverted", page.inverted));
         message.fields.push_back(
             integer_field("began_sample", static_cast<std::int64_t>(base_.at(page.position))));
+        message.fields.push_back(flag_field("flushed", flushed));
 
         message.text = std::format("{} bit/s RIC {} function {}", bit_rate, page.identity,
                                    page.function);
@@ -1534,6 +1601,7 @@ private:
     dsp::SampleRate rate_;
     std::vector<decode::PocsagDecoder> decoders_;
     decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
     std::vector<decode::PocsagPage> pages_;
 };
 
@@ -1561,7 +1629,8 @@ private:
 //                               RX copy was used, clause 4.3
 //   phasing              int    sitor_b.h's count of phasings when the line
 //                               ended; a change is a new transmission
-//   ended                text   line_end, length, idle or new_transmission
+//   ended                text   line_end, length, idle, new_transmission or
+//                               stream_end, the line flush handed over
 //   began_sample         int    receiver-stream index of the first character
 //   upper_sideband       flag   the polarity tried first
 //   phasings, losses_of_phase, both_mutilated
@@ -1591,6 +1660,7 @@ public:
             return shape;
         }
         base_.observe(chunk);
+        end_.observe(chunk);
         characters_.clear();
         decoder_.process(chunk.samples, characters_);
 
@@ -1622,6 +1692,15 @@ public:
             emit(chunk, LineEnd::Idle, out);
         }
         return {};
+    }
+
+    // The line in progress. A character whose DX copy arrived and whose RX
+    // copy had not is still held by sitor_b.h, which has no flush, and goes
+    // with it: clause 4.2 sends the RX copy 280 ms behind the DX, so that is
+    // the last 280 ms of a stream cut off mid-transmission and nothing of one
+    // that ended on its own idle signals.
+    void flush(std::vector<DecodedMessage>& out) override {
+        emit(end_.at_end(), decoders_detail::LineEnd::StreamEnd, out);
     }
 
     void reset() override {
@@ -1683,6 +1762,7 @@ private:
     decode::SitorConfig config_;
     decode::SitorBDecoder decoder_;
     decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
     std::vector<decode::SitorCharacter> characters_;
     decoders_detail::TextLine line_;
     std::size_t lost_ = 0;
@@ -1712,6 +1792,9 @@ private:
 //                               UTF-8, line ends as sent
 //   mutilated_characters int
 //   began_sample         int    receiver-stream index of the first "Z"
+//   flushed              flag   the stream ended before its "NNNN", and flush
+//                               handed over what had arrived; kind is
+//                               "incomplete"
 //
 // The text line is "ZCZC EA07" and the message with each line end shown as
 // " / ", so it stays one line.
@@ -1739,12 +1822,22 @@ public:
             return shape;
         }
         base_.observe(chunk);
+        end_.observe(chunk);
         messages_.clear();
         decoder_.process(chunk.samples, messages_);
         for (const decode::NavtexMessage& navtex : messages_) {
-            out.push_back(describe(navtex, chunk));
+            out.push_back(describe(navtex, chunk, false));
         }
         return {};
+    }
+
+    void flush(std::vector<DecodedMessage>& out) override {
+        messages_.clear();
+        decoder_.flush(messages_);
+        const DecoderChunk at_end = end_.at_end();
+        for (const decode::NavtexMessage& navtex : messages_) {
+            out.push_back(describe(navtex, at_end, true));
+        }
     }
 
     void reset() override {
@@ -1757,7 +1850,7 @@ private:
         : rate_(rate), decoder_(std::move(decoder)) {}
 
     [[nodiscard]] DecodedMessage describe(const decode::NavtexMessage& navtex,
-                                          const DecoderChunk& chunk) const {
+                                          const DecoderChunk& chunk, bool flushed) const {
         using namespace decoders_detail;
         const char area = navtex.area == 0 ? '?' : navtex.area;
         const char subject = navtex.subject == 0 ? '?' : navtex.subject;
@@ -1772,6 +1865,7 @@ private:
             "mutilated_characters", static_cast<std::int64_t>(navtex.mutilated_characters)));
         message.fields.push_back(
             integer_field("began_sample", static_cast<std::int64_t>(base_.at(navtex.position))));
+        message.fields.push_back(flag_field("flushed", flushed));
 
         // One line: CR LF pairs and lone line ends both become " / ".
         std::string flat;
@@ -1794,7 +1888,7 @@ private:
             message.text += " (preamble not clean)";
         }
         if (!navtex.complete) {
-            message.text += " (incomplete)";
+            message.text += flushed ? " (incomplete, stream ended)" : " (incomplete)";
         }
         return message;
     }
@@ -1802,6 +1896,7 @@ private:
     dsp::SampleRate rate_;
     decode::NavtexDecoder decoder_;
     decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
     std::vector<decode::NavtexMessage> messages_;
 };
 
@@ -1827,7 +1922,8 @@ private:
 //                               as unrecognised
 //   characters           int
 //   unrecognised         int
-//   ended                text   line_end, length or idle
+//   ended                text   line_end, length, idle or stream_end, the
+//                               line flush handed over
 //   began_sample         int    receiver-stream index of the first character's
 //                               first bit
 //   frequency_offset_hz  real   the tone's measured offset from 1000 Hz
@@ -1865,6 +1961,7 @@ public:
             return shape;
         }
         base_.observe(chunk);
+        end_.observe(chunk);
         characters_.clear();
         if (auto processed = decoder_.process(chunk.samples, characters_); !processed) {
             return processed;
@@ -1897,6 +1994,15 @@ public:
             emit(chunk, LineEnd::Idle, out);
         }
         return {};
+    }
+
+    // The line in progress. What psk31.h still holds is not handed over,
+    // because it offers no flush: a Varicode character waits for the two
+    // zeros that end it, which a transmitter's idle supplies, and QPSK31's
+    // Viterbi decoder holds Psk31Config::decision_delay_bits back, which a
+    // stream cut off mid-character loses.
+    void flush(std::vector<DecodedMessage>& out) override {
+        emit(end_.at_end(), decoders_detail::LineEnd::StreamEnd, out);
     }
 
     void reset() override {
@@ -1948,6 +2054,7 @@ private:
     decode::Psk31Config config_;
     decode::Psk31 decoder_;
     decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
     std::vector<decode::Psk31Character> characters_;
     decoders_detail::TextLine line_;
     std::size_t unrecognised_ = 0;
@@ -1985,7 +2092,8 @@ private:
 //                               wpm under Farnsworth spacing
 //   frequency_offset_hz  real   the tone's measured offset from 700 Hz
 //   level_deviations     real   cw.h's signal meter
-//   ended                text   length or idle
+//   ended                text   length, idle or stream_end, the line flush
+//                               handed over with the character being keyed
 //   began_sample         int    receiver-stream index of the first mark
 class CwChunkDecoder final : public ChunkDecoder {
 public:
@@ -2007,11 +2115,40 @@ public:
             return shape;
         }
         base_.observe(chunk);
+        end_.observe(chunk);
         characters_.clear();
         if (auto processed = decoder_.process(chunk.samples, characters_); !processed) {
             return processed;
         }
+        take(chunk, out);
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
+            emit(chunk, decoders_detail::LineEnd::Idle, out);
+        }
+        return {};
+    }
 
+    // The character being keyed, which cw.h's flush ends on the gap it has
+    // seen so far, then the line with it in.
+    void flush(std::vector<DecodedMessage>& out) override {
+        const DecoderChunk at_end = end_.at_end();
+        characters_.clear();
+        decoder_.flush(characters_);
+        take(at_end, out);
+        emit(at_end, decoders_detail::LineEnd::StreamEnd, out);
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        clear_line();
+    }
+
+private:
+    CwChunkDecoder(const decode::CwConfig& config, decode::Cw decoder)
+        : config_(config), decoder_(std::move(decoder)) {}
+
+    // characters_ into the line, ending it where a gap or its length says.
+    void take(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
         using decoders_detail::LineEnd;
         for (const decode::CwCharacter& c : characters_) {
             const std::uint64_t at = base_.at(c.first_sample);
@@ -2037,21 +2174,7 @@ public:
                 emit(chunk, LineEnd::Length, out);
             }
         }
-        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
-            emit(chunk, LineEnd::Idle, out);
-        }
-        return {};
     }
-
-    void reset() override {
-        decoder_.reset();
-        base_.reset();
-        clear_line();
-    }
-
-private:
-    CwChunkDecoder(const decode::CwConfig& config, decode::Cw decoder)
-        : config_(config), decoder_(std::move(decoder)) {}
 
     // Five word spaces of seven units each at the unit being read, or at 20
     // WPM's before the decoder has locked. Measured from the start of the
@@ -2103,6 +2226,7 @@ private:
     decode::CwConfig config_;
     decode::Cw decoder_;
     decoders_detail::StreamBase base_;
+    decoders_detail::StreamEnd end_;
     std::vector<decode::CwCharacter> characters_;
     decoders_detail::TextLine line_;
     std::string code_;

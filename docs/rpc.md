@@ -841,6 +841,17 @@ still queued ahead of `ended()`, and flags the piece `flushed`. `revenant-cli
 --decode` flushes every decoder when the run ends. The fifty-frame transmission
 in `tests/rpc/test_rpc_decode.cpp` arrives as pieces of 21, 21 and 8.
 
+Every other adapter that holds something is flushed the same way. POCSAG hands
+over a page whose closing idle codeword the stream cut short and NAVTEX a
+message still waiting for its `NNNN`, both flagged `flushed`; RTTY, SITOR-B,
+the PSK modes and CW hand over the line they were gathering, CW with the
+character being keyed, and `ended` reads `stream_end`. A flushed message is
+stamped where the last chunk ended, with no length, since no chunk completed
+it. `tests/rpc/test_rpc_decode_audio.cpp` removes a receiver on each of them
+with its last page, message or line still open and reads it arriving ahead of
+`ended()`. P25, TETRA, AX.25 and M17 hold nothing a client could read at the
+end of a stream, and a flush of one appends nothing.
+
 ### The front end can be pointed somewhere else
 
 `Session::setSourceCenter` retunes the source and answers with the centre the

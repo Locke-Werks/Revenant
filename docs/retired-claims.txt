@@ -998,8 +998,9 @@ phrase: nothing on this seam says the stream has ended
 retired: 2026-09-23
 commit: "Report D-STAR per superframe, and flush it when the receiver goes"
 instead: ChunkDecoder::flush is the end of the stream. The server calls it when
-    a receiver goes and revenant-cli when the run ends; the D-STAR adapter
-    takes it and the POCSAG, CW and NAVTEX adapters do not yet.
+    a receiver goes and revenant-cli when the run ends; every adapter that
+    holds something takes it, D-STAR first and the rest since "Flush POCSAG,
+    NAVTEX, CW and the text lines when the stream ends".
 
 phrase: A sync burst is eight symbols and noise matches it
 retired: 2026-09-23
@@ -1180,3 +1181,12 @@ commit: "Say what a wrong D-STAR P_FCS byte order would look like"
 instead: DStar::decode_header refuses a header whose P_FCS fails, so a wrong
     byte order shows as frame syncs with no header ever reported, and
     fcs_valid is always true on what the adapter sends.
+
+phrase: have a flush of their own in core/decode that their adapters do not call yet
+phrase: this adapter does not override ChunkDecoder::flush to call it
+phrase: A PAGE STILL OPEN WHEN THE AUDIO STOPS IS NOT REPORTED
+retired: 2026-09-23
+commit: "Flush POCSAG, NAVTEX, CW and the text lines when the stream ends"
+instead: The POCSAG, NAVTEX, CW, RTTY, SITOR-B and PSK adapters override
+    ChunkDecoder::flush and hand over the page, message or line they hold,
+    flagged flushed or ended stream_end.
