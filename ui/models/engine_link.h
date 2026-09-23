@@ -1064,6 +1064,13 @@ class EngineLink : public QObject {
     // somewhere, not when the pane goes.
     Q_PROPERTY(QString receiverGoneText READ receiverGoneText NOTIFY receiverGoneChanged)
 
+    // The frequency to offer the receiver back at, or zero for no offer.
+    // Non-zero only when the engine said a retune removed the pane's receiver
+    // for its filter shape, which an add at the same frequency answers; see
+    // receiver_can_come_back in models/receiver_gone.h. Same lifetime as the
+    // sentence beside it.
+    Q_PROPERTY(double receiverComebackHz READ receiverComebackHz NOTIFY receiverGoneChanged)
+
     // ------------------------------------------------------------------
     // Receivers this window does not hold
     // ------------------------------------------------------------------
@@ -2033,6 +2040,15 @@ public:
     // it the way it learns about those.
 
     [[nodiscard]] QString receiverGoneText() const { return receiver_gone_text_; }
+    [[nodiscard]] double receiverComebackHz() const
+    {
+        return static_cast<double>(receiver_comeback_hz_);
+    }
+
+    // Puts a receiver back at receiverComebackHz in the pane's mode, which is
+    // tuneReceiver with the mode left alone. Does nothing when there is no
+    // offer.
+    Q_INVOKABLE void addGoneReceiverBack();
 
     [[nodiscard]] QString strandedReceiverText() const { return stranded_text_; }
 
@@ -2656,6 +2672,10 @@ private:
     // Why the pane is empty when the engine emptied it. Qt thread only, and
     // deliberately outliving the pane; see the property.
     QString receiver_gone_text_;
+
+    // Where to offer that receiver back, zero for no offer. Set and cleared
+    // with receiver_gone_text_. Qt thread only.
+    std::int64_t receiver_comeback_hz_ = 0;
 
     // The last answer receiverBookmarked gave, so a receiver move that does
     // not change it emits nothing. Qt thread only.

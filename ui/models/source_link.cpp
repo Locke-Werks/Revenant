@@ -499,16 +499,19 @@ void EngineLink::adopt_source_tuning()
     emit sourceTuningChanged();
 
     // THE PANE'S RECEIVER, IF THE ENGINE SAYS THE RETUNE REMOVED IT. The answer
-    // names it and the frequency it was on, so the sentence states the cause
-    // rather than inferring one from the span, and the frequency is the
-    // engine's rather than this window's record of the tune. Before a recall
-    // below places a receiver, so the one torn down is the one that went. The
-    // inventory poll's own path, forget_removed_receiver, finds receiver_id_
-    // already moved on and does nothing.
+    // names it, the frequency it was on and why, so the sentence states the
+    // engine's cause rather than inferring one from the span, and the
+    // frequency is the engine's rather than this window's record of the tune.
+    // A receiver refused only for its filter shape is offered back at that
+    // frequency, which is the add the engine's refusal asks for. Before a
+    // recall below places a receiver, so the one torn down is the one that
+    // went. The inventory poll's own path, forget_removed_receiver, finds
+    // receiver_id_ already moved on and does nothing.
     for (const rpc::RetuneRemoval& gone : removed) {
         if (receiver_id_ != 0 && gone.id == static_cast<std::uint64_t>(receiver_id_)) {
-            receiver_gone_text_ =
-                QString::fromStdString(receiver_retuned_away_sentence(gone.frequency_hz));
+            receiver_gone_text_ = QString::fromStdString(
+                receiver_retuned_away_sentence(gone.frequency_hz, gone.cause, gone.reason));
+            receiver_comeback_hz_ = receiver_can_come_back(gone.cause) ? gone.frequency_hz : 0;
             emit receiverGoneChanged();
             removeReceiver();
             break;

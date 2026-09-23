@@ -884,7 +884,16 @@ engine rebases so the receiver stays on the absolute frequency it was tuned
 to. A receiver whose centre then falls outside the new span is removed.
 
 **The answer names every receiver the retune removed.** `removed` carries each
-one's id and the absolute frequency it was on before the tune, and by the time
+one's id, the absolute frequency it was on before the tune, why, and the
+engine's sentence saying so. `cause` is `outsideSpan`, `unplaceable` when the
+channel planner refused the new place, or `shapeChanged` when the new place
+needs a different filter, which the graph builds for a new receiver and not a
+running one; `unknown`, ordinal zero, is what a server built before the field
+sends. An enum as well as `reason` because a client acts on it: an add at the
+same frequency brings back a `shapeChanged` receiver and is refused for the
+other two, and matching that out of the sentence would break the day the
+sentence was reworded. `tests/rpc/test_rpc_session.cpp` reads both off a real
+engine's refusal. By the time
 it arrives the server has done for each what `removeVrx` does: every audio and
 decoder subscription on it has been sent `ended()` with a reason naming both
 frequencies, and its RDS decoder and ownership record are gone.

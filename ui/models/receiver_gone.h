@@ -31,6 +31,8 @@
 #include <cstdint>
 #include <string>
 
+#include "core/rpc/types.h"
+
 namespace revenant::ui {
 
 // Megahertz to three places, which resolves a kilohertz and is how an operator
@@ -101,23 +103,58 @@ namespace revenant::ui {
 }
 
 // The sentence when the ENGINE said the retune removed the receiver, which
-// Session.setSourceCenter now does: its answer lists every receiver the retune
-// removed, with the frequency each was on. Nothing here is inferred, so the
-// cause is stated outright and the frequency is the engine's rather than the
-// one this window recorded at tune time.
+// Session.setSourceCenter does: its answer lists every receiver the retune
+// removed, with the frequency each was on and why. Nothing here is inferred,
+// so the cause is stated outright and the frequency is the engine's rather
+// than the one this window recorded at tune time.
 //
-// ONE CAUSE THIS SENTENCE DOES NOT COVER. Since 2026-09-23 the engine also
-// removes a receiver that is still inside the span when its new place in a
-// channel needs a filter the graph will not swap in place. "Moved off" is then
-// not the reason, and the wire's RetuneRemoval carries no reason field yet to
-// tell this window so; engine::RetuneRemoval::reason has the sentence.
-[[nodiscard]] inline std::string receiver_retuned_away_sentence(std::int64_t frequency_hz)
+// WHAT THIS USED TO SAY for every removal: "the front end moved off" the
+// frequency. Since 2026-09-23 the engine also removes a receiver still inside
+// the span, when its new place in a channel needs a filter the graph will not
+// swap into a running receiver, and for that one "moved off" was false. The
+// wire now carries the cause, so each gets its own sentence.
+//
+// `reason` is the engine's sentence, which quotes the planner or the graph.
+// It is what an unknown cause falls back to, from a server that names none,
+// because it is still the engine's account and a guess from here would not be.
+[[nodiscard]] inline std::string receiver_retuned_away_sentence(std::int64_t frequency_hz,
+                                                                rpc::RetuneCause cause,
+                                                                const std::string& reason)
 {
     if (frequency_hz == 0) {
         return {};
     }
-    return "the front end moved off " + megahertz_text(frequency_hz) +
-           ", so the receiver there was let go";
+    const std::string where = megahertz_text(frequency_hz);
+    switch (cause) {
+        case rpc::RetuneCause::OutsideSpan:
+            return "the front end moved off " + where + ", so the receiver there was let go";
+        case rpc::RetuneCause::ShapeChanged:
+            return "the retune put " + where +
+                   " in a different place in its channel, which needs a different filter, so "
+                   "the engine let the receiver there go; adding it again builds that filter";
+        case rpc::RetuneCause::Unplaceable:
+            return "the retune left " + where +
+                   " where the channel grid cannot place a receiver, so the engine let it go";
+        case rpc::RetuneCause::Unknown:
+            break;
+    }
+    if (!reason.empty()) {
+        return reason;
+    }
+    return "the front end was retuned and the engine let the receiver at " + where + " go";
+}
+
+// Whether to offer the receiver back at the frequency it was on.
+//
+// Only for a shape refusal. That receiver was refused because the graph builds
+// a new filter shape for a new receiver and not for a running one, so an add
+// at the same frequency is exactly what the engine asked for. A receiver that
+// left the span, or that the grid refused, would be refused again at the same
+// frequency, and an unknown cause is a server that did not say, so offering
+// either would be offering something that fails.
+[[nodiscard]] inline bool receiver_can_come_back(rpc::RetuneCause cause)
+{
+    return cause == rpc::RetuneCause::ShapeChanged;
 }
 
 }  // namespace revenant::ui

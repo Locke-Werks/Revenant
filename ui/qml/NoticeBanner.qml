@@ -158,5 +158,27 @@ Rectangle {
             detail: engineLink.receiverGoneText
             ink: Theme.inkWarn
         }
+
+        // The one removal an add answers. A retune that moved a receiver to a
+        // place in its channel needing a different filter was refused only
+        // because the engine builds a new filter for a new receiver, so this
+        // puts one back at the frequency it was on, in the same mode. Offered
+        // for nothing else, because anything else would be refused again; see
+        // receiver_can_come_back in models/receiver_gone.h. A chip that acts,
+        // not a dialog: the sentence beside it is the question.
+        StatusChip {
+            visible: banner.receiverGone && engineLink.receiverComebackHz > 0
+            label: "add it back"
+            detail: "Adds a receiver again on the frequency the retune let go, in the same mode. "
+                    + "The engine builds the filter its new place in the channel needs."
+            ink: Theme.inkWarn
+
+            Accessible.role: Accessible.Button
+            Accessible.name: "add the receiver back"
+
+            TapHandler {
+                onTapped: engineLink.addGoneReceiverBack()
+            }
+        }
     }
 }

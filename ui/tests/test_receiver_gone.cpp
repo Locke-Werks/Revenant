@@ -13,7 +13,9 @@
 
 #include "models/receiver_gone.h"
 
+using revenant::rpc::RetuneCause;
 using revenant::ui::megahertz_text;
+using revenant::ui::receiver_can_come_back;
 using revenant::ui::receiver_gone_sentence;
 using revenant::ui::receiver_retuned_away_sentence;
 
@@ -84,9 +86,43 @@ TEST_CASE("the span edges are inside the span", "[receivergone]")
 TEST_CASE("a receiver the retune removed is told so, at the engine's frequency",
           "[receivergone]")
 {
-    CHECK(receiver_retuned_away_sentence(146'520'000) ==
+    CHECK(receiver_retuned_away_sentence(146'520'000, RetuneCause::OutsideSpan, "") ==
           "the front end moved off 146.520 MHz, so the receiver there was let go");
-    CHECK(receiver_retuned_away_sentence(0).empty());
+    CHECK(receiver_retuned_away_sentence(0, RetuneCause::OutsideSpan, "").empty());
+}
+
+// Each cause the engine names gets its own sentence. Rejects "moved off" for
+// every removal, which was the defect: a receiver refused for its filter shape
+// was still inside the span, its frequency still on screen. And rejects an
+// offer to put back a receiver the same add would refuse again.
+TEST_CASE("a retune's cause decides the sentence and the offer", "[receivergone]")
+{
+    const std::string engine_said = "the engine's own sentence";
+
+    const std::string shape =
+        receiver_retuned_away_sentence(7'100'000, RetuneCause::ShapeChanged, engine_said);
+    CHECK(shape ==
+          "the retune put 7.100 MHz in a different place in its channel, which needs a "
+          "different filter, so the engine let the receiver there go; adding it again builds "
+          "that filter");
+    CHECK(shape.find("moved off") == std::string::npos);
+
+    CHECK(receiver_retuned_away_sentence(7'100'000, RetuneCause::Unplaceable, engine_said) ==
+          "the retune left 7.100 MHz where the channel grid cannot place a receiver, so the "
+          "engine let it go");
+
+    // A server that names no cause: its sentence if it sent one, and a
+    // sentence that claims no cause if it did not.
+    CHECK(receiver_retuned_away_sentence(7'100'000, RetuneCause::Unknown, engine_said) ==
+          engine_said);
+    CHECK(receiver_retuned_away_sentence(7'100'000, RetuneCause::Unknown, "") ==
+          "the front end was retuned and the engine let the receiver at 7.100 MHz go");
+
+    // Only the shape refusal comes back from an add at the same frequency.
+    CHECK(receiver_can_come_back(RetuneCause::ShapeChanged));
+    CHECK_FALSE(receiver_can_come_back(RetuneCause::OutsideSpan));
+    CHECK_FALSE(receiver_can_come_back(RetuneCause::Unplaceable));
+    CHECK_FALSE(receiver_can_come_back(RetuneCause::Unknown));
 }
 
 // Nothing to say when there was no receiver. Zero is not a frequency the

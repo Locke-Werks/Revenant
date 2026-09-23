@@ -504,9 +504,22 @@ because all it can see is the receiver missing from the inventory. Since
 2026-09-23 the wire says it directly: `setSourceCenter` answers with `removed`,
 each receiver's id and the frequency it was on, and every audio and decoder
 subscription on it gets `ended()` with a reason naming the retune.
-`Client::retune_source` reads the list. The window still calls
+`Client::retune_source` reads the list, and the window tunes through it, so
+for a receiver the answer names the sentence is the engine's cause rather than
+the inferred one: each removal carries `cause` and the engine's `reason`, and
+`receiver_retuned_away_sentence` words each cause its own way. A receiver the
+engine refused only for its filter shape, which a retune by anything but a
+multiple of the channel spacing can do to AM, DSB, the sidebands and CW, is
+still inside the span, so "moved off" would be false there; the window says
+the new place needs a different filter and offers an "add it back" chip beside
+the notice, which puts a receiver on that frequency in the same mode. No other
+cause gets the chip, because an add at the same frequency would be refused
+again. The inferred sentence is what is left for a receiver that went some
+other way, another client's `removeVrx` for one.
+
+WHAT THE LAST SENTENCE OF THAT PARAGRAPH USED TO SAY: "The window still calls
 `set_source_center`, which answers with the centre alone, so its sentence is
-still the inferred one.
+still the inferred one." The window had already moved to `retune_source`.
 
 WHAT THIS PARAGRAPH USED TO SAY: "The engine is right to remove it and the
 client empties its pane, but neither announces it". The window's half was

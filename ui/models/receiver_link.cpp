@@ -261,6 +261,17 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
     arm_auto_filter();
 }
 
+void EngineLink::addGoneReceiverBack()
+{
+    if (receiver_comeback_hz_ == 0) {
+        return;
+    }
+    // An empty mode keeps the pane's, which removeReceiver leaves in wanted_,
+    // so the receiver comes back as it went. The tune clears the offer and
+    // the sentence, as any tune does.
+    tuneReceiver(static_cast<double>(receiver_comeback_hz_), QString());
+}
+
 // A receiver placed by hand has no measured signal behind it, so the
 // bandwidth goes to zero and the comparison is suppressed. Leaving the
 // previous click's measurement in place would compare the new receiver
@@ -339,8 +350,9 @@ void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
     // is stale. Cleared on the tune rather than on the removal, which is the
     // lifetime receiver_gone.h argues for: the sentence has to outlive the
     // pane it describes or nobody reads it.
-    if (!receiver_gone_text_.isEmpty()) {
+    if (!receiver_gone_text_.isEmpty() || receiver_comeback_hz_ != 0) {
         receiver_gone_text_.clear();
+        receiver_comeback_hz_ = 0;
         emit receiverGoneChanged();
     }
 
@@ -1087,6 +1099,8 @@ void EngineLink::forget_removed_receiver(const Error& failure)
             // the one sentence explaining why would be the one nobody sees.
             receiver_gone_text_ = QString::fromStdString(receiver_gone_sentence(
                 receiver_absolute_hz_, spanLowHz(), spanHighHz()));
+            // No offer: this path knows the receiver went and not why.
+            receiver_comeback_hz_ = 0;
             emit receiverGoneChanged();
 
             removeReceiver();
