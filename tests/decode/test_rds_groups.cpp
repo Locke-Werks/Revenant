@@ -2,11 +2,20 @@
 // print and against errors chosen rather than sampled.
 //
 // The bits in this file are generated here, by encoding blocks with
-// decode::make_block and shifting them out most significant bit first. Nothing
-// in it touches the 57 kHz subcarrier, the biphase decoder or the bit clock.
-// That is the seam stated in rds_groups.h and it is what makes these tests
-// mean something: a failure here is a framing, CRC or parsing failure and
-// cannot be the physical layer having a bad day.
+// decode::make_block and shifting them out most significant bit first. Every
+// case but one feeds them straight to the decoder and never touches the 57 kHz
+// subcarrier, the biphase decoder or the bit clock. That is the seam stated in
+// rds_groups.h and it is what makes these tests mean something: a failure in
+// one of them is a framing, CRC or parsing failure and cannot be the physical
+// layer having a bad day.
+//
+// The one is "every raw group kind round-trips through the RDS transmitter",
+// which puts its groups on a subcarrier through core/dsp/synth/rds_mod.h and
+// back through core/decode/rds_bits.h, so that the group routing is shown
+// working on bits a demodulator produced. It asserts no dropped and no
+// corrected blocks first, so a failure there says which side of the seam it
+// is on. WHAT THIS PARAGRAPH USED TO SAY: "Nothing in it touches the 57 kHz
+// subcarrier, the biphase decoder or the bit clock", with no exception.
 //
 // Where a test asserts an arithmetic fact from a standard, the citation is
 // beside the number. Three of them contradict a source document and say so at
@@ -27,7 +36,10 @@
 #include <string_view>
 #include <vector>
 
+#include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
+#include "core/dsp/synth/rds_mod.h"
+#include "core/dsp/types.h"
 
 namespace {
 
@@ -159,6 +171,20 @@ void prime(RdsDecoder& decoder) {
     return static_cast<std::uint16_t>((static_cast<unsigned>(type) << 12) |
                                       (version_b ? 0x0800u : 0x0000u) | 0x0400u | (5u << 5) |
                                       (low5 & 0x1Fu));
+}
+
+// Block 2 of a type 3A group, EN 50067 Figure 18: the application group type
+// code is the four type bits and the version bit of the group being handed
+// over, in the five low bits.
+[[nodiscard]] std::uint16_t oda_block2(std::uint8_t group_type, bool version_b) {
+    return block2_of(3, false,
+                     static_cast<std::uint8_t>((group_type << 1) | (version_b ? 1u : 0u)));
+}
+
+// Block 3 of a type 1A group, EN 50067 Figure 14: linkage actuator, three
+// variant bits, twelve bits of payload.
+[[nodiscard]] std::uint16_t type1a_block3(std::uint8_t variant, std::uint16_t payload) {
+    return static_cast<std::uint16_t>(((variant & 0x07u) << 12) | (payload & 0x0FFFu));
 }
 
 }  // namespace
@@ -2907,6 +2933,440 @@ TEST_CASE("a repaired programme type name segment is marked and a clean one unma
     CHECK(decoder.state().ptyn_corrected == 0x00);
 }
 
+// ---------------------------------------------------------------------------
+// Groups carried raw: EN 50067 clauses 3.1.4 and 3.1.5.8 to 3.1.5.13
+// ---------------------------------------------------------------------------
+
+TEST_CASE("type 8A is TMC by default and a payload counts once a second copy arrives",
+          "[rds]") {
+    // No 3A announcement at all, which is the arrangement EN 50067 Figure 14
+    // note 4 describes: TMC identified through type 1A variant 1 and carried
+    // in 8A because Table 3 says that is what 8A carries.
+    RdsDecoder decoder;
+    prime(decoder);
+
+    const GroupWords first{0x2345, block2_of(8, false, 0x0B), 0x1234, 0x5678, false};
+    const GroupWords second{0x2345, block2_of(8, false, 0x0B), 0x1234, 0x5679, false};
+
+    feed_group(decoder, first);
+    feed_group(decoder, second);
+    feed_group(decoder, first);
+
+    // Block 4 lost: counted as a TMC group, kept out of the table.
+    auto damaged = encode_group(second);
+    damaged[3] ^= 0x03FFFFFFu;
+    for (const std::uint32_t block : damaged) {
+        feed_word(decoder, block);
+    }
+
+    // And the type 1A variant 1 group that note describes.
+    feed_group(decoder, GroupWords{0x2345, block2_of(1, false, 0), type1a_block3(1, 0x0ABC),
+                                   0x0000, false});
+
+    const auto& tmc = decoder.state().tmc;
+    CHECK(decoder.state().pty == 5);
+    CHECK(decoder.state().tp);
+    CHECK_FALSE(tmc.announced);
+    CHECK(tmc.groups == 4);
+    CHECK(tmc.oda_groups == 0);
+    CHECK(tmc.incomplete == 1);
+    CHECK(tmc.evicted == 0);
+    CHECK(tmc.identification_valid);
+    CHECK(tmc.identification == 0x0ABC);
+
+    REQUIRE(tmc.messages.size() == 2);
+    const auto find = [&](std::uint16_t z) {
+        return std::find_if(tmc.messages.begin(), tmc.messages.end(),
+                            [z](const revenant::decode::TmcMessage& m) { return m.z == z; });
+    };
+    const auto a = find(0x5678);
+    const auto b = find(0x5679);
+    REQUIRE(a != tmc.messages.end());
+    REQUIRE(b != tmc.messages.end());
+
+    // All 37 bits come back as sent, and nothing is read out of them.
+    CHECK(a->x == 0x0B);
+    CHECK(a->y == 0x1234);
+    CHECK(a->receptions == 2);
+    CHECK(a->confirmed());
+    CHECK(b->receptions == 1);
+    CHECK_FALSE(b->confirmed());
+    CHECK(a->corrected_receptions == 0);
+}
+
+TEST_CASE("a TMC AID in a 3A group attributes the group type it names to TMC", "[rds]") {
+    // The three AIDs the RDS Forum register lists for ALERT-C. Each one
+    // attributes; the count of attributions is what says the service came in
+    // through ODA rather than through Table 3's default.
+    for (const std::uint16_t aid : {revenant::decode::kAidTmcTesting,
+                                    revenant::decode::kAidTmcAlertC,
+                                    revenant::decode::kAidTmcAlertCArbitraryPi}) {
+        INFO(std::format("AID {:04X}", aid));
+        RdsDecoder decoder;
+        prime(decoder);
+
+        feed_group(decoder, GroupWords{0x2345, oda_block2(8, false), 0x4321, aid, false});
+        feed_group(decoder, GroupWords{0x2345, block2_of(8, false, 0x11), 0xAAAA, 0xBBBB, false});
+
+        const auto& tmc = decoder.state().tmc;
+        CHECK(tmc.announced);
+        CHECK(tmc.aid == aid);
+        CHECK(tmc.group_type == 8);
+        CHECK_FALSE(tmc.version_b);
+        CHECK(tmc.oda_message == 0x4321);
+        CHECK(tmc.groups == 1);
+        CHECK(tmc.oda_groups == 1);
+        REQUIRE(tmc.messages.size() == 1);
+        CHECK(tmc.messages[0].x == 0x11);
+
+        // Attributed to TMC, not to the announcement as generic ODA data.
+        REQUIRE(decoder.state().oda.size() == 1);
+        CHECK(decoder.state().oda[0].data.groups == 0);
+    }
+
+    SECTION("on a version A group other than 8A") {
+        // EN 50067 clause 3.1.4.1: an ODA "must not be designed to operate
+        // with a specific group type". The announcement says where it went.
+        RdsDecoder decoder;
+        prime(decoder);
+        feed_group(decoder, GroupWords{0x2345, oda_block2(11, false), 0x0000,
+                                       revenant::decode::kAidTmcAlertC, false});
+        feed_group(decoder, GroupWords{0x2345, block2_of(11, false, 0x02), 0x0102, 0x0304, false});
+        CHECK(decoder.state().tmc.groups == 1);
+        CHECK(decoder.state().tmc.oda_groups == 1);
+        CHECK(decoder.state().oda[0].data.groups == 0);
+    }
+
+    SECTION("on a version B group, which cannot hold the 37 bits") {
+        RdsDecoder decoder;
+        prime(decoder);
+        feed_group(decoder, GroupWords{0x2345, oda_block2(8, true), 0x0000,
+                                       revenant::decode::kAidTmcAlertC, false});
+        feed_group(decoder, GroupWords{0x2345, block2_of(8, true, 0x03), 0x2345, 0x0304, true});
+        CHECK(decoder.state().tmc.groups == 0);
+        REQUIRE(decoder.state().oda.size() == 1);
+        CHECK(decoder.state().oda[0].data.groups == 1);
+        CHECK(decoder.state().oda[0].data.last.use == revenant::decode::RawGroupUse::kOpenData);
+    }
+}
+
+TEST_CASE("an application announced on a group type takes it from its Table 3 feature",
+          "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+
+    // AID 0x1234 is not TMC, so 8A stops being TMC for as long as it holds.
+    feed_group(decoder, GroupWords{0x2345, oda_block2(8, false), 0x0000, 0x1234, false});
+    feed_group(decoder, GroupWords{0x2345, block2_of(8, false, 0x07), 0xCAFE, 0xF00D, false});
+
+    CHECK(decoder.state().tmc.groups == 0);
+    REQUIRE(decoder.state().oda.size() == 1);
+    const auto& data = decoder.state().oda[0].data;
+    CHECK(data.groups == 1);
+    CHECK(data.last.use == revenant::decode::RawGroupUse::kOpenData);
+    CHECK(data.last.aid == 0x1234);
+    CHECK(data.last.group_type == 8);
+    CHECK(data.last.block2_low == 0x07);
+    CHECK(data.last.block3_valid);
+    CHECK(data.last.block3 == 0xCAFE);
+    CHECK(data.last.block4 == 0xF00D);
+
+    // A repeat of the same announcement keeps the count.
+    feed_group(decoder, GroupWords{0x2345, oda_block2(8, false), 0x0001, 0x1234, false});
+    CHECK(decoder.state().oda[0].data.groups == 1);
+    CHECK(decoder.state().oda[0].message == 0x0001);
+
+    // A different AID is a different user of the channel and starts again.
+    feed_group(decoder, GroupWords{0x2345, oda_block2(8, false), 0x0000, 0x5555, false});
+    CHECK(decoder.state().oda[0].data.groups == 0);
+
+    // AID 0x0000 hands the group type back to its normal feature, clause
+    // 3.1.5.4, and 8A is TMC again.
+    feed_group(decoder, GroupWords{0x2345, oda_block2(8, false), 0x0000, 0x0000, false});
+    feed_group(decoder, GroupWords{0x2345, block2_of(8, false, 0x07), 0xCAFE, 0xF00D, false});
+    CHECK(decoder.state().tmc.groups == 1);
+    CHECK(decoder.state().oda[0].data.groups == 0);
+}
+
+TEST_CASE("an announcement naming a group Table 6 does not list takes nothing away", "[rds]") {
+    // 2A is not available to ODA. A 3A group naming it is a broken encoder,
+    // and RadioText must keep decoding regardless. Not 0A, whose application
+    // group type code is 00000, the code Figure 18 reserves for "not carried
+    // in associated group", so no announcement can name it at all.
+    RdsDecoder decoder;
+    prime(decoder);
+
+    feed_group(decoder, GroupWords{0x2345, oda_block2(2, false), 0x0000, 0x1234, false});
+    feed_group(decoder, GroupWords{0x2345, block2_of(2, false, 0), chars_to_word('O', 'K'),
+                                   chars_to_word('\r', ' '), false});
+
+    CHECK(decoder.state().rt_received == 0x0001);
+    CHECK(decoder.state().rt_text() == "OK");
+    REQUIRE(decoder.state().oda.size() == 1);
+    CHECK(decoder.state().oda[0].data.groups == 0);
+}
+
+TEST_CASE("type 1A variant 7 keeps the EWS channel identification", "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+    feed_group(decoder, GroupWords{0x2345, block2_of(1, false, 0), type1a_block3(7, 0x0F0F),
+                                   0x0000, false});
+    CHECK(decoder.state().ews_channel_identification_valid);
+    CHECK(decoder.state().ews_channel_identification == 0x0F0F);
+    CHECK_FALSE(decoder.state().tmc.identification_valid);
+}
+
+TEST_CASE("types 5A and 5B are transparent data channels, delivered raw", "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+
+    // Channel 21 of 32, clause 3.1.5.8 Figure 22.
+    feed_group(decoder, GroupWords{0x2345, block2_of(5, false, 21), chars_to_word('D', 'A'),
+                                   chars_to_word('T', 'A'), false});
+    const auto& tdc = decoder.state().tdc;
+    CHECK(tdc.groups == 1);
+    CHECK(tdc.last.use == revenant::decode::RawGroupUse::kTransparentData);
+    CHECK(tdc.last.block2_low == 21);
+    CHECK(tdc.last.block3_valid);
+    CHECK(tdc.last.block3 == chars_to_word('D', 'A'));
+    CHECK(tdc.last.block4 == chars_to_word('T', 'A'));
+    CHECK(tdc.last.aid == 0);
+    CHECK_FALSE(tdc.last.corrected);
+
+    // Figure 23: 5B carries block 4 only, block 3 being the PI again.
+    feed_group(decoder, GroupWords{0x2345, block2_of(5, true, 3), 0x2345,
+                                   chars_to_word('!', '!'), true});
+    CHECK(tdc.groups == 2);
+    CHECK(tdc.last.version_b);
+    CHECK(tdc.last.block2_low == 3);
+    CHECK_FALSE(tdc.last.block3_valid);
+    CHECK(tdc.last.block4 == chars_to_word('!', '!'));
+
+    // Neither touched the display fields.
+    CHECK(decoder.state().ps_received == 0);
+    CHECK(decoder.state().rt_length == 0);
+}
+
+TEST_CASE("types 6A and 6B are in-house data, delivered raw and marked as such", "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+
+    feed_group(decoder, GroupWords{0x2345, block2_of(6, false, 0x1F), 0xDEAD, 0xBEEF, false});
+    feed_group(decoder, GroupWords{0x2345, block2_of(6, true, 0x00), 0x2345, 0x0042, true});
+
+    const auto& in_house = decoder.state().in_house;
+    CHECK(in_house.groups == 2);
+    CHECK(in_house.last.use == revenant::decode::RawGroupUse::kInHouse);
+    CHECK(revenant::decode::raw_group_use_name(in_house.last.use) == "in-house");
+    CHECK(in_house.last.version_b);
+    CHECK(in_house.last.block4 == 0x0042);
+}
+
+TEST_CASE("type 7A paging gives up its header and keeps the page", "[rds]") {
+    // Every segment address against EN 50067 Annex M Table M.2.
+    using revenant::decode::PagingContent;
+    using revenant::decode::paging_header;
+    const std::array<PagingContent, 16> expected = {
+        PagingContent::kNoMessage,
+        PagingContent::kFunctions,
+        PagingContent::kNumeric10OrFunctions,
+        PagingContent::kNumeric10OrFunctions,
+        PagingContent::kNumeric18OrInternational15,
+        PagingContent::kNumeric18OrInternational15,
+        PagingContent::kNumeric18OrInternational15,
+        PagingContent::kNumeric18OrInternational15,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+        PagingContent::kAlphanumeric,
+    };
+    for (std::uint8_t segment = 0; segment < 16; ++segment) {
+        INFO(std::format("segment {}", bits_of(segment, 4)));
+        CHECK(paging_header(segment).content == expected[segment]);
+        CHECK(paging_header(segment).segment == segment);
+        CHECK_FALSE(paging_header(segment).ab);
+        CHECK(paging_header(static_cast<std::uint8_t>(segment | 0x10)).ab);
+    }
+
+    RdsDecoder decoder;
+    prime(decoder);
+    feed_group(decoder, GroupWords{0x2345, block2_of(7, false, 0x10 | 0x09), 0x1111, 0x2222,
+                                   false});
+    const auto& paging = decoder.state().paging;
+    CHECK(paging.groups == 1);
+    CHECK(paging.last.use == revenant::decode::RawGroupUse::kRadioPaging);
+    const auto header = paging_header(paging.last.block2_low);
+    CHECK(header.ab);
+    CHECK(header.segment == 9);
+    CHECK(header.content == PagingContent::kAlphanumeric);
+
+    // 7B is ODA only, clause 3.1.5.11, and nothing announced it.
+    feed_group(decoder, GroupWords{0x2345, block2_of(7, true, 0x00), 0x2345, 0x3333, true});
+    CHECK(paging.groups == 1);
+}
+
+TEST_CASE("type 9A is counted as an emergency warning and delivered raw", "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+
+    CHECK(decoder.state().ews.groups == 0);
+    feed_group(decoder, GroupWords{0x2345, block2_of(9, false, 0x15), 0x9A9A, 0x0101, false});
+
+    const auto& ews = decoder.state().ews;
+    CHECK(ews.groups == 1);
+    CHECK(ews.last.use == revenant::decode::RawGroupUse::kEmergencyWarning);
+    CHECK(ews.last.block2_low == 0x15);
+    CHECK(ews.last.block3 == 0x9A9A);
+    CHECK(ews.last.block4 == 0x0101);
+
+    // A repaired block is marked on the raw group the same way it is marked
+    // on PS, so an EWS payload the corrector touched says so.
+    auto blocks = encode_group(GroupWords{0x2345, block2_of(9, false, 0x15), 0x9A9A, 0x0101,
+                                          false});
+    blocks[2] ^= 1u << 22;
+    for (const std::uint32_t block : blocks) {
+        feed_word(decoder, block);
+    }
+    CHECK(ews.groups == 2);
+    CHECK(ews.last.corrected);
+    CHECK(ews.last.block3 == 0x9A9A);
+}
+
+TEST_CASE("the TMC table is bounded and gives up unconfirmed payloads first", "[rds]") {
+    RdsDecoder decoder;
+    prime(decoder);
+
+    using revenant::decode::kMaxTmcMessages;
+    const auto tmc_group = [](std::uint32_t n) {
+        return GroupWords{0x2345, block2_of(8, false, static_cast<std::uint8_t>(n & 0x1F)),
+                          static_cast<std::uint16_t>(n >> 5), 0x7777, false};
+    };
+
+    // Payload 0 twice, so it is the one confirmed entry in a full table.
+    feed_group(decoder, tmc_group(0));
+    feed_group(decoder, tmc_group(0));
+    for (std::uint32_t n = 1; n < kMaxTmcMessages; ++n) {
+        feed_group(decoder, tmc_group(n));
+    }
+    REQUIRE(decoder.state().tmc.messages.size() == kMaxTmcMessages);
+    CHECK(decoder.state().tmc.evicted == 0);
+
+    // One more. The oldest unconfirmed payload is 1, not the confirmed 0.
+    feed_group(decoder, tmc_group(static_cast<std::uint32_t>(kMaxTmcMessages)));
+    const auto& messages = decoder.state().tmc.messages;
+    CHECK(messages.size() == kMaxTmcMessages);
+    CHECK(decoder.state().tmc.evicted == 1);
+    const auto has = [&](std::uint32_t n) {
+        const auto x = static_cast<std::uint8_t>(n & 0x1F);
+        const auto y = static_cast<std::uint16_t>(n >> 5);
+        return std::any_of(messages.begin(), messages.end(),
+                           [&](const auto& m) { return m.x == x && m.y == y; });
+    };
+    CHECK(has(0));
+    CHECK_FALSE(has(1));
+    CHECK(has(2));
+    CHECK(has(static_cast<std::uint32_t>(kMaxTmcMessages)));
+}
+
+TEST_CASE("every raw group kind round-trips through the RDS transmitter", "[rds]") {
+    // Through core/dsp/synth/rds_mod.h and the physical layer in
+    // core/decode/rds_bits.h rather than straight into feed(), so the group
+    // routing is exercised on bits that came off a 57 kHz subcarrier.
+    std::vector<std::uint8_t> bits;
+    const auto push = [&](const GroupWords& words) {
+        for (const std::uint32_t block : encode_group(words)) {
+            for (int i = 25; i >= 0; --i) {
+                bits.push_back(static_cast<std::uint8_t>((block >> i) & 1u));
+            }
+        }
+    };
+
+    const std::uint16_t pi = 0x2345;
+    const std::vector<GroupWords> cycle = {
+        {pi, oda_block2(8, false), 0x0C0D, revenant::decode::kAidTmcAlertC, false},
+        {pi, block2_of(8, false, 0x08), 0x1111, 0x2222, false},
+        {pi, block2_of(8, false, 0x08), 0x1111, 0x2222, false},
+        {pi, block2_of(8, false, 0x13), 0x3333, 0x4444, false},
+        {pi, block2_of(5, false, 7), 0x5A5A, 0x5B5B, false},
+        {pi, block2_of(6, false, 1), 0x6A6A, 0x6B6B, false},
+        {pi, block2_of(7, false, 0x02), 0x7A7A, 0x7B7B, false},
+        {pi, block2_of(9, false, 0x09), 0x9A9A, 0x9B9B, false},
+        {pi, block2_of(10, false, 0), chars_to_word('N', 'E'), chars_to_word('W', 'S'), false},
+        {pi, block2_of(10, false, 1), chars_to_word(' ', '2'), chars_to_word('4', ' '), false},
+        {pi, block2_of(1, false, 0), type1a_block3(7, 0x0321), 0x0000, false},
+    };
+    // Enough cycles that acquisition, a few hundred bits of carrier and
+    // timing settling plus one group of block sync, leaves at least two
+    // whole cycles decoded.
+    constexpr int kCycles = 4;
+    for (int n = 0; n < kCycles; ++n) {
+        for (const GroupWords& words : cycle) {
+            push(words);
+        }
+    }
+
+    revenant::siggen::RdsModSpec spec;
+    spec.rate = 171000;
+    spec.bits = bits;
+    auto composite = revenant::siggen::generate_rds(spec);
+    REQUIRE(composite.has_value());
+
+    revenant::decode::RdsBitsConfig config;
+    config.rate = 171000;
+    auto sync = revenant::decode::RdsBitSync::create(config);
+    REQUIRE(sync.has_value());
+
+    RdsDecoder decoder;
+    sync->process(revenant::dsp::ConstRealSpan(composite->samples),
+                  [&decoder](bool bit) { decoder.feed(bit); });
+
+    INFO(std::format("groups {} good {} corrected {} dropped {}", decoder.groups_decoded(),
+                     decoder.blocks_good(), decoder.blocks_corrected(),
+                     decoder.blocks_dropped()));
+    REQUIRE(decoder.synced());
+    CHECK(decoder.blocks_dropped() == 0);
+    CHECK(decoder.blocks_corrected() == 0);
+
+    const auto& state = decoder.state();
+    CHECK(state.pi == pi);
+
+    // TMC, through its ODA announcement.
+    CHECK(state.tmc.announced);
+    CHECK(state.tmc.aid == revenant::decode::kAidTmcAlertC);
+    CHECK(state.tmc.oda_message == 0x0C0D);
+    CHECK(state.tmc.groups >= 6);
+    CHECK(state.tmc.oda_groups == state.tmc.groups);
+    REQUIRE(state.tmc.messages.size() == 2);
+    for (const auto& message : state.tmc.messages) {
+        INFO(std::format("TMC x {:02X} y {:04X} z {:04X}", message.x, message.y, message.z));
+        CHECK(message.confirmed());
+        const bool known = (message.x == 0x08 && message.y == 0x1111 && message.z == 0x2222) ||
+                           (message.x == 0x13 && message.y == 0x3333 && message.z == 0x4444);
+        CHECK(known);
+    }
+
+    CHECK(state.tdc.groups >= 2);
+    CHECK(state.tdc.last.block2_low == 7);
+    CHECK(state.tdc.last.block3 == 0x5A5A);
+    CHECK(state.in_house.groups >= 2);
+    CHECK(state.in_house.last.block4 == 0x6B6B);
+    CHECK(state.paging.groups >= 2);
+    CHECK(revenant::decode::paging_header(state.paging.last.block2_low).content ==
+          revenant::decode::PagingContent::kNumeric10OrFunctions);
+    CHECK(state.ews.groups >= 2);
+    CHECK(state.ews.last.block3 == 0x9A9A);
+    CHECK(state.ews_channel_identification_valid);
+    CHECK(state.ews_channel_identification == 0x0321);
+
+    CHECK(state.ptyn_complete());
+    CHECK(state.ptyn_text() == "NEWS 24 ");
+    CHECK(state.ptyn_corrected == 0);
+}
+
 TEST_CASE("type 14A assembles other networks", "[rds]") {
     RdsDecoder decoder;
     prime(decoder);
@@ -3026,16 +3486,18 @@ TEST_CASE("a lost block 2 leaves the group type unknown and only PI recoverable"
 }
 
 TEST_CASE("an unparsed group type still yields its block 2 fields", "[rds]") {
-    // Types 5 through 9, 11, 12, 13, the B versions of 1, 3, 4 and 10, and
-    // 15A are real group types this decoder does not parse. The default label
-    // in apply_group is deliberate and the thing it must not do is discard the
-    // TP and PTY that every group's block 2 carries.
+    // A group type nobody announced and Table 3 gives no feature, such as
+    // 11A, reaches no parser at all. What must survive is the TP and PTY that
+    // every group's block 2 carries.
+    //
+    // WHAT THIS CASE USED TO SEND: type 8A, under the comment "Type 8A, which
+    // is TMC and is specified in CEN ENV 12313-1 rather than in the RDS
+    // standard at all". 8A is attributed to TMC now, raw, and is covered by
+    // the cases for it; 11A is ODA only and still unparsed.
     RdsDecoder decoder;
     prime(decoder);
 
-    // Type 8A, which is TMC and is specified in CEN ENV 12313-1 rather than in
-    // the RDS standard at all.
-    const std::uint16_t b2 = static_cast<std::uint16_t>((8u << 12) | 0x0400u | (17u << 5));
+    const std::uint16_t b2 = static_cast<std::uint16_t>((11u << 12) | 0x0400u | (17u << 5));
     feed_group(decoder, GroupWords{0x2345, b2, 0xABCD, 0xEF01, false});
 
     CHECK(decoder.state().pi == 0x2345);
@@ -3047,6 +3509,7 @@ TEST_CASE("an unparsed group type still yields its block 2 fields", "[rds]") {
     CHECK(decoder.state().af.empty());
     CHECK(decoder.state().oda.empty());
     CHECK(decoder.state().eon.empty());
+    CHECK(decoder.state().tmc.groups == 0);
     CHECK_FALSE(decoder.state().ta_valid);
 }
 

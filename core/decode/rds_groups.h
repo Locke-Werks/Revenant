@@ -1,8 +1,9 @@
 // RDS and RBDS baseband coding and group decoding.
 //
 // PROVENANCE. Clean room, per docs/clean-room.md. Everything here was written
-// from four published documents and from nothing else. No source code from any
-// other RDS implementation was read while writing it.
+// from the four published documents below and, for the raw TMC attribution
+// alone, the two listed after them, and from nothing else. No source code from
+// any other RDS implementation was read while writing it.
 //
 //   EN 50067:1998   The CENELEC RDS specification, read in full. The direct
 //                   ancestor of IEC 62106 and freely available, which is why
@@ -26,6 +27,13 @@
 //                   not a standard. Cited only for receiver design practice,
 //                   and marked as practice rather than as a requirement every
 //                   time.
+//
+//   ISO 14819-1:2021 The free preview only, from the front matter to clause
+//                   3.2, which gives field widths and the second-identical-
+//                   group rule and no bit positions. See TmcState for exactly
+//                   what that does and does not allow.
+//   ODA register    The RDS Forum's ODA AID list as published by NRSC,
+//                   rds-oda-aids.pdf dated 2020-07-14, for the three TMC AIDs.
 //
 // THE REGION SPLIT. The physical layer is not region-parameterised at all:
 // NRSC-4 (1998) clauses 1.1 through 1.7 are word for word EN 50067:1998. The
@@ -559,6 +567,98 @@ struct ClockTime {
     bool valid = false;
 };
 
+// ---------------------------------------------------------------------------
+// Groups carried raw
+// ---------------------------------------------------------------------------
+
+// What a group's payload is being used for, which is the only thing that
+// decides how a reader may interpret it.
+//
+// EN 50067 Table 3 gives groups 5A to 9A, 5B and 6B a feature the standard
+// names, and clause 3.1.4.1 Table 6 lets a type 3A group hand any of them to
+// an Open Data Application instead, "when not used for" that feature. Clause
+// 3.1.5.4: "For each group type addressed by the Application Group Type codes
+// of a particular transmission, only one application may be identified as the
+// current user of the channel", and AID 0000 means the normal feature. So the
+// use is decided per group type by whatever 3A announcement is current, and
+// the feature named in Table 3 is what is left when there is none.
+//
+// Every one of these is delivered raw. The standard defines none of their
+// payloads beyond the block 2 header bits: TDC and in-house bits are the
+// operator's, the EWS bits are "assigned unilaterally by each country", the
+// TMC bits "are defined by CEN" in a document this code was not written from,
+// and an ODA's bits belong to its own specification. Clause numbers are EN
+// 50067:1998.
+enum class RawGroupUse : std::uint8_t {
+    kTransparentData,   // 5A, 5B: clause 3.1.5.8, Figures 22 and 23
+    kInHouse,           // 6A, 6B: clause 3.1.5.9. "Consumer receivers should ignore"
+    kRadioPaging,       // 7A: clause 3.1.5.10 and Annex M
+    kTrafficMessage,    // 8A: clause 3.1.5.12. See TmcState
+    kEmergencyWarning,  // 9A: clause 3.1.5.13
+    kOpenData,          // any Table 6 group a 3A announcement gave a nonzero AID
+};
+
+[[nodiscard]] std::string_view raw_group_use_name(RawGroupUse use) noexcept;
+
+// One group's payload as it arrived. A version A group carries 37 bits: the
+// five low bits of block 2 and all of blocks 3 and 4. A version B group
+// carries 21, because block 3 repeats the PI and block3_valid is then false.
+struct RawGroup {
+    RawGroupUse use = RawGroupUse::kOpenData;
+    std::uint8_t group_type = 0;
+    bool version_b = false;
+
+    // b4..b0 of block 2. Block 2 always arrived, since a group without it
+    // has no type and is never classified.
+    std::uint8_t block2_low = 0;
+
+    std::uint16_t block3 = 0;
+    bool block3_valid = false;
+    std::uint16_t block4 = 0;
+    bool block4_valid = false;
+
+    // Set when block 2 or any payload block that arrived was corrected. The
+    // same rule StationState::ps_corrected applies: block 2 counts, because it
+    // carries the address or flag bits that say what the payload is.
+    bool corrected = false;
+
+    // The AID of the announcement that decided the use, or 0x0000 when the
+    // use is the feature Table 3 names.
+    std::uint16_t aid = 0;
+};
+
+// A count of the groups put to one use and the most recent of them. The
+// count is what an operator reads to know the feature is on air at all; the
+// payload is what a caller holding the feature's own specification decodes.
+struct RawFeature {
+    std::uint64_t groups = 0;
+    RawGroup last{};  // meaningless while groups is zero
+};
+
+// Radio paging header, EN 50067 Annex M clause M.2.1.6.1 Figure M.1 and
+// Table M.2. The five low bits of a type 7A group's block 2 are the paging A/B
+// flag, which "changes its value between different paging calls thus
+// indicating the start of a new or repeated call", and a four-bit paging
+// segment address T3..T0 that also says what kind of message follows.
+// Blocks 3 and 4 are the pager address and message digits, and nothing here
+// reads them: a page is addressed to somebody else's pager.
+enum class PagingContent : std::uint8_t {
+    kNoMessage,                  // 0000
+    kFunctions,                  // 0001
+    kNumeric10OrFunctions,       // 001X
+    kNumeric18OrInternational15, // 01XX
+    kAlphanumeric,               // 1XXX
+};
+
+struct PagingHeader {
+    bool ab = false;
+    std::uint8_t segment = 0;  // T3..T0
+    PagingContent content = PagingContent::kNoMessage;
+};
+
+[[nodiscard]] PagingHeader paging_header(std::uint8_t block2_low) noexcept;
+[[nodiscard]] std::string_view paging_content_name(PagingContent content) noexcept;
+
 // An Open Data Application announcement from a type 3A group. EN 50067 clause
 // 3.1.5.4 and Figure 18.
 struct OdaAnnouncement {
@@ -566,7 +666,132 @@ struct OdaAnnouncement {
     bool version_b = false;
     std::uint16_t message = 0;
     std::uint16_t aid = 0;  // 0x0000 means the group is used for its normal feature
+
+    // The groups that arrived on the announced group type while this
+    // announcement was current, raw. Zero for an AID of 0x0000, whose groups
+    // are counted under the feature Table 3 names, and zero for a TMC AID on
+    // a version A group, whose groups go to StationState::tmc.
+    RawFeature data{};
 };
+
+// ---------------------------------------------------------------------------
+// RDS-TMC, group 8A, carried raw
+// ---------------------------------------------------------------------------
+//
+// WHAT WAS IN HAND, AND WHAT THEREFORE IS NOT DECODED
+//
+// EN 50067:1998 clause 3.1.5.12 Figure 27 gives type 8A's layout as the PI,
+// the group code, TP and PTY, and then 37 bits whose "format and application
+// ... are defined by CEN", in ENV 12313-1, which became EN ISO 14819-1. The
+// only copy of ISO 14819-1 read here is the free preview of the 2021 edition,
+// which runs to clause 3.2. From it:
+//
+//   - the table of contents gives the widths of the five basic fields: event
+//     description 11 bits (5.3.2), primary location 16 bits (5.3.3),
+//     direction and extent 4 bits (5.3.4), duration 3 bits (5.3.5), diversion
+//     advice 1 bit (5.3.6);
+//   - clause 1: a user message uses one type 8A group, or up to five for a
+//     message with more detail;
+//   - Introduction 0.3: type 3A groups carry the TMC ODA identification, type
+//     8A groups carry the messages AND the tuning information AND the
+//     encryption administration information, and a terminal uses a group's
+//     data "once it has been verified by the reception of a second identical
+//     group";
+//   - 3.1.4: every group of one multi-group message carries the same
+//     continuity index.
+//
+// The positions of those fields inside the 37 bits are in clauses 7.2, 7.4,
+// 7.5, 9.3 to 9.5 and 8.3, none of which the preview reaches. Neither is the
+// layout of the 3A message bits for TMC, nor of the type 1A variant 1 TMC
+// identification. So nothing here decodes an event, a location, an extent, a
+// direction, a duration or a diversion bit, and nothing tells a user message
+// from a system or tuning group, or the first group of a multi-group message
+// from a later one. Reading the location out of block 4 because the widths
+// happen to fit would be a layout this code made up. The payload is kept
+// whole, and the first thing that becomes possible with clause 7 in hand is a
+// function from TmcMessage to those fields.
+//
+// What IS done is what the preview and EN 50067 support: recognising the
+// service by its AID, attributing 8A groups to it, and applying the
+// second-identical-group rule, so that a caller with the standard sees each
+// distinct payload once, counted, with its confirmation already applied.
+//
+// The AIDs are the RDS Forum's ODA register as published by NRSC
+// (rds-oda-aids.pdf, 2020-07-14), rows 36, 37 and 40: 0x0D45 is ALERT-C for
+// testing use only, 0xCD46 is ALERT-C where the PI country code equals the
+// location table country code, and 0xCD47 is ALERT-C where it need not.
+inline constexpr std::uint16_t kAidTmcTesting = 0x0D45;
+inline constexpr std::uint16_t kAidTmcAlertC = 0xCD46;
+inline constexpr std::uint16_t kAidTmcAlertCArbitraryPi = 0xCD47;
+
+[[nodiscard]] constexpr bool is_tmc_aid(std::uint16_t aid) noexcept {
+    return aid == kAidTmcTesting || aid == kAidTmcAlertC || aid == kAidTmcAlertCArbitraryPi;
+}
+
+// One distinct 37-bit type 8A payload and how often it has arrived.
+struct TmcMessage {
+    std::uint8_t x = 0;   // block 2 b4..b0
+    std::uint16_t y = 0;  // block 3
+    std::uint16_t z = 0;  // block 4
+
+    std::uint32_t receptions = 0;
+
+    // Receptions in which block 2, 3 or 4 had been corrected. A payload
+    // whose every reception was corrected has never been seen clean.
+    std::uint32_t corrected_receptions = 0;
+
+    // RdsDecoder::groups_decoded() when this payload last arrived, which is
+    // what the table evicts by when it is full.
+    std::uint64_t last_group = 0;
+
+    // ISO 14819-1:2021 Introduction 0.3: a group's data is used "once it has
+    // been verified by the reception of a second identical group, regardless
+    // of whether received 'immediately' or after several seconds or minutes".
+    [[nodiscard]] bool confirmed() const noexcept { return receptions >= 2; }
+};
+
+struct TmcState {
+    // A type 3A group has announced one of the TMC AIDs above, and the group
+    // type and message bits it announced. The message bits are raw: their
+    // layout is ISO 14819-1 clause 7.5, which was not in hand.
+    bool announced = false;
+    std::uint16_t aid = 0;
+    std::uint8_t group_type = 0;
+    bool version_b = false;
+    std::uint16_t oda_message = 0;
+
+    // EN 50067 Figure 14 variant 1, "TMC identification", whose twelve bits
+    // note 4 leaves to the CEN standard. Raw for the same reason.
+    std::uint16_t identification = 0;
+    bool identification_valid = false;
+
+    // Groups attributed to TMC, whether or not all three payload blocks
+    // arrived; the subset attributed by a 3A announcement rather than by
+    // Table 3's default use of 8A, which is what separates an ODA service
+    // from one identified the older way through type 1A variant 1; and the
+    // subset that could not join the table below because block 3 or block 4
+    // was lost.
+    std::uint64_t groups = 0;
+    std::uint64_t oda_groups = 0;
+    std::uint64_t incomplete = 0;
+
+    // Every distinct payload, bounded by kMaxTmcMessages. User messages,
+    // tuning information and encryption administration are all in here and
+    // are not told apart: see the note above.
+    std::vector<TmcMessage> messages;
+
+    // Payloads thrown out to make room, so a caller can tell a quiet service
+    // from one that overflowed the table.
+    std::uint64_t evicted = 0;
+};
+
+// A carousel of a few hundred messages repeated every few minutes is what a
+// busy service looks like, so this is sized for that rather than for one
+// screen. Full, the table evicts the least recently received unconfirmed
+// payload first, since an unconfirmed payload is the likeliest to be a
+// damaged copy of a confirmed one, and the least recently received confirmed
+// one only when there is no unconfirmed one left.
+inline constexpr std::size_t kMaxTmcMessages = 512;
 
 // One other network, assembled across type 14A groups. EN 50067 clause
 // 3.1.5.19 Figure 37.
@@ -764,6 +989,26 @@ struct StationState {
     std::vector<OdaAnnouncement> oda;
     std::vector<EonEntry> eon;
 
+    // The groups carried raw, one per feature Table 3 names. Groups a 3A
+    // announcement gave to an application are counted on that announcement
+    // instead. See RawGroupUse.
+    RawFeature tdc{};
+    RawFeature in_house{};
+    RawFeature paging{};
+    TmcState tmc{};
+
+    // Emergency Warning System, type 9A. EN 50067 clause 3.1.5.13: sent "very
+    // infrequently, unless an emergency occurs or test transmissions are
+    // required", with bits each country assigns for itself. A nonzero count is
+    // the one fact here that holds everywhere, and it is the one an operator
+    // needs: this station has transmitted an emergency warning group.
+    RawFeature ews{};
+
+    // EN 50067 Figure 14 variant 7, "Identification of EWS channel", twelve
+    // bits whose meaning clause 3.2.7 leaves to the EWS specification. Raw.
+    std::uint16_t ews_channel_identification = 0;
+    bool ews_channel_identification_valid = false;
+
     [[nodiscard]] std::string_view ps_text() const noexcept;
     [[nodiscard]] bool ps_complete() const noexcept { return ps_received == 0x0F; }
     [[nodiscard]] std::string_view rt_text() const noexcept;
@@ -855,6 +1100,9 @@ private:
     void apply_type3a(const Group& group);
     void apply_type4a(const Group& group);
     void apply_type10a(const Group& group);
+    void apply_tmc(const Group& group, std::uint16_t aid);
+    void apply_raw(RawFeature& feature, RawGroupUse use, const Group& group,
+                   std::uint16_t aid) noexcept;
     void apply_type14a(const Group& group);
     void apply_type14b(const Group& group);
     void apply_type15b(const Group& group);
@@ -866,6 +1114,9 @@ private:
     // the bound on how much a hostile or broken transmission can make the
     // decoder allocate.
     [[nodiscard]] EonEntry* eon_for(std::uint16_t pi);
+
+    // The current announcement for a group type, or null when none names it.
+    [[nodiscard]] OdaAnnouncement* oda_for(std::uint8_t group_type, bool version_b) noexcept;
 
     Options options_{};
 

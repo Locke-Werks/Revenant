@@ -744,6 +744,58 @@ std::string_view StationState::ptyn_text() const noexcept {
 }
 
 // ---------------------------------------------------------------------------
+// Groups carried raw
+// ---------------------------------------------------------------------------
+
+std::string_view raw_group_use_name(RawGroupUse use) noexcept {
+    switch (use) {
+        case RawGroupUse::kTransparentData: return "transparent data channel";
+        case RawGroupUse::kInHouse: return "in-house";
+        case RawGroupUse::kRadioPaging: return "radio paging";
+        case RawGroupUse::kTrafficMessage: return "traffic message channel";
+        case RawGroupUse::kEmergencyWarning: return "emergency warning";
+        case RawGroupUse::kOpenData: return "open data application";
+    }
+    return "unknown";  // C4715
+}
+
+PagingHeader paging_header(std::uint8_t block2_low) noexcept {
+    PagingHeader header;
+    header.ab = ((block2_low >> 4) & 0x01) != 0;
+    header.segment = static_cast<std::uint8_t>(block2_low & 0x0F);
+
+    // Table M.2, read from the most significant bit down: T3 set is
+    // alphanumeric whatever follows, T2 set is the 18 or 15 digit numeric
+    // forms, T1 set is the 10 digit form, and the two codes left are the
+    // table's first two rows.
+    if ((header.segment & 0x08) != 0) {
+        header.content = PagingContent::kAlphanumeric;
+    } else if ((header.segment & 0x04) != 0) {
+        header.content = PagingContent::kNumeric18OrInternational15;
+    } else if ((header.segment & 0x02) != 0) {
+        header.content = PagingContent::kNumeric10OrFunctions;
+    } else if (header.segment == 0x01) {
+        header.content = PagingContent::kFunctions;
+    } else {
+        header.content = PagingContent::kNoMessage;
+    }
+    return header;
+}
+
+std::string_view paging_content_name(PagingContent content) noexcept {
+    switch (content) {
+        case PagingContent::kNoMessage: return "no additional message";
+        case PagingContent::kFunctions: return "part of functions message";
+        case PagingContent::kNumeric10OrFunctions:
+            return "10 digit numeric message or part of functions message";
+        case PagingContent::kNumeric18OrInternational15:
+            return "18 digit numeric message or 15 digit international message";
+        case PagingContent::kAlphanumeric: return "alphanumeric message";
+    }
+    return "unknown";  // C4715
+}
+
+// ---------------------------------------------------------------------------
 // The decoder
 // ---------------------------------------------------------------------------
 
@@ -800,6 +852,17 @@ constexpr int kAcquireBlocks = 4;
 // detector for that case, noticing a known PI code arriving shifted one bit
 // left or right, which belongs with the bit clock rather than here.
 constexpr int kSyncLossThreshold = 50;
+
+// EN 50067 clause 3.1.4.1 Table 6: the group types a type 3A group may hand to
+// an Open Data Application. "Group types not shown in table 6 are not
+// available for ODA", so an announcement naming 0A or 2A is a broken encoder
+// and must not take PS or RadioText away from the display.
+[[nodiscard]] constexpr bool oda_capable(std::uint8_t group_type, bool version_b) noexcept {
+    if (version_b) {
+        return group_type >= 3 && group_type <= 13;
+    }
+    return (group_type >= 5 && group_type <= 9) || (group_type >= 11 && group_type <= 13);
+}
 
 }  // namespace
 
@@ -1128,6 +1191,57 @@ void RdsDecoder::apply_group(const Group& group) {
     state_.pty = static_cast<std::uint8_t>((b2 >> 5) & 0x1F);
     state_.pty_valid = true;
 
+    // THE ODA TABLE DECIDES FIRST, for the group types Table 6 lets it decide.
+    // A nonzero AID makes the group that application's, whatever Table 3
+    // would otherwise call it, and clause 3.1.5.4 allows one user per group
+    // type. A TMC AID on a version A group is still TMC: ISO 14819-1:2021
+    // Introduction 0.3 has the service identified in 3A groups and carried in
+    // 37-bit A group payloads, and EN 50067 clause 3.1.4.1 forbids an ODA
+    // being tied to one group type, so the announcement rather than the
+    // number 8 is what says where it went.
+    if (oda_capable(group.type, group.version_b)) {
+        OdaAnnouncement* oda = oda_for(group.type, group.version_b);
+        const std::uint16_t aid = oda != nullptr ? oda->aid : 0;
+        if (is_tmc_aid(aid) && !group.version_b) {
+            apply_tmc(group, aid);
+            return;
+        }
+        if (aid != 0) {
+            apply_raw(oda->data, RawGroupUse::kOpenData, group, aid);
+            return;
+        }
+
+        // No application holds the group type, so it carries whatever Table
+        // 3 names for it. The ODA-only types, 3B, 4B, 7B to 13B and 11A,
+        // 12A, name nothing and nobody announced them, so there is nothing to
+        // attribute them to; 13A is enhanced paging under Annex M clause M.3,
+        // which is not read here.
+        switch (group.type) {
+            case 5: apply_raw(state_.tdc, RawGroupUse::kTransparentData, group, 0); break;
+            case 6: apply_raw(state_.in_house, RawGroupUse::kInHouse, group, 0); break;
+            case 7:
+                if (!group.version_b) {
+                    apply_raw(state_.paging, RawGroupUse::kRadioPaging, group, 0);
+                }
+                break;
+            case 8:
+                if (!group.version_b) {
+                    apply_tmc(group, 0);
+                }
+                break;
+            case 9:
+                if (!group.version_b) {
+                    apply_raw(state_.ews, RawGroupUse::kEmergencyWarning, group, 0);
+                }
+                break;
+            default:
+                // group.type is four bits off the air rather than an enum, so
+                // this is not the exhaustiveness hole /w14062 guards.
+                break;
+        }
+        return;
+    }
+
     switch (group.type) {
         case 0: apply_type0(group); break;
         case 1: if (!group.version_b) { apply_type1a(group); } break;
@@ -1144,21 +1258,28 @@ void RdsDecoder::apply_group(const Group& group) {
             break;
         case 15: if (group.version_b) { apply_type15b(group); } break;
         default:
-            // Types 5 through 9, 11, 12, 13, the B versions of 1, 3, 4 and 10,
-            // and 15A are all real group types that this decoder does not
-            // parse. A default is correct here and is not the exhaustiveness
-            // hole /w14062 exists to catch: group.type is a four-bit field off
-            // the air, not an enum, and every one of the sixteen values is a
-            // value a transmitter may legally send.
+            // Nothing reaches here today. Types 5 to 9 and 11 to 13 went to
+            // the routing above in both versions, as did 3B, 4B and 10B, and
+            // every other type has a case in this switch: 1B lands in case 1
+            // and 15A in case 15, and both are dropped there. A default is
+            // still correct and is not the
+            // exhaustiveness hole /w14062 exists to catch: group.type is a
+            // four-bit field off the air, not an enum.
             //
-            // Type 8A is TMC and is specified in CEN ENV 12313-1 rather than
-            // in the RDS standard at all. Type 15A was Fast PS in North
-            // America and NRSC-4 (April 1998) clause 3.1.5.20 ordered encoder
-            // makers to stop emitting it and receiver makers to stop
-            // recognising it; NRSC-4-B reassigned it to Open Data
-            // Applications while EN 50067 Table 3 still lists it as defined in
-            // RBDS only. Not recognising it is the behaviour the 1998 text
-            // asked for.
+            // WHAT THIS COMMENT USED TO SAY: "Types 5 through 9, 11, 12, 13,
+            // the B versions of 1, 3, 4 and 10, and 15A are all real group
+            // types that this decoder does not parse", and "Type 8A is TMC and
+            // is specified in CEN ENV 12313-1 rather than in the RDS standard
+            // at all". Types 5 to 9 and the ODA groups are routed above now,
+            // raw, and TMC is attributed and counted there even though its
+            // fields are not decoded.
+            //
+            // Type 15A was Fast PS in North America and NRSC-4 (April 1998)
+            // clause 3.1.5.20 ordered encoder makers to stop emitting it and
+            // receiver makers to stop recognising it; NRSC-4-B reassigned it
+            // to Open Data Applications while EN 50067 Table 3 still lists it
+            // as defined in RBDS only. Not recognising it is the behaviour the
+            // 1998 text asked for.
             break;
     }
 }
@@ -1250,8 +1371,16 @@ void RdsDecoder::apply_type1a(const Group& group) {
         // EN 50067 clause 3.1.5.2 Figure 14 footnotes 1 to 8. Variants 4 and 5
         // are unassigned; 6 is for broadcasters' own use and note 7 says
         // consumer receivers must ignore it entirely, which is why it is not
-        // stored anywhere; 7 is EWS channel identification, which needs an
-        // EWS decoder this project does not have.
+        // stored anywhere. Variant 1 is TMC identification and variant 7 EWS
+        // channel identification, and both are kept as the twelve bits that
+        // arrived, because note 4 hands the first to the CEN standard and
+        // note 8 the second to the EWS specification, and neither layout is
+        // in the documents this was written from. Variant 2, paging
+        // identification, belongs to Annex M clause M.3 and is not read.
+        //
+        // WHAT THIS PARAGRAPH USED TO SAY about variant 7: "EWS channel
+        // identification, which needs an EWS decoder this project does not
+        // have". It still does not have one, and it keeps the bits anyway.
         switch (variant) {
             case 0: {
                 state_.ecc = static_cast<std::uint8_t>(payload & 0xFF);
@@ -1262,9 +1391,17 @@ void RdsDecoder::apply_type1a(const Group& group) {
                 }
                 break;
             }
+            case 1:
+                state_.tmc.identification = payload;
+                state_.tmc.identification_valid = true;
+                break;
             case 3:
                 state_.language = static_cast<std::uint8_t>(payload & 0xFF);
                 state_.language_valid = true;
+                break;
+            case 7:
+                state_.ews_channel_identification = payload;
+                state_.ews_channel_identification_valid = true;
                 break;
             default:
                 break;
@@ -1435,10 +1572,26 @@ void RdsDecoder::apply_type3a(const Group& group) {
         return;
     }
 
+    if (is_tmc_aid(announcement.aid)) {
+        state_.tmc.announced = true;
+        state_.tmc.aid = announcement.aid;
+        state_.tmc.group_type = announcement.group_type;
+        state_.tmc.version_b = announcement.version_b;
+        state_.tmc.oda_message = announcement.message;
+    }
+
+    // A repeat keeps the groups already counted against the application. A
+    // different AID on the same group type is a different user of the
+    // channel, clause 3.1.5.4 allowing one at a time, so its count starts
+    // again rather than inheriting its predecessor's payload.
     for (OdaAnnouncement& existing : state_.oda) {
         if (existing.group_type == announcement.group_type &&
             existing.version_b == announcement.version_b) {
-            existing = announcement;
+            if (existing.aid != announcement.aid) {
+                existing.data = RawFeature{};
+            }
+            existing.message = announcement.message;
+            existing.aid = announcement.aid;
             return;
         }
     }
@@ -1529,6 +1682,87 @@ void RdsDecoder::apply_type10a(const Group& group) {
     } else if (complete) {
         state_.ptyn_corrected = static_cast<std::uint8_t>(state_.ptyn_corrected & ~bit);
     }
+}
+
+void RdsDecoder::apply_raw(RawFeature& feature, RawGroupUse use, const Group& group,
+                           std::uint16_t aid) noexcept {
+    RawGroup raw;
+    raw.use = use;
+    raw.group_type = group.type;
+    raw.version_b = group.version_b;
+    raw.block2_low = static_cast<std::uint8_t>(group.blocks[1].value & 0x1F);
+
+    // A version B group's block 3 is the PI again, EN 50067 clause 3.1.3,
+    // and apply_group has already taken it. It is not payload.
+    if (!group.version_b && group.blocks[2].valid) {
+        raw.block3 = group.blocks[2].value;
+        raw.block3_valid = true;
+    }
+    if (group.blocks[3].valid) {
+        raw.block4 = group.blocks[3].value;
+        raw.block4_valid = true;
+    }
+    raw.corrected = group.blocks[1].corrected || (raw.block3_valid && group.blocks[2].corrected) ||
+                    (raw.block4_valid && group.blocks[3].corrected);
+    raw.aid = aid;
+
+    ++feature.groups;
+    feature.last = raw;
+}
+
+void RdsDecoder::apply_tmc(const Group& group, std::uint16_t aid) {
+    TmcState& tmc = state_.tmc;
+    ++tmc.groups;
+    if (aid != 0) {
+        ++tmc.oda_groups;
+    }
+
+    // A payload with a hole in it cannot be compared with another for the
+    // second-identical-group rule, and a partial one would sit in the table
+    // as a distinct message nobody sent.
+    if (!group.blocks[2].valid || !group.blocks[3].valid) {
+        ++tmc.incomplete;
+        return;
+    }
+
+    const auto x = static_cast<std::uint8_t>(group.blocks[1].value & 0x1F);
+    const std::uint16_t y = group.blocks[2].value;
+    const std::uint16_t z = group.blocks[3].value;
+    const bool corrected =
+        group.blocks[1].corrected || group.blocks[2].corrected || group.blocks[3].corrected;
+
+    for (TmcMessage& message : tmc.messages) {
+        if (message.x == x && message.y == y && message.z == z) {
+            ++message.receptions;
+            message.corrected_receptions += corrected ? 1u : 0u;
+            message.last_group = groups_decoded_;
+            return;
+        }
+    }
+
+    TmcMessage fresh;
+    fresh.x = x;
+    fresh.y = y;
+    fresh.z = z;
+    fresh.receptions = 1;
+    fresh.corrected_receptions = corrected ? 1u : 0u;
+    fresh.last_group = groups_decoded_;
+
+    if (tmc.messages.size() < kMaxTmcMessages) {
+        tmc.messages.push_back(fresh);
+        return;
+    }
+
+    // Full. See kMaxTmcMessages for why an unconfirmed payload goes first.
+    auto older = [](const TmcMessage& a, const TmcMessage& b) {
+        if (a.confirmed() != b.confirmed()) {
+            return !a.confirmed();
+        }
+        return a.last_group < b.last_group;
+    };
+    auto victim = std::min_element(tmc.messages.begin(), tmc.messages.end(), older);
+    *victim = fresh;
+    ++tmc.evicted;
 }
 
 void RdsDecoder::apply_type14a(const Group& group) {
@@ -1715,6 +1949,15 @@ void RdsDecoder::add_af(std::vector<dsp::Hertz>& list, dsp::Hertz hz) {
         return;
     }
     list.push_back(hz);
+}
+
+OdaAnnouncement* RdsDecoder::oda_for(std::uint8_t group_type, bool version_b) noexcept {
+    for (OdaAnnouncement& announcement : state_.oda) {
+        if (announcement.group_type == group_type && announcement.version_b == version_b) {
+            return &announcement;
+        }
+    }
+    return nullptr;
 }
 
 EonEntry* RdsDecoder::eon_for(std::uint16_t pi) {

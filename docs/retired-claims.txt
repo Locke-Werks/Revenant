@@ -1144,3 +1144,17 @@ commit: "End the RTL-SDR stream when a cancelled read returns an error"
 instead: The rtlsdr_demod_write_reg -9 pair at rtlsdr_close follows streaming,
     not the cancel. A probe reading with rtlsdr_read_sync, which never cancels
     a transfer, printed the same pair at close on two runs out of two.
+
+phrase: Types 5 through 9, 11, 12, 13, the B versions of 1, 3, 4 and 10
+retired: 2026-09-23
+commit: "Carry RDS groups 5A to 9A and announced ODA groups raw"
+instead: RdsDecoder routes 5A to 9A, 5B, 6B and every Table 6 group a 3A
+    announcement names, raw, into StationState and OdaAnnouncement::data;
+    only 1B and 15A are still dropped unparsed.
+
+phrase: Nothing in it touches the 57 kHz subcarrier, the biphase decoder
+retired: 2026-09-23
+commit: "Carry RDS groups 5A to 9A and announced ODA groups raw"
+instead: One case in tests/decode/test_rds_groups.cpp runs its groups through
+    core/dsp/synth/rds_mod.h and core/decode/rds_bits.h; every other case
+    feeds bits straight to the decoder.
