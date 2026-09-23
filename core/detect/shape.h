@@ -4,8 +4,12 @@
 // docs/detection.md splits identification into two tiers and this is the first
 // one: "From the spectrum, free, on frames the detector already has: bandwidth,
 // symmetry about the centre, presence of a carrier spike, how the shape moves
-// over time." Tier two is core/characterise, which reads complex baseband and
-// needs a probe receiver that does not exist yet.
+// over time." Tier two is core/characterise, which reads complex baseband from
+// a probe receiver, core/engine/probe.h, placed by core/detect/tier_two.h.
+//
+// WHAT THE SENTENCE BEFORE THIS USED TO SAY: "Tier two is core/characterise,
+// which reads complex baseband and needs a probe receiver that does not exist
+// yet."
 //
 // WHY THIS EXISTS. The detector decides on power alone. A band clears the
 // threshold when its summed excess over the local noise floor is large enough,

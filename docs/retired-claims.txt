@@ -1253,3 +1253,23 @@ commit: "Decide SITOR-B characters from one copy when the stream ends"
 instead: SitorBDecoder::flush decides each DX copy still waiting for its RX
     copy under clause 4.3 and marks it single_copy; the SITOR-B adapter's
     flush calls it and counts them in the line's single_copy field.
+
+phrase: `Demod` is `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`;
+phrase: which is Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw. Matching it makes the conversion a cast
+retired: 2026-09-21
+commit: "Add P25 Phase 1, D-STAR and TETRA as demodulator modes"
+instead: engine::Demod and the schema's Demod have eleven modes: Raw, Am, Nfm,
+    Wfm, Usb, Lsb, Dsb, Cw, then P25p1, Dstar and Tetra appended.
+
+phrase: `core/detect/` is reserved for it and nothing is written there yet
+retired: 2026-09-19
+commit: "Scale the spectrum from the device, and lay the detector foundation"
+instead: core/detect holds the wideband detector, shape.h's first
+    identification tier and tier_two.h, which places probe receivers on
+    tracks; docs/detection.md is the design.
+
+phrase: which reads complex baseband and needs a probe receiver that does not exist yet
+retired: 2026-09-23
+commit: "Add a pool of probe receivers the engine places for itself"
+instead: core/engine/probe.h is the probe receiver pool, and
+    core/detect/tier_two.h places its receivers on the detector's tracks.

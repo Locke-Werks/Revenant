@@ -880,18 +880,31 @@ operator has already said, by choosing a demodulator. That is the cheap half
 of the problem and it needs no classifier.
 
 It does need something that does not exist yet, and the RTTY example is
-exactly where it shows. `Demod` is `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`;
-there is no RTTY in it, and `VrxParams` carries no shift field, only
-`cw_pitch`. So "the operator selected RTTY with a 170 Hz shift" is not a state
+exactly where it shows. `Demod` has eleven modes, the eight demodulators
+`Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw` and the three digital voice taps
+`P25p1, Dstar, Tetra` appended after them; there is no RTTY in it, and
+`VrxParams` carries no shift field, only `cw_pitch`. The RTTY decoder reads a
+usb or lsb receiver's audio, and the receiver itself still does not know it is
+carrying RTTY. So "the operator selected RTTY with a 170 Hz shift" is not a state
 this engine can currently be in. The centre rule for the modes that do exist
 follows from `VrxParams` today; the modes the table below names as the
 interesting cases need the enumeration and the parameters to grow first. That
 is a small change and it is not a free one, because `Demod` is a frozen
 contract and its value is the demodulator kernel's specialization constant.
 
+WHAT THE FIRST SENTENCE OF THIS PARAGRAPH USED TO SAY: "`Demod` is `Raw, Am,
+Nfm, Wfm, Usb, Lsb, Dsb, Cw`;". That was the enumeration when it was written,
+and `P25p1`, `Dstar` and `Tetra` were appended to it since.
+
 Classification is for the unattended case: a scan, a wideband survey, a
-receiver parked on something the operator has not named. `core/detect/` is
-reserved for it and nothing is written there yet.
+receiver parked on something the operator has not named. `core/detect/` holds
+the wideband detector, which finds and tracks what is transmitting across the
+span from the spectrum frames, the first identification tier in
+`core/detect/shape.h`, and the second in `core/detect/tier_two.h`, which
+places `core/engine/probe.h`'s probe receivers on tracks and hands what
+`core/characterise` makes of them back to the detector. `docs/detection.md` is
+the design. WHAT THE SENTENCE BEFORE THIS USED TO SAY: "`core/detect/` is
+reserved for it and nothing is written there yet."
 
 The useful property, and the reason this is not a dependency to be afraid of,
 is that **a classification result is stable**. A transmission does not change

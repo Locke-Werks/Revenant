@@ -93,12 +93,17 @@ struct Rational {
 }
 
 enum Demod {
-    # Ordinal for ordinal with revenant::engine::Demod, which is
-    # Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw. Matching it makes the conversion
-    # a cast, and core/rpc/convert.h static_asserts every pair rather than
-    # trusting that: a mode reordered on one side and not the other would
-    # silently retune every receiver in a saved session, and nothing about
-    # the failure would point here.
+    # Ordinal for ordinal with revenant::engine::Demod, all eleven of them:
+    # the eight demodulators Raw to Cw and the three digital voice taps
+    # appended below. Matching it makes the conversion a cast, and
+    # core/rpc/convert.h static_asserts every pair rather than trusting
+    # that: a mode reordered on one side and not the other would silently
+    # retune every receiver in a saved session, and nothing about the
+    # failure would point here.
+    #
+    # WHAT THE FIRST SENTENCE USED TO SAY: "which is Raw, Am, Nfm, Wfm, Usb,
+    # Lsb, Dsb, Cw. Matching it makes the conversion a cast", which listed
+    # eight and stopped before p25p1, dstar and tetra.
     raw @0;
     am @1;
     nfm @2;
