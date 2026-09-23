@@ -606,7 +606,7 @@ public:
         return out;
     }
 
-    [[nodiscard]] Expected<dsp::Hertz> set_source_center(dsp::Hertz center) override {
+    [[nodiscard]] Expected<SourceRetune> set_source_center(dsp::Hertz center) override {
         if (source_ == nullptr) {
             return fail("Engine::set_source_center before a source is open: there is no front "
                         "end to point anywhere");
@@ -671,6 +671,9 @@ public:
         // because it is: place() refuses a receiver the new grid cannot carry,
         // and leaving it registered on a placement that no longer describes it
         // would be a receiver producing audio from the wrong channel.
+        SourceRetune out;
+        out.center = *landed;
+
         if (graph_ != nullptr) {
             const dsp::Hertz moved = *landed - was;
             const dsp::Hertz half_span = static_cast<dsp::Hertz>(info_.source_rate / 2);
@@ -695,11 +698,15 @@ public:
                                      : Expected<VrxPlacement>{std::unexpected(
                                            Error{"the receiver's centre is outside the new span"})};
                 if (!placement) {
-                    // Discarded for the reason the block above gives: the
-                    // device has already moved, and a client hears about the
-                    // receiver through vrx_status and its own subscriptions
-                    // rather than through this call's return.
-                    static_cast<void>(graph_->remove_vrx(id));
+                    // Reported in the answer rather than as a failure, for
+                    // the reason the block above gives: the device has
+                    // already moved. Only a removal that took is reported. A
+                    // refusal means the graph no longer held the receiver,
+                    // so whoever removed it has already accounted for it.
+                    if (graph_->remove_vrx(id)) {
+                        out.removed.push_back(
+                            RetuneRemoval{.id = id, .frequency = was + status->params.center});
+                    }
                     continue;
                 }
 
@@ -711,7 +718,7 @@ public:
             }
         }
 
-        return *landed;
+        return out;
     }
 
     [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override {

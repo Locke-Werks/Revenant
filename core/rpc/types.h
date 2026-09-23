@@ -159,6 +159,22 @@ struct SourceTuning {
     std::int64_t high_hz = 0;
 };
 
+// One receiver a front-end retune removed, with the absolute frequency its
+// centre was on before the tune.
+struct RetuneRemoval {
+    std::uint64_t id = 0;
+    std::int64_t frequency_hz = 0;
+};
+
+// What Session.setSourceCenter answers: the centre the device took, and every
+// receiver the move left outside the span. The server has already ended each
+// removed receiver's audio and decoder subscriptions with a reason naming the
+// retune by the time this arrives.
+struct SourceRetune {
+    std::int64_t granted_hz = 0;
+    std::vector<RetuneRemoval> removed;
+};
+
 // What a source can be pointed at. An ENVELOPE and not a promise: a device with
 // a gap in its coverage reports the ranges it knows about and still refuses a
 // frequency inside a gap, in its own words.

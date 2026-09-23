@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "core/engine/vrx.h"
+#include "tests/rpc/retunable_engine.h"
 
 namespace revenant::test {
 namespace {
@@ -58,6 +59,9 @@ Status Harness::open(const HarnessOptions& options) {
         return std::unexpected(with_context(created.error(), "building the engine"));
     }
     engine_ = std::move(*created);
+    if (options.retunable) {
+        engine_ = std::make_unique<RetunableEngine>(std::move(engine_));
+    }
 
     const std::string uri = options.source_uri.empty()
                                 ? scene_uri(options.samples, options.center_hz)

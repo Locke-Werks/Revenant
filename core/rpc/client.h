@@ -152,12 +152,20 @@ public:
     // old behaviour could not tell it had happened. So the surprising case is
     // the one that now needs asking for.
     //
-    // A REMOVED RECEIVER IS NOT REPORTED THROUGH THIS CALL. It answers with
-    // the centre the device took, because the retune succeeded and a receiver
-    // that could not come along is not a failed retune. A client finds out the
-    // way it finds out about any receiver that has gone: vrx_status refuses
-    // and the subscriptions end. Check vrx_ids after a retune rather than
-    // assuming the set is unchanged.
+    // A REMOVED RECEIVER IS REPORTED BY retune_source BELOW, not by this
+    // call, which answers with the centre alone. Both send the same request;
+    // this one is kept because it is the shape every caller already uses. The
+    // retune succeeded either way, and a receiver that could not come along
+    // is not a failed retune, so neither call fails for one.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "A client finds out the way it finds
+    // out about any receiver that has gone: vrx_status refuses and the
+    // subscriptions end." The subscriptions did not end. The engine removed
+    // the receiver without telling the server, so an audio subscriber on it
+    // heard nothing and got no ended(), and vrx_ids changing was the only
+    // trace. The server now ends every audio and decoder subscription on a
+    // removed receiver with a reason naming the retune, and the answer lists
+    // the removed receivers.
     //
     // EVERY ABSOLUTE FREQUENCY THIS CLIENT IS HOLDING IS STALE WHEN THIS
     // RETURNS. Call info() again and use the new source_center rather than
@@ -172,6 +180,14 @@ public:
     // three different things to do instead. Ask source_can_retune first and
     // grey the control out rather than offering one that always refuses.
     [[nodiscard]] virtual Expected<std::int64_t> set_source_center(std::int64_t center_hz) = 0;
+
+    // The same retune, answering with the receivers it removed as well as the
+    // centre. Each removal carries the absolute frequency the receiver was
+    // on, which is what a client names when it tells the operator a receiver
+    // went: the id means nothing to them. Every audio and decoder
+    // subscription on a removed receiver has already been sent ended() by the
+    // time this returns.
+    [[nodiscard]] virtual Expected<SourceRetune> retune_source(std::int64_t center_hz) = 0;
 
     // The front end's gain, by the stage's own name, answering with what the
     // device took.

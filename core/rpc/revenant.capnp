@@ -347,6 +347,17 @@ struct TuneRange {
     stepHz @2 :Int64;
 }
 
+# One receiver Session::setSourceCenter removed because its centre fell outside
+# the new span.
+struct RetuneRemoval {
+    vrx @0 :UInt64;
+
+    # The absolute frequency its centre was on, before the tune. The id means
+    # nothing to an operator; this is the number a client names when it says a
+    # receiver went.
+    frequencyHz @1 :Int64;
+}
+
 # One gain control on the device, named the way the device names it.
 #
 # A LIST AND NOT A NUMBER, WHICH IS THE WHOLE POINT. Users judge an SDR
@@ -2732,21 +2743,32 @@ interface Session {
     # a property of bytes on disk, and stopped being tolerable the first
     # time a real radio was on the other end.
     #
-    # WHAT MOVES, AND IT IS A SHORT LIST. The channelizer, every receiver
-    # and the whole spectrum stage work in the source's baseband frame and
-    # are never told where the front end is pointed, so nothing about a
-    # receiver's placement, filter, audio stream or subscription changes. A
-    # receiver sitting at baseband +300 kHz is still at +300 kHz and is now
-    # hearing a different piece of spectrum. What moves is the device's own
-    # oscillator and EngineInfo::sourceCenter.
+    # WHAT MOVES. The device's own oscillator, EngineInfo::sourceCenter, and
+    # every receiver's baseband offset, which the engine rebases so the
+    # receiver stays on the absolute frequency it was tuned to. A receiver
+    # whose CENTRE then falls outside the new span is removed.
     #
-    # WHICH MEANS EVERY ABSOLUTE FREQUENCY A CLIENT IS HOLDING IS STALE, and
-    # that is the trap. VrxParams::center is baseband and survives; a
-    # Detection's centerHz is absolute and does not; a label a client
-    # computed by adding sourceCenter to a bin is wrong by the retune. Read
-    # info() again after this returns rather than adding the delta, because
-    # the delta is not what was asked for: the answer here is where the
-    # device landed.
+    # WHAT THIS PARAGRAPH USED TO SAY, and it has been false since the rebase
+    # shipped on 2026-09-21: "nothing about a receiver's placement, filter,
+    # audio stream or subscription changes. A receiver sitting at baseband
+    # +300 kHz is still at +300 kHz and is now hearing a different piece of
+    # spectrum." The operator who retuned from broadcast FM and heard their
+    # receiver carry on at a frequency they had not chosen is why it changed.
+    #
+    # removed LISTS EVERY RECEIVER THE RETUNE TOOK, with the frequency each
+    # was on. Before 2026-09-23 nothing reported one: an audio subscriber on
+    # it got no ended() and went quiet, and vrxIds changing was the only
+    # trace. The server now ends every audio and decoder subscription on a
+    # removed receiver with a reason naming the retune, drops its RDS decoder
+    # and its ownership record, all before this answers. Empty from a server
+    # built before the field existed, which removed receivers just the same.
+    #
+    # EVERY ABSOLUTE FREQUENCY A CLIENT IS HOLDING THAT IS NOT A RECEIVER'S IS
+    # STALE, and that is the trap. A Detection's centerHz is absolute and
+    # belongs to the band that was left; a label a client computed by adding
+    # sourceCenter to a bin is wrong by the retune. Read info() again after
+    # this returns rather than adding the delta, because the delta is not
+    # what was asked for: the answer here is where the device landed.
     #
     # WHAT THE ENGINE DOES NOT DO. The device ring still holds samples
     # captured at the old centre, and they are left alone: it is a streaming
@@ -2774,7 +2796,7 @@ interface Session {
     # pick a frequency the dongle reaches. A refusal composed here would
     # replace all three with a category. Call sourceCanRetune first and grey
     # the control out rather than offering one that always refuses.
-    setSourceCenter @16 (centerHz :Int64) -> (grantedHz :Int64);
+    setSourceCenter @16 (centerHz :Int64) -> (grantedHz :Int64, removed :List(RetuneRemoval));
 
     # Whether the surface above will work, and the range it will work over.
     #

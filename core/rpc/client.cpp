@@ -1054,6 +1054,7 @@ public:
     [[nodiscard]] Expected<SourceStats> source_stats() override;
 
     [[nodiscard]] Expected<std::int64_t> set_source_center(std::int64_t center_hz) override;
+    [[nodiscard]] Expected<SourceRetune> retune_source(std::int64_t center_hz) override;
     [[nodiscard]] Expected<double> set_source_gain(std::string_view stage, double db) override;
     [[nodiscard]] Status set_source_gain_auto(std::string_view stage, bool on) override;
     [[nodiscard]] Expected<std::optional<SourceDescriptor>> source_descriptor() override;
@@ -1525,6 +1526,25 @@ Expected<std::int64_t> ClientImpl::set_source_center(std::int64_t center_hz) {
         request.setCenterHz(center_hz);
         return request.send().then(
             [](auto&& response) { return response.getGrantedHz(); });
+    });
+}
+
+Expected<SourceRetune> ClientImpl::retune_source(std::int64_t center_hz) {
+    return on_loop("retune_source", [center_hz](LoopState& state) {
+        auto request = state.session.setSourceCenterRequest();
+        request.setCenterHz(center_hz);
+        return request.send().then([](auto&& response) {
+            SourceRetune out;
+            out.granted_hz = response.getGrantedHz();
+            // A server built before this field never sends it, and it reads
+            // as an empty list. That server's removals are visible only as
+            // vrx_ids changing, which is all it ever offered.
+            for (const auto removal : response.getRemoved()) {
+                out.removed.push_back(RetuneRemoval{.id = removal.getVrx(),
+                                                    .frequency_hz = removal.getFrequencyHz()});
+            }
+            return out;
+        });
     });
 }
 

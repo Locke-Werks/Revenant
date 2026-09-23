@@ -382,12 +382,23 @@ an out-of-span receiver is REMOVED rather than parked, which was the owner's
 call on 2026-09-21: parked-and-said-to-be-parked is a state an operator then
 has to tidy up, and what they asked for was a disappearing receiver.
 
-**A SWEEP WILL DROP RECEIVERS, AND NOTHING SAYS SO YET.** Scrolling far enough
-takes the front end past whatever a receiver was tuned to, and that receiver
-goes. The engine is right to remove it and the client empties its pane, but
-neither announces it, so an operator sweeping with a receiver open watches it
-vanish without being told why. A sentence on the pane naming the frequency that
-was dropped is the missing piece.
+**A SWEEP WILL DROP RECEIVERS, AND BOTH ENDS NOW SAY SO.** Scrolling far
+enough takes the front end past whatever a receiver was tuned to, and that
+receiver goes. The window posts `receiverGoneText` from
+`ui/models/receiver_gone.h`, naming the frequency it had recorded, and offers
+the retune as the cause only when that frequency really is outside the span,
+because all it can see is the receiver missing from the inventory. Since
+2026-09-23 the wire says it directly: `setSourceCenter` answers with `removed`,
+each receiver's id and the frequency it was on, and every audio and decoder
+subscription on it gets `ended()` with a reason naming the retune.
+`Client::retune_source` reads the list. The window still calls
+`set_source_center`, which answers with the centre alone, so its sentence is
+still the inferred one.
+
+WHAT THIS PARAGRAPH USED TO SAY: "The engine is right to remove it and the
+client empties its pane, but neither announces it". The window's half was
+answered by "Say which receiver went, and refuse to guess why", and the
+engine's by the list above.
 
 **A device retune is not free and not instant.** An RTL-SDR takes time to
 settle and the sample stream is discontinuous across it. Measured on 2026-09-21

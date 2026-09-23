@@ -88,6 +88,7 @@
 #include "core/rpc/types.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/rpc/decoded_log.h"
 #include "tests/rpc/rpc_fixture.h"
 
 using namespace revenant;
@@ -1285,6 +1286,115 @@ TEST_CASE("a squelched receiver sends silence at the full rate rather than stopp
     CHECK(status->audio_dropped == 0);
 
     harness.client().unsubscribe_audio(*vrx);
+}
+
+TEST_CASE("a retune that strands a receiver ends its listeners and names it",
+          "[gpu][rpc][audio][m2]") {
+    REVENANT_NEEDS_GPU();
+
+    // THE GAP THIS CLOSES. Engine::set_source_center removes a receiver whose
+    // centre falls outside the new span, and until 2026-09-23 the server
+    // discarded the list: an audio subscriber on it got no ended() and went
+    // quiet, which is what a shut squelch sounds like, and the decoder
+    // subscriber the same. vrxIds changing was the only trace.
+    //
+    // Through tests/rpc/retunable_engine.h, because no source that opens
+    // without a radio will retune. It rebases and removes the way the engine
+    // does; the engine's own half is refereed against a dongle in
+    // tests/engine/test_engine.cpp.
+    HarnessOptions options = streaming_options();
+    options.center_hz = 100'000'000;
+    options.retunable = true;
+
+    Harness harness;
+    bring_up_running(harness, options);
+
+    // Two receivers 1.03 MHz apart in a span 2.4 MHz wide. Moving the front
+    // end up 600 kHz leaves the kept one at baseband -468928 and puts the
+    // stranded one at -1500000, outside the 1200016 either side of DC.
+    constexpr std::int64_t kStrandedOffset = -900'000;
+    constexpr std::int64_t kRetuneTo = 100'600'000;
+
+    auto kept = harness.client().add_vrx(nfm_receiver());
+    INFO(test::message_of(kept));
+    REQUIRE(kept.has_value());
+
+    rpc::VrxParams stranded_params = nfm_receiver();
+    stranded_params.center = kStrandedOffset;
+    auto stranded = harness.client().add_vrx(stranded_params);
+    INFO(test::message_of(stranded));
+    REQUIRE(stranded.has_value());
+
+    auto kept_audio = std::make_shared<AudioLog>();
+    REQUIRE(harness.client()
+                .subscribe_audio(*kept, 0, into(kept_audio), ending(kept_audio))
+                .has_value());
+    auto stranded_audio = std::make_shared<AudioLog>();
+    REQUIRE(harness.client()
+                .subscribe_audio(*stranded, 0, into(stranded_audio), ending(stranded_audio))
+                .has_value());
+
+    auto kept_decoded = std::make_shared<test::MessageLog>();
+    auto kept_decoder = harness.client().subscribe_decoded(
+        *kept, "pocsag", test::into(kept_decoded), test::ending(kept_decoded));
+    INFO(test::message_of(kept_decoder));
+    REQUIRE(kept_decoder.has_value());
+    auto stranded_decoded = std::make_shared<test::MessageLog>();
+    auto stranded_decoder = harness.client().subscribe_decoded(
+        *stranded, "pocsag", test::into(stranded_decoded), test::ending(stranded_decoded));
+    INFO(test::message_of(stranded_decoder));
+    REQUIRE(stranded_decoder.has_value());
+
+    REQUIRE(wait_for_chunks(*kept_audio, 10, 4000) >= 10);
+    REQUIRE(wait_for_chunks(*stranded_audio, 10, 4000) >= 10);
+
+    auto retuned = harness.client().retune_source(kRetuneTo);
+    INFO(test::message_of(retuned));
+    REQUIRE(retuned.has_value());
+    CHECK(retuned->granted_hz == kRetuneTo);
+
+    // NAMED IN THE ANSWER, by id and by the frequency it was on, which is the
+    // number an operator would recognise.
+    REQUIRE(retuned->removed.size() == 1);
+    CHECK(retuned->removed.front().id == *stranded);
+    CHECK(retuned->removed.front().frequency_hz == 100'000'000 + kStrandedOffset);
+
+    // TOLD, IN WORDS THAT SAY IT WAS THE RETUNE. A reason that said only
+    // "removed" would send an operator looking for whoever removed it.
+    REQUIRE(wait_for_ended(*stranded_audio, 4000));
+    INFO(stranded_audio->reason());
+    CHECK(stranded_audio->reason().find("retuned to 100600000 Hz") != std::string::npos);
+    CHECK(stranded_audio->reason().find("99100000 Hz") != std::string::npos);
+
+    const auto decoded_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (!stranded_decoded->ended() && std::chrono::steady_clock::now() < decoded_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    INFO(stranded_decoded->reason());
+    REQUIRE(stranded_decoded->ended());
+    CHECK(stranded_decoded->reason().find("retuned to 100600000 Hz") != std::string::npos);
+
+    // Really finished rather than merely quiet.
+    auto dead = harness.client().audio_stats(*stranded);
+    CHECK_FALSE(dead.has_value());
+
+    // THE CONTROL. The receiver that came along is still being heard, and
+    // neither of its subscriptions was ended, so the cleanup took the one
+    // receiver the engine removed and nothing else.
+    const std::size_t kept_at_retune = kept_audio->size();
+    REQUIRE(wait_for_chunks(*kept_audio, kept_at_retune + 10, 4000) >= kept_at_retune + 10);
+    CHECK_FALSE(kept_audio->ended());
+    CHECK_FALSE(kept_decoded->ended());
+    auto kept_stats = harness.client().decoded_stats(*kept, "pocsag");
+    INFO(test::message_of(kept_stats));
+    CHECK(kept_stats.has_value());
+
+    auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(*ids == std::vector<std::uint64_t>{*kept});
+
+    harness.client().unsubscribe_decoded(*kept, "pocsag");
+    harness.client().unsubscribe_audio(*kept);
 }
 
 TEST_CASE("closing the source ends a live audio subscription and says why",

@@ -807,23 +807,37 @@ device took, which a synthesiser with a tuning step will round.
 range, so a client can grey a control out rather than offering one that
 always refuses.
 
-This is a small engine change and the reason is structural rather than lucky.
 The channelizer, every receiver and the whole spectrum stage work in the
 source's baseband frame and are never told where the front end is pointed:
 `core/engine/vrx_place.cpp` is handed the grid, the rate and the request and
-nothing else. So a retune moves the device's own oscillator and
-`EngineInfo::sourceCenter`, and nothing about a placement, a filter, an audio
-stream or a subscription changes.
+nothing else. So a retune moves the device's own oscillator,
+`EngineInfo::sourceCenter`, and every receiver's baseband offset, which the
+engine rebases so the receiver stays on the absolute frequency it was tuned
+to. A receiver whose centre then falls outside the new span is removed.
 
-**Which is also the trap.** A receiver stays where it is in baseband, so it
-is now hearing a different piece of spectrum. Deciding what each open
-receiver was *for* and moving it is the client's job, because there is no
-reading of "keep this one on 145.1 MHz" that is right for a scanner as well
-as for a panadapter.
+**The answer names every receiver the retune removed.** `removed` carries each
+one's id and the absolute frequency it was on before the tune, and by the time
+it arrives the server has done for each what `removeVrx` does: every audio and
+decoder subscription on it has been sent `ended()` with a reason naming both
+frequencies, and its RDS decoder and ownership record are gone.
+`Client::retune_source` reads the list; `Client::set_source_center` still
+answers with the centre alone. Before 2026-09-23 the list was discarded in the
+server: an audio subscriber on a removed receiver got no `ended()` and went
+quiet, which is what a shut squelch sounds like, and `vrxIds` changing was the
+only trace. `tests/rpc/test_rpc_audio.cpp` strands one of two receivers and
+holds both halves.
 
-Every absolute frequency a client is holding is stale when the call returns.
-Read `info()` again rather than adding the delta: the answer is where the
-device landed, not what was asked for.
+WHAT THE TWO PARAGRAPHS BEFORE THIS USED TO SAY, and they have been false
+since the rebase shipped on 2026-09-21: "a retune moves the device's own
+oscillator and `EngineInfo::sourceCenter`, and nothing about a placement, a
+filter, an audio stream or a subscription changes", then "A receiver stays
+where it is in baseband, so it is now hearing a different piece of spectrum.
+Deciding what each open receiver was *for* and moving it is the client's job".
+The engine does the moving now, for the reason "Not done yet" below records.
+
+Every other absolute frequency a client is holding is stale when the call
+returns. Read `info()` again rather than adding the delta: the answer is where
+the device landed, not what was asked for.
 
 **What is deliberately not reset.** The device ring still holds samples
 captured at the old centre. It is a streaming window rather than a cache,
@@ -1456,12 +1470,17 @@ receivers. The cases poll with a ten second deadline regardless, because how
 soon the server notices a closed socket is a property of the loopback stack
 and not of this code.
 
-**What this does not do.** A receiver the ENGINE removed on its own, which a
-front-end retune does to one whose centre falls outside the new span, leaves
-its ownership record behind until its session ends, when the removal is
-attempted, refused and dropped. Receiver ids are never reused, so a stale record
-cannot be mistaken for a live receiver. `closeSource` clears every record,
-because every receiver goes with the source.
+**A receiver the engine removes on its own goes the same way.** A front-end
+retune removes one whose centre falls outside the new span, and
+`setSourceCenter` drops its ownership record along with its subscriptions
+before answering. `closeSource` clears every record, because every receiver
+goes with the source.
+
+WHAT THIS PARAGRAPH USED TO SAY, under "What this does not do": "A receiver the
+ENGINE removed on its own, which a front-end retune does to one whose centre
+falls outside the new span, leaves its ownership record behind until its
+session ends, when the removal is attempted, refused and dropped." True until
+2026-09-23, when the server started reading the engine's list of removals.
 
 ## Not done yet
 
@@ -1486,9 +1505,9 @@ receiver's own passband.
 Decided and shipped. A retune rebases every receiver to hold the absolute
 frequency it was tuned to, and one whose CENTRE falls outside the new span is
 removed. The centre and not the passband, because the centre is the frequency
-somebody typed or clicked. A client finds out the way it finds out about any
-receiver that has gone, so check `vrxIds` after a retune rather than assuming
-the set is unchanged.
+somebody typed or clicked. `setSourceCenter` lists every receiver it removed,
+and ends their subscriptions with a reason; see "The front end can be pointed
+somewhere else".
 
 **WHAT THIS ENTRY USED TO SAY, and the owner decided it on 2026-09-22.** It was
 headed "A receiver outlives the client that created it, and nothing reaps one

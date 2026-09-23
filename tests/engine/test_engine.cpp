@@ -1451,15 +1451,16 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     INFO(test::message_of(landed));
     REQUIRE(landed.has_value());
 
-    const dsp::Hertz offset = *landed - kWanted;
-    INFO("asked " << kWanted << " Hz, landed " << *landed << " Hz, offset " << offset);
+    const dsp::Hertz offset = landed->center - kWanted;
+    INFO("asked " << kWanted << " Hz, landed " << landed->center << " Hz, offset " << offset);
     CHECK(std::abs(offset) <= kWanted / 10'000);
 
     // EngineInfo follows the tune, which is what every axis label and every
     // detection is derived from.
-    CHECK(eng.info().source_center == *landed);
+    CHECK(eng.info().source_center == landed->center);
 
     REQUIRE(eng.vrx_ids().size() == 1);
+    CHECK(landed->removed.empty());
     auto held = eng.vrx_status(*receiver);
     REQUIRE(held.has_value());
     const dsp::Hertz absolute = eng.info().source_center + held->params.center;
@@ -1508,9 +1509,16 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     auto uhf = eng.set_source_center(435'000'000);
     INFO(test::message_of(uhf));
     REQUIRE(uhf.has_value());
-    CHECK(eng.info().source_center == *uhf);
+    CHECK(eng.info().source_center == uhf->center);
     CHECK(eng.vrx_ids().empty());
     CHECK_FALSE(eng.vrx_status(*receiver).has_value());
+
+    // AND THE ANSWER SAYS SO, which is what lets the RPC server end the
+    // receiver's subscribers with a reason instead of leaving them quiet. The
+    // frequency is where the receiver was, not where the front end went.
+    REQUIRE(uhf->removed.size() == 1);
+    CHECK(uhf->removed.front().id == *receiver);
+    CHECK(uhf->removed.front().frequency == kOpenedAt);
 
     // THE RETUNE ITSELF STILL SUCCEEDED AND THE ENGINE IS STILL SERVING. A
     // receiver that could not come along is not a failed retune, and an engine
@@ -1518,7 +1526,7 @@ TEST_CASE("a dongle opened after a close can be retuned while the graph runs",
     auto back = eng.set_source_center(98'100'000);
     INFO(test::message_of(back));
     REQUIRE(back.has_value());
-    CHECK(eng.info().source_center == *back);
+    CHECK(eng.info().source_center == back->center);
     CHECK(eng.running());
 
     // AND THE SOURCE IS STILL DELIVERING with no receiver left on it, which is

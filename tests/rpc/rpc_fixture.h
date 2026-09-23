@@ -170,6 +170,12 @@ struct HarnessOptions {
     // and zero mean the scene and kChannels, which is every other case.
     std::string source_uri;
     std::uint32_t channels = 0;
+
+    // Serve the engine through tests/rpc/retunable_engine.h, whose front end
+    // takes a retune, instead of directly. No source that opens without a
+    // radio will retune, and the server's half of setSourceCenter needs one
+    // that does. Everything else is still the real engine.
+    bool retunable = false;
 };
 
 // A ring request the engine satisfies in full, so nothing is clamped.

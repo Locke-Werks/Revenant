@@ -499,6 +499,36 @@ struct SourceTuning {
     dsp::Hertz high = 0;
 };
 
+// One receiver a front-end retune took away, because its centre fell outside
+// the new span.
+struct RetuneRemoval {
+    VrxId id;
+
+    // The absolute frequency its centre was on: the old source centre plus
+    // its baseband offset, read before the tune. This is the number an
+    // operator would recognise, where the id is one only a client holds.
+    dsp::Hertz frequency = 0;
+};
+
+// What Engine::set_source_center did.
+//
+// THE REMOVALS ARE PART OF THE ANSWER because nothing else reports them. The
+// graph drops a receiver without calling anybody, so until 2026-09-23 the only
+// trace of one was its id missing from vrx_ids: an audio subscriber on it got
+// no end and went quiet, which is indistinguishable from a shut squelch, and
+// the server above kept its RDS route, decoder routes and ownership record.
+// The caller holding this list is the one place that can take those down with
+// a reason.
+struct SourceRetune {
+    // The centre the device took, which a synthesiser with a tuning step
+    // rounds.
+    dsp::Hertz center = 0;
+
+    // In the order vrx_ids listed them. Empty when every receiver came
+    // along.
+    std::vector<RetuneRemoval> removed;
+};
+
 // How fast capture is arriving, against the wall clock.
 //
 // THE DIAGNOSIS NOBODY COULD MAKE FROM OUTSIDE THE PROCESS. A synthetic
@@ -1177,7 +1207,7 @@ public:
 
     // Points the front end somewhere else, and answers with the centre the
     // device actually took, which a synthesiser with a tuning step will
-    // round.
+    // round, and with the receivers the move removed.
     //
     // WHAT THIS USED TO SAY, AND IT IS NOW FALSE
     //
@@ -1211,10 +1241,19 @@ public:
     // receiver left half over the edge keeps running and sounds wrong, and both
     // the passband highlight and the client's own fit sentence already say so.
     //
-    // A client finds out the way it finds out about any receiver that has gone,
-    // through vrx_status refusing and its subscriptions ending. This call still
-    // answers with the centre the device took: the retune succeeded, and a
-    // receiver that could not come along is not a failed retune.
+    // The answer carries the centre the device took and every receiver the
+    // retune removed, with the frequency each was on. The retune succeeded,
+    // and a receiver that could not come along is not a failed retune, so a
+    // removal is reported beside the success rather than as a failure.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "A client finds out the way it finds
+    // out about any receiver that has gone, through vrx_status refusing and
+    // its subscriptions ending." Half of that was never true. The graph
+    // removes a receiver without telling anybody, so a subscription on it did
+    // not end: an audio subscriber went quiet with no ended() call, and
+    // core/rpc/server.cpp kept the receiver's RDS route, decoder routes and
+    // ownership record. The server now reads SourceRetune::removed and runs
+    // the same cleanup removeVrx does, with a reason naming the retune.
     //
     // WHAT IS DELIBERATELY NOT RESET, AND WHY THE RING IS THE EASY ONE
     //
@@ -1265,7 +1304,7 @@ public:
     // which is every file and every synthetic scene. Their sentence says
     // what to do instead, which is to reopen the URI, and a generic refusal
     // here would replace advice with a category.
-    [[nodiscard]] virtual Expected<dsp::Hertz> set_source_center(dsp::Hertz center) = 0;
+    [[nodiscard]] virtual Expected<SourceRetune> set_source_center(dsp::Hertz center) = 0;
 
     // The front end's gain, by the stage's own name, answering with the value
     // the device took.

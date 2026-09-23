@@ -2052,6 +2052,28 @@ public:
             return to_exception(landed.error());
         }
 
+        // Every receiver the engine removed gets the cleanup removeVrx gives
+        // one, because it has been removed just as surely. Before 2026-09-23
+        // this answer was discarded and none of that happened: an audio
+        // subscriber went quiet with no ended(), which is what a shut
+        // squelch sounds like, and the RDS route, the decoder routes and the
+        // ownership record stayed behind. The reason names both frequencies,
+        // since the operator knows the receiver by where it was and the
+        // retune by where it went.
+        auto removed = context.getResults().initRemoved(
+            static_cast<unsigned int>(landed->removed.size()));
+        for (unsigned int i = 0; i < removed.size(); ++i) {
+            const engine::RetuneRemoval& gone = landed->removed[i];
+            const std::string reason = std::format(
+                "the front end was retuned to {} Hz, which leaves this receiver's centre at {} "
+                "Hz outside the span, so the engine removed it",
+                landed->center, gone.frequency);
+            owner_.after_vrx_removed(gone.id, kj::StringPtr(reason.c_str()));
+
+            removed[i].setVrx(gone.id.value);
+            removed[i].setFrequencyHz(gone.frequency);
+        }
+
         // After the tune and only if it took, exactly as setVrxParams
         // clears the decoders after its own. The engine has already moved
         // every receiver's tuning epoch; this is the half above the engine,
@@ -2059,7 +2081,7 @@ public:
         // stations.
         owner_.forget_across_retune();
 
-        context.getResults().setGrantedHz(*landed);
+        context.getResults().setGrantedHz(landed->center);
         return kj::READY_NOW;
     }
 
