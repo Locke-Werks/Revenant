@@ -282,6 +282,12 @@ with cases in `ui/tests/test_audio_mix.cpp`, `test_resampler.cpp` and
   to what the loudest frame needs and recovers over 100 ms; below the
   threshold it multiplies by exactly one.
 
+The audio section shows the trim in ppm at the end of the line of depths, as
+a fixed-width readout. The mix's two counters are chips, there only while
+they are not zero: "late audio skipped", in milliseconds across every heard
+receiver, and "realigned", the times a receiver was moved to the lead's
+instant since the output opened. `ui/models/audio_counters.h` has the wording.
+
 A P25 receiver's audio is its decoded voice at 8000 S/s, which the mix
 resamples like any other; `docs/rpc.md` has how the engine serves it.
 

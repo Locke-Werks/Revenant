@@ -1,6 +1,7 @@
 #include "audio/audio_player.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <QSettings>
 #include <QVariant>
 
+#include "models/audio_counters.h"
 #include "models/settings.h"
 
 namespace revenant::ui {
@@ -696,7 +698,28 @@ void AudioPlayer::tick()
     const int buffered_ms = millis_for(ring_state.frames_buffered, format.sample_rate);
     const int ring_ms = millis_for(ring_state.capacity_frames, format.sample_rate);
 
-    const bool changed = counts.frames_written != counts_.frames_written ||
+    // Late audio across every heard receiver, not the lead's alone: the lead
+    // is read from its oldest frame and is never the one that skips. One
+    // snapshot per ring, for the reason AudioRing::Snapshot gives.
+    std::array<SkippedFrames, kMaxReceivers> skipped{};
+    const std::uint32_t heard = link_.mixMask();
+    for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
+        if ((heard & (1U << slot)) != 0) {
+            const AudioRing::Snapshot one = link_.audioRingAt(slot).snapshot();
+            skipped[slot] = SkippedFrames{one.counts.frames_skipped, one.format.sample_rate};
+        }
+    }
+    const double skipped_ms = skipped_millis(skipped);
+
+    // Rounded to what the readout prints, so a trim moving in its third
+    // decimal is not a status change twenty times a second.
+    const double trim_ppm =
+        pull_ == nullptr ? 0.0 : std::round(pull_->drift_trim_ppm() * 10.0) / 10.0;
+    const std::uint64_t realigned = pull_ == nullptr ? 0 : pull_->alignments();
+
+    const bool changed = skipped_ms != late_skipped_millis_ || trim_ppm != drift_trim_ppm_ ||
+                         realigned != realignments_ ||
+                         counts.frames_written != counts_.frames_written ||
                          counts.frames_filled != counts_.frames_filled ||
                          counts.frames_overrun != counts_.frames_overrun ||
                          counts.frames_starved != counts_.frames_starved ||
@@ -708,6 +731,9 @@ void AudioPlayer::tick()
                          sink_millis_ != was_sink_millis;
 
     counts_ = counts;
+    late_skipped_millis_ = skipped_ms;
+    drift_trim_ppm_ = trim_ppm;
+    realignments_ = realigned;
     buffered_millis_ = buffered_ms;
     ring_millis_ = ring_ms;
     shown_source_ = showing;

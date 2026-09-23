@@ -215,15 +215,40 @@ ColumnLayout {
     // On a line of its own under the controls rather than at the end of
     // their row: in the receiver window that row is narrower than it was
     // across the main window, and the depths were the part squeezed out.
-    Label {
+    //
+    // The clock trim ends the line: how far off its nominal rate the mix is
+    // reading every receiver to hold the ring between the engine's clock and
+    // the card's, audio/drift_trim.h. A Readout, so the line does not
+    // shuffle as the figure moves.
+    RowLayout {
         Layout.fillWidth: true
-        font.family: Theme.monoFont
+        Layout.minimumWidth: 0
         visible: engineLink.audioActive
-        text: engineLink.audioGrantedMillis + " ms granted  ·  "
-              + audioPlayer.bufferedMillis + "/" + audioPlayer.ringMillis
-              + " ms buffered  ·  " + audioPlayer.sinkMillis + " ms out"
-        color: Theme.inkDim
-        font.pixelSize: Theme.sizeSmall
+        spacing: 0
+
+        // Its own width at most and less when the window is narrow, so the
+        // trim sits right after it rather than at the far edge.
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            Layout.maximumWidth: implicitWidth
+            elide: Text.ElideRight
+            font.family: Theme.monoFont
+            text: engineLink.audioGrantedMillis + " ms granted  ·  "
+                  + audioPlayer.bufferedMillis + "/" + audioPlayer.ringMillis
+                  + " ms buffered  ·  " + audioPlayer.sinkMillis + " ms out  ·  clock"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Readout {
+            widest: UiRules.trimWidest()
+            text: UiRules.trimText(audioPlayer.driftTrimPpm)
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Item { Layout.fillWidth: true }
     }
 
     // Chips, each naming a problem with its sentence on hover. These were
@@ -250,6 +275,27 @@ ColumnLayout {
                   + "  ·  overran " + audioPlayer.overrunFrames + " frames"
                   + "  ·  engine dropped " + engineLink.audioFramesDropped
                   + " in " + engineLink.audioDropEvents + " events"
+            ink: Theme.inkWarn
+        }
+
+        // The mix's own two: audio that reached the mix after its instant
+        // had played, across every heard receiver rather than the focused
+        // one's ring the chip above reads, and a receiver moved to the
+        // focused one's instant. Each is a jump someone heard, so each is a
+        // chip, and only while it is not zero; models/audio_counters.h.
+        StatusChip {
+            visible: engineLink.audioActive
+                     && UiRules.showLateSkipped(audioPlayer.lateSkippedMillis)
+            label: "late audio skipped"
+            detail: UiRules.lateSkippedDetail(audioPlayer.lateSkippedMillis)
+            ink: Theme.inkWarn
+        }
+
+        StatusChip {
+            visible: engineLink.audioActive
+                     && UiRules.showRealigned(audioPlayer.realignments)
+            label: "realigned"
+            detail: UiRules.realignedDetail(audioPlayer.realignments)
             ink: Theme.inkWarn
         }
 

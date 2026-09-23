@@ -162,6 +162,7 @@ qt_add_executable(revenant_ui
     audio/mix_stages.h
     audio/resampler.cpp
     audio/resampler.h
+    models/audio_counters.h
     models/audio_link.cpp
     models/bookmark_link.cpp
     models/calibration.h
@@ -581,6 +582,7 @@ if(REVENANT_UI_TESTS)
             audio/audio_ring.cpp
             audio/resampler.cpp
             tests/test_aft.cpp
+            tests/test_audio_counters.cpp
             tests/test_audio_mix.cpp
             tests/test_audio_ring.cpp
             tests/test_drift_trim.cpp

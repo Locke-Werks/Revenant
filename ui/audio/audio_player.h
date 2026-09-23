@@ -75,10 +75,11 @@
 // arrivals, which holds the ring where it settled; audio/drift_trim.h has
 // the loop and what it measured. RingSource hands the mix the pull's
 // steady-clock reading for that, the same clock EngineLink stamps each chunk's
-// arrival with. The overrun and starve counters stay, for a drift past the
-// loop's 500 ppm clamp and for everything that is not drift. When the lead's
-// ring does evict, AudioMix moves every stream up past the hole together, so
-// the receivers stay aligned across it.
+// arrival with. The trim is on screen in ppm beside the depths, and the
+// overrun and starve counters stay, for a drift past the loop's 500 ppm
+// clamp and for everything that is not drift. When the lead's ring does
+// evict, AudioMix moves every stream up past the hole together, so the
+// receivers stay aligned across it.
 //
 // WHAT THIS PARAGRAPH USED TO SAY, under the heading THE RING FILLS OR
 // EMPTIES SLOWLY AND THAT IS NOT A FAULT: "nothing here disciplines one to
@@ -280,6 +281,17 @@ class AudioPlayer : public QObject {
     Q_PROPERTY(qulonglong gapEvents READ gapEvents NOTIFY statusChanged)
     Q_PROPERTY(qulonglong resyncs READ resyncs NOTIFY statusChanged)
 
+    // What the mix has done to hold the receivers together, which the
+    // counters above, the lead ring's alone, do not show. The trim is
+    // DriftTrim's, in ppm, zero with no sink open. Late audio skipped is
+    // RingCounts::frames_skipped across every heard receiver, in
+    // milliseconds so receivers at different rates add up. Realignments are
+    // AudioMix::alignments since the sink opened. models/audio_counters.h
+    // decides how each is shown.
+    Q_PROPERTY(double driftTrimPpm READ driftTrimPpm NOTIFY statusChanged)
+    Q_PROPERTY(double lateSkippedMillis READ lateSkippedMillis NOTIFY statusChanged)
+    Q_PROPERTY(qulonglong realignments READ realignments NOTIFY statusChanged)
+
 public:
     explicit AudioPlayer(EngineLink& link, QObject* parent = nullptr);
     ~AudioPlayer() override;
@@ -324,6 +336,10 @@ public:
     [[nodiscard]] qulonglong starvedFrames() const { return counts_.frames_starved; }
     [[nodiscard]] qulonglong gapEvents() const { return counts_.gap_events; }
     [[nodiscard]] qulonglong resyncs() const { return counts_.resyncs; }
+
+    [[nodiscard]] double driftTrimPpm() const { return drift_trim_ppm_; }
+    [[nodiscard]] double lateSkippedMillis() const { return late_skipped_millis_; }
+    [[nodiscard]] qulonglong realignments() const { return realignments_; }
 
 signals:
     void devicesChanged();
@@ -451,6 +467,10 @@ private:
     int sink_millis_ = 0;
     RingCounts counts_;
     FrameSource shown_source_ = FrameSource::idle;
+
+    double drift_trim_ppm_ = 0.0;
+    double late_skipped_millis_ = 0.0;
+    std::uint64_t realignments_ = 0;
 
     // WHAT WAS HERE: moved_pulls_ and shown_mismatch_, which tracked a sink
     // writing silence because it was open at another rate than the stream,

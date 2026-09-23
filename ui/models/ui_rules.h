@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -26,6 +27,7 @@
 #include <QVariantMap>
 #include <QtQmlIntegration>
 
+#include "models/audio_counters.h"
 #include "models/band_plan.h"
 #include "models/composite_probe.h"
 #include "models/frame_stats.h"
@@ -212,6 +214,39 @@ public:
     [[nodiscard]] Q_INVOKABLE bool meterHasReading(double dbfs) const
     {
         return meter_has_reading(dbfs);
+    }
+
+    // ---------------------------------------------------------------------
+    // The audio section's clock trim and mix counters. See
+    // models/audio_counters.h.
+    // ---------------------------------------------------------------------
+
+    [[nodiscard]] Q_INVOKABLE QString trimText(double ppm) const
+    {
+        return QString::fromStdString(format_trim_ppm(ppm));
+    }
+
+    [[nodiscard]] Q_INVOKABLE QString trimWidest() const { return to_qstring(kTrimWidest); }
+
+    [[nodiscard]] Q_INVOKABLE bool showLateSkipped(double millis) const
+    {
+        return show_late_skipped(millis);
+    }
+
+    [[nodiscard]] Q_INVOKABLE QString lateSkippedDetail(double millis) const
+    {
+        return QString::fromStdString(late_skipped_detail(millis));
+    }
+
+    [[nodiscard]] Q_INVOKABLE bool showRealigned(double count) const
+    {
+        return show_realigned(static_cast<std::uint64_t>(std::max(count, 0.0)));
+    }
+
+    [[nodiscard]] Q_INVOKABLE QString realignedDetail(double count) const
+    {
+        return QString::fromStdString(
+            realigned_detail(static_cast<std::uint64_t>(std::max(count, 0.0))));
     }
 
     // ---------------------------------------------------------------------
