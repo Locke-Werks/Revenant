@@ -840,19 +840,27 @@ TEST_CASE("D-STAR through the engine, the fine stage against the raw tap",
 
     constexpr dsp::SampleRate kNative = decode::DStarConfig{}.rate;
 
-    // Measured on 2026-09-22 on the RTX 4090, bit errors:
+    // Measured on 2026-09-23 on the RTX 4090, bit errors:
     //
     //                   fine stage       raw tap          raw tap mixed
     //                   48000 S/s        144000 S/s       to DC on host
-    //   30 dB           0 of 5982        0 of 5978        0 of 5978
+    //   30 dB           0 of 5982        0 of 5977        0 of 5978
     //    2 dB           14 of 5982       no lock          no lock
     //                   0.0023
     //
     // test_dstar.cpp measures 0.056 at 2 dB at the same noise density, for
     // the reason the P25 case gives. At 2 dB the raw tap's stream correlates
-    // with what was sent at 0.38 at best, mixed or not: the discriminator is
-    // past its threshold on 144 kHz of noise and the loss is not the carrier
-    // offset. At 30 dB the 5 kHz offset costs this decoder nothing.
+    // with what was sent at 0.36 at best as delivered and 0.38 mixed to DC:
+    // the discriminator is past its threshold on 144 kHz of noise and the
+    // loss is not the carrier offset. At 30 dB the 5 kHz offset costs this
+    // decoder nothing.
+    //
+    // WHAT THIS TABLE USED TO READ, measured on 2026-09-22 before "Decode
+    // D-STAR the same however its input is blocked": the raw tap at 30 dB was
+    // 0 of 5978, and the sentence after it said the raw tap's stream
+    // "correlates with what was sent at 0.38 at best, mixed or not". With that
+    // change the bits the raw tap yields moved by one and its best
+    // correlation at 2 dB by 0.02, and no count of errors moved.
     struct Point {
         double snr_db;
         double allowed_bit_error_rate;

@@ -73,10 +73,14 @@
 //   is the planner's figure there and is NOT the rate the tap delivers;
 //   core/engine/vrx.h says so. A decoder attached to one runs at the channel
 //   rate and hears the residual as a carrier offset. The P25 path removes
-//   it per data unit, from a least-squares fit of that unit's sync word, so
-//   its answer does not depend on how the stream is blocked. The D-STAR path
-//   still removes a constant offset as each call's mean of the discriminator,
-//   and core/decode/tetra.cpp has no offset correction at all.
+//   it per data unit, from a least-squares fit of that unit's sync word, and
+//   the D-STAR path per transmission, from a fit of its frame sync refreshed
+//   on every resynchronisation signal, so neither answer depends on how the
+//   stream is blocked. core/decode/tetra.cpp has no offset correction at all.
+//
+//   WHAT THIS USED TO SAY: "The D-STAR path still removes a constant offset
+//   as each call's mean of the discriminator". True until "Decode D-STAR the
+//   same however its input is blocked".
 
 #pragma once
 
@@ -2097,15 +2101,26 @@ private:
 //   "eot"          the End of Transmission marker, 1.4.5
 //
 // WHAT IS NOT REPORTED, AND WHY. An LSF whose CRC failed, and the packet and
-// BERT frames m17.h recognises by their sync bursts and does not decode. A
-// sync burst is eight symbols and noise matches it: through the engine on
-// 2026-09-22, the 2.5 s of noise after one 30 dB transmission produced two
-// LSFs whose CRC failed, with callsigns like "6BFI/5ALB", one BERT burst and
-// two packet bursts. The CRC is the only check an LSF carries, and a packet
-// or BERT frame has none this decoder reads, so none of them is an event a
-// client could tell from noise. lsf_crc_failures on the next "lsf" counts
-// the LSFs dropped, so a channel producing nothing but failures is visible
-// once one good one arrives.
+// BERT frames m17.h recognises by their sync bursts and does not decode. The
+// CRC is the only check an LSF carries, and a packet or BERT frame has none
+// this decoder reads, so none of them is an event a client could tell from
+// noise. lsf_crc_failures on the next "lsf" counts the LSFs dropped, so a
+// channel producing nothing but failures is visible once one good one
+// arrives.
+//
+// HOW OFTEN NOISE REACHES THIS DECODER NOW: never, in the two hours
+// tests/decode/test_m17_noise.cpp measured on 2026-09-23 through a 12.5 kHz
+// channel, 0 frames of any kind. m17.h requires 32 preamble symbols in front
+// of an LSF or BERT burst, tracks a transmission only through the bursts
+// clause 2.4 lets it carry, and joins a stream late only on two frames whose
+// Frame Numbers count by one.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, which is history from before those rules
+// and no longer what noise does: "A sync burst is eight symbols and noise
+// matches it: through the engine on 2026-09-22, the 2.5 s of noise after one
+// 30 dB transmission produced two LSFs whose CRC failed, with callsigns like
+// "6BFI/5ALB", one BERT burst and two packet bursts." An hour of noise then
+// started 1615 LSFs and passed 9808 frames.
 //
 // An "lsf" carries, from 2.5.2, Appendix A and Table 3.2:
 //   destination, source  text   the callsign for a standard address, "ALL"

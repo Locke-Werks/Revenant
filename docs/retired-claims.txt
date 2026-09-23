@@ -970,6 +970,16 @@ instead: A retune rebases every receiver's baseband offset to hold its absolute
     frequency and removes one whose centre falls outside the new span; the
     schema and docs/rpc.md said otherwise until 2026-09-23.
 
+phrase: The D-STAR path still removes a constant offset as each call's mean of
+    the discriminator
+phrase: D-STAR and TETRA still restart their state per call and have not been
+    measured for it
+retired: 2026-09-23
+commit: "Decode D-STAR the same however its input is blocked"
+instead: D-STAR fits each frame sync and every resynchronisation signal for the
+    carrier offset, both carry their filter state across calls, and
+    docs/modes.md holds every blocking identical to the whole capture.
+
 phrase: voice frames recovered by the time the header was reported, which is
     those already buffered
 retired: 2026-09-23
@@ -990,3 +1000,15 @@ commit: "Report D-STAR per superframe, and flush it when the receiver goes"
 instead: ChunkDecoder::flush is the end of the stream. The server calls it when
     a receiver goes and revenant-cli when the run ends; the D-STAR adapter
     takes it and the POCSAG, CW and NAVTEX adapters do not yet.
+
+phrase: A sync burst is eight symbols and noise matches it
+retired: 2026-09-23
+commit: "Refuse M17 syncs that noise finds, by the preamble and clause 2.4"
+instead: m17.h wants 32 preamble symbols and a burst clause 2.4 allows, and
+    tests/decode/test_m17_noise.cpp measured 0 frames in two hours of noise.
+
+phrase: correlates with what was sent at 0.38 at best, mixed or not
+retired: 2026-09-23
+commit: "Decode D-STAR the same however its input is blocked"
+instead: At 2 dB the raw tap correlates at 0.36 as delivered and 0.38 mixed to
+    DC, and at 30 dB it gives 0 bit errors in 5977, measured 2026-09-23.

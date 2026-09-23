@@ -796,8 +796,11 @@ discriminator now carry their state across calls, and each data unit is sliced
 against a least-squares fit of its own sync word, so no per-call estimate
 remains. The decoder's output is now identical in every blocking down to one
 sample per call, and this route recovers six of six at both block sizes.
-`docs/modes.md` has the measurements. D-STAR and TETRA still restart their
-state per call and have not been measured for it.
+`docs/modes.md` has the measurements. D-STAR and TETRA carry their state across
+calls as well since 2026-09-23, and `docs/modes.md` has theirs too: every
+blocking down to one sample a call gives the whole capture's answer. WHAT THIS
+SENTENCE USED TO SAY: "D-STAR and TETRA still restart their state per call and
+have not been measured for it."
 
 **The D-STAR adapter reports a transmission a superframe at a time.** `DStar`
 hands a transmission over in the pieces its own structure sets, the header with
