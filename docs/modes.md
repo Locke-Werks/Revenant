@@ -744,7 +744,14 @@ and the paragraph below says how.
 same clauses, and `tests/decode/test_p25p1.cpp`, `test_p25p1_voice.cpp`,
 `test_dstar.cpp` and `test_tetra.cpp` are the round trips. Each measures a bit
 or symbol error rate at a high and a low signal to noise and reports the
-figure rather than asserting it tight.
+figure rather than asserting it tight. `bench sweep --mode p25p1`, `dstar` and
+`tetra` extend the same measurements to curves, 128 transmissions a point, in
+SNR in 2500 Hz: a bit error rate of 0.01 at 17.9 dB for P25, 17.3 dB for
+D-STAR and 20.2 dB for TETRA, which across the whole sample rate is 5.0 dB,
+4.5 dB and 5.6 dB ([sensitivity.md](sensitivity.md)). D-STAR's test figure at
+its low point is the low end of a wide spread: twelve single transmissions at
+the same level gave 0.055 to 0.357, and the curve reads 0.168 at 15 dB in
+2500 Hz, 0.17 dB above it.
 
 **P25 Phase 1 voice.** The header word, the Link Control word and the
 encryption sync word each sit under a shortened Reed-Solomon code over
@@ -958,18 +965,25 @@ RTTY's 45.45 baud, 170 Hz shift and 2125 Hz mark are practice rather than
 anything S.1 or S.3 states, and all three are parameters along with the
 polarity. `core/dsp/synth/fsk_mod.cpp` is the transmitter and
 `tests/decode/test_rtty.cpp` the round trip, at 48 kHz and at 8 and 11.025 kHz.
-Measured through `add_real_awgn` over 300 characters: no errors at 10 dB in
-2500 Hz, a character error rate of 0.0033 at -5 dB and 0.14 at -8 dB, where
-the unit error rate is 0.0069 against 0.0064 for ideal non-coherent FSK. What
-it does not reach: no automatic frequency control, so the tones must be where
-the caller says, and no diversity or error correction, because ITA2 has none.
+Swept by `bench sweep --mode rtty` through `add_real_awgn`, 256 trials of 100
+characters a point: a character error rate of 0.01 at -5.2 dB in 2500 Hz,
+0.0077 at -5 dB, 0.18 at -8 dB and none from -1 dB up
+([sensitivity.md](sensitivity.md)). The test's one run of 300 characters gives
+0.14 at -8 dB, and there the unit error rate is 0.0069 against 0.0064 for
+ideal non-coherent FSK. What it does not reach: no automatic frequency
+control, so the tones must be where the caller says, and no diversity or error
+correction, because ITA2 has none.
 
 AX.25 is measured in `tests/decode/test_ax25.cpp` at 48 and 22.05 kHz, through
 a 0.5 percent transmitter clock error and a 10 dB tilt between the tones either
 way, which is what Finnegan and Benson section 4 report emphasis doing on real
-stations. Through `add_real_awgn`, over 60 frames of 81 octets: no frame lost
-at 20 dB in 2500 Hz, a frame error rate of 0.05 at 10 dB, 0.57 at 8 dB and
-0.98 at 6 dB, where the bit error rate after NRZI is 0.0024 and 0.018. The
+stations. Swept by `bench sweep --mode ax25` through `add_real_awgn`, 4096 UI
+frames of 60 information octets a point, 83 octets before the FCS: a frame
+error rate of 0.01 at 10.8 dB in 2500 Hz, 0.036 at 10 dB, 0.57 at 8 dB, every
+frame lost at 6 dB and none from 13 dB up. The test's 60 frames give 0.05 at
+10 dB, and its bit error rate after NRZI is 0.0024 at 8 dB and 0.018 at 6 dB.
+WHAT THIS PARAGRAPH USED TO SAY: "over 60 frames of 81 octets"; the frame is
+83. The
 AX.25 FCS is checked against the X.25 check `core/decode/dv_codes.cpp` already
 carried for TETRA, which is its only independent check, since ISO 3309 was not
 held. The address encoding is checked against Figures 3.4 and 3.7, and in doing
@@ -993,7 +1007,12 @@ arrives as comment text.
 POCSAG is measured in `tests/decode/test_pocsag.cpp` at all three rates, at
 48 and 22.05 kHz, in both polarities, and through a complex-baseband FSK
 signal, a channel filter and the FM discriminator in `core/decode/dv_phy.cpp`
-rather than from ideal audio alone. Through `add_awgn` at 1200 bit/s over 40
+rather than from ideal audio alone. Swept by `bench sweep --mode pocsag-512`,
+`pocsag-1200` and `pocsag-2400` through the same receiver, 4096 pages of 40
+alphanumeric characters a point: a page error rate of 0.01 at 7.3 dB in
+2500 Hz at 512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400; at 1200 bit/s 0.49
+lost at 8 dB and 0.073 at 9 dB, and 4 and 3 pages of 4096 still lost at 10 and
+11 dB before none from 12 dB up. Through `add_awgn` at 1200 bit/s over 40
 pages of 15 codewords: no page lost at 20 dB in 2500 Hz, including tuned 1 kHz
 off; none lost at 12 dB, where the raw bit error rate is 0.00019; 0.475 lost
 at 8 dB, where the raw bit error rate is 0.023 and BCH corrected 584 bits and
@@ -1040,11 +1059,24 @@ sidebands, the lower found by its complemented phasing signals. Through
 `add_real_awgn` over 562 characters: nothing lost at 10 dB in 2500 Hz; at
 -2 dB the DX copy is lost 0.53 percent of the time and no character is lost
 in both; at -5 dB the DX copy is lost 8.9 percent and 1.2 percent are lost in
-both, which is what time diversity buys. A 150 ms noise burst never prints a
+both, which is what time diversity buys. Swept by `bench sweep --mode sitor-b`,
+1024 transmissions of 100 characters a point, scored by edit distance so a
+character lost to a loss of phase or read as another valid signal counts as
+well: a character error rate of 0.01 at -1.1 dB in 2500 Hz, 0.092 at -5 dB,
+0.015 at -3 dB. It does not reach zero by +2 dB, and what is left is whole
+transmissions: at 0, +1 and +2 dB, 2, 4 and 2 of the 1024 lost every one of
+their 102 characters, with nothing in between. Why those transmissions print
+nothing has not been established; the crossing sits where those losses and
+the noise meet, which is why a different set of trials moved it by 0.7 dB
+([sensitivity.md](sensitivity.md)). A 150 ms noise burst never prints a
 wrong character, and loses one when noise turns a DX copy into a different
 valid signal, which clause 4.3 then refuses. NAVTEX at -2 dB receives all ten
 120-character messages exactly, and at -5 dB two of ten, with every
-preamble clean. What they do not reach: SITOR-A, which is an ARQ conversation
+preamble clean. Swept by `bench sweep --mode navtex`, 2048 messages a point,
+each its own transmission and counted received only with a clean preamble and
+its text exact: a message error rate of 0.01 at -2.6 dB in 2500 Hz, 0.031 at
+-3 dB, 0.28 at -4 dB and 0.86 at -5 dB, 3 of 2048 lost at -2 dB and none from
+-1 dB up. What they do not reach: SITOR-A, which is an ARQ conversation
 and not a broadcast; the selective B-mode, whose inverted traffic reads as
 mutilated; DSC, which reuses the discriminator and has not been written; and
 the meaning of NAVTEX's B1 and B2 letters, which is in the IMO NAVTEX Manual,
@@ -1069,11 +1101,19 @@ generators D+D^2+D^3 and 1+D^3+D^4, read as the in-phase and quadrature signs
 of the phase shift advanced by 45 degrees, and the test regenerates all 32
 entries and the article's worked example from those two polynomials.
 
-Measured over 600 characters at 48 kHz, signal to noise in 2500 Hz of audio:
-BPSK31 has a bit error rate of 2.5e-3 at -10 dB, QPSK31 2.8e-2 at -12 dB and
-PSK63 4.0e-3 at -7 dB, with no errors at +10 dB in any of the three. Against
-differential BPSK theory that is about 2 dB of implementation loss, most of it
-the sixth of each neighbour a matched filter leaves on a two-symbol pulse.
+Swept by `bench sweep --mode psk31`, `psk63` and `qpsk31`, transmissions of
+100 characters with the tone 8 Hz off centre, signal to noise in 2500 Hz of
+audio: a character error rate of 0.01 at -8.8 dB for PSK31, -5.8 dB for PSK63
+and -9.5 dB for QPSK31, and none from -4, -1 and -4 dB up
+([sensitivity.md](sensitivity.md)). QPSK31 goes from 0.78 at -12 dB to 0.014
+at -10, and at -12 dB it is all or nothing per transmission: of sixteen, six
+decoded with 0.05 to 0.13 and ten printed next to nothing. The test's one run
+of 600 characters, 2.8e-2 bit error rate and 0.09 character error rate at
+-12 dB, was one of the six. Measured over those 600 characters at 48 kHz:
+BPSK31 has a bit error rate of 2.5e-3 at -10 dB and PSK63 4.0e-3 at -7 dB,
+with no errors at +10 dB in any of the three. Against differential BPSK theory
+that is about 2 dB of implementation loss, most of it the sixth of each
+neighbour a matched filter leaves on a two-symbol pulse.
 `core/dsp/synth/psk31_mod.cpp` is the transmitter and `tests/decode/test_psk31.cpp`
 the round trips, at 48 kHz and 11025 Hz with the tone 12 and 27 Hz off centre.
 
@@ -1099,15 +1139,25 @@ within a few characters. Envelope detection runs through a boxcar sized to the
 estimated dot, against a noise floor tracked as a Rayleigh lower quartile, with
 a squelch that needs 5.5 noise deviations to open and 2 to stay open.
 
-Measured over 186 characters, signal to noise in 2500 Hz of audio: no errors
-down to -6 dB at 12 and 20 WPM; a character error rate of 0.086 at -10 dB for
-20 WPM, 0.10 for 12 WPM, and 0.075 at -8 dB for 35 WPM. It decodes nothing
+Swept by `bench sweep --mode cw` at 20 WPM, 256 transmissions of 60 random
+letters and figures a point, signal to noise in 2500 Hz of audio: a character
+error rate of 0.05 at -7.7 dB, 0.27 at -10 dB, and then a floor rather than
+zero, between 0.0084 and 0.016 from -5 to +3 dB and 0.0028 over 24
+transmissions at +10 dB ([sensitivity.md](sensitivity.md)). So its
+sensitivity is read at 0.05. Measured over the test's fixed 186 characters: no
+errors down to -6 dB at 12 and 20 WPM; a character error rate of 0.086 at
+-10 dB for 20 WPM, 0.10 for 12 WPM, and 0.075 at -8 dB for 35 WPM. It decodes
+nothing
 from a minute of noise after a transmission ends. `core/dsp/synth/cw_mod.cpp`
 is the keyer, with Farnsworth spacing and seeded hand-sending jitter, and
 `tests/decode/test_cw.cpp` the round trips at 48 kHz and 11025 Hz with the
 tone 50 and 30 Hz off centre.
 
-Not done: the measured speed reads slow in noise, 18.3 WPM for 20 at -10 dB
+Not done: the floor above. At +10 dB random text shows three ways to lose a
+character that the fixed text never triggers: a spurious E before the first
+character, the first word space lost, and a dash read as a dot after a run of
+dashes, "OTTTB" printed "OTTTH". None has been looked into. And the measured
+speed reads slow in noise, 18.3 WPM for 20 at -10 dB
 and 33.3 for 35 at -8 dB, and the reason has not been found. The decoder holds
 the first characters back until it has seen runs of two different lengths,
 then decodes them, so text whose marks and spaces are all one length, a row
@@ -1135,7 +1185,11 @@ tests regenerate the specification's CRC test vectors, its AB1CD address
 example, its 0xB4 symbol example, the Golay generator matrix and the first rows
 of the interleaver table.
 
-Measured over 100 stream frames, signal to noise in the 9 kHz channel
+Swept by `bench sweep --mode m17`, 512 transmissions of 25 stream frames a
+point: a stream frame error rate of 0.01 at 17.0 dB in 2500 Hz, which is
+11.4 dB in the 9 kHz channel bandwidth, 0.089 at 16 dB and 0.46 at 15 dB, and
+none from 20 dB up ([sensitivity.md](sensitivity.md)). Measured in the test
+over 100 stream frames, signal to noise in the 9 kHz channel
 bandwidth: no frame errors at 14 dB and above, a stream frame error rate of
 0.01 at 12 dB and 0.18 at 10 dB, with raw symbol error rates of 1.7e-3, 1.0e-2
 and 6.2e-2 at those three points. Clipping the soft values before the Viterbi

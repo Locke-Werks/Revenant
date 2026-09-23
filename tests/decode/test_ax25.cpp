@@ -271,8 +271,14 @@ TEST_CASE("AX.25 bit and frame error rates against noise, measured", "[decode][a
     //
     // The bit error rate is after NRZI, which turns one wrong tone decision
     // into two wrong bits, so it sits at twice the non-coherent FSK figure.
-    // A frame here is 81 octets, about 650 bits, which is why the frame error
-    // rate climbs so much faster. Allowances above the measurements.
+    // A frame here is 83 octets and the FCS, 680 bits before stuffing, which
+    // is why the frame error rate climbs so much faster. Allowances above the
+    // measurements.
+    //
+    // WHAT THIS USED TO SAY, until 2026-09-23: "A frame here is 81 octets,
+    // about 650 bits". Destination, source and one repeater are 21 octets,
+    // control and PID two, and the information field 60: 83, which siggen's
+    // ax25 --truth prints one frame per line.
     const Point points[] = {{20.0, 0.0}, {10.0, 0.2}, {8.0, 0.6}, {6.0, 1.0}};
 
     std::vector<std::vector<std::uint8_t>> frames;

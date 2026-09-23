@@ -1225,3 +1225,10 @@ commit: "Add a bench subject for every decoder with a transmitter"
 instead: 4968 bits is 23 bursts of 216. The last burst of a capture is never
     found, at any SNR, because nothing follows it; tools/bench's tetra subject
     sends one burst past its payload for that reason.
+
+phrase: A frame here is 81 octets, about 650 bits
+phrase: over 60 frames of 81 octets
+retired: 2026-09-23
+commit: "Add a bench subject for every decoder with a transmitter"
+instead: The AX.25 test's UI frame via WIDE1-1 with 60 information octets is
+    83 octets before the FCS, 680 bits with it before stuffing.
