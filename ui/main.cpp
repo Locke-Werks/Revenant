@@ -173,7 +173,10 @@ constexpr std::uint16_t kDefaultPort = 17690;
 // second takes over two minutes to fill a 600-row item and does not read as
 // a live radio while it does.
 //
-// So one, and the engine's own block size is what sets the rate. A client on
+// So one, and the engine sets the rate: a source at 1.97 MS/s or more keeps
+// its block, and a slower one, a recording most often, gets smaller blocks so
+// rows still arrive at revenant-engine's --rows, 30 a second by default
+// (EngineConfig::spectrum_rows_per_second). A client on
 // a slower machine, or one watching a much faster source, turns it down with
 // --every-nth; the engine drops what is not asked for before copying it, so
 // that costs the engine less rather than more.
