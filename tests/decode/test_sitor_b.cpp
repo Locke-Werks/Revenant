@@ -11,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <random>
@@ -305,6 +306,71 @@ TEST_CASE("a noise burst never prints a wrong character", "[decode][sitor]") {
     }
     CHECK(lost <= 2);
     CHECK(stats.dx_mutilated + stats.rx_mutilated + stats.both_mutilated > 0);
+}
+
+TEST_CASE("the bit clock leaves the boundary a transmission's first bit puts it on",
+          "[decode][sitor]") {
+    // core/dsp/synth starts the first unit at sample zero, and the bit clock's
+    // first reading is then on a boundary, where Gardner's detector reads
+    // nothing either way. core/decode/fsk.h's hang-up detector is what moves
+    // it off. Measured here as the bit at which the reading instant first
+    // comes within a tenth of a bit of a unit's centre and stays there for
+    // the rest of the 16 phasing pairs, against the same clock with the
+    // detector switched off by an unreachable ratio.
+    auto codes = siggen::ita2_encode_text(U"RYRY\r\n");
+    REQUIRE(codes.has_value());
+    auto clean = siggen::sitor_b_render(siggen::SitorModConfig{}, *codes);
+    REQUIRE(clean.has_value());
+
+    const auto settle = [](const std::vector<float>& audio, double ratio) {
+        decode::ToneDiscriminatorConfig tones;
+        tones.rate = 48'000;
+        tones.mark_hz = decode::kSitorCentreHz - decode::kSitorShiftHz / 2;
+        tones.space_hz = decode::kSitorCentreHz + decode::kSitorShiftHz / 2;
+        tones.symbol_rate = decode::kSitorBaud;
+        auto discriminator = decode::ToneDiscriminator::create(tones);
+        REQUIRE(discriminator.has_value());
+        decode::BitClockConfig config;
+        config.rate = 48'000;
+        config.symbol_rate = decode::kSitorBaud;
+        config.hang_up_ratio = ratio;
+        auto clock = decode::BitClock::create(config);
+        REQUIRE(clock.has_value());
+        std::vector<float> soft;
+        std::vector<decode::SoftBit> bits;
+        discriminator->process(audio, soft);
+        clock->process(soft, bits);
+        // 480 samples a unit; its centre sits 240 after the unit starts.
+        constexpr std::size_t kPhasingBits = 8 + 32 * 7;
+        std::size_t settled = kPhasingBits;
+        for (std::size_t i = kPhasingBits; i-- > 0;) {
+            if (i >= bits.size()) {
+                continue;
+            }
+            const auto at = static_cast<std::int64_t>(bits[i].position) -
+                            static_cast<std::int64_t>(discriminator->group_delay());
+            const std::int64_t off = ((at % 480) + 480) % 480 - 240;
+            if (off > 48 || off < -48) {
+                break;
+            }
+            settled = i;
+        }
+        return settled;
+    };
+
+    std::size_t worst_with = 0;
+    std::size_t worst_without = 0;
+    for (std::uint64_t seed = 1; seed <= 16; ++seed) {
+        std::vector<float> audio = *clean;
+        REQUIRE(siggen::add_real_awgn(audio, mean_power(audio), siggen::NoiseLevel::snr_in_2500_hz_db(20.0),
+                                      48'000, seed)
+                    .has_value());
+        worst_with = std::max(worst_with, settle(audio, decode::BitClockConfig{}.hang_up_ratio));
+        worst_without = std::max(worst_without, settle(audio, 1.0e9));
+    }
+    WARN("SITOR-B bit clock at 20 dB in 2500 Hz, 16 transmissions: settled by bit " << worst_with
+         << " with the hang-up detector, " << worst_without << " without, of 232 before the traffic");
+    CHECK(worst_with <= 32);
 }
 
 TEST_CASE("SITOR-B character error rate against noise, measured", "[decode][sitor]") {

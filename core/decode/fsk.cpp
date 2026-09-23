@@ -188,10 +188,14 @@ Expected<BitClock> BitClock::create(const BitClockConfig& config) {
         !(config.max_rate_error >= 0.0 && config.max_rate_error < 0.5)) {
         return fail("bit clock gains must lie in (0, 1] and the rate bound in [0, 0.5)");
     }
+    if (!(config.hang_up_bits >= 1.0) || !(config.hang_up_ratio > 1.0)) {
+        return fail("the hang-up detector needs at least one bit to average and a ratio above one");
+    }
 
     BitClock c;
     c.config_ = config;
     c.nominal_step_ = config.symbol_rate / static_cast<double>(config.rate);
+    c.level_alpha_ = 1.0 / config.hang_up_bits;
     c.reset();
     return c;
 }
@@ -207,6 +211,11 @@ void BitClock::reset() {
     have_last_centre_ = false;
     boundary_ = 0.0;
     have_boundary_ = false;
+    centre_level_ = 0.0;
+    boundary_level_ = 0.0;
+    tau_level_ = 0.0;
+    level_bits_ = 0;
+    hang_ups_ = 0;
 }
 
 void BitClock::process(ConstRealSpan soft, std::vector<SoftBit>& out) {
@@ -237,11 +246,33 @@ void BitClock::process(ConstRealSpan soft, std::vector<SoftBit>& out) {
                 // reads positive, and a late loop is behind, so the phase
                 // goes forward.
                 const double tau = std::clamp((centre - last_centre_) * boundary_ / 4.0, -0.5, 0.5);
+                tau_level_ += level_alpha_ * (tau - tau_level_);
                 phase_ += config_.phase_gain * tau;
                 step_ = std::clamp(step_ + config_.frequency_gain * tau * nominal_step_, low, high);
             }
             last_centre_ = centre;
             have_last_centre_ = true;
+
+            if (have_boundary_) {
+                centre_level_ += level_alpha_ * (std::abs(centre) - centre_level_);
+                boundary_level_ += level_alpha_ * (std::abs(boundary_) - boundary_level_);
+                ++level_bits_;
+                if (static_cast<double>(level_bits_) >= config_.hang_up_bits &&
+                    boundary_level_ > config_.hang_up_ratio * centre_level_) {
+                    // Half a bit the way the loop was already leaving, which
+                    // is away from the boundary it sits beside, so the bit it
+                    // has been reading stays the bit it reads and none is
+                    // lost or read twice. The two readings trade places, so
+                    // their averages do too, and the Gardner error is not
+                    // taken across the move.
+                    phase_ += tau_level_ >= 0.0 ? 0.5 : -0.5;
+                    tau_level_ = 0.0;
+                    std::swap(centre_level_, boundary_level_);
+                    level_bits_ = 0;
+                    have_last_centre_ = false;
+                    ++hang_ups_;
+                }
+            }
             have_boundary_ = false;
         }
 

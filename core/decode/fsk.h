@@ -219,6 +219,18 @@ struct BitClockConfig {
     // silence. 2 percent is ten times the rate tolerance any of the modes
     // this serves specifies.
     double max_rate_error = 0.02;
+
+    // The hang-up detector below. Bits over which the centre and boundary
+    // magnitudes are averaged, and the ratio of boundary to centre above
+    // which the loop is taken to be reading half a bit out. Engineering
+    // choices. Counting transitions on a noiseless ramp: locked, the ratio
+    // is about 0.5 on random data and 1 on a run of one polarity; half a bit
+    // out it is about 2 on random data and 1.6 on SITOR-B's phasing signals,
+    // which change level 5 times in 14 units and are the least favourable
+    // pattern among the modes this serves. 1.25 sits between the run and the
+    // phasing signals.
+    double hang_up_bits = 16.0;
+    double hang_up_ratio = 1.25;
 };
 
 // One bit, read at the instant the loop placed the bit centre.
@@ -262,6 +274,30 @@ struct SoftBit {
 // boundary at its input, and the loop locks the boundary reading to that
 // crossing, so the reading instant lands on the filter output's peak with no
 // correction for the delay needed here.
+//
+// WHY A HANG-UP DETECTOR
+//
+// Gardner's detector reads zero at two phases: the lock, and the point half a
+// bit away where the centre reading sits on the boundary. The second is
+// unstable, but near it the error is small and its sign is decided by noise,
+// so a loop that starts there stays for as long as the noise lets it. The
+// transmitters in core/dsp/synth start their first bit at sample zero, which
+// puts this loop's first reading exactly there. Measured on SITOR-B, whose
+// phasing lasts 232 bits: on one transmission that printed nothing, the
+// reading instant was still within a tenth of a bit of the boundary 160 bits
+// in, and 1 to 4 transmissions in 1024 printed nothing at each of 0, 1, 2, 6,
+// 10 and 20 dB in 2500 Hz. With the detector, none of those 6144 did.
+//
+// Half a bit out, the boundary reading lands on the bit centre, so it is the
+// larger of the two in magnitude; locked, the centre reading is. The loop
+// averages both magnitudes and, when the boundary's exceeds the centre's by
+// hang_up_ratio, moves the reading instant half a bit, in the direction the
+// averaged Gardner error was already pushing it. That is away from the
+// boundary it sits beside, so the bit it has been reading is still the bit it
+// reads. The direction matters: a first version always moved half a bit
+// later, and on SITOR-B at 0 to 2 dB it read one bit twice after the decoder
+// had already phased on the readings beside the boundary, which lost 1 or 2
+// transmissions in 1024 instead.
 class BitClock {
 public:
     BitClock() = default;
@@ -273,6 +309,10 @@ public:
     // Bits per sample the loop currently believes, as a ratio to the
     // nominal. Exposed for tests and for a caller reporting clock error.
     [[nodiscard]] double rate_ratio() const { return step_ / nominal_step_; }
+
+    // Times the hang-up detector has moved the reading instant half a bit
+    // since the last reset.
+    [[nodiscard]] std::uint64_t hang_ups() const { return hang_ups_; }
 
     void reset();
 
@@ -292,6 +332,15 @@ private:
     bool have_last_centre_ = false;
     double boundary_ = 0.0;
     bool have_boundary_ = false;
+
+    // The hang-up detector's averages of |centre| and |boundary|, and the
+    // bits they have seen since the last reset or move.
+    double centre_level_ = 0.0;
+    double boundary_level_ = 0.0;
+    double tau_level_ = 0.0;
+    double level_alpha_ = 0.0;
+    std::uint64_t level_bits_ = 0;
+    std::uint64_t hang_ups_ = 0;
 };
 
 }  // namespace revenant::decode
