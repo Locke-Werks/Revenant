@@ -654,10 +654,16 @@ private:
         using Result = decltype(work());
 
         retuning_.store(true, std::memory_order_release);
+        pause_epoch_.fetch_add(1, std::memory_order_acq_rel);
         struct ClearOnExit {
             std::atomic<bool>& flag;
-            ~ClearOnExit() { flag.store(false, std::memory_order_release); }
-        } clear_retuning{retuning_};
+            std::atomic<std::uint64_t>& epoch;
+            ~ClearOnExit()
+            {
+                epoch.fetch_add(1, std::memory_order_acq_rel);
+                flag.store(false, std::memory_order_release);
+            }
+        } clear_retuning{retuning_, pause_epoch_};
 
         const auto paused_at = std::chrono::steady_clock::now();
         const dsp::SampleIndex before_join = produced_index_;
@@ -743,6 +749,16 @@ private:
     // Held up across the join-and-restart a retune needs, and read by running().
     // Written only under control_, so a second retune cannot overlap the first.
     std::atomic<bool> retuning_{false};
+
+    // Odd while the transfers are paused for a control change, and moved on at
+    // both ends of every pause. run_delivery reads it on either side of its
+    // exit check, so a pause that began or ended between its reads cannot be
+    // taken for the stream ending. retuning_ alone cannot say that: a
+    // delivery thread that reads producer_done_ during a pause and retuning_
+    // after it has ended sees a finished producer and no retune, and would
+    // leave with the restarted transfers still filling the queue. Found by
+    // reading, not observed; the window is two loads wide.
+    std::atomic<std::uint64_t> pause_epoch_{0};
 
     std::atomic<bool> cancel_requested_{false};
     std::atomic<bool> producer_done_{true};
@@ -1502,6 +1518,7 @@ void RtlSdrSource::run_delivery()
         // sees everything it will ever publish. If it was false, a queue that
         // reads empty is genuinely empty at this instant and the loop sleeps
         // and looks again.
+        const std::uint64_t epoch_before = pause_epoch_.load(std::memory_order_acquire);
         const bool producer_finished = producer_done_.load(std::memory_order_acquire);
 
         // Acquire, pairing with the callback thread's release store of head.
@@ -1524,8 +1541,17 @@ void RtlSdrSource::run_delivery()
             // frames and the engine all stayed up, because the graph waits for
             // each block's frame on whichever thread called on_block and that
             // thread had gone.
-            if (producer_finished && !retuning_.load(std::memory_order_acquire)) {
-                break;
+            //
+            // The epoch is read on both sides of producer_done_, because a
+            // single read of a flag cannot tell "no pause" from "a pause that
+            // ended between my two loads". Odd at either read, or different
+            // between them, is a pause, and a pause is never the end.
+            if (producer_finished) {
+                const std::uint64_t epoch_after = pause_epoch_.load(std::memory_order_acquire);
+                const bool paused = (epoch_before & 1U) != 0 || epoch_after != epoch_before;
+                if (!paused) {
+                    break;
+                }
             }
             std::this_thread::sleep_for(kIdlePoll);
             continue;
