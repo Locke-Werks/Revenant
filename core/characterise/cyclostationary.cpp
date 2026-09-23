@@ -320,6 +320,16 @@ Expected<SymbolRateEstimate> estimate_symbol_rate(std::span<const Complex64> sam
         if (!comb_present) {
             continue;
         }
+        // The candidate is checked against the band above, but peak_near may
+        // land up to kHarmonicToleranceBins away from it, and at the bottom
+        // of the band that reaches DC, where the squared envelope's own
+        // pedestal always stands. 20 m at 1603 UT, through a 3 kS/s channel
+        // with a search starting at 2.9 Hz, reported two PSK signals "at
+        // 0.00 baud" that way. A rate outside the band searched is not a
+        // finding of this search.
+        if (fundamental.frequency_hz < low || fundamental.frequency_hz > high) {
+            continue;
+        }
         if (fundamental.margin_db < strongest.margin_db - kCombShortfallDb) {
             continue;
         }
