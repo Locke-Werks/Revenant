@@ -60,6 +60,40 @@ ColumnLayout {
             }
         }
 
+        // Automatic frequency tracking, off until ticked. Disabled on the
+        // modes with no centre to aim at, and the chip beside it says what
+        // the loop is doing, with its rules and its limits on hover. Left of
+        // the spacer, so the chip's text changing moves nothing else.
+        RCheckBox {
+            text: "AFT"
+            enabled: engineLink.aftOffered
+            checked: engineLink.aftEnabled
+            onToggled: engineLink.aftEnabled = checked
+        }
+
+        StatusChip {
+            ink: !engineLink.aftEnabled ? Theme.inkDim
+                 : engineLink.aftState === "correcting" ? Theme.accent
+                 : engineLink.aftState === "holding, signal jumped" ? Theme.inkWarn
+                 : Theme.inkDim
+            label: !engineLink.aftOffered ? "no AFT on " + engineLink.receiverDemod
+                   : !engineLink.aftEnabled ? "AFT off"
+                   : engineLink.aftState
+                     + (engineLink.aftHasError
+                        ? "  " + (engineLink.aftErrorHz >= 0 ? "+" : "")
+                          + Math.round(engineLink.aftErrorHz) + " Hz" : "")
+            detail: "AFT nudges the receiver so a drifting signal stays in the filter. "
+                    + "AM follows the carrier's peak, CW the peak while the key is down, "
+                    + "NFM and WFM the centre of the occupied band averaged over two "
+                    + "seconds. USB, LSB and DSB have no carrier to follow, so it is "
+                    + "not offered there. It moves at most 100 Hz every half second, "
+                    + "ignores errors under 30 Hz, holds with no signal, refuses to "
+                    + "chase a jump, and stands aside for three seconds whenever you tune. "
+                    + "RTTY and FSK are not tracked: their centre is the midpoint of two "
+                    + "tones, and the engine has no RTTY mode or shift to derive it from, "
+                    + "so on them it would follow one tone or wobble between both."
+        }
+
         Item { Layout.fillWidth: true }
 
         RButton {

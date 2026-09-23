@@ -153,6 +153,7 @@
 #include "audio/audio_ring.h"
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
+#include "models/aft.h"
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/receiver_gone.h"
@@ -981,6 +982,22 @@ class EngineLink : public QObject {
     // receiverFitText as its tooltip. See fit_label in models/receiver_match.h.
     Q_PROPERTY(QString receiverFitLabel READ receiverFitLabel NOTIFY receiverFitChanged)
 
+    // Automatic frequency tracking on the pane's receiver. Off by default
+    // and not remembered across a restart: a loop that moves the receiver
+    // on its own is something the operator turns on while watching it. See
+    // models/aft.h for the rules and ReceiverDetail.qml for the toggle.
+    Q_PROPERTY(bool aftEnabled READ aftEnabled WRITE setAftEnabled NOTIFY aftChanged)
+
+    // Whether the receiver's mode has a centre AFT can aim at. False on
+    // usb, lsb, dsb and raw, where the toggle is shown disabled.
+    Q_PROPERTY(bool aftOffered READ aftOffered NOTIFY aftChanged)
+
+    // What the loop is doing, as a word or two for a chip, and the signal's
+    // estimated distance from the receiver's centre when it has one.
+    Q_PROPERTY(QString aftState READ aftState NOTIFY aftChanged)
+    Q_PROPERTY(double aftErrorHz READ aftErrorHz NOTIFY aftChanged)
+    Q_PROPERTY(bool aftHasError READ aftHasError NOTIFY aftChanged)
+
     // A width change is drawn and has not been sent, because sending it
     // mid-gesture would break the audio once per pixel. It goes out on
     // release. The readout says so, because a filter that is drawn where
@@ -1726,6 +1743,12 @@ public:
     [[nodiscard]] bool receiverPending() const { return width_uncommitted_; }
     [[nodiscard]] QString receiverFitText() const { return receiver_fit_text_; }
     [[nodiscard]] QString receiverFitLabel() const { return receiver_fit_label_; }
+    [[nodiscard]] bool aftEnabled() const { return aft_.enabled(); }
+    void setAftEnabled(bool on);
+    [[nodiscard]] bool aftOffered() const;
+    [[nodiscard]] QString aftState() const;
+    [[nodiscard]] double aftErrorHz() const { return aft_step_.error_hz; }
+    [[nodiscard]] bool aftHasError() const { return aft_step_.have_error; }
 
     // Puts the detail pane on a receiver at this absolute frequency in this
     // mode, adding one if there is none and retuning the one there is.
@@ -2100,6 +2123,9 @@ signals:
     // BOTH the request and the grant, so neither receiverChanged nor
     // receiverStatusChanged covers it, and a property may name only one.
     void receiverFitChanged();
+
+    // Any of the aft properties changed.
+    void aftChanged();
 
     // The bookmark list changed: one was saved, removed or renamed. Also
     // emitted when the pane moves to another receiver, because
@@ -2529,6 +2555,17 @@ private:
     // receiver rather than the front end and settles far faster.
     ReceiverScrollState receiver_scroll_;
     QTimer receiver_scroll_flush_;
+
+    // Automatic frequency tracking, run once per passband frame on the Qt
+    // thread; see models/aft_link.cpp. aft_vrx_ is the receiver the loop's
+    // measurements came from, so a rebuilt receiver starts it afresh.
+    AftLoop aft_;
+    AftStep aft_step_;
+    std::uint64_t aft_vrx_ = 0;
+    void run_aft();
+
+    // The operator touched the receiver: the loop holds, then reacquires.
+    void aft_yield();
 
     // The timer came due with no wheel behind it: asks whether the accumulator
     // can be spent now.

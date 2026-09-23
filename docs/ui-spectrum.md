@@ -30,9 +30,13 @@ which are notes that wait in the drawer.
 
 The receiver window holds the receiver rack, one strip per receiver in the
 receiver's colour with a live meter, and the focused receiver's controls: its
-own dial, its mode, its bandwidth, the fine-tuning display below, RDS and
-audio. RDS is offered only on a wfm receiver granted enough filter to pass the
-subcarrier. Both windows remember where they were, and the top bar's
+own dial, its mode, its bandwidth, the fine-tuning display below with its own
+waterfall under it, RDS and audio. RDS is offered only on a wfm receiver
+granted enough filter to pass the subcarrier. The passband waterfall keeps its
+history in absolute hertz as the receiver moves, shifting rows by
+`ui/render/history_shift.h`. AFT is a tick box beside the receiver's dial, off
+until ticked; `ui/models/aft.h` carries the loop and the rules below, and it
+drives the same `moveReceiverCentre` path as the wheel. Both windows remember where they were, and the top bar's
 "receivers" button brings the second back after it is closed.
 
 A frequency dial steps one digit per wheel notch, with carry and borrow, and

@@ -168,6 +168,8 @@ qt_add_executable(revenant_ui
     models/ruler.h
     models/scale_settings.h
     models/ui_rules.h
+    models/aft.h
+    models/aft_link.cpp
     models/rds_link.cpp
     models/receiver_link.cpp
     models/source_link.cpp
@@ -482,6 +484,7 @@ if(REVENANT_UI_TESTS)
         # it broke.
         add_executable(revenant_ui_tests
             audio/audio_ring.cpp
+            tests/test_aft.cpp
             tests/test_audio_ring.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
