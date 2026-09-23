@@ -689,7 +689,7 @@ instead: The six KF4FIC files are 13:59 to 17:05 UT, one continuous recording
 
 phrase: asking for PSK31 at four bins across gets a 16384-point transform
 retired: 2026-09-22
-commit: e4ff536
+commit: 4924222
 instead: dsp::kMaxSpectrumTransform is 2048 and the shipped default is already
     there, so no longer transform exists to be chosen. HF resolution comes from
     the channel count: 1.465 Hz per bin on the 96 kS/s recordings at the 64
@@ -710,7 +710,7 @@ phrase: It is a display arrangement: nothing on the engine knows about it
 phrase: 3 kHz produce four groups in total
 phrase: And the groups move between runs of the same file
 retired: 2026-09-22
-commit: 711a736
+commit: 42a52d1
 instead: detect::LineGrouper follows tracks as groups with an id that survives
     between decisions, and revenant-cli --detect-groups prints it. Over the
     six HF excerpts it finds symmetric pairs about ten hertz round six
@@ -729,7 +729,7 @@ phrase: is the shape of the artefact and is the cheapest thing to gate on
 phrase: it gets the same treatment: written down rather than changed
 phrase: concluded that tier two has to use a real DemodStage rather than the raw tap
 retired: 2026-09-22
-commit: the change that capped a PSK call with no symbol rate
+commit: 0823dbd
 instead: A PSK call with no symbol rate is kept, flagged and held to 0.5, and
     may_drive_detection refuses it. A PSK call whose carrier sits where the
     occupied band's power has fallen under half its median is not made: that
@@ -738,7 +738,7 @@ instead: A PSK call with no symbol rate is kept, flagged and held to 0.5, and
 
 phrase: it is the tail of a distribution being sampled more times, not a property of the band
 retired: 2026-09-22
-commit: the change that measured the OFDM bar against lag count
+commit: 5a70e37
 instead: Forty and fifty-eight seconds of the same empty 40 m channel search the
     same 8161 lags and read 6.0 and 4.8 times the median, so the forty-second
     OFDM call is not a lag-count effect. On three synthetic noises the ratio
