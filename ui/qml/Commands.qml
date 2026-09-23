@@ -41,6 +41,7 @@ Item {
         "sourceOpen": engineLink.sourceOpen,
         "canRetune": engineLink.sourceCanRetune,
         "receiver": engineLink.receiverId > 0,
+        "secondReceiver": engineLink.rackCount > 1,
         "aftOffered": engineLink.aftOffered,
         "autoFilterOffered": engineLink.autoFilterOffered,
         "spectrumDrawing": commands.spanView.drawing
@@ -68,8 +69,13 @@ Item {
         },
         "palette.bands": () => commands.openPalette("bands"),
         "receiver.add": () => {
+            engineLink.addReceiver((engineLink.spanLowHz + engineLink.spanHighHz) / 2, "")
+        },
+        "receiver.centre": () => {
             engineLink.tuneReceiver((engineLink.spanLowHz + engineLink.spanHighHz) / 2, "")
         },
+        "receiver.next": (step) => engineLink.focusNextReceiver(Number(step)),
+        "receiver.solo": () => engineLink.toggleReceiverSolo(engineLink.focusedKey),
         "receiver.type": () => {
             commands.bringForward(commands.receiverWindow)
             commands.receiverWindow.receiverDial.edit()

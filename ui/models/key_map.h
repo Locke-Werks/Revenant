@@ -110,6 +110,7 @@ public:
         in.source_open = flag("sourceOpen");
         in.can_retune = flag("canRetune");
         in.receiver = flag("receiver");
+        in.second_receiver = flag("secondReceiver");
         in.aft_offered = flag("aftOffered");
         in.auto_filter_offered = flag("autoFilterOffered");
         in.spectrum_drawing = flag("spectrumDrawing");

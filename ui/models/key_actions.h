@@ -27,14 +27,15 @@
 //
 // WHAT IS NOT HERE, AND WHY.
 //
-// Next and previous receiver, and solo. The engine holds any number of
-// receivers and this client holds one per window, so there is no other
-// receiver to move to or to solo against; see ui/qml/ReceiverRack.qml. A key
-// bound to either would be one that never does anything.
-//
 // A list of detections. The "detections" panel is the detector's two
 // thresholds, and nothing in the client lists the detections themselves; they
 // are drawn on the span. The key opens the panel that exists.
+//
+// WHAT THIS BLOCK USED TO SAY FIRST: "Next and previous receiver, and solo.
+// The engine holds any number of receivers and this client holds one per
+// window, so there is no other receiver to move to or to solo against". The
+// client holds a rack of up to eight now, and all three are in the table,
+// needing a second receiver where there has to be another to move to.
 
 #pragma once
 
@@ -85,6 +86,9 @@ enum KeyNeed : std::uint32_t {
 
     // A spectrum on screen, which is what a pinned end is pinned against.
     kNeedsSpectrum = 1U << 6,
+
+    // A second receiver in the rack, which is what moving the focus needs.
+    kNeedsSecondReceiver = 1U << 7,
 };
 
 struct KeyAction {
@@ -146,9 +150,18 @@ inline constexpr std::array kKeyActions{
     KeyAction{"tune.band", "jump to a band", "tuning", "band plan menu",
               {"Ctrl+J", ""}, KeyContext::Window, kNeedsRetune, "palette.bands", ""},
 
-    // The receiver.
-    KeyAction{"receiver.add", "put the receiver on the span centre", "receiver", "add new vfo",
+    // The receiver, and the rack of them. Adding makes a new receiver and
+    // focuses it; the focused one is what every other receiver key acts on.
+    KeyAction{"receiver.add", "put a new receiver on the span centre", "receiver", "add new vfo rack",
               {"Ctrl+N", ""}, KeyContext::Window, kNeedsSource, "receiver.add", ""},
+    KeyAction{"receiver.centre", "move the receiver to the span centre", "receiver", "vfo tune middle",
+              {"", ""}, KeyContext::Window, kNeedsReceiver, "receiver.centre", ""},
+    KeyAction{"receiver.next", "focus the next receiver", "receiver", "vfo rack switch down",
+              {"Ctrl+PgDown", ""}, KeyContext::Window, kNeedsSecondReceiver, "receiver.next", "1"},
+    KeyAction{"receiver.previous", "focus the previous receiver", "receiver", "vfo rack switch up",
+              {"Ctrl+PgUp", ""}, KeyContext::Window, kNeedsSecondReceiver, "receiver.next", "-1"},
+    KeyAction{"receiver.solo", "solo the receiver or stop soloing", "receiver", "vfo rack alone listen audio",
+              {"Ctrl+Shift+S", ""}, KeyContext::Window, kNeedsReceiver, "receiver.solo", ""},
     KeyAction{"receiver.type", "type a frequency for the receiver", "receiver", "frequency dial vfo go to",
               {"Ctrl+Shift+G", ""}, KeyContext::Window, kNeedsReceiver, "receiver.type", ""},
     KeyAction{"receiver.remove", "remove the receiver", "receiver", "close delete vfo",
@@ -336,7 +349,7 @@ inline constexpr std::array kKeyContexts{
 // be enabled with the bottom missing.
 [[nodiscard]] constexpr std::uint32_t key_needs_expanded(std::uint32_t needs)
 {
-    if ((needs & (kNeedsAft | kNeedsAutoFilter)) != 0) {
+    if ((needs & (kNeedsAft | kNeedsAutoFilter | kNeedsSecondReceiver)) != 0) {
         needs |= kNeedsReceiver;
     }
     if ((needs & (kNeedsRetune | kNeedsSpectrum)) != 0) {
@@ -367,6 +380,7 @@ struct KeyState {
     bool source_open = false;
     bool can_retune = false;
     bool receiver = false;
+    bool second_receiver = false;
     bool aft_offered = false;
     bool auto_filter_offered = false;
     bool spectrum_drawing = false;
@@ -390,6 +404,9 @@ struct KeyState {
     }
     if (state.receiver) {
         have |= kNeedsReceiver;
+        if (state.second_receiver) {
+            have |= kNeedsSecondReceiver;
+        }
         if (state.aft_offered) {
             have |= kNeedsAft;
         }
@@ -418,6 +435,9 @@ struct KeyState {
     }
     if ((missing & kNeedsReceiver) != 0) {
         return "needs a receiver";
+    }
+    if ((missing & kNeedsSecondReceiver) != 0) {
+        return "needs a second receiver";
     }
     if ((missing & (kNeedsAft | kNeedsAutoFilter)) != 0) {
         return "not offered on this mode";

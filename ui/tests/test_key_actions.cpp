@@ -285,6 +285,36 @@ TEST_CASE("an action is enabled only when the window has what it needs")
     CHECK_FALSE(key_action_enabled(aft, have()));
 }
 
+// Rejects next and previous offered with nothing to move to, which is a key
+// that does nothing, and a second receiver counted without a first.
+TEST_CASE("moving the focus needs a second receiver in the rack")
+{
+    KeyState state;
+    state.connected = true;
+    state.source_open = true;
+    const auto have = [&] { return key_have(state); };
+    const KeyAction& next = *find_key_action("receiver.next");
+    const KeyAction& previous = *find_key_action("receiver.previous");
+    const KeyAction& solo = *find_key_action("receiver.solo");
+    const KeyAction& add = *find_key_action("receiver.add");
+
+    CHECK(key_action_enabled(add, have()));
+    CHECK_FALSE(key_action_enabled(solo, have()));
+
+    state.receiver = true;
+    CHECK(key_action_enabled(solo, have()));
+    CHECK_FALSE(key_action_enabled(next, have()));
+    CHECK(key_needs_text(key_missing(next.needs, have())) == "needs a second receiver");
+
+    state.second_receiver = true;
+    CHECK(key_action_enabled(next, have()));
+    CHECK(key_action_enabled(previous, have()));
+
+    state.receiver = false;
+    CHECK_FALSE(key_action_enabled(next, have()));
+    CHECK(key_needs_text(key_missing(next.needs, have())) == "needs a receiver");
+}
+
 // THE DOCUMENT CHECK. Rejects docs/ui-spectrum.md listing keys the table does
 // not bind. The key map there is the text render_key_map_markdown prints,
 // between two marker lines, and on a mismatch this prints what belongs there

@@ -38,6 +38,7 @@ namespace {
     state.source_open = true;
     state.can_retune = true;
     state.receiver = true;
+    state.second_receiver = true;
     state.aft_offered = true;
     state.auto_filter_offered = true;
     state.spectrum_drawing = true;

@@ -81,11 +81,17 @@ handler the table names. `revenant-ui --smoke-seconds N --palette QUERY
 --grab-main FILE` photographs the palette with a query typed into it, and
 `--keymap` in place of `--palette` the key map, on the offscreen platform.
 
-Not bound, because the client cannot do them: next and previous receiver,
-and solo. The engine holds any number of receivers and this client holds one
-per window, so there is nothing to move to and nothing to solo against. The
-detections key opens the detection thresholds, which is the panel there is;
-nothing in the client lists the detections themselves.
+The receiver keys act on the focused receiver in the rack; see "The receiver
+rack" below. Next and previous need a second receiver to move to, and the
+palette says so when there is none. The detections key opens the detection
+thresholds, which is the panel there is; nothing in the client lists the
+detections themselves.
+
+WHAT THIS PARAGRAPH USED TO SAY: "Not bound, because the client cannot do
+them: next and previous receiver, and solo. The engine holds any number of
+receivers and this client holds one per window, so there is nothing to move
+to and nothing to solo against." The rack holds up to eight, and all three
+are bound.
 
 <!-- The key map. Generated from ui/models/key_actions.h and checked by ui/tests/test_key_actions.cpp: edit the table, not these lines. -->
 
@@ -101,7 +107,10 @@ nothing in the client lists the detections themselves.
 | tuning | page the radio down a tenth of the span | `PgDown` |
 | tuning | type a frequency for the radio | `Ctrl+G` |
 | tuning | jump to a band | `Ctrl+J` |
-| receiver | put the receiver on the span centre | `Ctrl+N` |
+| receiver | put a new receiver on the span centre | `Ctrl+N` |
+| receiver | focus the next receiver | `Ctrl+PgDown` |
+| receiver | focus the previous receiver | `Ctrl+PgUp` |
+| receiver | solo the receiver or stop soloing | `Ctrl+Shift+S` |
 | receiver | type a frequency for the receiver | `Ctrl+Shift+G` |
 | receiver | remove the receiver | `Ctrl+Del` |
 | receiver | turn AFT on or off | `Ctrl+T` |
