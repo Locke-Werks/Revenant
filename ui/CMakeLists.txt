@@ -500,6 +500,7 @@ if(REVENANT_UI_TESTS)
             tests/test_bookmarks.cpp
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
+            tests/test_decoded_log.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_history_shift.cpp
