@@ -33,11 +33,19 @@ ColumnLayout {
     // receiver they tuned would start making noise with no control
     // on screen that explains why. Observed 2026-09-20 by clearing
     // a receiver while listening.
+    //
+    // HIDDEN ON A RECEIVER THAT MAKES NO AUDIO: raw, P25, D-STAR and
+    // TETRA hand out complex baseband for a decoder, and the engine
+    // refuses audio on them, so the section would only ever show the
+    // refusal. The link does not subscribe there either. The switch
+    // keeps its state underneath and is on screen again the moment the
+    // receiver is back in a mode that makes audio, before anything plays.
     visible: engineLink.receiverId > 0
-             || engineLink.audioWanted
-             || engineLink.audioEndedReason.length > 0
-             || engineLink.audioFault.length > 0
-             || audioPlayer.fault.length > 0
+             ? engineLink.audioOffered
+             : (engineLink.audioWanted
+                || engineLink.audioEndedReason.length > 0
+                || engineLink.audioFault.length > 0
+                || audioPlayer.fault.length > 0)
 
     RowLayout {
         Layout.fillWidth: true

@@ -1261,6 +1261,13 @@ class EngineLink : public QObject {
     // audioActive below is whether there is actually a stream.
     Q_PROPERTY(bool audioWanted READ audioWanted WRITE setAudioWanted NOTIFY audioChanged)
 
+    // Whether the pane's receiver makes audio at all, mode_makes_audio in
+    // models/mode_choice.h. False on raw and the three digital modes, whose
+    // output is complex baseband for a decoder: the window hides the audio
+    // section there, and apply_audio_request does not subscribe on one
+    // while the switch is on, because the engine would only refuse it.
+    Q_PROPERTY(bool audioOffered READ audioOffered NOTIFY receiverChanged)
+
     // A subscription exists on the engine right now. False while the
     // switch is on and the pane has no receiver, which is the ordinary
     // state before anything is tuned.
@@ -2087,6 +2094,9 @@ public:
 
     [[nodiscard]] bool audioWanted() const { return audio_wanted_.load(); }
     void setAudioWanted(bool wanted);
+    [[nodiscard]] bool audioOffered() const {
+        return mode_makes_audio(receiverDemod().toStdString());
+    }
 
     [[nodiscard]] bool audioActive() const { return audio_vrx_ != 0; }
     [[nodiscard]] qulonglong audioReceiverId() const { return audio_vrx_; }

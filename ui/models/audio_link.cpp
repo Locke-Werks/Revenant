@@ -244,8 +244,14 @@ void EngineLink::apply_audio_request()
             this, [this] { emit audioChanged(); }, Qt::QueuedConnection);
     }
 
+    // Nothing on a receiver that makes no audio. raw and the digital modes
+    // hand out complex baseband, the engine refuses audio on one in words,
+    // and that refusal would be the only thing the section had to show; the
+    // window hides the section there instead. The switch stays as it was, so
+    // a change back to an audio mode starts listening again.
+    const bool audible = mode_makes_audio(demod_name(live_receiver_demod_).toStdString());
     const qulonglong want =
-        audio_wanted_.load(std::memory_order_acquire) ? live_receiver_id_ : 0;
+        audio_wanted_.load(std::memory_order_acquire) && audible ? live_receiver_id_ : 0;
 
     if (live_audio_vrx_ != 0 && live_audio_vrx_ != want) {
         // The pane moved to another receiver, or the operator switched
@@ -253,6 +259,12 @@ void EngineLink::apply_audio_request()
         // receiver.
         stop_audio();
         work_audio_stats_ = {};
+    }
+
+    if (live_receiver_id_ != 0 && !audible) {
+        // A refusal from before the mode changed is about a receiver that
+        // is not there any more.
+        work_audio_fault_.clear();
     }
 
     if (want == 0 || live_audio_vrx_ == want || client_ == nullptr) {
@@ -270,8 +282,9 @@ void EngineLink::apply_audio_request()
                                  [this](const rpc::AudioChunk& chunk) { on_audio_chunk(chunk); },
                                  [this](const std::string& why) { on_audio_ended(why); });
     if (!granted) {
-        // The engine refused: no such receiver, a source that is not open,
-        // or a raw tap, in its own words. Not routed into errorText, for
+        // The engine refused: no such receiver or a source that is not
+        // open, in its own words. A complex tap would be refused too and is
+        // never asked; see the gate above. Not routed into errorText, for
         // the reason detectionFault is not: a refused subscription is not
         // a lost engine and must not read as one.
         work_audio_fault_ = QString::fromStdString(granted.error().message);
