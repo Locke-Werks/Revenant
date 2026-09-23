@@ -245,7 +245,6 @@ qt_add_qml_module(revenant_ui
         qml/FrequencyManagerPanel.qml
         qml/RecordingSection.qml
         qml/RecordingStrip.qml
-        qml/BookmarkRow.qml
         qml/DetectionControls.qml
         qml/SpanView.qml
         qml/Ruler.qml
