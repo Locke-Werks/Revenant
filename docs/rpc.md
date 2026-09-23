@@ -628,6 +628,14 @@ decoder said only whether it read complex baseband or audio, so RTTY on a `wfm`
 receiver was accepted and would have printed broadcast audio as teleprinter
 noise. A decoder added now is one adapter and one row again.
 
+**`DecoderInfo::modes` names the right-hand column as a list**, since
+2026-09-23, for a client that offers an operator only the decoders a receiver
+can feed. It is always the whole list: the three complex decoders, which read
+any complex tap, cross as `raw`, `p25p1`, `dstar` and `tetra` rather than as an
+empty list meaning "any", because empty is what an engine older than the field
+sends and a client has to be able to tell the two apart. The descriptions
+still say the modes in words, for a person reading the list.
+
 **One message shape and not a struct per mode.** A message carries the
 receiver, the decoder's registry name, a `kind` within that decoder, a sample
 span, a list of fields and an optional line of text. A field is a key and a

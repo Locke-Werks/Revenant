@@ -200,10 +200,15 @@ struct DecoderSpec {
     // complex decoders have always been attached: p25p1 on a raw tap is a
     // choice an operator can make on purpose.
     //
-    // NOT ON THE WIRE AS A LIST. DecoderInfo has no field for it and adding
-    // one is a schema change for something the description already says in
-    // words, so each description names its modes and subscribeDecoded refuses
-    // a receiver outside them naming the modes again.
+    // ON THE WIRE AS DecoderInfo::modes since 2026-09-23, written out whole by
+    // core/rpc/convert.cpp so empty never crosses as "any". The receiver
+    // window offers an operator the decoders a receiver can feed, and filling
+    // that menu from the descriptions would have meant parsing prose.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "NOT ON THE WIRE AS A LIST. DecoderInfo
+    // has no field for it and adding one is a schema change for something the
+    // description already says in words". The descriptions still say it, for a
+    // person reading the list.
     std::span<const std::string_view> modes;
 };
 
@@ -2341,8 +2346,10 @@ private:
 // it.
 //
 // AN AUDIO DECODER NAMES ITS MODES, and its description says them again in
-// words, because DecoderInfo carries no list and that is where a client
-// reading decoders() looks.
+// words for a person reading the list. DecoderInfo::modes carries them to a
+// client as a list. WHAT THIS PARAGRAPH USED TO SAY after "in words":
+// "because DecoderInfo carries no list and that is where a client reading
+// decoders() looks".
 [[nodiscard]] inline std::span<const DecoderSpec> decoder_registry() {
     using decoders_detail::kCwModes;
     using decoders_detail::kFmModes;

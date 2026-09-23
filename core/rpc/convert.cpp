@@ -751,9 +751,30 @@ void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMes
 }
 
 void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
-                        DecoderInput input, std::string_view description) {
+                        DecoderInput input, std::string_view description,
+                        std::span<const std::string_view> modes) {
     out.setName(std::string(name));
     out.setDescription(std::string(description));
+
+    std::vector<std::string> named;
+    if (modes.empty()) {
+        const bool complex = input == DecoderInput::ComplexBaseband;
+        for (auto ordinal = static_cast<std::uint16_t>(engine::Demod::Raw);
+             ordinal <= static_cast<std::uint16_t>(engine::Demod::Tetra); ++ordinal) {
+            const auto mode = static_cast<engine::Demod>(ordinal);
+            if (engine::is_complex_tap(mode) == complex) {
+                named.emplace_back(engine::demod_name(mode));
+            }
+        }
+    } else {
+        for (const std::string_view mode : modes) {
+            named.emplace_back(mode);
+        }
+    }
+    auto list = out.initModes(static_cast<unsigned>(named.size()));
+    for (unsigned i = 0; i < list.size(); ++i) {
+        list.set(i, named[i].c_str());
+    }
 
     // Exhaustive and with no default, per docs/conventions.md, so a third
     // input kind stops the build here.

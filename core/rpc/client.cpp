@@ -2035,6 +2035,9 @@ Expected<std::vector<DecoderInfo>> ClientImpl::decoders() {
                 info.input = row.getInput() == schema::DecoderInput::REAL_AUDIO
                                  ? DecoderInput::RealAudio
                                  : DecoderInput::ComplexBaseband;
+                for (const auto mode : row.getModes()) {
+                    info.modes.push_back(read_text(mode));
+                }
                 out.push_back(std::move(info));
             }
             return out;

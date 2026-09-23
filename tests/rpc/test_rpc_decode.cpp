@@ -369,6 +369,19 @@ TEST_CASE("the decoder registry crosses the wire", "[gpu][rpc][decode]") {
         CHECK((*listed)[i].name == registry[i].name);
         CHECK((*listed)[i].input == registry[i].input);
         CHECK((*listed)[i].description == registry[i].description);
+
+        // A registry row naming its modes crosses with exactly those, and one
+        // naming none crosses with every complex tap mode rather than empty,
+        // because empty on the wire means an engine that did not say.
+        std::vector<std::string> expected;
+        for (const std::string_view mode : registry[i].modes) {
+            expected.emplace_back(mode);
+        }
+        if (expected.empty()) {
+            expected = {"raw", "p25p1", "dstar", "tetra"};
+        }
+        INFO(registry[i].name);
+        CHECK((*listed)[i].modes == expected);
     }
 
     std::set<std::string> names;

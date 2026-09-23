@@ -23,6 +23,9 @@
 
 #pragma once
 
+#include <span>
+#include <string_view>
+
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
 #include "core/detect/detector.h"
@@ -254,8 +257,14 @@ void write_rds_bits_status(schema::RdsHealth::Builder out, const decode::RdsBits
 // failure this file exists to make reviewable, and the value union is the
 // part with a case to forget.
 void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMessage& in);
+
+// `modes` is DecoderSpec::modes, where empty means every mode whose output is
+// `input`. The wire promises a whole list, so an empty one is written out here
+// as each engine::Demod on the right side of is_complex_tap, which is the one
+// place that knows which modes those are.
 void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
-                        DecoderInput input, std::string_view description);
+                        DecoderInput input, std::string_view description,
+                        std::span<const std::string_view> modes);
 
 // There is deliberately no read_spectrum_geometry here.
 //

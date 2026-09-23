@@ -727,10 +727,16 @@ TEST_CASE("the audio decoders are listed with the input they read", "[gpu][rpc][
     for (const rpc::DecoderInfo& info : *listed) {
         if (info.input == rpc::DecoderInput::RealAudio) {
             audio.insert(info.name);
-            // DecoderInfo carries no list of modes, so each description has to
-            // say them.
+            // The description says the modes for a person and DecoderInfo::
+            // modes for a client, and the two have to agree. This used to say
+            // DecoderInfo carries no list of modes, so each description had to
+            // say them; the list crosses since 2026-09-23.
             INFO(info.name << ": " << info.description);
             CHECK(info.description.find("Reads a") != std::string::npos);
+            REQUIRE_FALSE(info.modes.empty());
+            for (const std::string& mode : info.modes) {
+                CHECK(info.description.find(mode) != std::string::npos);
+            }
         }
     }
     CHECK(audio == std::set<std::string>{"rtty", "ax25", "pocsag", "sitor_b", "navtex", "psk31",

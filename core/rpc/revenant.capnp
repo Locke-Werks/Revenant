@@ -2251,6 +2251,19 @@ struct DecoderInfo {
     name @0 :Text;
     input @1 :DecoderInput;
     description @2 :Text;
+
+    # The receiver modes this decoder reads, by the names Demod's enumerants
+    # carry in lower case: "usb", "lsb", "nfm", "p25p1", "raw". Always the
+    # whole list, so a decoder that reads any complex tap names all four of
+    # them rather than sending nothing for "any".
+    #
+    # Added on 2026-09-23 for a client that offers an operator only the
+    # decoders a receiver can feed. The description says the same in words,
+    # and a client that has to parse prose to fill a menu is the failure the
+    # typed fields on DecodedMessage exist to prevent. An engine older than
+    # this field sends an empty list, which a client reads as "not stated",
+    # never as "reads nothing".
+    modes @3 :List(Text);
 }
 
 struct DecodedStats {

@@ -1218,6 +1218,11 @@ struct DecoderInfo {
 
     // One sentence naming the standard it implements and what it recovers.
     std::string description;
+
+    // The receiver modes it reads, as demod names: "usb", "lsb", "nfm", "raw".
+    // The whole list, never empty for "any". Empty only from an engine older
+    // than the field, where it means the engine did not say.
+    std::vector<std::string> modes;
 };
 
 // One decoded-message subscription's running totals.

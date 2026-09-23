@@ -2211,7 +2211,7 @@ public:
         auto out = context.getResults().initDecoders(static_cast<unsigned>(registry.size()));
         for (unsigned i = 0; i < out.size(); ++i) {
             write_decoder_info(out[i], registry[i].name, registry[i].input,
-                               registry[i].description);
+                               registry[i].description, registry[i].modes);
         }
         return kj::READY_NOW;
     }
