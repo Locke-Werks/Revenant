@@ -1490,24 +1490,44 @@ void RdsDecoder::apply_type10a(const Group& group) {
     const bool ab = ((b2 >> 4) & 0x01) != 0;
     const std::size_t address = static_cast<std::size_t>(b2 & 0x01);
 
+    // EN 50067 clause 3.1.5.14 note 1: the A/B flag toggles when the PTYN
+    // changes, so a toggle clears the name exactly as it clears RadioText.
     if (!state_.ptyn_ab_valid || state_.ptyn_ab != ab) {
         state_.ptyn.fill(' ');
         state_.ptyn_received = 0;
+        state_.ptyn_corrected = 0;
     }
     state_.ptyn_ab = ab;
     state_.ptyn_ab_valid = true;
 
     const std::size_t base = address * 4;
-    if (group.blocks[2].valid) {
-        state_.ptyn[base] = high_char(group.blocks[2].value);
-        state_.ptyn[base + 1] = low_char(group.blocks[2].value);
+    const Block& b3 = group.blocks[2];
+    const Block& b4 = group.blocks[3];
+    if (b3.valid) {
+        state_.ptyn[base] = high_char(b3.value);
+        state_.ptyn[base + 1] = low_char(b3.value);
     }
-    if (group.blocks[3].valid) {
-        state_.ptyn[base + 2] = high_char(group.blocks[3].value);
-        state_.ptyn[base + 3] = low_char(group.blocks[3].value);
+    if (b4.valid) {
+        state_.ptyn[base + 2] = high_char(b4.value);
+        state_.ptyn[base + 3] = low_char(b4.value);
     }
-    if (group.blocks[2].valid && group.blocks[3].valid) {
+    const bool complete = b3.valid && b4.valid;
+    if (complete) {
         state_.ptyn_received = static_cast<std::uint8_t>(state_.ptyn_received | (1u << address));
+    }
+
+    // The rule apply_type2 gives rt_corrected, for the same two reasons. Block
+    // 2 counts, since C0 and the A/B flag decide where the characters land;
+    // and the mark is set by any write that used a corrected block but
+    // cleared only by a complete clean one, because a half-written segment
+    // says nothing about its other half.
+    const bool corrected = group.blocks[1].corrected || (b3.valid && b3.corrected) ||
+                           (b4.valid && b4.corrected);
+    const auto bit = static_cast<std::uint8_t>(1u << address);
+    if (corrected) {
+        state_.ptyn_corrected = static_cast<std::uint8_t>(state_.ptyn_corrected | bit);
+    } else if (complete) {
+        state_.ptyn_corrected = static_cast<std::uint8_t>(state_.ptyn_corrected & ~bit);
     }
 }
 

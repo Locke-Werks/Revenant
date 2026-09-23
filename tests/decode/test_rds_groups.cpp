@@ -152,6 +152,15 @@ void prime(RdsDecoder& decoder) {
                                       static_cast<unsigned char>(low));
 }
 
+// Block 2 of any group: EN 50067 Figure 9, four bits of type, the version bit,
+// TP and PTY, then the five bits the group type owns. TP set and PTY 5 on
+// every group built here, so a case can check the common fields survived.
+[[nodiscard]] std::uint16_t block2_of(std::uint8_t type, bool version_b, std::uint8_t low5) {
+    return static_cast<std::uint16_t>((static_cast<unsigned>(type) << 12) |
+                                      (version_b ? 0x0800u : 0x0000u) | 0x0400u | (5u << 5) |
+                                      (low5 & 0x1Fu));
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -2849,6 +2858,53 @@ TEST_CASE("type 10A carries the programme type name", "[rds]") {
     send_ptyn(true, 1, "TALK");
     CHECK(decoder.state().ptyn_text() == "    TALK");
     CHECK_FALSE(decoder.state().ptyn_complete());
+}
+
+TEST_CASE("a repaired programme type name segment is marked and a clean one unmarks it",
+          "[rds]") {
+    // The rule rt_corrected follows, applied to PTYN, which is the one text
+    // field an operator reads that had no mark at all.
+    RdsDecoder decoder;
+    prime(decoder);
+
+    const auto ptyn_group = [](bool ab, std::uint8_t address, const char* four) {
+        return GroupWords{0x2345, block2_of(10, false, static_cast<std::uint8_t>(
+                                                         (ab ? 0x10u : 0x00u) | (address & 1u))),
+                          chars_to_word(four[0], four[1]), chars_to_word(four[2], four[3]),
+                          false};
+    };
+
+    auto blocks = encode_group(ptyn_group(false, 1, "BALL"));
+    blocks[3] ^= 1u << 18;  // one bit inside block 4's information word
+    for (const std::uint32_t block : blocks) {
+        feed_word(decoder, block);
+    }
+    REQUIRE(decoder.blocks_corrected() == 1);
+    CHECK(decoder.state().ptyn_received == 0x02);
+    CHECK(decoder.state().ptyn_corrected == 0x02);
+    CHECK(decoder.state().ptyn_text() == "    BALL");
+
+    // The other segment arriving clean leaves the doubt where it was.
+    feed_group(decoder, ptyn_group(false, 0, "FOOT"));
+    CHECK(decoder.state().ptyn_corrected == 0x02);
+
+    // The same segment arriving clean clears it.
+    feed_group(decoder, ptyn_group(false, 1, "BALL"));
+    CHECK(decoder.state().ptyn_corrected == 0x00);
+    CHECK(decoder.state().ptyn_text() == "FOOTBALL");
+
+    // Block 2 counts: it carries C0 and the A/B flag. A repaired block 2 on a
+    // clean pair of character blocks still marks the segment it addressed.
+    auto by_address = encode_group(ptyn_group(false, 0, "FOOT"));
+    by_address[1] ^= 1u << 20;
+    for (const std::uint32_t block : by_address) {
+        feed_word(decoder, block);
+    }
+    CHECK(decoder.state().ptyn_corrected == 0x01);
+
+    // And a new name clears every mark with the characters they were about.
+    feed_group(decoder, ptyn_group(true, 1, "TALK"));
+    CHECK(decoder.state().ptyn_corrected == 0x00);
 }
 
 TEST_CASE("type 14A assembles other networks", "[rds]") {

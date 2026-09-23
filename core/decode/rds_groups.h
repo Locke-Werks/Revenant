@@ -697,6 +697,13 @@ struct StationState {
     bool ptyn_ab = false;
     bool ptyn_ab_valid = false;
 
+    // One bit per PTYN segment, set when a block the segment depends on had
+    // been corrected, on exactly the rule rt_corrected states: set on any
+    // write that involved a corrected block, cleared only by a complete clean
+    // reception of the segment. Block 2 counts, because it carries the segment
+    // address C0 and the A/B flag.
+    std::uint8_t ptyn_corrected = 0;
+
     ProgrammeItemNumber pin{};
     ClockTime clock{};
 
