@@ -519,7 +519,8 @@ struct Options {
     decode::Region rds_region = decode::Region::kRbds;
 
     // Decoders to attach to the --vrx receivers, by registry name, repeatable.
-    // "auto" is the decoder named after each receiver's mode. These are the
+    // "auto" is the decoder named after each receiver's mode, or every decoder
+    // that reads a receiver no decoder is named after. These are the
     // same adapters revenant-engine serves over subscribeDecoded, from
     // core/rpc/decoders.h, run here in-process.
     std::vector<std::string> decode;
@@ -591,11 +592,14 @@ void print_usage()
         "                      reads, and print each message it recovers as it arrives:\n"
         "                      the time in the receiver's stream, the receiver number,\n"
         "                      the decoder, the kind of message and one line of text.\n"
-        "                      Repeatable. auto attaches the decoder named after each\n"
-        "                      receiver's mode. The decoders are p25p1, dstar and tetra\n"
-        "                      and read a --vrx in the mode of the same name, such as\n"
-        "                      --vrx 453.1M:p25p1 --decode auto. Nothing is decrypted:\n"
-        "                      an encrypted P25 call is reported as encrypted.\n"
+        "                      Repeatable. p25p1, dstar and tetra read a --vrx in the\n"
+        "                      mode of the same name, such as --vrx 453.1M:p25p1.\n"
+        "                      rtty, sitor_b and navtex read a usb or lsb --vrx; ax25\n"
+        "                      (with APRS) and pocsag read an nfm one. auto attaches\n"
+        "                      the decoder named after each receiver's mode, and on a\n"
+        "                      usb, lsb or nfm receiver every decoder that reads it.\n"
+        "                      Nothing is decrypted: an encrypted P25 call is\n"
+        "                      reported as encrypted.\n"
         "\n"
         "Watching:\n"
         "  --spectrum[=<n>]    Draw an ASCII waterfall of the whole span, one row per\n"
@@ -2711,6 +2715,10 @@ struct DecodeTap {
     std::size_t number = 0;
     const rpc::DecoderSpec* spec = nullptr;
 
+    // The receiver's demodulator, engine::demod_name's spelling, for the
+    // decoders whose polarity the sideband decides.
+    std::string_view mode;
+
     std::mutex lock;
     std::unique_ptr<rpc::ChunkDecoder> decoder;
     std::vector<rpc::DecodedMessage> pending;
@@ -2744,7 +2752,7 @@ void decode_tap_chunk(DecodeTap& tap, const engine::AudioChunk& chunk)
     // from the placement, because a digital voice receiver's fine stage and a
     // raw tap deliver at different rates and only the chunk says which.
     if (tap.decoder == nullptr) {
-        auto made = tap.spec->make(chunk.rate);
+        auto made = tap.spec->make(rpc::DecoderBuild{.rate = chunk.rate, .mode = tap.mode});
         if (!made) {
             tap.fault = made.error().message;
             return;
@@ -3385,57 +3393,81 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
 
     // The event decoders, on the --vrx receivers, each attached before a
     // sample moves. A name attaches to every receiver whose output it reads;
-    // auto attaches the decoder named after each receiver's mode. A request
-    // that matches no receiver is refused, because a run that prints nothing
-    // looks exactly like a band with nothing on it.
+    // auto attaches the decoder named after each receiver's mode, and on a
+    // receiver no decoder is named after, every decoder that reads its audio:
+    // a usb receiver gets rtty, sitor_b and navtex, an nfm one ax25 and
+    // pocsag. That is the right default here and not on the wire, because an
+    // operator watching a terminal wants to see which of them the channel is
+    // carrying and a client subscribing names what it wants. A request that
+    // matches no receiver is refused, because a run that prints nothing looks
+    // exactly like a band with nothing on it.
     std::vector<std::shared_ptr<DecodeTap>> decode_taps;
     for (const std::string& name : options.decode) {
         std::size_t attached = 0;
         for (std::size_t i = 0; i < receivers.size(); ++i) {
             const Demod mode = receivers[i].spec.demod;
-            const rpc::DecoderSpec* spec =
-                name == "auto" ? rpc::find_decoder(engine::demod_name(mode))
-                               : rpc::find_decoder(name);
-            if (spec == nullptr) {
-                continue;
-            }
-            const bool complex_tap = engine::is_complex_tap(mode);
-            if ((spec->input == rpc::DecoderInput::ComplexBaseband) != complex_tap) {
-                continue;
+            const std::string_view mode_name = engine::demod_name(mode);
+            std::vector<const rpc::DecoderSpec*> specs;
+            if (name != "auto") {
+                specs.push_back(rpc::find_decoder(name));
+            } else if (const rpc::DecoderSpec* named = rpc::find_decoder(mode_name)) {
+                specs.push_back(named);
+            } else {
+                for (const rpc::DecoderSpec& candidate : rpc::decoder_registry()) {
+                    if (!candidate.modes.empty() && rpc::decoder_accepts(candidate, mode_name)) {
+                        specs.push_back(&candidate);
+                    }
+                }
             }
 
-            auto tap = std::make_shared<DecodeTap>();
-            tap->number = i + 1;
-            tap->spec = spec;
+            for (const rpc::DecoderSpec* spec : specs) {
+                if (spec == nullptr || !rpc::decoder_accepts(*spec, mode_name)) {
+                    continue;
+                }
+                const bool complex_tap = engine::is_complex_tap(mode);
+                if ((spec->input == rpc::DecoderInput::ComplexBaseband) != complex_tap) {
+                    continue;
+                }
 
-            // attach and not set, for the reason the RDS decoder gives above:
-            // a recording or a loudspeaker on the same receiver keeps its
-            // samples. Nothing detaches, because these live for the run.
-            if (auto wired = eng.attach_audio_sink(
-                    receivers[i].id,
-                    [tap](const engine::AudioChunk& chunk) -> Status {
-                        const std::lock_guard<std::mutex> held(tap->lock);
-                        decode_tap_chunk(*tap, chunk);
-                        return {};
-                    });
-                !wired) {
-                return std::unexpected(with_context(
-                    wired.error(),
-                    std::format("attaching the {} decoder to receiver {}", spec->name, i + 1)));
+                auto tap = std::make_shared<DecodeTap>();
+                tap->number = i + 1;
+                tap->spec = spec;
+                tap->mode = mode_name;
+
+                // attach and not set, for the reason the RDS decoder gives
+                // above: a recording or a loudspeaker on the same receiver
+                // keeps its samples. Nothing detaches, because these live for
+                // the run.
+                if (auto wired = eng.attach_audio_sink(
+                        receivers[i].id,
+                        [tap](const engine::AudioChunk& chunk) -> Status {
+                            const std::lock_guard<std::mutex> held(tap->lock);
+                            decode_tap_chunk(*tap, chunk);
+                            return {};
+                        });
+                    !wired) {
+                    return std::unexpected(with_context(
+                        wired.error(),
+                        std::format("attaching the {} decoder to receiver {}", spec->name, i + 1)));
+                }
+                std::println("  decode          {} on receiver {}", spec->name, i + 1);
+                decode_taps.push_back(std::move(tap));
+                ++attached;
             }
-            std::println("  decode          {} on receiver {}", spec->name, i + 1);
-            decode_taps.push_back(std::move(tap));
-            ++attached;
         }
         if (attached == 0) {
             std::string why;
             if (name == "auto") {
-                why = std::format("No --vrx is in a mode a decoder is named after; the decoders "
-                                  "are {}.",
+                why = std::format("No --vrx is in a mode a decoder is named after or reads; the "
+                                  "decoders are {}.",
                                   rpc::decoder_names());
+            } else if (const rpc::DecoderSpec* spec = rpc::find_decoder(name);
+                       !spec->modes.empty()) {
+                why = std::format("The {} decoder reads the audio of a {} receiver, and no --vrx "
+                                  "is one.",
+                                  name, rpc::decoder_modes_text(*spec));
             } else {
-                const bool wants_complex =
-                    rpc::find_decoder(name)->input == rpc::DecoderInput::ComplexBaseband;
+                const bool wants_complex = spec->input == rpc::DecoderInput::ComplexBaseband;
                 why = std::format(
                     "The {} decoder reads {}, and no --vrx produces it.", name,
                     wants_complex ? "complex baseband, which the raw, p25p1, dstar and tetra "
