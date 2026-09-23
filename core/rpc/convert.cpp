@@ -636,6 +636,42 @@ void write_rds_station(schema::RdsStation::Builder out, const decode::StationSta
     out.setPtynReceived(in.ptyn_received);
     out.setPtynAb(in.ptyn_ab);
     out.setPtynAbValid(in.ptyn_ab_valid);
+    out.setPtynCorrected(in.ptyn_corrected);
+
+    auto tmc = out.initTmc();
+    tmc.setAnnounced(in.tmc.announced);
+    tmc.setAid(in.tmc.aid);
+    tmc.setGroupType(in.tmc.group_type);
+    tmc.setVersionB(in.tmc.version_b);
+    tmc.setOdaMessage(in.tmc.oda_message);
+    tmc.setIdentification(in.tmc.identification);
+    tmc.setIdentificationValid(in.tmc.identification_valid);
+    tmc.setGroups(in.tmc.groups);
+    tmc.setOdaGroups(in.tmc.oda_groups);
+    tmc.setIncomplete(in.tmc.incomplete);
+    tmc.setEvicted(in.tmc.evicted);
+    auto messages = tmc.initMessages(static_cast<unsigned>(in.tmc.messages.size()));
+    for (unsigned i = 0; i < messages.size(); ++i) {
+        const decode::TmcMessage& row = in.tmc.messages[i];
+        messages[i].setX(row.x);
+        messages[i].setY(row.y);
+        messages[i].setZ(row.z);
+        messages[i].setReceptions(row.receptions);
+        messages[i].setCorrectedReceptions(row.corrected_receptions);
+    }
+
+    auto ews = out.initEws();
+    ews.setGroups(in.ews.groups);
+    ews.setGroupType(in.ews.last.group_type);
+    ews.setVersionB(in.ews.last.version_b);
+    ews.setBlock2Low(in.ews.last.block2_low);
+    ews.setBlock3(in.ews.last.block3);
+    ews.setBlock3Valid(in.ews.last.block3_valid);
+    ews.setBlock4(in.ews.last.block4);
+    ews.setBlock4Valid(in.ews.last.block4_valid);
+    ews.setCorrected(in.ews.last.corrected);
+    out.setEwsChannelIdentification(in.ews_channel_identification);
+    out.setEwsChannelIdentificationValid(in.ews_channel_identification_valid);
 
     auto clock = out.initClock();
     clock.setMjd(in.clock.mjd);

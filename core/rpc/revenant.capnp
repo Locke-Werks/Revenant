@@ -1868,6 +1868,89 @@ struct RdsOda {
     aid @3 :UInt16;
 }
 
+# A count of the groups put to one use, and the most recent of them, raw.
+#
+# RAW BECAUSE THE STANDARD DEFINES NOTHING PAST THE HEADER. EN 50067 leaves
+# these payloads to whoever owns the feature: the EWS bits are "assigned
+# unilaterally by each country". A client shows the count and may show the
+# bits in hexadecimal; it must not present them as decoded text or fields.
+struct RdsRawGroup {
+    # Groups put to this use since the decoder was built or last cleared.
+    # Zero means none has arrived, and every field below is then meaningless.
+    groups @0 :UInt64;
+
+    groupType @1 :UInt8;
+    versionB @2 :Bool;
+
+    # b4..b0 of block 2.
+    block2Low @3 :UInt8;
+
+    # Block 3 is not payload in a version B group, where it repeats the PI,
+    # and block3Valid is then false.
+    block3 @4 :UInt16;
+    block3Valid @5 :Bool;
+    block4 @6 :UInt16;
+    block4Valid @7 :Bool;
+
+    # A block this payload depends on, block 2 included, was corrected, so
+    # the bits may not be the station's.
+    corrected @8 :Bool;
+}
+
+# One distinct 37-bit type 8A payload and how often it arrived.
+struct RdsTmcMessage {
+    x @0 :UInt8;    # block 2 b4..b0
+    y @1 :UInt16;   # block 3
+    z @2 :UInt16;   # block 4
+    receptions @3 :UInt32;
+
+    # Receptions in which block 2, 3 or 4 had been corrected. Equal to
+    # receptions means this payload has never arrived clean.
+    correctedReceptions @4 :UInt32;
+}
+
+# RDS-TMC, attributed and counted, NOT DECODED.
+#
+# The bit positions of ALERT-C's event, location, extent, direction,
+# duration and diversion fields are ISO 14819-1 clauses 7 and 9, which were
+# not in hand when the decoder was written; core/decode/rds_groups.h under
+# TmcState says exactly what was. So there is no event code or location code
+# here, and a client must not derive one from these bits by guessing which
+# of them are which. What there is: whether a service is on air, how it was
+# identified, and every distinct payload with its reception count.
+struct RdsTmc {
+    # A type 3A group announced one of the RDS Forum register's TMC AIDs,
+    # 0x0D45, 0xCD46 or 0xCD47, on groupType/versionB, with odaMessage as its
+    # message bits, raw.
+    announced @0 :Bool;
+    aid @1 :UInt16;
+    groupType @2 :UInt8;
+    versionB @3 :Bool;
+    odaMessage @4 :UInt16;
+
+    # Type 1A variant 1, "TMC identification", twelve bits, raw.
+    identification @5 :UInt16;
+    identificationValid @6 :Bool;
+
+    # Groups attributed to TMC; those attributed through a 3A announcement
+    # rather than through 8A's default use; those that lost block 3 or 4 and
+    # so joined no message; and table entries evicted to stay within the
+    # decoder's bound. All cumulative.
+    groups @7 :UInt64;
+    odaGroups @8 :UInt64;
+    incomplete @9 :UInt64;
+    evicted @10 :UInt64;
+
+    # Every distinct payload, in no particular order. User messages, tuning
+    # information and encryption administration are all here and are not
+    # told apart. A payload with receptions of 2 or more is CONFIRMED: ISO
+    # 14819-1 Introduction 0.3 has a terminal use a group's data "once it has
+    # been verified by the reception of a second identical group". One with
+    # a single reception is as likely to be a damaged copy as a message, and a
+    # client should show confirmed payloads and at most count the rest.
+    messages @11 :List(RdsTmcMessage);
+}
+
 # One station's accumulated RDS state, as a display needs it.
 #
 # NOT EVERY FIELD OF revenant::decode::StationState, and that is the point,
@@ -2175,6 +2258,27 @@ struct RdsStation {
     # that is not clearing, which is a defect in the server and not in the
     # signal.
     discardedChunks @55 :UInt64;
+
+    # One bit per PTYN segment, set when a block the segment depends on was
+    # corrected and cleared by a clean reception of the whole segment. A set
+    # bit means the four characters may not be the station's: render them
+    # marked, or hold the segment until it arrives clean.
+    ptynCorrected @56 :UInt8;
+
+    # Traffic Message Channel. See RdsTmc for why it is counts and raw
+    # payloads rather than events and locations.
+    tmc @57 :RdsTmc;
+
+    # Emergency Warning System, type 9A. EN 50067 clause 3.1.5.13 says these
+    # groups are transmitted "very infrequently, unless an emergency occurs or
+    # test transmissions are required", so ews.groups above zero is the fact
+    # to surface, prominently: this station has sent an emergency warning
+    # group, or a test of one. The payload is each country's own format.
+    ews @58 :RdsRawGroup;
+
+    # Type 1A variant 7, "Identification of EWS channel", twelve bits, raw.
+    ewsChannelIdentification @59 :UInt16;
+    ewsChannelIdentificationValid @60 :Bool;
 }
 
 # ---------------------------------------------------------------------------

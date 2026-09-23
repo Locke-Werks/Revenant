@@ -802,6 +802,45 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.fault = read_text(in.getFault());
     out.discarding = in.getDiscarding();
     out.discarded_chunks = in.getDiscardedChunks();
+
+    out.ptyn_corrected = in.getPtynCorrected();
+
+    auto tmc = in.getTmc();
+    out.tmc.announced = tmc.getAnnounced();
+    out.tmc.aid = tmc.getAid();
+    out.tmc.group_type = tmc.getGroupType();
+    out.tmc.version_b = tmc.getVersionB();
+    out.tmc.oda_message = tmc.getOdaMessage();
+    out.tmc.identification = tmc.getIdentification();
+    out.tmc.identification_valid = tmc.getIdentificationValid();
+    out.tmc.groups = tmc.getGroups();
+    out.tmc.oda_groups = tmc.getOdaGroups();
+    out.tmc.incomplete = tmc.getIncomplete();
+    out.tmc.evicted = tmc.getEvicted();
+    auto messages = tmc.getMessages();
+    out.tmc.messages.reserve(messages.size());
+    for (auto row : messages) {
+        RdsTmcMessage entry;
+        entry.x = row.getX();
+        entry.y = row.getY();
+        entry.z = row.getZ();
+        entry.receptions = row.getReceptions();
+        entry.corrected_receptions = row.getCorrectedReceptions();
+        out.tmc.messages.push_back(entry);
+    }
+
+    auto ews = in.getEws();
+    out.ews.groups = ews.getGroups();
+    out.ews.group_type = ews.getGroupType();
+    out.ews.version_b = ews.getVersionB();
+    out.ews.block2_low = ews.getBlock2Low();
+    out.ews.block3 = ews.getBlock3();
+    out.ews.block3_valid = ews.getBlock3Valid();
+    out.ews.block4 = ews.getBlock4();
+    out.ews.block4_valid = ews.getBlock4Valid();
+    out.ews.corrected = ews.getCorrected();
+    out.ews_channel_identification = in.getEwsChannelIdentification();
+    out.ews_channel_identification_valid = in.getEwsChannelIdentificationValid();
     return out;
 }
 

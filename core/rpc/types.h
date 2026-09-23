@@ -885,6 +885,63 @@ struct RdsOda {
     std::uint16_t aid = 0;
 };
 
+// A count of the groups put to one use and the most recent of them, raw. The
+// standard defines nothing past the block 2 header for these payloads, so a
+// client shows the count and at most the bits, never decoded fields.
+struct RdsRawGroup {
+    // Zero means none has arrived and every field below is meaningless.
+    std::uint64_t groups = 0;
+
+    std::uint8_t group_type = 0;
+    bool version_b = false;
+    std::uint8_t block2_low = 0;  // b4..b0 of block 2
+
+    // Not payload in a version B group, which repeats the PI there.
+    std::uint16_t block3 = 0;
+    bool block3_valid = false;
+    std::uint16_t block4 = 0;
+    bool block4_valid = false;
+
+    // A block this payload depends on, block 2 included, was corrected.
+    bool corrected = false;
+};
+
+// One distinct 37-bit type 8A payload and how often it arrived.
+struct RdsTmcMessage {
+    std::uint8_t x = 0;   // block 2 b4..b0
+    std::uint16_t y = 0;  // block 3
+    std::uint16_t z = 0;  // block 4
+    std::uint32_t receptions = 0;
+    std::uint32_t corrected_receptions = 0;
+
+    // ISO 14819-1 Introduction 0.3: a group's data is used once a second
+    // identical group has verified it.
+    [[nodiscard]] bool confirmed() const { return receptions >= 2; }
+};
+
+// RDS-TMC, attributed and counted, NOT DECODED. ALERT-C's field positions
+// were not in hand, so there is no event or location code here and a client
+// must not derive one by guessing which bits are which. See the schema.
+struct RdsTmc {
+    bool announced = false;
+    std::uint16_t aid = 0;
+    std::uint8_t group_type = 0;
+    bool version_b = false;
+    std::uint16_t oda_message = 0;
+
+    std::uint16_t identification = 0;  // type 1A variant 1, raw
+    bool identification_valid = false;
+
+    std::uint64_t groups = 0;
+    std::uint64_t oda_groups = 0;
+    std::uint64_t incomplete = 0;
+    std::uint64_t evicted = 0;
+
+    // User messages, tuning information and encryption administration, not
+    // told apart. Show the confirmed ones.
+    std::vector<RdsTmcMessage> messages;
+};
+
 // One Enhanced Other Networks entry: what this station says about another.
 struct RdsEonEntry {
     std::uint16_t pi = 0;
@@ -1112,6 +1169,22 @@ struct RdsStation {
     // Climbing while discarding stays true is a fence that is not clearing,
     // which is a server defect rather than a quiet band.
     std::uint64_t discarded_chunks = 0;
+
+    // One bit per PTYN segment, set when a block the segment depends on was
+    // corrected. A set bit means those four characters may not be the
+    // station's.
+    std::uint8_t ptyn_corrected = 0;
+
+    RdsTmc tmc;
+
+    // Emergency Warning System, type 9A. ews.groups above zero is the fact
+    // to surface: this station has sent an emergency warning group, or a
+    // test of one. The payload is each country's own format.
+    RdsRawGroup ews;
+
+    // Type 1A variant 7, raw.
+    std::uint16_t ews_channel_identification = 0;
+    bool ews_channel_identification_valid = false;
 
     [[nodiscard]] bool decoding() const { return fault.empty(); }
 };

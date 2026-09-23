@@ -792,6 +792,155 @@ TEST_CASE("a synthetic station's PI, PS and RadioText come back over the wire",
     CHECK(again->health.groups_decoded == station->health.groups_decoded);
 }
 
+namespace {
+
+// Block 2 of any group, EN 50067 Figure 9: type, version, TP, PTY and the
+// five bits the group owns. Written out here for the reason type0_block2
+// gives.
+[[nodiscard]] std::uint16_t any_block2(std::uint8_t type, std::uint8_t low5) {
+    std::uint16_t word = static_cast<std::uint16_t>(static_cast<unsigned>(type) << 12);
+    word = static_cast<std::uint16_t>(word | 0x0400u);
+    word = static_cast<std::uint16_t>(word | ((kStationPty & 0x1Fu) << 5));
+    word = static_cast<std::uint16_t>(word | (low5 & 0x1Fu));
+    return word;
+}
+
+constexpr std::uint16_t kTmcAid = 0xCD46;  // RDS Forum ODA register, ALERT-C
+constexpr std::string_view kStationPtyn = "NEWS 24 ";
+
+// A station carrying the fields that only reach the wire through the TMC,
+// EWS and PTYN additions: PS so it has a name, a 3A announcement of TMC on
+// 8A, two distinct 8A payloads, a 9A emergency warning group, the two PTYN
+// segments and a type 1A variant 7 group. Once per cycle each, so a payload
+// seen in two cycles is confirmed.
+[[nodiscard]] std::vector<std::uint8_t> feature_station_bits(int cycles) {
+    std::vector<std::uint8_t> bits;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        for (std::uint8_t segment = 0; segment < 4; ++segment) {
+            push_group(bits, GroupWords{
+                                 kStationPi,
+                                 type0_block2(kStationPty, true, false, true, false, segment),
+                                 0xE0E0,
+                                 chars_to_word(kStationPs[segment * 2U],
+                                               kStationPs[segment * 2U + 1U]),
+                                 false,
+                             });
+        }
+        // Figure 18: the application group type code for 8A is 10000.
+        push_group(bits, GroupWords{kStationPi, any_block2(3, 8u << 1), 0x0C0D, kTmcAid, false});
+        push_group(bits, GroupWords{kStationPi, any_block2(8, 0x08), 0x1111, 0x2222, false});
+        push_group(bits, GroupWords{kStationPi, any_block2(8, 0x13), 0x3333, 0x4444, false});
+        push_group(bits, GroupWords{kStationPi, any_block2(9, 0x09), 0x9A9A, 0x9B9B, false});
+        for (std::uint8_t segment = 0; segment < 2; ++segment) {
+            const std::size_t at = static_cast<std::size_t>(segment) * 4U;
+            push_group(bits, GroupWords{kStationPi, any_block2(10, segment),
+                                        chars_to_word(kStationPtyn[at], kStationPtyn[at + 1U]),
+                                        chars_to_word(kStationPtyn[at + 2U],
+                                                      kStationPtyn[at + 3U]),
+                                        false});
+        }
+        // Figure 14 variant 7, twelve bits of EWS channel identification.
+        push_group(bits, GroupWords{kStationPi, any_block2(1, 0),
+                                    static_cast<std::uint16_t>((7u << 12) | 0x0321u), 0x0000,
+                                    false});
+    }
+    return bits;
+}
+
+}  // namespace
+
+TEST_CASE("a station's TMC, EWS and PTYN come back over the wire", "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    // Eleven groups a cycle; four cycles leave three after acquisition, so
+    // every payload is seen at least twice.
+    siggen::WfmSpec spec = station_spec(true);
+    spec.rds.bits = feature_station_bits(4);
+
+    StationFile file("features");
+    const auto written = file.write(spec, 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    bring_up(harness, rds_options(file.uri()));
+
+    auto vrx = harness.client().add_vrx(rds_receiver());
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    // Builds the decoder before the first sample, as the first case explains.
+    auto first = harness.client().rds_station(*vrx);
+    INFO(test::message_of(first));
+    REQUIRE(first.has_value());
+    CHECK(first->tmc.groups == 0);
+    CHECK(first->ews.groups == 0);
+    CHECK(first->tmc.messages.empty());
+
+    run_to_completion(harness, file.samples(), 120'000);
+
+    auto station = harness.client().rds_station(*vrx);
+    INFO(test::message_of(station));
+    REQUIRE(station.has_value());
+    INFO(std::format("groups {} good {} corrected {} dropped {}",
+                     station->health.groups_decoded, station->health.blocks_good,
+                     station->health.blocks_corrected, station->health.blocks_dropped));
+
+    REQUIRE(station->health.sync == rpc::RdsSync::Synced);
+    CHECK(station->health.blocks_dropped == 0);
+    CHECK(station->pi == kStationPi);
+    CHECK(text_of(station->ps, 8) == kStationPs);
+
+    // PTYN, with its new mark clear because nothing was corrected.
+    CHECK(station->ptyn_received == 0x03);
+    CHECK(text_of(station->ptyn, 8) == kStationPtyn);
+    CHECK(station->ptyn_corrected == 0);
+
+    // TMC: announced through 3A, and the two payloads confirmed and nothing
+    // else in the table.
+    //
+    // NOT EVERY 8A GROUP IS ATTRIBUTED THROUGH THE ANNOUNCEMENT, and that is
+    // the decoder being right. The decode starts wherever acquisition ends,
+    // so the first cycle's 8A groups can arrive before its first 3A has, and
+    // with no announcement current an 8A group is TMC by EN 50067 Table 3's
+    // default and counted there. The first run measured 8 attributed and 6
+    // through the announcement: one cycle's two before it.
+    CHECK(station->tmc.announced);
+    CHECK(station->tmc.aid == kTmcAid);
+    CHECK(station->tmc.group_type == 8);
+    CHECK_FALSE(station->tmc.version_b);
+    CHECK(station->tmc.oda_message == 0x0C0D);
+    CHECK(station->tmc.groups >= 4);
+    CHECK(station->tmc.oda_groups >= station->tmc.groups - 2);
+    CHECK(station->tmc.oda_groups >= 4);
+    CHECK(station->tmc.incomplete == 0);
+    CHECK(station->tmc.evicted == 0);
+    CHECK_FALSE(station->tmc.identification_valid);
+    REQUIRE(station->tmc.messages.size() == 2);
+    for (const rpc::RdsTmcMessage& message : station->tmc.messages) {
+        INFO(std::format("x {:02X} y {:04X} z {:04X} receptions {}", message.x, message.y,
+                         message.z, message.receptions));
+        CHECK(message.confirmed());
+        CHECK(message.corrected_receptions == 0);
+        const bool sent = (message.x == 0x08 && message.y == 0x1111 && message.z == 0x2222) ||
+                          (message.x == 0x13 && message.y == 0x3333 && message.z == 0x4444);
+        CHECK(sent);
+    }
+
+    // EWS: counted, raw, and the channel identification with it.
+    CHECK(station->ews.groups >= 2);
+    CHECK(station->ews.group_type == 9);
+    CHECK_FALSE(station->ews.version_b);
+    CHECK(station->ews.block2_low == 0x09);
+    CHECK(station->ews.block3_valid);
+    CHECK(station->ews.block3 == 0x9A9A);
+    CHECK(station->ews.block4_valid);
+    CHECK(station->ews.block4 == 0x9B9B);
+    CHECK_FALSE(station->ews.corrected);
+    CHECK(station->ews_channel_identification_valid);
+    CHECK(station->ews_channel_identification == 0x0321);
+}
+
 TEST_CASE("two receivers decode one station under two regions at once",
           "[gpu][rpc][rds]") {
     REVENANT_NEEDS_GPU();

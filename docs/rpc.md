@@ -583,6 +583,23 @@ such receiver". The detector still refuses on its own fault and should: a
 detector fault means the track list no longer describes anything, where this
 one leaves a struct that was true when it was written.
 
+**`tmc`, `ews` and `ptynCorrected` are counts and raw bits, and a client must
+draw them as that.** `ews.groups` above zero is the one to surface
+prominently: EN 50067 has 9A sent only in an emergency or a test of one, and
+the payload is each country's own format, so show that it happened and at
+most the bits in hexadecimal. `tmc` says whether a service is on air, whether
+it came in through a 3A announcement, and every distinct 37-bit payload with
+its reception count; show the ones with two or more receptions, which is ISO
+14819-1's own confirmation rule, and count the rest. There is no event or
+location code in it, because the field positions were not in the part of ISO
+14819-1 that was read, and a client that picks 16 bits out and calls them a
+location is inventing a layout. `ptynCorrected` marks programme type name
+segments a correction touched; the decoder keeps the same mark for PS and
+RadioText, and neither of those two is on the wire yet. Transparent data,
+in-house and paging groups are counted in the
+decoder and deliberately not on the wire: none has anything an operator reads,
+and paging is somebody else's pager.
+
 **What it costs**, measured rather than asserted: 12.07 ms of one core per
 second of composite at 171000 S/s, which is 0.145 ms per chunk against the
 detector's 0.201 ms per frame, per decoding receiver rather than per engine.
