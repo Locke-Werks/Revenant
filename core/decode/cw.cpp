@@ -268,7 +268,11 @@ void MorseTiming::estimate_unit() {
     if (recent_.size() < kRunsToLock) {
         return;
     }
-    std::vector<double> sorted(recent_.begin(), recent_.end());
+    std::vector<double> sorted;
+    sorted.reserve(recent_.size());
+    for (const Run& run : recent_) {
+        sorted.push_back(run.seconds);
+    }
     std::sort(sorted.begin(), sorted.end());
     const double fifth = sorted[sorted.size() / 5];
 
@@ -294,6 +298,26 @@ void MorseTiming::estimate_unit() {
     // taken for units whatever length it is.
     if (!locked_ && !longer) {
         return;
+    }
+
+    // After it, a new unit has to be confirmed by a dash: a mark at least
+    // twice it, which clause 2.1 says a dash is at three. The twentieth
+    // percentile is a unit only while a fifth of the recent runs are one unit
+    // long, and T, M and O between them can leave fewer: "TMT OT" keys three
+    // one-unit runs in fifteen, the percentile lands on a dash, the cluster
+    // holds dashes and letter spaces, and the first version took the unit for
+    // somewhere between one and three and printed dashes after it as dots.
+    // No mark in that window is twice such a unit, where a real change of
+    // speed brings its own dashes with it. A window with no dash at all keeps
+    // the unit it had, which costs nothing: its dots are read against the
+    // unit that was right.
+    if (locked_) {
+        const bool confirmed = std::ranges::any_of(recent_, [&](const Run& run) {
+            return run.key_down && run.seconds >= kDotDashSplitUnits * mean;
+        });
+        if (!confirmed) {
+            return;
+        }
     }
     const double shortest = unit_for_wpm(config_.max_wpm);
     const double longest = unit_for_wpm(config_.min_wpm);
@@ -384,11 +408,15 @@ void MorseTiming::apply_space(double seconds, SampleIndex start,
     }
 }
 
-void MorseTiming::mark(double seconds, SampleIndex start, std::vector<CwCharacter>& out) {
-    recent_.push_back(seconds);
+void MorseTiming::remember_run(bool key_down, double seconds) {
+    recent_.push_back(Run{key_down, seconds, 0});
     if (recent_.size() > kRecentRuns) {
         recent_.pop_front();
     }
+}
+
+void MorseTiming::mark(double seconds, SampleIndex start, std::vector<CwCharacter>& out) {
+    remember_run(true, seconds);
     estimate_unit();
     if (!locked_) {
         held_.push_back(Run{true, seconds, start});
@@ -414,10 +442,7 @@ void MorseTiming::space(double seconds, SampleIndex start, std::vector<CwCharact
         // Silence before the first mark is not a space between anything.
         return;
     }
-    recent_.push_back(seconds);
-    if (recent_.size() > kRecentRuns) {
-        recent_.pop_front();
-    }
+    remember_run(false, seconds);
     if (!locked_) {
         held_.push_back(Run{false, seconds, start});
         return;

@@ -282,6 +282,33 @@ TEST_CASE("the timing decoder follows a hand sender and a change of speed",
     CHECK(std::abs(changing.wpm() - 35.0) < 1.0);
 }
 
+TEST_CASE("the timing decoder reads a run of dashes as dashes", "[decode][cw]") {
+    // T, M and O carry no one-unit run between them but the element spaces
+    // inside M and O, so a few of them together leave the recent runs almost
+    // all three units long: dashes and letter spaces. The unit estimate took
+    // its one-unit cluster as everything within twice the twentieth
+    // percentile, which in that window is a dash, so the cluster held dashes
+    // and the unit came out too long; dashes after it were shorter than two
+    // of those and printed as dots, "PARIS TTTTTTTTTT PARIS" as
+    // "PARIS TTTTTTH HARIS". Clause 2.1 fixes a dash at three dots whatever
+    // the window holds.
+    for (const std::string text : {"PARIS TTTTTTTTTT PARIS", "PARIS TMT OT MOTTO TOM PARIS",
+                                   "CQ 0 00 000 TOM 0000 DE G3PLX"}) {
+        for (const double wpm : {12.0, 20.0, 35.0}) {
+            siggen::CwModConfig mod;
+            mod.wpm = wpm;
+            auto runs = siggen::cw_key_runs(mod, text);
+            REQUIRE(runs.has_value());
+            decode::MorseTiming timing;
+            const std::string got = decode_runs(*runs, timing);
+            INFO(wpm << " WPM sent '" << text << "' decoded '" << got << "', measured "
+                     << timing.wpm());
+            CHECK(got == text);
+            CHECK(std::abs(timing.wpm() - wpm) < 0.01 * wpm);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The audio decoder against the keyer
 // ---------------------------------------------------------------------------

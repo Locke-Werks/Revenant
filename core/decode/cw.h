@@ -232,6 +232,7 @@ class MorseTiming {
     };
 
     void estimate_unit();
+    void remember_run(bool key_down, double seconds);
     void apply_mark(double seconds, SampleIndex start, std::vector<CwCharacter>& out);
     void apply_space(double seconds, SampleIndex start, std::vector<CwCharacter>& out);
     void end_character(std::vector<CwCharacter>& out);
@@ -244,7 +245,7 @@ class MorseTiming {
 
     // Recent runs of both kinds, which the unit is estimated from, and the
     // runs held back until it could be.
-    std::deque<double> recent_;
+    std::deque<Run> recent_;
     std::vector<Run> held_;
 
     // Spaces of two units or more, for the letter and word clusters.
