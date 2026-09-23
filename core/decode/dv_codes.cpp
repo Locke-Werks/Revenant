@@ -123,6 +123,350 @@ Golay18Decode p25_golay18_decode(std::uint32_t word) {
 }
 
 // ---------------------------------------------------------------------------
+// P25 Phase 1: the shortened Hamming code
+// ---------------------------------------------------------------------------
+
+std::uint16_t p25_hamming10_encode(std::uint8_t hexbit) {
+    std::uint16_t word = 0;
+    for (unsigned row = 0; row < 6U; ++row) {
+        // Row 1 of Table 5-4 is the most significant information bit, the
+        // same convention as the Golay table beside it.
+        if ((hexbit >> (5U - row)) & 1U) {
+            word ^= kP25Hamming10Rows[row];
+        }
+    }
+    return static_cast<std::uint16_t>(word & 0x3FFU);
+}
+
+Hamming10Decode p25_hamming10_decode(std::uint16_t word) {
+    const std::uint32_t received = word & 0x3FFU;
+    Hamming10Decode out;
+    std::uint32_t best = std::numeric_limits<std::uint32_t>::max();
+    for (std::uint32_t candidate = 0; candidate < 64U; ++candidate) {
+        const auto hexbit = static_cast<std::uint8_t>(candidate);
+        const auto distance =
+            static_cast<std::uint32_t>(std::popcount(received ^ p25_hamming10_encode(hexbit)));
+        if (distance < best) {
+            best = distance;
+            out.information = hexbit;
+        }
+    }
+    out.distance = best;
+    out.detected = best >= 2;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// P25 Phase 1: the Reed-Solomon codes over GF(2^6)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct Gf64Tables {
+    std::array<std::uint8_t, 63> exp{};
+    std::array<int, 64> log{};
+};
+
+// Clause 5.9: "reducing the powers of alpha modulo the primitive
+// characteristic polynomial". Each step multiplies by alpha, which is a shift,
+// and reduces with alpha^6 = alpha + 1 when the shift reaches bit 6.
+constexpr Gf64Tables make_gf64_tables() {
+    Gf64Tables tables;
+    tables.log.fill(-1);
+    unsigned value = 1;
+    for (unsigned e = 0; e < 63U; ++e) {
+        tables.exp[e] = static_cast<std::uint8_t>(value);
+        tables.log[value] = static_cast<int>(e);
+        value <<= 1U;
+        if (value & 0x40U) {
+            value ^= kP25Gf64Polynomial;
+        }
+    }
+    return tables;
+}
+
+constexpr Gf64Tables kGf64 = make_gf64_tables();
+
+std::uint8_t gf64_inverse(std::uint8_t value) {
+    // Callers never ask for the inverse of zero; the decoder checks first.
+    return kGf64.exp[static_cast<std::size_t>((63 - kGf64.log[value]) % 63)];
+}
+
+// A polynomial over GF(2^6) with index = degree.
+using Gf64Poly = std::vector<std::uint8_t>;
+
+std::uint8_t poly_eval(const Gf64Poly& poly, std::uint8_t x) {
+    std::uint8_t result = 0;
+    for (std::size_t i = poly.size(); i-- > 0;) {
+        result = static_cast<std::uint8_t>(p25_gf64_mul(result, x) ^ poly[i]);
+    }
+    return result;
+}
+
+Gf64Poly poly_mul(const Gf64Poly& a, const Gf64Poly& b) {
+    if (a.empty() || b.empty()) {
+        return {};
+    }
+    Gf64Poly out(a.size() + b.size() - 1, 0);
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        for (std::size_t j = 0; j < b.size(); ++j) {
+            out[i + j] ^= p25_gf64_mul(a[i], b[j]);
+        }
+    }
+    return out;
+}
+
+Status check_rs_code(const P25ReedSolomon& code) {
+    if (code.k == 0 || code.n <= code.k || code.n > 63) {
+        return fail(std::format(
+            "a P25 Reed-Solomon code over GF(2^6) needs 0 < k < n <= 63 (TIA-102.BAAA-A "
+            "clause 5.9 shortens every one of them from length 63); got n = {}, k = {}",
+            code.n, code.k));
+    }
+    return {};
+}
+
+}  // namespace
+
+std::uint8_t p25_gf64_exp(unsigned e) { return kGf64.exp[e % 63U]; }
+
+int p25_gf64_log(std::uint8_t value) { return kGf64.log[value & 0x3FU]; }
+
+std::uint8_t p25_gf64_mul(std::uint8_t a, std::uint8_t b) {
+    if (a == 0 || b == 0) {
+        return 0;
+    }
+    const int sum = kGf64.log[a & 0x3FU] + kGf64.log[b & 0x3FU];
+    return kGf64.exp[static_cast<std::size_t>(sum % 63)];
+}
+
+std::vector<std::uint8_t> p25_rs_generator(const P25ReedSolomon& code) {
+    // Clause 5.9: g(x) = (x + alpha)(x + alpha^2) ... (x + alpha^R).
+    const std::size_t parity = code.n - code.k;
+    Gf64Poly g{1};
+    for (std::size_t j = 1; j <= parity; ++j) {
+        g = poly_mul(g, Gf64Poly{p25_gf64_exp(static_cast<unsigned>(j)), 1});
+    }
+    return g;
+}
+
+Expected<std::vector<std::uint8_t>> p25_rs_encode(const P25ReedSolomon& code,
+                                                  std::span<const std::uint8_t> information) {
+    if (auto status = check_rs_code(code); !status) {
+        return std::unexpected(status.error());
+    }
+    if (information.size() != code.k) {
+        return fail(std::format("the ({},{}) Reed-Solomon code takes {} information hexbits; got {}",
+                                code.n, code.k, code.k, information.size()));
+    }
+    for (const std::uint8_t hexbit : information) {
+        if (hexbit > 0x3FU) {
+            return fail(std::format("a hexbit is six bits (TIA-102.BAAA-A clause 5.1.1); got {:#x}",
+                                    hexbit));
+        }
+    }
+
+    // Systematic encoding: the parity is m(x) * x^R mod g(x). The long
+    // division runs highest degree first, which is transmission order, so
+    // the working register is the code word itself.
+    const std::size_t parity = code.n - code.k;
+    const Gf64Poly g = p25_rs_generator(code);
+    std::vector<std::uint8_t> word(information.begin(), information.end());
+    word.resize(code.n, 0);
+    for (std::size_t i = 0; i < code.k; ++i) {
+        const std::uint8_t coefficient = word[i];
+        if (coefficient == 0) {
+            continue;
+        }
+        // g's coefficient of degree R - j lines up with word[i + j].
+        for (std::size_t j = 0; j <= parity; ++j) {
+            word[i + j] ^= p25_gf64_mul(coefficient, g[parity - j]);
+        }
+    }
+    std::copy(information.begin(), information.end(), word.begin());
+    return word;
+}
+
+Expected<P25RsDecode> p25_rs_decode(const P25ReedSolomon& code,
+                                    std::span<const std::uint8_t> received,
+                                    std::span<const std::size_t> erasures) {
+    if (auto status = check_rs_code(code); !status) {
+        return std::unexpected(status.error());
+    }
+    if (received.size() != code.n) {
+        return fail(std::format("the ({},{}) Reed-Solomon code word is {} hexbits; got {}",
+                                code.n, code.k, code.n, received.size()));
+    }
+    const std::size_t n = code.n;
+    const std::size_t parity = code.n - code.k;
+    for (const std::size_t position : erasures) {
+        if (position >= n) {
+            return fail(std::format("erasure position {} is outside a {}-hexbit code word",
+                                    position, n));
+        }
+    }
+
+    P25RsDecode out;
+    out.codeword.assign(received.begin(), received.end());
+    for (std::uint8_t& hexbit : out.codeword) {
+        hexbit &= 0x3FU;
+    }
+    out.erasures = static_cast<std::uint32_t>(erasures.size());
+
+    // Transmission index t carries the coefficient of degree n - 1 - t.
+    Gf64Poly r(n, 0);
+    for (std::size_t t = 0; t < n; ++t) {
+        r[n - 1 - t] = out.codeword[t];
+    }
+
+    // S(x) = S_1 + S_2 x + ... + S_R x^(R-1), with S_j = r(alpha^j).
+    Gf64Poly syndromes(parity, 0);
+    bool clean = true;
+    for (std::size_t j = 0; j < parity; ++j) {
+        syndromes[j] = poly_eval(r, p25_gf64_exp(static_cast<unsigned>(j + 1)));
+        clean = clean && syndromes[j] == 0;
+    }
+    if (clean) {
+        out.decoded = true;
+        return out;
+    }
+    if (erasures.size() > parity) {
+        return out;
+    }
+
+    // Erasure locator, the product of (1 + X x) over the erased positions,
+    // where X = alpha^degree.
+    Gf64Poly locator{1};
+    for (const std::size_t position : erasures) {
+        const std::uint8_t x = p25_gf64_exp(static_cast<unsigned>(n - 1 - position));
+        locator = poly_mul(locator, Gf64Poly{1, x});
+    }
+
+    // Berlekamp-Massey, started from the erasure locator with its length at
+    // the number of erasures, so the polynomial it ends on locates both.
+    const std::size_t f = erasures.size();
+    Gf64Poly connection(parity + 1, 0);
+    Gf64Poly previous(parity + 1, 0);
+    std::copy(locator.begin(), locator.end(), connection.begin());
+    std::copy(locator.begin(), locator.end(), previous.begin());
+    std::size_t length = f;
+    std::size_t shift = 1;
+    std::uint8_t previous_discrepancy = 1;
+    for (std::size_t step = f; step < parity; ++step) {
+        std::uint8_t discrepancy = syndromes[step];
+        for (std::size_t i = 1; i <= length; ++i) {
+            discrepancy ^= p25_gf64_mul(connection[i], syndromes[step - i]);
+        }
+        if (discrepancy == 0) {
+            ++shift;
+            continue;
+        }
+        const std::uint8_t scale = p25_gf64_mul(discrepancy, gf64_inverse(previous_discrepancy));
+        const Gf64Poly saved = connection;
+        for (std::size_t i = 0; i + shift <= parity; ++i) {
+            connection[i + shift] ^= p25_gf64_mul(scale, previous[i]);
+        }
+        if (2 * length <= step + f) {
+            length = step + 1 + f - length;
+            previous = saved;
+            previous_discrepancy = discrepancy;
+            shift = 1;
+        } else {
+            ++shift;
+        }
+    }
+
+    std::size_t degree = 0;
+    for (std::size_t i = 0; i <= parity; ++i) {
+        if (connection[i] != 0) {
+            degree = i;
+        }
+    }
+    if (degree != length || length < f || 2 * (length - f) + f > parity) {
+        return out;
+    }
+    connection.resize(length + 1);
+
+    // Chien search over the n positions the shortened code has.
+    std::vector<std::size_t> located;
+    for (std::size_t d = 0; d < n; ++d) {
+        const std::uint8_t x_inverse = p25_gf64_exp(static_cast<unsigned>(63 - d % 63));
+        if (poly_eval(connection, x_inverse) == 0) {
+            located.push_back(d);
+        }
+    }
+    if (located.size() != length) {
+        return out;
+    }
+
+    // Forney, with the first consecutive root at alpha^1, which makes the
+    // X^(1-b) factor one. Characteristic two makes the formal derivative the
+    // odd-degree terms moved down one place, and every sign a plus.
+    Gf64Poly evaluator = poly_mul(syndromes, connection);
+    evaluator.resize(parity);
+    Gf64Poly derivative(connection.size() > 1 ? connection.size() - 1 : 1, 0);
+    for (std::size_t i = 1; i < connection.size(); i += 2) {
+        derivative[i - 1] = connection[i];
+    }
+    Gf64Poly corrected = r;
+    for (const std::size_t d : located) {
+        const std::uint8_t x_inverse = p25_gf64_exp(static_cast<unsigned>(63 - d % 63));
+        const std::uint8_t denominator = poly_eval(derivative, x_inverse);
+        if (denominator == 0) {
+            return out;
+        }
+        corrected[d] ^= p25_gf64_mul(poly_eval(evaluator, x_inverse), gf64_inverse(denominator));
+    }
+
+    for (std::size_t j = 0; j < parity; ++j) {
+        if (poly_eval(corrected, p25_gf64_exp(static_cast<unsigned>(j + 1))) != 0) {
+            return out;
+        }
+    }
+
+    std::uint32_t changed = 0;
+    for (std::size_t t = 0; t < n; ++t) {
+        const std::uint8_t value = corrected[n - 1 - t];
+        changed += (value != out.codeword[t]) ? 1U : 0U;
+        out.codeword[t] = value;
+    }
+    out.decoded = true;
+    out.corrected = changed;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// P25 Phase 1: the low speed data code
+// ---------------------------------------------------------------------------
+
+std::uint16_t p25_lsd_encode(std::uint8_t octet) {
+    // Clause 5.6: systematic, so the parity is octet(x) * x^8 mod g(x).
+    std::uint32_t reg = static_cast<std::uint32_t>(octet) << 8U;
+    for (int bit = 15; bit >= 8; --bit) {
+        if ((reg >> static_cast<unsigned>(bit)) & 1U) {
+            reg ^= static_cast<std::uint32_t>(kP25LsdGenerator) << static_cast<unsigned>(bit - 8);
+        }
+    }
+    return static_cast<std::uint16_t>((static_cast<std::uint32_t>(octet) << 8U) | (reg & 0xFFU));
+}
+
+LsdDecode p25_lsd_decode(std::uint16_t word) {
+    LsdDecode out;
+    std::uint32_t best = std::numeric_limits<std::uint32_t>::max();
+    for (std::uint32_t candidate = 0; candidate < 256U; ++candidate) {
+        const auto octet = static_cast<std::uint8_t>(candidate);
+        const auto distance = static_cast<std::uint32_t>(
+            std::popcount(static_cast<std::uint32_t>(word ^ p25_lsd_encode(octet)) & 0xFFFFU));
+        if (distance < best) {
+            best = distance;
+            out.octet = octet;
+        }
+    }
+    out.distance = best;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Convolutional codes
 // ---------------------------------------------------------------------------
 
