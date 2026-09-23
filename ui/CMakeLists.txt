@@ -175,11 +175,33 @@ qt_add_executable(revenant_ui
     ${revenant_rpc_client_sources}
 )
 
+# The palette and the type sizes, as one object every section file reads. A
+# singleton rather than a property on the window, because a section in its own
+# file cannot see the window's id.
+set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
 qt_add_qml_module(revenant_ui
     URI Revenant
     VERSION 1.0
     QML_FILES
         qml/Main.qml
+        qml/Theme.qml
+        qml/Plate.qml
+        qml/NoticeRow.qml
+        qml/TuneSelection.qml
+        qml/StatusRow.qml
+        qml/SourcePicker.qml
+        qml/TuningPanel.qml
+        qml/ReceiverNotices.qml
+        qml/BookmarkRow.qml
+        qml/EngineNotices.qml
+        qml/DetectionControls.qml
+        qml/SpanView.qml
+        qml/FrequencyAxis.qml
+        qml/VfoPane.qml
+        qml/RdsPane.qml
+        qml/AudioPane.qml
+        qml/ClickReadout.qml
 )
 
 # qmlcachegen's output, which compiles each QML file to C++ and is ours no more
