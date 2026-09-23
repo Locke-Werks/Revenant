@@ -154,6 +154,7 @@
 #include "core/rpc/client.h"
 #include "core/rpc/types.h"
 #include "models/aft.h"
+#include "models/auto_filter.h"
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/receiver_gone.h"
@@ -998,6 +999,20 @@ class EngineLink : public QObject {
     Q_PROPERTY(double aftErrorHz READ aftErrorHz NOTIFY aftChanged)
     Q_PROPERTY(bool aftHasError READ aftHasError NOTIFY aftChanged)
 
+    // Fitting the pane's receiver's filter to the signal it was tuned onto,
+    // once per click-to-tune and once when switched on. Off by default and
+    // not remembered across a restart, on the same terms as AFT. See
+    // models/auto_filter.h for the rules and models/auto_filter_link.cpp for
+    // when it runs.
+    Q_PROPERTY(bool autoFilterEnabled READ autoFilterEnabled WRITE setAutoFilterEnabled
+                   NOTIFY autoFilterChanged)
+
+    // Whether the receiver's mode has a rule. False on raw only.
+    Q_PROPERTY(bool autoFilterOffered READ autoFilterOffered NOTIFY receiverChanged)
+
+    // What the last fit did, or that one is measuring, as a word or two.
+    Q_PROPERTY(QString autoFilterState READ autoFilterState NOTIFY autoFilterChanged)
+
     // A width change is drawn and has not been sent, because sending it
     // mid-gesture would break the audio once per pixel. It goes out on
     // release. The readout says so, because a filter that is drawn where
@@ -1749,6 +1764,10 @@ public:
     [[nodiscard]] QString aftState() const;
     [[nodiscard]] double aftErrorHz() const { return aft_step_.error_hz; }
     [[nodiscard]] bool aftHasError() const { return aft_step_.have_error; }
+    [[nodiscard]] bool autoFilterEnabled() const { return auto_filter_enabled_; }
+    void setAutoFilterEnabled(bool on);
+    [[nodiscard]] bool autoFilterOffered() const;
+    [[nodiscard]] QString autoFilterState() const;
 
     // Puts the detail pane on a receiver at this absolute frequency in this
     // mode, adding one if there is none and retuning the one there is.
@@ -2126,6 +2145,13 @@ signals:
 
     // Any of the aft properties changed.
     void aftChanged();
+
+    // Any of the auto filter properties changed.
+    void autoFilterChanged();
+
+    // The auto filter has just moved the edges, from these. The pane eases
+    // its rules from here to the new edges, so the fit is seen happen.
+    void autoFilterFitted(int from_low, int from_high);
 
     // The bookmark list changed: one was saved, removed or renamed. Also
     // emitted when the pane moves to another receiver, because
@@ -2566,6 +2592,19 @@ private:
 
     // The operator touched the receiver: the loop holds, then reacquires.
     void aft_yield();
+
+    // The auto filter, run once per passband frame on the Qt thread while a
+    // fit is due; see models/auto_filter_link.cpp. auto_filter_due_ is set by
+    // a click-to-tune and by switching it on, and cleared by the fit, by a
+    // drag, and by any tuning by hand.
+    bool auto_filter_enabled_ = false;
+    bool auto_filter_due_ = false;
+    AutoFilterAverage auto_filter_average_;
+    AutoFilterFit auto_filter_last_{};
+    std::uint64_t auto_filter_vrx_ = 0;
+    void run_auto_filter();
+    void arm_auto_filter();
+    void cancel_auto_filter(AutoFilterOutcome why);
 
     // The timer came due with no wheel behind it: asks whether the accumulator
     // can be spent now.

@@ -115,6 +115,13 @@ inline constexpr int kRescaleMs = 150;
 // differently while armed; the pane is already on the live axis.
 inline constexpr int kRescaleArmMs = 2'000;
 
+// How the auto filter's fit is shown: the rules move from the old edges to the
+// new over kFitEaseMs, which is inside the 200 ms a movement may take before
+// it reads as the display lagging, and then stay in the active colour until
+// kFitShowMs so the eye has somewhere to land after the motion stops.
+inline constexpr int kFitEaseMs = 150;
+inline constexpr int kFitShowMs = 700;
+
 // What a press landed on.
 enum class PassbandGrab : std::uint8_t {
     None,
@@ -205,6 +212,8 @@ private slots:
     void takeFrame();
     void takeStatus();
     void onConnectionChanged();
+    void takeAutoFilterFit(int from_low, int from_high);
+    void stepFit();
 
 private:
     // Where the pane's axis currently is, in hertz from the receiver's
@@ -296,6 +305,20 @@ private:
 
     // Which edge the keyboard moves. Both means the passband pans.
     PassbandGrab selection_ = PassbandGrab::Band;
+
+    // The auto filter's fit being shown: where the edges were, and how long
+    // ago they moved. Drawn from, not stored as, the request, which is
+    // already the fitted pair.
+    bool showing_fit_ = false;
+    double fit_from_low_ = 0.0;
+    double fit_from_high_ = 0.0;
+    QElapsedTimer fit_clock_;
+    QTimer fit_tick_;
+
+    // The requested edges as drawn this frame, eased while a fit is shown.
+    [[nodiscard]] double drawnLow() const;
+    [[nodiscard]] double drawnHigh() const;
+    [[nodiscard]] double fitEase() const;
 };
 
 }  // namespace revenant::ui

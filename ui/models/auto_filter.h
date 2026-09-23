@@ -263,17 +263,18 @@ struct AutoFilterInput {
 };
 
 enum class AutoFilterOutcome {
+    Idle,       // on, and nothing has asked for a fit yet
     Fitted,     // new edges, to be applied
     Unchanged,  // the fit is the filter already there
     Waiting,    // the engine has not said the edge limit or the edges yet
     NoRule,     // raw: nothing to fit
     NoSignal,   // nothing near the receiver is occupied
     Ambiguous,  // sideband: neither side leads
-    Dragging,   // the operator is dragging; left alone
+    Dragging,   // the operator is dragging, or touched the filter; left alone
 };
 
 struct AutoFilterFit {
-    AutoFilterOutcome outcome = AutoFilterOutcome::NoSignal;
+    AutoFilterOutcome outcome = AutoFilterOutcome::Idle;
     int low_hz = 0;
     int high_hz = 0;
 };
@@ -590,6 +591,8 @@ private:
         return std::string(text);
     };
     switch (last.outcome) {
+    case AutoFilterOutcome::Idle:
+        return "fits on the next tune";
     case AutoFilterOutcome::Fitted:
     case AutoFilterOutcome::Unchanged: {
         const std::string what = last.outcome == AutoFilterOutcome::Fitted ? "fitted " : "fits ";
@@ -608,7 +611,7 @@ private:
     case AutoFilterOutcome::Ambiguous:
         return "no clear sideband";
     case AutoFilterOutcome::Dragging:
-        return "left to your drag";
+        return "left to you";
     }
     return "auto filter on";
 }

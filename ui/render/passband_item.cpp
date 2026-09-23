@@ -27,6 +27,11 @@ namespace {
 // edges against: a fill dark enough to read on its own would hide the edge of
 // the signal it is there to be lined up with.
 const QColor kBandFill{96, 176, 255, 42};
+
+// The fill while the auto filter's fit is being shown: a little stronger, for
+// the few hundred milliseconds kFitShowMs allows, so the new band reads as
+// the thing that just changed.
+const QColor kFitFill{96, 176, 255, 72};
 const QColor kEdgeRule{128, 196, 255, 220};
 const QColor kEdgeRuleActive{184, 226, 255, 255};
 
@@ -141,6 +146,9 @@ PassbandItem::PassbandItem(QQuickItem* parent) : QQuickItem(parent)
 
     rescale_tick_.setInterval(16);
     connect(&rescale_tick_, &QTimer::timeout, this, &PassbandItem::stepRescale);
+
+    fit_tick_.setInterval(16);
+    connect(&fit_tick_, &QTimer::timeout, this, &PassbandItem::stepFit);
 }
 
 void PassbandItem::setLink(EngineLink* link)
@@ -160,6 +168,7 @@ void PassbandItem::setLink(EngineLink* link)
         connect(link_, &EngineLink::receiverChanged, this, &PassbandItem::takeStatus);
         connect(link_, &EngineLink::connectionChanged, this,
                 &PassbandItem::onConnectionChanged);
+        connect(link_, &EngineLink::autoFilterFitted, this, &PassbandItem::takeAutoFilterFit);
     }
     have_frame_ = false;
     columns_.clear();
@@ -279,13 +288,14 @@ void PassbandItem::rebuildQuads()
     }
 
     const double h = height();
-    const double low_px = pixelAtOffset(link_->receiverPassbandLow());
-    const double high_px = pixelAtOffset(link_->receiverPassbandHigh());
+    const double low_px = pixelAtOffset(drawnLow());
+    const double high_px = pixelAtOffset(drawnHigh());
 
     const double left = std::max(0.0, std::min(low_px, high_px));
     const double right = std::min(width(), std::max(low_px, high_px));
     if (right > left) {
-        fill_quads_.push_back(OverlayQuad{QRectF(left, 0.0, right - left, h), kBandFill});
+        fill_quads_.push_back(OverlayQuad{QRectF(left, 0.0, right - left, h),
+                                          showing_fit_ ? kFitFill : kBandFill});
     }
 
     const auto rule = [&](double x, double thickness, const QColor& colour) {
@@ -314,8 +324,8 @@ void PassbandItem::rebuildQuads()
         if (at_limit_ && (grab_ == which || grab_ == PassbandGrab::Band)) {
             return kLimitRule;
         }
-        if (grab_ == which || (grab_ == PassbandGrab::None &&
-                               (hovered_ == which || selection_ == which))) {
+        if (showing_fit_ || grab_ == which ||
+            (grab_ == PassbandGrab::None && (hovered_ == which || selection_ == which))) {
             return kEdgeRuleActive;
         }
         return kEdgeRule;
@@ -548,6 +558,11 @@ void PassbandItem::mousePressEvent(QMouseEvent* event)
         return;
     }
 
+    // A fit still being shown ends here: the rules are the operator's now,
+    // and the grab below has to find them where the request has them.
+    showing_fit_ = false;
+    fit_tick_.stop();
+
     grab_ = grab;
     selection_ = grab;
     press_x_ = x;
@@ -738,6 +753,65 @@ void PassbandItem::stepRescale()
     if (rescale_clock_.elapsed() >= kRescaleMs) {
         rescaling_ = false;
         rescale_tick_.stop();
+    }
+    rebuildQuads();
+    update();
+}
+
+// ---------------------------------------------------------------------------
+// The auto filter's fit
+// ---------------------------------------------------------------------------
+
+double PassbandItem::fitEase() const
+{
+    // The same cubic ease-out as the rescale, for the same reason: the start
+    // of the movement is the part the eye follows.
+    const double t = std::clamp(static_cast<double>(fit_clock_.elapsed()) /
+                                    static_cast<double>(kFitEaseMs),
+                                0.0, 1.0);
+    return 1.0 - std::pow(1.0 - t, 3.0);
+}
+
+double PassbandItem::drawnLow() const
+{
+    const double to = link_->receiverPassbandLow();
+    return showing_fit_ ? fit_from_low_ + (to - fit_from_low_) * fitEase() : to;
+}
+
+double PassbandItem::drawnHigh() const
+{
+    const double to = link_->receiverPassbandHigh();
+    return showing_fit_ ? fit_from_high_ + (to - fit_from_high_) * fitEase() : to;
+}
+
+void PassbandItem::takeAutoFilterFit(int from_low, int from_high)
+{
+    if (grab_ != PassbandGrab::None) {
+        // The link never fits during a drag, and an ease drawn under the
+        // pointer would move the handle being held.
+        return;
+    }
+    fit_from_low_ = from_low;
+    fit_from_high_ = from_high;
+    showing_fit_ = true;
+    fit_clock_.start();
+    fit_tick_.start();
+
+    // A fit can cross a rung, and then the span moves when the engine's
+    // answer lands. The same ease a drag's release gets, from the axis the
+    // pane has now.
+    frozen_ = drawnAxis();
+    armRescale();
+
+    rebuildQuads();
+    update();
+}
+
+void PassbandItem::stepFit()
+{
+    if (!showing_fit_ || fit_clock_.elapsed() >= kFitShowMs) {
+        showing_fit_ = false;
+        fit_tick_.stop();
     }
     rebuildQuads();
     update();

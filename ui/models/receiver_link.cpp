@@ -256,6 +256,9 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
     }
 
     tune_receiver(absolute_hz, chosen, measured, named);
+
+    // A click on a detection is the one tune the auto filter answers.
+    arm_auto_filter();
 }
 
 // A receiver placed by hand has no measured signal behind it, so the
@@ -264,8 +267,10 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
 // against a band it was never measured in.
 void EngineLink::tuneReceiver(double absolute_hz, const QString& mode)
 {
-    // Tuning by hand: AFT holds, then starts again from here.
+    // Tuning by hand: AFT holds, then starts again from here, and a fit
+    // still measuring is for a signal the operator has moved off.
     aft_yield();
+    cancel_auto_filter(AutoFilterOutcome::Idle);
 
     // A mode named here is the operator's. This entry point is a frequency
     // and a mode stated by hand with no measurement behind either, so there
@@ -388,6 +393,7 @@ void EngineLink::takeReceiverScroll(double angle_delta_eighths)
     // The wheel is tuning by hand, and the flush timer that finishes a
     // gesture arrives here too.
     aft_yield();
+    cancel_auto_filter(AutoFilterOutcome::Idle);
 
     if (receiver_id_ == 0) {
         receiver_scroll_ = ReceiverScrollState{};
@@ -428,6 +434,9 @@ void EngineLink::setReceiverDemod(const QString& mode)
         emit receiverFaultChanged();
         return;
     }
+
+    // The auto filter's chip names the mode.
+    emit autoFilterChanged();
 
     // THE OPERATOR HAS NAMED A MODE ON THIS RECEIVER, which is a fact about
     // the receiver rather than about this call, so it is recorded above the
@@ -472,8 +481,10 @@ void EngineLink::setReceiverDemod(const QString& mode)
 
 void EngineLink::setReceiverPassband(int low, int high)
 {
-    // Tuning by hand: AFT holds, then starts again from here.
+    // Tuning by hand: AFT holds, then starts again from here. The operator's
+    // hand on the filter also wins over a fit still measuring.
     aft_yield();
+    cancel_auto_filter(AutoFilterOutcome::Dragging);
 
     const auto [fitted_low, fitted_high] = fit_edges(low, high);
     if (fitted_low == wanted_.passband_low && fitted_high == wanted_.passband_high) {
@@ -514,8 +525,10 @@ void EngineLink::setReceiverPassband(int low, int high)
 
 void EngineLink::beginReceiverDrag()
 {
-    // Tuning by hand: AFT holds, then starts again from here.
+    // Tuning by hand: AFT holds, then starts again from here, and the auto
+    // filter never fights a drag.
     aft_yield();
+    cancel_auto_filter(AutoFilterOutcome::Dragging);
 
     dragging_ = true;
     drag_changed_ = false;
@@ -552,6 +565,7 @@ void EngineLink::nudgeReceiverPassband(int delta_hz)
 {
     // Tuning by hand: AFT holds, then starts again from here.
     aft_yield();
+    cancel_auto_filter(AutoFilterOutcome::Dragging);
 
     if (delta_hz == 0) {
         return;
@@ -580,6 +594,7 @@ void EngineLink::resetReceiverPassband()
 {
     // Tuning by hand: AFT holds, then starts again from here.
     aft_yield();
+    cancel_auto_filter(AutoFilterOutcome::Dragging);
 
     wanted_.passband_low = 0;
     wanted_.passband_high = 0;
@@ -600,6 +615,7 @@ void EngineLink::removeReceiver()
 
     receiver_id_ = 0;
     static_cast<void>(reset_passband_display());
+    cancel_auto_filter(AutoFilterOutcome::Idle);
     receiver_status_ = {};
     receiver_edge_limit_ = 0;
     edges_touched_ = false;
@@ -1278,6 +1294,10 @@ void EngineLink::drain_passband()
     // After the display has it, so a move AFT makes is drawn against the
     // frame it was measured on.
     run_aft();
+
+    // And after AFT, so a move AFT has just asked for holds the fit back
+    // until the engine confirms it; see run_auto_filter.
+    run_auto_filter();
 }
 
 bool EngineLink::reset_passband_display()

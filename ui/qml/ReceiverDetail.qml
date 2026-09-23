@@ -99,6 +99,33 @@ ColumnLayout {
                     + "so on them it would follow one tone or wobble between both."
         }
 
+        // The auto filter, off until ticked, in the same shape as AFT: a
+        // tick box and a chip saying what the last fit did, with the rules on
+        // hover. models/auto_filter.h has them.
+        RCheckBox {
+            text: "auto filter"
+            enabled: engineLink.autoFilterOffered
+            checked: engineLink.autoFilterEnabled
+            onToggled: engineLink.autoFilterEnabled = checked
+        }
+
+        StatusChip {
+            ink: !engineLink.autoFilterEnabled ? Theme.inkDim
+                 : engineLink.autoFilterState.startsWith("fitted") ? Theme.accent
+                 : Theme.inkDim
+            label: !engineLink.autoFilterOffered ? "no auto filter on " + engineLink.receiverDemod
+                   : engineLink.autoFilterState
+            detail: "Auto filter fits the filter to the signal once, when you click a "
+                    + "detection to tune it and when you switch it on, from half a second "
+                    + "of the display averaged. AM goes out to the outer sideband lines "
+                    + "either side of the carrier, USB and LSB from the carrier to the far "
+                    + "edge of the signal on the side it is on, CW and narrow data get a "
+                    + "tight window on the tone, and NFM, WFM and DSB the measured occupied "
+                    + "width. It never moves an edge you are dragging, leaves the filter "
+                    + "alone when there is no signal, and stays inside what the channel "
+                    + "allows."
+        }
+
         Item { Layout.fillWidth: true }
 
         RButton {

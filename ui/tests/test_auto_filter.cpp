@@ -361,6 +361,7 @@ TEST_CASE("the chip says what the fit did", "[autofilter]")
     AutoFilterFit fit;
     CHECK(auto_filter_label(false, false, fit, "am") == "auto filter off");
     CHECK(auto_filter_label(true, true, fit, "am") == "measuring");
+    CHECK(auto_filter_label(true, false, fit, "am") == "fits on the next tune");
     fit.outcome = AutoFilterOutcome::Fitted;
     fit.low_hz = -4'250;
     fit.high_hz = 4'250;

@@ -170,6 +170,8 @@ qt_add_executable(revenant_ui
     models/ui_rules.h
     models/aft.h
     models/aft_link.cpp
+    models/auto_filter.h
+    models/auto_filter_link.cpp
     models/rds_link.cpp
     models/receiver_link.cpp
     models/source_link.cpp
