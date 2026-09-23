@@ -448,6 +448,110 @@ PNG` photographs the panel on a sample list, and `--preview-import FILE` puts
 an import preview in it first. A smoke run never writes a memory file: it
 reads only what `--memories` names, and without it starts empty.
 
+## Recordings
+
+The owner asked on 2026-09-23: "I want to be able to load recordings from the
+UI, switching from the dongle." A recording is a source in the radio panel,
+in a section of its own under the radios and always drawn, since choosing a
+file needs none of the device listing the radios need.
+
+**Choosing one.** "open recording…" opens the platform's file dialog, the one
+modal thing in the window: browsing a filesystem is the operating system's
+job and a drawn browser in the panel would be a worse copy of it. Its first
+filter is every type the engine opens, WAV, RF64, BW64, SigMF by either half
+and the raw `.cu8`, `.cs8`, `.cs16`, `.cs24` and `.cf32`, then one filter per
+kind and "All files" for a raw file with some other extension. Under the
+button are the last ten opened, newest first, kept in QSettings under
+`recordings/recent` (`ui/models/settings.h`). An entry holds the centre, rate
+and format as they were typed, so a recording that states no centre reopens
+with the one it needed. A file that is not there is hidden and not forgotten,
+so a recording on an unplugged drive comes back with the drive.
+
+**What the file says, before anything is sent.** Container, format and bit
+width, rate, channels, length and centre, with the notes the engine would
+attach and, when the engine would refuse the file, its reason in a chip and
+the open button dead. `ui/models/recording_header.h` reads it.
+
+The client reads the header, not the engine, because the wire has no call that
+describes a file without opening it: `listSources` enumerates devices and a
+file is named rather than enumerated, `sourceDescriptor` describes what is
+already open, and neither carries a centre frequency. core/rpc is read-only
+from `ui/`. So the reader follows `core/source/file_source.cpp` rather than
+improving on it: the same container sniff in the same order, the same five
+formats, the same refusals. **The path is resolved by the engine**, on the
+engine's machine. `revenant-engine` binds loopback only, so today that is this
+machine and the preview reads the file the engine will open; for an engine at
+any other address the preview says the engine opens the path on its own
+machine. After every open the window compares the length, rate, format and
+centre the engine reports against what the preview read, and says so in the
+strip when they differ.
+
+**The centre.** Prefilled from the file when it records one, and then a
+different one typed over it is refused with the engine's own reasoning, since
+the engine refuses a centre that disagrees with the container. Required when
+the file records none, which is every KF4FIC wideband WAV. For those the name
+is read for a guess, offered beside the box and never filled in on its own:
+"7000_7300kHz" gives the band's midpoint, 7150000, labelled as the band and not
+necessarily the tuning, which is the assumption `docs/recordings.md` made and
+says it made; "7100kHz" or "7100000Hz", as HDSDR and SDR# name theirs, gives
+that frequency. A bare number is never read as one, because a date, a time and
+a sample rate are bare numbers in the same names. A raw file also needs its
+rate, and its format when its extension names none; a container's own rate is
+not restated. `ui/models/recording_plan.h` has these rules, and a SigMF
+recording that retunes is refused there because the engine opens one of its
+segments only when `segment=` names it and this section does not offer that.
+
+**Opening** builds `file:///C:/...?center=...` (with `rate=` and `format=` for
+raw) and hands it to `EngineLink::openSource`, the call and the close-then-open
+the radios use. Receivers, audio, decoders, RDS and the detector go, the
+waterfall starts again and `sourceEpoch` tells the window its indices
+restarted, exactly as on a radio change; opening a radio from the list above
+goes back. One thing had to be fixed for that to hold from the command line:
+an open posted before the connection existed was applied on the first pass,
+whose epoch poll then took the new epoch for a first sighting and kept the
+closed source's spectrum subscription, so nothing was drawn. The connection now
+records the epoch it opened on.
+
+**While one plays**, a strip under the top bar, there only while a recording
+is open, gives its name, its position against its length on a two-pixel line,
+what paces it, and "plays once". It is a readout and not a transport, because
+three things are not on the wire and are not drawn as though they were:
+
+- **Seek.** `SourceDescriptor::seekable` is true for a file and its note in
+  `core/rpc/revenant.capnp` says nothing seeks yet. The position is a readout.
+- **Pace.** `sourcePacedBy` is the `--pace` the engine was started with and
+  nothing on the wire sets it. A file opened from the window plays at that
+  pace: an engine started for a dongle at the default `--pace 0` replays a
+  recording as fast as the GPU retires it, measured at 319x realtime on the
+  60 s excerpt over a synthetic scene, and the strip then says "unthrottled"
+  and the factor. Start the engine with `--pace 1` to listen to a recording.
+- **Loop.** The file backend's URI grammar has no loop key and the source
+  ends when the bytes do.
+
+**At the end** the strip says "ended at" the length, and the engine keeps
+serving. Until 2026-09-23 `revenant-engine` exited when any source ran out,
+so a recording opened over the dongle took the engine with it when it
+finished; only the command line's own source ends the process now.
+
+**From the command line**, `--open-recording PATH[:CENTER]` does the same
+open at startup, the centre in the frequency box's grammar and split off the
+last colon, so a drive letter is never taken for one. Given more than once,
+each earlier one goes on the recent list as though opened and the last is
+opened; one that cannot be opened yet is left in the section with its reason
+on stderr. `--open-panel radio` opens the panel, and with `--grab-main` the two
+photograph the section and a recording playing on the offscreen platform,
+where the native dialog cannot be driven.
+
+**What opening costs that it did not choose.** A source change makes the
+window ask for the device listing again, which `note_source_epoch` does so the
+panel's rows do not describe the world before the switch, and listing opens
+every device index to describe it. With a dongle held by another process that
+open is refused, librtlsdr prints `usb_open error -3` on the engine's stderr,
+and the row says the device is busy. Whether a refused open does anything to
+the holder's stream was not measured. It is the radios' behaviour rather than
+this section's, and a listing that waited for the panel to be open would avoid
+it.
+
 ## Auto-scaling, both ends
 
 The colour map's floor and ceiling both track the signal automatically, over a
