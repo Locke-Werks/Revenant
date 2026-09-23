@@ -2168,10 +2168,20 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
         }
 
         // Every receiver's display tap reads dsp::kDisplayTaps channel
-        // samples below the block it is filtering, and the stage refuses a
-        // ring that cannot hold that and a whole dispatch at once.
+        // samples below the block it is filtering, and the frames submitted
+        // behind it are writing above that, for the spectrum's reason above.
+        // The stage refuses a ring that cannot hold the reach and every frame
+        // in flight at once.
+        //
+        // WHAT THIS USED TO COUNT: `max_blocks + kDisplayTaps`, one dispatch
+        // above the reach and not frames_in_flight of them. At 100 blocks a
+        // dispatch and three frames that is 512 blocks where the 256 tap
+        // display filter needs 556, and a spectrum stage of 256 points or more
+        // hid it by making the ring larger for its own reasons.
         if (config.passband_transform != 0) {
-            wanted = std::max(wanted, static_cast<std::uint64_t>(max_blocks) + dsp::kDisplayTaps);
+            wanted = std::max(wanted, static_cast<std::uint64_t>(max_blocks) *
+                                              config.frames_in_flight +
+                                          dsp::kDisplayTaps);
         }
         ring_blocks = static_cast<std::uint32_t>(std::bit_ceil(wanted));
     }

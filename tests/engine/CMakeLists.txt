@@ -85,6 +85,12 @@
 # centre label, handed over through engine::open_built_source, because every
 # backend that runs without hardware refuses a retune and is right to.
 
+# test_channel_ring.cpp needs a GPU. It is the channel ring's depth against a
+# receiver's display tap with frames in flight counted: one case builds the
+# stage directly, as test_vrx_reanchor.cpp does, and one runs a stationary tone
+# through the engine with no spectrum stage to make the ring larger than the
+# tap alone asks for.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -92,6 +98,7 @@ add_executable(revenant_engine_tests
     test_audio_egress.cpp
     test_audio_fanout.cpp
     test_audio_wasapi.cpp
+    test_channel_ring.cpp
     test_engine.cpp
     test_engine_dv.cpp
     test_engine_passband.cpp

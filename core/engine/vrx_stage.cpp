@@ -572,15 +572,23 @@ Status DemodStage::build_display(const VrxStageRequest& request, std::uint64_t b
     display_ = std::move(*planned);
 
     // The display filter reaches back further than most fine filters do,
-    // kDisplayTaps channel samples, and both have to be live in the channel
-    // ring with a whole dispatch above them.
-    const std::uint64_t channel_span = blocks + display_.fine.taps;
+    // kDisplayTaps channel samples, and all of it has to stay live while
+    // every frame in flight behind this one writes its own dispatch above
+    // it. Frames overlap on the device, so a ring that holds the reach and
+    // one dispatch lets the channelizer in a later frame overwrite history
+    // this frame's tap is still reading, and the pane shows a splice.
+    //
+    // WHAT THIS USED TO COUNT: `blocks + taps`, one dispatch above the reach.
+    // At 100 blocks and three frames in flight that accepted a 512 block
+    // ring where the 256 tap filter needs 556.
+    // tests/engine/test_channel_ring.cpp.
+    const std::uint64_t channel_span = blocks * frames_in_flight_ + display_.fine.taps;
     if (channel_span > channel_ring_blocks_) {
         return fail(std::format(
-            "the {} tap display filter over a {} block dispatch needs {} channel samples live "
-            "and the channel ring holds {}. The engine's ring_seconds is too short for a "
-            "passband stage",
-            display_.fine.taps, blocks, channel_span, channel_ring_blocks_));
+            "the {} tap display filter with {} frames in flight of {} blocks each needs {} "
+            "channel samples live and the channel ring holds {}. The engine's ring_seconds is "
+            "too short for a passband stage",
+            display_.fine.taps, frames_in_flight_, blocks, channel_span, channel_ring_blocks_));
     }
 
     // Sized for R = 1, one display output per channel sample, which is the
