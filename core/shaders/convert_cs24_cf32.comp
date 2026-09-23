@@ -1,0 +1,137 @@
+// Widen packed cs24 I/Q into the device ring's canonical Complex32.
+//
+// Sibling of core/shaders/convert_cu8_cf32.comp, which carries the full
+// argument for why the conversion happens on the device and why the scale is
+// a multiply rather than a divide. Read that file first; this one states only
+// what differs, and what differs is the packing.
+//
+// WHY THIS FORMAT EXISTS HERE. HF recorders write 24-bit PCM WAV, and the six
+// KF4FIC recordings in docs/recordings.md are that: 96 kS/s, two channels, three
+// bytes a component. The alternatives were a host pass over every sample, which
+// is the pass the upload kernels exist to remove, or an offline conversion to
+// float that costs 4/3 of the file on disk, 17 GB for those six.
+//
+// THE PACKING, which is the part the other three kernels never had to think
+// about. A sample is six bytes, I then Q, each a little-endian 24-bit two's
+// complement code. Six does not divide four, so a sample straddles a word
+// boundary on every other index and no single load serves one. What does tile
+// is a PAIR: two samples are twelve bytes, exactly three words, and the layout
+// of those three words is the same for every pair.
+//
+//     word 3k      I0[0..23]           Q0[0..7]
+//     word 3k + 1  Q0[8..23]           I1[0..15]
+//     word 3k + 2  I1[16..23]          Q1[0..23]
+//
+// So sample s lives in words floor(3s / 2) and floor(3s / 2) + 1, starting at
+// bit 0 of the first when s is even and at bit 16 when it is odd. The kernel
+// loads those two words and treats them as one 64-bit value shifted right by
+// that amount; I is then the low 24 bits and Q the 24 above it.
+//
+// THE TAIL. The last sample reads two words and never a third. For an odd
+// sample count the final sample is even, occupies the first six bytes of its
+// pair, and its second word is half padding: two bytes past the data, exactly
+// the padding the 8-bit kernels already leave after an odd count. So the rule
+// the host already follows, bind whole words covering every sample byte, is
+// sufficient here too and needs no special case. core/dsp/convert.cpp states
+// the same bound for the twin and rejects a buffer short of it.
+//
+// THE SCALE, 2^-23. Twin of the cs8 and cs16 choice at 2^-7 and 2^-15, for the
+// same reasons: code -8388608 is exactly -1.0, code +8388607 is one LSB short
+// of +1.0, nothing leaves the unit interval, and a power of two makes the
+// multiply exact. There is a second reason special to this width. A float has
+// a 24-bit significand, so every one of the 2^24 codes converts to float with
+// no rounding at all, and the multiply by a power of two adds none either. The
+// whole conversion is exact, which makes it bit-identical not only to the CPU
+// twin but to scripts/wav24_to_float32.py, which divides by 2^23 in double
+// precision and rounds a value that needs no rounding. The float32 excerpts in
+// docs/recordings.md are therefore the same numbers this kernel produces from
+// the original files, and that equality is what lets the two paths be compared.
+//
+// No dither and no bias. Code 0 is +0.0.
+
+#version 450
+
+// Never hardcoded; specialized at pipeline creation. Id 0 is the project-wide
+// convention, core/gpu/kernel.h kLocalSizeXConstantId.
+layout(local_size_x_id = 0) in;
+
+// 2^-23, exactly representable, so every multiply below is exact.
+// core/dsp/convert.h declares the same number as kCs24Scale.
+const float kCs24Scale = 0.00000011920928955078125;
+
+// Read as 32-bit words. There is no 24-bit storage type in Vulkan at all, and
+// 8-bit access would need VK_KHR_8bit_storage, which core/gpu/context.cpp does
+// not request. Byte 0 of a word is its least significant eight bits, which is
+// the host's ordering on every implementation Vulkan runs on.
+layout(std430, binding = 0) readonly buffer PackedSource {
+    uint words[];
+} src;
+
+layout(std430, binding = 1) writeonly buffer IqRing {
+    vec2 samples[];
+} ring;
+
+layout(push_constant) uniform Params {
+    // Ring capacity minus one; the capacity is a power of two.
+    uint ring_mask;
+
+    // Ring offset of converted sample 0, or equivalently the low 32 bits of
+    // its absolute sample index. The mask makes them the same thing.
+    uint dst_offset;
+
+    // Index of the first packed sample in the source buffer, in samples.
+    uint src_offset;
+
+    uint count;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+
+    if (index >= params.count) {
+        return;
+    }
+
+    const uint src_index = params.src_offset + index;
+
+    // floor(3s / 2) written as s + s/2, which cannot overflow before the word
+    // index itself would. 3s would wrap at s = 2^32 / 3, a third of the range
+    // the twin accepts.
+    const uint word_index = src_index + (src_index >> 1u);
+    const uint lo = src.words[word_index];
+    const uint hi = src.words[word_index + 1u];
+
+    // 0 for an even sample, 16 for an odd one.
+    const uint shift = (src_index & 1u) << 4u;
+
+    // The low 32 bits of (hi:lo) >> shift. Shifting hi left by 32 - shift in
+    // one step would be a shift by 32 when shift is 0, which GLSL leaves
+    // undefined, so it is two shifts of which neither reaches 32: by 16 and
+    // then by 16 - shift. For shift 0 that discards hi entirely, which is
+    // right, since an even sample's I lies wholly in lo.
+    const uint window = (lo >> shift) | ((hi << 16u) << (16u - shift));
+
+    // I is the low 24 bits of the window. Q starts at bit 24 of the shifted
+    // value, so it is the window's top byte with hi >> shift above it.
+    const uint i_raw = window;
+    const uint q_raw = (window >> 24u) | ((hi >> shift) << 8u);
+
+    // Signed extraction of the low 24 bits. bitfieldExtract replicates the
+    // field's top bit when the operand is an int, which is the sign extension
+    // two's complement needs; the unsigned overload would zero extend and turn
+    // every negative sample into a large positive one.
+    const int i_code = bitfieldExtract(int(i_raw), 0, 24);
+    const int q_code = bitfieldExtract(int(q_raw), 0, 24);
+
+    // `precise` forbids fusion and reassociation, as in the other three
+    // kernels. Both the conversion to float and the multiply are exact here,
+    // so there is nothing for a compiler to change, and the qualifier is what
+    // keeps that true if the expression ever grows a term.
+    precise float i_value = float(i_code) * kCs24Scale;
+    precise float q_value = float(q_code) * kCs24Scale;
+
+    // dst_offset + index may wrap modulo 2^32, which is not a bug: the
+    // capacity is a power of two dividing 2^32, so the mask lands on exactly
+    // the slot the unwrapped arithmetic names.
+    ring.samples[(params.dst_offset + index) & params.ring_mask] = vec2(i_value, q_value);
+}

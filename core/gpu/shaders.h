@@ -49,6 +49,10 @@ namespace revenant::gpu::shaders {
 [[nodiscard]] std::span<const std::uint32_t> convert_cs8_cf32();
 [[nodiscard]] std::span<const std::uint32_t> convert_cs16_cf32();
 
+// 24-bit PCM, which HF recorders write. Three bytes a component do not divide
+// a 32-bit word, so the kernel reads each sample from two words.
+[[nodiscard]] std::span<const std::uint32_t> convert_cs24_cf32();
+
 // The per-receiver fine stage: mix by the residual offset, filter, resample.
 // Twin of revenant::dsp::reference_vrx_fine.
 [[nodiscard]] std::span<const std::uint32_t> vrx_fine();

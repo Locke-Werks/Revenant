@@ -102,6 +102,15 @@ constexpr std::uint64_t kBytesPerWord = 4;
     const std::uint64_t bytes_needed = last_sample * bytes_per_sample;
     const std::uint64_t words_needed = (bytes_needed + kBytesPerWord - 1U) / kBytesPerWord;
     const std::uint64_t words_bound = words_needed * kBytesPerWord;
+
+    // The kernel's word index is 32-bit too. Only cs24 can reach this: at six
+    // bytes a sample its last word index passes 2^32 while the sample index is
+    // still under it.
+    if (words_needed > 0x100000000ULL) {
+        return fail(std::format("{} src_offset {} plus count {} reaches word {}, past the 32-bit "
+                                "word index the kernel uses",
+                                who, params.src_offset, params.count, words_needed - 1U));
+    }
     if (static_cast<std::uint64_t>(packed.size()) < words_bound) {
         return fail(std::format("{} reads {} whole words ({} bytes) for {} samples at offset "
                                 "{}, source buffer holds {} bytes",
@@ -133,6 +142,12 @@ float cs8_to_float(std::int8_t code) {
 float cs16_to_float(std::int16_t code) {
     // One multiply by 2^-15, exact for every code, for the same reasons.
     return static_cast<float>(code) * kCs16Scale;
+}
+
+float cs24_to_float(std::int32_t code) {
+    // Exact twice over: a 24-bit code fits a float's significand, so the
+    // conversion does not round, and the multiply is by a power of two.
+    return static_cast<float>(code) * kCs24Scale;
 }
 
 Status reference_convert_cu8_cf32(std::span<const std::byte> packed,
@@ -244,6 +259,56 @@ Status reference_convert_cs16_cf32(std::span<const std::byte> packed,
 
         const float i_value = cs16_to_float(static_cast<std::int16_t>(i_code));
         const float q_value = cs16_to_float(static_cast<std::int16_t>(q_code));
+
+        const std::size_t slot =
+            static_cast<std::size_t>((params.dst_offset + index) & params.ring_mask);
+        ring[slot] = Complex32{i_value, q_value};
+    }
+
+    return {};
+}
+
+Status reference_convert_cs24_cf32(std::span<const std::byte> packed,
+                                   const ConvertParams& params, ComplexSpan ring) {
+    if (const auto ok = check_request("reference_convert_cs24_cf32", packed, params, ring, 6);
+        !ok) {
+        return ok;
+    }
+
+    if (params.count == 0) {
+        return {};
+    }
+
+    // The smallest nonzero magnitude here is kCs24Scale, 1.2e-07, so no
+    // denormal is reachable. The guard is the project's policy for a
+    // reference and pins the thread's mode regardless of the caller's.
+    const ScopedDenormalFlush flush_denormals;
+
+    for (std::uint32_t index = 0; index < params.count; ++index) {
+        const std::uint32_t src_index = params.src_offset + index;
+
+        // Two samples tile three words, so sample s starts in word
+        // floor(3s / 2), at bit 0 when s is even and bit 16 when it is odd,
+        // and ends in the word after. Written as s + s/2 as the kernel writes
+        // it; check_request has already refused a request whose last word
+        // index would not fit.
+        const std::uint32_t word_index = src_index + (src_index >> 1U);
+        const std::uint32_t lo = load_word(packed, word_index);
+        const std::uint32_t hi = load_word(packed, word_index + 1U);
+        const std::uint32_t shift = (src_index & 1U) << 4U;
+
+        // The low 32 bits of (hi:lo) >> shift, in the kernel's two steps. The
+        // kernel cannot shift by 32 and neither does this, so the arithmetic
+        // is the same even where C++ would have allowed a shortcut.
+        const std::uint32_t window = (lo >> shift) | ((hi << 16U) << (16U - shift));
+        const std::uint32_t i_raw = window;
+        const std::uint32_t q_raw = (window >> 24U) | ((hi >> shift) << 8U);
+
+        const std::int32_t i_code = extract_signed(i_raw, 0, 24);
+        const std::int32_t q_code = extract_signed(q_raw, 0, 24);
+
+        const float i_value = cs24_to_float(i_code);
+        const float q_value = cs24_to_float(q_code);
 
         const std::size_t slot =
             static_cast<std::size_t>((params.dst_offset + index) & params.ring_mask);

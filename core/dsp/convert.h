@@ -1,17 +1,17 @@
-// CPU twins of the three format-conversion kernels.
+// CPU twins of the four format-conversion kernels.
 //
-// core/shaders/convert_cu8_cf32.comp, convert_cs8_cf32.comp and
-// convert_cs16_cf32.comp widen a source's native sample width into the ring's
-// canonical Complex32 during upload, so the native bytes cross the bus exactly
-// once and the host never makes a pass over every sample. These are the
-// referees for those three kernels: bit-identical output for identical input,
-// not merely the same mathematical result.
+// core/shaders/convert_cu8_cf32.comp, convert_cs8_cf32.comp,
+// convert_cs16_cf32.comp and convert_cs24_cf32.comp widen a source's native
+// sample width into the ring's canonical Complex32 during upload, so the
+// native bytes cross the bus exactly once and the host never makes a pass over
+// every sample. These are the referees for those four kernels: bit-identical
+// output for identical input, not merely the same mathematical result.
 //
 // Being bit-identical is easier here than it is for a filter, and the reason
 // is worth stating because it constrains what the kernels are allowed to do.
 // Vulkan requires OpFMul to be correctly rounded and permits OpFDiv 2.5 ULP of
 // error, so a division in a kernel is not reproducible across vendors and no
-// CPU twin could referee it. All three kernels therefore multiply by a float
+// CPU twin could referee it. All four kernels therefore multiply by a float
 // constant, and the constants below are those same floats, asserted against
 // the exact words the SPIR-V modules carry. Two implementations performing one
 // correctly-rounded multiply by the same float agree by construction.
@@ -68,7 +68,14 @@ inline constexpr float kCu8Scale = 0.00784313772F;
 inline constexpr float kCs8Scale = 0.0078125F;
 inline constexpr float kCs16Scale = 0.000030517578125F;
 
-// The exact words the three SPIR-V modules carry, so a mistyped digit in
+// 2^-23, by the same rule at 24 bits. A float's significand is 24 bits, so
+// every one of the 2^24 codes converts to float exactly as well, and the whole
+// cs24 conversion rounds nowhere. That is what makes it bit-identical to
+// scripts/wav24_to_float32.py, which divides by 2^23 in double precision and
+// then rounds a value that needs no rounding.
+inline constexpr float kCs24Scale = 0.00000011920928955078125F;
+
+// The exact words the four SPIR-V modules carry, so a mistyped digit in
 // either this file or a .comp is a compile error here rather than a
 // bit-exactness failure in CI with no obvious cause. Verified against the
 // OpConstant operands emitted by glslangValidator for target-env vulkan1.3.
@@ -80,6 +87,8 @@ static_assert(std::bit_cast<std::uint32_t>(kCs8Scale) == 0x3C000000U,
               "kCs8Scale must be the float in convert_cs8_cf32.comp");
 static_assert(std::bit_cast<std::uint32_t>(kCs16Scale) == 0x38000000U,
               "kCs16Scale must be the float in convert_cs16_cf32.comp");
+static_assert(std::bit_cast<std::uint32_t>(kCs24Scale) == 0x34000000U,
+              "kCs24Scale must be the float in convert_cs24_cf32.comp");
 
 // The endpoint properties the conversions are chosen for, checked rather than
 // asserted in prose. Constant evaluation is correctly rounded IEEE, so these
@@ -92,6 +101,9 @@ static_assert(127.0F * kCs8Scale == 0.9921875F, "cs8 full scale positive is one 
 static_assert(-32768.0F * kCs16Scale == -1.0F, "cs16 code -32768 must map to exactly -1");
 static_assert(32767.0F * kCs16Scale == 0.999969482421875F,
               "cs16 full scale positive is one LSB short");
+static_assert(-8388608.0F * kCs24Scale == -1.0F, "cs24 code -8388608 must map to exactly -1");
+static_assert(8388607.0F * kCs24Scale == 0.99999988079071044921875F,
+              "cs24 full scale positive is one LSB short");
 
 // The four values every convert kernel takes as push constants, in the order
 // it declares them. The host builds one of these and both sides read the same
@@ -144,7 +156,12 @@ static_assert(sizeof(ConvertParams) == 4 * sizeof(std::uint32_t),
 [[nodiscard]] float cs8_to_float(std::int8_t code);
 [[nodiscard]] float cs16_to_float(std::int16_t code);
 
-// Twins of the three kernels.
+// There is no 24-bit integer type, so the code arrives sign extended in an
+// int32. A value outside [-2^23, 2^23) is not a 24-bit code and is not
+// something the kernel can produce; the twin never passes one.
+[[nodiscard]] float cs24_to_float(std::int32_t code);
+
+// Twins of the four kernels.
 //
 // packed is the staging buffer exactly as the device sees it: the source's
 // native bytes, little-endian, indexed from its own start and not from the
@@ -176,6 +193,14 @@ static_assert(sizeof(ConvertParams) == 4 * sizeof(std::uint32_t),
                                                 ComplexSpan ring);
 
 [[nodiscard]] Status reference_convert_cs16_cf32(std::span<const std::byte> packed,
+                                                 const ConvertParams& params,
+                                                 ComplexSpan ring);
+
+// Six bytes a sample, so a sample straddles a word boundary on every other
+// index and the twin, like the kernel, assembles each sample from two words.
+// The whole-word bound is the same rule as the 8-bit formats: an odd count
+// leaves two bytes of padding in the last word, and the kernel loads it.
+[[nodiscard]] Status reference_convert_cs24_cf32(std::span<const std::byte> packed,
                                                  const ConvertParams& params,
                                                  ComplexSpan ring);
 

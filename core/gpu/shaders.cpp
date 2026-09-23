@@ -13,6 +13,7 @@
 #include "shaders/convert_cu8_cf32_comp.h"
 #include "shaders/convert_cs8_cf32_comp.h"
 #include "shaders/convert_cs16_cf32_comp.h"
+#include "shaders/convert_cs24_cf32_comp.h"
 #include "shaders/vrx_fine_comp.h"
 #include "shaders/vrx_demod_comp.h"
 
@@ -56,6 +57,11 @@ std::span<const std::uint32_t> convert_cs8_cf32() {
 std::span<const std::uint32_t> convert_cs16_cf32() {
     return std::span<const std::uint32_t>(convert_cs16_cf32_comp_spv,
                                           std::size(convert_cs16_cf32_comp_spv));
+}
+
+std::span<const std::uint32_t> convert_cs24_cf32() {
+    return std::span<const std::uint32_t>(convert_cs24_cf32_comp_spv,
+                                          std::size(convert_cs24_cf32_comp_spv));
 }
 
 std::span<const std::uint32_t> vrx_fine() {
