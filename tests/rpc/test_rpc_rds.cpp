@@ -112,8 +112,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <format>
@@ -939,6 +941,69 @@ TEST_CASE("a station's TMC, EWS and PTYN come back over the wire", "[gpu][rpc][r
     CHECK_FALSE(station->ews.corrected);
     CHECK(station->ews_channel_identification_valid);
     CHECK(station->ews_channel_identification == 0x0321);
+}
+
+namespace {
+
+// feature_station_bits with RadioText beside it, a third 8A payload sent in
+// the eleventh cycle only, late enough that a client which connected after
+// the file started has seen it, so the table holds one heard once; and one
+// information bit
+// of the second PTYN segment's block 3 flipped in every cycle. The decoder
+// corrects a single bit, so that segment arrives right and is always marked
+// corrected, which is the state the client's mark is photographed in.
+//
+// PRE-DIFFERENTIAL, as station_bits says: one bit flipped here is one bit
+// wrong after the decoder undoes clause 1.6.
+[[nodiscard]] std::vector<std::uint8_t> photographed_station_bits(int cycles) {
+    std::vector<std::uint8_t> bits;
+    const std::vector<std::uint8_t> features = feature_station_bits(1);
+    const std::vector<std::uint8_t> text = station_bits(1);
+    constexpr std::size_t kGroupBits = 104;
+    constexpr std::size_t kBlock3Info = 52;
+    // Groups in feature_station_bits' cycle: four 0A, 3A, two 8A, 9A, then
+    // the two 10A segments. The second 10A is the tenth group.
+    constexpr std::size_t kPtynSegment1Group = 9;
+    for (int cycle = 0; cycle < cycles; ++cycle) {
+        const std::size_t start = bits.size();
+        bits.insert(bits.end(), features.begin(), features.end());
+        bits[start + kPtynSegment1Group * kGroupBits + kBlock3Info + 5] ^= 1U;
+        // RadioText's four 2A groups, the second half of station_bits' cycle.
+        bits.insert(bits.end(), text.begin() + static_cast<std::ptrdiff_t>(4 * kGroupBits),
+                    text.end());
+        if (cycle == 10) {
+            push_group(bits, GroupWords{kStationPi, any_block2(8, 0x05), 0x5555, 0x6666, false});
+        }
+    }
+    return bits;
+}
+
+}  // namespace
+
+// Hidden, so catch_discover_tests does not register it. Writes the station
+// above to REVENANT_RDS_CAPTURE as cf32 at kRdsSourceRate with the station at
+// DC, for revenant-engine to serve and revenant-ui --rds to photograph:
+// file:///<path>?rate=1368000&center=<hz> with --channels 4, and the receiver
+// kReceiverOffsetHz above the centre. Twenty cycles is about 31 s.
+TEST_CASE("the TMC, EWS and PTYN station the client is photographed on",
+          "[.][rds-capture]") {
+    const char* target = std::getenv("REVENANT_RDS_CAPTURE");
+    if (target == nullptr || *target == '\0') {
+        SKIP("REVENANT_RDS_CAPTURE is not set");
+    }
+    siggen::WfmSpec spec = station_spec(true);
+    spec.rds.bits = photographed_station_bits(20);
+
+    StationFile file("photographed");
+    const auto written = file.write(spec, 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+    std::error_code copied;
+    std::filesystem::copy_file(file.path(), target,
+                               std::filesystem::copy_options::overwrite_existing, copied);
+    INFO(copied.message());
+    REQUIRE_FALSE(copied);
+    WARN(std::format("wrote {} samples to {}", file.samples(), target));
 }
 
 TEST_CASE("two receivers decode one station under two regions at once",

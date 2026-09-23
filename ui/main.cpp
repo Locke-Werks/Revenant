@@ -9,8 +9,9 @@
 // USAGE
 //
 //   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
-//               [--receiver FREQ:MODE] [--decode NAME] [--grab-receivers FILE]
-//               [--palette QUERY] [--keymap] [--grab-main FILE]
+//               [--receiver FREQ:MODE] [--decode NAME] [--rds]
+//               [--grab-receivers FILE] [--palette QUERY] [--keymap]
+//               [--grab-main FILE]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -24,10 +25,12 @@
 // --receiver opens a receiver at FREQ in MODE once a source is open that
 // reaches it, FREQ in the frequency box's grammar with bare numbers in hertz,
 // "14005000:usb" or "145.005M:nfm". --decode names a decoder to attach to it,
-// or auto, and switches decoding on. --grab-receivers writes the receiver
-// window to FILE as a PNG when a smoke run ends. Together they drive and
-// photograph the decode section with nobody at the mouse, which is what they
-// are for: a window on the offscreen platform takes no input from, and puts
+// or auto, and switches decoding on. --rds switches the RDS section on for
+// that receiver, which on a wfm one raises it to the composite rate as the
+// switch in the window does. --grab-receivers writes the receiver window to
+// FILE as a PNG when a smoke run ends. Together they drive and photograph the
+// decode and RDS sections with nobody at the mouse, which is what they are
+// for: a window on the offscreen platform takes no input from, and puts
 // nothing on, the desktop it runs beside.
 //
 // --palette opens the main window's command palette with QUERY typed into it,
@@ -356,6 +359,7 @@ int main(int argc, char* argv[])
     std::uint32_t smoke_seconds = 0;
     QString startup_receiver;
     QString startup_decoder;
+    bool startup_rds = false;
     QString grab_receivers;
     QString grab_main;
     QString palette_query;
@@ -379,6 +383,10 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--decode") && i + 1 < args.size()) {
             startup_decoder = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--rds")) {
+            startup_rds = true;
             continue;
         }
         if (args[i] == QStringLiteral("--grab-receivers") && i + 1 < args.size()) {
@@ -425,6 +433,11 @@ int main(int argc, char* argv[])
             return 2;
         }
         startup_hz = static_cast<double>(parsed->hertz);
+    }
+    if (startup_rds && startup_receiver.isEmpty()) {
+        std::fputs("--rds needs --receiver, which is the receiver it switches RDS on for\n",
+                   stderr);
+        return 2;
     }
     if (!grab_receivers.isEmpty() && !smoke) {
         std::fputs("--grab-receivers needs --smoke-seconds, which is the run it ends\n", stderr);
@@ -477,6 +490,12 @@ int main(int argc, char* argv[])
     link.start(address, port, every_nth);
     if (!startup_receiver.isEmpty()) {
         link.setStartupReceiver(startup_hz, startup_mode, startup_decoder);
+    }
+    // The switch is sticky and asks nothing until the pane holds a receiver,
+    // so setting it before the receiver is placed is the order the window's
+    // own switch would take too.
+    if (startup_rds) {
+        link.setRdsWanted(true);
     }
 
     // DECLARED AFTER THE LINK ON PURPOSE, so it is destroyed BEFORE it.
