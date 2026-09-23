@@ -15,6 +15,7 @@
 //               [--receiver FREQ:MODE ...] [--decode NAME] [--rds]
 //               [--grab-receivers FILE] [--palette QUERY] [--keymap]
 //               [--grab-main FILE]
+//               [--frame-stats FILE] [--maximise]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -45,6 +46,16 @@
 // also fails when ui/qml/Commands.qml lacks a handler the key table names,
 // which is the one check on that table that has to run the QML to be made.
 //
+// --frame-stats times every frame each window draws and what the display
+// items spend on it, and on the way out writes the figures to FILE as JSON
+// and one line to stderr; render/frame_probe.h and models/frame_stats.h are
+// the instrument and docs/ui-spectrum.md, "Frame budget", says what it is
+// for. It works with or without --smoke-seconds, and a smoke run with
+// QT_QPA_PLATFORM=windows is a timed run in a real window that still opens
+// no sound card. --maximise opens the main window maximised, because a smoke
+// run restores no geometry and the frame budget is about the size the span is
+// actually used at, not the QML's default.
+//
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
 // somebody makes on purpose. core/rpc/server.h binds 127.0.0.1 by default,
@@ -70,6 +81,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -96,6 +108,7 @@
 #include "models/engine_link.h"
 #include "models/frequency_entry.h"
 #include "models/settings.h"
+#include "render/frame_probe.h"
 
 // main() is at global scope, unlike everything it constructs. An alias
 // rather than a using-directive, so the keys still read as settings::
@@ -306,6 +319,9 @@ int main(int argc, char* argv[])
         if (std::string_view(argv[i]) == "--smoke-seconds") {
             smoke = true;
         }
+        if (std::string_view(argv[i]) == "--frame-stats") {
+            revenant::ui::FrameProbe::prepare();
+        }
     }
     if (smoke && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) {
         qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -373,6 +389,8 @@ int main(int argc, char* argv[])
     QString palette_query;
     bool palette_wanted = false;
     bool keymap_wanted = false;
+    QString frame_stats;
+    bool maximise = false;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
@@ -412,6 +430,14 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--keymap")) {
             keymap_wanted = true;
+            continue;
+        }
+        if (args[i] == QStringLiteral("--frame-stats") && i + 1 < args.size()) {
+            frame_stats = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--maximise")) {
+            maximise = true;
             continue;
         }
         if (args[i] == QStringLiteral("--smoke-seconds")) {
@@ -527,6 +553,16 @@ int main(int argc, char* argv[])
         player.start();
     }
 
+    // Declared before the QML engine so it is destroyed after it: every
+    // display item reports to it, and a render thread can still be finishing
+    // a frame while the engine tears the windows down.
+    std::unique_ptr<revenant::ui::FrameProbe> frame_probe;
+    if (!frame_stats.isEmpty()) {
+        frame_probe = std::make_unique<revenant::ui::FrameProbe>(frame_stats, link);
+        QObject::connect(&app, &QGuiApplication::aboutToQuit, frame_probe.get(),
+                         [probe = frame_probe.get()] { probe->finish(); });
+    }
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
@@ -561,6 +597,15 @@ int main(int argc, char* argv[])
     QObject* commands =
         root_window != nullptr ? root_window->findChild<QObject*>(QStringLiteral("commands"))
                                : nullptr;
+
+    if (frame_probe != nullptr && root_window != nullptr) {
+        frame_probe->watch(root_window, QStringLiteral("main"));
+        frame_probe->watch(root_window->findChild<QQuickWindow*>(QStringLiteral("vrxWindow")),
+                           QStringLiteral("receivers"));
+    }
+    if (maximise && root_window != nullptr) {
+        root_window->showMaximized();
+    }
 
     // Every handler the key table names has to be in Commands.qml, and only
     // the QML can say whether it is. Checked on every smoke run, which is
@@ -631,6 +676,9 @@ int main(int argc, char* argv[])
         if (code != 0) {
             return code;
         }
+        if (frame_probe != nullptr && !frame_probe->written()) {
+            return 1;
+        }
         if (qml_warnings > 0) {
             std::fprintf(stderr, "smoke: %d QML warning(s)\n", qml_warnings);
             return 1;
@@ -656,5 +704,9 @@ int main(int argc, char* argv[])
         }
     }
 
-    return QGuiApplication::exec();
+    const int code = QGuiApplication::exec();
+    if (code == 0 && frame_probe != nullptr && !frame_probe->written()) {
+        return 1;
+    }
+    return code;
 }

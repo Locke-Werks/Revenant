@@ -27,6 +27,7 @@
 #include <QString>
 #include <QWheelEvent>
 
+#include "models/frame_stats.h"
 #include "models/receiver_palette.h"
 
 namespace revenant::ui {
@@ -1177,6 +1178,7 @@ void SpectrumItem::takeReceiver()
 
 void SpectrumItem::takeFrame()
 {
+    const FrameCost cost(FrameItem::Spectrum, FramePhase::Take);
     if (link_ == nullptr) {
         return;
     }
@@ -1321,6 +1323,7 @@ void SpectrumItem::wheelEvent(QWheelEvent* event)
 
 QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
 {
+    const FrameCost cost(FrameItem::Spectrum, FramePhase::Sync);
     const qreal w = width();
     const qreal h = height();
     if (w <= 0.0 || h <= 0.0) {

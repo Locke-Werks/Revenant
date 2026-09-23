@@ -10,6 +10,7 @@
 #include <QSGRectangleNode>
 #include <QSGTexture>
 
+#include "models/frame_stats.h"
 #include "render/history_resize.h"
 #include "render/spectrum_scale.h"
 
@@ -184,6 +185,7 @@ void PassbandWaterfallItem::geometryChange(const QRectF& new_geometry,
 
 void PassbandWaterfallItem::takeFrame()
 {
+    const FrameCost cost(FrameItem::PassbandWaterfall, FramePhase::Take);
     if (link_ == nullptr) {
         return;
     }
@@ -261,6 +263,7 @@ void PassbandWaterfallItem::takeFrame()
 
 QSGNode* PassbandWaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
 {
+    const FrameCost cost(FrameItem::PassbandWaterfall, FramePhase::Sync);
     const qreal w = width();
     const qreal h = height();
     if (w <= 0.0 || h <= 0.0 || history_.isNull()) {

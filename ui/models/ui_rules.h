@@ -28,6 +28,7 @@
 
 #include "models/band_plan.h"
 #include "models/composite_probe.h"
+#include "models/frame_stats.h"
 #include "models/frequency_dial.h"
 #include "models/level_meter.h"
 #include "models/mode_choice.h"
@@ -113,6 +114,7 @@ public:
     [[nodiscard]] Q_INVOKABLE QVariantList rulerTicks(double low, double high, double width,
                                                       double char_px, double reserve_left) const
     {
+        const FrameCost cost(FrameItem::Ruler, FramePhase::Take);
         QVariantList out;
         const RulerPlan plan = plan_ruler(low, high, width, char_px, reserve_left);
         out.reserve(static_cast<qsizetype>(plan.ticks.size()));

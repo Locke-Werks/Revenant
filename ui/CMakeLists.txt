@@ -170,6 +170,7 @@ qt_add_executable(revenant_ui
     models/engine_link.cpp
     models/engine_link.h
     models/band_plan.h
+    models/frame_stats.h
     models/frequency_dial.h
     models/key_actions.h
     models/key_map.h
@@ -194,6 +195,8 @@ qt_add_executable(revenant_ui
     models/source_link.cpp
     models/window_raise.h
     render/colour_map.h
+    render/frame_probe.cpp
+    render/frame_probe.h
     render/history_shift.h
     render/passband_item.cpp
     render/passband_item.h
@@ -307,6 +310,9 @@ target_link_libraries(revenant_ui
     PRIVATE
         Qt6::Core
         Qt6::Gui
+        # render/frame_probe.cpp's <rhi/qrhi.h>, the only place Qt reports a
+        # frame's GPU time.
+        Qt6::GuiPrivate
         Qt6::Multimedia
         Qt6::Quick
         Qt6::QuickControls2
@@ -551,6 +557,7 @@ if(REVENANT_UI_TESTS)
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
+            tests/test_frame_stats.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_history_shift.cpp

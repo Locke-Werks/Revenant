@@ -18,6 +18,7 @@
 #include <QSGNode>
 #include <QSGRectangleNode>
 
+#include "models/frame_stats.h"
 #include "models/key_actions.h"
 #include "models/key_map.h"
 #include "models/receiver_palette.h"
@@ -427,6 +428,7 @@ void PassbandItem::resizeColumns(int columns, std::size_t bins)
 
 void PassbandItem::takeFrame()
 {
+    const FrameCost cost(FrameItem::Passband, FramePhase::Take);
     if (link_ == nullptr) {
         return;
     }
@@ -1037,6 +1039,7 @@ void PassbandItem::geometryChange(const QRectF& new_geometry, const QRectF& old_
 
 QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
 {
+    const FrameCost cost(FrameItem::Passband, FramePhase::Sync);
     const qreal w = width();
     const qreal h = height();
     if (w <= 0.0 || h <= 0.0) {

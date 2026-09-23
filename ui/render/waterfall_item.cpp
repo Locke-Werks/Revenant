@@ -18,6 +18,8 @@
 #include <QSGTexture>
 #include <QWheelEvent>
 
+#include "models/frame_stats.h"
+
 namespace revenant::ui {
 namespace {
 
@@ -535,6 +537,7 @@ void WaterfallItem::takeReceiver()
 
 void WaterfallItem::takeFrame()
 {
+    const FrameCost cost(FrameItem::Waterfall, FramePhase::Take);
     if (link_ == nullptr) {
         return;
     }
@@ -699,6 +702,7 @@ void WaterfallItem::wheelEvent(QWheelEvent* event)
 
 QSGNode* WaterfallItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /*data*/)
 {
+    const FrameCost cost(FrameItem::Waterfall, FramePhase::Sync);
     const qreal w = width();
     const qreal h = height();
     if (w <= 0.0 || h <= 0.0 || history_.isNull()) {
