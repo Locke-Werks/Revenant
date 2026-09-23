@@ -11,6 +11,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <string>
+#include <string_view>
 
 #include "models/recording_status.h"
 
@@ -53,12 +54,45 @@ TEST_CASE("position reads against length, and the pace says what paces it", "[re
 
     sample.paced_by = 0.0;
     sample.realtime_factor = 11.84;
-    CHECK(describe_playback(sample).pace == "unthrottled, 11.8x");
+    CHECK(describe_playback(sample).pace == "max, 11.8x");
     sample.realtime_factor = 0.0;
-    CHECK(describe_playback(sample).pace == "unthrottled");
+    CHECK(describe_playback(sample).pace == "max");
 
     sample.paced_by = 0.5;
     CHECK(describe_playback(sample).pace == "0.5x realtime");
+
+    // Rejects: the setting alone when the source cannot reach it. 4x asked
+    // and 2.1x reached is a source that cannot keep up, and "4x realtime"
+    // there describes a pace nobody is hearing.
+    sample.paced_by = 4.0;
+    sample.realtime_factor = 3.98;
+    CHECK(describe_playback(sample).pace == "4x realtime");
+    sample.realtime_factor = 2.13;
+    CHECK(describe_playback(sample).pace == "4x realtime asked, running at 2.1x");
+    sample.realtime_factor = 0.0;
+    CHECK(describe_playback(sample).pace == "4x realtime");
+}
+
+TEST_CASE("the pace control offers four paces and claims none it does not offer",
+          "[recording]")
+{
+    using revenant::ui::kPaceOptions;
+    using revenant::ui::pace_for_option;
+    using revenant::ui::pace_option_for;
+
+    // Every option there and back, so the control and the wire agree.
+    for (const std::string_view option : kPaceOptions) {
+        const auto pace = pace_for_option(option);
+        REQUIRE(pace.has_value());
+        CHECK(pace_option_for(*pace) == option);
+    }
+    CHECK(pace_for_option("max") == 0.0);
+
+    // Rejects: rounding a pace=3 from a typed URI to the nearest segment,
+    // which would fill a segment claiming a pace that is not in force.
+    CHECK(pace_option_for(3.0).empty());
+    CHECK(pace_option_for(0.5).empty());
+    CHECK_FALSE(pace_for_option("3x").has_value());
 }
 
 TEST_CASE("the end is every sample delivered, or an engine that stopped", "[recording]")

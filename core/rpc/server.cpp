@@ -2272,10 +2272,24 @@ public:
                       "chose to it rather than composing one from scratch"});
         }
 
-        if (auto opened = owner_.open_source(std::string_view(uri.begin(), uri.size()));
-            !opened) {
+        // A RECORDING OPENED FROM A WINDOW PLAYS AT REALTIME unless its URI
+        // says otherwise. Here and not in Engine::open_source, because the
+        // engine's command-line source is opened there too and --pace is how
+        // that one is paced. source::with_default_file_pace has the reason.
+        const std::string paced =
+            source::with_default_file_pace(std::string_view(uri.begin(), uri.size()), "1");
+        if (auto opened = owner_.open_source(paced); !opened) {
             return to_exception(opened.error());
         }
+        return kj::READY_NOW;
+    }
+
+    kj::Promise<void> setSourcePace(SetSourcePaceContext context) override {
+        auto paced = owner_.engine().set_source_pace(context.getParams().getPace());
+        if (!paced) {
+            return to_exception(paced.error());
+        }
+        context.getResults().setPaced(*paced);
         return kj::READY_NOW;
     }
 

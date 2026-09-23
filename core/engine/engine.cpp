@@ -145,6 +145,7 @@ public:
                 config.pace));
         }
         config_ = config;
+        pace_.store(config.pace, std::memory_order_release);
 
         gpu::Context::Options options;
         options.device_index = config.gpu_index;
@@ -487,6 +488,10 @@ public:
         // a gap would be a stream nobody could ever produce a sample for.
         ++info_.source_epoch;
 
+        // The source's own pace when it has one, a file opened with pace=,
+        // and the configured one when it has none.
+        pace_.store(source_->own_pace().value_or(config_.pace), std::memory_order_release);
+
         // The starting point, and set_source_center keeps it current from
         // here on.
         //
@@ -610,6 +615,9 @@ public:
         prototype_ = dsp::PrototypeFilter{};
         block_samples_ = 0;
         clamp_note_.clear();
+
+        // A pace set on the closed source was that source's.
+        pace_.store(config_.pace, std::memory_order_release);
 
         corrected_ = nullptr;
         calibration_key_.clear();
@@ -957,7 +965,7 @@ public:
 
     [[nodiscard]] SourcePacing source_pacing() const override {
         SourcePacing out;
-        out.paced_by = config_.pace;
+        out.paced_by = pace_.load(std::memory_order_acquire);
         out.demand = capabilities_.flow == source::FlowControl::Demand;
         if (source_ == nullptr) {
             return out;
@@ -997,6 +1005,31 @@ public:
         out.realtime_factor = measured.factor;
         out.window_seconds = measured.window_seconds;
         return out;
+    }
+
+    [[nodiscard]] Expected<double> set_source_pace(double pace) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (source_ == nullptr) {
+            return fail("Engine::set_source_pace before a source is open: a pace belongs to the "
+                        "source it times");
+        }
+        if (!std::isfinite(pace) || pace < 0.0) {
+            return fail(std::format(
+                "pace must be zero for unthrottled or a positive multiple of realtime, got {}",
+                pace));
+        }
+        if (capabilities_.flow != source::FlowControl::Demand) {
+            return fail(std::format(
+                "'{}' runs on its own device's clock, so there is no pace to set: a live radio "
+                "delivers at the rate it samples at",
+                capabilities_.display_name.empty() ? capabilities_.uri
+                                                   : capabilities_.display_name));
+        }
+        if (auto set = source_->set_pace(pace); !set) {
+            return std::unexpected(with_context(set.error(), "Engine::set_source_pace"));
+        }
+        pace_.store(pace, std::memory_order_release);
+        return pace;
     }
 
     // A control call on the source, with whatever the source counted as lost
@@ -1221,9 +1254,10 @@ public:
         // mode: it is what happens when nothing is holding a stopwatch, and
         // the only thing setting the pace is then the graph's blocking
         // reserve. A caller monitoring a capture on a loudspeaker asks for a
-        // stopwatch by setting EngineConfig::pace, which the source honours
-        // and the engine does nothing else with.
-        options.pace = config_.pace;
+        // stopwatch by setting EngineConfig::pace, or a file's pace=, or
+        // set_source_pace, which the source honours and the engine does
+        // nothing else with.
+        options.pace = pace_.load(std::memory_order_acquire);
 
         Graph* graph = graph_.get();
         auto started = source_->start(options, [graph](const source::SourceBlock& block) {
@@ -1508,6 +1542,10 @@ private:
     // steady_clock question, and docs/conventions.md keeps the DSP path off
     // any clock at all.
     std::atomic<std::int64_t> stream_start_ns_{0};
+
+    // The pace in force: SourcePacing::paced_by has the rule. Atomic because
+    // source_pacing reads it from whatever thread polls, unlocked.
+    std::atomic<double> pace_{0.0};
     std::atomic<std::int64_t> stream_stop_ns_{0};
 
     // The realtime factor's window: see core/engine/pacing_window.h. run()'s

@@ -224,6 +224,14 @@ struct RecordingPlan {
         append("center", std::to_string(plan.center_hz));
     }
 
+    // REALTIME, SAID RATHER THAN LEFT TO THE ENGINE. openSource adds pace=1
+    // to a file with none since 2026-09-23, and an engine from before that
+    // took its own --pace instead, which for one started for the dongle is 0
+    // and replays the recording at hundreds of times realtime. An engine that
+    // predates pace= refuses the key by name, which is a sentence in the
+    // strip rather than a recording played as a burst.
+    append("pace", "1");
+
     plan.uri = std::move(uri);
     plan.ready = true;
     return plan;

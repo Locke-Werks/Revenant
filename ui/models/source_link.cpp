@@ -684,6 +684,12 @@ void EngineLink::openSource(const QString& uri)
 
     source_fault_.clear();
     emit sourcesChanged();
+
+    // A refused pace was about the source this open replaces.
+    if (!pace_fault_.isEmpty()) {
+        pace_fault_.clear();
+        emit pacingChanged();
+    }
 }
 
 void EngineLink::closeSource()

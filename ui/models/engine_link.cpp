@@ -234,6 +234,7 @@ void EngineLink::supervise()
             apply_source_request();
             apply_source_tune();
             apply_calibration();
+            apply_source_pace();
 
             // Then the receiver work. A drag posts a request and wakes this
             // loop immediately rather than waiting out the poll interval,
@@ -358,6 +359,7 @@ void EngineLink::supervise()
             // about to be closed.
             apply_source_gain();
             apply_calibration();
+            apply_source_pace();
 
             apply_receiver_request();
 

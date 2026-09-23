@@ -739,9 +739,9 @@ class EngineLink : public QObject {
     // near the volume slider is the only thing that said anything at all.
     //
     // realtimeFactor is samples of capture per wall second over the source
-    // rate. sourcePacedBy is the --pace setting, zero for unthrottled, and
+    // rate. sourcePacedBy is the pace in force, zero for unthrottled, and
     // it is here because a factor of 0.5 means opposite things depending
-    // on whether anybody asked for it.
+    // on whether anybody asked for it. setSourcePace changes it.
     //
     // POLLED, NOT CONSTANT, unlike the rest of EngineInfo. It is a
     // measurement and it moves, so it is re-read on the probe pass once a
@@ -750,6 +750,10 @@ class EngineLink : public QObject {
     // measurement noise is worse than no line at all.
     Q_PROPERTY(double realtimeFactor READ realtimeFactor NOTIFY pacingChanged)
     Q_PROPERTY(double sourcePacedBy READ sourcePacedBy NOTIFY pacingChanged)
+
+    // What the engine said when it refused the last setSourcePace, and empty
+    // once one lands. Its own field for the reason tuneFault is.
+    Q_PROPERTY(QString sourcePaceFault READ sourcePaceFault NOTIFY pacingChanged)
 
     // The wire carries the measurement at all. False against an engine
     // built before the field existed, and it is what stops a missing
@@ -1596,6 +1600,7 @@ public:
 
     [[nodiscard]] double realtimeFactor() const { return pacing_.realtime_factor; }
     [[nodiscard]] double sourcePacedBy() const { return pacing_.paced_by; }
+    [[nodiscard]] QString sourcePaceFault() const { return pace_fault_; }
     [[nodiscard]] bool pacingCarried() const { return pacing_.carried; }
     [[nodiscard]] QString pacingText() const { return pacing_text_; }
     [[nodiscard]] bool sourceBehind() const { return pacing_is_fault(pacing_verdict_); }
@@ -1812,6 +1817,13 @@ public:
     // measurement of what the RTL-SDR's own AGC did to the detector's track
     // list, and whether it is right depends on the antenna.
     Q_INVOKABLE void setSourceGainAuto(bool on);
+
+    // How fast the open recording plays, as a multiple of realtime, zero for
+    // as fast as the engine goes. Posted to the supervisor like the gain,
+    // because it is a round trip; sourcePacedBy moves when the engine
+    // answers, and sourcePaceFault carries a refusal. Implemented in
+    // pace_link.cpp.
+    Q_INVOKABLE void setSourcePace(double pace);
 
     // Opens what the picker composed, closing whatever is open first.
     //
@@ -3567,6 +3579,23 @@ private:
 
     // Qt thread. Posts settings for the supervisor.
     void post_calibration(const rpc::CalibrationSettings& settings);
+
+    // Supervisor thread, then the Qt thread: a pace setSourcePace posted, and
+    // the engine's answer. See pace_link.cpp.
+    void apply_source_pace();
+    void adopt_source_pace();
+
+    // ---- the recording's pace --------------------------------------------
+    std::mutex pace_mutex_;
+    bool want_pace_ = false;              // guarded by pace_mutex_
+    double want_pace_value_ = 0.0;        // guarded by pace_mutex_
+    bool handover_has_pace_ = false;      // guarded by pace_mutex_
+    bool handover_pace_granted_ = false;  // guarded by pace_mutex_
+    double handover_pace_ = 0.0;          // guarded by pace_mutex_
+    QString handover_pace_fault_;         // guarded by pace_mutex_
+
+    // Qt thread only.
+    QString pace_fault_;
 
     // ---- calibration ---------------------------------------------------
     //

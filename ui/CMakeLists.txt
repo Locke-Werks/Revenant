@@ -204,6 +204,7 @@ qt_add_executable(revenant_ui
     models/receiver_palette.h
     models/receiver_rack.h
     models/open_source_link.cpp
+    models/pace_link.cpp
     models/recent_recordings.h
     models/recording_header.h
     models/recording_link.cpp

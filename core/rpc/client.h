@@ -209,6 +209,12 @@ public:
     // where GainStage::has_auto says the device will do it.
     [[nodiscard]] virtual Status set_source_gain_auto(std::string_view stage, bool on) = 0;
 
+    // How fast the open source plays, as a multiple of realtime with zero for
+    // unthrottled, answering with the pace now in force. EngineInfo's
+    // source_paced_by reads it back. Refused on a live radio and on anything
+    // but a file, in the engine's words; nothing else moves.
+    [[nodiscard]] virtual Expected<double> set_source_pace(double pace) = 0;
+
     // What the OPEN source can do, which is a different question from what
     // list_sources answers.
     //

@@ -591,6 +591,127 @@ TEST_CASE("a sink error stops the stream and is returned from stop", "[source][m
 }
 
 // ---------------------------------------------------------------------------
+// A file's own pace
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a file's pace= is its own and a bad one is refused", "[source]") {
+    const ScratchCapture capture(10'000);
+    const std::string base = capture.uri(2'400'000);
+
+    // None stated takes the caller's StreamOptions::pace, which is what every
+    // URI written before pace= existed still gets.
+    auto plain = source::open_source(base);
+    REQUIRE(plain.has_value());
+    CHECK_FALSE((*plain)->own_pace().has_value());
+
+    auto four = source::open_source(base + "&pace=4");
+    INFO(test::message_of(four));
+    REQUIRE(four.has_value());
+    CHECK((*four)->own_pace() == 4.0);
+
+    // max is what a person typing the URI means by zero.
+    for (const char* spelling : {"max", "MAX", "0"}) {
+        auto flat_out = source::open_source(base + "&pace=" + spelling);
+        INFO(spelling);
+        REQUIRE(flat_out.has_value());
+        CHECK((*flat_out)->own_pace() == 0.0);
+    }
+
+    for (const char* bad : {"-1", "fast", "inf", ""}) {
+        auto refused = source::open_source(base + "&pace=" + bad);
+        INFO("pace=" << bad);
+        REQUIRE_FALSE(refused.has_value());
+        CHECK(refused.error().message.find("pace") != std::string::npos);
+    }
+}
+
+TEST_CASE("a file plays at its pace and a change restarts the stopwatch", "[source]") {
+    // Two seconds of capture at 100 kS/s, opened at ten times realtime, so
+    // 50000 samples are out 50 ms in. The pace then drops to realtime.
+    //
+    // THE STOPWATCH IS WHAT THIS IS ABOUT. Timed from the stream's start at
+    // the new pace, sample 50000 is not due until 0.5 s, so the stream would
+    // go silent for 0.45 s while the clock caught up with where it already
+    // was. Restarted at the change, it goes on at realtime at once: 20000
+    // more samples in the next 200 ms, where the old origin gives none.
+    constexpr dsp::SampleRate kRate = 100'000;
+    const ScratchCapture capture(static_cast<std::size_t>(2 * kRate));
+
+    auto opened = source::open_source(capture.uri(kRate) + "&pace=10");
+    REQUIRE(opened.has_value());
+
+    source::StreamOptions options;
+    options.block_samples = 1000;
+
+    // Unthrottled in the options, which the URI's pace overrides.
+    options.pace = 0.0;
+
+    std::atomic<std::uint64_t> delivered{0};
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE((*opened)
+                ->start(options,
+                        [&](const source::SourceBlock& block) -> Status {
+                            delivered.fetch_add(block.sample_count, std::memory_order_relaxed);
+                            return {};
+                        })
+                .has_value());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    REQUIRE((*opened)->set_pace(1.0).has_value());
+    const std::uint64_t at_change = delivered.load(std::memory_order_relaxed);
+    CHECK((*opened)->own_pace() == 1.0);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const std::uint64_t after = delivered.load(std::memory_order_relaxed);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+    // Stopped here rather than played out, which at realtime would be most of
+    // two seconds for nothing more to check.
+    REQUIRE((*opened)->stop().has_value());
+    INFO(at_change << " samples at the change, " << after << " 200 ms later, " << seconds
+                   << " s in");
+
+    // Ten times realtime before the change, and neither realtime nor flat out:
+    // 50000 samples, with room either way for the sleep's granularity.
+    CHECK(at_change >= 30'000);
+    CHECK(at_change <= 100'000);
+
+    // Realtime from the change on: 20000 in 200 ms, where timing from the
+    // old origin would have delivered nothing.
+    CHECK(after - at_change >= 12'000);
+    CHECK(after - at_change <= 28'000);
+
+    // And a negative pace is refused rather than read as flat out.
+    CHECK_FALSE((*opened)->set_pace(-1.0).has_value());
+}
+
+TEST_CASE("a client's open gets pace=1 on a file and nothing else", "[source]") {
+    using source::with_default_file_pace;
+
+    CHECK(with_default_file_pace("file:///C:/x.cf32?rate=2400000", "1") ==
+          "file:///C:/x.cf32?rate=2400000&pace=1");
+    CHECK(with_default_file_pace("file:///C:/x.wav", "1") == "file:///C:/x.wav?pace=1");
+    CHECK(with_default_file_pace("file:///C:/x.wav?", "1") == "file:///C:/x.wav?pace=1");
+    CHECK(with_default_file_pace("FILE:///C:/x.wav", "1") == "FILE:///C:/x.wav?pace=1");
+
+    // A pace already stated is the caller's, including one asking for flat out.
+    CHECK(with_default_file_pace("file:///C:/x.wav?pace=max", "1") ==
+          "file:///C:/x.wav?pace=max");
+    CHECK(with_default_file_pace("file:///C:/x.wav?pace=4&center=7100000", "1") ==
+          "file:///C:/x.wav?pace=4&center=7100000");
+
+    // Not a file: a synthetic scene and a radio are the host's to pace.
+    CHECK(with_default_file_pace("synthetic:wideband?rate=2400000", "1") ==
+          "synthetic:wideband?rate=2400000");
+    CHECK(with_default_file_pace("rtlsdr://0?freq=98.1M", "1") == "rtlsdr://0?freq=98.1M");
+
+    // Unreadable goes back as it came, for the open to refuse in its own words.
+    CHECK(with_default_file_pace("file:///C:/x.wav?rate", "1") == "file:///C:/x.wav?rate");
+    CHECK(with_default_file_pace("nonsense", "1") == "nonsense");
+}
+
+// ---------------------------------------------------------------------------
 // Containers: SigMF
 // ---------------------------------------------------------------------------
 

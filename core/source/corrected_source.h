@@ -47,6 +47,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <utility>
 
@@ -96,6 +97,8 @@ public:
     [[nodiscard]] bool running() const override { return inner_->running(); }
     [[nodiscard]] Status seek(dsp::SampleIndex index) override { return inner_->seek(index); }
     [[nodiscard]] SourceStats stats() const override { return inner_->stats(); }
+    [[nodiscard]] std::optional<double> own_pace() const override { return inner_->own_pace(); }
+    [[nodiscard]] Status set_pace(double pace) override { return inner_->set_pace(pace); }
 
     // The inner source's, with ppm_error filled from the correction when the
     // source had nothing better to say. A measured correction is a statement

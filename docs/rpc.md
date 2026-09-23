@@ -1092,11 +1092,14 @@ samples were never produced. The number itself existed, in
 `revenant-engine`'s own status line as `x 0.20`, in a terminal a GUI operator
 never sees.
 
-The second is the `--pace` the engine was started with, and the pair is the
-point. A factor of 0.5 is a source that cannot keep up when the pace is zero,
-and is exactly what was asked for when the pace is 0.5. A client that drew
-one without the other would raise an alarm on every deliberate half-speed
-replay.
+The second is the pace in force, and the pair is the point. A factor of 0.5 is
+a source that cannot keep up when the pace is zero, and is exactly what was
+asked for when the pace is 0.5. A client that drew one without the other would
+raise an alarm on every deliberate half-speed replay. Which pace is in force,
+and how a client changes it, is the next section.
+
+WHAT THIS PARAGRAPH USED TO SAY, before 2026-09-23: "The second is the
+`--pace` the engine was started with". Nothing else could set it then.
 
 Zero in the factor means **not measured**, which is a third state and not a
 stalled source: it is what `info()` answers between opening the source and
@@ -1136,6 +1139,50 @@ audio was not: after N retunes in T seconds the factor was (T - 0.33 N) / T.
 
 An engine built before the window sends `realtimeWindowSeconds` as zero, and
 the client does not call a source behind on that engine's lifetime mean.
+
+### A recording a client opens plays at realtime
+
+Pace used to be `EngineConfig::pace`, set once by `revenant-engine --pace`, and
+nothing on the wire could change it. The engine a window talks to is usually
+the one started for the dongle, at the default `--pace 0`, so a recording
+opened from the radio panel played as fast as the GPU retired it, measured at
+319x realtime, and was heard as a burst.
+
+**The rule.** A file source carries its own pace, `pace=` in its URI: `1` for
+realtime, any positive factor, `0` or `max` for unthrottled. A file with one
+runs at it whatever `--pace` says. `openSource` adds `pace=1` to a file URI
+that has none, because a person listening is the reason to open a recording
+from a window, so a file opened over the wire plays at realtime unless its URI
+asks otherwise. The engine's own command-line source is not opened through
+`openSource` and keeps `--pace`, so a headless recorder or a test run
+unthrottled is unchanged; a command-line file URI with `pace=` still wins over
+`--pace`. Synthetic scenes and radios are never given a default: a scene is the
+host's to pace, and a radio's crystal sets its rate.
+
+`source::with_default_file_pace` in `core/source/registry.h` is the rule,
+applied in `Session.openSource`. The URI the engine then opened, with the
+`pace=1` in it, is what `SourceDescriptor::uri` reports, so a session written
+down from it replays at the same pace.
+
+**Changing it.** `Session.setSourcePace` sets the open source's pace and
+answers with the pace in force, which `sourcePacedBy` then reports. It applies
+from the next block and the stopwatch restarts there: timed from the old
+origin, a stream sped up would deliver the minutes it was suddenly behind in a
+burst, and one slowed down would go silent until the clock caught up with
+where it already was. It is refused with no source open, on a Paced source,
+and on a source that cannot change its pace while it runs, which today is
+every source but a file. Nothing else moves: not a receiver, not a
+subscription, and not `sourceEpoch`.
+
+`tests/rpc/test_rpc_pace.cpp` measures it through `realtimeFactor` on an engine
+started at pace 0, once the two-second window has filled, within 3 percent: a
+file opened over the wire with no `pace=` plays at 1.00x, one with `pace=4` at
+4.00x, and `setSourcePace(4)` on a playing file moves it to 4.00x with the
+epoch unchanged. Measured on the RTX 4090 on 2026-09-23 over two runs, a
+256000 S/s recording in 4096-sample blocks: 1.0000x to 1.0008x with no
+`pace=`, 4.0006x to 4.0024x with `pace=4`, and 4.0017x to 4.0031x after
+`setSourcePace(4)`. `tests/engine/test_sources.cpp` has the stopwatch restart
+at the source.
 
 ### A clamped passband says so in words, and an FM one is refused instead
 

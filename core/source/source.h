@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -83,6 +84,9 @@ struct StreamOptions {
     // Demand sources only. 0 is unthrottled, which is the default and what
     // every test and the milestone exit criterion use. 1.0 paces to realtime,
     // which a GUI replaying a capture wants and nothing else does.
+    //
+    // A source that carries a pace of its own, a file whose URI stated pace=,
+    // runs at that and ignores this. See Source::own_pace.
     double pace = 0.0;
 };
 
@@ -148,6 +152,31 @@ public:
 
     [[nodiscard]] virtual SourceStats stats() const = 0;
     [[nodiscard]] virtual ClockQuality clock() const = 0;
+
+    // The pace this source runs at whatever StreamOptions::pace says, as a
+    // multiple of realtime with zero for unthrottled, or nothing when it takes
+    // the caller's.
+    //
+    // WHY A SOURCE CARRIES ONE AT ALL. Pace used to be the host's alone,
+    // EngineConfig::pace from revenant-engine's --pace, fixed at startup. An
+    // engine started for a dongle runs at --pace 0, and a recording a client
+    // opened on it then played as fast as the GPU retired it, measured at 319x
+    // realtime. A file's URI can now say pace=, so the recording decides how
+    // fast it plays rather than the process it happened to be opened in.
+    //
+    // Virtual with a default rather than pure, so the backends and the test
+    // sources that have no pace of their own need say nothing.
+    [[nodiscard]] virtual std::optional<double> own_pace() const { return std::nullopt; }
+
+    // Sets the pace from now on, running or not, and makes it the source's own
+    // so a later start keeps it. Refused on a source that cannot honour one,
+    // which is every Paced source: the device's crystal is the clock there.
+    [[nodiscard]] virtual Status set_pace(double pace) {
+        static_cast<void>(pace);
+        return fail("this source does not take a pace. A live device runs on its own clock, "
+                    "and of the sources that do not, only a file can change its pace while it "
+                    "plays");
+    }
 
 protected:
     Source() = default;

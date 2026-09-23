@@ -122,6 +122,9 @@ public:
     [[nodiscard]] engine::SourcePacing source_pacing() const override {
         return inner_->source_pacing();
     }
+    [[nodiscard]] Expected<double> set_source_pace(double pace) override {
+        return inner_->set_source_pace(pace);
+    }
 
     [[nodiscard]] Expected<engine::VrxId> add_vrx(const engine::VrxParams& params) override {
         return inner_->add_vrx(params);

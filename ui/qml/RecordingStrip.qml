@@ -1,15 +1,21 @@
 // What the window says while the engine has a recording open: its name, how
-// far through it the engine is, what paces it, and that it plays once.
+// far through it the engine is, the pace in force with a control to change
+// it, and that it plays once.
 //
 // A STRIP UNDER THE TOP BAR, THERE ONLY WHILE A RECORDING IS OPEN, in the
 // shape of the fault strip below it: a radio session pays nothing for it, and
 // the bar above keeps its width for the dial and the band buttons it already
 // fills at 1280 pixels.
 //
-// A READOUT AND NOT A TRANSPORT. The wire has no seek, no pace control and no
-// loop, and ui/models/recording_status.h records each of those; a scrub bar or
-// a speed menu here would be a control nothing could apply. The progress is a
-// two-pixel line for that reason rather than a slider with a handle.
+// A READOUT WITH ONE CONTROL. The pace is the one thing the wire lets a client
+// change while a recording plays, Session.setSourcePace, so it gets 1x, 2x, 4x
+// and max. There is no seek and no loop on the wire, and
+// ui/models/recording_status.h records both; a scrub bar here would be a
+// control nothing could apply, so the progress is a two-pixel line rather
+// than a slider with a handle.
+//
+// WHAT THIS NOTE USED TO SAY, before 2026-09-23: "The wire has no seek, no
+// pace control and no loop".
 
 import QtQuick
 import QtQuick.Controls
@@ -88,6 +94,22 @@ Rectangle {
             text: recordingLink.paceText
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
+        }
+
+        // Filled from what the engine says is in force, so a pick shows when
+        // it has landed and a pace this does not offer fills nothing.
+        RSegmented {
+            visible: !recordingLink.ended
+            options: recordingLink.paceOptions
+            current: recordingLink.paceOption
+            onPicked: option => recordingLink.setPace(option)
+        }
+
+        StatusChip {
+            visible: recordingLink.paceFault.length > 0
+            label: "pace refused"
+            detail: recordingLink.paceFault
+            ink: Theme.inkWarn
         }
 
         Label {

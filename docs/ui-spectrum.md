@@ -531,8 +531,8 @@ not restated. `ui/models/recording_plan.h` has these rules, and a SigMF
 recording that retunes is refused there because the engine opens one of its
 segments only when `segment=` names it and this section does not offer that.
 
-**Opening** builds `file:///C:/...?center=...` (with `rate=` and `format=` for
-raw) and hands it to `EngineLink::openSource`, the call and the close-then-open
+**Opening** builds `file:///C:/...?center=...&pace=1` (with `rate=` and
+`format=` for raw) and hands it to `EngineLink::openSource`, the call and the close-then-open
 the radios use. Receivers, audio, decoders, RDS and the detector go, the
 waterfall starts again and `sourceEpoch` tells the window its indices
 restarted, exactly as on a radio change; opening a radio from the list above
@@ -544,19 +544,31 @@ records the epoch it opened on.
 
 **While one plays**, a strip under the top bar, there only while a recording
 is open, gives its name, its position against its length on a two-pixel line,
-what paces it, and "plays once". It is a readout and not a transport, because
-three things are not on the wire and are not drawn as though they were:
+the pace in force, a 1x, 2x, 4x and max control, and "plays once".
+
+- **Pace.** The section sends `pace=1`, and `openSource` adds it to a file URI
+  with none, so a recording plays at realtime on an engine started for the
+  dongle at `--pace 0`. Before that it played at the engine's `--pace`, which
+  there replayed a recording as fast as the GPU retired it, measured at 319x
+  realtime on the 60 s excerpt over a synthetic scene. The control sends
+  `Session.setSourcePace` and fills the segment the engine then reports in
+  `sourcePacedBy`, so a pick shows when it has landed and a `pace=3` typed
+  into a URI fills none. The text beside it is the pace in force, plus what
+  the source reaches only where that says something: "max, 11.8x", or "4x
+  realtime asked, running at 2.1x" for a source that cannot keep up.
+  `docs/rpc.md`, "A recording a client opens plays at realtime", has the rule.
+
+Two things are not on the wire and are not drawn as though they were:
 
 - **Seek.** `SourceDescriptor::seekable` is true for a file and its note in
   `core/rpc/revenant.capnp` says nothing seeks yet. The position is a readout.
-- **Pace.** `sourcePacedBy` is the `--pace` the engine was started with and
-  nothing on the wire sets it. A file opened from the window plays at that
-  pace: an engine started for a dongle at the default `--pace 0` replays a
-  recording as fast as the GPU retires it, measured at 319x realtime on the
-  60 s excerpt over a synthetic scene, and the strip then says "unthrottled"
-  and the factor. Start the engine with `--pace 1` to listen to a recording.
 - **Loop.** The file backend's URI grammar has no loop key and the source
   ends when the bytes do.
+
+WHAT THIS PARAGRAPH USED TO SAY, before 2026-09-23, under **Pace**:
+"`sourcePacedBy` is the `--pace` the engine was started with and nothing on
+the wire sets it", and "Start the engine with `--pace 1` to listen to a
+recording."
 
 **At the end** the strip says "ended at" the length, and the engine keeps
 serving. Until 2026-09-23 `revenant-engine` exited when any source ran out,
@@ -1006,7 +1018,8 @@ and the half the worked example above uses, is unreachable by construction.
 The section on the fine-tuning display states the same rounding rule a page
 earlier, which is where the contradiction should have been caught.
 
-Three further things sit under that, and together they close the route:
+Three further things sat under that. The first two still do, and they close
+the route:
 
 **`Fd` is not a knob.** Nothing in `VrxParams` sets it. It is derived from
 the mode, the bandwidth and the CW pitch through `minimum_demod_rate`. The
@@ -1022,11 +1035,16 @@ grid has `Fc = 625 kHz` and fits; a 2.4 MS/s dongle capture on the same grid
 has `Fc = 75 kHz` and does not. Slow scrub would fail first on exactly the
 recordings anybody actually has.
 
-**`pace` is not live either.** `EngineConfig` is consumed at `Engine::create`,
-and the file source's copy is a plain non-atomic double written once in
-`start()` and read on the delivery thread. Changing `k` today means stopping
-and restarting the source. Making it live is an atomic and a memory-ordering
-rule, not a parameter pass.
+**`pace` is live now, and only upwards of zero.** `Engine::set_source_pace`
+and `Session.setSourcePace` change a file's pace while it plays; the file
+source holds it in an atomic, reads it once a block, and restarts its
+stopwatch at a change, which is the behaviour a scrub wants too.
+
+WHAT THIS PARAGRAPH USED TO SAY, before 2026-09-23: "**`pace` is not live
+either.** `EngineConfig` is consumed at `Engine::create`, and the file
+source's copy is a plain non-atomic double written once in `start()` and read
+on the delivery thread. Changing `k` today means stopping and restarting the
+source."
 
 And a fourth, which is about the gesture rather than the plumbing: **`pace`
 is validated non-negative everywhere**, so a backwards scrub, the single most
@@ -1074,10 +1092,15 @@ so "live sources do not scrub" is already true and already well worded.
 
 What is missing is the way through. `Engine` takes ownership of the source at
 `open_source` and exposes only its capabilities and its stats: there is no
-`seek`, no `tune`, no live `pace`, and no accessor that would let a caller
-reach past it. Horizontal scroll over the wide display needs one new surface
-and vertical scroll needs two more. Naming one of them and stopping, which an
-earlier draft of this section did, understates the work by two thirds.
+`seek` and no accessor that would let a caller reach past it. A tune arrived
+as `set_source_center` and a live pace as `set_source_pace`, so horizontal
+scroll, which tunes, has its surface, and vertical scroll, which scrubs, still
+needs the seek.
+
+WHAT THIS PARAGRAPH USED TO SAY: "there is no `seek`, no `tune`, no live
+`pace`, and no accessor that would let a caller reach past it. Horizontal
+scroll over the wide display needs one new surface and vertical scroll needs
+two more."
 
 ## AFT
 

@@ -179,6 +179,10 @@ struct EngineConfig {
     // audio a loudspeaker cannot accept, and what the listener hears is the
     // monitor's backlog being trimmed rather than the recording. A Paced
     // source ignores this, because its own hardware already sets the rate.
+    //
+    // A DEFAULT, NOT THE LAST WORD. A file whose URI states pace= runs at that
+    // (Source::own_pace), and set_source_pace changes it while a source is
+    // open. SourcePacing::paced_by is what is in force.
     double pace = 0.0;
 
     // Points in the full-span spectrum's per-channel transform. Zero, the
@@ -702,7 +706,12 @@ struct SourcePacing {
     // keeps growing while the sample count does not."
     double realtime_factor = 0.0;
 
-    // EngineConfig::pace, echoed. Zero is unthrottled.
+    // The pace in force, zero for unthrottled: the source's own when it has
+    // one, a file's pace= (Source::own_pace), and EngineConfig::pace when it
+    // has none, until set_source_pace changes it.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "EngineConfig::pace, echoed." True until
+    // a file could carry its own pace and a client could change it.
     //
     // CARRIED BESIDE THE MEASUREMENT BECAUSE THE MEASUREMENT ALONE CANNOT
     // TELL A FAULT FROM A SETTING. A factor of 0.5 is a source that cannot
@@ -1512,6 +1521,19 @@ public:
     // cannot keep up from one that was deliberately throttled.
     [[nodiscard]] virtual SourcePacing source_pacing() const = 0;
 
+    // Changes how fast the open source plays, as a multiple of realtime with
+    // zero for unthrottled, and answers with the pace now in force. Applies
+    // from the next block, running or not, and the stopwatch restarts there,
+    // so a change never makes the stream catch up.
+    //
+    // Refused before a source is open, on a Paced source, whose device sets
+    // the rate, and in the source's own words on one that cannot change it,
+    // which is every source but a file today. The pace is the source's until
+    // it is closed; the next one starts from its own again.
+    //
+    // Virtual with a refusal rather than pure, for the reason submit_probe is.
+    [[nodiscard]] virtual Expected<double> set_source_pace(double pace);
+
     // Adding a receiver must not rebuild the coarse stage, and nothing in
     // VrxParams appears in GridParams, so it cannot.
     //
@@ -1714,6 +1736,11 @@ inline ProbeStats Engine::probe_stats() const { return {}; }
 inline Expected<CalibrationState> Engine::calibration() const {
     return fail("this engine keeps no calibration: it was written before "
                 "core/source/calibration.h existed");
+}
+
+inline Expected<double> Engine::set_source_pace(double) {
+    return fail("this engine cannot change a source's pace: it was written before "
+                "Engine::set_source_pace existed");
 }
 
 inline Expected<CalibrationState> Engine::set_calibration(const source::DeviceCalibration&) {

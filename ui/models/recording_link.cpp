@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <QDir>
@@ -306,6 +307,22 @@ void RecordingLink::open()
     emit recentChanged();
 }
 
+QStringList RecordingLink::paceOptions() const
+{
+    QStringList out;
+    for (const std::string_view option : kPaceOptions) {
+        out.append(QString::fromLatin1(option.data(), static_cast<qsizetype>(option.size())));
+    }
+    return out;
+}
+
+void RecordingLink::setPace(const QString& option)
+{
+    if (const auto pace = pace_for_option(option.toStdString())) {
+        engine_.setSourcePace(*pace);
+    }
+}
+
 QString RecordingLink::openAtStartup(const QStringList& arguments)
 {
     if (arguments.isEmpty()) {
@@ -367,6 +384,8 @@ void RecordingLink::refresh_playback()
     playing_name_ = open.value(QStringLiteral("displayName")).toString();
     position_text_ = qs(line.position);
     pace_text_ = qs(line.pace);
+    pace_option_ = qs(pace_option_for(sample.paced_by));
+    pace_fault_ = engine_.sourcePaceFault();
     ended_ = line.ended;
     fraction_ = line.fraction;
     mismatch_ = mismatch;

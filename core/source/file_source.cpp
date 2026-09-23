@@ -29,6 +29,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <system_error>
@@ -903,9 +904,19 @@ public:
     [[nodiscard]] SourceStats stats() const override;
     [[nodiscard]] ClockQuality clock() const override;
 
+    [[nodiscard]] std::optional<double> own_pace() const override;
+    [[nodiscard]] Status set_pace(double pace) override;
+
 private:
     void run();
     void join_locked();
+
+    // Sleeps until `target` or until the pace changes or a stop is asked for,
+    // whichever is first, and says whether the pace changed. In slices, so a
+    // block held for a slow pace does not hold a faster one back for its whole
+    // length.
+    [[nodiscard]] bool sleep_for_pace(std::chrono::steady_clock::time_point target,
+                                      double pace_in_force);
 
     SourceCapabilities caps_{};
     std::string path_{};
@@ -935,7 +946,13 @@ private:
     FilePtr file_{};
     std::vector<std::byte> buffer_{};
     std::size_t block_samples_ = 0;
-    double pace_ = 0.0;
+
+    // The URI's pace=, or the last set_pace. Under control_.
+    std::optional<double> own_pace_{};
+
+    // The pace in force. Atomic because set_pace moves it while the delivery
+    // loop reads it on every block.
+    std::atomic<double> pace_{0.0};
 
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
@@ -983,6 +1000,11 @@ Status FileSource::open(const FileSourceConfig& config, ResolvedFile resolved)
     length_samples_ = resolved.length_samples;
     data_offset_ = resolved.data_offset;
     anchor_ns_ = resolved.anchor_ns;
+
+    if (config.pace_given) {
+        own_pace_ = config.pace;
+        pace_.store(config.pace, std::memory_order_release);
+    }
 
     ClockModelConfig clock_config;
     clock_config.source = ClockSource::Internal;
@@ -1101,7 +1123,7 @@ Status FileSource::start(const StreamOptions& options, BlockSink sink)
 
     buffer_.assign(block * bytes_per_sample_, std::byte{0});
     block_samples_ = block;
-    pace_ = options.pace;
+    pace_.store(own_pace_.value_or(options.pace), std::memory_order_release);
     sink_ = std::move(sink);
 
     position_ = options.start_index;
@@ -1154,6 +1176,46 @@ SourceStats FileSource::stats() const
     return out;
 }
 
+std::optional<double> FileSource::own_pace() const
+{
+    std::scoped_lock lock(control_);
+    return own_pace_;
+}
+
+Status FileSource::set_pace(double pace)
+{
+    if (!std::isfinite(pace) || pace < 0.0) {
+        return fail(std::format("pace must be zero for unthrottled or a positive multiple of "
+                                "realtime, got {}",
+                                pace));
+    }
+    std::scoped_lock lock(control_);
+    own_pace_ = pace;
+    pace_.store(pace, std::memory_order_release);
+    return {};
+}
+
+bool FileSource::sleep_for_pace(std::chrono::steady_clock::time_point target,
+                                double pace_in_force)
+{
+    using Clock = std::chrono::steady_clock;
+
+    // Short enough that a change from a crawl to realtime is heard at once,
+    // long enough that a realtime stream wakes a few times a block at most.
+    constexpr auto kSlice = std::chrono::milliseconds(20);
+
+    for (auto now = Clock::now(); now < target; now = Clock::now()) {
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        if (pace_.load(std::memory_order_acquire) != pace_in_force) {
+            return true;
+        }
+        std::this_thread::sleep_until(std::min(target, now + kSlice));
+    }
+    return false;
+}
+
 ClockQuality FileSource::clock() const
 {
     // The model is immutable after open, so this reads it without a lock. The
@@ -1178,6 +1240,7 @@ void FileSource::run()
     // realtime without anything in the code saying so.
     Clock::time_point pace_origin{};
     dsp::SampleIndex pace_origin_index = 0;
+    double pace = pace_.load(std::memory_order_acquire);
 
     while (!stop_requested_.load(std::memory_order_acquire)) {
         const dsp::SampleIndex requested = pending_seek_.exchange(kNoPendingSeek,
@@ -1239,15 +1302,29 @@ void FileSource::run()
         block.dropped_before = 0;
         block.sequence = sequence;
 
-        if (pace_ > 0.0) {
-            const dsp::SampleIndex since = position_ - pace_origin_index;
-            const double nominal_ns =
-                static_cast<double>(duration_ns_of(since, rate_)) / pace_;
-            const auto target =
-                pace_origin + std::chrono::nanoseconds(static_cast<std::int64_t>(nominal_ns));
-            if (target > Clock::now()) {
-                std::this_thread::sleep_until(target);
+        // A CHANGE OF PACE RESTARTS THE STOPWATCH HERE, for the reason a seek
+        // does: timed from the old origin at the new pace, a stream sped up
+        // from realtime would find itself minutes behind and deliver them in
+        // a burst, and one slowed down would go silent until the clock caught
+        // up with where it already was.
+        for (bool changed = true; changed;) {
+            changed = false;
+            if (const double now_pace = pace_.load(std::memory_order_acquire); now_pace != pace) {
+                pace = now_pace;
+                pace_origin = Clock::now();
+                pace_origin_index = position_;
             }
+            if (pace > 0.0) {
+                const dsp::SampleIndex since = position_ - pace_origin_index;
+                const double nominal_ns =
+                    static_cast<double>(duration_ns_of(since, rate_)) / pace;
+                const auto target =
+                    pace_origin + std::chrono::nanoseconds(static_cast<std::int64_t>(nominal_ns));
+                changed = sleep_for_pace(target, pace);
+            }
+        }
+        if (stop_requested_.load(std::memory_order_acquire)) {
+            break;
         }
 
         // Allowed to block for as long as it likes. That is the backpressure,

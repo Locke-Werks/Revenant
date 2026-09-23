@@ -80,6 +80,24 @@ struct SourceDescriptor {
 // rather than played at one frequency. A value stated in both the URI and
 // the container has to agree, and the backend says which two numbers
 // disagreed rather than preferring one.
+//
+// pace= sets how fast a file plays, as a multiple of realtime: 1 to listen,
+// 4 for four times, 0 or max for as fast as the engine retires it. A file
+// with it runs at that whatever the host asked for; one without takes the
+// host's pace, which for revenant-engine is --pace. See Source::own_pace.
+//
+//   file:///D:/hf/HDSDR_20260921_140307Z_7100kHz_RF.wav?pace=1
 [[nodiscard]] Expected<std::unique_ptr<Source>> open_source(std::string_view uri);
+
+// `uri` with pace=`pace` added when it opens a file and states no pace, and
+// unchanged otherwise, including when it cannot be parsed: the open reports
+// that.
+//
+// Session.openSource puts every URI through this with "1", so a recording a
+// client opens plays at realtime unless it says otherwise. A person listening
+// is the reason to open one from a window, and the engine a window talks to
+// was most likely started for a dongle at --pace 0. The engine's own
+// command-line source is not put through it: --pace is how that one is paced.
+[[nodiscard]] std::string with_default_file_pace(std::string_view uri, std::string_view pace);
 
 }  // namespace revenant::source

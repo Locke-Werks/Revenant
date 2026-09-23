@@ -79,6 +79,14 @@ class RecordingLink : public QObject {
     Q_PROPERTY(QString playingName READ playingName NOTIFY playbackChanged)
     Q_PROPERTY(QString positionText READ positionText NOTIFY playbackChanged)
     Q_PROPERTY(QString paceText READ paceText NOTIFY playbackChanged)
+
+    // The pace control: its options, the one the engine says is in force, or
+    // empty for a pace it does not offer, and the engine's refusal of the last
+    // one picked. See kPaceOptions and pace_option_for.
+    Q_PROPERTY(QStringList paceOptions READ paceOptions CONSTANT)
+    Q_PROPERTY(QString paceOption READ paceOption NOTIFY playbackChanged)
+    Q_PROPERTY(QString paceFault READ paceFault NOTIFY playbackChanged)
+
     Q_PROPERTY(bool ended READ ended NOTIFY playbackChanged)
     Q_PROPERTY(double fraction READ fraction NOTIFY playbackChanged)
 
@@ -110,6 +118,9 @@ public:
     [[nodiscard]] QString playingName() const { return playing_name_; }
     [[nodiscard]] QString positionText() const { return position_text_; }
     [[nodiscard]] QString paceText() const { return pace_text_; }
+    [[nodiscard]] QStringList paceOptions() const;
+    [[nodiscard]] QString paceOption() const { return pace_option_; }
+    [[nodiscard]] QString paceFault() const { return pace_fault_; }
     [[nodiscard]] bool ended() const { return ended_; }
     [[nodiscard]] double fraction() const { return fraction_; }
     [[nodiscard]] QString mismatch() const { return mismatch_; }
@@ -132,6 +143,10 @@ public:
     // the top of the recent list. Does nothing when the plan is not ready,
     // which the button's enabled state already says.
     Q_INVOKABLE void open();
+
+    // One of paceOptions, sent through EngineLink::setSourcePace. The segment
+    // fills when the engine answers, not when the click lands.
+    Q_INVOKABLE void setPace(const QString& option);
 
     // --open-recording, each PATH[:CENTER] in the order given. Every one but
     // the last goes on the recent list as though it had been opened; the last
@@ -178,6 +193,8 @@ private:
     QString playing_name_;
     QString position_text_;
     QString pace_text_;
+    QString pace_option_;
+    QString pace_fault_;
     bool ended_ = false;
     double fraction_ = 0.0;
     QString mismatch_;

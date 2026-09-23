@@ -7,27 +7,30 @@
 //
 // Position is SourceStats::samplesDelivered against the open source's
 // SourceDescriptor::lengthSamples, both already on the wire. Pace is
-// EngineInfo::sourcePacedBy, the --pace the engine was STARTED with, beside
-// realtimeFactor, what it is achieving. Three things are not on the wire and
-// are not drawn as though they were:
+// EngineInfo::sourcePacedBy, the pace in force, beside realtimeFactor, what
+// it is achieving, and Session.setSourcePace changes it: the strip's 1x, 2x,
+// 4x and max. Two things are not on the wire and are not drawn as though
+// they were:
 //
 //   Seek. SourceDescriptor::seekable is true for a file, and its own note in
 //   core/rpc/revenant.capnp says "NOTHING SEEKS YET: there is no seek on this
 //   wire". The position is a readout and not a handle.
 //
-//   A pace control. sourcePacedBy is read-only, set on the engine's command
-//   line, and a file opened from this window plays at whatever that was: an
-//   engine started for a dongle with the default --pace 0 plays a recording
-//   as fast as the GPU retires it. The strip says which rather than offering
-//   a control nothing could apply.
-//
 //   Loop. The file backend's URI grammar has no loop key and the source ends
 //   when the bytes do. The strip says the recording plays once.
+//
+// WHAT THIS NOTE USED TO SAY, before 2026-09-23, under a third heading, "A
+// pace control": "sourcePacedBy is read-only, set on the engine's command
+// line, and a file opened from this window plays at whatever that was". A
+// file opened from this window plays at realtime now, because the section
+// sends pace=1 and openSource adds it when a URI does not.
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <format>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -78,7 +81,8 @@ struct PlaybackLine {
     // "12:34 / 1:02:06", or "ended at 1:02:06". Empty with no rate.
     std::string position;
 
-    // "realtime", "0.5x realtime", "unthrottled, 11.8x". Empty once ended.
+    // "realtime", "4x realtime", "max, 11.8x", "4x asked, running at 2.1x".
+    // Empty once ended.
     std::string pace;
 
     bool ended = false;
@@ -111,16 +115,68 @@ struct PlaybackLine {
     }
     line.position = format_clock(at / rate) + " / " + format_clock(sample.length / rate);
 
+    // THE PACE IN FORCE, and what it reaches only where that says something
+    // the setting does not. At max there is no setting to read, so the
+    // measurement is the pace. Paced, a reading within a tenth of the setting
+    // is the setting and is not drawn; one further below it is a source that
+    // cannot keep up, which the setting alone would hide. Nothing measured yet
+    // reads as the setting.
     if (sample.paced_by <= 0.0) {
         line.pace = sample.realtime_factor > 0.0
-                        ? std::format("unthrottled, {:.1f}x", sample.realtime_factor)
-                        : std::string("unthrottled");
-    } else if (sample.paced_by == 1.0) {
-        line.pace = "realtime";
+                        ? std::format("max, {:.1f}x", sample.realtime_factor)
+                        : std::string("max");
+        return line;
+    }
+    const std::string asked = sample.paced_by == 1.0
+                                  ? std::string("realtime")
+                                  : std::format("{:g}x realtime", sample.paced_by);
+    if (sample.realtime_factor > 0.0 && sample.realtime_factor < 0.9 * sample.paced_by) {
+        line.pace = std::format("{} asked, running at {:.1f}x", asked, sample.realtime_factor);
     } else {
-        line.pace = std::format("{:g}x realtime", sample.paced_by);
+        line.pace = asked;
     }
     return line;
+}
+
+// ---------------------------------------------------------------------------
+// The pace control
+// ---------------------------------------------------------------------------
+
+// What the strip offers, in the order it draws them. max is zero on the wire:
+// as fast as the engine retires the samples.
+inline constexpr std::array<std::string_view, 4> kPaceOptions{"1x", "2x", "4x", "max"};
+
+// The option a pace is, or empty for one the strip does not offer, a pace=3
+// typed into a URI, so no segment claims to be in force when none is.
+[[nodiscard]] inline std::string pace_option_for(double paced_by)
+{
+    if (paced_by <= 0.0) {
+        return "max";
+    }
+    for (const double offered : {1.0, 2.0, 4.0}) {
+        if (paced_by == offered) {
+            return std::format("{:g}x", offered);
+        }
+    }
+    return {};
+}
+
+// The pace an option asks for, or nothing for text that is not one.
+[[nodiscard]] inline std::optional<double> pace_for_option(std::string_view option)
+{
+    if (option == "max") {
+        return 0.0;
+    }
+    if (option == "1x") {
+        return 1.0;
+    }
+    if (option == "2x") {
+        return 2.0;
+    }
+    if (option == "4x") {
+        return 4.0;
+    }
+    return std::nullopt;
 }
 
 // What the engine opened against what the preview said it would, as a sentence

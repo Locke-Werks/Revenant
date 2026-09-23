@@ -3365,7 +3365,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                          floor ? std::format("{:.1f} s of baseband at {} S/s or more per probe",
                                              floor->seconds, floor->rate)
                                : floor.error().message);
-            if (config.pace == 0.0 &&
+            if (eng.source_pacing().paced_by == 0.0 &&
                 eng.source_capabilities().flow != source::FlowControl::Paced) {
                 std::println("                  this source is unthrottled and will outrun the "
                              "probes; --pace 1 or --realtime lets them keep up");

@@ -312,6 +312,8 @@ void print_usage()
         "  --pace <x>          Deliver at x times realtime, default 0 for unthrottled.\n"
         "                      A live radio sets its own rate and ignores this. A file\n"
         "                      or synthetic source served to a live display wants 1.\n"
+        "                      A file URI's own pace= wins, and a file a client\n"
+        "                      opens plays at 1 unless its URI says otherwise.\n"
         "\n"
         "Spectrum:\n"
         "  --spectrum <n>      Points per coarse channel in the full-span transform,\n"
@@ -921,9 +923,13 @@ void print_engine_block(const engine::Engine& eng)
     // and common use of this program and it wants exactly this setting.
     // EngineInfo::realtimeFactor and sourcePacedBy are the same fact on the
     // wire, for the operator who is looking at a GUI rather than at this.
-    if (eng.source_capabilities().flow == source::FlowControl::Demand && options.pace == 0.0) {
+    //
+    // The pace in force and not --pace, because a file whose URI says pace=
+    // runs at that whatever --pace was.
+    if (eng.source_capabilities().flow == source::FlowControl::Demand &&
+        eng.source_pacing().paced_by == 0.0) {
         std::println(stderr,
-                     "warning: '{}' is a demand source and --pace is 0, so it is asked to "
+                     "warning: '{}' is a demand source running unthrottled, so it is asked to "
                      "deliver as fast as the machine retires it rather than on a clock. "
                      "Nothing downstream paces it, so a client listening to this hears "
                      "whatever rate the source reaches, and a source that cannot reach "

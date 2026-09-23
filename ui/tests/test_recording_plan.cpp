@@ -90,7 +90,7 @@ TEST_CASE("a WAV with no centre waits for one and then sends only center=", "[re
     REQUIRE(planned.ready);
     CHECK(planned.uri ==
           "file:///C:/Users/vexam/projects/SDR Recordings/"
-          "KF4FIC_wideband_7000_7300kHz_20170821_1359UT.wav?center=7150000");
+          "KF4FIC_wideband_7000_7300kHz_20170821_1359UT.wav?center=7150000&pace=1");
     CHECK(planned.rate == 96000);
     CHECK(planned.format == RecordingFormat::Cs24);
     CHECK(planned.length_samples == 357'739'520u);
@@ -110,6 +110,9 @@ TEST_CASE("a centre the recording states is not restated, and a different one is
     REQUIRE(plain.ready);
     CHECK(plain.uri.find("center=") == std::string::npos);
     CHECK(plain.center_hz == 7'100'000);
+
+    // Realtime is still said, with nothing else to separate it from the path.
+    CHECK(plain.uri.ends_with(".wav?pace=1"));
     CHECK(plain.center_from_file);
 
     CHECK(plan_recording_open(header, centre(7'100'000)).ready);
@@ -145,7 +148,8 @@ TEST_CASE("a raw file needs a rate and a centre, and always states its format", 
     choice.rate_typed = true;
     const auto planned = plan_recording_open(header, choice);
     REQUIRE(planned.ready);
-    CHECK(planned.uri == "file:///D:/caps/x.CS16?rate=2400000&format=cs16&center=98100000");
+    CHECK(planned.uri ==
+          "file:///D:/caps/x.CS16?rate=2400000&format=cs16&center=98100000&pace=1");
     CHECK(planned.length_samples == 1000);
 
     // The operator's format wins over the extension's for a raw file, and the

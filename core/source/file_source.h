@@ -6,6 +6,10 @@
 // there is no code path that makes it so. Faster than realtime is what
 // happens when nothing is holding a stopwatch.
 //
+// A pace holds one: pace= in the URI, or StreamOptions::pace when the URI
+// states none, and set_pace while it plays. The next block after a change is
+// timed from where the stream is, so a change never makes it catch up.
+//
 // This is the backend the milestone exit criterion runs against, and the
 // reason is in the design: a synthesised scene dense enough for a fifty
 // receiver test cannot be generated in realtime on this machine, so the scene
@@ -226,6 +230,15 @@ struct FileSourceConfig {
     // recorder's tolerance states it and the anchor accuracy then grows with
     // elapsed samples rather than sitting still.
     double ppm_uncertainty = 0.0;
+
+    // How fast to play, as a multiple of realtime, zero for unthrottled.
+    //
+    // Given, it is the source's own and StreamOptions::pace is ignored; not
+    // given, the caller's StreamOptions::pace applies, which is what every
+    // URI written before pace= existed still gets. Source::own_pace has why a
+    // file carries this rather than leaving it to the host.
+    bool pace_given = false;
+    double pace = 0.0;
 };
 
 // Maps "cu8", "cs8", "cs16", "cs24", "cf32" onto the enum. Lives here rather than in

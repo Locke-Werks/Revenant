@@ -1601,3 +1601,31 @@ commit: "Put DMR back in scope in modes.md and say what licenses M17's text"
 instead: M17's Licenses page puts the specification text under the GFDL 1.3 or
     later and its embedded software listings under GPL-2.0-or-later; the
     repository's LICENSE file is plain GPL-2.0. The verdict is unchanged.
+
+phrase: sourcePacedBy is the --pace the engine was started with
+phrase: EngineInfo::sourcePacedBy, the --pace the engine was STARTED with
+phrase: The second is the --pace the engine was started with
+phrase: The --pace setting the engine was started with, as a multiple of realtime
+phrase: The engine's --pace, as a multiple of realtime
+phrase: sourcePacedBy is the --pace setting, zero for unthrottled
+retired: 2026-09-23
+commit: "Play a client's recording at realtime and change its pace from the strip"
+instead: sourcePacedBy is the pace in force: a file's pace=, 1 for a file
+    opened through openSource without one, --pace for anything else, and
+    whatever Session.setSourcePace set last; docs/rpc.md, "A recording a
+    client opens plays at realtime".
+
+phrase: sourcePacedBy is read-only, set on the engine's command line
+phrase: The wire has no seek, no pace control and no loop
+phrase: Start the engine with --pace 1 to listen to a recording
+retired: 2026-09-23
+commit: "Play a client's recording at realtime and change its pace from the strip"
+instead: Session.setSourcePace changes a playing file's pace, the recording
+    strip offers 1x, 2x, 4x and max, and a recording opened from the window
+    plays at realtime on any engine because the section sends pace=1.
+
+phrase: the file source's copy is a plain non-atomic double written once
+retired: 2026-09-23
+commit: "Play a client's recording at realtime and change its pace from the strip"
+instead: The file source holds its pace in an atomic read once a block, and
+    set_pace changes it while the stream runs, restarting the stopwatch there.

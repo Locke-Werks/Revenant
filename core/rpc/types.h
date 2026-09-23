@@ -124,8 +124,14 @@ struct EngineInfo {
     // and naming the wrong component; this is what names the right one.
     double realtime_factor = 0.0;
 
-    // The engine's --pace, as a multiple of realtime. Zero is unthrottled,
-    // and means nothing at all on a live radio, which runs on its own clock.
+    // The pace in force, as a multiple of realtime: a file's pace=, 1 for a
+    // file opened through open_source without one, the engine's --pace for
+    // anything else, and whatever set_source_pace set last. Zero is
+    // unthrottled, and means nothing at all on a live radio, which runs on its
+    // own clock.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "The engine's --pace, as a multiple of
+    // realtime."
     double source_paced_by = 0.0;
 
     // Which stream the sample indices on this connection belong to. Zero

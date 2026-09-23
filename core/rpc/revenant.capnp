@@ -331,8 +331,16 @@ struct EngineInfo {
     # because the elapsed time keeps growing while the sample count does not."
     realtimeFactor @11 :Float64;
 
-    # The --pace setting the engine was started with, as a multiple of
-    # realtime. Zero is unthrottled.
+    # The pace in force, as a multiple of realtime. Zero is unthrottled.
+    #
+    # WHICH PACE THAT IS. A file whose URI states pace= runs at that. A file
+    # opened through openSource without one runs at 1, because that call
+    # adds pace=1 to it. Any other source runs at the engine's --pace. And
+    # setSourcePace changes it while the source is open.
+    #
+    # WHAT THIS COMMENT USED TO SAY, before 2026-09-23: "The --pace setting
+    # the engine was started with, as a multiple of realtime." True while
+    # nothing but the command line could set it.
     #
     # CARRIED BESIDE THE MEASUREMENT BECAUSE THE MEASUREMENT ALONE CANNOT
     # TELL A FAULT FROM A SETTING. A realtimeFactor of 0.5 is a source that
@@ -3180,6 +3188,13 @@ interface Session {
     # AND THE SAMPLE INDICES START AGAIN. EngineInfo::sourceEpoch is what
     # separates the new stream's index zero from the old one's; read its note
     # before correlating anything across this call.
+    #
+    # A FILE OPENED HERE PLAYS AT REALTIME unless its URI says pace=. The
+    # engine adds pace=1 to a file URI with none, because a person listening
+    # is the reason to open a recording from a window, and the engine a window
+    # talks to was most likely started for a dongle at --pace 0, which would
+    # replay it as fast as the GPU retires it. pace=0 or pace=max asks for
+    # that on purpose. The engine's own command-line source keeps --pace.
     openSource @18 (uri :Text) -> ();
 
     # Closes the source, leaving an engine that openSource can be called on
@@ -3325,4 +3340,18 @@ interface Session {
     # A calibration file that could not be written is not a refusal: the
     # settings are in force, and persisted and note in the answer say so.
     setCalibration @26 (settings :CalibrationSettings) -> (calibration :Calibration);
+
+    # How fast the open source plays, as a multiple of realtime with zero for
+    # as fast as the engine retires it, answering with the pace now in force.
+    # EngineInfo::sourcePacedBy reads it back.
+    #
+    # From the next block, and the stopwatch restarts there: a stream sped up
+    # does not deliver the minutes it would have been behind in a burst, and
+    # one slowed down does not go silent while the clock catches up.
+    #
+    # Refused with no source open, on a Paced source, whose device sets the
+    # rate, and on a source that cannot change its pace while it runs, which
+    # today is everything but a file. Nothing moves but the pace: no receiver,
+    # no subscription and not sourceEpoch.
+    setSourcePace @27 (pace :Float64) -> (paced :Float64);
 }

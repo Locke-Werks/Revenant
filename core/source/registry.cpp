@@ -510,6 +510,28 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
 // Backend configuration from a URI
 // ---------------------------------------------------------------------------
 
+// A file's pace=: a positive multiple of realtime, or 0 or max for as fast as
+// the consumer retires it. "max" is there because it is what a person typing
+// the URI means by zero, and reading 0 as unthrottled rather than as stopped
+// is this project's convention and not an obvious one.
+[[nodiscard]] Expected<double> pace_from_text(std::string_view text)
+{
+    if (lowercased(text) == "max") {
+        return 0.0;
+    }
+    double value = 0.0;
+    const char* first = text.data();
+    const char* last = first + text.size();
+    const auto result = std::from_chars(first, last, value);
+    if (result.ec != std::errc{} || result.ptr != last || !std::isfinite(value) || value < 0.0) {
+        return fail(std::format(
+            "pace={} is not a pace. It takes a positive multiple of realtime, 1 to listen, or "
+            "0 or max to play as fast as the engine retires the samples",
+            text));
+    }
+    return value;
+}
+
 [[nodiscard]] Expected<FileSourceConfig> file_config_of(const ParsedUri& uri)
 {
     if (uri.body.empty()) {
@@ -561,7 +583,12 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     if (!name) {
         return std::unexpected(name.error());
     }
+    auto pace_text = query->text("pace", "");
+    if (!pace_text) {
+        return std::unexpected(pace_text.error());
+    }
 
+    const bool pace_given = query->present("pace");
     const bool anchor_given = query->present("anchor_ns");
     const bool accuracy_given = query->present("anchor_accuracy_ns");
     const bool rate_given = query->present("rate");
@@ -604,6 +631,15 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
             *segment));
     }
 
+    double pace = 0.0;
+    if (pace_given) {
+        auto parsed = pace_from_text(*pace_text);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        pace = *parsed;
+    }
+
     FileSourceConfig config;
     config.uri = uri.original;
     config.path = uri.body;
@@ -623,6 +659,8 @@ Expected<bool> Query::boolean(std::string_view key, bool fallback)
     config.anchor_accuracy_given = accuracy_given;
     config.anchor_accuracy_ns = *accuracy;
     config.ppm_uncertainty = *ppm;
+    config.pace_given = pace_given;
+    config.pace = pace;
     return config;
 }
 
@@ -1157,6 +1195,31 @@ Expected<std::unique_ptr<Source>> open_source(std::string_view uri)
 
     return fail(std::format("'{}' is not a source scheme this build knows. Known schemes are {}.",
                             parsed->scheme, known_schemes()));
+}
+
+std::string with_default_file_pace(std::string_view uri, std::string_view pace)
+{
+    // Anything this cannot read goes back as it came, because the open that
+    // follows reports it in the words it always has, and a second sentence
+    // here about the same fault would be worse than one.
+    auto parsed = split_uri(uri);
+    if (!parsed || parsed->scheme != "file") {
+        return std::string(uri);
+    }
+    auto query = Query::parse(parsed->query);
+    if (!query || query->present("pace")) {
+        return std::string(uri);
+    }
+
+    std::string out(uri);
+    if (uri.find('?') == std::string_view::npos) {
+        out.push_back('?');
+    } else if (!parsed->query.empty()) {
+        out.push_back('&');
+    }
+    out.append("pace=");
+    out.append(pace);
+    return out;
 }
 
 // ---------------------------------------------------------------------------
