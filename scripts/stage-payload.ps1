@@ -147,6 +147,15 @@ $qtLibraries = @(
     "Qt6QuickLayouts.dll"
     "Qt6QuickTemplates2.dll"
     "Qt6Svg.dll"
+
+    # QtQuick.Dialogs, for the recording section's file dialog. Kept on the
+    # import rather than on a measured load: the dialog loads these only when
+    # it opens, which the offscreen run that measured the rest never does.
+    # Qt6LabsFolderListModel is what the non-native fallback dialog imports.
+    "Qt6QuickDialogs2.dll"
+    "Qt6QuickDialogs2QuickImpl.dll"
+    "Qt6QuickDialogs2Utils.dll"
+    "Qt6LabsFolderListModel.dll"
 )
 
 # Qt Multimedia's FFmpeg backend and the libraries it loads.
@@ -203,13 +212,21 @@ $qtPlugins = @(
 # Main.qml imports QtQuick, QtQuick.Controls and QtQuick.Layouts. Controls
 # resolves its style at run time, and main.cpp pins that to Basic, which is
 # why exactly one of the seven style directories is here.
+#
+# RecordingSection.qml imports QtQuick.Dialogs for its FileDialog. On Windows
+# that is the native dialog, served by the platform plugin; QtQuick/Dialogs
+# carries its quickimpl fallback with it, which imports Qt.labs.folderlistmodel,
+# so both are here whole rather than the fallback failing at import on a
+# machine where the native one is refused.
 $qmlModules = @(
     "qml/QtQml"
     "qml/QtQuick/Controls/Basic"
     "qml/QtQuick/Controls/impl"
+    "qml/QtQuick/Dialogs"
     "qml/QtQuick/Layouts"
     "qml/QtQuick/Templates"
     "qml/QtQuick/Window"
+    "qml/Qt/labs/folderlistmodel"
 )
 
 # Files that sit at the root of a QML module directory whose subdirectories

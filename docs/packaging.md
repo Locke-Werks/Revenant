@@ -148,10 +148,23 @@ Kept, and why:
   are members of the same redistributable, are loaded on demand, and come to
   under 2 MB. Shipping a redistributable minus the parts one execution did not
   touch is how a rare path becomes a loader dialog on somebody else's machine.
-- Six QML modules copied whole, plus the loose files at the root of `QtQuick`
+- Eight QML modules copied whole, plus the loose files at the root of `QtQuick`
   and `QtQuick/Controls`. A QML module is its `qmldir`, its `.qmltypes`, its
   `.qml` files and its plugin together, and a partial copy fails at import with
   a message naming a type rather than a file.
+- `QtQuick.Dialogs` and its libraries, `Qt6QuickDialogs2`,
+  `Qt6QuickDialogs2QuickImpl` and `Qt6QuickDialogs2Utils`, since 2026-09-23,
+  for the file dialog in the picker's recording section. On Windows the dialog
+  is the native one, served by the platform plugin; the module carries a
+  drawn fallback under `quickimpl`, which imports `Qt.labs.folderlistmodel`,
+  so that module and `Qt6LabsFolderListModel` are kept too rather than the
+  fallback failing at import. These four were NOT in the measured run's module
+  list: the dialog loads them when it opens, and the offscreen run that
+  measured the rest never opens one. They are kept on the import, which
+  `scripts/stage-payload.ps1` says beside them.
+
+WHAT THE FIRST ITEM OF THAT PAIR USED TO SAY: "Six QML modules copied whole".
+The two added for the file dialog made it eight.
 
 `qtquick2plugin.dll` and `QtQml`'s `qmlplugin.dll` are in the payload and did
 not load. Their `qmldir` marks them optional and the linked Qt libraries
@@ -187,7 +200,7 @@ decision and it is not made here.
 | `opengl32sw.dll` | 19.7 MB | The software OpenGL fallback. Qt Quick's RHI defaults to Direct3D 11 on Windows, which falls back to WARP in software without this file. `QSG_RHI_BACKEND=opengl` on a machine with no OpenGL driver will not start |
 | `dxcompiler.dll` and `dxil.dll` | 15.1 MB | `QSG_RHI_BACKEND=d3d12` will not start |
 | `qmltooling` | 1.0 MB | The QML debugger and profiler, reachable only with `-qmljsdebugger` on the command line |
-| `QtQuick/Effects`, `QtQuick/Shapes` | small | `Main.qml` imports `QtQuick`, `QtQuick.Controls`, `QtQuick.Layouts` and `Revenant`, and neither of these |
+| `QtQuick/Effects`, `QtQuick/Shapes` | small | `Main.qml` imports `QtQuick`, `QtQuick.Controls`, `QtQuick.Layouts` and `Revenant`, and neither of these; `RecordingSection.qml` adds `QtQuick.Dialogs`, which is kept, and neither of these either |
 | `windowsmediaplugin.dll`, `networkinformation`, `tls`, `iconengines`, `generic/qtuiotouchplugin` | small | Unloaded in the measured run. The TLS backends matter only to `QSslSocket`, which nothing here opens: the RPC wire is plaintext Cap'n Proto over a socket |
 
 Three of those are one-line reversals in `scripts/stage-payload.ps1`. The script
