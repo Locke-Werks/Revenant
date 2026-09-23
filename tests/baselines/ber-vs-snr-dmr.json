@@ -1,0 +1,114 @@
+{
+  "commit": "9d9fde9",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 320,
+    "snr_start_db": 13.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 24.000000,
+    "trial_batch": 64,
+    "trials_per_point": 128
+  },
+  "mode": "dmr",
+  "points": [
+    {
+      "ber": 1.000000000000e+00,
+      "bit_errors": 5120,
+      "bits_total": 5120,
+      "decoded_count": 0,
+      "snr_db": 13.000000,
+      "trials": 128
+    },
+    {
+      "ber": 9.953125000000e-01,
+      "bit_errors": 5096,
+      "bits_total": 5120,
+      "decoded_count": 0,
+      "snr_db": 14.000000,
+      "trials": 128
+    },
+    {
+      "ber": 8.943359375000e-01,
+      "bit_errors": 4579,
+      "bits_total": 5120,
+      "decoded_count": 0,
+      "snr_db": 15.000000,
+      "trials": 128
+    },
+    {
+      "ber": 5.283203125000e-01,
+      "bit_errors": 2705,
+      "bits_total": 5120,
+      "decoded_count": 0,
+      "snr_db": 16.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.697265625000e-01,
+      "bit_errors": 869,
+      "bits_total": 5120,
+      "decoded_count": 0,
+      "snr_db": 17.000000,
+      "trials": 128
+    },
+    {
+      "ber": 3.437500000000e-02,
+      "bit_errors": 176,
+      "bits_total": 5120,
+      "decoded_count": 30,
+      "snr_db": 18.000000,
+      "trials": 128
+    },
+    {
+      "ber": 6.835937500000e-03,
+      "bit_errors": 35,
+      "bits_total": 5120,
+      "decoded_count": 96,
+      "snr_db": 19.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.562500000000e-03,
+      "bit_errors": 8,
+      "bits_total": 5120,
+      "decoded_count": 120,
+      "snr_db": 20.000000,
+      "trials": 128
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 5120,
+      "decoded_count": 128,
+      "snr_db": 21.000000,
+      "trials": 128
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 5120,
+      "decoded_count": 128,
+      "snr_db": 22.000000,
+      "trials": 128
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 5120,
+      "decoded_count": 128,
+      "snr_db": 23.000000,
+      "trials": 128
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 5120,
+      "decoded_count": 128,
+      "snr_db": 24.000000,
+      "trials": 128
+    }
+  ],
+  "schema": 1,
+  "subject": "dmr 4FSK at 48000 S/s, a base station channel with its CACH carrying one CSBK a slot on both timeslots; CSBK error rate against SNR in 2500 Hz"
+}

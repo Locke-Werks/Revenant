@@ -48,7 +48,8 @@ spacing shows two clusters". SITOR-B, NAVTEX, AX.25, the three POCSAG rates,
 PSK31, PSK63, QPSK31 and D-STAR were swept again the same day at commit "Limit
 FM discriminator clicks before POCSAG's level discriminator", after the fixes
 the section below records, and their baselines replaced; of those, SITOR-B's,
-POCSAG's and D-STAR's crossings moved.
+POCSAG's and D-STAR's crossings moved. DMR was added and swept the same day
+at commit "Serve DMR bursts over the wire as decoded messages".
 
 WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
 512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400, SITOR-B -1.1 dB and D-STAR
@@ -71,6 +72,7 @@ WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
 | P25 Phase 1, C4FM | bit | 0.01 | 2500 Hz | 17.9 dB | `bench sweep --mode p25p1 --seed 20260918` |
 | D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.2 dB | `bench sweep --mode dstar --seed 20260918` |
 | TETRA, pi/4-DQPSK | bit | 0.01 | 2500 Hz | 20.2 dB | `bench sweep --mode tetra --seed 20260918` |
+| DMR, CSBKs on both timeslots | frame | 0.01 | 2500 Hz | 18.8 dB | `bench sweep --mode dmr --seed 20260918` |
 | RDS | bit | 0.01 | Eb/N0 | 7.2 dB | `bench sweep --mode rds --snr-start 2 --snr-stop 12 --trials 1024 --min-bit-errors 0 --seed 20260918` |
 
 Every figure is the crossing in that mode's committed baseline,
@@ -88,7 +90,9 @@ What each unit is:
   trial that printed garbage is capped at one error per character sent.
 - **frame**: a frame that did not come back byte for byte. AX.25 frames carry
   60 information octets, 83 octets before the FCS; M17 frames are the 16-byte
-  stream payloads after one Link Setup Frame.
+  stream payloads after one Link Setup Frame; DMR frames are CSBKs, ten
+  octets each through the BPTC (196,96) and the CRC-CCITT, one a slot on
+  both timeslots of a base station channel with its CACH.
 - **page**: a POCSAG page whose identity and 40-character alphanumeric text
   did not both come back.
 - **message**: a NAVTEX message of 120 characters not received exactly with a
@@ -120,6 +124,7 @@ framing.
 | P25 Phase 1 | 9600 bit/s | -5.84 dB |
 | D-STAR | 4800 bit/s | -2.83 dB |
 | TETRA | 36000 bit/s | -11.58 dB |
+| DMR | 9600 bit/s gross | -5.84 dB |
 
 Some tests in `tests/decode` state their figures in other bandwidths. To
 compare: M17's 9 kHz channel figure is the 2500 Hz one less 5.56 dB; P25's and

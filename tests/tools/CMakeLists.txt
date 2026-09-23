@@ -87,6 +87,7 @@ if(TARGET bench)
         "p25p1:16:26"
         "dstar:16:24"
         "tetra:18:26"
+        "dmr:16:24"
     )
     foreach(entry IN LISTS bench_mode_smoke)
         string(REPLACE ":" ";" parts "${entry}")

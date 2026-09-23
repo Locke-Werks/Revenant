@@ -1,6 +1,12 @@
-// M17, P25 Phase 1, D-STAR and TETRA: the complex baseband modes, each through
-// its transmitter in core/dsp/synth/m17_mod.h or dv_mod.h, white noise from
-// core/dsp/synth/channel.h calibrated in 2500 Hz, and the decoder.
+// M17, P25 Phase 1, D-STAR, TETRA and DMR: the complex baseband modes, each
+// through its transmitter in core/dsp/synth/m17_mod.h, dv_mod.h or
+// dmr_mod.h, white noise from core/dsp/synth/channel.h calibrated in
+// 2500 Hz, and the decoder.
+//
+// DMR counts CSBKs that came back whole, the frame error rate
+// tests/decode/test_dmr.cpp measures: its voice is AMBE+2 and never decoded,
+// and a CSBK is one burst of control signalling through the whole chain from
+// the sync to the CRC.
 //
 // WHAT IS MEASURED, AND WHY IT IS NOT THE SAME FOR ALL FOUR
 //
@@ -31,12 +37,14 @@
 #include <string>
 #include <vector>
 
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/dv_phy.h"
 #include "core/decode/m17.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/tetra.h"
 #include "core/dsp/synth/channel.h"
+#include "core/dsp/synth/dmr_mod.h"
 #include "core/dsp/synth/dv_mod.h"
 #include "core/dsp/synth/m17_mod.h"
 #include "tools/bench/mode_support.h"
@@ -442,6 +450,103 @@ ModeSubject tetra() {
     return mode;
 }
 
+// ---------------------------------------------------------------------------
+// DMR
+// ---------------------------------------------------------------------------
+
+// Eight payload bytes a CSBK: TS 102 361-1 figure 7.8's octets 2 to 9.
+constexpr std::size_t kDmrCsbkPayloadBytes = 8;
+
+// Idle slots either side, for the reason tetra() sends a burst past its
+// payload: the receive filter's delay and the burst grid take the edges of a
+// capture, and a real base station channel runs on around what is read.
+constexpr std::size_t kDmrLeadSlots = 8;
+
+std::vector<std::array<std::uint8_t, 10>> dmr_csbks(std::span<const std::uint8_t> payload) {
+    std::vector<std::array<std::uint8_t, 10>> out;
+    for (std::size_t at = 0; at + kDmrCsbkPayloadBytes <= payload.size(); at += kDmrCsbkPayloadBytes) {
+        // Figure 7.8: LB set and CSBKO 111111, then FID 0x10, a manufacturer's
+        // feature set (Table 9.21), so the eight octets after them are raw.
+        std::array<std::uint8_t, 10> octets{0xBF, 0x10};
+        std::copy_n(payload.begin() + static_cast<std::ptrdiff_t>(at), kDmrCsbkPayloadBytes, octets.begin() + 2);
+        out.push_back(octets);
+    }
+    return out;
+}
+
+ModeSubject dmr() {
+    ModeSubject mode;
+    mode.mode = "dmr";
+    mode.subject = "dmr 4FSK at 48000 S/s, a base station channel with its CACH carrying one CSBK a slot on "
+                   "both timeslots; CSBK error rate against SNR in 2500 Hz";
+    mode.unit = "frame";
+    mode.axis = "SNR in 2500 Hz";
+    mode.default_payload_bytes = 40 * kDmrCsbkPayloadBytes;
+    mode.minimum_payload_bytes = 4 * kDmrCsbkPayloadBytes;
+    mode.payload_multiple = kDmrCsbkPayloadBytes;
+    mode.snr_start_db = 13.0;
+    mode.snr_stop_db = 24.0;
+    mode.trials = 128;
+    mode.real_audio = false;
+    mode.generator = [](std::span<const std::uint8_t> payload, double snr_db, std::uint64_t seed) {
+        const auto csbks = dmr_csbks(payload);
+        std::vector<siggen::DmrSlot> slots;
+        const std::array<std::uint8_t, decode::kDmrCachPayloadBits> null_payload{};
+        for (std::size_t i = 0; i < csbks.size() + 2 * kDmrLeadSlots; ++i) {
+            siggen::DmrSlot slot;
+            // Table 9.24: slots alternate, and the CACH names the one after it.
+            slot.cach = siggen::dmr_cach(true, i % 2 == 0 ? 1 : 2, decode::kDmrLcssSingle, null_payload);
+            if (i >= kDmrLeadSlots && i - kDmrLeadSlots < csbks.size()) {
+                auto burst = siggen::dmr_bptc_burst(decode::DmrSyncType::BsData, 1, decode::DmrDataType::Csbk,
+                                                    csbks[i - kDmrLeadSlots]);
+                if (!burst) {
+                    return std::vector<dsp::Complex32>{};
+                }
+                slot.burst = *burst;
+            } else {
+                slot.burst = siggen::dmr_idle_burst(decode::DmrSyncType::BsData, 1);
+            }
+            slots.push_back(slot);
+        }
+        auto samples = siggen::dmr_render_slots(siggen::DmrModConfig{}, slots);
+        if (!samples || !add_noise(*samples, snr_db, kRate48, seed)) {
+            return std::vector<dsp::Complex32>{};
+        }
+        return std::move(*samples);
+    };
+    mode.score = [](dsp::ConstComplexSpan samples, std::span<const std::uint8_t> payload) {
+        const auto sent = dmr_csbks(payload);
+        auto decoder = decode::Dmr::create(decode::DmrConfig{});
+        if (samples.empty() || !decoder) {
+            return score_units(sent.size(), 0);
+        }
+        std::vector<decode::DmrBurst> bursts;
+        if (!decoder->process(samples, bursts)) {
+            return score_units(sent.size(), 0);
+        }
+        // Matched by content, each sent CSBK at most once. The payload is
+        // the bench's random bytes, so two CSBKs alike would be a collision
+        // in 64 bits.
+        std::vector<bool> seen(sent.size(), false);
+        std::size_t good = 0;
+        for (const decode::DmrBurst& burst : bursts) {
+            if (!burst.csbk) {
+                continue;
+            }
+            for (std::size_t i = 0; i < sent.size(); ++i) {
+                if (!seen[i] && burst.csbk->octets == sent[i]) {
+                    seen[i] = true;
+                    ++good;
+                    break;
+                }
+            }
+        }
+        return score_units(sent.size(), good);
+    };
+    mode.truth = [](std::span<const std::uint8_t> payload) { return hex_lines(payload, kDmrCsbkPayloadBytes); };
+    return mode;
+}
+
 }  // namespace
 
 Expected<ModeSubject> make_dv_subject(std::string_view mode) {
@@ -461,6 +566,9 @@ Expected<ModeSubject> make_dv_subject(std::string_view mode) {
     }
     if (mode == "tetra") {
         return tetra();
+    }
+    if (mode == "dmr") {
+        return dmr();
     }
     return fail(std::format("'{}' is not a digital voice mode", mode));
 }

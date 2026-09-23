@@ -175,7 +175,8 @@ jobs:
       # workstation's CPU with other builds running on it: 664 s for all
       # fifteen, of which navtex took 151 s, qpsk31 134 s, psk31 91 s, cw
       # 69 s, sitor-b 68 s and psk63 54 s, and the other nine under 45 s
-      # each. With the RDS step's 226 s and the BPSK sweep's fraction of a
+      # each. dmr, the sixteenth, took 4 s making its baseline later that
+      # day. With the RDS step's 226 s and the BPSK sweep's fraction of a
       # second, the sweeps in this job come to about 15 minutes, so every
       # mode runs every night. If they pass 30 minutes, the rule is to split
       # this list across alternate nights by family, the audio modes one
@@ -187,7 +188,7 @@ jobs:
         shell: pwsh
         run: |
           $modes = 'rtty', 'ax25', 'pocsag-512', 'pocsag-1200', 'pocsag-2400', 'sitor-b', 'navtex',
-                   'psk31', 'psk63', 'qpsk31', 'cw', 'm17', 'p25p1', 'dstar', 'tetra'
+                   'psk31', 'psk63', 'qpsk31', 'cw', 'm17', 'p25p1', 'dstar', 'tetra', 'dmr'
           New-Item -ItemType Directory -Force -Path bench-out | Out-Null
           $failed = @()
           $all = [System.Diagnostics.Stopwatch]::StartNew()
