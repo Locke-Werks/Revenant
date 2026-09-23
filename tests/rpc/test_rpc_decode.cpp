@@ -63,11 +63,19 @@
 #include "core/rpc/types.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
+#include "tests/rpc/decoded_log.h"
 #include "tests/rpc/rpc_fixture.h"
 
 using namespace revenant;
 using test::Harness;
 using test::HarnessOptions;
+using test::ending;
+using test::flag_of;
+using test::integer_of;
+using test::into;
+using test::MessageLog;
+using test::text_of;
+using test::wait_for;
 
 namespace {
 
@@ -104,9 +112,9 @@ constexpr dsp::SampleRate kTetraTapRate = decode::TetraConfig{}.rate;
 constexpr double kQuietSeconds = 0.5;
 
 // Long enough for a loaded machine to finish a file of about a second
-// unthrottled, and for the last message to cross the socket.
+// unthrottled. The wait for the last message to cross the socket is
+// tests/rpc/decoded_log.h's.
 constexpr int kRunTimeoutMs = 60'000;
-constexpr int kMessageWaitMs = 10'000;
 
 // ---------------------------------------------------------------------------
 // The transmissions
@@ -294,90 +302,6 @@ private:
     std::filesystem::path path_;
     dsp::SampleIndex samples_ = 0;
 };
-
-// ---------------------------------------------------------------------------
-// The subscriber
-// ---------------------------------------------------------------------------
-
-// What arrived, safe to read from the test thread while the client's loop is
-// still delivering.
-class MessageLog {
-public:
-    void record(const rpc::DecodedMessage& message) {
-        const std::lock_guard<std::mutex> held(lock_);
-        messages_.push_back(message);
-    }
-    void end(const std::string& reason) {
-        const std::lock_guard<std::mutex> held(lock_);
-        ended_ = true;
-        reason_ = reason;
-    }
-    [[nodiscard]] std::vector<rpc::DecodedMessage> messages() const {
-        const std::lock_guard<std::mutex> held(lock_);
-        return messages_;
-    }
-    [[nodiscard]] bool ended() const {
-        const std::lock_guard<std::mutex> held(lock_);
-        return ended_;
-    }
-    [[nodiscard]] std::string reason() const {
-        const std::lock_guard<std::mutex> held(lock_);
-        return reason_;
-    }
-
-private:
-    mutable std::mutex lock_;
-    std::vector<rpc::DecodedMessage> messages_;
-    bool ended_ = false;
-    std::string reason_;
-};
-
-[[nodiscard]] rpc::Client::DecodedCallback into(std::shared_ptr<MessageLog> log) {
-    return [log](const rpc::DecodedMessage& message) { log->record(message); };
-}
-[[nodiscard]] rpc::Client::DecodedEndedCallback ending(std::shared_ptr<MessageLog> log) {
-    return [log](const std::string& reason) { log->end(reason); };
-}
-
-// Polls the log until `want` is satisfied or the wait runs out, and hands back
-// the last list either way.
-template <typename Predicate>
-[[nodiscard]] std::vector<rpc::DecodedMessage> wait_for(const MessageLog& log,
-                                                        Predicate want) {
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(kMessageWaitMs);
-    for (;;) {
-        auto seen = log.messages();
-        if (want(seen) || std::chrono::steady_clock::now() >= deadline) {
-            return seen;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-}
-
-[[nodiscard]] std::int64_t integer_of(const rpc::DecodedMessage& message, std::string_view key) {
-    const rpc::DecodedField* field = message.field(key);
-    REQUIRE(field != nullptr);
-    const std::int64_t* value = field->integer();
-    REQUIRE(value != nullptr);
-    return *value;
-}
-
-[[nodiscard]] bool flag_of(const rpc::DecodedMessage& message, std::string_view key) {
-    const rpc::DecodedField* field = message.field(key);
-    REQUIRE(field != nullptr);
-    const bool* value = field->flag();
-    REQUIRE(value != nullptr);
-    return *value;
-}
-
-[[nodiscard]] std::string text_of(const rpc::DecodedMessage& message, std::string_view key) {
-    const rpc::DecodedField* field = message.field(key);
-    REQUIRE(field != nullptr);
-    const std::string* value = field->text();
-    REQUIRE(value != nullptr);
-    return *value;
-}
 
 void bring_up(Harness& harness, const CaptureFile& file) {
     HarnessOptions options;
