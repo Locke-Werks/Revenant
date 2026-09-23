@@ -30,22 +30,17 @@ jobs:
   # The long BER against SNR sweeps. These do not belong in a per-PR gate: they
   # take too long to sit in front of a review, and a curve moving is a different
   # kind of news from a kernel disagreeing with its reference.
+  #
+  # One device. Until 2026-09-22 this was a matrix with a second leg on the
+  # Radeon integrated graphics, which is no longer supported or tested; ci.yml
+  # says why at build-and-test. The index is pinned because that part is still
+  # in the machine.
   sweep:
-    name: sweep (${{ matrix.name }})
+    name: sweep (nvidia-4090)
     runs-on: [self-hosted, windows, x64, gpu]
     timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      # One physical machine, so one leg at a time. See ci.yml.
-      max-parallel: 1
-      matrix:
-        include:
-          - name: nvidia-4090
-            gpu_index: 0
-          - name: amd-igpu
-            gpu_index: 1
     env:
-      REVENANT_GPU_INDEX: ${{ matrix.gpu_index }}
+      REVENANT_GPU_INDEX: "0"
       VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache\revenant
     steps:
       - uses: actions/checkout@v4
@@ -105,14 +100,12 @@ jobs:
           # about. A step comparing columns here would be a second, worse copy
           # of that.
           #
-          # One baseline serves both legs on purpose. Through M0 the subject
-          # under test is a CPU BPSK demodulator, so both devices are expected
-          # to produce byte-identical curves and a difference between them would
-          # itself be the finding. From M4, when decoders are GPU kernels, the
-          # legs start measuring genuinely different work and this comment
-          # should be revisited rather than trusted.
+          # The subject under test is a CPU BPSK demodulator, so the curve does
+          # not depend on the device at all. When decoders become GPU kernels
+          # the device starts to matter and this comment should be revisited
+          # rather than trusted.
           New-Item -ItemType Directory -Force -Path bench-out | Out-Null
-          $curve = "bench-out/ber-vs-snr-${{ matrix.name }}.json"
+          $curve = "bench-out/ber-vs-snr-nvidia-4090.json"
           "device: $env:REVENANT_GPU_INDEX   seed: $env:REVENANT_BENCH_SEED"
 
           & '${{ steps.preflight.outputs.tool }}' sweep `
@@ -139,7 +132,7 @@ jobs:
         if: always() && steps.preflight.outputs.ready == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: bench-curves-${{ matrix.name }}
+          name: bench-curves-nvidia-4090
           path: bench-out/**
           if-no-files-found: warn
           retention-days: 90

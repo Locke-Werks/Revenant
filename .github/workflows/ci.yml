@@ -7,7 +7,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The GPU legs run on the developer's own workstation. A superseded run left
+# The GPU jobs run on the developer's own workstation. A superseded run left
 # queued there is not just wasted minutes, it is a machine somebody is trying to
 # work on, so a new push cancels the old run outright.
 concurrency:
@@ -229,11 +229,22 @@ jobs:
   # The conformance suite diffs GPU compute kernels against CPU reference
   # implementations. A hosted runner has no discrete GPU, so it cannot execute
   # the one thing this project's correctness argument rests on. The runner is a
-  # Windows 11 workstation carrying two real Vulkan devices, and each leg below
-  # is bound to one of them.
+  # Windows 11 workstation, and this job is bound to its RTX 4090.
+  #
+  # ONE DEVICE, AND IT USED TO BE TWO. Until 2026-09-22 this was a matrix with
+  # a second leg on the Radeon integrated graphics in the same machine's Ryzen
+  # 9 7950X. That device is no longer supported or tested: its driver corrupts
+  # the spectrum kernel when several dispatches share a submission, measured in
+  # docs/fft.md, and the leg was failing on it rather than on anything in this
+  # tree. So AMD has no CI coverage now, the same way Intel has none. The
+  # machine still carries the part, which is why the index below is pinned
+  # rather than left to enumeration order.
+  #
+  # The name keeps the device in it, so the check a branch rule requires is
+  # the one it always was.
   build-and-test:
     needs: guards
-    name: build-and-test (${{ matrix.name }})
+    name: build-and-test (nvidia-4090)
     runs-on: [self-hosted, windows, x64, gpu]
     # NOT ON A FORK. This is the line that stands between a public repository
     # and somebody else's code running on the maintainer's desktop.
@@ -248,7 +259,7 @@ jobs:
     # GitHub's own guidance is not to pair self-hosted runners with public
     # repositories without exactly this kind of gate.
     #
-    # So a pull request from a fork skips every GPU leg. It still gets the
+    # So a pull request from a fork skips every workstation job. It still gets the
     # guards job on a hosted runner, which is ephemeral and disposable. The
     # conformance run happens when a maintainer pushes the branch to this
     # repository, which is also when somebody has read the diff.
@@ -259,22 +270,12 @@ jobs:
     # tired, and this condition is not.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      # Both legs are the same physical machine. Running them at once would have
-      # two builds competing for the same disk and two suites competing for the
-      # same driver, and a timing-sensitive failure there is not a real one.
-      max-parallel: 1
-      matrix:
-        include:
-          - name: nvidia-4090
-            gpu_index: 0
-          - name: amd-igpu
-            gpu_index: 1
     env:
       # The engine reads its device from the environment rather than a flag, so
-      # a leg is a variable and nothing in the build has to know about CI.
-      REVENANT_GPU_INDEX: ${{ matrix.gpu_index }}
+      # the device is a variable and nothing in the build has to know about CI.
+      # Index 0 is the RTX 4090. Pinned, because the unsupported integrated part
+      # is still in the machine and would otherwise be a candidate.
+      REVENANT_GPU_INDEX: "0"
       # The GPU cases skip when there is no device, so that a developer without
       # Vulkan still gets the CPU-side suite. That would let a runner whose
       # driver had quietly died report a green build having tested nothing on
@@ -309,13 +310,13 @@ jobs:
         with:
           arch: x64
 
-      - name: Which device this leg is bound to
+      - name: Which device this job is bound to
         shell: pwsh
         run: |
-          # Index 0 is the RTX 4090, index 1 the Radeon integrated part. Printed
-          # because a driver update that reorders enumeration would otherwise
-          # silently run the same device twice.
-          "REVENANT_GPU_INDEX = $env:REVENANT_GPU_INDEX (${{ matrix.name }})"
+          # Index 0 is the RTX 4090. Printed because a driver update that
+          # reorders enumeration would otherwise quietly run the suite on the
+          # integrated part, which is not supported.
+          "REVENANT_GPU_INDEX = $env:REVENANT_GPU_INDEX (nvidia-4090)"
 
       - name: Configure
         run: cmake --preset ci
@@ -346,23 +347,18 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: reference-diff-${{ matrix.name }}
+          name: reference-diff-nvidia-4090
           path: |
             build/ci/Testing/**/*.log
           if-no-files-found: warn
           retention-days: 14
 
-      # The engine half of the installer payload, from one leg only. Both legs
-      # build the same binary against the same preset and differ solely in
-      # which GPU the suite ran against, so uploading from each would be two
-      # artifacts racing for one name. See docs/packaging.md.
+      # The engine half of the installer payload. See docs/packaging.md.
       - name: Stage the engine half of the payload
-        if: matrix.name == 'nvidia-4090'
         shell: pwsh
         run: ./scripts/stage-payload.ps1 -Only engine -Out dist/engine -Clean
 
       - name: Upload the engine half
-        if: matrix.name == 'nvidia-4090'
         uses: actions/upload-artifact@v4
         with:
           name: payload-engine
@@ -402,7 +398,7 @@ jobs:
         run: cmake --preset headless
 
       - name: Build
-        # Numerics are covered by the two GPU legs above. This job is here to
+        # Numerics are covered by build-and-test above. This job is here to
         # prove the Qt boundary holds, so it builds and stops.
         run: cmake --build --preset headless
 
