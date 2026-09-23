@@ -55,6 +55,8 @@ ApplicationWindow {
         EngineNotices {}
         DetectionControls {}
 
+        // The spectrum, the waterfall and the axis under both, which is one
+        // section because the axis labels those two and nothing else.
         SpanView {
             selection: tuneSelection
         }
@@ -62,7 +64,6 @@ ApplicationWindow {
         VfoPane {}
         RdsPane {}
         AudioPane {}
-        FrequencyAxis {}
 
         ClickReadout {
             selection: tuneSelection
