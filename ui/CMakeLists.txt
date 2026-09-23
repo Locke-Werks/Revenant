@@ -199,8 +199,11 @@ qt_add_executable(revenant_ui
     models/receiver_link.cpp
     models/receiver_palette.h
     models/receiver_rack.h
+    models/open_source_link.cpp
     models/recent_recordings.h
     models/recording_header.h
+    models/recording_link.cpp
+    models/recording_link.h
     models/recording_plan.h
     models/recording_status.h
     models/source_link.cpp
@@ -240,6 +243,9 @@ qt_add_qml_module(revenant_ui
         qml/StatusRow.qml
         qml/SourcePicker.qml
         qml/FrequencyManagerPanel.qml
+        qml/RecordingSection.qml
+        qml/RecordingStrip.qml
+        qml/BookmarkRow.qml
         qml/DetectionControls.qml
         qml/SpanView.qml
         qml/Ruler.qml

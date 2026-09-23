@@ -596,6 +596,19 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool sourceOpen READ sourceOpen NOTIFY connectionChanged)
     Q_PROPERTY(qulonglong sourceEpoch READ sourceEpoch NOTIFY connectionChanged)
 
+    // WHAT IS OPEN, BY NAME, AND HOW FAR THROUGH IT THE ENGINE IS. The open
+    // source's descriptor as a map (uri, backend, displayName, lengthSamples,
+    // rate, format, seekable, epoch; empty with nothing open) and
+    // SourceStats::samplesDelivered. The recording strip reads both; see
+    // ui/models/recording_link.h. Implemented in open_source_link.cpp.
+    //
+    // NOT CALLED openSource, which is the Q_INVOKABLE below that opens one and
+    // which the radio panel's open button calls by that name. One name for a
+    // property and a method leaves QML to pick one of them for that call.
+    Q_PROPERTY(QVariantMap openedSource READ openedSource NOTIFY openedSourceChanged)
+    Q_PROPERTY(qulonglong sourceSamplesDelivered READ sourceSamplesDelivered
+                   NOTIFY openedSourceChanged)
+
     // THE OPEN SOURCE'S GAIN STAGE, and whether there is one to draw.
     //
     // Off Session.sourceDescriptor, which describes the source that is already
@@ -2586,6 +2599,49 @@ signals:
     // refusal moved. Not emitted for a line arriving; the log model has its
     // own rows for that.
     void decodeChanged();
+
+    // The open source's description or the delivered count moved.
+    void openedSourceChanged();
+
+public:
+    [[nodiscard]] QVariantMap openedSource() const { return open_source_; }
+    [[nodiscard]] qulonglong sourceSamplesDelivered() const { return samples_delivered_; }
+
+private:
+    // ---- the open source, by name: open_source_link.cpp --------------------
+
+    // Supervisor thread, from poll_source_pacing, once per epoch per
+    // connection. The descriptor is Session.sourceDescriptor, which touches no
+    // device.
+    void poll_open_source(std::uint64_t epoch);
+
+    // Supervisor thread, from poll_front_end, which already holds the
+    // SourceStats this is read off. No round trip of its own.
+    void note_samples_delivered(std::uint64_t delivered);
+
+    // Qt thread, queued from the two above.
+    void adopt_open_source();
+
+    // Its own lock rather than source_mutex_, so nothing here can be held
+    // across, or wait behind, the picker's listing.
+    std::mutex open_source_mutex_;
+    bool handover_has_open_source_ = false;  // guarded by open_source_mutex_
+    QVariantMap handover_open_source_;        // guarded by open_source_mutex_
+    bool handover_has_delivered_ = false;     // guarded by open_source_mutex_
+    std::uint64_t handover_delivered_ = 0;    // guarded by open_source_mutex_
+
+    // Supervisor thread only. Cleared by attempt_connect, because an engine
+    // restarted under this window starts its epochs at one again and would
+    // otherwise match the number read from the last one.
+    std::uint64_t open_source_epoch_ = 0;
+    bool open_source_read_ = false;
+    QVariantMap posted_open_source_;
+    std::uint64_t posted_delivered_ = 0;
+    bool delivered_posted_ = false;
+
+    // Qt thread only.
+    QVariantMap open_source_;
+    qulonglong samples_delivered_ = 0;
 
 private:
     // The supervisor thread, and the two halves of what it does.

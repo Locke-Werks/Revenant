@@ -16,6 +16,7 @@
 //               [--grab-receivers FILE] [--palette QUERY] [--keymap]
 //               [--grab-main FILE] [--frame-stats FILE] [--maximise]
 //               [--memories FILE] [--panel NAME] [--preview-import FILE]
+//               [--open-recording PATH[:CENTER] ...]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -61,6 +62,17 @@
 // name the key table uses, "memories", "radio" or "detections", and
 // --preview-import reads FILE into the frequency manager's import preview.
 // With --grab-main they photograph the frequency manager on sample memories.
+// --open-recording PATH[:CENTER] opens a recording at startup through the
+// picker's own path: the header is read, the centre goes in its box, and the
+// open is sent if nothing is missing, otherwise the section shows what is and
+// the reason goes to stderr. CENTER takes the frequency box's grammar, and is
+// needed for a file that records none, which is every KF4FIC WAV. Given more
+// than once, each earlier one goes on the recent list as though it had been
+// opened and the last is the one opened. --open-panel NAME is the same flag as
+// --panel, kept because the recording lane's scripts name it, so a smoke run
+// can photograph the picker with --panel radio; a native file dialog cannot be
+// driven offscreen, and these are how the recording path is exercised without
+// one.
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
@@ -114,6 +126,7 @@
 #include "models/engine_link.h"
 #include "models/frequency_entry.h"
 #include "models/frequency_manager.h"
+#include "models/recording_link.h"
 #include "models/settings.h"
 #include "render/frame_probe.h"
 
@@ -401,10 +414,19 @@ int main(int argc, char* argv[])
     QString memories_file;
     QString open_panel;
     QString preview_import;
+    QStringList startup_recordings;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
     for (int i = 1; i < args.size(); ++i) {
+        if (args[i] == QStringLiteral("--open-recording") && i + 1 < args.size()) {
+            startup_recordings.append(args[++i]);
+            continue;
+        }
+        if (args[i] == QStringLiteral("--open-panel") && i + 1 < args.size()) {
+            open_panel = args[++i];
+            continue;
+        }
         if (args[i] == QStringLiteral("--every-nth") && i + 1 < args.size()) {
             const std::string value = args[++i].toStdString();
             if (!parse_u32(value, every_nth)) {
@@ -607,10 +629,19 @@ int main(int argc, char* argv[])
         memories.previewImport(preview_import);
     }
 
+    // The recording section and strip. Keeps its recent list in memory in a
+    // smoke run, which writes no settings.
+    revenant::ui::RecordingLink recordings(link, address, !smoke);
+    if (const QString refused = recordings.openAtStartup(startup_recordings);
+        !refused.isEmpty()) {
+        std::fprintf(stderr, "%s\n", refused.toLocal8Bit().constData());
+    }
+
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
     engine.rootContext()->setContextProperty(QStringLiteral("audioPlayer"), &player);
     engine.rootContext()->setContextProperty(QStringLiteral("frequencyManager"), &memories);
+    engine.rootContext()->setContextProperty(QStringLiteral("recordingLink"), &recordings);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,

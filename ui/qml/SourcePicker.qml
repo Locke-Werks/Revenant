@@ -742,4 +742,8 @@ ColumnLayout {
             }
         }
     }
+
+    // A recording, beside the radios and always drawn, since choosing one
+    // does not need the device listing the radios need. RecordingSection.qml.
+    RecordingSection {}
 }

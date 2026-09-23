@@ -317,6 +317,7 @@ void EngineLink::poll_source_pacing(bool engine_running)
     // THIS thread. info_ is the Qt thread's and reading it from the supervisor
     // to get the same number was a data race.
     poll_source_gain_stage(info->source_epoch);
+    poll_open_source(info->source_epoch);
 
     PacingSample sample;
     sample.carried = true;
@@ -389,6 +390,8 @@ void EngineLink::poll_front_end(bool engine_running)
         // and the probe above this is what says so.
         return;
     }
+
+    note_samples_delivered(stats->samples_delivered);
 
     FrontEndSample sample;
     sample.engine_running = engine_running;

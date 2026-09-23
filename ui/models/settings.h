@@ -114,4 +114,11 @@ inline constexpr QLatin1StringView kBookmarks{"bookmarks/list"};
 inline constexpr QLatin1StringView kEngineAddress{"engine/address"};
 inline constexpr QLatin1StringView kEnginePort{"engine/port"};
 
+// The last ten recordings opened from the picker, newest first, as one JSON
+// array for the reason kBookmarks is one. Each entry is the path and the
+// centre, rate and format boxes as they were typed, so a recording that
+// states no centre reopens with the one it needed; see
+// ui/models/recent_recordings.h.
+inline constexpr QLatin1StringView kRecentRecordings{"recordings/recent"};
+
 }  // namespace revenant::ui::settings

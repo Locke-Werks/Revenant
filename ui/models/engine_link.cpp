@@ -628,6 +628,8 @@ bool EngineLink::attempt_connect()
     // would never be published, and the window would keep showing a
     // sentence about a source that is no longer there.
     posted_pacing_ = {};
+    open_source_read_ = false;
+    delivered_posted_ = false;
 
     // THE EPOCH THIS CONNECTION OPENED ON, taken from the EngineInfo it opened
     // with rather than left for the first pacing poll to find. An open posted

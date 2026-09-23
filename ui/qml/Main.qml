@@ -101,6 +101,11 @@ ApplicationWindow {
             tuneDigit: keyCommands.tuneDigit
         }
 
+        // The open recording's name, position and pace, while there is one.
+        RecordingStrip {
+            Layout.fillWidth: true
+        }
+
         NoticeBanner {
             Layout.fillWidth: true
         }
