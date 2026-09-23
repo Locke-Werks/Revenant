@@ -41,6 +41,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <string>
 #include <utility>
 #include <vector>
@@ -137,7 +138,13 @@ void EngineLink::on_audio_chunk(std::size_t slot, const rpc::AudioChunk& chunk)
     // is worked out in AudioRing::write under the ring's own lock. See the
     // block at the top of audio/audio_ring.h for what that lock costs this
     // thread and why it is the trade that was taken.
-    audio_rings_[slot].write(chunk);
+    //
+    // Timed as it comes off the wire, which is what lets AudioMix put
+    // receivers whose indices share no origin on one timeline. See THE
+    // ARRIVAL ANCHOR on AudioRing::write.
+    const auto arrival = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch());
+    audio_rings_[slot].write(chunk, static_cast<std::int64_t>(arrival.count()));
 }
 
 void EngineLink::on_audio_ended(std::size_t slot, qulonglong vrx, const std::string& reason)
@@ -231,12 +238,21 @@ void EngineLink::forget_audio()
 void EngineLink::publish_mix()
 {
     std::uint32_t mask = 0;
+    std::uint32_t level = 0;
+    std::uint32_t wfm = 0;
     int pane_slot = -1;
     for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
         if (live_audio_[slot].vrx == 0) {
             continue;
         }
         mask |= 1U << slot;
+        const std::string mode = demod_name(live_audio_[slot].demod).toStdString();
+        if (mode_needs_level(mode)) {
+            level |= 1U << slot;
+        }
+        if (live_audio_[slot].demod == rpc::Demod::Wfm) {
+            wfm |= 1U << slot;
+        }
         if (live_audio_[slot].vrx == live_receiver_id_) {
             pane_slot = static_cast<int>(slot);
         }
@@ -273,6 +289,10 @@ void EngineLink::publish_mix()
     mix_granted_millis_.store(
         lead < 0 ? 0U : live_audio_[static_cast<std::size_t>(lead)].granted,
         std::memory_order_release);
+    // The two mode masks before the mask that admits a slot, so the pull
+    // thread never sees a slot heard with a stale treatment.
+    mix_level_mask_.store(level, std::memory_order_release);
+    mix_wfm_mask_.store(wfm, std::memory_order_release);
     mix_mask_.store(mask, std::memory_order_release);
     mix_lead_slot_.store(lead, std::memory_order_release);
 }
@@ -335,6 +355,7 @@ void EngineLink::apply_audio_request()
     // only thing the section had to show; the window hides the section
     // there instead.
     std::array<qulonglong, kMaxReceivers> desired{};
+    std::array<rpc::Demod, kMaxReceivers> desired_demod{};
     if (audio_wanted_.load(std::memory_order_acquire)) {
         for (const AudioWant& want : wants) {
             if (want.slot >= desired.size()) {
@@ -350,6 +371,7 @@ void EngineLink::apply_audio_request()
                 continue;
             }
             desired[want.slot] = vrx;
+            desired_demod[want.slot] = demod;
         }
     }
 
@@ -400,7 +422,7 @@ void EngineLink::apply_audio_request()
                 continue;
             }
 
-            live_audio_[slot] = AudioSub{want, *granted};
+            live_audio_[slot] = AudioSub{want, *granted, desired_demod[slot]};
 
             // THE RING IS RESIZED FROM THE GRANT AND NOT FROM THE REQUEST,
             // and the reset is what makes that stick. subscribe_audio

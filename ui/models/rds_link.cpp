@@ -106,12 +106,15 @@ void EngineLink::setRdsWanted(bool wanted)
         adopt_rds_services(false);
 
         // AND THE RECEIVER GOES BACK TO PROGRAMME AUDIO. 171000 is the
-        // multiplex, which is not a thing anybody listens to, so a receiver
-        // left at it is one the operator cannot hear the station on. Leaving
-        // it would make this switch a control with a permanent side effect,
-        // discoverable only by turning the audio on afterwards and finding
-        // the station gone. The cost is one more audio restart, which is what
-        // the switch going on already paid.
+        // multiplex, which the window can only play as mono, filtered and
+        // de-emphasised by audio/audio_mix.h, so a receiver left at it has
+        // lost its stereo. Leaving it would make this switch a control with a
+        // permanent side effect, discoverable only by listening afterwards.
+        // The cost is one more audio restart, which is what the switch going
+        // on already paid. WHAT THIS USED TO SAY: "171000 is the multiplex,
+        // which is not a thing anybody listens to, so a receiver left at it
+        // is one the operator cannot hear the station on", true until the mix
+        // played its programme band on 2026-09-23.
         //
         // Not conditional on the audio switch. The rate is a property of the
         // receiver and the next thing to subscribe to it inherits whatever it

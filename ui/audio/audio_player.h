@@ -24,17 +24,19 @@
 // this object publishes is a status line that a human reads at twenty
 // frames a second at most.
 //
-// So a 50 ms timer on the Qt thread takes ONE snapshot of the ring, which
-// carries the format, the generation and the counters together, and the
-// one thing it reacts to is the open sink no longer matching the stream: a
-// stream that started, or changed rate or channel count. The cost of that
-// is up to 50 ms between the first chunk arriving and the sink opening,
-// which is inside the ring's own depth and is therefore not a dropout.
+// So a 50 ms timer on the Qt thread takes ONE snapshot of the lead ring,
+// which carries the format and the counters together, and the one thing it
+// reacts to is a stream starting or stopping. The cost of that is up to
+// 50 ms between the first chunk arriving and the sink opening, which is
+// inside the ring's own depth and is therefore not a dropout.
 //
-// One snapshot and not three reads. Two separately locked reads of a ring
-// the Cap'n Proto event loop is writing can disagree with each other, and
-// the pair that did was format and generation: see AudioRing::Snapshot for
-// what that cost.
+// WHAT THIS PARAGRAPH USED TO SAY: that the timer reacts to "the open sink
+// no longer matching the stream: a stream that started, or changed rate or
+// channel count". The sink is opened at the DEVICE's format since
+// 2026-09-23 and every stream is resampled to it, so a stream changing shape
+// is AudioMix's business on the pull thread and never a reopen. The snapshot
+// is still one call rather than several, for the reason AudioRing::Snapshot
+// gives.
 //
 // THE THREE BUFFER DEPTHS AND HOW THEY RELATE
 //
@@ -70,15 +72,23 @@
 // Extrapolated, a drift that way fills the ring in about ten minutes and
 // then loses about one chunk every nine, which is what AudioRing's front
 // eviction and its overrun counter exist for. A drift the other way starves
-// at the same rate. Neither is corrected, because correcting it means
-// resampling by a fraction of a percent, which is a DSP stage this process
-// is not the place for, and the alternative of dropping or repeating whole
-// chunks is audible in a way the drift is not. What is provided instead is
-// that both counters are on screen, so a display that is quietly losing a
-// chunk every few minutes says so.
+// at the same rate. Neither is corrected. Correcting it means resampling by
+// a fraction of a percent under a loop that measures the drift, and the
+// alternative of dropping or repeating whole chunks is audible in a way the
+// drift is not. What is provided instead is that both counters are on
+// screen, so a display that is quietly losing a chunk every few minutes says
+// so. When the lead's ring does evict, AudioMix moves every stream up past
+// the hole together, so the receivers stay aligned across it.
+//
+// WHAT THE SECOND SENTENCE BEFORE THIS USED TO SAY: that correcting the
+// drift "means resampling by a fraction of a percent, which is a DSP stage
+// this process is not the place for". The process resamples every stream to
+// the device's rate since 2026-09-23; what it still does not have is the
+// measurement loop a drift correction would need.
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -97,6 +107,7 @@
 #include <QTimer>
 #include <QtQmlIntegration>
 
+#include "audio/audio_mix.h"
 #include "audio/audio_ring.h"
 #include "models/engine_link.h"
 
@@ -104,41 +115,31 @@ namespace revenant::ui {
 
 // The QIODevice QAudioSink pulls through. Lives on the Qt thread and is
 // READ on the sink's own thread, which is the whole of why it touches
-// nothing but the rings and a handful of atomics.
+// nothing but the rings, its own mix and a handful of atomics.
 //
 // THE MIX. Every slot in EngineLink::mixMask holds a subscription on a
-// heard receiver, each in its own ring. A pull reads every one of those
-// rings at the sink's format and sums them, each scaled by its strip's gain.
-// The LEAD slot, EngineLink::mixLeadSlot, is the one the sink's format was
-// taken from and the one whose frames the status line describes.
+// heard receiver, each in its own ring. A pull hands every one of those
+// rings to an AudioMix made at the sink's format, which resamples each to
+// it, aligns them on the lead's instant, levels the amplitude-detected
+// modes, scales each by its strip's gain, sums and limits. audio/audio_mix.h
+// has how, and what the mix before it decided instead.
 //
-// WHAT WAS CHOSEN, BECAUSE THE CODE COULD NOT SETTLE IT. The simplest mix
-// that is correct, and three decisions it makes:
-//
-//   Format: a ring at another rate or channel count than the lead's is left
-//   out of the mix rather than resampled, because this process holds no DSP.
-//   All receivers run at the engine's default 48000 unless RDS has raised
-//   the focused one to its composite rate, and that one is the multiplex,
-//   which nobody wants mixed under programme audio anyway.
-//
-//   Alignment: none. Each ring plays from its own head, so two receivers on
-//   the same transmission can be up to a ring's depth, 200 ms, apart. The
-//   chunks carry absolute sample indices and aligning on them is possible;
-//   it needs a policy for a ring that is behind, and that is the open point.
-//
-//   Level: a plain sum, so eight loud receivers can exceed full scale, which
-//   the float sink passes on and the device clips. The strip gains are the
-//   operator's control over it; no automatic normalisation.
+// WHAT THIS BLOCK USED TO SAY, under "WHAT WAS CHOSEN, BECAUSE THE CODE
+// COULD NOT SETTLE IT": "a ring at another rate or channel count than the
+// lead's is left out of the mix rather than resampled, because this process
+// holds no DSP", "Alignment: none. Each ring plays from its own head", and
+// "Level: a plain sum, so eight loud receivers can exceed full scale". The
+// owner approved the best-effort mix that replaced all three on 2026-09-23.
 class RingSource final : public QIODevice {
     Q_OBJECT
 
 public:
-    // stream is the format the LEAD ring produces and out_channels is the
-    // channel count the SINK was opened at. They differ in exactly one
-    // case, a mono stream on a device that will not take mono, and the
-    // duplication that bridges them is in readData. See open_sink.
-    RingSource(EngineLink& link, RingFormat stream, int out_channels,
-               QObject* parent = nullptr);
+    // The sink's own format, fixed for the life of this source: its rate,
+    // its channel count and the sample format it takes. Float unless the
+    // device takes none, in which case the mix is converted on the way out;
+    // the limiter holds it under full scale, so the conversion clips nothing.
+    RingSource(EngineLink& link, std::uint32_t out_rate, int out_channels,
+               QAudioFormat::SampleFormat sample_format, QObject* parent = nullptr);
 
     [[nodiscard]] bool isSequential() const override { return true; }
     [[nodiscard]] qint64 bytesAvailable() const override;
@@ -149,23 +150,16 @@ public:
         return last_source_.load(std::memory_order_relaxed);
     }
 
-    // The format this source was built for, fixed for its life, so no lock
-    // and no atomic. It is what AudioPlayer::tick compares the ring against
-    // to decide whether the open sink is still the right shape.
-    [[nodiscard]] RingFormat stream() const { return stream_; }
+    // How many pulls the limiter turned something down in, since this
+    // source was made. Written by the sink's thread, read by the Qt thread.
+    [[nodiscard]] std::uint64_t limited_pulls() const {
+        return limited_pulls_.load(std::memory_order_relaxed);
+    }
 
-    // How many pulls have found the ring's format moved and written silence
-    // instead of audio. Written by the sink's thread, read by the Qt thread
-    // on its timer.
-    //
-    // A COUNT AND NOT A FLAG, because the Qt thread needs to know whether
-    // the mismatch is HAPPENING and not only whether it happened once. A
-    // flag it cleared would race the pull thread setting it again, and a
-    // flag it did not clear would latch on the one ordinary case, the 50 ms
-    // between a receiver changing rate and the reopen. A count moving
-    // between two ticks says the sink is writing silence right now.
-    [[nodiscard]] std::uint64_t format_moved_pulls() const {
-        return format_moved_pulls_.load(std::memory_order_relaxed);
+    // Times the mix moved a stream to the lead's instant. See
+    // AudioMix::alignments.
+    [[nodiscard]] std::uint64_t alignments() const {
+        return alignments_.load(std::memory_order_relaxed);
     }
 
 protected:
@@ -177,42 +171,23 @@ protected:
 
 private:
     EngineLink& link_;
+    AudioMix mix_;
+    QAudioFormat::SampleFormat sample_format_;
+    int bytes_per_sample_ = 4;
 
-    // The format the sink was opened FOR, which is fixed for its life. The
-    // ring's current format can differ from it for up to one timer tick
-    // after a receiver changes rate, and the byte arithmetic here has to
-    // follow the sink or it writes the wrong number of bytes into a buffer
-    // the sink sized.
-    //
-    // Handed to AudioRing::read rather than checked against format() first,
-    // so the comparison and the copy happen under one lock. See that
-    // declaration: the two-call form was a real race between this thread
-    // and the Cap'n Proto event loop, not a theoretical one.
-    RingFormat stream_;
+    // The mix is written into this and converted or copied out, rather than
+    // written through the char* the sink hands over. A float write through a
+    // reinterpreted char* is only defined when that pointer is suitably
+    // aligned and nothing in QIODevice promises it. Sized on first use and
+    // reused, so the pull path allocates once.
+    std::vector<float> mixed_;
 
-    // The sink's channel count, which is stream_.channel_count except on a
-    // device that refuses mono.
-    int out_channels_ = 1;
-
-    // Read into this and memcpy out, rather than casting the char* the sink
-    // hands over. A float write through a reinterpreted char* is only
-    // defined when that pointer is suitably aligned and nothing in
-    // QIODevice promises it. Sized on first use and reused, so the pull
-    // path allocates once.
-    std::vector<float> scratch_;
-
-    // The sum of every ring's frames, at the stream's channel count. Sized
-    // on first use beside scratch_ and for the same reason.
-    std::vector<float> mix_;
-
-    // The mono frames widened to the sink's channel count, when those two
-    // differ. Separate from scratch_ because the ring's read has to see a
-    // buffer at the RING's channel count, and written through rather than
-    // straight into the sink's char buffer for the alignment reason above.
-    std::vector<float> widened_;
+    std::array<MixSlot, kMaxReceivers> slots_{};
+    std::array<AudioRing*, kMaxReceivers> rings_{};
 
     std::atomic<FrameSource> last_source_{FrameSource::idle};
-    std::atomic<std::uint64_t> format_moved_pulls_{0};
+    std::atomic<std::uint64_t> limited_pulls_{0};
+    std::atomic<std::uint64_t> alignments_{0};
 };
 
 class AudioPlayer : public QObject {
@@ -246,16 +221,14 @@ class AudioPlayer : public QObject {
     Q_PROPERTY(bool playing READ playing NOTIFY statusChanged)
 
     // What the LAST frame handed to the card was, in words: waiting, audio,
-    // squelched, gap, starving, format mismatch. Five of those six are
-    // silence and they are five different things. The first five come
-    // straight off FrameSource in audio/audio_ring.h.
+    // squelched, gap, starving. Four of those five are silence and they are
+    // four different things. They come straight off FrameSource in
+    // audio/audio_ring.h, for the lead stream.
     //
-    // THE SIXTH IS THIS OBJECT'S OWN AND IT OUTRANKS THE RING'S REPORT. A
-    // pull that finds the ring's format moved writes silence and takes
-    // nothing, and the ring counts that as starved because starved is what
-    // the card plays. Starving means the audio is LATE, which sends the
-    // operator to the network, and nothing is late here: the sink is open
-    // at the wrong rate for the stream. See the mismatch branch in tick().
+    // WHAT THIS PARAGRAPH USED TO SAY: that there was a sixth, "format
+    // mismatch", this object's own, for a sink open at another rate than the
+    // stream. The sink is open at the device's format and every stream is
+    // resampled to it since 2026-09-23, so there is no such state.
     Q_PROPERTY(QString source READ source NOTIFY statusChanged)
 
     // The squelch, pulled out of source as its own flag so an indicator can
@@ -268,16 +241,19 @@ class AudioPlayer : public QObject {
     // is the engine refusing a subscription: one is fixed by picking
     // another output and the other is not.
     //
-    // WHAT SURVIVES A REOPEN AND WHAT DOES NOT. Three faults are kept
-    // behind this one string because they have different lifetimes, and
-    // merging them is how the most important one got erased. See
-    // device_fault_, sink_fault_ and format_fault_ below.
+    // WHAT SURVIVES A REOPEN AND WHAT DOES NOT. Two faults are kept behind
+    // this one string because they have different lifetimes, and merging
+    // them is how the more important one got erased. See device_fault_ and
+    // sink_fault_ below. There were three until 2026-09-23; the third,
+    // format_fault_, described a sink open at another rate than the stream,
+    // which cannot happen now.
     Q_PROPERTY(QString fault READ fault NOTIFY statusChanged)
 
-    // Something the player ADAPTED rather than something wrong: today the
-    // only one is a mono stream duplicated onto a device that takes no
-    // mono. Kept apart from fault for the reason open_sink gives, that a
-    // line carrying both trains the operator to ignore it.
+    // Something the player ADAPTED rather than something wrong: the focused
+    // receiver's stream resampled to the device's rate, or a mono stream
+    // copied to every channel of the device. Kept apart from fault for the
+    // reason open_sink gives, that a line carrying both trains the operator
+    // to ignore it.
     Q_PROPERTY(QString note READ note NOTIFY statusChanged)
 
     // The three depths from the note at the top of this file, in
@@ -352,10 +328,16 @@ private:
     // shape, close if there is no stream, and republish the status line.
     void tick();
 
-    // Qt thread. Opens a sink on the selected device at the stream's own
-    // format, or records why it could not.
-    void open_sink(RingFormat format, std::uint64_t generation);
+    // Qt thread. Opens a sink on the selected device at the DEVICE's own
+    // rate and channel count, or records why it could not.
+    // WHAT THIS USED TO SAY: "at the stream's own format". See open_sink for
+    // what that cost.
+    void open_sink();
     void close_sink();
+
+    // Qt thread. What the player adapted, for note(): the lead stream's rate
+    // against the sink's, and a mono stream on a device of several channels.
+    [[nodiscard]] QString describe_adaptation(RingFormat lead) const;
 
     // Qt thread. The selected device, or the system default when the
     // selection is 0 or names a device that has gone.
@@ -376,15 +358,14 @@ private:
     std::unique_ptr<QAudioSink> sink_;
     std::unique_ptr<RingSource> pull_;
 
-    // The generation the open sink was built for. A ring generation past
-    // this one is a stream that changed rate or channel count under it.
+    // The format the open sink runs at, the device's. Zero when closed.
     //
-    // Only comparable within one ring, so the lead slot it was read from
-    // goes with it. A lead that moves to another ring at the same format is
-    // a new pair of these and not a reopen: the mix goes on at the rate it
-    // was playing at.
-    std::uint64_t open_generation_ = 0;
-    int open_lead_ = -1;
+    // WHAT WAS HERE: open_generation_ and open_lead_, the lead ring's format
+    // generation the sink was opened for, so tick() could reopen when a
+    // stream changed rate or channel count under it. A stream's shape no
+    // longer decides the sink's, so nothing reopens on it.
+    std::uint32_t sink_rate_ = 0;
+    int sink_channels_ = 0;
 
     // handle_sink_state saw QAudio::StoppedState with an error on it. It
     // cannot close the sink from inside that sink's own signal, so this
@@ -449,17 +430,9 @@ private:
     // rewritten if that attempt fails.
     QString sink_fault_;
 
-    // A fault about the SHAPE: the open sink's format is not the ring's,
-    // so every pull is writing silence, and it has been that way for long
-    // enough that the reopen which should have ended it plainly is not
-    // coming. Held apart from sink_fault_ because open_sink clears that one
-    // at the top of every attempt, and this condition is the attempt not
-    // being made.
-    //
-    // Written and cleared only by tick(), which is the one place that can
-    // see both formats at once. Empty in the ordinary case, including the
-    // one tick of mismatch a receiver changing rate costs.
-    QString format_fault_;
+    // WHAT WAS HERE: format_fault_, "a fault about the SHAPE: the open
+    // sink's format is not the ring's, so every pull is writing silence".
+    // Gone with the state it described; see open_generation_ above.
 
     QString note_;
     qreal volume_ = 0.7;
@@ -471,22 +444,10 @@ private:
     RingCounts counts_;
     FrameSource shown_source_ = FrameSource::idle;
 
-    // The mismatch, as tick() tracks it across passes. moved_pulls_ is the
-    // pull thread's count as of the last pass, so a difference means the
-    // sink wrote silence during it; shown_mismatch_ is what source()
-    // reports and, read at the top of the next pass, is also what says the
-    // mismatch has now lasted two passes and is a fault rather than a
-    // reopen in progress. Both are reset by close_sink, because a new pull
-    // starts its count at zero.
-    //
-    // There was an int mismatch_ticks_ here counting consecutive passes
-    // towards a threshold of ten. It could never pass one: close_sink()
-    // zeroed it, open_sink() begins with close_sink(), and the reopen runs
-    // on the same condition that produces the mismatch. See the block in
-    // tick() for why the replacement is a transition and not a bigger
-    // threshold.
-    std::uint64_t moved_pulls_ = 0;
-    bool shown_mismatch_ = false;
+    // WHAT WAS HERE: moved_pulls_ and shown_mismatch_, which tracked a sink
+    // writing silence because it was open at another rate than the stream,
+    // and before them a mismatch_ticks_ counter that could never pass one.
+    // All three went with the reopen they watched.
 };
 
 }  // namespace revenant::ui

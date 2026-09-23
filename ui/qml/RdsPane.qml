@@ -18,9 +18,15 @@
 //
 // WHICH IS WHY THERE ARE TWO SENTENCES HERE AND NOT ONE. rdsStatus is
 // about the decoder and always present. The line below it is about the
-// AUDIO, which has become the multiplex, and an operator listening to
-// the station gets no other account of why it stopped sounding like
-// one: audioActive is still true and the level meter still moves.
+// AUDIO, which the receiver now hands out as the multiplex. The window
+// plays that multiplex's programme band in mono, and the chip is the
+// only account of why a stereo station went mono.
+//
+// WHAT THE PARAGRAPH ABOVE USED TO SAY, from its third sentence: "The line
+// below it is about the AUDIO, which has become the multiplex, and an
+// operator listening to the station gets no other account of why it stopped
+// sounding like one". Until 2026-09-23 the multiplex went to the device as
+// it came, and the owner's device refused its 171000 S/s outright.
 
 import QtQuick
 import QtQuick.Controls
@@ -101,18 +107,21 @@ ColumnLayout {
 
         // WHAT THE AUDIO HAS BECOME, and only while somebody is listening
         // to it. The receiver hands out the 171 kHz composite multiplex
-        // while RDS is on, which is the subcarrier the decoder needs and
-        // is not programme audio, so a listener hears the station replaced
-        // by noise with nothing on screen accounting for it.
+        // while RDS is on, which is the subcarrier the decoder needs, and
+        // the mix plays its programme band: filtered to 15 kHz, clear of
+        // the pilot, and de-emphasised at 75 us. That is the station in
+        // mono. audio/audio_mix.h has it.
         //
         // Gated on audioWanted rather than shown whenever the rate is
         // raised. An operator who is not listening does not need to be
         // told what the audio sounds like, and the rate is the switch
         // working rather than a condition to warn about.
         //
-        // inkWarn, because it is a consequence the operator did not ask
-        // for and has to act on to undo: the fix is the RDS switch, which
-        // puts the receiver back to programme audio on the way off.
+        // WHAT THIS BLOCK USED TO SAY: that the multiplex "is not programme
+        // audio, so a listener hears the station replaced by noise", and
+        // that the chip was inkWarn for a consequence the operator had to
+        // act on to undo. The consequence is the stereo image now, and the
+        // chip is dim.
         // AN EMERGENCY WARNING GROUP IS SAID IN THE ROW, in the loudest ink,
         // beside the decoder's own state and ahead of the station's name. EN
         // 50067 has 9A sent very infrequently unless there is an emergency or
@@ -127,9 +136,11 @@ ColumnLayout {
 
         StatusChip {
             visible: engineLink.rdsCompositeReceiver && engineLink.audioWanted
-            label: "audio is the multiplex"
-            detail: "the audio on this receiver is the FM multiplex while RDS is "
-                    + "on, not programme audio. Turn rds off to hear the station."
+            label: "audio is mono"
+            detail: "while RDS is on this receiver hands out the FM multiplex, and "
+                    + "what plays is its programme band in mono, filtered to 15 kHz and "
+                    + "de-emphasised. Turn rds off for stereo."
+            ink: Theme.inkDim
         }
 
         // The station, which is the whole point and is only shown

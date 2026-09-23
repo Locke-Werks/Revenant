@@ -86,6 +86,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <vector>
 
@@ -181,6 +182,17 @@ struct RingCounts {
     // baseline is restarted rather than the chunk being spliced.
     std::uint64_t restarts = 0;
 
+    // Frames read_at passed over because the mix's playhead for this stream
+    // was already past them: audio that arrived later than the receivers it
+    // is aligned with. Not an overrun, which is the card being slow, and not
+    // a gap, which is audio that never arrived.
+    std::uint64_t frames_skipped = 0;
+
+    // Frames read_at was asked for from before the oldest one buffered, and
+    // wrote as silence: already played, already skipped, or from before the
+    // stream began. What a resampler's first read reaches back for.
+    std::uint64_t frames_missed = 0;
+
     // Chunks refused because sample_rate or channel_count was zero.
     //
     // WHAT THIS PARAGRAPH USED TO SAY. Until 2026-09-20 it gave the reason
@@ -221,6 +233,10 @@ struct ReadResult {
 
 class AudioRing {
 public:
+    // What write() is given when nobody timed the chunk's arrival, which
+    // leaves the arrival anchor where it was. See anchor below.
+    static constexpr std::int64_t kNoArrival = std::numeric_limits<std::int64_t>::min();
+
     AudioRing() = default;
 
     AudioRing(const AudioRing&) = delete;
@@ -263,7 +279,23 @@ public:
     // gap in frames_gap_discarded and raises resyncs. The timeline jumps
     // there, and the resync counter is the only thing that says so, which
     // is why it is on screen rather than only in here.
-    void write(const rpc::AudioChunk& chunk);
+    //
+    // THE ARRIVAL ANCHOR, WHICH IS WHAT LETS TWO RINGS BE ALIGNED. arrival_ns
+    // is a steady clock reading taken when the chunk came off the wire. Each
+    // receiver counts its sample index from its own start, so two receivers'
+    // indices have no common origin, and nothing on the wire gives them one.
+    // What they do share is the engine: one completion pass delivers every
+    // receiver's chunk for a source block, and those chunks reach this client
+    // together. So arrival minus the stream time of the chunk's end is, up to
+    // network jitter, a constant per stream, and the difference between two
+    // streams' constants is the offset between their timelines.
+    //
+    // The anchor is that constant: the least arrival-minus-stream-time seen,
+    // since jitter only ever delays, allowed to creep up by 1/256 of the
+    // difference per chunk. The creep is what follows the engine's clock
+    // drifting against this machine's, 0.03 percent measured on 2026-09-20,
+    // which would otherwise pin the anchor to its first second.
+    void write(const rpc::AudioChunk& chunk, std::int64_t arrival_ns = kNoArrival);
 
     // Consumer. Called on whatever thread QAudioSink pulls on.
     //
@@ -306,6 +338,24 @@ public:
     [[nodiscard]] ReadResult read(float* out, std::size_t frames,
                                   const RingFormat& expect);
 
+    // Consumer, by index rather than from the head: `frames` frames starting
+    // at the stream's own index `first`, which is how AudioMix reads a
+    // stream it has aligned against another.
+    //
+    // Frames before `first` still buffered are dropped and counted as
+    // skipped. Frames asked for from before the oldest buffered one are
+    // silence, counted as missed. Frames past the newest are silence, counted
+    // as starved. The format check is read()'s, under the same lock and with
+    // the same answer: a moved format touches nothing.
+    [[nodiscard]] ReadResult read_at(float* out, std::size_t frames, std::uint64_t first,
+                                     const RingFormat& expect);
+
+    // Counts frames the card was given silence for because this stream had
+    // nothing yet, without reading. AudioMix holds its playhead on the lead
+    // stream rather than reading past what has arrived, and the frames it
+    // held for are the same starve read() used to count.
+    void note_starved(std::size_t frames);
+
     // Forgets the stream and everything buffered, and leaves the counters
     // where they are: they describe one subscription and reset() is called
     // when one ends. Use reset_counts() for a new subscription.
@@ -347,6 +397,17 @@ public:
         RingCounts counts;
         std::size_t frames_buffered = 0;
         std::size_t capacity_frames = 0;
+
+        // The stream's own indices: the oldest frame still buffered and one
+        // past the newest. Meaningful only with has_stream, which is false
+        // before the first chunk of a format.
+        bool has_stream = false;
+        std::uint64_t head_index = 0;
+        std::uint64_t next_index = 0;
+
+        // See THE ARRIVAL ANCHOR on write(). False until a timed chunk.
+        bool has_anchor = false;
+        std::int64_t anchor_ns = 0;
     };
 
     [[nodiscard]] Snapshot snapshot() const;
@@ -408,6 +469,9 @@ private:
 
     FrameSource last_source_ = FrameSource::idle;
     RingCounts counts_;
+
+    bool has_anchor_ = false;
+    std::int64_t anchor_ns_ = 0;
 };
 
 }  // namespace revenant::ui

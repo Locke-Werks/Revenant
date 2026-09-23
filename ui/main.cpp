@@ -1,10 +1,13 @@
 // revenant-ui: the window that draws what the engine is hearing.
 //
-// It is a client and nothing else. It holds no DSP, opens no device and
-// never sees a sample: everything on screen arrives through
-// core/rpc/client.h over a socket, which is the split core/rpc/types.h
-// explains and the reason this is a second process rather than a second
-// window in revenant-cli.
+// It is a client and nothing else. It opens no radio and never sees an
+// I/Q sample: everything on screen arrives through core/rpc/client.h over
+// a socket, which is the split core/rpc/types.h explains and the reason
+// this is a second process rather than a second window in revenant-cli.
+// The one signal processing it does is on the audio it plays: the rack's
+// mix in audio/audio_mix.h resamples, levels and limits what the engine
+// sends. WHAT THIS PARAGRAPH USED TO SAY: "It holds no DSP, opens no
+// device and never sees a sample", which the mix made false on 2026-09-23.
 //
 // USAGE
 //

@@ -1186,11 +1186,16 @@ class EngineLink : public QObject {
     // models/composite_probe.h for the whole mechanism and the two conditions
     // this window answers without asking.
     //
-    // THE RATE IS PUT BACK WHEN THE SWITCH GOES OFF. 171000 is the multiplex
-    // and not programme audio, so a receiver left there is one nobody can
-    // listen to, and the switch would have a permanent side effect nobody
-    // asked for. While the switch is on the pane says so, because an operator
-    // with the audio on hears the composite.
+    // THE RATE IS PUT BACK WHEN THE SWITCH GOES OFF. 171000 is the multiplex,
+    // which the window can only play as mono programme audio, so a receiver
+    // left there has lost its stereo, and the switch would have a permanent
+    // side effect nobody asked for. While the switch is on the pane says so.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "171000 is the multiplex and not
+    // programme audio, so a receiver left there is one nobody can listen to",
+    // and that "an operator with the audio on hears the composite". Since
+    // 2026-09-23 audio/audio_mix.h filters a wfm multiplex to 15 kHz and
+    // de-emphasises it on the way into the mix.
 
     // The operator asked for RDS on the pane's receiver. Sticky across a
     // retune and a reconnect, on the same terms audioWanted is: it is a
@@ -1206,11 +1211,12 @@ class EngineLink : public QObject {
     // would be reading a receiver property to learn an RDS one.
     //
     // It exists so the window can say what the audio has become. An operator
-    // listening to a station and turning RDS on hears the composite, and
-    // nothing else on screen would account for that: audioActive is still
-    // true, the level meter still moves, and the sound is wrong. See
+    // listening to a stereo station and turning RDS on hears it go mono, and
+    // nothing else on screen would account for that. See
     // models/composite_probe.h for why the rate is the receiver's rather than
-    // a second receiver's.
+    // a second receiver's. WHAT THIS USED TO SAY: that the operator "hears
+    // the composite" and "the sound is wrong", which was true until the mix
+    // played the multiplex's programme band on 2026-09-23.
     Q_PROPERTY(bool rdsCompositeReceiver READ rdsCompositeReceiver NOTIFY rdsChanged)
 
     // "rds" or "rbds", which is a SETTING and never an inference. The PI
@@ -2158,6 +2164,19 @@ public:
     // The strip gain for a slot, as an amplitude.
     [[nodiscard]] float mixGain(std::size_t slot) const {
         return mix_gain_[slot].load(std::memory_order_relaxed);
+    }
+
+    // Which slots hold a receiver whose mode hands out audio at the level
+    // its signal came in at, as bits: mode_needs_level in
+    // models/mode_choice.h. AudioMix levels those.
+    [[nodiscard]] std::uint32_t mixLevelMask() const {
+        return mix_level_mask_.load(std::memory_order_acquire);
+    }
+
+    // Which slots hold a wfm receiver, as bits. AudioMix plays one at the
+    // multiplex rate as programme audio.
+    [[nodiscard]] std::uint32_t mixWfmMask() const {
+        return mix_wfm_mask_.load(std::memory_order_acquire);
     }
 
     // The lead subscription's grant, which sizes the sink.
@@ -3737,6 +3756,10 @@ private:
     struct AudioSub {
         qulonglong vrx = 0;
         std::uint32_t granted = 0;
+
+        // The receiver's mode, fixed for its life because a mode change is a
+        // new receiver. publish_mix reads it for the two mode masks.
+        rpc::Demod demod = rpc::Demod::Nfm;
     };
     std::array<AudioSub, kMaxReceivers> live_audio_{};
 
@@ -3759,6 +3782,8 @@ private:
     std::atomic<std::uint32_t> mix_mask_{0};
     std::atomic<std::uint32_t> mix_granted_millis_{0};
     std::array<std::atomic<float>, kMaxReceivers> mix_gain_{};
+    std::atomic<std::uint32_t> mix_level_mask_{0};
+    std::atomic<std::uint32_t> mix_wfm_mask_{0};
 
     // Supervisor thread only: the pane receiver's subscription, derived from
     // live_audio_ on every pass, which is what the audio section describes.

@@ -19,6 +19,22 @@ namespace {
 // two for the card's.
 constexpr std::size_t kMinChunksBuffered = 4;
 
+// index frames at `rate` in nanoseconds, split so the multiply cannot
+// overflow: a 171000 S/s stream reaches 2^63 / 1e9 frames in under a day.
+[[nodiscard]] std::int64_t stream_ns(std::uint64_t index, std::uint32_t rate)
+{
+    const std::uint64_t whole = index / rate;
+    const std::uint64_t part = index % rate;
+    return static_cast<std::int64_t>(whole * 1'000'000'000ULL +
+                                     (part * 1'000'000'000ULL) / rate);
+}
+
+// How far the anchor creeps up towards a later reading, per chunk, as a
+// shift. 1/256 at about 146 chunks a second is a time constant under two
+// seconds, which follows a 0.03 percent drift with a lag of half a
+// millisecond.
+constexpr int kAnchorCreepShift = 8;
+
 }  // namespace
 
 void AudioRing::set_depth_millis(std::uint32_t millis)
@@ -59,6 +75,10 @@ void AudioRing::establish(RingFormat incoming)
     have_stream_ = false;
     next_index_ = 0;
     last_source_ = FrameSource::idle;
+
+    // A new format is a new stream with a new origin.
+    has_anchor_ = false;
+    anchor_ns_ = 0;
 }
 
 void AudioRing::grow_to(std::size_t frames)
@@ -134,7 +154,7 @@ void AudioRing::push_silence(std::size_t frames, FrameSource source)
     push(nullptr, frames, source);
 }
 
-void AudioRing::write(const rpc::AudioChunk& chunk)
+void AudioRing::write(const rpc::AudioChunk& chunk, std::int64_t arrival_ns)
 {
     const RingFormat incoming{chunk.sample_rate, chunk.channel_count};
 
@@ -199,6 +219,9 @@ void AudioRing::write(const rpc::AudioChunk& chunk)
         // splice, so the baseline moves and the count says it did.
         ++counts_.restarts;
         next_index_ = chunk.sample_index;
+
+        // A new origin, so the arrival anchor of the old one says nothing.
+        has_anchor_ = false;
     }
 
     if (gap > 0) {
@@ -250,6 +273,102 @@ void AudioRing::write(const rpc::AudioChunk& chunk)
     }
 
     next_index_ = chunk.sample_index + frames64;
+
+    if (arrival_ns != kNoArrival) {
+        // See THE ARRIVAL ANCHOR on the declaration.
+        const std::int64_t reading = arrival_ns - stream_ns(next_index_, format_.sample_rate);
+        if (!has_anchor_ || reading < anchor_ns_) {
+            anchor_ns_ = reading;
+            has_anchor_ = true;
+        } else {
+            anchor_ns_ += (reading - anchor_ns_) >> kAnchorCreepShift;
+        }
+    }
+}
+
+ReadResult AudioRing::read_at(float* out, std::size_t frames, std::uint64_t first,
+                              const RingFormat& expect)
+{
+    const std::lock_guard<std::mutex> lock(mutex_);
+
+    ReadResult result;
+    result.format = format_;
+    result.format_moved = format_ != expect;
+    result.last_source = last_source_;
+
+    if (out == nullptr || frames == 0) {
+        return result;
+    }
+    if (result.format_moved || !format_.valid()) {
+        result.frames_starved = frames;
+        counts_.frames_starved += frames;
+        return result;
+    }
+
+    const std::size_t channels = format_.channel_count;
+    std::uint64_t head = next_index_ - buffered_;
+
+    // Everything buffered ahead of where the reader is has been overtaken.
+    if (have_stream_ && first > head && buffered_ > 0) {
+        const auto skip = static_cast<std::size_t>(
+            std::min<std::uint64_t>(first - head, static_cast<std::uint64_t>(buffered_)));
+        head_ = (head_ + skip) % capacity_;
+        buffered_ -= skip;
+        counts_.frames_skipped += skip;
+        head += skip;
+    }
+
+    std::size_t done = 0;
+    if (!have_stream_ || first < head) {
+        const std::size_t missing = !have_stream_
+                                        ? frames
+                                        : static_cast<std::size_t>(std::min<std::uint64_t>(
+                                              head - first, static_cast<std::uint64_t>(frames)));
+        std::memset(out, 0, missing * channels * sizeof(float));
+        counts_.frames_missed += missing;
+        done = missing;
+    }
+
+    // Frames asked for past the newest one are the starve below; everything
+    // else from here is in the ring, starting at its head, because the skip
+    // above put the head at `first` or the missing run brought `first` up to
+    // the head.
+    const bool reachable = have_stream_ && first + done >= head && first + done <= next_index_;
+    const std::size_t take =
+        reachable ? std::min(frames - done, buffered_) : 0;
+    std::size_t copied = 0;
+    while (copied < take) {
+        const std::size_t run = std::min(take - copied, capacity_ - head_);
+        std::memcpy(&out[(done + copied) * channels], &samples_[head_ * channels],
+                    run * channels * sizeof(float));
+        last_source_ = static_cast<FrameSource>(sources_[head_ + run - 1]);
+        head_ = (head_ + run) % capacity_;
+        buffered_ -= run;
+        copied += run;
+    }
+    done += copied;
+    result.frames_from_ring = copied;
+
+    if (done < frames) {
+        const std::size_t short_by = frames - done;
+        std::memset(&out[done * channels], 0, short_by * channels * sizeof(float));
+        result.frames_starved = short_by;
+        counts_.frames_starved += short_by;
+        last_source_ = FrameSource::starved;
+    }
+
+    result.last_source = last_source_;
+    return result;
+}
+
+void AudioRing::note_starved(std::size_t frames)
+{
+    if (frames == 0) {
+        return;
+    }
+    const std::lock_guard<std::mutex> lock(mutex_);
+    counts_.frames_starved += frames;
+    last_source_ = FrameSource::starved;
 }
 
 ReadResult AudioRing::read(float* out, std::size_t frames, const RingFormat& expect)
@@ -351,6 +470,8 @@ void AudioRing::reset()
     last_source_ = FrameSource::idle;
     samples_.clear();
     sources_.clear();
+    has_anchor_ = false;
+    anchor_ns_ = 0;
 }
 
 void AudioRing::reset_counts()
@@ -363,7 +484,13 @@ void AudioRing::reset_counts()
 AudioRing::Snapshot AudioRing::snapshot() const
 {
     const std::lock_guard<std::mutex> lock(mutex_);
-    return Snapshot{format_, format_generation_, counts_, buffered_, capacity_};
+    Snapshot out{format_, format_generation_, counts_, buffered_, capacity_};
+    out.has_stream = have_stream_ && format_.valid();
+    out.next_index = next_index_;
+    out.head_index = next_index_ - buffered_;
+    out.has_anchor = has_anchor_;
+    out.anchor_ns = anchor_ns_;
+    return out;
 }
 
 RingFormat AudioRing::format() const

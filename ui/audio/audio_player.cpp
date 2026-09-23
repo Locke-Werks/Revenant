@@ -1,6 +1,8 @@
 #include "audio/audio_player.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstring>
 
 #include <QMediaDevices>
@@ -39,9 +41,24 @@ constexpr int kMinSinkMillis = 20;
 // RingSource
 // ---------------------------------------------------------------------------
 
-RingSource::RingSource(EngineLink& link, RingFormat stream, int out_channels, QObject* parent)
-    : QIODevice(parent), link_(link), stream_(stream), out_channels_(out_channels)
+RingSource::RingSource(EngineLink& link, std::uint32_t out_rate, int out_channels,
+                       QAudioFormat::SampleFormat sample_format, QObject* parent)
+    : QIODevice(parent), link_(link), mix_(out_rate, out_channels), sample_format_(sample_format)
 {
+    // No default label: a sample format Qt adds later is refused by
+    // open_sink before a source is made for it, and C4062 names the switch
+    // here that would need it. See cmake/CompilerFlags.cmake.
+    switch (sample_format_) {
+        case QAudioFormat::UInt8: bytes_per_sample_ = 1; break;
+        case QAudioFormat::Int16: bytes_per_sample_ = 2; break;
+        case QAudioFormat::Int32: bytes_per_sample_ = 4; break;
+        case QAudioFormat::Float: bytes_per_sample_ = 4; break;
+        case QAudioFormat::Unknown:
+        case QAudioFormat::NSampleFormats: bytes_per_sample_ = 4; break;
+    }
+    for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
+        rings_[slot] = &link_.audioRingAt(slot);
+    }
 }
 
 qint64 RingSource::bytesAvailable() const
@@ -52,107 +69,77 @@ qint64 RingSource::bytesAvailable() const
     // zero-length answer as the end of the stream: it goes Idle and stops.
     // A dropout would then end the audio rather than dip it, which is the
     // one failure mode the starve fill exists to avoid.
-    return static_cast<qint64>(out_channels_) * 4 * stream_.sample_rate;
+    return static_cast<qint64>(mix_.out_channels()) * bytes_per_sample_ *
+           static_cast<qint64>(mix_.out_rate());
 }
 
 qint64 RingSource::readData(char* data, qint64 maxlen)
 {
     const qint64 frame_bytes =
-        static_cast<qint64>(out_channels_) * static_cast<qint64>(sizeof(float));
+        static_cast<qint64>(mix_.out_channels()) * static_cast<qint64>(bytes_per_sample_);
     if (data == nullptr || frame_bytes <= 0 || maxlen < frame_bytes) {
         return 0;
     }
 
     const auto frames = static_cast<std::size_t>(maxlen / frame_bytes);
-    const auto out_bytes = static_cast<std::size_t>(frames) *
-                           static_cast<std::size_t>(frame_bytes);
-
-    const std::size_t in_channels = stream_.channel_count;
-    const std::size_t floats = frames * in_channels;
-    if (scratch_.size() < floats) {
-        scratch_.resize(floats);
+    const std::size_t floats = frames * static_cast<std::size_t>(mix_.out_channels());
+    if (mixed_.size() < floats) {
+        mixed_.resize(floats);
     }
-    if (mix_.size() < floats) {
-        mix_.resize(floats);
-    }
-    std::fill(mix_.begin(), mix_.begin() + static_cast<std::ptrdiff_t>(floats), 0.0F);
 
-    // stream_ goes IN, so each ring compares it against its own format under
-    // the one lock it takes for the copy. Asking format() first and read()
-    // second is two locked calls with a window between them, and the writer
-    // is the Cap'n Proto event loop: a receiver that changed rate in that
-    // window would be copied into scratch_ at the new channel count while
-    // every length here was worked out from the old one.
-    const int lead = link_.mixLeadSlot();
+    // What the rack says about each slot this pull. Read once, here, so a
+    // strip moved mid-pull changes the next pull and not half of this one.
     const std::uint32_t mask = link_.mixMask();
-    bool lead_moved = false;
-    FrameSource lead_source = FrameSource::idle;
+    const std::uint32_t level = link_.mixLevelMask();
+    const std::uint32_t wfm = link_.mixWfmMask();
     for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
-        if ((mask & (1U << slot)) == 0) {
-            continue;
-        }
-        const ReadResult result = link_.audioRingAt(slot).read(scratch_.data(), frames, stream_);
-        if (static_cast<int>(slot) == lead) {
-            lead_source = result.last_source;
-            lead_moved = result.format_moved;
-        }
-        if (result.format_moved) {
-            // A ring at another format is left out; see THE MIX in the
-            // header. Its buffer was not touched.
-            continue;
-        }
-        const float gain = link_.mixGain(slot);
-        for (std::size_t i = 0; i < floats; ++i) {
-            mix_[i] += gain * scratch_[i];
-        }
+        const std::uint32_t bit = 1U << slot;
+        slots_[slot] = MixSlot{.heard = (mask & bit) != 0,
+                               .gain = link_.mixGain(slot),
+                               .level = (level & bit) != 0,
+                               .wfm = (wfm & bit) != 0};
     }
-    last_source_.store(lead_source, std::memory_order_relaxed);
+    const MixControl control{link_.mixLeadSlot(), slots_};
+    const MixPull pulled = mix_.pull(rings_, control, mixed_.data(), frames);
 
-    if (lead_moved) {
-        // The stream changed shape under an open sink, which is one timer
-        // tick at most: the ring re-establishes on the first chunk at the
-        // new rate and tick() reopens the sink. The ring copied nothing and
-        // left scratch_ alone, so the silence is written here at the SINK's
-        // channel count, which is the only width that fits this buffer.
-        // Silence rather than the new stream's samples, because playing
-        // those through a sink opened at the old rate is a tape at the
-        // wrong speed.
-        std::memset(data, 0, out_bytes);
-        last_source_.store(FrameSource::starved, std::memory_order_relaxed);
+    last_source_.store(pulled.lead < 0 ? FrameSource::idle : pulled.lead_source,
+                       std::memory_order_relaxed);
+    if (pulled.limited) {
+        limited_pulls_.fetch_add(1, std::memory_order_relaxed);
+    }
+    alignments_.store(mix_.alignments(), std::memory_order_relaxed);
 
-        // Counted, because starved is a lie about the cause here and it is
-        // the only report the ring can make: from inside the ring this is
-        // silence reaching the card, and from out here it is silence
-        // reaching the card BECAUSE THIS SINK IS THE WRONG SHAPE. tick()
-        // reads the count, says which one it is on the status line, and
-        // raises a fault when it is still true on the following pass. See
-        // the mismatch block in tick().
-        format_moved_pulls_.fetch_add(1, std::memory_order_relaxed);
-        return frames * frame_bytes;
+    // Out in the sink's own sample format. The limiter holds the mix under
+    // -1 dBFS, so the integer conversions below clip nothing.
+    switch (sample_format_) {
+        case QAudioFormat::Float:
+        case QAudioFormat::Unknown:
+        case QAudioFormat::NSampleFormats:
+            std::memcpy(data, mixed_.data(), floats * sizeof(float));
+            break;
+        case QAudioFormat::Int32:
+            for (std::size_t i = 0; i < floats; ++i) {
+                const auto value = static_cast<std::int32_t>(
+                    std::lround(std::clamp(static_cast<double>(mixed_[i]), -1.0, 1.0) *
+                                2147483647.0));
+                std::memcpy(data + i * 4, &value, 4);
+            }
+            break;
+        case QAudioFormat::Int16:
+            for (std::size_t i = 0; i < floats; ++i) {
+                const auto value = static_cast<std::int16_t>(
+                    std::lround(std::clamp(mixed_[i], -1.0F, 1.0F) * 32767.0F));
+                std::memcpy(data + i * 2, &value, 2);
+            }
+            break;
+        case QAudioFormat::UInt8:
+            for (std::size_t i = 0; i < floats; ++i) {
+                data[i] = static_cast<char>(static_cast<std::uint8_t>(
+                    std::lround(std::clamp(mixed_[i], -1.0F, 1.0F) * 127.0F + 128.0F)));
+            }
+            break;
     }
-
-    if (static_cast<std::size_t>(out_channels_) == in_channels) {
-        std::memcpy(data, mix_.data(), floats * sizeof(float));
-        return frames * frame_bytes;
-    }
-
-    // THE ONE CONVERSION THIS PLAYER DOES BESIDE THE MIX, and it is a copy
-    // rather than a decision. A mono frame is written to every output
-    // channel, which is what mono means; nothing is resampled. open_sink is
-    // what guarantees this is only ever reached with one input channel.
-    const auto out_floats = frames * static_cast<std::size_t>(out_channels_);
-    if (widened_.size() < out_floats) {
-        widened_.resize(out_floats);
-    }
-    for (std::size_t frame = 0; frame < frames; ++frame) {
-        const float value = mix_[frame];
-        for (int channel = 0; channel < out_channels_; ++channel) {
-            widened_[frame * static_cast<std::size_t>(out_channels_) +
-                     static_cast<std::size_t>(channel)] = value;
-        }
-    }
-    std::memcpy(data, widened_.data(), out_floats * sizeof(float));
-    return frames * frame_bytes;
+    return static_cast<qint64>(frames) * frame_bytes;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +382,7 @@ qreal AudioPlayer::sink_gain() const
                                                      QtAudio::LinearVolumeScale));
 }
 
-void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
+void AudioPlayer::open_sink()
 {
     close_sink();
 
@@ -412,83 +399,53 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
         return;
     }
 
+    // AT THE DEVICE'S OWN RATE AND CHANNEL COUNT, which is the change that
+    // ended the RDS dropout. This asked the device for the focused
+    // receiver's rate until 2026-09-23. RDS raises a wfm receiver to the
+    // 171000 S/s composite, the owner's device refused 32-bit float there,
+    // and the audio stopped with this function's own sentence about it. A
+    // shared-mode Windows output runs at its mix rate and nothing else, so
+    // the sink is opened at what the device prefers and AudioMix resamples
+    // every stream to it.
+    //
+    // Float when the device takes it at that rate, because the mix is float
+    // and the limiter's headroom is below full scale either way; otherwise
+    // the device's own sample format, which RingSource converts to.
+    const QAudioFormat preferred = out.preferredFormat();
     QAudioFormat wanted;
-    wanted.setSampleRate(static_cast<int>(format.sample_rate));
-    wanted.setChannelCount(static_cast<int>(format.channel_count));
+    wanted.setSampleRate(preferred.sampleRate() > 0 ? preferred.sampleRate() : 48'000);
+    wanted.setChannelCount(preferred.channelCount() > 0 ? preferred.channelCount() : 2);
     wanted.setSampleFormat(QAudioFormat::Float);
-
-    int out_channels = static_cast<int>(format.channel_count);
-    QString widened;
-
     if (!out.isFormatSupported(wanted)) {
-        // A DEVICE THAT REFUSES MONO IS THE ORDINARY CASE, NOT AN EDGE ONE.
-        //
-        // Plenty of outputs take stereo and nothing else: the default output
-        // on the machine this was written on is a Blackmagic DeckLink Mini
-        // Monitor 4K, which offers 48000 Hz on 2 channels and refuses the same
-        // rate on 1. Refusing outright there means the operator can never
-        // listen on the device their machine is already using, which is not a
-        // defensible answer to "play the audio".
-        //
-        // WHAT THIS PARAGRAPH USED TO SAY, in its opening sentence: "Every
-        // engine built from this tree sets AudioChunk::channelCount to 1".
-        // WFM stereo landed in
-        // f3c0544 and a broadcast receiver at an ordinary audio rate sets 2.
-        // core/rpc/revenant.capnp was corrected on 2026-09-21 and this copy was
-        // not, because the phrase was never listed in docs/retired-claims.txt
-        // for the check to hunt, which is the failure that file exists to stop.
-        //
-        // The CODE below was always right and is unchanged: the widening is
-        // gated on one input channel, so a stereo stream has never reached it.
-        //
-        // So a mono stream is widened by DUPLICATION, which is a copy and
-        // not a conversion. Every output channel gets the same sample, no
-        // gain is applied and nothing is mixed, so the audio that reaches
-        // the card is bit for bit the audio the engine sent. That is a
-        // different kind of change from the two refused below and it is
-        // why it is allowed.
-        //
-        // Only from ONE channel. Fitting a stereo stream into some other
-        // channel count is a downmix or an upmix with a matrix in it, which
-        // is a decision about what the operator should hear, and nothing
-        // here is entitled to make it.
-        const QAudioFormat preferred = out.preferredFormat();
-        QAudioFormat widened_format = wanted;
-        widened_format.setChannelCount(preferred.channelCount());
-
-        if (format.channel_count == 1 && preferred.channelCount() > 1 &&
-            out.isFormatSupported(widened_format)) {
-            wanted = widened_format;
-            out_channels = preferred.channelCount();
-            widened = QStringLiteral("%1 takes no mono, so the one channel is copied to "
-                                     "all %2 of its outputs.")
-                          .arg(out.description())
-                          .arg(out_channels);
-        } else {
-            // REFUSED RATHER THAN CONVERTED, and the reason is headroom.
-            // The schema is explicit that a demodulator puts a fully
-            // modulated signal at exactly full scale and a settling AGC
-            // overshoots it, so samples above 1.0 are ordinary here.
-            // Converting to the 16-bit integer format such a device
-            // usually does accept would clip every one of them, and
-            // clipping an AGC overshoot sounds like the radio is
-            // distorting rather than like the player is. Resampling is
-            // refused on its own terms: it is a DSP decision and
-            // ui/CMakeLists.txt links no part of core/dsp on purpose.
-            //
-            // So the operator is told which device refused what, and what
-            // that device does want, and picks another output.
+        const QAudioFormat::SampleFormat own = preferred.sampleFormat();
+        const bool writable = own == QAudioFormat::Int16 || own == QAudioFormat::Int32 ||
+                              own == QAudioFormat::UInt8;
+        QAudioFormat fallback = wanted;
+        fallback.setSampleFormat(own);
+        if (!writable || !out.isFormatSupported(fallback)) {
             sink_fault_ = QStringLiteral(
-                         "%1 will not take 32-bit float at %2 Hz on %3 channel(s). It "
-                         "offers %4 Hz on %5. Pick another output.")
-                         .arg(out.description())
-                         .arg(format.sample_rate)
-                         .arg(format.channel_count)
-                         .arg(preferred.sampleRate())
-                         .arg(preferred.channelCount());
+                              "%1 will not take its own preferred rate, %2 Hz on %3 "
+                              "channel(s), in 32-bit float or in a sample format this player "
+                              "writes. Pick another output.")
+                              .arg(out.description())
+                              .arg(wanted.sampleRate())
+                              .arg(wanted.channelCount());
             return;
         }
+        wanted = fallback;
     }
+
+    // WHAT THIS FUNCTION DID UNTIL 2026-09-23, from here to the sink: it
+    // asked for the stream's rate and channel count in float, widened a mono
+    // stream by duplication onto a device that refused mono, and otherwise
+    // refused with "%1 will not take 32-bit float at %2 Hz on %3
+    // channel(s). It offers %4 Hz on %5. Pick another output." That sentence
+    // is what the owner saw when RDS raised the receiver to 171000 S/s. The
+    // duplication survives in AudioMix, which puts a mono stream on every
+    // channel of the device, and the refusal survives only for a device that
+    // will not take its own preferred rate.
+    const int out_channels = wanted.channelCount();
+    const auto out_rate = static_cast<std::uint32_t>(wanted.sampleRate());
 
     sink_ = std::make_unique<QAudioSink>(out, wanted);
 
@@ -497,31 +454,21 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
     // comes off the grant rather than off the request.
     const int granted = static_cast<int>(link_.mixGrantedMillis());
     sink_millis_ = std::max(kMinSinkMillis, granted / kSinkDepthDivisor);
-    const auto sink_frames =
-        static_cast<qsizetype>((static_cast<std::uint64_t>(sink_millis_) *
-                                format.sample_rate) /
-                               1000U);
-    sink_->setBufferSize(sink_frames * out_channels *
-                         static_cast<qsizetype>(sizeof(float)));
+    const auto sink_frames = static_cast<qsizetype>(
+        (static_cast<std::uint64_t>(sink_millis_) * out_rate) / 1000U);
+    sink_->setBufferSize(sink_frames * out_channels * wanted.bytesPerSample());
     sink_->setVolume(sink_gain());
 
     connect(sink_.get(), &QAudioSink::stateChanged, this,
             [this](QAudio::State state) { handle_sink_state(state); });
 
-    pull_ = std::make_unique<RingSource>(link_, format, out_channels);
+    pull_ = std::make_unique<RingSource>(link_, out_rate, out_channels, wanted.sampleFormat());
     pull_->open(QIODevice::ReadOnly);
     sink_->start(pull_.get());
 
-    open_generation_ = generation;
+    sink_rate_ = out_rate;
+    sink_channels_ = out_channels;
     active_device_ = out.description();
-
-    // The widening is a NOTE and not a fault, kept apart because the two
-    // mean opposite things to the operator: a fault is something to act on
-    // and this is a statement that nothing needs acting on, the audio is
-    // reaching the card exactly as the engine sent it and simply on more
-    // than one channel. Filing it as a fault would train the operator to
-    // ignore the line that also carries a device that has gone.
-    note_ = widened;
 
     if (fell_back) {
         // resolve_device could not use the selection, so this sink is on
@@ -539,7 +486,7 @@ QString AudioPlayer::fault() const
     // and an operator whose chosen headset has gone AND whose fallback
     // refuses the format needs to read both sentences to know what to do.
     QStringList parts;
-    for (const QString& one : {device_fault_, sink_fault_, format_fault_}) {
+    for (const QString& one : {device_fault_, sink_fault_}) {
         if (!one.isEmpty()) {
             parts.append(one);
         }
@@ -556,19 +503,10 @@ void AudioPlayer::close_sink()
         sink_.reset();
     }
     pull_.reset();
-    open_generation_ = 0;
-    open_lead_ = -1;
+    sink_rate_ = 0;
+    sink_channels_ = 0;
     active_device_.clear();
     sink_millis_ = 0;
-
-    // The mismatch belonged to the sink that is going, and the next
-    // RingSource starts its own count at zero. Leaving moved_pulls_ where
-    // it was would read the next sink's first pull as a count going
-    // BACKWARDS, which is a difference, which is a mismatch reported on a
-    // sink that has only just opened at the right format.
-    moved_pulls_ = 0;
-    shown_mismatch_ = false;
-    format_fault_.clear();
 
     // The note describes the sink that is going, so it goes with it.
     // Neither fault does: close_sink is on the path a refused format takes
@@ -656,37 +594,14 @@ void AudioPlayer::tick()
         close_sink();
     }
 
-    // The lead ring, which the sink's format follows. See THE MIX in the
-    // header for which one that is.
+    // The lead ring, whose frames the status line describes. See THE MIX in
+    // the header for which one that is. One snapshot, for the reason
+    // AudioRing::Snapshot gives.
     const int lead = link_.mixLeadSlot();
     const AudioRing::Snapshot ring_state =
         lead < 0 ? AudioRing::Snapshot{}
                  : link_.audioRingAt(static_cast<std::size_t>(lead)).snapshot();
-
-    // ONE CALL, BECAUSE THE FORMAT AND THE GENERATION HAVE TO AGREE.
-    //
-    // This was format() and then format_generation(), two locked calls with
-    // the Cap'n Proto event loop free to run between them. A chunk at a new
-    // rate landing in that window returned the OLD format with the NEW
-    // generation, and the reopen below then opened a sink at the old rate
-    // and filed it under the new generation. Nothing asked for a reopen
-    // afterwards, because the only thing that asks is a generation past the
-    // recorded one and the recorded one was already current. Every pull
-    // after that found the format moved and wrote silence, for as long as
-    // the receiver stayed at that rate. See AudioRing::Snapshot.
     const RingFormat format = ring_state.format;
-    const std::uint64_t generation = ring_state.generation;
-
-    // What the sink's own thread did with the pulls since the last pass. A
-    // pull that found the format moved wrote silence at the sink's width
-    // and took nothing from the ring. Read BEFORE the reopen below, which
-    // is what ends it: the operator is still owed the truth about the 50 ms
-    // it lasted, and a mismatch that outlives several passes is a sink that
-    // is not being reopened at all.
-    const std::uint64_t moved_pulls =
-        pull_ == nullptr ? moved_pulls_ : pull_->format_moved_pulls();
-    const bool mismatch = moved_pulls != moved_pulls_;
-    moved_pulls_ = moved_pulls;
 
     // TWO DIFFERENT QUESTIONS, READ FROM TWO DIFFERENT PROPERTIES.
     //
@@ -736,10 +651,6 @@ void AudioPlayer::tick()
         if (sink_ != nullptr) {
             close_sink();
         }
-    } else if (!format.valid()) {
-        if (sink_ != nullptr) {
-            close_sink();
-        }
     } else if (sink_failed_) {
         // NOT REOPENED UNTIL SOMETHING CHANGES. A device that has just
         // failed fails again, and this branch runs twenty times a second,
@@ -748,98 +659,26 @@ void AudioPlayer::tick()
         // cleared by the operator picking a device and by the device list
         // changing, which are the two things that make another attempt
         // worth making, and both are what the message asks for.
-    } else if (lead != open_lead_ && pull_ != nullptr && pull_->stream() == format) {
-        // The lead moved to another ring at the same format: the focus went
-        // to another heard receiver. The sink plays on, and the generation
-        // recorded is now the new ring's, which is the only one it can be
-        // compared with.
-        open_lead_ = lead;
-        open_generation_ = generation;
-    } else if (sink_ == nullptr || generation != open_generation_ || lead != open_lead_ ||
-               (pull_ != nullptr && pull_->stream() != format)) {
-        // A generation past the one the sink was opened for is a stream
-        // that changed rate or channel count. Reopened rather than
-        // resampled, for the reason the header gives: this process holds no
-        // DSP.
+    } else if (sink_ == nullptr) {
+        // Opened at the device's format, whatever the streams are. Neither
+        // fault is cleared here: a device that refused refuses again on the
+        // next tick, so clearing would flicker the message twenty times a
+        // second; open_sink owns sink_fault_ and rewrites it either way, and
+        // device_fault_ outlives the open on purpose.
         //
-        // THE FORMAT COMPARISON IS NOT REDUNDANT WITH THE GENERATION ONE.
-        // The generation is a cheap proxy for "the ring moved", and the
-        // sink being the wrong shape for the stream is the condition that
-        // actually matters. Anything that leaves those two disagreeing is
-        // permanent silence, because the generation is the only thing the
-        // reopen used to consult and it reads as up to date. The snapshot
-        // above closes the one route in that was known; this closes the
-        // class, so the next one that gets invented costs 50 ms instead of
-        // the whole session.
-        //
-        // Neither fault is cleared here. A device that refused the format
-        // refuses it again on the next tick, so clearing would flicker the
-        // message twenty times a second; open_sink owns sink_fault_ and
-        // rewrites it either way, and device_fault_ outlives the open on
-        // purpose.
-        open_sink(format, generation);
-        if (sink_ != nullptr) {
-            open_lead_ = lead;
-        }
+        // WHAT THIS BRANCH USED TO BE: a reopen whenever the lead ring's
+        // format generation moved or its format differed from the sink's,
+        // "reopened rather than resampled, for the reason the header gives:
+        // this process holds no DSP", with a second branch for a lead that
+        // moved to another ring at the same format and a block raising a
+        // fault when the sink stayed at the wrong format for two passes. A
+        // stream's shape is AudioMix's business now and none of it applies.
+        open_sink();
     }
 
-    // THE MISMATCH, SAID IN WORDS RATHER THAN LEFT AS SILENCE.
-    //
-    // RAISED ON THE SECOND CONSECUTIVE PASS, WHICH IS A REPLACEMENT FOR A
-    // TICK COUNTER THAT COULD NOT FIRE.
-    //
-    // What this used to do: mismatch_ticks_ counted passes and the fault
-    // needed ten of them, half a second. It never reached two. close_sink()
-    // zeroes mismatch_ticks_, open_sink() begins with close_sink(), and the
-    // reopen branch above runs on exactly the condition that produces a
-    // mismatch, so every pass that counted one also reset the count. The
-    // sentence below was unreachable for the whole life of the feature, and
-    // the constant behind it read as a tuned threshold.
-    //
-    // The fix is not a bigger number. It is that a count accumulated across
-    // ticks is the wrong shape when the event being counted destroys the
-    // counter: the fault belongs on the TRANSITION into the state and is
-    // cleared explicitly on the way out.
-    //
-    // WHY TWO PASSES AND NOT ONE. One pass of mismatch is the ordinary cost
-    // of a receiver changing rate, and the reopen on that same pass ends
-    // it, so the next pass reads the fresh RingSource's count against a
-    // moved_pulls_ that close_sink zeroed and finds no mismatch. source()
-    // says "format mismatch" for that 50 ms and nothing else needs saying.
-    // Two passes running means the reopen either did not happen or did not
-    // stick, which is 100 ms of silence with a healthy wire behind it and
-    // is the state an operator cannot tell from a quiet band.
-    //
-    // Both of the ways in are still caught. A sink that is not being
-    // reopened keeps the same pull_ and its count keeps climbing. A
-    // receiver whose shape changes faster than a sink can be opened for it
-    // gets a fresh pull_ each pass and that one starts reporting moved
-    // pulls before the next tick.
-    //
-    // shown_mismatch_ holds the previous pass's answer and is assigned at
-    // the bottom of this function, so reading it here reads the pass
-    // before. close_sink() sets it false, which cannot matter from inside
-    // tick(): the assignment below overwrites it either way.
-    if (!mismatch) {
-        format_fault_.clear();
-    } else if (shown_mismatch_ && pull_ != nullptr) {
-        // NO DURATION AND NO REMEDY IN THE SENTENCE. A tick count in it
-        // would rewrite the string twenty times a second, which is the
-        // flicker the reopen branch above refuses for the same reason, and
-        // the two ways to get here want opposite advice: a sink that is
-        // not reopening wants audio toggled off and on, and a receiver
-        // whose shape is flapping wants leaving alone. Both want the fact,
-        // which is that the card is being fed silence and the wire is not
-        // the reason.
-        const RingFormat open_at = pull_->stream();
-        format_fault_ =
-            QStringLiteral("the output is open at %1 Hz on %2 channel(s) and the stream "
-                           "is %3 Hz on %4, so every frame reaching the card is silence.")
-                .arg(open_at.sample_rate)
-                .arg(open_at.channel_count)
-                .arg(format.sample_rate)
-                .arg(format.channel_count);
-    }
+    // What was adapted, said in words. Computed each pass because the lead
+    // can move to a stream at another rate without the sink reopening.
+    note_ = sink_ == nullptr ? QString{} : describe_adaptation(format);
 
     const RingCounts counts = ring_state.counts;
     const FrameSource showing =
@@ -848,8 +687,7 @@ void AudioPlayer::tick()
     const int buffered_ms = millis_for(ring_state.frames_buffered, format.sample_rate);
     const int ring_ms = millis_for(ring_state.capacity_frames, format.sample_rate);
 
-    const bool changed = mismatch != shown_mismatch_ ||
-                         counts.frames_written != counts_.frames_written ||
+    const bool changed = counts.frames_written != counts_.frames_written ||
                          counts.frames_filled != counts_.frames_filled ||
                          counts.frames_overrun != counts_.frames_overrun ||
                          counts.frames_starved != counts_.frames_starved ||
@@ -864,24 +702,39 @@ void AudioPlayer::tick()
     buffered_millis_ = buffered_ms;
     ring_millis_ = ring_ms;
     shown_source_ = showing;
-    shown_mismatch_ = mismatch;
 
     if (changed) {
         emit statusChanged();
     }
 }
 
-QString AudioPlayer::source() const
+QString AudioPlayer::describe_adaptation(RingFormat lead) const
 {
-    // AHEAD OF THE FRAME SOURCES, because the ring reports this case as
-    // starved and starved is the wrong answer here. Starving means the
-    // audio is late, which points at the network or the engine. Nothing is
-    // late in a mismatch: the chunks are arriving and the sink is open at a
-    // rate they are not. Same silence, opposite place to go looking.
-    if (shown_mismatch_) {
-        return QStringLiteral("format mismatch");
+    if (!lead.valid() || sink_rate_ == 0) {
+        return {};
     }
 
+    // A NOTE AND NOT A FAULT, kept apart because the two mean opposite
+    // things to the operator: a fault is something to act on and this is a
+    // statement that nothing needs acting on. Filing it as a fault would
+    // train the operator to ignore the line that also carries a device that
+    // has gone.
+    QStringList parts;
+    if (lead.sample_rate != sink_rate_) {
+        parts.append(QStringLiteral("the focused receiver's %1 Hz is resampled to %2's %3 Hz.")
+                         .arg(lead.sample_rate)
+                         .arg(active_device_)
+                         .arg(sink_rate_));
+    }
+    if (lead.channel_count == 1 && sink_channels_ > 1) {
+        parts.append(QStringLiteral("its one channel is copied to all %1 outputs.")
+                         .arg(sink_channels_));
+    }
+    return parts.join(QStringLiteral("  "));
+}
+
+QString AudioPlayer::source() const
+{
     // No default label; see cmake/CompilerFlags.cmake.
     switch (shown_source_) {
         case FrameSource::idle:

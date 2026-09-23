@@ -213,23 +213,53 @@ another; with none, every receiver that is not muted is heard. The audio
 section's listen switch and the player's volume and mute sit above all of it.
 
 **The mix.** Each heard receiver has its own audio subscription and its own
-ring, one per rack slot, and the player sums them at the sink's format, each
-scaled by its strip's gain, which runs from 0 dB down to -40 dB and then off.
-The underrun, gap and overrun accounting is each ring's own and unchanged,
-and the audio section describes the focused receiver's stream. Three things
-were decided rather than read off the code, and are the open points:
+ring, one per rack slot, and `ui/audio/audio_mix.h` mixes them at the output
+device's own rate and channel count, each scaled by its strip's gain, which
+runs from 0 dB down to -40 dB and then off. The underrun, gap and overrun
+accounting is each ring's own, and the audio section describes the focused
+receiver's stream. The owner approved this best-effort mix on 2026-09-23,
+with cases in `ui/tests/test_audio_mix.cpp`, `test_resampler.cpp` and
+`test_mix_stages.cpp`:
 
-- A ring at another rate or channel count than the lead's, the focused
-  receiver's when it is heard, is left out of the mix rather than resampled,
-  because the client holds no DSP. Every receiver runs at the engine's 48000
-  until RDS raises the focused one to its composite rate, which is the
-  multiplex and not programme audio.
-- There is no alignment across receivers. Each ring plays from its own head,
-  so two receivers on one transmission can be up to a ring's depth, 200 ms,
-  apart. The chunks carry absolute sample indices and aligning on them is
-  possible; it needs a policy for a ring that has fallen behind.
-- The sum is plain, so several loud receivers can exceed full scale and the
-  device clips. The strip gains are the control over it.
+- Every receiver is resampled to the device's rate by a Kaiser-windowed sinc,
+  flat to 0.42 of the lower rate and 80 dB down from its Nyquist, and a mono
+  one is put on every output channel. From 171000 to 48000 a 20 kHz tone came
+  through within 5.2e-5 of its value and a 30 kHz one 93 dB down; equal rates
+  are a copy. A wfm receiver RDS has raised to 171000 S/s hands out the
+  multiplex, so it is filtered to 15 kHz, 85 dB down at the pilot, and
+  de-emphasised at 75 us: the station in mono, which the RDS section's chip
+  says.
+- Receivers are aligned. The focused one leads and is read from its oldest
+  frame and never past its newest, holding the whole mix when it runs out;
+  every other receiver is read at the index that falls at the lead's instant.
+  Receivers' indices share no origin, so each ring keeps an arrival anchor,
+  the least arrival time minus stream time seen, allowed to creep up 1/256
+  of the way per chunk to follow the clocks drifting; the difference between
+  two anchors is the offset between their timelines. A receiver more than
+  5 ms from where the lead puts it is moved there, and audio that arrives
+  after its instant has been played is skipped rather than played late.
+- Amplitude-detected receivers, am, usb, lsb, dsb and cw, are levelled by an
+  AGC with VrxParams' own 10 ms attack and 500 ms decay, holding the peak at
+  -12 dBFS with at most 70 dB of gain. Their demodulators hand out audio in
+  the input's units and the engine applies no AGC, so on 2026-09-23 those
+  five peaked at 3e-7 to 2e-6 through `tests/rpc`'s harness, where nfm and
+  wfm peaked at 10.0 and 4.6, and the owner heard nothing from any of them.
+- The sum goes through a soft limiter under -1 dBFS whose gain drops at once
+  to what the loudest frame needs and recovers over 100 ms; below the
+  threshold it multiplies by exactly one.
+
+A P25 receiver's audio is its decoded voice at 8000 S/s, which the mix
+resamples like any other; `docs/rpc.md` has how the engine serves it.
+
+WHAT THE THREE POINTS BEFORE THIS USED TO SAY, as the open decisions of the
+first mix: "A ring at another rate or channel count than the lead's, the
+focused receiver's when it is heard, is left out of the mix rather than
+resampled, because the client holds no DSP"; "There is no alignment across
+receivers. Each ring plays from its own head"; "The sum is plain, so several
+loud receivers can exceed full scale and the device clips." The first is what
+killed the audio when RDS raised the focused receiver to 171000 S/s, since the
+sink was opened at the focused receiver's format and the device refused it, and
+it also left every mono receiver out of the mix under a focused stereo one.
 
 **The colours** are `ui/models/receiver_palette.h`: eight, one per slot, the
 same on the strip, the marker on both displays, the ruler's band and the

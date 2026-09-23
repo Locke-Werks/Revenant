@@ -24,6 +24,7 @@ using revenant::ui::kModeChoices;
 using revenant::ui::mode_is_digital;
 using revenant::ui::mode_label;
 using revenant::ui::mode_makes_audio;
+using revenant::ui::mode_needs_level;
 using revenant::ui::mode_names;
 
 namespace {
@@ -120,6 +121,22 @@ TEST_CASE("only the analogue demodulators make audio", "[modes]")
     for (const std::string_view name : {"raw", "p25p1", "dstar", "tetra", "dmr", ""}) {
         INFO(name);
         CHECK_FALSE(mode_makes_audio(name));
+    }
+}
+
+// Rejects leaving am, ssb and cw at the level their signal came in at, which
+// is what the owner heard as no audio at all, and rejects levelling a
+// discriminator's or a vocoder's output, which already arrives at a
+// listening level whatever the signal.
+TEST_CASE("the amplitude-detected modes are the ones levelled", "[modes]")
+{
+    for (const std::string_view name : {"am", "usb", "lsb", "dsb", "cw"}) {
+        INFO(name);
+        CHECK(mode_needs_level(name));
+    }
+    for (const std::string_view name : {"nfm", "wfm", "p25p1", "raw", "dstar", "tetra", ""}) {
+        INFO(name);
+        CHECK_FALSE(mode_needs_level(name));
     }
 }
 

@@ -182,16 +182,15 @@ ColumnLayout {
 
         Item { Layout.fillWidth: true }
 
-        // WHAT IS COMING OUT OF THE SPEAKER, in a word or two. Five
-        // of the six are silence and they are five different
-        // things: see FrameSource in ui/audio/audio_ring.h for the
-        // first five and the source property in
-        // ui/audio/audio_player.h for "format mismatch", which is
-        // the player's own. It follows the frames reaching the card
-        // and not the newest chunk off the wire, so it is in step
-        // with what is audible.
+        // WHAT IS COMING OUT OF THE SPEAKER, in a word. Four of the
+        // five are silence and they are four different things: see
+        // FrameSource in ui/audio/audio_ring.h. It follows the frames
+        // reaching the card and not the newest chunk off the wire, so
+        // it is in step with what is audible. There was a sixth, the
+        // player's own "format mismatch", until the sink opened at the
+        // device's format on 2026-09-23.
         Readout {
-            widest: "format mismatch"
+            widest: "squelched"
             font.family: Theme.uiFont
             text: audioPlayer.source
             color: audioPlayer.source === "audio" ? Theme.inkTune
@@ -282,9 +281,10 @@ ColumnLayout {
         }
 
         // Something the player adapted, which is not a fault and is not
-        // coloured as one. Today the only one is a mono stream copied
-        // onto a device that takes no mono, which is the ordinary case
-        // on a machine whose default output is stereo only.
+        // coloured as one: the focused receiver resampled to the device's
+        // rate, which is every receiver RDS has raised to 171000 S/s and
+        // every P25 receiver's 8000, and a mono stream copied to every
+        // channel of a stereo device, which is the ordinary case.
         StatusChip {
             visible: audioPlayer.note.length > 0
             label: "adapted"

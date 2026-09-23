@@ -1458,3 +1458,17 @@ commit: "Serve a P25 receiver's voice on subscribeAudio"
 instead: subscribeAudio on a p25p1 receiver serves its IMBE voice at 8000 S/s,
     silent between calls and through an encrypted one; D-STAR and TETRA are
     still refused, for want of a voice codec. core/rpc/voice_audio.h has it.
+
+phrase: is left out of the mix rather than resampled
+phrase: There is no alignment across receivers. Each ring plays from its own head
+phrase: The sum is plain, so several loud receivers can exceed full scale
+phrase: It holds no DSP, opens no device and never sees a sample
+phrase: 171000 is the multiplex, which is not a thing anybody listens to
+phrase: 171000 is the multiplex and not programme audio, so a receiver left there is one nobody can listen to
+retired: 2026-09-23
+commit: "Mix the rack at the device's rate, aligned, levelled and limited"
+instead: ui/audio/audio_mix.h resamples every heard receiver to the output
+    device's rate, aligns them on the focused one's instant by arrival
+    anchors, levels am, ssb and cw, plays a wfm multiplex as mono programme
+    audio and limits the sum under -1 dBFS. The sink opens at the device's
+    format, so RDS's 171000 S/s no longer reaches the device.

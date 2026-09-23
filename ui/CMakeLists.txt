@@ -152,10 +152,15 @@ endif()
 # ---------------------------------------------------------------------------
 qt_add_executable(revenant_ui
     main.cpp
+    audio/audio_mix.cpp
+    audio/audio_mix.h
     audio/audio_player.cpp
     audio/audio_player.h
     audio/audio_ring.cpp
     audio/audio_ring.h
+    audio/mix_stages.h
+    audio/resampler.cpp
+    audio/resampler.h
     models/audio_link.cpp
     models/bookmark_link.cpp
     models/decoded_link.cpp
@@ -416,6 +421,11 @@ endif()
 # indicator. That class holds every decision on the audio path that can be
 # wrong in a way a person would not hear until much later.
 #
+# It covers AudioMix and what it is built from: the resampler's accuracy and
+# stopband, the alignment of receivers whose indices share no origin, the
+# level AGC for the amplitude-detected modes, the multiplex's de-emphasis and
+# the soft limiter on the sum.
+#
 # It covers plan_history_resize, which is the waterfall's ring arithmetic
 # across a height change: which wrapped index a kept row comes from, how
 # many rows survive, and where the write cursor lands.
@@ -511,10 +521,13 @@ if(REVENANT_UI_TESTS)
         include(CTest)
         include(Catch)
 
-        # audio_ring.cpp and nothing else of ours that has a .cpp. The point
-        # of that class is that it holds no Qt type, and a test target that
-        # linked Qt would stop that being true the first time somebody
-        # reached for QString in there.
+        # audio_ring.cpp, audio_mix.cpp and resampler.cpp, and nothing else
+        # of ours that has a .cpp. The point of those classes is that they
+        # hold no Qt type, and a test target that linked Qt would stop that
+        # being true the first time somebody reached for QString in there.
+        # WHAT THIS PARAGRAPH USED TO SAY: "audio_ring.cpp and nothing else of
+        # ours that has a .cpp." The mix and its resampler joined it on
+        # 2026-09-23 on the same terms.
         #
         # render/history_resize.h is the other side of the same rule and has
         # no source file: it is the waterfall's ring arithmetic lifted out of
@@ -524,9 +537,14 @@ if(REVENANT_UI_TESTS)
         # fail this link with a message about symbols and not about the rule
         # it broke.
         add_executable(revenant_ui_tests
+            audio/audio_mix.cpp
             audio/audio_ring.cpp
+            audio/resampler.cpp
             tests/test_aft.cpp
+            tests/test_audio_mix.cpp
             tests/test_audio_ring.cpp
+            tests/test_mix_stages.cpp
+            tests/test_resampler.cpp
             tests/test_auto_filter.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
