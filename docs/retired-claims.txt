@@ -836,7 +836,7 @@ instead: The schema and the client did not move for the audio decoders, and the
 
 phrase: an optimised build was not measured
 retired: 2026-09-22
-commit: the docs/rpc.md change that recorded the audio decoders' measurements
+commit: 2ef5c00
 instead: The P25 adapter spent 21.50 to 24.53 ms of one core per second of
     48000 S/s input over three runs of the ci preset's RelWithDebInfo build,
     against 83.58 ms in Debug.
