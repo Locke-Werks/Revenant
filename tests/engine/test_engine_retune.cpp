@@ -20,8 +20,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <format>
 #include <memory>
@@ -276,4 +278,96 @@ TEST_CASE("after a retune every receiver is on its own frequency or reported rem
             CHECK(gone.reason.find("remove and an add") != std::string::npos);
         }
     }
+}
+
+TEST_CASE("a retune cancels the probes submitted before it and none submitted after it",
+          "[gpu][engine][retune][probe-pool]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // One probe receiver and no stream. The first request below is placed and
+    // then waits for samples that never arrive, so it is still collecting when
+    // the retune lands; the second queues behind it for want of a receiver.
+    // Both came from the old centre and both have to come back Cancelled.
+    auto opened = open_movable(1);
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+    engine::Engine& eng = **opened;
+
+    constexpr std::uint64_t kCollecting = 1;
+    constexpr std::uint64_t kQueued = 2;
+    REQUIRE(eng.submit_probe(engine::ProbeRequest{
+                                 .tag = kCollecting, .center = 15'625, .occupied_hz = 3'000})
+                .has_value());
+    REQUIRE(eng.submit_probe(engine::ProbeRequest{
+                                 .tag = kQueued, .center = 31'250, .occupied_hz = 3'000})
+                .has_value());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline && eng.probe_stats().busy == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(eng.probe_stats().busy == 1);
+
+    // THEN A RETUNE AND, AT ONCE, REQUESTS FOR THE NEW CENTRE. The pool's
+    // worker looks at the cancel on its next poll, up to 10 ms later, and
+    // used to cancel everything it found queued by then, these included:
+    // tier two asked about a detection on the new centre and was told the
+    // front end had moved underneath it. Too wide on purpose, so each answer
+    // is immediate and needs no receiver, which keeps the one the pool has
+    // out of it.
+    //
+    // Several rounds, because the window is a race: one request made just
+    // after the worker's poll would pass under the old code too. Twenty in a
+    // row cannot. Each round waits for its own answer before the next
+    // retune, because a request still queued when the NEXT retune lands was
+    // submitted before that one and is rightly cancelled by it.
+    constexpr int kRounds = 20;
+    std::uint64_t next_tag = 100;
+    std::vector<std::uint64_t> after;
+    std::vector<engine::ProbeOutcome> outcomes;
+    const auto collect = [&](std::size_t wanted) {
+        const auto collect_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < collect_by && outcomes.size() < wanted) {
+            std::array<engine::ProbeOutcome, 16> scratch{};
+            const std::size_t got = eng.take_probe_outcomes(scratch);
+            outcomes.insert(outcomes.end(), scratch.begin(),
+                            scratch.begin() + static_cast<std::ptrdiff_t>(got));
+            if (got == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    };
+    for (int round = 0; round < kRounds; ++round) {
+        const dsp::Hertz centre = kOpenedAt + (round % 2 == 0 ? 3'500 : 0);
+        auto landed = eng.set_source_center(centre);
+        INFO(test::message_of(landed));
+        REQUIRE(landed.has_value());
+
+        const std::uint64_t tag = next_tag++;
+        REQUIRE(eng.submit_probe(engine::ProbeRequest{
+                                     .tag = tag, .center = 0, .occupied_hz = kRate})
+                    .has_value());
+        after.push_back(tag);
+
+        // The two from before the first retune come back in its first round.
+        collect(after.size() + 2);
+        REQUIRE(outcomes.size() == after.size() + 2);
+    }
+
+    std::size_t cancelled_after = 0;
+    for (const engine::ProbeOutcome& outcome : outcomes) {
+        INFO("probe " << outcome.tag << " came back " << engine::probe_status_name(outcome.status));
+        if (outcome.tag == kCollecting || outcome.tag == kQueued) {
+            CHECK(outcome.status == engine::ProbeStatus::Cancelled);
+            continue;
+        }
+        CHECK(outcome.status == engine::ProbeStatus::TooWide);
+        if (outcome.status == engine::ProbeStatus::Cancelled) {
+            ++cancelled_after;
+        }
+    }
+    WARN(std::format("{} of {} requests made just after a retune came back cancelled",
+                     cancelled_after, after.size()));
+    CHECK(cancelled_after == 0);
 }

@@ -277,9 +277,12 @@ public:
     // One consumer thread. Copies out what has finished, oldest first.
     [[nodiscard]] std::size_t take(std::span<ProbeOutcome> out);
 
-    // Control plane. Ends every probe that is collecting and every one still
-    // queued, each with a Cancelled outcome. Called when the front end
-    // moves, because an extract that straddles a retune is two signals.
+    // Control plane. Ends every probe submitted before this call, collecting
+    // or still queued, each with a Cancelled outcome. Called when the front
+    // end moves, because an extract that straddles a retune is two signals.
+    // A probe submitted after it returns is served, however soon after: the
+    // worker notices the call at its next poll, and what it cancels then is
+    // decided by when each request was submitted, not by when it looked.
     void cancel_all();
 
     [[nodiscard]] ProbeStats stats() const;

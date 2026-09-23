@@ -205,7 +205,17 @@ struct ProbePool::Impl {
     Graph* graph = nullptr;
     ProbePoolConfig config{};
 
-    std::unique_ptr<SpscRing<ProbeRequest>> requests;
+    // A request as it crosses the ring: what the caller asked, and the cancel
+    // generation current when it was submitted. See cancel_generation. No
+    // member initialisers, because SpscRing zero-fills its storage rather
+    // than constructing and refuses a type that is not trivially default
+    // constructible.
+    struct Queued {
+        ProbeRequest request;
+        std::uint64_t generation;
+    };
+
+    std::unique_ptr<SpscRing<Queued>> requests;
     std::unique_ptr<SpscRing<ProbeOutcome>> outcomes;
 
     struct Slot {
@@ -219,18 +229,27 @@ struct ProbePool::Impl {
         bool cancelling = false;
         bool built_for_job = false;
         ProbeRequest request{};
+        std::uint64_t generation = 0;
         ProbeShape shape{};
     };
     std::vector<Slot> slots;
 
     // Requests taken off the ring and waiting for a free receiver. Worker
     // only, so a deque is fine here.
-    std::deque<ProbeRequest> pending;
+    std::deque<Queued> pending;
 
     std::uint32_t next_id = 0;
 
     // cancel_all moves this; the worker compares it against the last value
     // it acted on.
+    //
+    // AND EVERY REQUEST CARRIES THE VALUE IT WAS SUBMITTED UNDER, so the
+    // worker cancels only what is older than the move. The worker acts on a
+    // move at its next poll, up to kWorkerPoll later, and it used to cancel
+    // everything queued by then. A caller that retuned and at once asked
+    // about a detection on the new centre had that request cancelled too,
+    // for a retune that happened before it was made: 20 of 20 in
+    // tests/engine/test_engine_retune.cpp before this, 0 of 20 after.
     std::atomic<std::uint64_t> cancel_generation{0};
     std::uint64_t seen_generation = 0;
 
@@ -273,12 +292,21 @@ struct ProbePool::Impl {
         if (generation != seen_generation) {
             seen_generation = generation;
             drain_requests();
-            while (!pending.empty()) {
-                emit(cancelled_outcome(pending.front()));
-                pending.pop_front();
+
+            // Order kept for what survives, which is the order they were
+            // submitted in and so the order they are served in.
+            std::deque<Queued> kept;
+            for (const Queued& queued : pending) {
+                if (queued.generation < generation) {
+                    emit(cancelled_outcome(queued.request));
+                } else {
+                    kept.push_back(queued);
+                }
             }
+            pending.swap(kept);
+
             for (Slot& slot : slots) {
-                if (slot.busy) {
+                if (slot.busy && slot.generation < generation) {
                     slot.cancelling = true;
                 }
             }
@@ -300,20 +328,21 @@ struct ProbePool::Impl {
 
         drain_requests();
         while (!pending.empty()) {
-            Slot* free = choose_slot(pending.front());
+            Slot* free = choose_slot(pending.front().request);
             if (free == nullptr) {
                 break;
             }
-            const ProbeRequest request = pending.front();
+            const Queued queued = pending.front();
             pending.pop_front();
-            start(*free, request, static_cast<std::uint32_t>(free - slots.data()));
+            start(*free, queued.request, static_cast<std::uint32_t>(free - slots.data()));
+            free->generation = queued.generation;
         }
     }
 
     void drain_requests() {
-        ProbeRequest request{};
-        while (requests->read(std::span<ProbeRequest>(&request, 1)) == 1) {
-            pending.push_back(request);
+        Queued queued{};
+        while (requests->read(std::span<Queued>(&queued, 1)) == 1) {
+            pending.push_back(queued);
         }
     }
 
@@ -567,7 +596,7 @@ Expected<std::unique_ptr<ProbePool>> ProbePool::create(Graph& graph,
     impl.next_id = config.first_id;
     impl.slots.resize(config.size);
 
-    auto requests = SpscRing<ProbeRequest>::create(kRingCapacity);
+    auto requests = SpscRing<Impl::Queued>::create(kRingCapacity);
     if (!requests) {
         return std::unexpected(with_context(requests.error(), "the probe request ring"));
     }
@@ -602,7 +631,13 @@ ProbePool::~ProbePool() {
 }
 
 Status ProbePool::submit(const ProbeRequest& request) {
-    if (impl_->requests->write(std::span<const ProbeRequest>(&request, 1)) != 1) {
+    // Stamped here, on the caller's thread, so a request made after
+    // cancel_all returned carries the new generation however long the worker
+    // takes to notice the move.
+    const Impl::Queued queued{
+        .request = request,
+        .generation = impl_->cancel_generation.load(std::memory_order_acquire)};
+    if (impl_->requests->write(std::span<const Impl::Queued>(&queued, 1)) != 1) {
         impl_->refused.fetch_add(1, std::memory_order_relaxed);
         return fail(std::format("the probe request ring holds {} and is full; take outcomes "
                                 "before submitting more",
