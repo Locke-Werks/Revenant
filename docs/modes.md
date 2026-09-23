@@ -178,7 +178,7 @@ never paste a table, a figure or a paragraph.
 | JS8 | 8-GFSK, 79 symbols, four speeds from 3.125 to 20 baud, 75-bit frames in six types | JS8Call User Guide, free; Appendix A prints the modified Huffman code. The dictionary compression table is not published | Medium |
 | PSK31, PSK63, QPSK31 | BPSK 31.25 or 62.5 baud, cosine envelope, roughly 60 Hz occupied; QPSK adds r=1/2 K=5 | G3PLX in RadCom Dec 1998 and Jan 1999, reprinted free by ARRL with the full varicode table | Small |
 | RTTY (ITA2) | 2-FSK, 45.45 baud, 170 Hz shift standard, 5-unit alphabet, 1.5 stop bits | ITU-T Recommendation S.1 for the alphabet and S.3 for the 7.5-unit character, free; the 45.45/170 convention is practice and is cited as such. Done, see below | Small |
-| AMTOR SITOR-A and SITOR-B | 2-FSK, 100 baud, 170 Hz shift, CCIR 476 7-unit 4/3 code, 450 ms ARQ cycle or 280 ms time-diversity FEC | ITU-R M.625-4 (03/2012, in force) and M.476-5, free | Small |
+| AMTOR SITOR-A and SITOR-B | 2-FSK, 100 baud, 170 Hz shift, CCIR 476 7-unit 4/3 code, 450 ms ARQ cycle or 280 ms time-diversity FEC | ITU-R M.625-4 (03/2012, in force) and M.476-5, free. SITOR-B done, see below | Small |
 | Olivia | MFSK 2 to 256 tones over 125 to 2000 Hz; default 32/1000 at 31.25 baud; Walsh FEC scrambled by 0xE257E6D0291574EC | "The Draft Specification For The Olivia HF Transmission System", SP9VRC, hosted free by ARRL | Medium |
 | Contestia | Olivia geometry, six-bit alphabet, half the FEC | fldigi mode documentation only. Cite the page and the retrieval date | Small |
 | MT63 | 64 DBPSK tones, 10 symbols/s per tone, 15.625 Hz spacing in MT63-1000, Walsh expansion over 32 symbols | ARRL MT-63 technical characteristics page, free | Medium |
@@ -322,8 +322,8 @@ clean-room breach and is wrong within a year.
 | VDES and AIS ASM channels | ASM at 161.950 and 162.000 MHz reuses the AIS physical layer; VDE-TER is pi/4-QPSK, 8PSK and 16QAM across 25, 50 and 100 kHz to about 307 kbit/s | ITU-R M.2092-2 (02/2026, verified in force), free; IALA G1117 Edition 3.0, free | Medium |
 | DSC on VHF (channel 70) | FFSK 1200 baud on 156.525 MHz, mark 1300 Hz, space 2100 Hz, 10-bit symbols, time diversity | ITU-R M.493-16 (12/2023, verified in force), free; M.541-11 for procedures | Small |
 | DSC on MF and HF | 2-FSK 100 baud, 170 Hz shift, centre 1700 Hz in J2B; same symbol alphabet and diversity | ITU-R M.493-16, free | Small |
-| NAVTEX | F1B FSK, 170 Hz shift, 100 baud, CCIR 476 7-unit 4/3 code, 280 ms time-diversity FEC, about 300 Hz; 518, 490 and 4209.5 kHz | ITU-R M.540-2 (06/1990, verified still in force), free, plus the IMO NAVTEX Manual for the B1 to B4 header semantics | Small |
-| NBDP SITOR-A and SITOR-B | FSK 100 baud, 170 Hz shift; SITOR-A is a 450 ms ARQ cycle, SITOR-B is the NAVTEX FEC mode | ITU-R M.625-4 (03/2012, verified in force) and M.476-5, free | Small |
+| NAVTEX | F1B FSK, 170 Hz shift, 100 baud, CCIR 476 7-unit 4/3 code, 280 ms time-diversity FEC, about 300 Hz; 518, 490 and 4209.5 kHz | ITU-R M.540-2 (06/1990, verified still in force), free, plus the IMO NAVTEX Manual for the B1 to B4 header semantics. Framing done without the IMO semantics, see below | Small |
+| NBDP SITOR-A and SITOR-B | FSK 100 baud, 170 Hz shift; SITOR-A is a 450 ms ARQ cycle, SITOR-B is the NAVTEX FEC mode | ITU-R M.625-4 (03/2012, verified in force) and M.476-5, free. SITOR-B done, see below | Small |
 | NAVDAT (500 kHz and HF) | OFDM in 10.5 kHz, QPSK, 16-QAM and 64-QAM, 12 to 18 kbit/s | ITU-R M.2010-2 for 500 kHz and M.2058-1 for HF, free | Large |
 | HF radiofax / WEFAX | FM subcarrier, 1900 Hz centre plus or minus 400 Hz, 1500 and 2300 Hz at the extremes, 60 to 240 lines per minute, IOC 576 or 288, start tone 300 or 675 Hz, stop 450 Hz | WMO-No. 386 (frozen 2024-12-31) plus the free NOAA/NWS Worldwide Marine Radiofacsimile Broadcast Schedules, which is the practical citation for the constants | Medium |
 
@@ -823,7 +823,8 @@ wire yet; they report through the decoded-message seam once it exists.
 `core/decode/fsk.cpp` is the part with no standard in it: a tone-pair
 discriminator for audio that carries the shift as two tones, a level
 discriminator for audio that is already the data waveform, and a
-transition-tracking bit clock, which SITOR-B, NAVTEX and DSC can reuse.
+bit clock driven by Gardner's detector, which SITOR-B and NAVTEX below also
+use and DSC can.
 
 | Mode | File | Document | What comes out |
 | --- | --- | --- | --- |
@@ -831,6 +832,8 @@ transition-tracking bit clock, which SITOR-B, NAVTEX and DSC can reuse.
 | AX.25 over 1200 baud AFSK | `core/decode/ax25.cpp` | AX.25 v2.2 (TAPR, July 1998) clauses 3, 3.1, 3.4, 3.6 to 3.10, 3.12 and 4.2.1; the modem from Finnegan and Benson, "Clarifying the Amateur Bell 202 Modem", TAPR DCC 2014, sections 2 and 3.2 | Frames whose FCS checks, with destination, source and up to eight repeaters, the control field and its frame kind, the PID and the information field, and the sample indices of the first and last bit; counts of candidates, FCS failures and malformed frames |
 | APRS | `core/decode/aprs.cpp` | APRS Protocol Reference 1.0.1 (29 August 2000) chapters 5, 6, 7, 8, 9, 10, 14 and 16 | Position reports uncompressed and compressed with timestamp, ambiguity, symbol, course, speed, altitude and range; status with timestamp or Maidenhead locator; messages, acknowledgements and rejections with their numbers; Mic-E position, message type, course, speed, telemetry, status text and altitude |
 | POCSAG | `core/decode/pocsag.cpp` | ITU-R M.584-2 Annex 1 clauses 1.1 to 1.4, 2.1, 2.2 and 2.5.1 with Tables 1 to 3; ITU-R M.539-3 clause 4.3 for the rates and polarity | Pages with the 21-bit identity, function bits, numeric or alphanumeric text per the function bits and the raw message bits for the two function values M.584 gives no format, the sample index of the address codeword, the bits BCH corrected and the codewords it could not, and whether the sync arrived inverted |
+| SITOR-B | `core/decode/sitor_b.cpp` | ITU-R M.625-4 clauses 1.1 to 1.3, 4.2 to 4.4, 4.6.4, 4.6.5 and 4.6.7 with Tables 1 and 2; M.476-5 Annex 1 agrees | Characters with the sample index of the DX copy, letters and figures case, whether the RX copy was used, whether both copies were lost, and the phasing each came from; counts of phasings, copies lost and ends of transmission |
+| NAVTEX | `core/decode/navtex.cpp` | ITU-R M.540-2 Annex II clauses 2, 3 and 6 and Figure 1 | Messages with B1, B2 and the B3 B4 serial as sent, whether the preamble arrived clean per clause 3, the text between the preamble and NNNN, the count of lost characters, and whether NNNN arrived |
 
 RTTY's 45.45 baud, 170 Hz shift and 2125 Hz mark are practice rather than
 anything S.1 or S.3 states, and all three are parameters along with the
@@ -884,6 +887,26 @@ codeword, and the decoder uses the code word. What it does not reach: one rate
 per decoder instance, so a receiver scanning all three runs three; no message
 format for function bits 01 and 10, which M.584 does not define; and FLEX,
 which is blocked on its document.
+
+SITOR-B and NAVTEX sit on the same FSK discriminator and clock as RTTY and
+AX.25. Checking M.625-4's Table 1 against ITU-T S.1's through the RTTY table
+found the two agree on every combination, and that the 32 traffic signals and
+three mode B service signals use all 35 three-of-seven patterns, so every
+single bit error is detected and a weight-preserving double error never is.
+`tests/decode/test_sitor_b.cpp` measures at 48 and 11.025 kHz on both
+sidebands, the lower found by its complemented phasing signals. Through
+`add_real_awgn` over 562 characters: nothing lost at 10 dB in 2500 Hz; at
+-2 dB the DX copy is lost 0.53 percent of the time and no character is lost
+in both; at -5 dB the DX copy is lost 8.9 percent and 1.2 percent are lost in
+both, which is what time diversity buys. A 150 ms noise burst never prints a
+wrong character, and loses one when noise turns a DX copy into a different
+valid signal, which clause 4.3 then refuses. NAVTEX at -2 dB receives all ten
+120-character messages exactly, and at -5 dB two of ten, with every
+preamble clean. What they do not reach: SITOR-A, which is an ARQ conversation
+and not a broadcast; the selective B-mode, whose inverted traffic reads as
+mutilated; DSC, which reuses the discriminator and has not been written; and
+the meaning of NAVTEX's B1 and B2 letters, which is in the IMO NAVTEX Manual,
+not held, so they are reported as the letters sent.
 
 ## What would change the list
 
