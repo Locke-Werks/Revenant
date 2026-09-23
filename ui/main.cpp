@@ -139,6 +139,7 @@
 #include "models/recording_link.h"
 #include "models/settings.h"
 #include "render/frame_probe.h"
+#include "render/window_pacer.h"
 
 // main() is at global scope, unlike everything it constructs. An alias
 // rather than a using-directive, so the keys still read as settings::
@@ -692,6 +693,23 @@ int main(int argc, char* argv[])
     QQuickWindow* receiver_window_item =
         root_window != nullptr ? root_window->findChild<QQuickWindow*>(QStringLiteral("vrxWindow"))
                                : nullptr;
+
+    // The receiver window is presented without waiting for vsync and drawn
+    // straight after each main-window frame, because two windows that each
+    // wait for vsync hold the one GUI thread through both waits, and the main
+    // window missed 16.9% of its frames that way. render/window_pacer.h has
+    // the measurements. Here and not later, because the swap interval is read
+    // when the window is first shown, which remember_window and the smoke run
+    // below both do.
+    std::unique_ptr<revenant::ui::WindowPacer> pacer;
+    if (receiver_window_item != nullptr) {
+        if (!revenant::ui::WindowPacer::unthrottle(receiver_window_item)) {
+            std::fputs("revenant-ui: the receiver window was shown before its swap interval "
+                       "was set, so it waits for vsync\n",
+                       stderr);
+        }
+        pacer = std::make_unique<revenant::ui::WindowPacer>(root_window, receiver_window_item);
+    }
 
     if (frame_probe != nullptr && root_window != nullptr) {
         frame_probe->watch(root_window, QStringLiteral("main"));

@@ -227,6 +227,8 @@ qt_add_executable(revenant_ui
     render/spectrum_scale.h
     render/waterfall_item.cpp
     render/waterfall_item.h
+    render/window_pacer.cpp
+    render/window_pacer.h
     ${revenant_capnp_sources}
     ${revenant_rpc_client_sources}
 )
@@ -333,7 +335,9 @@ target_link_libraries(revenant_ui
         Qt6::Core
         Qt6::Gui
         # render/frame_probe.cpp's <rhi/qrhi.h>, the only place Qt reports a
-        # frame's GPU time.
+        # frame's GPU time, and render/window_pacer.cpp's
+        # <qpa/qplatformwindow.h>, the only place it says whether a window has
+        # a frame asked for and not yet delivered.
         Qt6::GuiPrivate
         Qt6::Multimedia
         Qt6::Quick
