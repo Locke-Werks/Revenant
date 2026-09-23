@@ -637,6 +637,14 @@ public:
     [[nodiscard]] std::vector<VrxId> vrx_ids() const;
     [[nodiscard]] std::size_t probe_count() const;
 
+    // Switches the DC removal and the I/Q correction on or off. Read by the
+    // recording thread at the next block; two atomics and no queue, because
+    // neither half has state a half-applied change could tear. Switching the
+    // stage on from fully off starts the estimate afresh, so a correction
+    // measured on an hour-old stream is not applied to a retuned one.
+    void set_front_end_correction(bool dc_removal, bool iq_correction);
+    [[nodiscard]] FrontEndCorrectionStatus front_end_correction() const;
+
     // --- the sample path, the source thread only ----------------------------
 
     // The source's BlockSink. Blocks as backpressure against a Demand source

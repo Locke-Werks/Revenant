@@ -62,4 +62,10 @@ namespace revenant::gpu::shaders {
 // revenant::dsp::reference_vrx_demod.
 [[nodiscard]] std::span<const std::uint32_t> vrx_demod();
 
+// A zero-IF front end's DC offset and I/Q imbalance: the five moments of a
+// block summed in fixed chunks, and the correction applied in place on the
+// ring. Twins in core/dsp/front_end_correction.h.
+[[nodiscard]] std::span<const std::uint32_t> iq_moments();
+[[nodiscard]] std::span<const std::uint32_t> iq_correct();
+
 }  // namespace revenant::gpu::shaders

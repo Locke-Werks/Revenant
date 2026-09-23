@@ -1,0 +1,68 @@
+// Takes a receiver's DC offset and I/Q imbalance out of one block of the ring,
+// in place.
+//
+//     I_c = I - dc_i
+//     Q_c = cross * I_c + scale * (Q - dc_q)
+//
+// with dc_i, dc_q, cross and scale estimated on the host from the moments
+// core/shaders/iq_moments.comp summed; core/dsp/front_end_correction.h has
+// the model, the estimator and its citations. Run after the convert kernel and
+// before the channelizer, so everything downstream sees the corrected stream
+// and nothing downstream knows there was a correction.
+//
+// IN PLACE THROUGH TWO BINDINGS. The engine binds the ring as both, and each
+// invocation reads and then writes the one slot it owns, so no invocation
+// reads what another wrote. Two bindings rather than one read-write buffer so
+// the reference diff can hand the kernel separate input and output buffers
+// through gpu::run_kernel, which zeroes its outputs before a dispatch. The
+// declarations carry no `restrict`, so aliasing the two is legal.
+//
+// THE IDENTITY IS EXACT IN VALUE: dc 0, cross 0 and scale 1 return every
+// sample unchanged, because x - 0 is x, 0 * i is a zero and a zero plus 1 * q
+// is q. The one bit it can move is the sign of a Q that is itself a negative
+// zero, which comes back positive when I is positive. The engine still skips
+// the dispatch when nothing is switched on, so a stream nobody asked to
+// correct is not even read.
+//
+// `precise` for the reason every kernel here gives: the Q line is two
+// products and a sum, which a compiler fuses into an FMA unless told not to,
+// and the twin in core/dsp/front_end_correction_reference.cpp rounds each
+// operation on its own.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+layout(std430, binding = 0) readonly buffer Source {
+    vec2 samples[];
+} src;
+
+layout(std430, binding = 1) writeonly buffer Destination {
+    vec2 samples[];
+} dst;
+
+layout(push_constant) uniform Params {
+    uint ring_mask;
+    uint offset;
+    uint count;
+    float dc_i;
+    float dc_q;
+    float cross;
+    float scale;
+} params;
+
+void main() {
+    const uint index = gl_GlobalInvocationID.x;
+    if (index >= params.count) {
+        return;
+    }
+
+    const uint slot = (params.offset + index) & params.ring_mask;
+    const vec2 v = src.samples[slot];
+
+    precise float i = v.x - params.dc_i;
+    precise float q_dc = v.y - params.dc_q;
+    precise float q = params.cross * i + params.scale * q_dc;
+
+    dst.samples[slot] = vec2(i, q);
+}

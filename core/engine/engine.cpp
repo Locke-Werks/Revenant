@@ -58,6 +58,9 @@
 #include "core/engine/ring_consumer.h"
 #include "core/engine/scheduler.h"
 #include "core/engine/vrx_stage.h"
+#include "core/source/calibration.h"
+#include "core/source/corrected_source.h"
+#include "core/source/frequency_correction.h"
 
 namespace revenant::engine {
 namespace {
@@ -199,8 +202,20 @@ public:
 
     // Everything open_source does once a source exists. The caller holds the
     // lifecycle lock and has checked that no source is open.
-    [[nodiscard]] Status adopt_source_locked(std::unique_ptr<source::Source> source,
+    [[nodiscard]] Status adopt_source_locked(std::unique_ptr<source::Source> raw_source,
                                              std::string_view uri) {
+        // --- the calibration, before anything reads a frequency ---------------
+        //
+        // Every source is wrapped, a calibrated one or not, so a correction
+        // measured later in the session has somewhere to go. The wrapper at
+        // zero is exact arithmetic that returns its input.
+        const StoredCalibration stored = stored_calibration_for(raw_source->capabilities());
+        auto wrapped = std::make_unique<source::CorrectedSource>(
+            std::move(raw_source),
+            stored.correction_applied ? stored.settings.correction_ppb : 0);
+        source::CorrectedSource* corrected = wrapped.get();
+        std::unique_ptr<source::Source> source = std::move(wrapped);
+
         const dsp::SampleRate rate = source->sample_rate();
         if (rate <= 0) {
             return fail(std::format("'{}' reports a sample rate of {}", uri, rate));
@@ -438,10 +453,20 @@ public:
             probes_ = std::move(*pool);
         }
 
+        graph_->set_front_end_correction(stored.settings.dc_removal,
+                                         stored.settings.iq_correction);
+
         source_ = std::move(source);
         capabilities_ = source_->capabilities();
         block_samples_ = block_samples;
         prototype_ = std::move(*prototype);
+
+        corrected_ = corrected;
+        calibration_key_ = stored.key;
+        calibration_ = stored.settings;
+        calibration_persisted_ = stored.persisted;
+        calibration_file_unreadable_ = stored.file_unreadable;
+        calibration_note_ = stored.note;
 
         info_.ring = ring_->geometry();
         info_.grid = grid;
@@ -585,6 +610,14 @@ public:
         prototype_ = dsp::PrototypeFilter{};
         block_samples_ = 0;
         clamp_note_.clear();
+
+        corrected_ = nullptr;
+        calibration_key_.clear();
+        calibration_ = source::DeviceCalibration{};
+        calibration_persisted_ = false;
+        calibration_file_unreadable_ = false;
+        calibration_note_.clear();
+        calibration_store_fault_.clear();
 
         // The device survives and everything describing a source does not.
         // Assigning a fresh EngineInfo and putting the device back is one line
@@ -886,6 +919,40 @@ public:
             return std::unexpected(with_context(applied.error(), "Engine::set_source_gain_auto"));
         }
         return {};
+    }
+
+    [[nodiscard]] Expected<CalibrationState> calibration() const override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        return calibration_state_locked();
+    }
+
+    [[nodiscard]] Expected<CalibrationState> set_calibration(
+        const source::DeviceCalibration& settings) override {
+        const std::scoped_lock lifecycle(lifecycle_lock_);
+        if (source_ == nullptr || corrected_ == nullptr || graph_ == nullptr) {
+            return fail("Engine::set_calibration before a source is open: a calibration belongs "
+                        "to a device, and there is none");
+        }
+        if (!source::correction_in_range(settings.correction_ppb)) {
+            return fail(std::format(
+                "Engine::set_calibration: a correction of {} ppb is past the {} ppb either way "
+                "that a crystal error can be. A figure that large is a different radio, or a "
+                "carrier that was not the one it was taken for.",
+                settings.correction_ppb, source::kMaxCorrectionPpb));
+        }
+
+        // The labels move and the device does not. See the declaration.
+        if (!capabilities_.device_corrects_frequency) {
+            if (auto set = corrected_->set_correction_ppb(settings.correction_ppb); !set) {
+                return std::unexpected(with_context(set.error(), "Engine::set_calibration"));
+            }
+            info_.source_center = source_->center();
+        }
+        graph_->set_front_end_correction(settings.dc_removal, settings.iq_correction);
+        calibration_ = settings;
+
+        store_calibration_locked();
+        return calibration_state_locked();
     }
 
     [[nodiscard]] SourcePacing source_pacing() const override {
@@ -1275,6 +1342,114 @@ public:
     [[nodiscard]] const dsp::PrototypeFilter& prototype() const { return prototype_; }
 
 private:
+    // What the calibration file holds for a source about to be opened.
+    struct StoredCalibration {
+        std::string key;
+        source::DeviceCalibration settings{};
+        bool correction_applied = true;
+        bool persisted = false;
+        bool file_unreadable = false;
+        std::string note;
+    };
+
+    // Looks the device up in EngineConfig::calibration_path. Never fails an
+    // open: a device with no serial, an engine with no path and a file that
+    // will not parse all open uncalibrated and say why in the note.
+    [[nodiscard]] StoredCalibration stored_calibration_for(
+        const source::SourceCapabilities& caps) const {
+        StoredCalibration out;
+        out.key = source::calibration_key(caps);
+        out.correction_applied = !caps.device_corrects_frequency;
+
+        if (out.key.empty()) {
+            out.note = "this source carries no serial, so a calibration set on it applies "
+                       "until it is closed and is not kept";
+        } else if (auto ok = source::validate_calibration_key(out.key); !ok) {
+            out.note = ok.error().message;
+            out.key.clear();
+        } else if (config_.calibration_path.empty()) {
+            out.note = "this engine was started without a calibration file, so a calibration "
+                       "set here applies until the source is closed and is not kept";
+        } else {
+            auto table = source::load_calibration_table(config_.calibration_path);
+            if (!table) {
+                out.file_unreadable = true;
+                out.note = std::format(
+                    "the calibration file could not be read, so this device opened "
+                    "uncalibrated and nothing will be written over the file until it is "
+                    "fixed: {}",
+                    table.error().message);
+            } else {
+                out.persisted = true;
+                if (const auto found = table->find(out.key); found != table->end()) {
+                    out.settings = found->second;
+                }
+            }
+        }
+
+        if (!out.correction_applied) {
+            if (!out.note.empty()) {
+                out.note += ". ";
+            }
+            out.note += "The device was opened with a frequency correction of its own (ppm= on "
+                        "its URI), so the stored correction is kept but not applied: two "
+                        "corrections of one crystal would correct it twice";
+        }
+        return out;
+    }
+
+    // Writes the open device's settings into the file, keeping every other
+    // device's line. Caller holds lifecycle_lock_.
+    void store_calibration_locked() {
+        if (calibration_key_.empty() || config_.calibration_path.empty() ||
+            calibration_file_unreadable_) {
+            calibration_persisted_ = false;
+            return;
+        }
+        auto table = source::load_calibration_table(config_.calibration_path);
+        if (!table) {
+            calibration_file_unreadable_ = true;
+            calibration_persisted_ = false;
+            calibration_store_fault_ = std::format(
+                "the calibration is in force and was not kept: the calibration file could not "
+                "be read, and nothing is written over a file that cannot be read: {}",
+                table.error().message);
+            return;
+        }
+        (*table)[calibration_key_] = calibration_;
+        if (auto saved = source::save_calibration_table(config_.calibration_path, *table);
+            !saved) {
+            calibration_persisted_ = false;
+            calibration_store_fault_ = std::format(
+                "the calibration is in force and was not kept: {}", saved.error().message);
+            return;
+        }
+        calibration_persisted_ = true;
+        calibration_store_fault_.clear();
+    }
+
+    [[nodiscard]] CalibrationState calibration_state_locked() const {
+        CalibrationState out;
+        if (source_ == nullptr || corrected_ == nullptr) {
+            return out;
+        }
+        out.open = true;
+        out.key = calibration_key_;
+        out.settings = calibration_;
+        out.correction_applied = !capabilities_.device_corrects_frequency;
+        out.persisted = calibration_persisted_;
+        out.note = calibration_note_;
+        if (!calibration_store_fault_.empty()) {
+            out.note += out.note.empty() ? "" : ". ";
+            out.note += calibration_store_fault_;
+        }
+        out.device_center = corrected_->device_center();
+        if (graph_ != nullptr) {
+            out.front_end = graph_->front_end_correction();
+        }
+        return out;
+    }
+
     EngineConfig config_{};
     EngineInfo info_{};
     std::string clamp_note_;
@@ -1298,6 +1473,23 @@ private:
     source::SourceCapabilities capabilities_{};
     dsp::PrototypeFilter prototype_{};
     std::size_t block_samples_ = 0;
+
+    // The open source's calibration. corrected_ borrows the wrapper source_
+    // owns, which every opened source is wrapped in. All of it is written
+    // under lifecycle_lock_ and cleared by close_source.
+    source::CorrectedSource* corrected_ = nullptr;
+    std::string calibration_key_;
+    source::DeviceCalibration calibration_{};
+    bool calibration_persisted_ = false;
+
+    // Set when the calibration file exists and could not be read. Nothing is
+    // written over it then: a hand-edited file with one bad line would
+    // otherwise lose every other device in it at the next change.
+    bool calibration_file_unreadable_ = false;
+
+    // What the open said, and what the last write said when it failed.
+    std::string calibration_note_;
+    std::string calibration_store_fault_;
 
     // Ids start at one so that a default-constructed VrxId is never a live
     // receiver; see VrxId::valid().

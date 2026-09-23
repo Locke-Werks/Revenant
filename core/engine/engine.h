@@ -124,6 +124,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/dsp/front_end_correction.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/types.h"
 #include "core/engine/device_ring.h"
@@ -131,6 +132,7 @@
 #include "core/engine/vrx.h"
 #include "core/error.h"
 #include "core/gpu/context.h"
+#include "core/source/calibration.h"
 #include "core/source/registry.h"
 #include "core/source/source.h"
 
@@ -248,6 +250,14 @@ struct EngineConfig {
     // has the bus arithmetic and docs/detection.md the measured GPU cost.
     // Clamped to kMaxProbeReceivers.
     std::uint32_t probe_receivers = 0;
+
+    // Where each device's calibration is kept between sessions, keyed by its
+    // serial. EMPTY KEEPS NOTHING: a calibration set on this engine applies
+    // for the life of the open source and is not restored next time, which is
+    // what every test and every library caller wants. revenant-engine passes
+    // %LOCALAPPDATA%\Revenant\calibration.txt. core/source/calibration.h has
+    // the format and why the engine rather than the client keeps it.
+    std::string calibration_path;
 };
 
 // The widest receiver a grid is expected to be able to carry, anywhere on it.
@@ -596,6 +606,61 @@ struct SourceRetune {
     // In the order vrx_ids listed them. Empty when every receiver came
     // along.
     std::vector<RetuneRemoval> removed;
+};
+
+// What the front-end correction stage is doing.
+//
+// The stage is core/shaders/iq_moments.comp and core/shaders/iq_correct.comp,
+// run on each block after the convert kernel and before the channelizer, so
+// every consumer of the ring sees the corrected stream. The estimate behind it
+// is core/dsp/front_end_correction.h's, and it only runs while at least one
+// half is switched on: a stream nobody asked to correct is not read.
+struct FrontEndCorrectionStatus {
+    bool dc_removal = false;
+    bool iq_correction = false;
+
+    // Blocks whose moments have been read into the estimate since the stage
+    // was last switched on from off.
+    std::uint64_t blocks_measured = 0;
+
+    // Fields are published one at a time by the recording thread, so two of
+    // them can come from consecutive blocks. That is a display's worth of
+    // tearing and nothing acts on these numbers but a person.
+    dsp::FrontEndEstimate estimate{};
+};
+
+// A device's calibration as the engine holds it, and what the engine has
+// measured of its front end. docs/calibration.md is the operator's account.
+struct CalibrationState {
+    // False with no source open, and nothing below means anything then.
+    bool open = false;
+
+    // What it is kept under, "rtlsdr:00000001", or empty for a source that
+    // carries no serial: every file and every synthetic scene.
+    std::string key;
+
+    // What is in force for the open source.
+    source::DeviceCalibration settings;
+
+    // False when the device was told a correction of its own at open, which
+    // an rtlsdr URI with ppm= does. settings.correction_ppb is then held and
+    // stored but not applied, because applying both corrects one crystal
+    // twice. note says so.
+    bool correction_applied = true;
+
+    // True when settings are written to EngineConfig::calibration_path and
+    // restored the next time this device is opened. False with no key, with
+    // no path configured, or when the file could not be read or written; note
+    // says which.
+    bool persisted = false;
+    std::string note;
+
+    // Where the device itself is tuned, on its own crystal's scale, beside
+    // EngineInfo::source_center, which is where it really listens. Equal when
+    // nothing is corrected.
+    dsp::Hertz device_center = 0;
+
+    FrontEndCorrectionStatus front_end{};
 };
 
 // How fast capture is arriving, against the wall clock.
@@ -1578,6 +1643,33 @@ public:
     [[nodiscard]] virtual std::size_t take_probe_outcomes(std::span<ProbeOutcome> out);
     [[nodiscard]] virtual ProbeStats probe_stats() const;
 
+    // The open source's calibration: its crystal correction, the DC removal
+    // and the I/Q correction, and what the front-end stage has measured.
+    //
+    // A calibration is restored from EngineConfig::calibration_path when a
+    // device with a serial is opened, so an operator measures a dongle once.
+    // CalibrationState::open is false with no source, and that is a state
+    // rather than a failure, for the reason sourceDescriptor gives on the wire.
+    //
+    // Virtual with a refusal rather than pure, for the reason submit_probe
+    // is: an Engine written before calibration has none and says so.
+    [[nodiscard]] virtual Expected<CalibrationState> calibration() const;
+
+    // Replaces the open source's calibration, applies it, and stores it
+    // under the device's key when there is one and a path is configured.
+    //
+    // A CHANGE OF CORRECTION MOVES THE NUMBERS AND NOT THE RADIO. The device
+    // is not retuned, so every receiver stays on the signal it was on and
+    // EngineInfo::source_center, and every absolute frequency built from it,
+    // moves to what it should have read. core/source/corrected_source.h has
+    // the reasoning and the part the correction does not reach.
+    //
+    // Refused before a source is open, and for a correction past a thousand
+    // ppm. A failure to write the file is not a refusal: the settings are in
+    // force and CalibrationState::persisted and note say they were not kept.
+    [[nodiscard]] virtual Expected<CalibrationState> set_calibration(
+        const source::DeviceCalibration& settings);
+
 protected:
     Engine() = default;
 
@@ -1618,6 +1710,16 @@ inline Status Engine::submit_probe(const ProbeRequest&) {
 inline std::size_t Engine::take_probe_outcomes(std::span<ProbeOutcome>) { return 0; }
 
 inline ProbeStats Engine::probe_stats() const { return {}; }
+
+inline Expected<CalibrationState> Engine::calibration() const {
+    return fail("this engine keeps no calibration: it was written before "
+                "core/source/calibration.h existed");
+}
+
+inline Expected<CalibrationState> Engine::set_calibration(const source::DeviceCalibration&) {
+    return fail("this engine keeps no calibration: it was written before "
+                "core/source/calibration.h existed");
+}
 
 inline void Engine::drop_audio_fanouts() {
     const std::scoped_lock held(audio_fanout_lock_);

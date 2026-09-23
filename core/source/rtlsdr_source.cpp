@@ -501,6 +501,25 @@ struct OpenedDevice {
     return steps;
 }
 
+// The dongle's USB serial string, read off the handle that is already open.
+//
+// rtlsdr_get_usb_strings on the handle rather than rtlsdr_get_device_usb_strings
+// on the index, because the index form opens the device a second time, and
+// that is refused while this process holds it. Empty when the device will not
+// say, which leaves the calibration unkeyed rather than failing an open that
+// is otherwise fine. rtl-sdr.h documents each buffer as 256 bytes.
+[[nodiscard]] std::string serial_of(rtlsdr_dev_t* device)
+{
+    char manufacturer[256] = {};
+    char product[256] = {};
+    char serial[256] = {};
+    if (rtlsdr_get_usb_strings(device, manufacturer, product, serial) != 0) {
+        return {};
+    }
+    serial[sizeof(serial) - 1] = '\0';
+    return std::string(serial);
+}
+
 [[nodiscard]] int nearest_step(const std::vector<int>& steps, int wanted)
 {
     int best = steps.front();
@@ -563,6 +582,10 @@ struct OpenedDevice {
         stage.has_auto = true;
         caps.gain_stages.push_back(std::move(stage));
     }
+
+    // ppm= goes to librtlsdr, which moves the tuner and the resampler itself,
+    // so the engine must not add a stored correction on top of it.
+    caps.device_corrects_frequency = config.ppm_given;
 
     caps.clock_sources = {ClockSource::Internal};
     caps.flow = FlowControl::Paced;
@@ -2012,9 +2035,10 @@ Expected<SourceCapabilities> describe_rtlsdr_source(const RtlSdrSourceConfig& co
     const rtlsdr_tuner tuner = rtlsdr_get_tuner_type(device);
     const std::vector<int> gain_steps = gain_steps_of(device);
 
-    return capabilities_of(config, index,
-                           (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner,
-                           gain_steps);
+    SourceCapabilities caps = capabilities_of(
+        config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps);
+    caps.serial = serial_of(device);
+    return caps;
 }
 
 Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& config)
@@ -2042,6 +2066,7 @@ Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& c
 
     SourceCapabilities caps = capabilities_of(
         config, index, (name == nullptr || *name == '\0') ? "RTL-SDR" : name, tuner, gain_steps);
+    caps.serial = serial_of(device);
 
     auto applied = configure(device, config, gain_steps, caps.tune_ranges);
     if (!applied) {

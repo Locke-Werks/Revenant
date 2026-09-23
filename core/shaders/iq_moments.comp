@@ -1,0 +1,89 @@
+// The five second-order moments of one block of the ring, in fixed chunks.
+//
+// WHAT FOR. core/dsp/front_end_correction.h estimates a zero-IF receiver's DC
+// offset and its I/Q imbalance from the means of I and Q and the three
+// products I^2, Q^2 and IQ. This kernel produces those sums on the device, so
+// the host reads a few kilobytes per block instead of the block, and
+// core/shaders/iq_correct.comp applies what the host concluded.
+//
+// WHY FIXED CHUNKS SUMMED IN ORDER, AND NOT A TREE IN SHARED MEMORY. A float
+// sum depends on the order it is taken in. A shared-memory reduction takes
+// its order from the workgroup size, which is a specialization constant and
+// differs by device, so its answer would too, and no one twin could referee
+// both. Here each invocation owns kChunk consecutive samples and adds them one
+// at a time from zero, so the order is fixed by the block alone and the twin
+// in core/dsp/front_end_correction_reference.cpp reproduces the bits on any
+// workgroup size. The chunk sums are added in double on the host.
+//
+// The cost is parallelism: a 32768-sample block is 512 invocations of 64
+// dependent adds each. That is a few microseconds against a 13.6 ms block,
+// and the kernel only runs while an operator has asked for the correction.
+//
+// `precise` on every accumulator, because each `sum + x * x` is exactly the
+// shape a compiler fuses into an FMA, which rounds once where the twin rounds
+// twice.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+// core/dsp/front_end_correction.h declares the same number as kIqMomentsChunk.
+// A literal on both sides rather than a push constant, so a host cannot make
+// them disagree about the summation order.
+const uint kChunk = 64u;
+
+// Floats written per chunk, kIqMomentsPerChunk on the host.
+const uint kPerChunk = 5u;
+
+layout(std430, binding = 0) readonly buffer IqRing {
+    vec2 samples[];
+} ring;
+
+layout(std430, binding = 1) writeonly buffer Sums {
+    float value[];
+} sums;
+
+layout(push_constant) uniform Params {
+    // Ring capacity minus one; the capacity is a power of two.
+    uint ring_mask;
+
+    // Ring offset of the block's first sample.
+    uint src_offset;
+
+    uint count;
+} params;
+
+void main() {
+    const uint chunk = gl_GlobalInvocationID.x;
+    const uint chunks = (params.count + kChunk - 1u) / kChunk;
+    if (chunk >= chunks) {
+        return;
+    }
+
+    const uint first = chunk * kChunk;
+    const uint last = min(first + kChunk, params.count);
+
+    precise float si = 0.0;
+    precise float sq = 0.0;
+    precise float sii = 0.0;
+    precise float sqq = 0.0;
+    precise float siq = 0.0;
+
+    for (uint k = first; k < last; ++k) {
+        // src_offset + k may wrap modulo 2^32, which lands on the right slot
+        // because the capacity is a power of two dividing 2^32.
+        const vec2 v = ring.samples[(params.src_offset + k) & params.ring_mask];
+        si = si + v.x;
+        sq = sq + v.y;
+        sii = sii + v.x * v.x;
+        sqq = sqq + v.y * v.y;
+        siq = siq + v.x * v.y;
+    }
+
+    const uint at = chunk * kPerChunk;
+    sums.value[at + 0u] = si;
+    sums.value[at + 1u] = sq;
+    sums.value[at + 2u] = sii;
+    sums.value[at + 3u] = sqq;
+    sums.value[at + 4u] = siq;
+}

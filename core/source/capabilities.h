@@ -246,6 +246,21 @@ struct SourceCapabilities {
 
     std::string display_name;
 
+    // The physical device's own serial string, where it has one and it could
+    // be read. Empty for a file and a synthetic scene, and for a dongle that
+    // was described without being opened.
+    //
+    // It is what a calibration is keyed by, because an index is only an
+    // enumeration order and two dongles swap places across a replug. See
+    // core/source/calibration.h for why it is still not a unique key.
+    std::string serial;
+
+    // True when the device itself was told a frequency correction when it was
+    // opened, which an rtlsdr URI with ppm= does through librtlsdr. The
+    // engine then applies no stored correction of its own on top, since
+    // two corrections of one crystal is a crystal corrected twice.
+    bool device_corrects_frequency = false;
+
     // Empty when this description is complete. Otherwise why it is not: the
     // device is attached and enumerable but could not be opened to be asked,
     // most often because something else is already streaming from it.

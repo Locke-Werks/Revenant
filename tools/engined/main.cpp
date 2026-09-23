@@ -80,6 +80,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <memory>
 #include <mutex>
@@ -209,6 +210,12 @@ struct Options {
     // Mint over whatever is there, rather than loading it.
     bool new_token = false;
 
+    // Where each device's calibration is kept. Empty puts calibration.txt
+    // beside the token, so an engine given its own token file for a service
+    // or a test keeps its calibration there too rather than in the
+    // operator's profile.
+    std::string calibration_file;
+
     // Zero is "work it out from the source rate", which is what the engine
     // does with EngineConfig::channels at zero. See default_channel_count in
     // core/engine/engine.cpp: 64 is a good grid at 20 MS/s and an unusable
@@ -275,6 +282,11 @@ void print_usage()
         "                      app data is not somewhere your client can read.\n"
         "                      The path is printed on startup and the token never is;\n"
         "                      run `type` on the file when you need the bytes.\n"
+        "  --calibration-file <path>\n"
+        "                      Where each device's frequency correction, DC removal\n"
+        "                      and I/Q correction are kept, by serial. Default is\n"
+        "                      calibration.txt beside the token file. See\n"
+        "                      docs/calibration.md.\n"
         "  --new-token         Mint a fresh token over the existing file.\n"
         "                      ROTATING DOES NOT DISCONNECT ANYBODY. A session already\n"
         "                      granted is a capability and capabilities do not\n"
@@ -421,6 +433,18 @@ void print_usage()
                 return fail("--token-file needs a path");
             }
             options.token_file = *text;
+            continue;
+        }
+
+        if (arg == "--calibration-file") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            if (text->empty()) {
+                return fail("--calibration-file needs a path");
+            }
+            options.calibration_file = *text;
             continue;
         }
 
@@ -853,6 +877,11 @@ void print_engine_block(const engine::Engine& eng)
     config.passband_transform = options.passband_points;
     config.spectrum_floor_db = options.spectrum_floor_db;
     config.spectrum_ceiling_db = options.spectrum_ceiling_db;
+    config.calibration_path = options.calibration_file.empty()
+                                  ? (std::filesystem::path(token->first).parent_path() /
+                                     "calibration.txt")
+                                        .string()
+                                  : options.calibration_file;
 
     auto created = engine::Engine::create(config);
     if (!created) {
@@ -927,6 +956,7 @@ void print_engine_block(const engine::Engine& eng)
 
     std::println("");
     std::println("token file      {}", token->first);
+    std::println("calibration     {}", config.calibration_path);
 
     // One line on stderr and no second flag. Two flags that have to agree are
     // two flags that get out of sync, and the token does not make this wire

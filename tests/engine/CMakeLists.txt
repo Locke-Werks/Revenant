@@ -124,6 +124,7 @@ add_executable(revenant_engine_tests
     test_audio_egress.cpp
     test_audio_fanout.cpp
     test_audio_wasapi.cpp
+    test_calibration.cpp
     test_channel_ring.cpp
     test_device_lock.cpp
     test_engine.cpp
@@ -134,6 +135,7 @@ add_executable(revenant_engine_tests
     test_engine_retune.cpp
     test_engine_spectrum.cpp
     test_pacing_window.cpp
+    test_front_end_correction.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp
     test_signal_meter.cpp

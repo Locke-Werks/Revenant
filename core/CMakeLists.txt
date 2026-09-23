@@ -105,6 +105,8 @@ add_library(revenant_core STATIC
     dsp/complex_ops.cpp
     dsp/convert.cpp
     dsp/denormal_mode.cpp
+    dsp/front_end_correction.cpp
+    dsp/front_end_correction_reference.cpp
     dsp/pfb_branch_reference.cpp
     dsp/pfb_design.cpp
     dsp/pfb_fft_reference.cpp
@@ -137,8 +139,10 @@ add_library(revenant_core STATIC
     gpu/kernel.cpp
     gpu/shaders.cpp
     gpu/vma_impl.cpp
+    source/calibration.cpp
     source/capabilities.cpp
     source/clock_model.cpp
+    source/corrected_source.cpp
     source/file_source.cpp
     source/registry.cpp
     source/rtlsdr_source.cpp
@@ -187,6 +191,8 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cs24_cf32.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_fine.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_demod.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_moments.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_correct.comp"
 )
 
 revenant_apply_warnings(revenant_core)

@@ -172,11 +172,18 @@ One kernel per file, under `core/shaders/`, named for what it does.
 
 Workgroup size is a specialization constant. Never hardcoded, never a `#define`
 patched at build time. One line, and it is the same line in every kernel under
-`core/shaders/`, twelve of them on 2026-09-23:
+`core/shaders/`, fourteen of them by the end of 2026-09-23:
 
 ```glsl
 layout(local_size_x_id = 0) in;
 ```
+
+WHAT THAT SENTENCE USED TO SAY, EARLIER THE SAME DAY: "the same line in every
+kernel under `core/shaders/`, twelve of them on 2026-09-23". The front-end
+correction's `iq_moments.comp` and `iq_correct.comp` arrived with "Calibrate a
+device's crystal, DC offset and I/Q imbalance in the engine" and carry the same
+line. A count dated to the day still went stale inside the day, which is the
+argument for reading the directory rather than the number.
 
 WHAT THE SENTENCE BEFORE THE SNIPPET USED TO SAY: "it is the same line in all
 eleven kernels under `core/shaders/`". The twelfth, `convert_cs24_cf32.comp`,

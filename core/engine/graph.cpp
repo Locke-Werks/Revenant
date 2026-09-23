@@ -817,6 +817,17 @@ struct Graph::Impl {
         dsp::SampleIndex spectrum_start = 0;
         dsp::SampleIndex spectrum_count = 0;
         bool spectrum_recorded = false;
+
+        // The front-end correction's moments for this frame's block, written
+        // by the device straight into host-visible memory. Read by the
+        // recording thread when it next takes this slot, which is after the
+        // completion thread has retired it, so no second thread touches them.
+        // moments_count is the block's length, or zero when nothing was
+        // measured.
+        gpu::Buffer moments;
+        VkDescriptorSet moments_set = VK_NULL_HANDLE;
+        VkDescriptorSet correct_set = VK_NULL_HANDLE;
+        std::uint32_t moments_count = 0;
     };
 
     const gpu::Context* context = nullptr;
@@ -853,6 +864,34 @@ struct Graph::Impl {
     gpu::ComputePipeline fft_pipeline;
     gpu::ComputePipeline spectrum_pipeline;
     gpu::ComputePipeline spectrum_levels_pipeline;
+
+    // The front-end correction's two kernels. Built with the coarse chain
+    // whether or not the stage is ever switched on, so switching it on is two
+    // atomics rather than a pipeline build under a running stream.
+    gpu::ComputePipeline iq_moments_pipeline;
+    gpu::ComputePipeline iq_correct_pipeline;
+
+    // Recording thread only: the estimate, the scratch its readback lands in,
+    // and whether the stage ran on the previous block, which is how a switch
+    // from off to on is seen.
+    dsp::FrontEndCorrector front_end;
+    std::vector<float> moments_scratch;
+    bool front_end_was_on = false;
+
+    // Written by set_front_end_correction on any thread.
+    std::atomic<bool> dc_removal{false};
+    std::atomic<bool> iq_correction{false};
+
+    // The estimate as the recording thread last published it. Separate
+    // atomics; see FrontEndCorrectionStatus for why that is enough.
+    std::atomic<bool> fe_measured{false};
+    std::atomic<bool> fe_iq_plausible{false};
+    std::atomic<double> fe_dc_i{0.0};
+    std::atomic<double> fe_dc_q{0.0};
+    std::atomic<double> fe_gain{1.0};
+    std::atomic<double> fe_sin_phase{0.0};
+    std::atomic<std::uint64_t> fe_samples{0};
+    std::atomic<std::uint64_t> fe_blocks{0};
 
     // A second specialization of core/shaders/spectrum.comp, at one channel
     // and the passband's own transform size.
@@ -1019,6 +1058,108 @@ struct Graph::Impl {
                 granted, *published));
         }
         return {};
+    }
+
+    // Recording thread. Folds the moments a slot's previous block left into
+    // the estimate, then publishes what the estimate now says.
+    //
+    // THE ESTIMATE LAGS BY THE FRAMES IN FLIGHT, and that is the price of not
+    // waiting for the device: a block is corrected with what the blocks
+    // frames_in_flight before it measured. At three frames of 13.6 ms that is
+    // 41 ms, against time constants of a tenth of a second and a second.
+    void read_front_end_moments(Frame& frame) {
+        if (frame.moments_count == 0) {
+            return;
+        }
+        const std::uint32_t count = frame.moments_count;
+        frame.moments_count = 0;
+
+        const std::size_t floats =
+            static_cast<std::size_t>(dsp::iq_moments_chunks(count)) * dsp::kIqMomentsPerChunk;
+        if (floats > moments_scratch.size()) {
+            return;
+        }
+        const std::span<float> sums(moments_scratch.data(), floats);
+        if (!frame.moments.read(std::as_writable_bytes(sums))) {
+            // A read of pinned memory that fails leaves the estimate where it
+            // was, which is what skipping one block's measurement costs.
+            return;
+        }
+
+        front_end.update(dsp::total_moments(sums, count), config.source_rate);
+
+        const dsp::FrontEndEstimate& estimate = front_end.estimate();
+        fe_dc_i.store(estimate.dc_i, std::memory_order_relaxed);
+        fe_dc_q.store(estimate.dc_q, std::memory_order_relaxed);
+        fe_gain.store(estimate.gain, std::memory_order_relaxed);
+        fe_sin_phase.store(estimate.sin_phase, std::memory_order_relaxed);
+        fe_samples.store(estimate.samples_seen, std::memory_order_relaxed);
+        fe_iq_plausible.store(estimate.iq_plausible, std::memory_order_relaxed);
+        fe_blocks.fetch_add(1, std::memory_order_relaxed);
+        fe_measured.store(estimate.measured, std::memory_order_release);
+    }
+
+    // Recording thread. Records the moments of the block just written to the
+    // ring and, once there is an estimate, the correction of it in place.
+    //
+    // THE MOMENTS ARE OF THE UNCORRECTED BLOCK. The estimator is feed-forward:
+    // it measures the receiver's own offset and imbalance rather than what is
+    // left of them after the correction, so there is no loop to settle and
+    // nothing to go unstable. The moments dispatch reads the ring before the
+    // correction writes it, and the barrier between them says so.
+    void record_front_end_correction(Frame& frame, std::uint32_t destination,
+                                     std::uint32_t count) {
+        const bool dc = dc_removal.load(std::memory_order_acquire);
+        const bool iq = iq_correction.load(std::memory_order_acquire);
+        const bool on = dc || iq;
+        if (on && !front_end_was_on) {
+            front_end.reset();
+            fe_blocks.store(0, std::memory_order_relaxed);
+            fe_measured.store(false, std::memory_order_release);
+        }
+        front_end_was_on = on;
+        if (!on || count == 0) {
+            return;
+        }
+
+        const auto capacity_mask =
+            static_cast<std::uint32_t>(ring->geometry().capacity_mask);
+
+        // The convert kernel or the copy wrote the block; both are writes the
+        // moments dispatch has to see.
+        record_barrier(frame.commands,
+                       VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+        dsp::IqMomentsParams moments;
+        moments.ring_mask = capacity_mask;
+        moments.src_offset = destination;
+        moments.count = count;
+        record_dispatch(frame.commands, iq_moments_pipeline, frame.moments_set,
+                        std::as_bytes(std::span<const dsp::IqMomentsParams>(&moments, 1)),
+                        group_count(dsp::iq_moments_chunks(count), geometry.local_size_x));
+        frame.moments_count = count;
+        dispatches.fetch_add(1, std::memory_order_relaxed);
+        readbacks.fetch_add(1, std::memory_order_relaxed);
+
+        if (!front_end.estimate().measured) {
+            return;
+        }
+
+        // The correction overwrites what the moments read.
+        record_barrier(frame.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT);
+
+        dsp::IqCorrectParams correct = front_end.correction(dc, iq);
+        correct.ring_mask = capacity_mask;
+        correct.offset = destination;
+        correct.count = count;
+        record_dispatch(frame.commands, iq_correct_pipeline, frame.correct_set,
+                        std::as_bytes(std::span<const dsp::IqCorrectParams>(&correct, 1)),
+                        group_count(count, geometry.local_size_x));
+        dispatches.fetch_add(1, std::memory_order_relaxed);
     }
 
     void push_control(ControlOp* op) {
@@ -2314,15 +2455,16 @@ Expected<std::unique_ptr<Graph>> Graph::create(const gpu::Context& context, Devi
     // allocated whether or not the stage is built, because a pool is cheap
     // and sizing it two ways is one more thing to get wrong.
     //
-    // The buffer count is the sum of the five kernels' bindings: convert 2,
-    // branch 3, transform 3, spectrum 4, levels 2.
+    // The buffer count is the sum of the seven kernels' bindings: convert 2,
+    // branch 3, transform 3, spectrum 4, levels 2, and the front-end
+    // correction's moments 2 and correct 2.
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = config.frames_in_flight * 14;
+    pool_size.descriptorCount = config.frames_in_flight * 18;
 
     VkDescriptorPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = config.frames_in_flight * 5;
+    pool_info.maxSets = config.frames_in_flight * 7;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
 
@@ -2719,6 +2861,40 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         impl.spectrum_levels_pipeline = std::move(*levels_pipeline);
     }
 
+    // The front-end correction. No grid constants: both kernels take their
+    // whole shape in push constants.
+    {
+        gpu::ComputePipeline::Options moments;
+        moments.spirv = gpu::shaders::iq_moments();
+        moments.storage_buffer_count = 2;
+        moments.local_size_x = impl.geometry.local_size_x;
+        moments.push_constant_bytes = sizeof(dsp::IqMomentsParams);
+        auto moments_pipeline = gpu::ComputePipeline::create(context, moments);
+        if (!moments_pipeline) {
+            return std::unexpected(
+                with_context(moments_pipeline.error(), "Graph::prepare iq moments"));
+        }
+        impl.iq_moments_pipeline = std::move(*moments_pipeline);
+
+        gpu::ComputePipeline::Options correct;
+        correct.spirv = gpu::shaders::iq_correct();
+        correct.storage_buffer_count = 2;
+        correct.local_size_x = impl.geometry.local_size_x;
+        correct.push_constant_bytes = sizeof(dsp::IqCorrectParams);
+        auto correct_pipeline = gpu::ComputePipeline::create(context, correct);
+        if (!correct_pipeline) {
+            return std::unexpected(
+                with_context(correct_pipeline.error(), "Graph::prepare iq correct"));
+        }
+        impl.iq_correct_pipeline = std::move(*correct_pipeline);
+
+        impl.moments_scratch.assign(
+            static_cast<std::size_t>(dsp::iq_moments_chunks(
+                static_cast<std::uint32_t>(impl.geometry.block_samples))) *
+                dsp::kIqMomentsPerChunk,
+            0.0F);
+    }
+
     impl.coarse_builds.fetch_add(1, std::memory_order_relaxed);
 
     // --- one frame's worth of everything, times frames_in_flight ------------
@@ -2809,7 +2985,19 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             frame.spectrum_levels_readback = std::move(*levels_readback);
         }
 
-        VkDescriptorSetLayout layouts[5]{};
+        {
+            const VkDeviceSize moments_bytes =
+                static_cast<VkDeviceSize>(impl.moments_scratch.size()) * sizeof(float);
+            auto moments = gpu::Buffer::create(context, moments_bytes, kReadbackUsage,
+                                               gpu::MemoryKind::Readback);
+            if (!moments) {
+                return std::unexpected(
+                    with_context(moments.error(), "Graph::prepare iq moments readback"));
+            }
+            frame.moments = std::move(*moments);
+        }
+
+        VkDescriptorSetLayout layouts[7]{};
         std::uint32_t set_count = 0;
         if (impl.has_convert) {
             layouts[set_count++] = impl.convert_pipeline.descriptor_layout();
@@ -2820,6 +3008,8 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
             layouts[set_count++] = impl.spectrum_pipeline.descriptor_layout();
             layouts[set_count++] = impl.spectrum_levels_pipeline.descriptor_layout();
         }
+        layouts[set_count++] = impl.iq_moments_pipeline.descriptor_layout();
+        layouts[set_count++] = impl.iq_correct_pipeline.descriptor_layout();
 
         VkDescriptorSetAllocateInfo set_alloc{};
         set_alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -2827,7 +3017,7 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
         set_alloc.descriptorSetCount = set_count;
         set_alloc.pSetLayouts = layouts;
 
-        VkDescriptorSet sets[5]{};
+        VkDescriptorSet sets[7]{};
         result = vkAllocateDescriptorSets(device, &set_alloc, sets);
         if (result != VK_SUCCESS) {
             return fail(std::format("vkAllocateDescriptorSets failed for frame {} ({})", i,
@@ -2868,13 +3058,31 @@ Status Graph::prepare(const dsp::PrototypeFilter& prototype,
                 return std::unexpected(with_context(wrote.error(), "Graph::prepare spectrum set"));
             }
 
-            frame.spectrum_levels_set = sets[next];
+            frame.spectrum_levels_set = sets[next++];
             const VkBuffer levels_bound[] = {frame.spectrum_output.handle(),
                                              frame.spectrum_levels_output.handle()};
             if (auto wrote = write_storage_set(device, frame.spectrum_levels_set, levels_bound);
                 !wrote) {
                 return std::unexpected(
                     with_context(wrote.error(), "Graph::prepare spectrum levels set"));
+            }
+        }
+
+        frame.moments_set = sets[next++];
+        {
+            const VkBuffer bound[] = {impl.ring->buffer(), frame.moments.handle()};
+            if (auto wrote = write_storage_set(device, frame.moments_set, bound); !wrote) {
+                return std::unexpected(with_context(wrote.error(), "Graph::prepare moments set"));
+            }
+        }
+
+        // The ring twice, as the source and the destination: the kernel
+        // corrects in place. See core/shaders/iq_correct.comp.
+        frame.correct_set = sets[next++];
+        {
+            const VkBuffer bound[] = {impl.ring->buffer(), impl.ring->buffer()};
+            if (auto wrote = write_storage_set(device, frame.correct_set, bound); !wrote) {
+                return std::unexpected(with_context(wrote.error(), "Graph::prepare correct set"));
             }
         }
     }
@@ -3514,6 +3722,11 @@ Status Graph::on_block(const source::SourceBlock& block) {
     const auto frame_index = static_cast<std::uint32_t>(ticket % in_flight);
     auto& frame = impl.frames[frame_index];
 
+    // The front-end correction's estimate, from the moments this slot's last
+    // block left behind. The wait above is what makes the read safe: the slot
+    // is only handed out once the completion thread has retired its frame.
+    impl.read_front_end_moments(frame);
+
     // The one host pass over the samples, into pinned memory the convert
     // kernel reads directly. Partitioned across the pool because at 20 MS/s
     // this is 160 MB/s of memcpy and one core is not the right amount of
@@ -3684,6 +3897,9 @@ Status Graph::on_block(const source::SourceBlock& block) {
         vkCmdCopyBuffer(frame.commands, frame.staging.handle(), impl.ring->buffer(), region_count,
                         regions);
     }
+
+    impl.record_front_end_correction(frame, destination,
+                                     static_cast<std::uint32_t>(block.sample_count));
 
     if (block_count > 0) {
         record_barrier(frame.commands,
@@ -3893,7 +4109,7 @@ Status Graph::on_block(const source::SourceBlock& block) {
     // Everything above this line stayed on the device. What crosses back is
     // audio PCM and a frame of decibels, which is the whole of what
     // core/engine/engine.h permits.
-    if (frame.spectrum_recorded || !frame.vrxs.empty()) {
+    if (frame.spectrum_recorded || !frame.vrxs.empty() || frame.moments_count > 0) {
         record_barrier(frame.commands,
                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -3993,6 +4209,30 @@ void Graph::cancel() {
     // again, which is why this call did nothing until 2026-09-20.
     impl.frame_epoch.fetch_add(1, std::memory_order_release);
     impl.frame_epoch.notify_all();
+}
+
+void Graph::set_front_end_correction(bool dc_removal, bool iq_correction) {
+    auto& impl = *impl_;
+    impl.dc_removal.store(dc_removal, std::memory_order_release);
+    impl.iq_correction.store(iq_correction, std::memory_order_release);
+}
+
+FrontEndCorrectionStatus Graph::front_end_correction() const {
+    const auto& impl = *impl_;
+    FrontEndCorrectionStatus out;
+    out.dc_removal = impl.dc_removal.load(std::memory_order_acquire);
+    out.iq_correction = impl.iq_correction.load(std::memory_order_acquire);
+    out.blocks_measured = impl.fe_blocks.load(std::memory_order_relaxed);
+    out.estimate.measured = impl.fe_measured.load(std::memory_order_acquire);
+    if (out.estimate.measured) {
+        out.estimate.dc_i = impl.fe_dc_i.load(std::memory_order_relaxed);
+        out.estimate.dc_q = impl.fe_dc_q.load(std::memory_order_relaxed);
+        out.estimate.gain = impl.fe_gain.load(std::memory_order_relaxed);
+        out.estimate.sin_phase = impl.fe_sin_phase.load(std::memory_order_relaxed);
+        out.estimate.samples_seen = impl.fe_samples.load(std::memory_order_relaxed);
+        out.estimate.iq_plausible = impl.fe_iq_plausible.load(std::memory_order_relaxed);
+    }
+    return out;
 }
 
 GraphStats Graph::stats() const {
