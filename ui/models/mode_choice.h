@@ -120,12 +120,17 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 // Whether a receiver in this mode makes audio, which is whether the audio
 // section applies to it at all.
 //
-// A copy of engine::produces_audio. raw, p25p1, dstar and tetra hand out
-// complex baseband, two floats a sample, for a decoder to read, and the
-// engine refuses an audio subscription on one. So the window neither asks nor
-// shows a section that could only say it was refused. Whether P25 voice
-// should ever come out of this section is an open decision, and it is the
-// engine's refusal that would change, not this table first.
+// engine::produces_audio's seven analogue modes, and p25p1. raw, dstar and
+// tetra hand out complex baseband, two floats a sample, for a decoder to
+// read, and the engine refuses an audio subscription on one. So the window
+// neither asks nor shows a section that could only say it was refused. A
+// p25p1 receiver's audio is its decoded IMBE voice, which subscribeAudio
+// serves since 2026-09-23 on the owner's decision that a digital voice
+// receiver plays its voice; core/rpc/voice_audio.h has it.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "Whether P25 voice should ever come out
+// of this section is an open decision, and it is the engine's refusal that
+// would change, not this table first." The refusal changed first.
 //
 // A name this window does not know is taken as making none, for the reason
 // demod_from_name gives for refusing one: a guess here would subscribe to a
@@ -133,7 +138,7 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 [[nodiscard]] constexpr bool mode_makes_audio(std::string_view name)
 {
     return name == "am" || name == "nfm" || name == "wfm" || name == "usb" || name == "lsb" ||
-           name == "dsb" || name == "cw";
+           name == "dsb" || name == "cw" || name == "p25p1";
 }
 
 // Whether a receiver in this mode hands out audio at the level its signal

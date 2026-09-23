@@ -109,16 +109,21 @@ TEST_CASE("the digital segment names the digital mode in force", "[modes]")
     CHECK_FALSE(mode_is_digital("dmr"));
 }
 
-// Rejects an audio section on a complex tap, where the engine refuses the
-// subscription and the section could only show that. The list is
-// engine::produces_audio's, and raw is in it with the digital three.
-TEST_CASE("only the analogue demodulators make audio", "[modes]")
+// Rejects an audio section on a complex tap the engine refuses audio on,
+// where the section could only show the refusal, and rejects hiding it on a
+// P25 receiver, whose audio is its decoded voice since 2026-09-23.
+//
+// WHAT THIS CASE USED TO SAY: "only the analogue demodulators make audio",
+// with p25p1 among the modes that make none. That failed on the owner's
+// decision that a digital voice receiver plays its voice, which is the P25
+// half of this change.
+TEST_CASE("the analogue demodulators and P25 make audio", "[modes]")
 {
-    for (const std::string_view name : {"am", "nfm", "wfm", "usb", "lsb", "dsb", "cw"}) {
+    for (const std::string_view name : {"am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1"}) {
         INFO(name);
         CHECK(mode_makes_audio(name));
     }
-    for (const std::string_view name : {"raw", "p25p1", "dstar", "tetra", "dmr", ""}) {
+    for (const std::string_view name : {"raw", "dstar", "tetra", "dmr", ""}) {
         INFO(name);
         CHECK_FALSE(mode_makes_audio(name));
     }

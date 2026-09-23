@@ -1355,10 +1355,12 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool audioWanted READ audioWanted WRITE setAudioWanted NOTIFY audioChanged)
 
     // Whether the pane's receiver makes audio at all, mode_makes_audio in
-    // models/mode_choice.h. False on raw and the three digital modes, whose
-    // output is complex baseband for a decoder: the window hides the audio
-    // section there, and apply_audio_request does not subscribe on one
-    // while the switch is on, because the engine would only refuse it.
+    // models/mode_choice.h. False on raw, D-STAR and TETRA, whose output is
+    // complex baseband for a decoder: the window hides the audio section
+    // there, and apply_audio_request does not subscribe on one while the
+    // switch is on, because the engine would only refuse it. True on P25,
+    // whose audio is its decoded voice since 2026-09-23.
+    // WHAT THIS USED TO SAY: "False on raw and the three digital modes".
     Q_PROPERTY(bool audioOffered READ audioOffered NOTIFY receiverChanged)
 
     // A subscription exists on the engine right now. False while the

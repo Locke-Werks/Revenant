@@ -350,10 +350,10 @@ void EngineLink::apply_audio_request()
     // where the operator put it.
 
     // What should be subscribed, by slot. Nothing on a receiver that makes
-    // no audio: raw and the digital modes hand out complex baseband, the
-    // engine refuses audio on one in words, and that refusal would be the
-    // only thing the section had to show; the window hides the section
-    // there instead.
+    // no audio: raw, D-STAR and TETRA hand out complex baseband, the engine
+    // refuses audio on one in words, and that refusal would be the only
+    // thing the section had to show; the window hides the section there
+    // instead. A P25 receiver's audio is its voice since 2026-09-23.
     std::array<qulonglong, kMaxReceivers> desired{};
     std::array<rpc::Demod, kMaxReceivers> desired_demod{};
     if (audio_wanted_.load(std::memory_order_acquire)) {
