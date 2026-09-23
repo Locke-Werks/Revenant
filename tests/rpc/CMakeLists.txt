@@ -90,12 +90,20 @@ endif()
 # Matching the message rather than the exit code is not a workaround here: the
 # exit code is unavailable by construction once a pass regex is set, and the
 # prefix is the one string every one of those paths shares.
+#
+# --port 0 EXPLICITLY, because the program's own default is now 17690, which
+# is revenant-ui's. A test binding that would fail on the machine this suite is
+# usually run on, where an operator's engine is holding it, and would take the
+# port from under that engine on a machine where it is not yet running. Passing
+# zero also keeps the one path that makes two engines on a machine possible
+# covered, so an explicit --port 0 cannot quietly start meaning the default.
 if(TARGET revenant-engine)
     add_test(
         NAME engined_serves_and_reports_its_port
         COMMAND revenant-engine
                 "synthetic:wideband?rate=2400032&emitters=4&seed=4242&samples=4800064"
                 --gpu -1
+                --port 0
                 --spectrum 256
                 --block-samples 16384
                 --duration 0.5
@@ -106,7 +114,22 @@ if(TARGET revenant-engine)
         LABELS "rpc"
         TIMEOUT 300
         PASS_REGULAR_EXPRESSION "listening on 127\\.0\\.0\\.1:[0-9]+"
-        FAIL_REGULAR_EXPRESSION "revenant-engine: "
+        FAIL_REGULAR_EXPRESSION "revenant-engine: |listening on 127\\.0\\.0\\.1:17690"
+    )
+
+    # The default itself, read off the usage text rather than by binding it,
+    # for the collision reason above. The usage prints the same constant the
+    # parser defaults to, so this fails if either moves without the other.
+    # No FAIL_REGULAR_EXPRESSION: the usage text opens with "revenant-engine: "
+    # itself, which is the failure prefix the entry above matches.
+    add_test(
+        NAME engined_defaults_to_the_ui_port
+        COMMAND revenant-engine --help
+    )
+    set_tests_properties(engined_defaults_to_the_ui_port PROPERTIES
+        LABELS "rpc"
+        TIMEOUT 60
+        PASS_REGULAR_EXPRESSION "--port <n> +Port, default 17690,"
     )
 else()
     message(STATUS "revenant-engine is not present yet, skipping its service test")

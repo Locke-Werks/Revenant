@@ -1491,7 +1491,18 @@ sweeping.
 
 What exists: `tools/engined` builds `revenant-engine`, which links
 `revenant_rpc_server`, binds a port, prints it, and serves a real engine until
-`--duration` expires. `tests/rpc` binds an ephemeral loopback port per case,
+`--duration` expires. The port defaults to 17690, which is `revenant-ui`'s
+default, so the two meet with neither being told a port; `--port 0` binds a
+free one for a second engine on the machine. `ServerOptions::port` in the
+library stays at zero, which is what the suite needs.
+
+The bind is exclusive, and kj's own `listen()` is not. kj sets `SO_REUSEADDR`,
+which on Windows lets a second socket bind a port another is listening on:
+with the fixed default, a second engine printed `listening on
+127.0.0.1:17690` beside the first and served. `core/rpc/listen.cpp` binds with
+`SO_EXCLUSIVEADDRUSE` instead, so the second is refused with `WSAEADDRINUSE`,
+and an engine restarted while its old connections sit in `TIME_WAIT` still
+binds, measured on 2026-09-22. `tests/rpc` binds an ephemeral loopback port per case,
 connects a real `Client` and drives a real engine through it. A channel centre
 that is not a whole hertz is compared against what the engine holds rather than
 against the other end of the wire, all eight demodulator modes round-trip, an

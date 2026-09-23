@@ -20,14 +20,25 @@
 // secret written to any of those has left the machine. There is deliberately
 // no --print-token; `type` on the file is the way to read it.
 //
-// THE PORT IS PRINTED AND FLUSHED, AND THAT IS NOT DECORATION
+// THE DEFAULT PORT IS 17690, AND THE PORT IS PRINTED AND FLUSHED EITHER WAY
 //
-// ServerOptions::port defaults to zero, meaning bind whatever is free, so
-// that two engines on one machine do not collide. An ephemeral port is then
-// unknowable to whoever wants to connect unless this says what it was. stdout
-// is block buffered when it is a pipe, which is precisely the case where a
-// supervisor is reading for that line, so the line is flushed rather than
-// left to arrive whenever the buffer happens to fill.
+// 17690 is revenant-ui's default (ui/main.cpp, kDefaultPort), so the engine
+// and the window find each other with neither naming a port. --port 0 still
+// binds whatever is free, which is what a supervisor running two engines on
+// one machine, or a test suite, asks for. ServerOptions::port in the library
+// stays at zero for the suite's sake; the fixed number is this program's.
+//
+// The bound port is printed either way. An ephemeral port is unknowable to
+// whoever wants to connect unless this says what it was, and stdout is block
+// buffered when it is a pipe, which is precisely the case where a supervisor
+// is reading for that line, so the line is flushed rather than left to arrive
+// whenever the buffer happens to fill.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "ServerOptions::port defaults to zero,
+// meaning bind whatever is free, so that two engines on one machine do not
+// collide", as the reason this program's default was zero too. The collision
+// is real and is what --port 0 is for; it was the wrong default for the one
+// engine an operator runs beside the one window.
 //
 // THE SOURCE IS OPENED BEFORE THE SERVER IS CREATED
 //
@@ -171,15 +182,23 @@ using source::parse_frequency;
 // The command line
 // ---------------------------------------------------------------------------
 
+// The port revenant-ui connects to when it is told nothing. Stated here and in
+// ui/main.cpp, which is a separate CMake project that shares no header with
+// this one; the usage text below prints this constant so the two cannot drift
+// apart without one of them being edited on purpose.
+constexpr std::uint16_t kDefaultPort = 17690;
+
 struct Options {
     std::string uri;
 
     std::string bind = "127.0.0.1";
 
-    // Zero binds an ephemeral port, which is the default because two engines
-    // on one machine is the ordinary case and a fixed default port makes the
-    // second one fail. The bound port is printed either way.
-    std::uint16_t port = 0;
+    // revenant-ui's default, so the two meet without either being told a
+    // port. Zero binds an ephemeral one, for a second engine on the same
+    // machine or a test; a second engine left at this default fails to bind
+    // and says so, which is the right answer for an operator who did not
+    // mean to start two. The bound port is printed either way.
+    std::uint16_t port = kDefaultPort;
 
     // Empty asks core/rpc/token.h for %LOCALAPPDATA%\Revenant\rpc-token.
     // Named when the engine runs as a service, where that path resolves
@@ -245,9 +264,10 @@ void print_usage()
         "                      so a token crossing a network is readable and replayable\n"
         "                      by anything on the path. Off loopback still means a\n"
         "                      tunnel; binding elsewhere prints a warning saying so.\n"
-        "  --port <n>          Port, default 0, which binds whatever is free. The bound\n"
-        "                      port is printed on startup either way, because an\n"
-        "                      ephemeral one is otherwise unknowable to a client.\n"
+        "  --port <n>          Port, default {}, which is where revenant-ui looks when\n"
+        "                      it is told nothing. 0 binds whatever is free, for a\n"
+        "                      second engine on this machine. The bound port is\n"
+        "                      printed on startup either way.\n"
         "  --token-file <path> Where the pre-shared token lives. Default is\n"
         "                      %LOCALAPPDATA%\\Revenant\\rpc-token, which is minted on\n"
         "                      first run readable only by you and SYSTEM. Name a path\n"
@@ -317,7 +337,8 @@ void print_usage()
         "Examples:\n"
         "  revenant-engine \"synthetic:wideband?rate=2400000&emitters=8&seed=4242\" \\\n"
         "      --pace 1\n"
-        "  revenant-engine \"rtlsdr://0?freq=162.550M&rate=2400000\" --port 47000\n");
+        "  revenant-engine \"rtlsdr://0?freq=162.550M&rate=2400000\" --port 47000\n",
+        kDefaultPort);
 }
 
 [[nodiscard]] Expected<Options> parse_options(int argc, char** argv)
@@ -890,6 +911,17 @@ void print_engine_block(const engine::Engine& eng)
 
     auto server = rpc::Server::create(eng, server_options);
     if (!server) {
+        // The default port is the one case where the likeliest cause is known:
+        // an engine is already running beside the window. Said as a
+        // possibility, because the bind can fail for other reasons and the
+        // socket's own words follow.
+        if (options.port == kDefaultPort) {
+            return std::unexpected(with_context(
+                server.error(),
+                std::format("starting the RPC server on {}, revenant-ui's default port. If "
+                            "another engine already holds it, --port 0 binds a free one",
+                            kDefaultPort)));
+        }
         return std::unexpected(with_context(server.error(), "starting the RPC server"));
     }
 
