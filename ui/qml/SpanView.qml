@@ -135,6 +135,10 @@ ColumnLayout {
             readonly property double concentration:
                 trackId !== 0 ? engineLink.detectionConcentration(trackId) : -1
 
+            // What the engine says the signal is, in full: the bracket has
+            // room for the name only. models/label_tune.h writes the line.
+            readonly property string label: trackId !== 0 ? engineLink.detectionLabelText(trackId) : ""
+
             anchors.right: parent.right
             anchors.top: parent.top
             anchors.rightMargin: 6
@@ -153,7 +157,8 @@ ColumnLayout {
                 color: Theme.ink
                 font.family: Theme.monoFont
                 font.pixelSize: Theme.sizeSmall
-                text: "track " + hoverCard.trackId
+                text: (hoverCard.label !== "" ? hoverCard.label + "\n" : "")
+                      + "track " + hoverCard.trackId
                       + "  ·  held for " + hoverCard.held.toFixed(2)
                       + (hoverCard.margin >= 0 ? "  ·  margin " + hoverCard.margin.toFixed(2) : "")
                       + (hoverCard.concentration >= 0

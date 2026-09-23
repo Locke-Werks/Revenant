@@ -58,8 +58,11 @@ QtObject {
     // inside another receiver's band, which focuses that receiver and tunes
     // nothing, from a click anywhere else. Only a click that tuned is a new
     // reading for the readout.
+    //
+    // The detection's id goes with it, so its label can set the receiver's
+    // mode, filter and decoder; see EngineLink::tuneReceiverToDetection.
     function takeTune(id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) {
-        if (engineLink.spanClick(pointerHz, centerHz, bandwidthHz))
+        if (engineLink.spanClick(pointerHz, centerHz, bandwidthHz, id))
             selection.record(id, centerHz, bandwidthHz, candidates, rank, exhausted)
     }
 

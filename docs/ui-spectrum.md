@@ -1219,11 +1219,17 @@ fit did. `ui/models/auto_filter.h` holds the rules and their cases are in
 `ui/tests/test_auto_filter.cpp`; `ui/models/auto_filter_link.cpp` is when
 it runs.
 
-**Once, on a tune.** A fit is armed by a click on a detection and by ticking
-the box, and by nothing else. A filter that refitted itself on every retune
-would be a second pair of hands on the handles. Tuning by hand, the wheel, a
-change of mode or a removed receiver drop a fit that is still measuring and
-clear the chip.
+**Once, on a tune.** A fit is armed by a click on a detection while the box is
+ticked, by ticking the box, and, since 2026-09-23, by a click on a detection
+whose label sets the receiver, ticked or not: the owner asked that a label set
+the receiver, and this fit is the filter half of that. See "The label on the
+bracket" below. Nothing else arms one. A filter that refitted itself on every
+retune would be a second pair of hands on the handles. Tuning by hand, the
+wheel, a change of mode or a removed receiver drop a fit that is still
+measuring and clear the chip.
+
+WHAT THE FIRST SENTENCE USED TO SAY: "A fit is armed by a click on a detection
+and by ticking the box, and by nothing else."
 
 **Never against the operator.** A fit that comes due while an edge or the
 band is under the pointer is dropped, and so is one still measuring when the
@@ -1275,6 +1281,44 @@ outside. The NFM station at 99.9090 MHz, recorded as 10.8 kHz wide, was
 fitted from the 16 kHz default to ±6.59 kHz. The first run of the AM case
 bridged only 1.5 kHz between line pairs and fitted the carrier alone, 0.73
 kHz wide; the 4 kHz bridge is the correction.
+
+## The label on the bracket
+
+The owner's request of 2026-09-23: the pink bracket shows what the signal is
+and a click sets the receiver from it. The engine names the signal, in
+`Detection.label`, and `docs/detection.md`, "The label on the wire", says how.
+This is the client's half, and `ui/models/label_tune.h` holds all of it with
+its cases in `ui/tests/test_label_tune.cpp`.
+
+**On the bracket.** A labelled plate is the name alone: `P25`, `NFM`,
+`BPSK`. Plates that would collide are dropped, the weaker signal's first, and
+on the labelled scene at 1280 pixels plates carrying the name and the
+frequency showed seven of eleven labels where the names alone show one for
+every emitter; the frequency is on the ruler under the bracket and in the
+hover card. The weaker-first rule is what puts AM on an AM station, whose
+carrier outranks its two sideband tracks. An
+unlabelled plate reads as it did, the frequency and the SNR. Every plate is
+set in the theme's monospace at its small size.
+
+**In the hover card.** A first line with what the bracket has no room for:
+the frequency and the SNR, the kind, the confidence, the symbol rate where one
+was measured, and whether
+the label sets the receiver. An unlabelled track says which of two things it
+is, "not identified yet" or "probed 2 times, nothing identified".
+
+**On a click.** The label chooses the mode where the width rule used to, on
+the same condition, so a mode the operator named on the receiver still wins. A
+protocol sets its decoder's mode and attaches that decoder with the decode
+switch on: P25 and M17 to p25p1, D-STAR and TETRA to their own, POCSAG and
+AX.25 to nfm, RTTY, SITOR-B and PSK31 to usb, CW to cw. An analogue label sets
+its own mode and attaches nothing. A digital family with no protocol sets usb
+when it is 3 kHz wide or less and otherwise leaves the width rule to choose.
+The filter is one auto filter fit, ticked or not. A label that is unknown or
+may not drive changes nothing about a click.
+
+**What it cannot do yet.** Label USB or LSB, which the engine cannot tell
+apart; attach a DMR decoder, which does not exist yet; fit a filter when the
+receiver window's pane is not open, because the fit reads the pane.
 
 ## Decoding
 

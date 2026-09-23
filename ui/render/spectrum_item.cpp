@@ -10,6 +10,7 @@
 #include <QBrush>
 #include <QColor>
 #include <QCursor>
+#include <QFont>
 #include <QFontMetricsF>
 #include <QGuiApplication>
 #include <QHoverEvent>
@@ -28,6 +29,7 @@
 #include <QWheelEvent>
 
 #include "models/frame_stats.h"
+#include "models/label_tune.h"
 #include "models/receiver_palette.h"
 
 namespace revenant::ui {
@@ -139,23 +141,42 @@ constexpr double kReceiverCentreTickPx = 9.0;
 // labels carry as many decimals as their 1-2-5 step needs and no more, so on
 // a broadcast span they read to a tenth of a megahertz and the two do not
 // share a precision. They share a unit, which is what the reader matches.
+//
+// SINCE 2026-09-23 A LABELLED BOX IS NAMED FOR WHAT IT IS: "P25", "NFM".
+// models/label_tune.h's bracket_text writes it and says why the name stands
+// alone; the frequency and the SNR go to the hover card, which is where the
+// owner's design pass puts the full detail. An unlabelled box reads as it did.
 [[nodiscard]] QString box_label(const DetectionBox& box)
 {
+    const bool named = box.label.kind != rpc::LabelKind::Unknown && !box.label.name.empty();
     const QString megahertz =
         QString::number(static_cast<double>(box.center_hz) / 1.0e6, 'f', 4);
+    const QString lead = named ? QString::fromStdString(box.label.name) : megahertz;
 
     switch (box.state) {
         case rpc::TrackState::Held:
-            return megahertz + QStringLiteral("  held ") +
+            return lead + QStringLiteral("  held ") +
                    QString::number(box.silent_seconds, 'f', 1) + QStringLiteral(" s");
         case rpc::TrackState::Merged:
-            return megahertz + QStringLiteral("  merged");
+            return lead + QStringLiteral("  merged");
         case rpc::TrackState::Pending:
         case rpc::TrackState::Live:
             break;
     }
-    return megahertz + QStringLiteral("  ") + QString::number(box.snr_2500_db, 'f', 1) +
-           QStringLiteral(" dB");
+    return QString::fromStdString(bracket_text(box.label, box.center_hz, box.snr_2500_db));
+}
+
+// THE PLATES ARE SET IN THE THEME'S MONOSPACE, Theme.monoFont at
+// Theme.sizeSmall, so a column of frequencies lines up digit under digit and
+// a label reads the same on the bracket as in the hover card beside it. Named
+// here rather than read from the QML singleton, which a painted item cannot
+// see; qml/Theme.qml names this function beside the two properties.
+[[nodiscard]] QFont overlay_label_font()
+{
+    QFont font(QStringLiteral("Cascadia Mono"));
+    font.setStyleHint(QFont::Monospace);
+    font.setPixelSize(11);
+    return font;
 }
 
 // WHAT THE LABEL USED TO END WITH: the track's confidence to two places, after
@@ -456,6 +477,7 @@ void build_detection_boxes(const EngineLink& link, double width_px,
         box.confidence = detection.confidence;
         box.first_seen = detection.first_seen;
         box.last_detected = detection.last_detected;
+        box.label = detection.label;
 
         const double centre = static_cast<double>(detection.center_hz);
         const double half = static_cast<double>(detection.bandwidth_hz) / 2.0;
@@ -628,28 +650,56 @@ void build_detection_labels(const std::vector<DetectionBox>& boxes,
 {
     out.clear();
 
-    // Left to right, skipping any that would collide with the one before it.
-    // A smudge of overlapping frequencies says less than three clean ones and
-    // a gap. The selected box is appended last whatever it collides with,
-    // because the operator asked for that one specifically.
-    const QFontMetricsF metrics(QGuiApplication::font());
-    double claimed_to = -1.0e9;
+    // Strongest first, skipping any that would collide with one already
+    // placed, then drawn left to right. A smudge of overlapping plates says
+    // less than three clean ones and a gap. The selected box is appended last
+    // whatever it collides with, because the operator asked for that one
+    // specifically.
+    //
+    // WHAT THE FIRST SENTENCE USED TO SAY: "Left to right, skipping any that
+    // would collide with the one before it." On the labelled scene an AM
+    // station is three tracks, a carrier at 24.7 dB and its sidebands at
+    // 8.8 dB either side, and left to right put the lower sideband's plate up
+    // and dropped the carrier's; the plate a station keeps should be the one
+    // for the part of it that is loudest.
+    const QFontMetricsF metrics(overlay_label_font());
     const DetectionBox* chosen = nullptr;
 
+    struct Candidate {
+        OverlayLabel label;
+        double start = 0.0;
+        double end = 0.0;
+        double snr = 0.0;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(boxes.size());
     for (const DetectionBox& box : boxes) {
         if (box.id != 0 && box.id == selected_id) {
             chosen = &box;
             continue;
         }
-
         OverlayLabel label = detection_label(box);
         const double plate_width = metrics.horizontalAdvance(label.text) + 8.0;
         const double start = label.center_px - plate_width / 2.0;
-        if (start < claimed_to + 4.0) {
-            continue;
+        candidates.push_back({std::move(label), start, start + plate_width, box.snr_2500_db});
+    }
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const Candidate& a, const Candidate& b) { return a.snr > b.snr; });
+
+    std::vector<const Candidate*> placed;
+    for (const Candidate& candidate : candidates) {
+        const bool clear = std::none_of(placed.begin(), placed.end(), [&](const Candidate* other) {
+            return candidate.start < other->end + 4.0 && other->start < candidate.end + 4.0;
+        });
+        if (clear) {
+            placed.push_back(&candidate);
         }
-        claimed_to = start + plate_width;
-        out.push_back(std::move(label));
+    }
+    std::sort(placed.begin(), placed.end(), [](const Candidate* a, const Candidate* b) {
+        return a->label.center_px < b->label.center_px;
+    });
+    for (const Candidate* candidate : placed) {
+        out.push_back(candidate->label);
     }
 
     if (chosen != nullptr) {
@@ -661,7 +711,7 @@ void build_detection_labels(const std::vector<DetectionBox>& boxes,
 
 double overlay_label_height()
 {
-    const QFontMetricsF metrics(QGuiApplication::font());
+    const QFontMetricsF metrics(overlay_label_font());
     return metrics.height() + 2.0;
 }
 
@@ -781,6 +831,7 @@ void OverlayLabelItem::setLabels(std::vector<OverlayLabel> labels)
 
 void OverlayLabelItem::paint(QPainter* painter)
 {
+    painter->setFont(overlay_label_font());
     for (const OverlayLabel& label : labels_) {
         paint_label(*painter, label.text, label.center_px, width(), label.ink);
     }

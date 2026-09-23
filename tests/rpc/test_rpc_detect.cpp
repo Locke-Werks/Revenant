@@ -60,8 +60,10 @@
 #include "core/engine/engine.h"
 #include "core/error.h"
 #include "core/rpc/client.h"
+#include "core/rpc/decoders.h"
 #include "core/rpc/server.h"
 #include "core/rpc/types.h"
+#include "ui/models/label_tune.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
 #include "tests/rpc/rpc_fixture.h"
@@ -1497,4 +1499,33 @@ TEST_CASE("a probed detection crosses the wire with its label", "[gpu][rpc][dete
     const auto stopped = rig.stop();
     INFO(test::message_of(stopped));
     REQUIRE(stopped.has_value());
+}
+
+// The client's label table against the server's decoder registry, here
+// because ui/tests links no decoder and this binary links all of them.
+//
+// REJECTS: a decoder name in ui/models/label_tune.h that the registry does not
+// hold, which would attach nothing and say nothing about it, and a decoder
+// paired with a mode whose output it does not read, which subscribeDecoded
+// refuses in words the operator would then see instead of a decode.
+TEST_CASE("every labelled protocol's decoder reads the mode the label sets", "[rpc][detect]") {
+    for (const auto& row : ui::label_tune_detail::kProtocols) {
+        INFO(std::string(row.name));
+        CHECK(engine::demod_from_name(row.mode).has_value());
+        if (row.decoder.empty()) {
+            continue;
+        }
+        const rpc::DecoderSpec* found = nullptr;
+        for (const rpc::DecoderSpec& spec : rpc::decoder_registry()) {
+            if (spec.name == row.decoder) {
+                found = &spec;
+            }
+        }
+        REQUIRE(found != nullptr);
+        CHECK(rpc::decoder_accepts(*found, row.mode));
+    }
+    for (const auto& row : ui::label_tune_detail::kAnalogue) {
+        INFO(std::string(row.name));
+        CHECK(engine::demod_from_name(row.mode).has_value());
+    }
 }

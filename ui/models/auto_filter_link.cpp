@@ -52,11 +52,16 @@ QString EngineLink::autoFilterState() const
                                                     receiverDemod().toStdString()));
 }
 
-void EngineLink::arm_auto_filter()
+void EngineLink::arm_auto_filter(bool labelled)
 {
-    if (!auto_filter_enabled_) {
+    // A click on a labelled detection fits once whether or not the toggle is
+    // on: the owner's request of 2026-09-23 is that a label sets the receiver,
+    // filter included, and this is the one fit the client has. The toggle
+    // still decides for every other click. See models/label_tune.h.
+    if (!auto_filter_enabled_ && !labelled) {
         return;
     }
+    auto_filter_once_ = !auto_filter_enabled_;
     auto_filter_due_ = true;
     auto_filter_average_.reset();
     emit autoFilterChanged();
@@ -86,7 +91,7 @@ void EngineLink::cancel_auto_filter(AutoFilterOutcome why)
 
 void EngineLink::run_auto_filter()
 {
-    if (!auto_filter_enabled_ || !auto_filter_due_ || receiver_id_ == 0) {
+    if ((!auto_filter_enabled_ && !auto_filter_once_) || !auto_filter_due_ || receiver_id_ == 0) {
         return;
     }
     if (dragging_) {

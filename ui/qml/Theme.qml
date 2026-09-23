@@ -79,7 +79,10 @@ QtObject {
 
     // One sans for the interface and one monospace for every number an
     // operator reads as a number. Both ship with Windows 11, so nothing is
-    // bundled and the installer does not change.
+    // bundled and the installer does not change. The detection plates on the
+    // span are painted in C++ and cannot read this singleton, so
+    // overlay_label_font in render/spectrum_item.cpp names monoFont at
+    // sizeSmall itself; change the two together.
     readonly property string uiFont: "Segoe UI Variable Text"
     readonly property string monoFont: "Cascadia Mono"
 

@@ -189,6 +189,10 @@ struct DetectionBox {
 
     // 1 while live, falling toward kDetectionFadeFloor across the hold.
     double fade = 1.0;
+
+    // What the engine says this is, which the plate leads with. See
+    // models/label_tune.h.
+    rpc::DetectionLabel label;
 };
 
 enum class DetectionStyle : std::uint8_t {
@@ -242,9 +246,13 @@ void build_detection_quads(const std::vector<DetectionBox>& boxes, double width_
 // What one box is called, and in the colour its state is drawn in.
 [[nodiscard]] OverlayLabel detection_label(const DetectionBox& box);
 
-// The labels for the Band style, left to right, skipping any that would
-// collide with the one before it. The chosen box is always in the list and is
-// always last, so it is drawn over whatever it collides with.
+// The labels for the Band style, placed strongest first and skipping any that
+// would collide with one already placed, then ordered left to right. The
+// chosen box is always in the list and is always last, so it is drawn over
+// whatever it collides with.
+//
+// WHAT THIS USED TO SAY: "left to right, skipping any that would collide with
+// the one before it". spectrum_item.cpp has why it changed.
 void build_detection_labels(const std::vector<DetectionBox>& boxes,
                             std::uint64_t selected_id, std::vector<OverlayLabel>& out);
 

@@ -194,8 +194,20 @@ void EngineLink::update_receiver_fit()
     emit receiverFitChanged();
 }
 
+QString EngineLink::detectionLabelText(qulonglong id) const
+{
+    for (const rpc::Detection& detection : shown_.detections) {
+        if (detection.id == id) {
+            return QString::fromStdString(
+                hover_line(detection.label, detection.center_hz, detection.snr_2500_db));
+        }
+    }
+    return {};
+}
+
 void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode,
-                                         double detection_bandwidth_hz)
+                                         double detection_bandwidth_hz,
+                                         qulonglong detection_id)
 {
     // Tuning by hand: AFT holds, then starts again from here.
     aft_yield();
@@ -255,14 +267,45 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
     // condition here because this file links Qt and that test binary does not,
     // so a rule written inline is a rule nothing checks.
     const bool named = !chosen.isEmpty();
-    if (click_chooses_demod(named, measured, demod_touched_)) {
+
+    // The label, when the click named a detection and the list still holds
+    // it. It chooses where the width rule used to, on the same condition, so
+    // an operator's own mode survives a labelled click exactly as it
+    // survives an unlabelled one. models/label_tune.h is the mapping.
+    LabelTune from_label;
+    if (detection_id != 0) {
+        for (const rpc::Detection& detection : shown_.detections) {
+            if (detection.id == detection_id) {
+                from_label = label_tune(detection.label, measured);
+                break;
+            }
+        }
+    }
+    const bool label_chooses =
+        from_label.drives && click_chooses_demod(named, measured, demod_touched_);
+
+    if (label_chooses) {
+        chosen = QString::fromUtf8(from_label.mode.data(),
+                                   static_cast<qsizetype>(from_label.mode.size()));
+    } else if (click_chooses_demod(named, measured, demod_touched_)) {
         chosen = demod_name(demod_for_detection(measured));
     }
 
     tune_receiver(absolute_hz, chosen, measured, named);
 
-    // A click on a detection is the one tune the auto filter answers.
-    arm_auto_filter();
+    // The decoder the label calls for, chosen and switched on, the same two
+    // calls the decode section's menu and switch make. The choice is
+    // reconciled against the receiver's mode on the supervisor's next pass,
+    // so it attaches once the new mode is in force.
+    if (label_chooses && !from_label.decoder.empty()) {
+        setDecodeChoice(QString::fromUtf8(from_label.decoder.data(),
+                                          static_cast<qsizetype>(from_label.decoder.size())));
+        setDecodeWanted(true);
+    }
+
+    // A click on a detection is the one tune the auto filter answers, and a
+    // labelled one fits once whether or not the toggle is on.
+    arm_auto_filter(label_chooses);
 }
 
 void EngineLink::addGoneReceiverBack()

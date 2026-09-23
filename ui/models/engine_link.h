@@ -161,6 +161,7 @@
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/decoded_model.h"
+#include "models/label_tune.h"
 #include "models/mode_choice.h"
 #include "models/receiver_gone.h"
 #include "models/receiver_marker.h"
@@ -2083,8 +2084,21 @@ public:
     // broadcast FM took the mode back to wfm after every click. The
     // measurement chooses for a receiver whose mode nobody has stated, which
     // is the case the paragraph above is about.
+    //
+    // A DETECTION'S LABEL SETS THE RECEIVER, since 2026-09-23, when the click
+    // names the detection and its label may drive: the mode from the label,
+    // one auto filter fit whether or not the toggle is on, and the decoder the
+    // label calls for, attached and switched on. models/label_tune.h is the
+    // mapping and says when it falls back to the width rule above. The
+    // operator's own mode still wins, by the same click_chooses_demod.
     Q_INVOKABLE void tuneReceiverToDetection(double absolute_hz, const QString& mode,
-                                             double detection_bandwidth_hz);
+                                             double detection_bandwidth_hz,
+                                             qulonglong detection_id = 0);
+
+    // What the label of the detection with this id says, for the hover card:
+    // models/label_tune.h's hover_line, or empty when the list does not hold
+    // the id.
+    [[nodiscard]] Q_INVOKABLE QString detectionLabelText(qulonglong id) const;
 
     // Changes the mode in place as far as the operator is concerned, which
     // is a remove and an add underneath: the demodulator IS the stage and
@@ -2281,7 +2295,10 @@ public:
     // receiver's band it focuses that receiver; anywhere else it tunes the
     // focused one, or opens the first. Answers whether it tuned, which is
     // whether the click readout has a new click to show.
-    Q_INVOKABLE bool spanClick(double pointer_hz, double center_hz, double bandwidth_hz);
+    // detection_id is the detection the click resolved to, zero for none,
+    // which is what lets its label set the receiver.
+    Q_INVOKABLE bool spanClick(double pointer_hz, double center_hz, double bandwidth_hz,
+                               qulonglong detection_id = 0);
 
     // The second click of a double click at the same place. Adds a receiver
     // there and puts the focused one back where the first click found it.
@@ -3131,11 +3148,17 @@ private:
     // drag, and by any tuning by hand.
     bool auto_filter_enabled_ = false;
     bool auto_filter_due_ = false;
+
+    // Set when a labelled click armed a fit the toggle did not ask for, so
+    // run_auto_filter makes that one fit with the toggle off. See
+    // arm_auto_filter.
+    bool auto_filter_once_ = false;
+
     AutoFilterAverage auto_filter_average_;
     AutoFilterFit auto_filter_last_{};
     std::uint64_t auto_filter_vrx_ = 0;
     void run_auto_filter();
-    void arm_auto_filter();
+    void arm_auto_filter(bool labelled = false);
     void cancel_auto_filter(AutoFilterOutcome why);
 
     // The timer came due with no wheel behind it: asks whether the accumulator

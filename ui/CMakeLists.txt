@@ -198,6 +198,7 @@ qt_add_executable(revenant_ui
     models/auto_filter_link.cpp
     models/noise_controls.h
     models/noise_link.cpp
+    models/label_tune.h
     models/rack_link.cpp
     models/rds_link.cpp
     models/receiver_link.cpp
@@ -607,6 +608,7 @@ if(REVENANT_UI_TESTS)
             tests/test_key_steps.cpp
             tests/test_memories.cpp
             tests/test_memory_import.cpp
+            tests/test_label_tune.cpp
             tests/test_mode_choice.cpp
             tests/test_noise_controls.cpp
             tests/test_palette_match.cpp

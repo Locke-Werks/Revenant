@@ -421,7 +421,8 @@ void EngineLink::addStartupReceiver(double absolute_hz, const QString& mode)
     startup_extra_.emplace_back(absolute_hz, mode);
 }
 
-bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth_hz)
+bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth_hz,
+                           qulonglong detection_id)
 {
     std::vector<RackBand> bands;
     for (const RackMarker& marker : rackMarkers()) {
@@ -458,7 +459,7 @@ bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth
             click_snapshot_.edges_touched = edges_touched_;
             click_snapshot_.demod_touched = demod_touched_;
             click_snapshot_.detection_bandwidth_hz = tuned_detection_bandwidth_;
-            tuneReceiverToDetection(center_hz, QString{}, bandwidth_hz);
+            tuneReceiverToDetection(center_hz, QString{}, bandwidth_hz, detection_id);
             return true;
         case SpanClick::Add:
         case SpanClick::Full:
