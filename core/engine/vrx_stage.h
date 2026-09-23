@@ -26,6 +26,11 @@ namespace revenant::engine {
 // Demod::Raw is declined rather than handled. The raw tap needs no kernel at
 // all, the graph's own copy is a buffer copy, and building a mixer and a
 // filter to hand back the samples unchanged would be slower and less exact.
+//
+// Except for a probe, which asks for the mixer and the filter because it does
+// not want the samples unchanged: VrxStageRequest::fine_stage_complex_tap in
+// core/engine/graph.h. WHAT THIS PARAGRAPH USED TO SAY AT ITS END: the sentence
+// above and nothing after it, which read as every Raw request.
 void install_default_vrx_stages();
 
 }  // namespace revenant::engine

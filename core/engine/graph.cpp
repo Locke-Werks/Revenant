@@ -580,6 +580,10 @@ struct Graph::Impl {
     struct VrxSlot {
         VrxId id;
 
+        // Fixed at add_vrx. A Probe is dispatched like any receiver and left
+        // out of vrx_ids; see VrxRole.
+        VrxRole role = VrxRole::Receiver;
+
         // Control plane only, under control_lock. These are what vrx_status
         // reports, and no engine thread reads them.
         VrxParams params;
@@ -2900,7 +2904,8 @@ const GraphGeometry& Graph::geometry() const { return impl_->geometry; }
 // Control plane
 // ---------------------------------------------------------------------------
 
-Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlacement& placement) {
+Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlacement& placement,
+                               VrxRole role) {
     auto& impl = *impl_;
     if (!impl.prepared) {
         return fail("Graph::add_vrx before prepare");
@@ -2930,6 +2935,7 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     request.local_size_x = impl.geometry.local_size_x;
     request.audio_rate = resolved.audio_rate;
     request.passband_transform = impl.geometry.passband_transform;
+    request.fine_stage_complex_tap = role == VrxRole::Probe;
 
     std::unique_ptr<VrxStage> stage;
     if (impl.factory) {
@@ -2938,6 +2944,16 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
             return std::unexpected(with_context(built.error(), "Graph::add_vrx"));
         }
         stage = std::move(*built);
+    }
+    if (stage == nullptr && role == VrxRole::Probe) {
+        // A probe exists to hand core/characterise an extract mixed to DC and
+        // filtered near the signal. The raw tap is neither, and a probe that
+        // quietly became one would put the classifier back the 20 dB down
+        // docs/detection.md measured the raw tap at.
+        return fail(std::format(
+            "a probe receiver needs the fine stage and no stage factory built one for '{}'. "
+            "engine::install_default_vrx_stages installs the factory that does",
+            demod_name(params.demod)));
     }
     if (stage == nullptr) {
         // Demod::Raw alone falls back to the graph's own copy. The digital
@@ -2960,6 +2976,7 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
 
     auto slot = std::make_shared<Impl::VrxSlot>();
     slot->id = id;
+    slot->role = role;
     slot->params = params;
     slot->placement = placement;
     slot->recording_params = params;
@@ -3281,9 +3298,22 @@ std::vector<VrxId> Graph::vrx_ids() const {
     std::vector<VrxId> out;
     out.reserve(impl.known.size());
     for (const auto& slot : impl.known) {
+        if (slot->role == VrxRole::Probe) {
+            continue;
+        }
         out.push_back(slot->id);
     }
     return out;
+}
+
+std::size_t Graph::probe_count() const {
+    auto& impl = *impl_;
+    std::scoped_lock lock(impl.control_lock);
+    return static_cast<std::size_t>(
+        std::count_if(impl.known.begin(), impl.known.end(),
+                      [](const std::shared_ptr<Impl::VrxSlot>& slot) {
+                          return slot->role == VrxRole::Probe;
+                      }));
 }
 
 // ---------------------------------------------------------------------------

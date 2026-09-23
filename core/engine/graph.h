@@ -137,6 +137,40 @@ struct VrxStageRequest {
     // whole window of this length". The passband no longer reads the fine
     // ring, so the fine ring is sized for the demodulator alone.
     std::uint32_t passband_transform = 0;
+
+    // Build Demod::Raw through the fine stage rather than declining it to
+    // the graph's own raw tap.
+    //
+    // THE FACTORY DECISION docs/detection.md LEFT OPEN, and it is made here
+    // rather than by a new demodulator. The raw tap copies one coarse channel
+    // with the carrier wherever the residual left it; a classifier wants the
+    // extract mixed to DC, filtered near the signal and at a rate sized to
+    // it, which is exactly what the fine stage and core/shaders/vrx_demod.
+    // comp's complex passthrough give the digital voice modes. Raw already
+    // has that passthrough, bit-exact against its twin in
+    // tests/reference/test_vrx.cpp, so the only thing missing was a path to
+    // it. A new Demod enumerator would have been a wire change for something
+    // nothing on the wire may name.
+    //
+    // Set only by the graph, for a VrxRole::Probe receiver. An ordinary Raw
+    // receiver keeps the raw tap, because core/rpc and revenant-cli
+    // --characterise both read that path's channel-rate output and would
+    // silently get a different stream.
+    bool fine_stage_complex_tap = false;
+};
+
+// What a receiver is for, which decides whether anything outside the engine
+// may see it.
+//
+// A Probe is the engine's own: core/engine/probe.h places it on a detection
+// to collect baseband for core/characterise. It is a real receiver on the
+// graph, recorded and dispatched like any other, and it is left out of
+// vrx_ids so that no client, no RPC surface and no retune pass ever finds it.
+// docs/detection.md settled that nothing goes on the wire as a family, and a
+// receiver that exists to produce one does not go there either.
+enum class VrxRole : std::uint8_t {
+    Receiver,
+    Probe,
 };
 
 // What one recorded dispatch will produce on the host side.
@@ -574,8 +608,13 @@ public:
 
     // --- control plane, any thread but the recording thread -----------------
 
+    // A Probe is built through the fine stage whatever its mode and is left
+    // out of vrx_ids; see VrxRole. Every other method here answers for it
+    // exactly as for a Receiver, because the engine that owns it needs to
+    // retune it, read its status and remove it.
     [[nodiscard]] Expected<VrxId> add_vrx(VrxId id, const VrxParams& params,
-                                          const VrxPlacement& placement);
+                                          const VrxPlacement& placement,
+                                          VrxRole role = VrxRole::Receiver);
     [[nodiscard]] Status remove_vrx(VrxId id);
     [[nodiscard]] Status set_vrx_params(VrxId id, const VrxParams& params,
                                         const VrxPlacement& placement);
@@ -593,7 +632,10 @@ public:
     // it.
     [[nodiscard]] Status set_passband_sink(VrxId id, PassbandSink sink);
     [[nodiscard]] Expected<VrxStatus> vrx_status(VrxId id) const;
+
+    // Receivers only. Probes are counted by probe_count and listed nowhere.
     [[nodiscard]] std::vector<VrxId> vrx_ids() const;
+    [[nodiscard]] std::size_t probe_count() const;
 
     // --- the sample path, the source thread only ----------------------------
 

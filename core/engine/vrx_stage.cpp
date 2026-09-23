@@ -1331,7 +1331,11 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
 void install_default_vrx_stages() {
     install_vrx_stage_factory(
         [](const VrxStageRequest& request) -> Expected<std::unique_ptr<VrxStage>> {
-            if (request.params.demod == Demod::Raw) {
+            // A probe's Raw is the exception, and the reason it is decided
+            // here: core/engine/graph.h, VrxStageRequest::
+            // fine_stage_complex_tap. It gets the fine stage and the kernel's
+            // Raw passthrough, the same path the digital voice modes take.
+            if (request.params.demod == Demod::Raw && !request.fine_stage_complex_tap) {
                 // Declined, not failed. The graph's own raw tap is a buffer
                 // copy of a channel that is already contiguous, and a null
                 // stage is how the seam says so.
