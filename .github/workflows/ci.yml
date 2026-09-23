@@ -572,6 +572,70 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The engine and a client in two processes, on two C runtimes.
+  #
+  # Every case in tests/rpc puts the engine and its client in one address
+  # space, so nothing there has allocated on one runtime's heap and freed on
+  # the other's, which is the failure the process split exists to prevent.
+  # tests/twoprocess builds core/rpc/client.cpp /MD, the way ui/ does, as a
+  # small client of its own, and scripts/two-process-smoke.ps1 runs it against
+  # the revenant-engine.exe build-and-test staged: the /MT binary that ships.
+  #
+  # A job rather than a step in ui because it needs that engine, which only
+  # build-and-test produces, and a GPU to run it on. It configures its own
+  # small CMake project for the reason ui/ is one: one cache cannot hold both
+  # runtimes.
+  two-process:
+    needs: build-and-test
+    runs-on: [self-hosted, windows, x64, gpu]
+
+    # The same gate as build-and-test, for the same reason.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tests/twoprocess
+    env:
+      REVENANT_GPU_INDEX: "0"
+      REVENANT_REQUIRE_GPU: "1"
+      VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache\revenant
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the vcpkg binary cache directory
+        shell: pwsh
+        working-directory: .
+        run: New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: payload-engine
+          path: dist/engine
+
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1, pinned: this one is not GitHub's and it runs on the workstation
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake --preset vs -DREVENANT_WERROR=ON "-DREVENANT_ENGINE=${{ github.workspace }}/dist/engine/revenant-engine.exe"
+
+      - name: Build
+        run: cmake --build --preset vs
+
+      - name: Test
+        run: ctest --preset vs --no-tests=error
+
+      - name: Engine output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-process-smoke
+          path: |
+            tests/twoprocess/build/vs/smoke/*
+            tests/twoprocess/build/vs/Testing/**/*.log
+          if-no-files-found: warn
+          retention-days: 14
+
   # ---------------------------------------------------------------------------
   # The installer, unsigned, on every build
   # ---------------------------------------------------------------------------
@@ -589,7 +653,7 @@ jobs:
   # packaging still works, and the stub says UNSIGNED DEV BUILD on its face so
   # it cannot be mistaken for a shipping artifact.
   package:
-    needs: [build-and-test, ui]
+    needs: [build-and-test, ui, two-process]
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -750,7 +814,7 @@ jobs:
   # azure/login step, and looking for one has already cost a day against a
   # configuration that was never broken.
   release:
-    needs: [build-and-test, ui]
+    needs: [build-and-test, ui, two-process]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     environment: release

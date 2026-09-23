@@ -275,6 +275,28 @@ tree's suite says nothing about the client, which links no part of the engine
 and reaches it over a socket. docs/ci.md lists what that job covers and, file
 by file, what it does not.
 
+### The two-process smoke test
+
+`tests/twoprocess` is a third CMake project, for the reason `ui/` is one: it
+builds `core/rpc/client.cpp` `/MD` into a small client, and one cache cannot
+hold both runtimes. Its one test starts `revenant-engine` from the root tree
+on a synthetic source, reads the port it prints, and runs the client against
+it in a separate process. From inside `tests/twoprocess`, with the root tree
+built:
+
+```powershell
+cmake --preset vs -DREVENANT_ENGINE=..\..\build\ci\tools\engined\revenant-engine.exe
+cmake --build --preset vs
+$env:REVENANT_GPU_INDEX = 0
+ctest --preset vs
+```
+
+`REVENANT_ENGINE` defaults to `build/ci`'s engine, and the configure warns if
+nothing is there. The test needs a GPU, because the engine does. On 2026-09-22
+against a `dev` engine it logged in, listed 2 sources, took 22 spectrum frames
+of 8192 bins and 8 audio chunks from an NFM receiver, and passed in 1.9 s. CI
+runs it as the `two-process` job against the engine `build-and-test` staged.
+
 ## Packaging and signing
 
 docs/packaging.md is the whole of it: what the installer carries, how to build

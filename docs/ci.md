@@ -65,8 +65,9 @@ merging. A conformance result nobody can trust is worth less than one that is la
 | `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite on the RTX 4090 |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
 | `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
-| `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, and keeps it as an artifact. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
-| `release` | `windows-latest` | On a `v*` tag only: signs the payload, forges, signs the installer, publishes. Has never run. docs/packaging.md holds the order and why it is that order |
+| `two-process` | self-hosted | Builds `tests/twoprocess`, a small client compiled `/MD` from `core/rpc/client.cpp`, and runs it in its own process against the `/MT` `revenant-engine.exe` that `build-and-test` staged: login, source list, spectrum frames and a receiver's audio across the two runtimes |
+| `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, checks both carry their licence material, builds the corresponding-source archive, and keeps both as artifacts. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
+| `release` | `windows-latest` | On a `v*` tag only: checks the tag against the version, signs the payload, forges, signs the installer, and publishes it with the corresponding-source archive. Has never run. docs/packaging.md holds the order and why it is that order |
 | `sweep` (nightly) | self-hosted | Runs the BER sweep and compares against `tests/baselines/ber-vs-snr.json`, failing on a regression |
 
 `build-and-test` and the nightly sweep select their device with `REVENANT_GPU_INDEX`,

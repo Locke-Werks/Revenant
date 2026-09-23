@@ -1,0 +1,10 @@
+{
+    "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+    "name": "revenant-twoprocess",
+    "version-semver": "0.1.0",
+    "description": "The /MD client half of the two-process smoke test",
+    "supports": "windows",
+    "dependencies": [
+        "capnproto"
+    ]
+}
