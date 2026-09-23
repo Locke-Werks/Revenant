@@ -104,14 +104,18 @@ ColumnLayout {
             onPinRequested: ScaleSettings.pinFloor(spectrum.drawFloorDb)
             onUnpinRequested: ScaleSettings.unpinFloor()
             onNudged: (steps) => ScaleSettings.nudgeFloor(steps)
-        }
 
-        Plate {
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            anchors.margins: 4
-            visible: span.drawing && spectrum.headroomDb > 0.05
-            text: "floor +" + spectrum.headroomDb.toFixed(1) + " dB for the column peak"
+            // How far above the engine's floor this one is drawn, and why, on
+            // hover. It was a plate of its own in the corner opposite,
+            // "floor +16.8 dB for the column peak", always on screen and read
+            // by nobody who did not already know what it meant.
+            detail: spectrum.headroomDb > 0.05
+                    ? "Drawn " + spectrum.headroomDb.toFixed(1) + " dB above the engine's "
+                      + "floor, its fifth percentile. Each column of the display shows the "
+                      + "loudest of the bins under it, and on an empty band the loudest of "
+                      + "those sits that far above the fifth percentile of one, so the "
+                      + "floor is raised to match."
+                    : ""
         }
 
         // THE TRACK UNDER THE POINTER, in full, on either display.
@@ -201,7 +205,7 @@ ColumnLayout {
             Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 6
-                text: "history fills in from the top as frames arrive"
+                text: "filling from the top"
                 color: Theme.inkOff
                 font.family: Theme.uiFont
                 font.pixelSize: Theme.sizeSmall

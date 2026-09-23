@@ -83,6 +83,7 @@ Rectangle {
             // streamed.
             RButton {
                 implicitWidth: 26
+                implicitHeight: 20
                 flat: true
                 checkable: true
                 checked: strip.entry.muted
@@ -90,13 +91,16 @@ Rectangle {
                 tint: Theme.inkWarn
                 ink: Theme.inkDim
                 onClicked: engineLink.setReceiverMuted(strip.entry.key, !strip.entry.muted)
-                ToolTip.visible: hovered
-                ToolTip.delay: 500
-                ToolTip.text: strip.entry.muted ? "unmute this receiver" : "mute this receiver"
+
+                Tip {
+                    visible: parent.hovered
+                    text: strip.entry.muted ? "unmute this receiver" : "mute this receiver"
+                }
             }
 
             RButton {
                 implicitWidth: 26
+                implicitHeight: 20
                 flat: true
                 checkable: true
                 checked: strip.entry.solo
@@ -104,51 +108,48 @@ Rectangle {
                 tint: strip.tint
                 ink: Theme.inkDim
                 onClicked: engineLink.toggleReceiverSolo(strip.entry.key)
-                ToolTip.visible: hovered
-                ToolTip.delay: 500
-                ToolTip.text: strip.entry.solo
-                              ? "stop soloing, so every unmuted receiver is heard"
-                              : "hear this receiver alone, muted or not"
+
+                Tip {
+                    visible: parent.hovered
+                    text: strip.entry.solo ? "stop soloing, so every unmuted receiver is heard"
+                                           : "hear this receiver alone, muted or not"
+                }
             }
 
             RButton {
                 implicitWidth: 22
+                implicitHeight: 20
                 flat: true
                 text: "×"
                 ink: Theme.inkDim
                 onClicked: engineLink.removeRackReceiver(strip.entry.key)
-                ToolTip.visible: hovered
-                ToolTip.delay: 500
-                ToolTip.text: "remove this receiver"
+
+                Tip {
+                    visible: parent.hovered
+                    text: "remove this receiver"
+                }
             }
         }
 
-        Readout {
-            Layout.alignment: Qt.AlignLeft
-            widest: "0000.000000 MHz"
-            horizontalAlignment: Text.AlignLeft
-            text: (strip.entry.frequencyHz / 1.0e6).toFixed(6) + " MHz"
-            color: strip.entry.pending || strip.entry.refused ? Theme.inkDim : Theme.ink
-            font.pixelSize: 15
-        }
-
+        // Where it is tuned, and its level in figures at the other end of the
+        // same row, over the meter that draws it. The level had a row of its
+        // own beside the meter, which made every strip a line taller than it
+        // needed to be; the rack is shorter docked under the span than it was
+        // in a window of its own.
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
 
-            Rectangle {
-                Layout.fillWidth: true
-                implicitHeight: 5
-                radius: 2
-                color: Theme.panelSolid
-
-                Rectangle {
-                    width: parent.width * UiRules.meterFraction(strip.entry.levelDbfs)
-                    height: parent.height
-                    radius: 2
-                    color: strip.entry.heard ? strip.tint : Theme.inkOff
-                }
+            Readout {
+                Layout.alignment: Qt.AlignLeft
+                widest: "0000.000000 MHz"
+                horizontalAlignment: Text.AlignLeft
+                text: (strip.entry.frequencyHz / 1.0e6).toFixed(6) + " MHz"
+                color: strip.entry.pending || strip.entry.refused ? Theme.inkDim : Theme.ink
+                font.pixelSize: Theme.sizeFigure
             }
+
+            Item { Layout.fillWidth: true }
 
             // A REFUSAL REPLACES THE LEVEL. The engine said it will not make
             // this receiver, so there is no level to wait for, and "opening"
@@ -178,6 +179,20 @@ Rectangle {
                         ? strip.entry.levelDbfs.toFixed(0) + " dBFS"
                         : "no level yet"
                 font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            implicitHeight: 4
+            radius: 2
+            color: Theme.panelSolid
+
+            Rectangle {
+                width: parent.width * UiRules.meterFraction(strip.entry.levelDbfs)
+                height: parent.height
+                radius: 2
+                color: strip.entry.heard ? strip.tint : Theme.inkOff
             }
         }
 

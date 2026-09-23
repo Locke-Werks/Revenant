@@ -119,14 +119,15 @@ RowLayout {
 
     // Why the box is dead. Two causes and they are different news:
     // a recording cannot retune, and a client built against a wire
-    // with no such call is this window's own limitation.
-    Label {
-        Layout.minimumWidth: 0
+    // with no such call is this window's own limitation. A dim chip with
+    // the sentence on hover, on the owner's rule for chips: it used to be
+    // the sentence itself across the bar, which with the engine's own
+    // wording could run the width of the window.
+    StatusChip {
         visible: !engineLink.sourceCanRetune
                  && engineLink.sourceRetuneUnavailable.length > 0
-        text: engineLink.sourceRetuneUnavailable
-        color: Theme.inkDim
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+        label: "fixed tuning"
+        detail: engineLink.sourceRetuneUnavailable
+        ink: Theme.inkDim
     }
 }

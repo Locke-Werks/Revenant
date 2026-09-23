@@ -17,6 +17,9 @@ Row {
     property string text
     property bool pinned: false
 
+    // More about the end, on hover of the plate. Empty for none.
+    property string detail
+
     signal pinRequested()
     signal unpinRequested()
     signal nudged(int steps)
@@ -26,6 +29,13 @@ Row {
     Plate {
         text: pin.pinned ? pin.text + "  pinned" : pin.text
         anchors.verticalCenter: parent.verticalCenter
+
+        HoverHandler { id: plateHover }
+
+        Tip {
+            visible: plateHover.hovered && pin.detail.length > 0
+            text: pin.detail
+        }
     }
 
     RButton {

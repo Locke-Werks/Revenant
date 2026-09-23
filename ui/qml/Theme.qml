@@ -86,10 +86,12 @@ QtObject {
     readonly property string uiFont: "Segoe UI Variable Text"
     readonly property string monoFont: "Cascadia Mono"
 
-    // Three sizes for text and one for the dials.
+    // Three sizes for text, one for a receiver's frequency on its rack strip,
+    // and one for the dials. The strip's was a 15 written into the strip.
     readonly property int sizeTitle: 13
     readonly property int sizeBody: 12
     readonly property int sizeSmall: 11
+    readonly property int sizeFigure: 15
     readonly property int sizeDial: 26
 
     // The shape of a control.

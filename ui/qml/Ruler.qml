@@ -170,9 +170,12 @@ Item {
                              engineLink.frequencyAtFraction(mouse.x / Math.max(1, ruler.width)))
 
         // The click rule, where the click is made. See UiRules.spanClickHint.
-        ToolTip.visible: containsMouse
-        ToolTip.delay: 900
-        ToolTip.text: UiRules.spanClickHint()
+        Tip {
+            visible: pointer.containsMouse
+            delay: 900
+            text: UiRules.spanClickHint()
+        }
+
         onWheel: (wheel) => {
             const eighths = UiRules.scrollEighths(wheel.angleDelta.x, wheel.angleDelta.y)
             if (eighths !== 0 && engineLink.sourceCanRetune)

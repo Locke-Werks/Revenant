@@ -32,7 +32,7 @@ CheckBox {
             visible: control.checked
             text: "✓"
             color: Theme.panelSolid
-            font.pixelSize: 11
+            font.pixelSize: Theme.sizeSmall
             font.bold: true
         }
     }

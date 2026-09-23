@@ -47,10 +47,11 @@ RowLayout {
             ink: Theme.inkDim
             onClicked: picker.tuneTo(index)
 
-            ToolTip.visible: hovered
-            ToolTip.delay: 500
-            ToolTip.text: (modelData.low / 1e6) + " to " + (modelData.high / 1e6) + " MHz, "
-                          + modelData.mode
+            Tip {
+                visible: parent.hovered
+                text: (modelData.low / 1e6) + " to " + (modelData.high / 1e6) + " MHz, "
+                      + modelData.mode
+            }
         }
     }
 

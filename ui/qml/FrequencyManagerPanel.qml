@@ -383,7 +383,7 @@ Item {
                 model: panel.manager
                 boundsBehavior: Flickable.StopAtBounds
                 keyNavigationEnabled: false
-                ScrollBar.vertical: ScrollBar {}
+                ScrollBar.vertical: RScrollBar {}
                 onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
                 Keys.onPressed: (event) => {
@@ -733,7 +733,7 @@ Item {
                         clip: true
                         model: panel.manager.importAdds
                         boundsBehavior: Flickable.StopAtBounds
-                        ScrollBar.vertical: ScrollBar {}
+                        ScrollBar.vertical: RScrollBar {}
 
                         delegate: RowLayout {
                             required property var modelData
@@ -774,7 +774,7 @@ Item {
                         clip: true
                         model: panel.manager.importSkips
                         boundsBehavior: Flickable.StopAtBounds
-                        ScrollBar.vertical: ScrollBar {}
+                        ScrollBar.vertical: RScrollBar {}
 
                         delegate: RowLayout {
                             required property var modelData

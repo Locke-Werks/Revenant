@@ -158,14 +158,16 @@ GridLayout {
 
         onMoved: engineLink.confidenceBar = confidenceSlider.bar
 
-        ToolTip.visible: hovered
-        ToolTip.delay: 400
-        ToolTip.text: "This window only. Filters what the engine sends back; "
-                      + "the detector still tracks everything below it.\n"
-                      + "At the right-hand stop only a saturated track clears it: "
-                      + "85 consecutive detections, about 8.4 s of unbroken carrier "
-                      + "at the shipped settings, and one missed decision costs most "
-                      + "of that back. A bursty signal never reaches it."
+        Tip {
+            visible: parent.hovered
+            delay: 400
+            text: "This window only. Filters what the engine sends back; "
+                  + "the detector still tracks everything below it.\n"
+                  + "At the right-hand stop only a saturated track clears it: "
+                  + "85 consecutive detections, about 8.4 s of unbroken carrier "
+                  + "at the shipped settings, and one missed decision costs most "
+                  + "of that back. A bursty signal never reaches it."
+        }
     }
 
     // From the handle and not from the link, which is the opposite
@@ -342,10 +344,12 @@ GridLayout {
         value: engineLink.detectionThresholdDb
         onMoved: engineLink.detectionThresholdDb = value
 
-        ToolTip.visible: hovered
-        ToolTip.delay: 400
-        ToolTip.text: "The engine's, shared by every client. Changes what the "
-                      + "detector finds at all. Last writer wins."
+        Tip {
+            visible: parent.hovered
+            delay: 400
+            text: "The engine's, shared by every client. Changes what the "
+                  + "detector finds at all. Last writer wins."
+        }
     }
 
     Label {

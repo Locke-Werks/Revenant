@@ -39,7 +39,8 @@ Rectangle {
     visible: retrying || detectorRefused || behind || frontEndFault || tuneRefused
              || radioRefused || receiverGone
     implicitHeight: rows.implicitHeight + 12
-    color: Qt.rgba(0.84, 0.38, 0.29, 0.10)
+    // The fault ink at a tenth, from the Theme rather than written out here.
+    color: Qt.rgba(Theme.inkBad.r, Theme.inkBad.g, Theme.inkBad.b, 0.10)
     border.width: 0
 
     Rectangle {

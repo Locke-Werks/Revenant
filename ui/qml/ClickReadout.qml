@@ -210,7 +210,7 @@ ColumnLayout {
                      ? "the receiver moved here. This is the measured centre of the "
                        + "occupied band, not the mode's logical centre, so it is the "
                        + "carrier for AM and it is wrong for RTTY and SSB: drag the "
-                       + "filter edges in the receiver window to put the passband where "
+                       + "filter edges on the receiver's own display to put the passband where "
                        + "the signal is."
                      : "no detection there, so this is the frequency under the pointer.")
                     + "  Exactly " + Math.round(readout.selection.tunedHz) + " Hz."

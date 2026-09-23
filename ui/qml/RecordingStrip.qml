@@ -63,8 +63,11 @@ Rectangle {
             elide: Text.ElideMiddle
 
             HoverHandler { id: nameHover }
-            ToolTip.visible: nameHover.hovered
-            ToolTip.text: engineLink.openedSource.uri === undefined ? "" : engineLink.openedSource.uri
+
+            Tip {
+                visible: nameHover.hovered && text.length > 0
+                text: engineLink.openedSource.uri === undefined ? "" : engineLink.openedSource.uri
+            }
         }
 
         Label {
