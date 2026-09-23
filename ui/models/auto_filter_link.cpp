@@ -65,6 +65,14 @@ void EngineLink::arm_auto_filter()
 void EngineLink::cancel_auto_filter(AutoFilterOutcome why)
 {
     if (!auto_filter_due_) {
+        // Nothing measuring. The last fit's result still goes when the
+        // receiver is somewhere new, or it is read as a statement about the
+        // signal the receiver is on now: seen live as "fitted nfm" over a
+        // filter that was an AM fit on another station.
+        if (why == AutoFilterOutcome::Idle && auto_filter_last_.outcome != AutoFilterOutcome::Idle) {
+            auto_filter_last_ = {};
+            emit autoFilterChanged();
+        }
         return;
     }
     auto_filter_due_ = false;

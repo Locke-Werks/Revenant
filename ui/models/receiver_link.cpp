@@ -435,7 +435,9 @@ void EngineLink::setReceiverDemod(const QString& mode)
         return;
     }
 
-    // The auto filter's chip names the mode.
+    // A fit made or measuring for the old mode is not one for this mode, and
+    // the chip names the mode, so both go.
+    cancel_auto_filter(AutoFilterOutcome::Idle);
     emit autoFilterChanged();
 
     // THE OPERATOR HAS NAMED A MODE ON THIS RECEIVER, which is a fact about
