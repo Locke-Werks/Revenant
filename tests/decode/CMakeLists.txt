@@ -123,6 +123,7 @@ add_executable(revenant_decode_tests
     test_ax25.cpp
     test_cw.cpp
     test_dstar.cpp
+    test_dstar_blocking.cpp
     test_imbe.cpp
     test_navtex.cpp
     test_m17.cpp

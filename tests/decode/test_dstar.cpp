@@ -209,6 +209,10 @@ TEST_CASE("a D-STAR voice transmission round trips through GMSK", "[decode][dsta
     auto samples = siggen::dstar_render(mod, message);
     INFO((samples.has_value() ? std::string{} : samples.error().message));
     REQUIRE(samples.has_value());
+    // A tenth of a second of carrier-off after the last frame, as any
+    // receiver's stream has: the receive filter and the timing recovery hold
+    // the last few bits back until samples behind them arrive.
+    samples->insert(samples->end(), static_cast<std::size_t>(kRate / 10), dsp::Complex32{});
 
     decode::DStarConfig config;
     config.rate = kRate;
@@ -222,9 +226,24 @@ TEST_CASE("a D-STAR voice transmission round trips through GMSK", "[decode][dsta
     INFO("transmissions recovered: " << transmissions.size());
     REQUIRE_FALSE(transmissions.empty());
 
-    const decode::DStarTransmission& tx = transmissions.front();
+    // The transmission arrives as a piece with the header and the first
+    // superframe, then a piece per superframe after it; dstar.h says why.
+    decode::DStarTransmission tx = transmissions.front();
+    for (std::size_t i = 1; i < transmissions.size(); ++i) {
+        REQUIRE_FALSE(transmissions[i].header.has_value());
+        CHECK(transmissions[i].first_bit == tx.first_bit);
+        tx.frames.insert(tx.frames.end(), transmissions[i].frames.begin(),
+                         transmissions[i].frames.end());
+        tx.ended = transmissions[i].ended;
+    }
     INFO("sync correlation " << tx.sync_score << ", frames " << tx.frames.size());
     REQUIRE(tx.header.has_value());
+    CHECK(transmissions.front().frames.size() == decode::kDStarResyncInterval);
+
+    // Clause 4.1.2 h: dstar_render ends the transmission with the last
+    // frame, and every voice frame before it comes back.
+    CHECK(tx.ended);
+    CHECK(tx.frames.size() == message.voice_frames.size());
     CHECK(tx.header->fcs_valid);
     CHECK(tx.header->own_callsign == "JA1RL");
     CHECK(tx.header->companion == "CQCQCQ");

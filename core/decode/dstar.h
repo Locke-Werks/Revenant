@@ -76,6 +76,15 @@ inline constexpr std::size_t kDStarVoiceBits = 72;
 inline constexpr std::size_t kDStarDataBits = 24;
 inline constexpr std::size_t kDStarFrameBits = kDStarVoiceBits + kDStarDataBits;
 
+// NOT STATED BY THE STANDARD, which names GMSK and gives neither a modulation
+// index nor a deviation. Minimum shift keying means an index of one half, a
+// quarter turn of phase per bit, and so a peak deviation of a quarter of the
+// bit rate; core/dsp/synth/dv_mod.cpp transmits the same number for the same
+// reason. The decoder divides by it only to put the bits near +/-1, and
+// measures the real deviation on every frame sync, so a transmitter off this
+// number is sliced correctly.
+inline constexpr double kDStarPeakDeviationHz = kDStarBitRate / 4.0;
+
 // Clause 4.1.1 a: for GMSK the bit sync is "1010" repeated, 64 bits standard.
 inline constexpr std::size_t kDStarBitSyncBits = 64;
 
@@ -162,6 +171,26 @@ struct DStarVoiceFrame {
     bool carried_resync = false;
 };
 
+// One piece of a transmission. The decoder hands a transmission over in
+// pieces whose boundaries are set by the transmission itself, never by how
+// the input was blocked:
+//
+//   - the first piece carries the header and the first superframe, the 21
+//     voice frames from one clause 4.1.2 c resynchronisation signal to the
+//     next, or fewer if the transmission closed sooner;
+//   - each later piece carries no header and the next superframe, or what
+//     remained of it when the transmission closed.
+//
+// A transmission closes on the clause 4.1.2 h last frame, which sets `ended`
+// on the piece that carries it, or when a frame where clause 4.1.2 c puts the
+// resynchronisation signal does not carry it, which means the receiver has
+// lost the transmission, or on flush().
+//
+// WHAT THIS USED TO BE, until 2026-09-23: one record per transmission, handed
+// over as soon as the header decoded, carrying whichever voice frames had
+// already arrived in the same call. Every frame after that was dropped, so
+// the frames a transmission reported depended on the block length, from none
+// to all of them.
 struct DStarTransmission {
     std::optional<DStarHeader> header;
     std::vector<DStarVoiceFrame> frames;
@@ -170,11 +199,21 @@ struct DStarTransmission {
     // opposed to the capture simply running out.
     bool ended = false;
 
-    // Index into the recovered bit stream at which the frame sync was found,
-    // and whether the discriminator polarity was inverted.
+    // The recovered bit at which the frame sync starts, counted from the
+    // first bit of the stream since create() or reset(), and whether the
+    // discriminator polarity was inverted. Every piece of a transmission
+    // carries its first piece's values.
     std::size_t first_bit = 0;
     double sync_score = 0.0;
     bool inverted = false;
+
+    // What the frame sync said about the carrier, from a least-squares fit of
+    // its 15 known bits (dv_phy.h, fit_levels): the offset of the carrier
+    // from DC as the discriminator sees it, and the deviation against the
+    // quarter of the bit rate that GMSK's modulation index of one half
+    // implies, 1.0 for a transmitter on it.
+    double carrier_offset_hz = 0.0;
+    double deviation_ratio = 1.0;
 };
 
 struct DStarConfig {
@@ -190,9 +229,11 @@ struct DStarConfig {
     // levels mean.
     double bandwidth_time = 0.5;
 
-    // Correlation the frame sync must reach. An engineering choice. The sync
-    // word is 15 bits, so 0.8 admits one wrong bit and rejects the sidelobes
-    // of the alternating bit-sync pattern that precedes it.
+    // Centred correlation (dv_phy.h, centred_correlation_at) the frame sync
+    // must reach. An engineering choice. The sync word is 15 bits, so 0.8
+    // admits one wrong bit and rejects the sidelobes of the alternating
+    // bit-sync pattern that precedes it. Centred so that a carrier offset,
+    // which the discriminator turns into a constant, does not move the score.
     double sync_threshold = 0.8;
 
     std::size_t filter_taps = 65;
@@ -206,10 +247,26 @@ class DStar {
    public:
     [[nodiscard]] static Expected<DStar> create(const DStarConfig& config);
 
-    // Consumes complex baseband and appends every transmission whose frame
-    // sync and radio header were recovered from it.
+    // Consumes complex baseband and appends every piece of a transmission
+    // completed by it; DStarTransmission says where a piece ends. A stream
+    // gives the same pieces however it is split into calls.
     [[nodiscard]] Status process(ConstComplexSpan samples, std::vector<DStarTransmission>& out);
 
+    // The stream has ended. Appends what a transmission still open has
+    // recovered, without `ended`, since its last frame never arrived.
+    void flush(std::vector<DStarTransmission>& out);
+
+    // Every bit recovered in the last call, in the Ap1.5 polarity, for bit
+    // error measurement on a stream with no frame sync to fit against, which
+    // is how the error rate cases feed it: one call, random bits. Sliced at
+    // the mean of the call's own soft bits, which over balanced data is the
+    // carrier offset. That is a per-call estimate and makes these bits depend
+    // on the blocking, on purpose and only here: nothing process() reports
+    // reads them. The transmissions are sliced against their own frame sync's
+    // fit.
+    //
+    // WHAT THIS USED TO RETURN, until 2026-09-23: every bit the decoder still
+    // buffered, not only the last call's.
     [[nodiscard]] std::span<const std::uint8_t> last_bits() const { return last_bits_; }
 
     void reset();
@@ -219,17 +276,45 @@ class DStar {
 
     [[nodiscard]] Expected<DStarHeader> decode_header(std::span<const float> soft) const;
 
+    // Reads frames of the open transmission from the buffer. Returns false
+    // when it needs more bits than have arrived.
+    bool advance_open(std::vector<DStarTransmission>& out);
+
+    // Hands over the pending piece of the open transmission and closes it.
+    void close_open(bool ended, std::vector<DStarTransmission>& out);
+
+    // Hands over the pending piece and starts the next.
+    void emit_piece(std::vector<DStarTransmission>& out);
+
+    // A soft bit put back on the +/-1 levels by the open transmission's fit.
+    [[nodiscard]] double corrected(std::size_t index) const;
+
     DStarConfig config_{};
-    std::vector<float> filter_taps_;
+    FmDiscriminator discriminator_{};
+    RealFir filter_{};
     SymbolSync sync_{};
 
+    // Soft bits in units of the nominal deviation, carrier offset included,
+    // and how many have been trimmed off the front, so a position can be
+    // given from the start of the stream.
     std::vector<float> soft_bits_;
     std::vector<std::uint8_t> last_bits_;
     std::size_t consumed_ = 0;
+    std::size_t trimmed_ = 0;
+
+    // The transmission being read, if any: the piece being filled, the next
+    // frame's position in soft_bits_, how many voice frames it has so far,
+    // whether its first piece has gone out, and the fit that slices it.
+    std::optional<DStarTransmission> open_;
+    std::size_t open_cursor_ = 0;
+    std::size_t open_frames_ = 0;
+    bool open_header_sent_ = false;
+    LevelFit open_fit_{};
 
     std::vector<RecoveredSymbol> recovered_;
     std::vector<float> discriminated_;
     std::vector<float> filtered_;
+    std::vector<Complex32> shaped_;
 };
 
 // ---------------------------------------------------------------------------

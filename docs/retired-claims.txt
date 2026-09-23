@@ -909,3 +909,18 @@ commit: "Carry TETRA's matched filter across calls"
 instead: TetraBurst::first_symbol counts differential symbols from the start of
     the stream, however many process() calls it took, so it no longer moves
     with the blocking.
+
+phrase: D-STAR and TETRA still call the one-call forms per block
+retired: 2026-09-23
+commit: "Decode D-STAR the same however its input is blocked"
+instead: Both carry their discriminator and filter state across calls, D-STAR
+    fits each frame sync for the carrier offset, and
+    tests/decode/test_dstar_blocking.cpp and test_tetra_blocking.cpp hold
+    every blocking identical to the whole capture.
+
+phrase: so the check is against the tail sitting where the data slot starts
+retired: 2026-09-23
+commit: "Decode D-STAR the same however its input is blocked"
+instead: Clause 4.1.2 h puts the last frame's tail 32 bits into it, behind the
+    sync pattern, and DStar looks for it there; before, no transmission ever
+    ended.

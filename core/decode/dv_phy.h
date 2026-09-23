@@ -26,17 +26,21 @@
 // signal: the discriminator starts against 1+0i and the filters from zeros.
 // That is right for a capture handed over in one piece, which is how the
 // transmitters in core/dsp/synth use them. A decoder the engine feeds one
-// block at a time wants FmDiscriminator and RealFir instead, which carry the
-// previous sample and the filter history across calls, and SymbolSync, which
-// anchors its windows to the stream. Through those three a stream gives the
-// same symbols however it is split, bit for bit. P25 learned this the hard
-// way on 2026-09-22: in 1024-sample blocks, calling the one-call forms per
-// block, with each block's mean taken as the carrier offset on top, cost it
-// one of the six headers it decoded from the capture whole, and
+// block at a time wants FmDiscriminator, RealFir and ComplexFir instead,
+// which carry the previous sample and the filter history across calls, and
+// SymbolSync, which anchors its windows to the stream. Through those a stream
+// gives the same symbols however it is split, bit for bit. P25 learned this
+// the hard way on 2026-09-22: in 1024-sample blocks, calling the one-call
+// forms per block, with each block's mean taken as the carrier offset on top,
+// cost it one of the six headers it decoded from the capture whole, and
 // put 38 NID bits and 28 Golay words of correction on the rest where the
 // whole capture needed none, all of it gone once the state was carried.
 // tests/decode/test_p25p1_blocking.cpp has the breakdown. D-STAR and TETRA
-// still call the one-call forms per block.
+// followed on 2026-09-23, and test_dstar_blocking.cpp and
+// test_tetra_blocking.cpp have what the one-call forms cost them.
+//
+// WHAT THE END OF THAT PARAGRAPH USED TO SAY: "D-STAR and TETRA still call
+// the one-call forms per block."
 //
 // A carrier offset through a frequency discriminator is a constant added to
 // every symbol. centred_correlation_at finds a sync word regardless of it and
