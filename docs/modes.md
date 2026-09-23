@@ -188,8 +188,8 @@ never paste a table, a figure or a paragraph.
 | FSQ and FSQCall | IFK+ over 33 tones at three times the symbol rate, 8.79 Hz spacing at 2.93 baud | Author documentation at w1hkj.org and qsl.net/zl1bpu, publicly disclosed by the authors | Small |
 | Hellschreiber (Feld-Hell and variants) | OOK raster, 122.5 baud element rate, 7x14 element cell, 2.5 char/s, about 75 Hz | "Hellschreiber Modes - Technical Specifications", ZL1BPU 1998, free | Small |
 | Throb and ThrobX | Multi-tone OOK at 1, 2 or 4 symbols/s over 9 or 11 tones | fldigi mode documentation only | Small |
-| AX.25 packet | 1200 baud Bell 202 AFSK, 9600 baud G3RUH scrambled FSK, 300 baud HF FSK; HDLC with bit stuffing and the X.25 FCS | AX.25 v2.2, TAPR/ARRL July 1998, free. The two modems have no standards document and are cited to Bell 202 and to Miller's 1988 article | Medium |
-| APRS | AX.25 UI frames; position, weather, telemetry, object, status, message, Mic-E and base-91 compressed formats | APRS Protocol Reference 1.0.1, free at aprs.org, plus the WB2OSZ consolidated 1.2 | Medium |
+| AX.25 packet | 1200 baud Bell 202 AFSK, 9600 baud G3RUH scrambled FSK, 300 baud HF FSK; HDLC with bit stuffing and the X.25 FCS | AX.25 v2.2, TAPR/ARRL July 1998, free. The two modems have no standards document and are cited to Bell 202 and to Miller's 1988 article. 1200 baud done, see below | Medium |
+| APRS | AX.25 UI frames; position, weather, telemetry, object, status, message, Mic-E and base-91 compressed formats | APRS Protocol Reference 1.0.1, free at aprs.org, plus the WB2OSZ consolidated 1.2. Position, status, message and Mic-E done, see below | Medium |
 | FX.25 | AX.25 with a 64-bit correlation tag selecting one of several Reed-Solomon configurations | Stensat Group, TAPR DCC 2006, free | Small |
 | IL2P | Reed-Solomon header and payload blocks replacing HDLC on the same physical layers | IL2P Specification Draft v0.6, 16 March 2024, KK4HEJ, free | Small |
 | PACTOR-I | 2-FSK, 100 or 200 baud, 200 Hz shift, 1.25 s ARQ cycle, 0x55 sync header, ITU-T CRC | ARRL PACTOR technical characteristics page, free, which prints the complete Huffman table, packet structure, status byte and ARQ timing | Medium |
@@ -828,6 +828,8 @@ transition-tracking bit clock, which SITOR-B, NAVTEX and DSC can reuse.
 | Mode | File | Document | What comes out |
 | --- | --- | --- | --- |
 | RTTY | `core/decode/rtty.cpp` | ITU-T S.1 (03/93) clauses 3, 4.1 to 4.5 and Tables 1 and 2 for ITA2; ITU-T S.3 (11/88) clauses 1.3 and 1.4 and Table 1 for the 7.5-unit character | Characters with the sample index of their start element, letters and figures case tracked, a decision margin per character, and counts of framing errors and false starts |
+| AX.25 over 1200 baud AFSK | `core/decode/ax25.cpp` | AX.25 v2.2 (TAPR, July 1998) clauses 3, 3.1, 3.4, 3.6 to 3.10, 3.12 and 4.2.1; the modem from Finnegan and Benson, "Clarifying the Amateur Bell 202 Modem", TAPR DCC 2014, sections 2 and 3.2 | Frames whose FCS checks, with destination, source and up to eight repeaters, the control field and its frame kind, the PID and the information field, and the sample indices of the first and last bit; counts of candidates, FCS failures and malformed frames |
+| APRS | `core/decode/aprs.cpp` | APRS Protocol Reference 1.0.1 (29 August 2000) chapters 5, 6, 7, 8, 9, 10, 14 and 16 | Position reports uncompressed and compressed with timestamp, ambiguity, symbol, course, speed, altitude and range; status with timestamp or Maidenhead locator; messages, acknowledgements and rejections with their numbers; Mic-E position, message type, course, speed, telemetry, status text and altitude |
 
 RTTY's 45.45 baud, 170 Hz shift and 2125 Hz mark are practice rather than
 anything S.1 or S.3 states, and all three are parameters along with the
@@ -838,6 +840,32 @@ Measured through `add_real_awgn` over 300 characters: no errors at 10 dB in
 the unit error rate is 0.0069 against 0.0064 for ideal non-coherent FSK. What
 it does not reach: no automatic frequency control, so the tones must be where
 the caller says, and no diversity or error correction, because ITA2 has none.
+
+AX.25 is measured in `tests/decode/test_ax25.cpp` at 48 and 22.05 kHz, through
+a 0.5 percent transmitter clock error and a 10 dB tilt between the tones either
+way, which is what Finnegan and Benson section 4 report emphasis doing on real
+stations. Through `add_real_awgn`, over 60 frames of 81 octets: no frame lost
+at 20 dB in 2500 Hz, a frame error rate of 0.05 at 10 dB, 0.57 at 8 dB and
+0.98 at 6 dB, where the bit error rate after NRZI is 0.0024 and 0.018. The
+AX.25 FCS is checked against the X.25 check `core/decode/dv_codes.cpp` already
+carried for TETRA, which is its only independent check, since ISO 3309 was not
+held. The address encoding is checked against Figures 3.4 and 3.7, and in doing
+so found that AX.25 2.2 misprints every N in its figures as 0x98, which is L,
+and that Figure 3.8 sets an extension bit clause 3.12.4 says is clear; the code
+follows the text. What it does not reach: connected-mode procedure, which has
+nothing to decode; modulo 128 control fields, which a receiver joining partway
+cannot tell from modulo 8; 9600 baud G3RUH and 300 baud HF packet; and FCS-based
+bit repair, so one wrong bit loses a frame.
+
+APRS is checked in `tests/decode/test_aprs.cpp` against 35 examples the
+reference prints in chapters 8, 9, 10, 14 and 16, including page 38's
+compressed longitude, page 40's GGA altitude, pages 44 and 53's Mic-E
+destination and information field and page 55's Mic-E altitude, and against
+both encodings of page 52's Mic-E speed and course. What it does not reach:
+objects, items, weather, telemetry reports, queries and third-party traffic are
+recognised and refused by name; data extensions other than course and speed
+stay in the comment; and the WB2OSZ 1.2 revision was not read, so what it adds
+arrives as comment text.
 
 ## What would change the list
 
