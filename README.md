@@ -190,7 +190,7 @@ in clauses of ISO 14819-1 nobody here has read; `docs/modes.md` has both.
 This paragraph used to read "What does not: a decoder on a live signal, other
 than RDS." and went on to say that nothing in the engine or the command line
 ran P25, D-STAR or TETRA on a receiver, "their demodulator modes hand out a raw
-tap and nothing reads it". Thirteen decoders now run on a live receiver and
+tap and nothing reads it". Fourteen decoders now run on a live receiver and
 over the wire, those three among them, so a reader who took it at its word
 would not have looked for any of them.
 
