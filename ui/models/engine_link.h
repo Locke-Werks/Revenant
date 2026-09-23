@@ -137,6 +137,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -157,6 +158,7 @@
 #include "models/auto_filter.h"
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
+#include "models/decoded_model.h"
 #include "models/receiver_gone.h"
 #include "models/receiver_scroll.h"
 #include "models/scroll_tune.h"
@@ -1309,6 +1311,50 @@ class EngineLink : public QObject {
     Q_PROPERTY(qulonglong audioBacklogFrames READ audioBacklogFrames NOTIFY audioChanged)
     Q_PROPERTY(qulonglong audioBufferFrames READ audioBufferFrames NOTIFY audioChanged)
 
+    // ------------------------------------------------------------------
+    // Decoding on the receiver the detail pane is on
+    // ------------------------------------------------------------------
+    //
+    // Session.subscribeDecoded attaches one of the engine's event decoders to
+    // a receiver and streams what it recovers. This is the pane's use of it,
+    // implemented in ui/models/decoded_link.cpp; which decoders a receiver is
+    // offered and what a line says are models/decoded_log.h's.
+    //
+    // RECONCILED, NOT COMMANDED, the way the audio is and for its reason:
+    // apply_decode_request compares what the switch and the pane's receiver
+    // ask for against what this client holds on every supervisor pass, so a
+    // retune, a mode change, a clear and a reconnect are one code path.
+
+    // The operator asked for decoding on the pane's receiver. A switch and not
+    // a state: it stays on across a receiver change and a reconnect, and not
+    // across a restart, on AFT's terms.
+    Q_PROPERTY(bool decodeWanted READ decodeWanted WRITE setDecodeWanted NOTIFY decodeChanged)
+
+    // What the menu shows, which is the operator's pick when this receiver
+    // offers it and the head of the menu when it does not. "auto" or a
+    // decoder's registry name.
+    Q_PROPERTY(QString decodeChoice READ decodeChoice WRITE setDecodeChoice NOTIFY decodeChanged)
+
+    // The menu for the pane's receiver: auto first when it would attach
+    // anything, then every decoder the engine says reads the receiver's mode.
+    // Empty when there is no receiver or nothing reads its mode, and the
+    // section is hidden then.
+    Q_PROPERTY(QStringList decodeChoices READ decodeChoices NOTIFY decodeChanged)
+
+    // The decoders subscribed right now, comma separated, which is what auto
+    // turned into. Empty when nothing is.
+    Q_PROPERTY(QString decodeAttached READ decodeAttached NOTIFY decodeChanged)
+
+    // Why something the switch asked for is not running, as a word or two
+    // and as the engine's sentence: a refused subscription, or a stream the
+    // engine ended. Both empty when nothing is wrong.
+    Q_PROPERTY(QString decodeLabel READ decodeLabel NOTIFY decodeChanged)
+    Q_PROPERTY(QString decodeDetail READ decodeDetail NOTIFY decodeChanged)
+
+    // The log. Survives a change of receiver and a reconnect, because what
+    // was decoded is still what was decoded; the operator clears it.
+    Q_PROPERTY(revenant::ui::DecodedLogModel* decodedLog READ decodedLog CONSTANT)
+
 public:
     explicit EngineLink(QObject* parent = nullptr);
     ~EngineLink() override;
@@ -2080,6 +2126,33 @@ public:
     // accessor is shaped this way.
     [[nodiscard]] AudioRing& audioRing() { return audio_ring_; }
 
+    // ------------------------------------------------------------------
+    // The decode surface. Implemented in ui/models/decoded_link.cpp.
+    // ------------------------------------------------------------------
+
+    [[nodiscard]] bool decodeWanted() const { return decode_wanted_.load(); }
+    void setDecodeWanted(bool wanted);
+
+    [[nodiscard]] QString decodeChoice() const { return decode_choice_shown_; }
+    void setDecodeChoice(const QString& choice);
+
+    [[nodiscard]] QStringList decodeChoices() const { return decode_choices_; }
+    [[nodiscard]] QString decodeAttached() const { return decode_attached_; }
+    [[nodiscard]] QString decodeLabel() const { return decode_label_; }
+    [[nodiscard]] QString decodeDetail() const { return decode_detail_; }
+    [[nodiscard]] DecodedLogModel* decodedLog() { return &decoded_log_; }
+
+    // The engine's one sentence about a decoder, for the menu's tooltip.
+    // Empty for auto and for a name the engine did not list.
+    [[nodiscard]] Q_INVOKABLE QString decoderDescription(const QString& name) const;
+
+    // A receiver to open, and what to decode on it, as soon as a source is
+    // open that reaches the frequency. For main()'s --receiver and --decode,
+    // which exist so the decode section can be exercised and photographed
+    // without anybody clicking. Once per call: the first connection that can
+    // place it does, and nothing after that repeats it.
+    void setStartupReceiver(double absolute_hz, const QString& mode, const QString& decoder);
+
 signals:
     // The link came up or went away. An item holding history keyed to one
     // engine's geometry clears it here, on the edge into connected: the next
@@ -2202,6 +2275,11 @@ signals:
     // One signal for all of them, because every one of them is read by the
     // same status strip and none of them repaints anything.
     void audioChanged();
+
+    // The decode switch, the menu, the choice, what is attached, or a
+    // refusal moved. Not emitted for a line arriving; the log model has its
+    // own rows for that.
+    void decodeChanged();
 
 private:
     // The supervisor thread, and the two halves of what it does.
@@ -3256,6 +3334,117 @@ private:
     // between clicking listen and hearing anything reads as the control
     // not working.
     bool audio_work_pending_ = false;  // guarded by supervisor_mutex_
+
+    // ------------------------------------------------------------------
+    // Decoding. Implemented in ui/models/decoded_link.cpp.
+    // ------------------------------------------------------------------
+
+    // Supervisor thread. Fetches the engine's decoder list once per
+    // connection, then reconciles the subscriptions against the switch, the
+    // choice and the pane's receiver. Every decode state change goes through
+    // here, for the reason apply_audio_request gives.
+    void apply_decode_request();
+
+    // Supervisor thread. Cancels every decoder subscription this client
+    // holds, before its receiver is removed, so the engine's ended() keeps
+    // meaning a removal somebody else made. drop_receiver calls it beside
+    // stop_audio for that reason.
+    void stop_decoded();
+
+    // Supervisor thread. The engine or its source went, taking every
+    // subscription with it; nothing to cancel. The list is asked for again,
+    // because the next engine may be a different build.
+    void forget_decoded();
+
+    // Supervisor thread. Hands the Qt thread what changed, when it did.
+    void note_decode();
+
+    // Qt thread.
+    void adopt_decode();
+    void drain_decoded();
+    void update_decode_choices();
+    void place_startup_receiver();
+
+    // Invoked on the Cap'n Proto event loop thread. The first copies the
+    // message into the hand-off and posts one wake; the second records the
+    // engine's words and wakes the supervisor, which does the rest.
+    void on_decoded_message(const rpc::DecodedMessage& message);
+    void on_decoded_ended(std::uint64_t vrx, const std::string& decoder,
+                          const std::string& reason);
+
+    // Qt thread only.
+    DecodedLogModel decoded_log_;
+    std::vector<rpc::DecoderInfo> decoder_infos_;
+    QString decode_choice_ = QStringLiteral("auto");
+    QString decode_choice_shown_;
+    QStringList decode_choices_;
+    QString decode_attached_;
+    QString decode_label_;
+    QString decode_detail_;
+
+    // The startup receiver, until a connection can place it.
+    bool startup_pending_ = false;
+    double startup_hz_ = 0.0;
+    QString startup_mode_;
+    QString startup_decoder_;
+
+    // Written by the Qt thread, read by the supervisor.
+    std::atomic<bool> decode_wanted_{false};
+
+    // The Cap'n Proto loop's hand-off to the Qt thread, and the ended
+    // arrivals and the choice for the supervisor, all under one lock: each
+    // is a few strings and nothing waits on it for long.
+    struct DecodedEnded {
+        std::uint64_t vrx = 0;
+        std::string decoder;
+        std::string reason;
+    };
+    std::mutex decoded_mutex_;
+    std::vector<rpc::DecodedMessage> pending_decoded_;       // guarded by decoded_mutex_
+    std::vector<std::int64_t> pending_decoded_arrived_ms_;   // guarded by decoded_mutex_
+    std::uint64_t pending_decoded_unkept_ = 0;               // guarded by decoded_mutex_
+    std::vector<DecodedEnded> pending_decoded_ended_;        // guarded by decoded_mutex_
+    std::string requested_decode_choice_ = "auto";           // guarded by decoded_mutex_
+    bool has_decode_handover_ = false;                       // guarded by decoded_mutex_
+    std::vector<rpc::DecoderInfo> handover_decoder_infos_;   // guarded by decoded_mutex_
+    bool handover_has_infos_ = false;                        // guarded by decoded_mutex_
+    QString handover_decode_attached_;                       // guarded by decoded_mutex_
+    QString handover_decode_label_;                          // guarded by decoded_mutex_
+    QString handover_decode_detail_;                         // guarded by decoded_mutex_
+    std::atomic<bool> decoded_wake_pending_{false};
+
+    // Supervisor thread only. What the engine can attach, whether it has been
+    // asked this connection, and what this client holds on which receiver.
+    std::vector<rpc::DecoderInfo> work_decoder_infos_;
+    bool decoder_infos_asked_ = false;
+    QString decoder_infos_fault_;
+    rpc::Demod live_receiver_demod_ = rpc::Demod::Nfm;
+    qulonglong live_decoded_vrx_ = 0;
+    std::vector<std::string> live_decoded_;
+
+    // The receiver a stream on it ended, whether because the engine removed
+    // it or because a decoder refused what it delivered. Nothing is
+    // subscribed on it again: a removed receiver refuses and a refusing
+    // decoder refuses again, and either would write a second sentence over
+    // the engine's own. A new receiver is a new id and clears it.
+    qulonglong decode_ended_vrx_ = 0;
+    QString work_decode_ended_;
+
+    // The receiver and choice the refusals below were collected for, so a
+    // refused name is asked once and not on every pass.
+    qulonglong decode_tried_vrx_ = 0;
+    std::string decode_tried_choice_;
+    std::vector<std::pair<std::string, std::string>> decode_refusals_;
+
+    // The last hand-off, so a pass with nothing new posts nothing.
+    QString posted_decode_attached_;
+    QString posted_decode_label_;
+    QString posted_decode_detail_;
+
+    // Set by setDecodeWanted, setDecodeChoice and an ended arrival, cleared by
+    // the supervisor when it has reconciled. In the wait predicate for the
+    // reason audio_work_pending_ is.
+    bool decode_work_pending_ = false;  // guarded by supervisor_mutex_
 };
 
 }  // namespace revenant::ui

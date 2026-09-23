@@ -436,6 +436,11 @@ public:
         }
     }
 
+    // Lines that arrived and were let go before they reached the log, because
+    // the hand-off in front of it was full. Counted with the cap's, which is
+    // the same loss one step earlier.
+    void count_unkept(std::uint64_t count) { evicted_ += count; }
+
     // plan_append, evict_front and push_batch in one, for a caller with no
     // view to tell.
     void append(std::vector<DecodedLine> batch)

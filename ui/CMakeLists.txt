@@ -158,6 +158,10 @@ qt_add_executable(revenant_ui
     audio/audio_ring.h
     models/audio_link.cpp
     models/bookmark_link.cpp
+    models/decoded_link.cpp
+    models/decoded_log.h
+    models/decoded_model.cpp
+    models/decoded_model.h
     models/engine_link.cpp
     models/engine_link.h
     models/band_plan.h
@@ -214,6 +218,7 @@ qt_add_qml_module(revenant_ui
         qml/BandPicker.qml
         qml/FrequencyDial.qml
         qml/RdsPane.qml
+        qml/DecodePane.qml
         qml/AudioPane.qml
         qml/ClickReadout.qml
         qml/TopBar.qml

@@ -843,6 +843,9 @@ void EngineLink::apply_receiver_request()
         return;
     }
 
+    // Taken in place, so the receiver keeps its id and this is its mode now.
+    // The decode reconcile reads it to know what the receiver can feed.
+    live_receiver_demod_ = params.demod;
     note_receiver_fault(QString{});
 }
 
@@ -856,6 +859,7 @@ bool EngineLink::recreate_receiver(const rpc::VrxParams& params)
         return false;
     }
     live_receiver_id_ = *added;
+    live_receiver_demod_ = params.demod;
 
     // The passband subscription is reattached with the receiver, because it
     // was keyed on the id that has just gone. A failure here is not fatal
@@ -898,6 +902,10 @@ void EngineLink::drop_receiver()
     // tracking. stop_audio returns immediately when there is nothing to
     // stop.
     stop_audio();
+
+    // The decoders for the same reason and in the same place: cancelled
+    // before the remove, so the engine does not send ended() for it.
+    stop_decoded();
 
     if (live_receiver_id_ == 0 || client_ == nullptr) {
         live_receiver_id_ = 0;

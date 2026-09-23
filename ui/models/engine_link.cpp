@@ -143,6 +143,16 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     receiver_scroll_flush_.setSingleShot(true);
     connect(&receiver_scroll_flush_, &QTimer::timeout, this,
             [this] { takeReceiverScroll(0.0); });
+
+    // The decode menu is a function of the pane's receiver and its mode, and
+    // both move on these two. update_decode_choices emits only on a change.
+    connect(this, &EngineLink::receiverChanged, this, &EngineLink::update_decode_choices);
+    connect(this, &EngineLink::receiverStatusChanged, this,
+            &EngineLink::update_decode_choices);
+
+    // A receiver asked for on the command line is placed by the first
+    // connection whose source can reach it. See setStartupReceiver.
+    connect(this, &EngineLink::connectionChanged, this, &EngineLink::place_startup_receiver);
 }
 
 EngineLink::~EngineLink()
@@ -221,6 +231,7 @@ void EngineLink::supervise()
             // the old one would leave the audio on a receiver that no
             // longer exists until the next pass.
             apply_audio_request();
+            apply_decode_request();
             poll_receiver_status();
             poll_detections();
 
@@ -241,6 +252,7 @@ void EngineLink::supervise()
             std::unique_lock<std::mutex> lock(supervisor_mutex_);
             supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
                 return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
+                                      decode_work_pending_ ||
                                       tune_work_pending_ || rds_work_pending_ ||
                                       source_work_pending_) &&
                                      client_ != nullptr);
@@ -289,6 +301,9 @@ void EngineLink::supervise()
             audio_ring_.reset();
             work_audio_stats_ = {};
 
+            // Every decoder subscription went with it, on the same terms.
+            forget_decoded();
+
             // The decoder went with the engine, and the station on screen
             // was one engine's reading of one receiver. Nothing has to be
             // torn down on an engine that is gone; what this clears is the
@@ -336,6 +351,7 @@ void EngineLink::supervise()
             apply_stranded_release();
 
             apply_audio_request();
+            apply_decode_request();
             poll_receiver_status();
 
             // On the probe pass only, so once a second. These are a
@@ -374,6 +390,7 @@ void EngineLink::supervise()
         // thread.
         supervisor_wake_.wait_for(lock, kDetectionPollInterval, [this] {
             return stopping_ || ((receiver_work_pending_ || audio_work_pending_ ||
+                                  decode_work_pending_ ||
                                   tune_work_pending_ || rds_work_pending_ ||
                                   source_work_pending_) &&
                                  client_ != nullptr);

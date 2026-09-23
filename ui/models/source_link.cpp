@@ -860,6 +860,7 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
     live_audio_granted_ = 0;
     audio_ring_.reset();
     work_audio_stats_ = {};
+    forget_decoded();
     clear_rds(QStringLiteral(
         "the source was replaced, so nothing is decoding RDS. The switch stays on and the "
         "decoder is rebuilt on the next receiver."));

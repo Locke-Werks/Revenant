@@ -1,5 +1,5 @@
 // The receiver window: the rack of receiver strips, the focused receiver's
-// controls and fine-tuning display, and its RDS and audio.
+// controls and fine-tuning display, and its RDS, decoding and audio.
 //
 // A SECOND TOP-LEVEL WINDOW IN THE SAME PROCESS, not a second process and not
 // a pane. The owner asked on 2026-09-22 for the receiver to be a wholly
@@ -74,6 +74,7 @@ Window {
             }
 
             RdsPane { Layout.minimumWidth: 0 }
+            DecodePane { Layout.minimumWidth: 0 }
             AudioPane { Layout.minimumWidth: 0 }
         }
     }
