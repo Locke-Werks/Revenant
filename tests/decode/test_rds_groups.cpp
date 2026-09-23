@@ -3339,7 +3339,10 @@ TEST_CASE("every raw group kind round-trips through the RDS transmitter", "[rds]
     CHECK(state.tmc.aid == revenant::decode::kAidTmcAlertC);
     CHECK(state.tmc.oda_message == 0x0C0D);
     CHECK(state.tmc.groups >= 6);
-    CHECK(state.tmc.oda_groups == state.tmc.groups);
+    // Up to one cycle's three 8A groups can land before the first 3A the
+    // decoder sees, and are TMC by Table 3's default rather than by the
+    // announcement.
+    CHECK(state.tmc.oda_groups + 3 >= state.tmc.groups);
     REQUIRE(state.tmc.messages.size() == 2);
     for (const auto& message : state.tmc.messages) {
         INFO(std::format("TMC x {:02X} y {:04X} z {:04X}", message.x, message.y, message.z));
