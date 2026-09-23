@@ -114,14 +114,9 @@ void WaterfallItem::setLink(EngineLink* link)
     // sample ranges. Leaving the pixels would show the previous engine's
     // band under the next one's axis, which is the failure onConnectionChanged
     // describes at more length.
-    if (!history_.isNull()) {
-        history_.fill(kBackground);
-        std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
-    }
-    filled_rows_ = 0;
-    emit historyChanged();
-    write_row_ = std::max(history_.height() - 1, 0);
-    std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
+    clearHistory();
+    seen_connected_ = link_ != nullptr && link_->connected();
+    seen_epoch_ = link_ == nullptr ? 0 : static_cast<std::uint64_t>(link_->sourceEpoch());
     boxes_.clear();
     rebuildOverlay();
     emit linkChanged();
@@ -162,31 +157,44 @@ void WaterfallItem::onConnectionChanged()
         // it is what the engine said while it was there. It stays until the
         // next engine pushes it off the bottom.
         //
-        // The detection boxes go, for the reason SpectrumItem gives at the
-        // same place: history is a record and a box is an invitation to
-        // click, and clicking a track the engine has forgotten would tune a
-        // receiver to nothing.
+        // The live boxes go, for the reason SpectrumItem gives at the same
+        // place: a live box is an invitation to click, and clicking a track
+        // the engine has forgotten would tune a receiver to nothing. The
+        // boxes already drawn are history like the rows under them and stay
+        // with them, closed where they were.
+        seen_connected_ = false;
         boxes_.clear();
+        box_history_.observe({}, 0.0);
         rebuildOverlay();
         update();
         return;
     }
 
-    // A new engine, and the axis under this item has changed with it. Every
-    // stored row was drawn against the previous span, so keeping them would
-    // put a signal at a frequency it was never at. That is the same reason
-    // this file's header gives for discarding history on a WIDTH change, and
-    // it applies harder here: a resize keeps the band and only moves the
-    // pixels, where a new engine can be tuned somewhere else entirely.
-    if (!history_.isNull()) {
-        history_.fill(kBackground);
+    // THE SAME STREAM WITH ITS CENTRE MOVED, WHICH IS A RETUNE. A granted
+    // retune emits the same signal a new engine does, because every absolute
+    // frequency the window shows has moved. The rows are not a different
+    // picture: they are the same band, now somewhere else on the axis, so
+    // they slide by the tune rather than being thrown away. See the note on
+    // retunes in the header.
+    const auto epoch = static_cast<std::uint64_t>(link_->sourceEpoch());
+    if (seen_connected_ && epoch == seen_epoch_) {
+        followAxis();
+        rebuildOverlay();
+        update();
+        return;
     }
-    write_row_ = std::max(history_.height() - 1, 0);
-    filled_rows_ = 0;
-    emit historyChanged();
+    seen_connected_ = true;
+    seen_epoch_ = epoch;
+
+    // A new engine or a new stream, and the axis under this item has changed
+    // with it. Every stored row was drawn against the previous span, so
+    // keeping them would put a signal at a frequency it was never at. That is
+    // the same reason this file's header gives for discarding history on a
+    // WIDTH change, and it applies harder here: a resize keeps the band and
+    // only moves the pixels, where a new engine can be tuned somewhere else
+    // entirely, and a new stream's sample indices start again from zero.
+    clearHistory();
     reduced_bins_ = 0;
-    std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
-    std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
     boxes_.clear();
 
     // The same two SpectrumItem clears here and for the same reason: the
@@ -318,10 +326,114 @@ void WaterfallItem::rebuild(int columns, int rows, std::size_t bins)
     columns_.assign(static_cast<std::size_t>(wide), kSpectrumFloorDb);
     reduced_bins_ = bins;
 
+    // The rows are gone, so the axis they were on and the boxes drawn over
+    // them go too. The next frame starts both again.
+    axis_ = {};
+    box_history_.clear();
+
     const std::size_t bins_per_column =
         bins == 0 ? 1 : std::max<std::size_t>(1, bins / static_cast<std::size_t>(wide));
     headroom_db_ = peak_reduction_headroom_db(bins_per_column);
     emit endsChanged();
+}
+
+void WaterfallItem::clearHistory()
+{
+    if (!history_.isNull()) {
+        history_.fill(kBackground);
+    }
+    write_row_ = std::max(history_.height() - 1, 0);
+    filled_rows_ = 0;
+    emit historyChanged();
+    std::fill(row_spans_.begin(), row_spans_.end(), RowSpan{});
+    std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+    axis_ = {};
+    box_history_.clear();
+}
+
+void WaterfallItem::followAxis()
+{
+    if (link_ == nullptr || history_.isNull()) {
+        return;
+    }
+    const HistoryShift plan =
+        plan_history_shift(axis_, link_->spanLowHz(), link_->spanHighHz(), history_.width());
+    if (plan.reset) {
+        if (plan.beyond) {
+            // Tuned a whole span or more away. Nothing stored is on screen any
+            // more, but every row still stands for the time it was written at,
+            // so the pixels go and the sample ranges stay, and the boxes, which
+            // are in absolute hertz, fall off the edge on their own.
+            history_.fill(kBackground);
+            std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+        } else if (axis_.valid()) {
+            // Hertz per pixel changed with the width and the bins unchanged,
+            // which only a new span does: a different picture, so a fresh
+            // history. A first frame, with no axis yet, has nothing to clear.
+            clearHistory();
+        }
+    } else if (plan.shift_px != 0) {
+        shiftRows(plan.shift_px);
+    }
+    axis_ = plan.axis;
+}
+
+void WaterfallItem::shiftRows(int pixels)
+{
+    const int wide = history_.width();
+    if (pixels == 0 || wide <= 0) {
+        return;
+    }
+    const auto background = static_cast<std::uint32_t>(
+        0xFF000000U | (static_cast<std::uint32_t>(kBackground.blue()) << 16U) |
+        (static_cast<std::uint32_t>(kBackground.green()) << 8U) |
+        static_cast<std::uint32_t>(kBackground.red()));
+    for (int row = 0; row < history_.height(); ++row) {
+        shift_row(reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide, pixels,
+                  background);
+    }
+    std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
+}
+
+void WaterfallItem::recordDetections()
+{
+    if (link_ == nullptr || !link_->connected()) {
+        return;
+    }
+    const double span_hz = link_->spanHighHz() - link_->spanLowHz();
+    if (!(span_hz > 0.0) || width() <= 0.0) {
+        return;
+    }
+
+    std::vector<TrackSighting> live;
+    live.reserve(link_->detections().size());
+    for (const rpc::Detection& detection : link_->detections()) {
+        TrackSighting track;
+        track.id = detection.id;
+        const std::int64_t half = detection.bandwidth_hz / 2;
+        track.low_hz = detection.center_hz - half;
+        track.high_hz = detection.center_hz + (detection.bandwidth_hz - half);
+        track.first_seen = detection.first_seen;
+        track.last_detected = detection.last_detected;
+        track.merged = detection.state == rpc::TrackState::Merged;
+        live.push_back(track);
+    }
+
+    // Two logical pixels: an estimate that wanders less than the eye can see
+    // on this display extends the box it is in rather than starting another.
+    box_history_.observe(live, 2.0 * span_hz / width());
+}
+
+void WaterfallItem::forgetScrolledBoxes()
+{
+    const int tall = history_.height();
+    if (tall <= 0 || filled_rows_ < tall) {
+        // Nothing has scrolled off yet.
+        return;
+    }
+    // The oldest row still held is the one the cursor points at, which the
+    // next frame overwrites.
+    box_history_.forget_before(row_spans_[static_cast<std::size_t>(write_row_)].start);
 }
 
 bool WaterfallItem::rowsForSamples(std::uint64_t from_sample, std::uint64_t to_sample,
@@ -466,7 +578,42 @@ void WaterfallItem::rebuildOverlay()
         build_detection_boxes(*link_, width(), boxes_);
     }
     resolveRows();
-    build_detection_quads(boxes_, width(), height(), selected_detection_, hovered_detection_,
+
+    // What is drawn is the history, not the live list: every segment the
+    // waterfall still holds rows for, on the rows it was drawn on, placed on
+    // the span's axis now so that a retune moves it with the pixels. A live
+    // track is its own newest segment, so it is drawn once.
+    drawn_.clear();
+    const double low_hz = link_ == nullptr ? 0.0 : link_->spanLowHz();
+    const double span_hz = link_ == nullptr ? 0.0 : link_->spanHighHz() - low_hz;
+    const int tall = history_.height();
+    if (span_hz > 0.0 && tall > 0 && filled_rows_ > 0) {
+        const double w = width();
+        const qreal h = height();
+        drawn_.reserve(box_history_.segments().size());
+        for (const BoxSegment& segment : box_history_.segments()) {
+            int top_row = 0;
+            int bottom_row = 0;
+            if (!rowsForSamples(segment.from_sample, segment.to_sample, top_row, bottom_row)) {
+                continue;
+            }
+            DetectionBox box;
+            box.id = segment.id;
+            box.state = segment.merged ? rpc::TrackState::Merged
+                        : segment.open ? rpc::TrackState::Live
+                                       : rpc::TrackState::Held;
+            box.center_hz = (segment.low_hz + segment.high_hz) / 2;
+            box.bandwidth_hz = segment.high_hz - segment.low_hz;
+            box.left_px = (static_cast<double>(segment.low_hz) - low_hz) / span_hz * w;
+            box.right_px = (static_cast<double>(segment.high_hz) - low_hz) / span_hz * w;
+            box.center_px = (box.left_px + box.right_px) / 2.0;
+            box.top_px = h * static_cast<qreal>(top_row) / static_cast<qreal>(tall);
+            box.bottom_px = h * static_cast<qreal>(bottom_row + 1) / static_cast<qreal>(tall);
+            box.time_bounded = true;
+            drawn_.push_back(box);
+        }
+    }
+    build_detection_quads(drawn_, width(), height(), selected_detection_, hovered_detection_,
                           DetectionStyle::Rows, quads_);
 
     // Appended after the rectangles so the receiver's band composites over
@@ -525,6 +672,7 @@ void WaterfallItem::placeLabels()
 
 void WaterfallItem::takeDetections()
 {
+    recordDetections();
     rebuildOverlay();
     update();
 }
@@ -557,6 +705,10 @@ void WaterfallItem::takeFrame()
         rebuild(wide, tall, frame.power_db.size());
     }
 
+    // Onto the axis this frame is drawn against, before its row goes in, so
+    // the stored rows and the new one agree about where every hertz is.
+    followAxis();
+
     reduce_peak(frame.power_db, columns_);
     ends_ = resolve_ends(frame.floor_db, frame.ceiling_db, headroom_db_, pinsInForce());
 
@@ -586,6 +738,7 @@ void WaterfallItem::takeFrame()
         filled_rows_ += 1;
         emit historyChanged();
     }
+    forgetScrolledBoxes();
 
     // After the row is in, because the newest row is the leading edge of
     // every live rectangle. This frame also carries a later sample index, so

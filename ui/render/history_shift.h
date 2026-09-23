@@ -30,11 +30,23 @@
 // rate and with it hertz per pixel", which made every width change a fresh
 // history while the pane was the fine stream.
 //
+// THE SPAN WATERFALL USES IT TOO, since 2026-09-23. A retune of the front end
+// moves the main span's axis the way a receiver move moves the pane's, and
+// the owner saw the main waterfall's history wiped at every tune: rows drawn
+// against the old centre were thrown away rather than moved. Both waterfalls
+// now plan with plan_history_shift and move their pixels with shift_row, so
+// there is one way this is done.
+//
 // This header holds no Qt; ui/tests links it.
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 
 namespace revenant::ui {
 
@@ -55,6 +67,14 @@ struct HistoryAxis {
 struct HistoryShift {
     // Throw the stored rows away and start again on the new axis.
     bool reset = false;
+
+    // Set with reset when the scale is the same and the axis moved a whole
+    // width or more. Nothing stored is still on screen, but the rows still
+    // stand for the times they were written at, so a display that keeps a
+    // time record beside its pixels (the span waterfall's sample ranges) can
+    // blank the pixels and keep the record. False for a change of scale,
+    // which is a different picture altogether.
+    bool beyond = false;
 
     // Otherwise move every stored row this many pixels to the RIGHT, which is
     // negative for an axis that moved up in frequency: the same signal is
@@ -89,6 +109,7 @@ struct HistoryShift {
     // that large is a reset by another name.
     if (whole >= width_px || whole <= -width_px) {
         out.reset = true;
+        out.beyond = true;
         out.axis = HistoryAxis{new_low_hz, hz_per_px};
         return out;
     }
@@ -97,6 +118,28 @@ struct HistoryShift {
     out.axis = HistoryAxis{stored.low_hz + static_cast<double>(whole) * stored.hz_per_px,
                            stored.hz_per_px};
     return out;
+}
+
+// Moves one row of 32-bit pixels `pixels` to the RIGHT, negative for left,
+// and fills what shifts in from outside with `fill`. A shift of the whole
+// width or more fills the row. This is the pixel half of a plan above: every
+// stored row takes the same shift, and what arrives from outside the old axis
+// was never measured, so it is drawn as the bottom of the colour map rather
+// than as anything that could be read as a signal.
+inline void shift_row(std::uint32_t* line, int width_px, int pixels, std::uint32_t fill)
+{
+    if (line == nullptr || width_px <= 0 || pixels == 0) {
+        return;
+    }
+    const int moved = std::min(std::abs(pixels), width_px);
+    const auto keep = static_cast<std::size_t>(width_px - moved);
+    if (pixels > 0) {
+        std::memmove(line + moved, line, keep * sizeof(std::uint32_t));
+        std::fill(line, line + moved, fill);
+    } else {
+        std::memmove(line, line + moved, keep * sizeof(std::uint32_t));
+        std::fill(line + keep, line + width_px, fill);
+    }
 }
 
 }  // namespace revenant::ui

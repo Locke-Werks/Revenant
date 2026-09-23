@@ -861,6 +861,22 @@ the signal stopped, so down there it is drawn solid; fading belongs to the
 spectrum marker alone, where it means the tracker has not dropped this track
 yet and the signal has stopped.
 
+**A box on the waterfall is history.** The owner asked on 2026-09-23 that a box
+drawn on the waterfall be fixed once drawn, and it is: it stays on the rows it
+was drawn on and scrolls off with them, where it used to vanish the moment the
+detector's hold ran out. `ui/render/box_history.h` keeps each track as
+segments of a fixed extent in absolute hertz over a stretch of the sample
+clock. A live track grows its newest segment upward; when its measured edges
+move by more than two pixels a new segment starts on the next row and the old
+one is left as it was, so a drifting track leaves a staircase and nothing
+already drawn is redrawn at a newer estimate. Because the segments are in
+absolute hertz they slide with the rows on a retune. A segment is forgotten
+once it ends before the oldest row the waterfall holds, a new engine or a new
+stream clears them with the rows, and cases are in
+`ui/tests/test_box_history.cpp`. The spectrum's bracket and its label still
+follow the live tracks alone, and only a live track can be clicked, hovered or
+labelled on the waterfall: one the detector has let go is nothing to tune to.
+
 ### Horizontal scroll tunes
 
 Over the fine-tuning display, it moves the receiver. That is
@@ -994,9 +1010,27 @@ transfers around the tune. docs/rpc.md, under "The front end can be pointed
 somewhere else", has the measurement and the boundary. A mouse wheel emits
 events far faster than a tuner can follow, so the wide-scroll path has to
 coalesce: accumulate the wheel delta, issue one tune per settling interval,
-and let the waterfall smear while it happens rather than queueing a hundred
+and let the picture step while it happens rather than queueing a hundred
 retunes. The fine case needs none of that, which is the other reason the two
 gestures are not the same operation wearing different hats.
+
+**The waterfall's history slides with a retune.** Since 2026-09-23 the span
+waterfall keeps its rows in absolute hertz the way the passband waterfall
+does: a granted retune moves every stored row sideways by the whole pixels
+the span moved, through the same `ui/render/history_shift.h`, and the columns
+that slide in from outside the old span are the bottom of the colour map. A
+tune a whole span or more away blanks the pixels and keeps the rows' sample
+ranges, so the detection boxes below still know their times. The owner saw the
+history wiped at every tune before this: a retune reaches the waterfall on the
+same signal a new engine does, and the waterfall took it for one. It now tells
+the two apart by the source epoch. A spectrum frame carries no centre on the
+wire, so a frame made before a tune and delivered after the granted centre
+arrives is drawn one tune out of place; the device streams nothing across the
+tune, so that is a few rows at most.
+
+WHAT THE SENTENCE BEFORE THIS USED TO SAY: "issue one tune per settling
+interval, and let the waterfall smear while it happens rather than queueing a
+hundred retunes."
 
 ### Vertical scroll scrubs, and it should sound like tape
 

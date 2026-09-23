@@ -24,8 +24,13 @@
 // radio is still working through them long after the operator stopped. So the
 // wheel delta accumulates and at most one tune goes out per settling
 // interval: the operator sees the picture jump in steps rather than watching a
-// backlog drain. The waterfall smears across each step, which is what a
-// discontinuous stream actually looks like and is the honest picture.
+// backlog drain. The waterfall's history slides by each step, since
+// 2026-09-23, so a stored carrier stays at its own frequency; the rows the
+// stream missed across the tune are simply not there.
+//
+// WHAT THE LAST SENTENCE USED TO SAY: "The waterfall smears across each step,
+// which is what a discontinuous stream actually looks like and is the honest
+// picture."
 //
 // WHY THIS HOLDS NO Qt. ui/tests links it, on the same terms as
 // models/receiver_marker.h and render/history_resize.h. Which gestures issue a

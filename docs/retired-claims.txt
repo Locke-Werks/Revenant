@@ -1716,3 +1716,14 @@ instead: The owner answered it on 2026-09-23: the file stays, read under
     librtlsdr's COPYING like the rest of the library, and compiling it out of
     the overlay is the way out if that reading is challenged.
     docs/clean-room.md, open item 3.
+
+phrase: axis moves only when the front end retunes, and it throws its history away then
+phrase: every row the waterfall holds was drawn under a frequency axis that no longer applies
+phrase: The waterfall smears across each step, which is what a discontinuous stream
+phrase: and let the waterfall smear while it happens rather than queueing
+retired: 2026-09-23
+commit: "Slide the span waterfall on a retune and keep its boxes as history"
+instead: A granted retune moves the span waterfall's stored rows sideways by the
+    tune, through render/history_shift.h as the passband waterfall does, and
+    only a new engine or a new stream clears them. docs/ui-spectrum.md, "The
+    waterfall's history slides with a retune".

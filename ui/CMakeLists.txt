@@ -214,6 +214,7 @@ qt_add_executable(revenant_ui
     models/recording_status.h
     models/source_link.cpp
     models/window_raise.h
+    render/box_history.h
     render/colour_map.h
     render/frame_probe.cpp
     render/frame_probe.h
@@ -461,7 +462,11 @@ endif()
 #
 # It covers plan_history_resize, which is the waterfall's ring arithmetic
 # across a height change: which wrapped index a kept row comes from, how
-# many rows survive, and where the write cursor lands.
+# many rows survive, and where the write cursor lands. And plan_history_shift
+# and shift_row, which slide both waterfalls' history when their axis moves,
+# and BoxHistory, which keeps the span waterfall's detection boxes as history
+# that scrolls off with its rows rather than vanishing with the detector's
+# hold.
 #
 # It covers parse_frequency, which decides what unit a bare number typed
 # into the frequency box means and therefore where the radio goes.
@@ -599,6 +604,7 @@ if(REVENANT_UI_TESTS)
             tests/test_auto_filter.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
+            tests/test_box_history.cpp
             tests/test_calibration.cpp
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp

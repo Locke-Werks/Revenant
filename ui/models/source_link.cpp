@@ -550,12 +550,17 @@ void EngineLink::adopt_source_tuning()
     }
 
     if (geometry_moved) {
-        // AND THE HISTORY GOES WITH IT. The span moved, so every row the
-        // waterfall holds was drawn under a frequency axis that no longer
-        // applies, and a row left in place would put a signal where it
-        // never was. That is the argument connectionChanged already
-        // carries, word for word, for a new engine; a retune is the same
-        // event for the same reason.
+        // Every absolute frequency on screen has moved, which is what
+        // connectionChanged tells a binding. The span waterfall hears it too
+        // and tells a retune from a new engine by the source epoch: a retune
+        // keeps the stream, so its rows slide by the tune rather than going.
+        // render/waterfall_item.h has the rule.
+        //
+        // WHAT THIS COMMENT USED TO SAY: "AND THE HISTORY GOES WITH IT. The
+        // span moved, so every row the waterfall holds was drawn under a
+        // frequency axis that no longer applies, and a row left in place
+        // would put a signal where it never was." A row left in place would;
+        // a row moved by the tune is where it was.
         emit connectionChanged();
     }
 }

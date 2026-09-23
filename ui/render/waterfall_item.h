@@ -71,6 +71,26 @@
 // says why it is not in this file: a wrapped ring index is the part that can
 // be off by one, and none of it needs a window to test.
 //
+// A RETUNE SLIDES THE HISTORY, it does not clear it. The rows are kept in
+// absolute hertz the way the passband waterfall keeps its own: when the front
+// end moves, every stored row moves sideways by the whole pixels the axis
+// moved, render/history_shift.h plans it and moves the pixels for both
+// waterfalls, and what slides in from outside the old span is the bottom of
+// the colour map. The sample ranges beside the pixels do not move, because a
+// retune moves frequency and not time.
+//
+// WHAT THIS PARAGRAPH REPLACES: nothing here said so, and the history was
+// thrown away on every tune, because a granted retune emits connectionChanged
+// and onConnectionChanged treated that as a new engine. The owner saw the
+// result on 2026-09-23 as the waterfall wiping itself at every notch of the
+// wheel.
+//
+// ONE LIMIT, AND IT IS THE WIRE'S. A spectrum frame carries no centre
+// frequency, so a frame is placed on the axis the link holds when it arrives.
+// Frames the engine made before a tune and delivers after the granted centre
+// has been read are drawn one retune out of place: a few rows at most, since
+// the device stops streaming across the tune.
+//
 // WHAT THE DETECTION OVERLAY IS DOING IN HERE
 //
 // render/spectrum_item.h owns it, and this file includes that header for it
@@ -79,6 +99,14 @@
 // detection differently on purpose. This one has a time axis, so a detection
 // here is a rectangle closed in both axes, and the rows it spans are
 // resolved from a ring of sample ranges kept beside the pixels.
+//
+// AND A BOX HERE IS HISTORY, since 2026-09-23. What is drawn is every box the
+// waterfall has drawn and still holds rows for, not the detector's current
+// list: a box stays on its rows when the detector lets the track go and
+// scrolls off with them, and a box already drawn is never redrawn at a newer
+// estimate. render/box_history.h keeps the records. The live list still
+// decides what a click or the pointer can pick and which box carries a label,
+// because a track the detector has let go is nothing to tune to.
 
 #pragma once
 
@@ -91,7 +119,9 @@
 #include <vector>
 
 #include "models/engine_link.h"
+#include "render/box_history.h"
 #include "render/history_resize.h"
+#include "render/history_shift.h"
 #include "render/spectrum_item.h"
 #include "render/spectrum_scale.h"
 
@@ -216,6 +246,25 @@ private:
     void onConnectionChanged();
     void rebuild(int columns, int rows, std::size_t bins);
 
+    // Empties the pixels, the sample ranges and the box history together, for
+    // a new engine or a new stream: every row was drawn against a span that is
+    // not this one.
+    void clearHistory();
+
+    // Moves the stored rows to where the link's span now puts them. Called
+    // when a retune lands and before each row is written. See the note on
+    // retunes at the top of this file.
+    void followAxis();
+
+    // Moves every stored row sideways; render/history_shift.h has the rule.
+    void shiftRows(int pixels);
+
+    // Folds the detector's current list into the box history.
+    void recordDetections();
+
+    // Forgets the boxes that ended before the oldest row still held.
+    void forgetScrolledBoxes();
+
     // Reallocates the ring at a new HEIGHT and carries the rows over. Only
     // legal when the width has not moved; see the note in geometryChange
     // for why the width case cannot do this. render/history_resize.h holds
@@ -283,7 +332,20 @@ private:
     float headroom_db_ = 0.0F;
     std::size_t reduced_bins_ = 0;
 
+    // The absolute axis the stored rows are on, as on the passband waterfall.
+    HistoryAxis axis_{};
+
+    // Which stream the rows belong to, so a retune, which arrives on the same
+    // signal as a new engine, can be told from one. seen_connected_ is false
+    // until a connection has been seen, and after one is lost.
+    bool seen_connected_ = false;
+    std::uint64_t seen_epoch_ = 0;
+
+    // The detector's live tracks, for picking and labels, and every box drawn
+    // from the history, which is what the overlay shows.
     std::vector<DetectionBox> boxes_;
+    BoxHistory box_history_;
+    std::vector<DetectionBox> drawn_;
     std::vector<OverlayQuad> quads_;
     std::uint64_t selected_detection_ = 0;
     std::uint64_t hovered_detection_ = 0;

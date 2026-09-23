@@ -150,18 +150,9 @@ void PassbandWaterfallItem::shiftRows(int pixels)
         0xFF000000U | (static_cast<std::uint32_t>(kBackground.blue()) << 16U) |
         (static_cast<std::uint32_t>(kBackground.green()) << 8U) |
         static_cast<std::uint32_t>(kBackground.red()));
-    const int moved = std::min(std::abs(pixels), wide);
-    const auto keep = static_cast<std::size_t>(wide - moved);
-
     for (int row = 0; row < history_.height(); ++row) {
-        auto* line = reinterpret_cast<std::uint32_t*>(history_.scanLine(row));
-        if (pixels > 0) {
-            std::memmove(line + moved, line, keep * sizeof(std::uint32_t));
-            std::fill(line, line + moved, background);
-        } else {
-            std::memmove(line, line + moved, keep * sizeof(std::uint32_t));
-            std::fill(line + keep, line + wide, background);
-        }
+        shift_row(reinterpret_cast<std::uint32_t*>(history_.scanLine(row)), wide, pixels,
+                  background);
     }
     std::fill(tile_dirty_.begin(), tile_dirty_.end(), std::uint8_t{1});
 }

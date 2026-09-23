@@ -15,12 +15,16 @@
 // change here too. There are no detections on this display and no time axis
 // anybody reads off it, so none of the sample-range bookkeeping comes across.
 //
-// What is its own is that the axis moves under it. The span waterfall's axis
-// moves only when the front end retunes, and it throws its history away then.
-// This one's moves every time the receiver does: a wheel notch, a drag of the
-// band, AFT. render/history_shift.h shifts the stored rows sideways by the
-// pixels the axis moved, so the history stays where it was in absolute terms
-// and a drifting carrier draws as a slant rather than as a jump at every move.
+// What is its own is how often the axis moves under it. The span waterfall's
+// axis moves only when the front end retunes; this one's moves every time the
+// receiver does: a wheel notch, a drag of the band, AFT. render/history_shift.h
+// shifts the stored rows sideways by the pixels the axis moved, so the history
+// stays where it was in absolute terms and a drifting carrier draws as a slant
+// rather than as a jump at every move. The span waterfall does the same on a
+// retune, through the same header, since 2026-09-23.
+//
+// WHAT THE SECOND SENTENCE USED TO SAY: "The span waterfall's axis moves only
+// when the front end retunes, and it throws its history away then."
 // A change of span discards it, and the span changes only when the passband's
 // reach crosses a rung of the display rate, a factor of two or more; a filter
 // dragged inside a rung keeps every row.
