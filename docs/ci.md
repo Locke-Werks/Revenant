@@ -155,7 +155,7 @@ and no more.
 
 The client compiles, with `REVENANT_WERROR=ON`, which also fires the eight `static_assert`
 declarations in `models/engine_link.h` that nothing else in CI reaches. `qt_add_qml_module`
-runs `qmlcachegen` over `qml/Main.qml`, so a syntax error there is a red build; nothing
+runs `qmlcachegen` over every file under `qml/`, so a syntax error in any of them is a red build; nothing
 checks what the QML does.
 
 `revenant_ui_tests` passes. It holds the pieces of the client that were lifted out of Qt
@@ -208,7 +208,7 @@ only meaningful once something rasterises it.
 
 **`audio/audio_player.cpp`.** WASAPI in shared mode. Needs a sound card.
 
-**`main.cpp` and `qml/Main.qml`.** Wiring and layout.
+**`main.cpp` and the files under `qml/`.** Wiring and layout.
 
 None of this is covered by the engine tree's tests, however many there are on the day:
 `ui/` links no part of the engine and talks to it over a socket. This sentence used to
