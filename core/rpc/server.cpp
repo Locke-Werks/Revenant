@@ -2249,9 +2249,9 @@ public:
         // that a complex tap has no audio.
         if (!decoder_accepts(*spec, engine::demod_name(mode))) {
             return to_exception(Error{std::format(
-                "the {} decoder reads the audio of a {} receiver and receiver {} is {}. Add a "
-                "receiver in {} on the signal",
-                spec->name, decoder_modes_text(*spec), id->value, engine::demod_name(mode),
+                "the {} decoder reads {} and receiver {} is {}. Add a receiver in {} on the "
+                "signal",
+                spec->name, decoder_needs_text(*spec), id->value, engine::demod_name(mode),
                 decoder_modes_text(*spec))});
         }
 

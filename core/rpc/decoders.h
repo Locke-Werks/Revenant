@@ -96,10 +96,13 @@
 
 #include "core/decode/aprs.h"
 #include "core/decode/ax25.h"
+#include "core/decode/cw.h"
 #include "core/decode/dstar.h"
+#include "core/decode/m17.h"
 #include "core/decode/navtex.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/pocsag.h"
+#include "core/decode/psk31.h"
 #include "core/decode/rtty.h"
 #include "core/decode/sitor_b.h"
 #include "core/decode/tetra.h"
@@ -210,6 +213,14 @@ struct DecoderSpec {
         out += spec.modes[i];
     }
     return out;
+}
+
+// What a refusal says the decoder reads: "the audio of a usb or lsb receiver",
+// "the complex baseband of a p25p1 or raw receiver".
+[[nodiscard]] inline std::string decoder_needs_text(const DecoderSpec& spec) {
+    return std::format("the {} of a {} receiver",
+                       spec.input == DecoderInput::RealAudio ? "audio" : "complex baseband",
+                       decoder_modes_text(spec));
 }
 
 namespace decoders_detail {
@@ -323,6 +334,14 @@ inline void to_complex(const DecoderChunk& chunk, std::vector<dsp::Complex32>& o
 inline constexpr std::string_view kSidebandModes[] = {"usb", "lsb"};
 inline constexpr std::string_view kFmModes[] = {"nfm"};
 
+// CW reads a cw receiver, whose demodulator puts the carrier at its pitch, or
+// a sideband receiver the operator has tuned to put the tone there.
+inline constexpr std::string_view kCwModes[] = {"cw", "usb", "lsb"};
+
+// M17 is complex baseband like P25 and has no demodulator of its own; see its
+// adapter for why these two and not dstar or tetra.
+inline constexpr std::string_view kM17Modes[] = {"p25p1", "raw"};
+
 // The shape check every audio adapter makes, in words naming both halves.
 [[nodiscard]] inline Status require_audio(std::string_view decoder, const DecoderChunk& chunk,
                                           dsp::SampleRate built_for) {
@@ -411,16 +430,54 @@ struct TextLine {
     std::size_t characters = 0;
     bool visible = false;
 
+    // The end of the chunk that delivered the latest character, and whether
+    // one has been added since that was last set.
+    std::uint64_t arrived = 0;
+    bool fresh = false;
+
     void add(char32_t glyph, std::uint64_t at) {
+        begin(at);
+        append_utf8(text, glyph);
+        visible = visible || glyph != U' ';
+    }
+    // A token already in UTF-8, which is how CW hands out a character: a
+    // service signal is a word in angle brackets and E-acute is two bytes.
+    void add_text(std::string_view token, std::uint64_t at) {
+        begin(at);
+        text += token;
+        visible = visible || token.find_first_not_of(' ') != std::string_view::npos;
+    }
+
+    // Whether the channel has been quiet for `idle` samples by the end of a
+    // chunk, with that chunk's characters already added.
+    //
+    // FROM WHEN THE LAST CHARACTER ARRIVED, NOT FROM WHERE IT SITS. A decoder
+    // hands a character over some time after its position: RTTY after its
+    // stop element, PSK31 and CW after the two seconds they spend finding the
+    // tone, which they then release in one batch. Measured from the
+    // positions, that batch ended the line the moment it arrived; through
+    // the engine on 2026-09-22, CW split "CQ CQ DE N0CALL K" after "N0".
+    // Between two characters in one delivery the positions are compared
+    // instead, by the adapters, because there the latency cancels.
+    [[nodiscard]] bool quiet_at(std::uint64_t chunk_end, std::uint64_t idle) {
+        if (fresh) {
+            arrived = chunk_end;
+            fresh = false;
+        }
+        return characters > 0 && chunk_end > arrived + idle;
+    }
+
+    void clear() { *this = TextLine{}; }
+
+private:
+    void begin(std::uint64_t at) {
         if (characters == 0) {
             first_sample = at;
         }
         last_sample = at;
         ++characters;
-        append_utf8(text, glyph);
-        visible = visible || glyph != U' ';
+        fresh = true;
     }
-    void clear() { *this = TextLine{}; }
 };
 
 // Why a line was handed out, as the "ended" field spells it.
@@ -839,8 +896,7 @@ public:
                 emit(chunk, LineEnd::Length, out);
             }
         }
-        if (line_.characters > 0 &&
-            chunk.start + chunk.frames() > line_.last_sample + idle_samples()) {
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
             emit(chunk, LineEnd::Idle, out);
         }
         return {};
@@ -1407,8 +1463,7 @@ public:
                 emit(chunk, LineEnd::Length, out);
             }
         }
-        if (line_.characters > 0 &&
-            chunk.start + chunk.frames() > line_.last_sample + idle_samples()) {
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
             emit(chunk, LineEnd::Idle, out);
         }
         return {};
@@ -1596,6 +1651,520 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// PSK31, PSK63 and QPSK31
+// ---------------------------------------------------------------------------
+//
+// Reads a usb or lsb receiver's audio, core/decode/psk31.h, with the tone put
+// at 1000 Hz in the audio: Psk31Config's centre, with its AFC capturing 40 Hz
+// either side. One message per line of text, gathered as RTTY's are; kind is
+// "line". Three registry rows and one adapter, because the three modes are one
+// decoder with a mode each and nothing in the audio says which a transmitter
+// chose: BPSK31 read as QPSK31 is text of the wrong characters, not a refusal.
+//
+// THE SIDEBAND MATTERS TO QPSK ONLY. QEX page 8, as psk31.h cites it: a lower
+// sideband demodulator mirrors the spectrum and turns every phase advance into
+// a retard, so the adapter sets Psk31Config::lower_sideband from the mode.
+//
+// Every message:
+//   text                 text   the line, its line end removed; a character
+//                               Varicode does not recognise is U+FFFD, which
+//                               covers the extended alphabet psk31.h reports
+//                               as unrecognised
+//   characters           int
+//   unrecognised         int
+//   ended                text   line_end, length or idle
+//   began_sample         int    receiver-stream index of the first character's
+//                               first bit
+//   frequency_offset_hz  real   the tone's measured offset from 1000 Hz
+//   acquisition_strength real   psk31.h's line_to_mean when the carrier was
+//                               found; the threshold is 6
+//   lower_sideband       flag
+//
+// NOTHING PRINTS FOR THE FIRST TWO SECONDS of a transmission, which is the
+// acquisition window psk31.h holds before decoding, and the decoder acquires
+// once: a second transmitter on another tone later in the stream is not
+// followed. psk31.h has both.
+template <decode::Psk31Mode Mode>
+class PskChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = Mode == decode::Psk31Mode::Bpsk31   ? "psk31"
+                                              : Mode == decode::Psk31Mode::Bpsk63 ? "psk63"
+                                                                                  : "qpsk31";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::Psk31Config config;
+        config.rate = build.rate;
+        config.mode = Mode;
+        config.lower_sideband = build.mode == "lsb";
+        auto built = decode::Psk31::create(config);
+        if (!built) {
+            return std::unexpected(
+                with_context(built.error(), std::format("building the {} decoder", kName)));
+        }
+        return std::unique_ptr<ChunkDecoder>(new PskChunkDecoder(config, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, config_.rate); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        characters_.clear();
+        if (auto processed = decoder_.process(chunk.samples, characters_); !processed) {
+            return processed;
+        }
+
+        using decoders_detail::LineEnd;
+        for (const decode::Psk31Character& c : characters_) {
+            const std::uint64_t at = base_.at(c.first_sample);
+            if (line_.characters > 0 && at > line_.last_sample + idle_samples()) {
+                emit(chunk, LineEnd::Idle, out);
+            }
+            if (c.recognised && (c.ascii == '\r' || c.ascii == '\n')) {
+                emit(chunk, LineEnd::LineEnd, out);
+                continue;
+            }
+            if (!c.recognised) {
+                line_.add(char32_t{0xFFFD}, at);
+                ++unrecognised_;
+            } else if (c.ascii >= 0x20 || c.ascii == '\t') {
+                line_.add(static_cast<char32_t>(c.ascii), at);
+            } else {
+                // The other control characters print nothing.
+                continue;
+            }
+            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
+                emit(chunk, LineEnd::Length, out);
+            }
+        }
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
+            emit(chunk, LineEnd::Idle, out);
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        line_.clear();
+        unrecognised_ = 0;
+    }
+
+private:
+    PskChunkDecoder(const decode::Psk31Config& config, decode::Psk31 decoder)
+        : config_(config), decoder_(std::move(decoder)) {}
+
+    // Ten characters of ten bits, a Varicode character of middling length
+    // and its two-zero gap, at the mode's symbol rate: 3.2 s of PSK31.
+    [[nodiscard]] std::uint64_t idle_samples() const {
+        return static_cast<std::uint64_t>(decoders_detail::kIdleCharacters * 10.0 *
+                                          static_cast<double>(config_.rate) /
+                                          decode::psk31_symbol_rate(Mode));
+    }
+
+    void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,
+              std::vector<DecodedMessage>& out) {
+        if (!line_.visible) {
+            line_.clear();
+            unrecognised_ = 0;
+            return;
+        }
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, "line", chunk);
+        message.fields.push_back(text_field("text", line_.text));
+        message.fields.push_back(
+            integer_field("characters", static_cast<std::int64_t>(line_.characters)));
+        message.fields.push_back(
+            integer_field("unrecognised", static_cast<std::int64_t>(unrecognised_)));
+        message.fields.push_back(text_field("ended", std::string(line_end_name(why))));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(line_.first_sample)));
+        message.fields.push_back(real_field("frequency_offset_hz", decoder_.frequency_offset_hz()));
+        message.fields.push_back(
+            real_field("acquisition_strength", decoder_.acquisition_strength()));
+        message.fields.push_back(flag_field("lower_sideband", config_.lower_sideband));
+        message.text = line_.text;
+        out.push_back(std::move(message));
+        line_.clear();
+        unrecognised_ = 0;
+    }
+
+    decode::Psk31Config config_;
+    decode::Psk31 decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::Psk31Character> characters_;
+    decoders_detail::TextLine line_;
+    std::size_t unrecognised_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// CW
+// ---------------------------------------------------------------------------
+//
+// Reads a cw receiver's audio, or a usb or lsb receiver's, core/decode/cw.h,
+// with the tone at 700 Hz, CwConfig's centre, give or take the 100 Hz its
+// acquisition captures. A cw receiver puts the carrier at its cw_pitch, whose
+// default is 700, so a cw receiver left at its default pitch and tuned to the
+// signal is the case this was written for. A pitch set elsewhere moves the
+// tone out of the capture range and nothing decodes; the pitch is not in
+// DecoderBuild, because it is the one parameter a retune can change without
+// rebuilding the decoder, and a decoder that followed it would have to be told
+// about retunes, which this seam does not do.
+//
+// One message per line: M.1677-1 has no line end, so a line ends at
+// kMaxLineCharacters or when the key has been up for five word spaces at the
+// speed being read, 2.1 s at 20 WPM. kind is "line".
+//
+// Every message:
+//   text                 text   the line; a service signal is its clause
+//                               1.1.3 name in angle brackets, as cw.h writes
+//                               it, and a code the table does not hold is
+//                               U+FFFD
+//   characters           int    characters and word spaces
+//   unrecognised         int
+//   code                 text   the dots and dashes, one group a character,
+//                               "/" between words
+//   wpm                  real   character speed, PARIS, when the line ended
+//   overall_wpm          real   the speed the letter spaces imply; lower than
+//                               wpm under Farnsworth spacing
+//   frequency_offset_hz  real   the tone's measured offset from 700 Hz
+//   level_deviations     real   cw.h's signal meter
+//   ended                text   length or idle
+//   began_sample         int    receiver-stream index of the first mark
+class CwChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "cw";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::CwConfig config;
+        config.rate = build.rate;
+        auto built = decode::Cw::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the cw decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new CwChunkDecoder(config, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, config_.rate); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        characters_.clear();
+        if (auto processed = decoder_.process(chunk.samples, characters_); !processed) {
+            return processed;
+        }
+
+        using decoders_detail::LineEnd;
+        for (const decode::CwCharacter& c : characters_) {
+            const std::uint64_t at = base_.at(c.first_sample);
+            if (line_.characters > 0 && at > line_.last_sample + idle_samples()) {
+                emit(chunk, LineEnd::Idle, out);
+            }
+            if (c.text == " ") {
+                // A word space opens nothing, so a line never starts with one.
+                if (line_.characters > 0) {
+                    line_.add_text(" ", at);
+                    code_ += " /";
+                }
+                continue;
+            }
+            if (c.recognised) {
+                line_.add_text(c.text, at);
+            } else {
+                line_.add(char32_t{0xFFFD}, at);
+                ++unrecognised_;
+            }
+            code_ += (code_.empty() ? "" : " ") + c.code;
+            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
+                emit(chunk, LineEnd::Length, out);
+            }
+        }
+        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
+            emit(chunk, LineEnd::Idle, out);
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+        clear_line();
+    }
+
+private:
+    CwChunkDecoder(const decode::CwConfig& config, decode::Cw decoder)
+        : config_(config), decoder_(std::move(decoder)) {}
+
+    // Five word spaces of seven units each at the unit being read, or at 20
+    // WPM's before the decoder has locked. Measured from the start of the
+    // line's last character, so it includes that character's own length.
+    [[nodiscard]] std::uint64_t idle_samples() const {
+        const double unit = decoder_.timing().locked()
+                                ? decoder_.timing().unit_seconds()
+                                : decode::kParisUnitSecondsTimesWpm / 20.0;
+        return static_cast<std::uint64_t>(5.0 * decode::kMorseWordSpaceDots * unit *
+                                          static_cast<double>(config_.rate));
+    }
+
+    void clear_line() {
+        line_.clear();
+        code_.clear();
+        unrecognised_ = 0;
+    }
+
+    void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,
+              std::vector<DecodedMessage>& out) {
+        if (!line_.visible) {
+            clear_line();
+            return;
+        }
+        // A trailing word space is the gap before the line ended, not text.
+        while (!line_.text.empty() && line_.text.back() == ' ') {
+            line_.text.pop_back();
+        }
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, "line", chunk);
+        message.fields.push_back(text_field("text", line_.text));
+        message.fields.push_back(
+            integer_field("characters", static_cast<std::int64_t>(line_.characters)));
+        message.fields.push_back(
+            integer_field("unrecognised", static_cast<std::int64_t>(unrecognised_)));
+        message.fields.push_back(text_field("code", code_));
+        message.fields.push_back(real_field("wpm", decoder_.wpm()));
+        message.fields.push_back(real_field("overall_wpm", decoder_.overall_wpm()));
+        message.fields.push_back(real_field("frequency_offset_hz", decoder_.frequency_offset_hz()));
+        message.fields.push_back(real_field("level_deviations", decoder_.level_deviations()));
+        message.fields.push_back(text_field("ended", std::string(line_end_name(why))));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(line_.first_sample)));
+        message.text = line_.text;
+        out.push_back(std::move(message));
+        clear_line();
+    }
+
+    decode::CwConfig config_;
+    decode::Cw decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::CwCharacter> characters_;
+    decoders_detail::TextLine line_;
+    std::string code_;
+    std::size_t unrecognised_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// M17
+// ---------------------------------------------------------------------------
+//
+// Reads complex baseband, core/decode/m17.h, like P25 and D-STAR, and has no
+// demodulator of its own: the Demod enum does not grow for it. Two receivers
+// feed it:
+//
+//   A p25p1 receiver. Its fine stage mixes to DC, filters to +/-6250 Hz and
+//   resamples to 48000 S/s, and M17's 4800 symbols a second at 2.4 kHz peak
+//   deviation occupy about 9 kHz, docs/modes.md's figure, so the P25 channel
+//   carries it whole at the rate m17.h was measured at. This is the one to use.
+//
+//   A raw receiver, at the grid's channel rate with the carrier wherever the
+//   grid left it, on the terms the top of this file gives for the complex
+//   decoders on a raw tap. m17.h needs two samples a symbol, 9600 S/s, and
+//   calibrates a carrier offset per frame against the sync burst.
+//
+// dstar is not listed because its channel is +/-3000 Hz and cuts M17's
+// sidebands, and tetra because its 72000 S/s and +/-12.5 kHz were measured
+// for nothing M17 does.
+//
+// Messages, one per event rather than one per frame. A stream frame arrives
+// every 40 ms, 25 a second, which would fill a subscription's 256 in ten
+// seconds of one call, and its payload is Codec 2 voice this tree does not
+// render; docs/modes.md has why. So:
+//
+//   "lsf"          a Link Setup Frame whose CRC checked, or one rebuilt from six
+//                  LICH chunks by a receiver that joined mid-stream
+//   "stream_end"   the stream frame carrying 2.8.1's end-of-stream bit
+//   "eot"          the End of Transmission marker, 1.4.5
+//
+// WHAT IS NOT REPORTED, AND WHY. An LSF whose CRC failed, and the packet and
+// BERT frames m17.h recognises by their sync bursts and does not decode. A
+// sync burst is eight symbols and noise matches it: through the engine on
+// 2026-09-22, the 2.5 s of noise after one 30 dB transmission produced two
+// LSFs whose CRC failed, with callsigns like "6BFI/5ALB", one BERT burst and
+// two packet bursts. The CRC is the only check an LSF carries, and a packet
+// or BERT frame has none this decoder reads, so none of them is an event a
+// client could tell from noise. lsf_crc_failures on the next "lsf" counts
+// the LSFs dropped, so a channel producing nothing but failures is visible
+// once one good one arrives.
+//
+// An "lsf" carries, from 2.5.2, Appendix A and Table 3.2:
+//   destination, source  text   the callsign for a standard address, "ALL"
+//                               for broadcast, and the address in hex
+//                               otherwise
+//   destination_address, source_address
+//                        int    the 48-bit values
+//   destination_kind, source_kind
+//                        text   standard, extended, broadcast or reserved
+//   type                 int    the TYPE field as sent
+//   stream               flag   bit 0
+//   data_type, encryption_type, encryption_subtype, channel_access_number
+//                        int    bits 2..1, 4..3, 6..5 and 10..7
+//   encrypted            flag   encryption_type is not zero. Reported, never
+//                               decrypted, per docs/modes.md
+//   signed_stream        flag   bit 11
+//   meta                 bytes  the 14 META bytes
+//   from_lich            flag   rebuilt from LICH chunks
+//   lsf_crc_failures     int    cumulative, LSFs dropped because their CRC
+//                               failed
+// Every message carries sync_score (real), inverted (flag) and began_sample
+// (int, receiver-stream index of the sync burst's first symbol). A
+// "stream_end" adds frame_number (int) and lich_worst_correction (int).
+class M17ChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "m17";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::M17Config config;
+        config.rate = build.rate;
+        auto built = decode::M17::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the m17 decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new M17ChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_complex(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        decoders_detail::to_complex(chunk, iq_);
+        frames_.clear();
+        if (auto processed = decoder_.process(iq_, frames_); !processed) {
+            return processed;
+        }
+        for (const decode::M17Frame& frame : frames_) {
+            describe(frame, chunk, out);
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    M17ChunkDecoder(dsp::SampleRate rate, decode::M17 decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] static std::string_view kind_name(decode::M17AddressKind kind) {
+        switch (kind) {
+            case decode::M17AddressKind::Reserved: return "reserved";
+            case decode::M17AddressKind::Standard: return "standard";
+            case decode::M17AddressKind::Extended: return "extended";
+            case decode::M17AddressKind::Broadcast: return "broadcast";
+        }
+        return "unknown";
+    }
+
+    [[nodiscard]] static std::string address_text(const decode::M17Address& address) {
+        switch (address.kind) {
+            case decode::M17AddressKind::Standard: return address.callsign;
+            case decode::M17AddressKind::Broadcast: return "ALL";
+            case decode::M17AddressKind::Reserved:
+            case decode::M17AddressKind::Extended: break;
+        }
+        return std::format("0x{:012X}", address.value);
+    }
+
+    [[nodiscard]] DecodedMessage start(std::string kind, const decode::M17Frame& frame,
+                                       const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        DecodedMessage message = stamped(kName, std::move(kind), chunk);
+        message.fields.push_back(real_field("sync_score", frame.sync_score));
+        message.fields.push_back(flag_field("inverted", frame.inverted));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(base_.at(frame.first_sample))));
+        return message;
+    }
+
+    void describe(const decode::M17Frame& frame, const DecoderChunk& chunk,
+                  std::vector<DecodedMessage>& out) {
+        using namespace decoders_detail;
+        if (frame.lsf.has_value() && !frame.lsf->crc_valid) {
+            ++lsf_crc_failures_;
+        } else if (frame.lsf.has_value()) {
+            const decode::M17Lsf& lsf = *frame.lsf;
+            DecodedMessage message = start("lsf", frame, chunk);
+            const std::string destination = address_text(lsf.destination);
+            const std::string source = address_text(lsf.source);
+            message.fields.push_back(text_field("destination", destination));
+            message.fields.push_back(text_field("source", source));
+            message.fields.push_back(integer_field(
+                "destination_address", static_cast<std::int64_t>(lsf.destination.value)));
+            message.fields.push_back(
+                integer_field("source_address", static_cast<std::int64_t>(lsf.source.value)));
+            message.fields.push_back(
+                text_field("destination_kind", std::string(kind_name(lsf.destination.kind))));
+            message.fields.push_back(
+                text_field("source_kind", std::string(kind_name(lsf.source.kind))));
+            const decode::M17Type& type = lsf.type;
+            message.fields.push_back(integer_field("type", type.raw));
+            message.fields.push_back(flag_field("stream", type.stream));
+            message.fields.push_back(integer_field("data_type", type.data_type));
+            message.fields.push_back(integer_field("encryption_type", type.encryption_type));
+            message.fields.push_back(integer_field("encryption_subtype", type.encryption_subtype));
+            message.fields.push_back(
+                integer_field("channel_access_number", type.channel_access_number));
+            message.fields.push_back(flag_field("encrypted", type.encryption_type != 0));
+            message.fields.push_back(flag_field("signed_stream", type.signed_stream));
+            message.fields.push_back(bytes_field(
+                "meta", std::vector<std::uint8_t>(lsf.meta.begin(), lsf.meta.end())));
+            message.fields.push_back(flag_field("from_lich", frame.lsf_from_lich));
+            message.fields.push_back(integer_field("lsf_crc_failures",
+                                                   static_cast<std::int64_t>(lsf_crc_failures_)));
+            message.text = std::format("{} > {} CAN {} type 0x{:04X} {}{}", source, destination,
+                                       type.channel_access_number, type.raw,
+                                       type.encryption_type != 0 ? "encrypted" : "clear",
+                                       frame.lsf_from_lich ? ", from LICH" : "");
+            out.push_back(std::move(message));
+        }
+
+        switch (frame.kind) {
+            case decode::M17FrameKind::LinkSetup: break;
+            case decode::M17FrameKind::Stream:
+                if (frame.stream.has_value() && frame.stream->last) {
+                    DecodedMessage message = start("stream_end", frame, chunk);
+                    message.fields.push_back(integer_field("frame_number", frame.stream->frame_number));
+                    message.fields.push_back(
+                        integer_field("lich_worst_correction", frame.stream->lich_worst_correction));
+                    message.text =
+                        std::format("stream ended at frame {}", frame.stream->frame_number);
+                    out.push_back(std::move(message));
+                }
+                break;
+            case decode::M17FrameKind::Packet:
+            case decode::M17FrameKind::Bert: break;
+            case decode::M17FrameKind::EndOfTransmission: {
+                DecodedMessage message = start("eot", frame, chunk);
+                message.text = "end of transmission";
+                out.push_back(std::move(message));
+                break;
+            }
+        }
+    }
+
+    dsp::SampleRate rate_;
+    decode::M17 decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<dsp::Complex32> iq_;
+    std::vector<decode::M17Frame> frames_;
+    std::uint64_t lsf_crc_failures_ = 0;
+};
+
+// ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
 
@@ -1604,16 +2173,19 @@ private:
 // A NEW DECODER IS ONE ROW HERE AND ONE ADAPTER ABOVE. The name is what a
 // client passes to subscribeDecoded and what DecodedMessage::decoder carries,
 // so it is permanent once published. A decoder named after an engine::Demod,
-// as the first three are, is also what an empty name resolves to on a
-// receiver in that mode. The audio decoders are named after their protocol,
-// because a usb receiver may be carrying any of three of them, and an empty
-// name on a usb receiver is refused with the list of those that read it.
+// as p25p1, dstar, tetra and cw are, is also what an empty name resolves to on
+// a receiver in that mode. The other audio decoders are named after their
+// protocol, because a usb receiver may be carrying any of seven of them, and
+// an empty name on a usb receiver is refused with the list of those that read
+// it.
 //
 // AN AUDIO DECODER NAMES ITS MODES, and its description says them again in
 // words, because DecoderInfo carries no list and that is where a client
 // reading decoders() looks.
 [[nodiscard]] inline std::span<const DecoderSpec> decoder_registry() {
+    using decoders_detail::kCwModes;
     using decoders_detail::kFmModes;
+    using decoders_detail::kM17Modes;
     using decoders_detail::kSidebandModes;
     static constexpr DecoderSpec kRegistry[] = {
         {P25p1Decoder::kName, DecoderInput::ComplexBaseband,
@@ -1649,6 +2221,30 @@ private:
          "NAVTEX, ITU-R M.540-2 over SITOR-B: each message with its B1 to B4 area, subject and "
          "serial and whether that preamble arrived clean. Reads a usb or lsb receiver's audio",
          &NavtexChunkDecoder::make, kSidebandModes},
+        {PskChunkDecoder<decode::Psk31Mode::Bpsk31>::kName, DecoderInput::RealAudio,
+         "PSK31, G3PLX in QEX July/August 1999: Varicode text at 31.25 baud, binary PSK, with "
+         "the tone at 1000 Hz in the audio and 40 Hz of AFC. Reads a usb or lsb receiver's "
+         "audio",
+         &PskChunkDecoder<decode::Psk31Mode::Bpsk31>::make, kSidebandModes},
+        {PskChunkDecoder<decode::Psk31Mode::Bpsk63>::kName, DecoderInput::RealAudio,
+         "PSK63: PSK31's signal at 62.5 baud, with the tone at 1000 Hz in the audio. Reads a "
+         "usb or lsb receiver's audio",
+         &PskChunkDecoder<decode::Psk31Mode::Bpsk63>::make, kSidebandModes},
+        {PskChunkDecoder<decode::Psk31Mode::Qpsk31>::kName, DecoderInput::RealAudio,
+         "QPSK31, QEX July/August 1999: PSK31 with the K=5 convolutional code and Viterbi "
+         "decoding, the tone at 1000 Hz in the audio. Reads a usb or lsb receiver's audio, and "
+         "the sideband is taken from the receiver",
+         &PskChunkDecoder<decode::Psk31Mode::Qpsk31>::make, kSidebandModes},
+        {CwChunkDecoder::kName, DecoderInput::RealAudio,
+         "CW, ITU-R M.1677-1 International Morse code: lines of text with the character and "
+         "overall speed in PARIS words per minute, the tone at 700 Hz in the audio. Reads a cw "
+         "receiver at its default pitch, or a usb or lsb receiver's audio",
+         &CwChunkDecoder::make, kCwModes},
+        {M17ChunkDecoder::kName, DecoderInput::ComplexBaseband,
+         "M17, Protocol Specification Part I 2.0.4: each link setup frame's callsigns, type and "
+         "encrypted flag, the end of each stream, and the end of transmission. Reads the complex "
+         "baseband of a p25p1 receiver, 48000 S/s in a 12.5 kHz channel, or a raw tap",
+         &M17ChunkDecoder::make, kM17Modes},
     };
     return kRegistry;
 }
@@ -1658,7 +2254,8 @@ private:
 [[nodiscard]] inline std::string decoders_reading(std::string_view mode) {
     std::string out;
     for (const DecoderSpec& spec : decoder_registry()) {
-        if (spec.modes.empty() || !decoder_accepts(spec, mode)) {
+        if (spec.input != DecoderInput::RealAudio || spec.modes.empty() ||
+            !decoder_accepts(spec, mode)) {
             continue;
         }
         if (!out.empty()) {

@@ -3413,8 +3413,12 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             } else if (const rpc::DecoderSpec* named = rpc::find_decoder(mode_name)) {
                 specs.push_back(named);
             } else {
+                // Audio decoders only: a raw tap stays as it was, with nothing
+                // attached by auto, because p25p1, dstar, tetra and m17 all read
+                // one and the operator is the one who knows which it carries.
                 for (const rpc::DecoderSpec& candidate : rpc::decoder_registry()) {
-                    if (!candidate.modes.empty() && rpc::decoder_accepts(candidate, mode_name)) {
+                    if (candidate.input == rpc::DecoderInput::RealAudio &&
+                        !candidate.modes.empty() && rpc::decoder_accepts(candidate, mode_name)) {
                         specs.push_back(&candidate);
                     }
                 }
@@ -3463,9 +3467,8 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                                   rpc::decoder_names());
             } else if (const rpc::DecoderSpec* spec = rpc::find_decoder(name);
                        !spec->modes.empty()) {
-                why = std::format("The {} decoder reads the audio of a {} receiver, and no --vrx "
-                                  "is one.",
-                                  name, rpc::decoder_modes_text(*spec));
+                why = std::format("The {} decoder reads {}, and no --vrx is one.", name,
+                                  rpc::decoder_needs_text(*spec));
             } else {
                 const bool wants_complex = spec->input == rpc::DecoderInput::ComplexBaseband;
                 why = std::format(
