@@ -3,7 +3,8 @@
 // Four commands:
 //
 //   sweep       run a sweep and write the curve, for the reference BPSK
-//               subject or, with --mode rds, the RDS decoder
+//               subject, the RDS decoder with --mode rds, or any decoder in
+//               tools/bench/mode_subjects.h by its name
 //   compare     diff two curve files, exit nonzero on a regression
 //   validate    run the reference BPSK subject and check the measured curve
 //               against Q(sqrt(2*Eb/N0))
@@ -29,6 +30,7 @@
 #include <cstdio>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -39,6 +41,7 @@
 #include "core/engine/vrx.h"
 #include "core/error.h"
 #include "tools/bench/curve.h"
+#include "tools/bench/mode_subjects.h"
 #include "tools/bench/rds_subject.h"
 #include "tools/bench/sweep.h"
 #include "tools/bench/throughput.h"
@@ -176,6 +179,16 @@ struct SweepArgs {
     std::string commit;
     std::string out_path;
     bool quiet = false;
+
+    // Set for every mode but bpsk and rds, which predate the table in
+    // tools/bench/mode_subjects.h and keep their own handling here.
+    std::optional<bench::ModeSubject> decoder;
+
+    // What the report calls the axis and the error rate, and where the
+    // sensitivity is read. Eb/N0 and bits for the two older modes.
+    std::string axis = "Eb/N0";
+    std::string unit = "bit";
+    double threshold = 0.01;
 };
 
 constexpr std::string_view kSweepOptions[] = {
@@ -248,12 +261,48 @@ Expected<SweepArgs> parse_sweep_args(const ArgMap& args) {
     parsed.config.thread_count = static_cast<unsigned>(*threads);
     parsed.reference.samples_per_symbol = static_cast<std::uint32_t>(*sps);
 
-    if (const Status ok = parsed.config.validate(); !ok) {
-        return std::unexpected(ok.error());
-    }
-
     parsed.mode = std::string(args.text("mode", "bpsk"));
-    if (parsed.mode == "rds") {
+    if (parsed.mode != "bpsk" && parsed.mode != "rds") {
+        Expected<bench::ModeSubject> decoder = bench::make_mode_subject(parsed.mode);
+        if (!decoder) {
+            return fail(std::format("{}; or bpsk or rds", decoder.error().message));
+        }
+        if (args.has("sps")) {
+            return fail(std::format("option '--sps' belongs to the bpsk mode; the {} mode fixes its own rate",
+                                    parsed.mode));
+        }
+        // The mode's own grid, trial count and payload unless an option says
+        // otherwise, so `bench sweep --mode NAME` alone reproduces the curve
+        // the nightly compares against its baseline.
+        if (!args.has("snr-start")) {
+            parsed.config.snr_start_db = decoder->snr_start_db;
+        }
+        if (!args.has("snr-stop")) {
+            parsed.config.snr_stop_db = decoder->snr_stop_db;
+        }
+        if (!args.has("snr-step")) {
+            parsed.config.snr_step_db = decoder->snr_step_db;
+        }
+        if (!args.has("trials")) {
+            parsed.config.trials_per_point = decoder->trials;
+        }
+        if (!args.has("min-bit-errors")) {
+            parsed.config.min_bit_errors = decoder->min_errors;
+        }
+        if (!args.has("payload-bytes")) {
+            parsed.config.payload_bytes = decoder->default_payload_bytes;
+        }
+        const std::size_t bytes = parsed.config.payload_bytes;
+        if (bytes < decoder->minimum_payload_bytes || bytes % decoder->payload_multiple != 0) {
+            return fail(std::format("the {} mode needs a payload of at least {} bytes in whole units of {}",
+                                    parsed.mode, decoder->minimum_payload_bytes, decoder->payload_multiple));
+        }
+        parsed.axis = decoder->axis;
+        parsed.unit = decoder->unit;
+        parsed.threshold = decoder->threshold;
+        parsed.subject = std::string(args.text("subject", decoder->subject));
+        parsed.decoder = std::move(*decoder);
+    } else if (parsed.mode == "rds") {
         // The RDS rate is fixed by the subject, so a samples-per-symbol figure
         // would be accepted and do nothing, which is the silent fallback
         // require_known exists to prevent.
@@ -268,13 +317,17 @@ Expected<SweepArgs> parse_sweep_args(const ArgMap& args) {
             return fail(std::format("the rds mode needs at least {} payload bytes to lock and still score",
                                     bench::kRdsMinimumPayloadBytes));
         }
-    } else if (parsed.mode != "bpsk") {
-        return fail(std::format("unknown mode '{}': bpsk or rds", parsed.mode));
     }
-    parsed.subject = std::string(args.text(
-        "subject", parsed.mode == "rds"
-                       ? std::string("rds-bits/171000")
-                       : std::format("reference-bpsk-coherent/sps{}", parsed.reference.samples_per_symbol)));
+    if (!parsed.decoder) {
+        parsed.subject = std::string(args.text(
+            "subject", parsed.mode == "rds"
+                           ? std::string("rds-bits/171000")
+                           : std::format("reference-bpsk-coherent/sps{}", parsed.reference.samples_per_symbol)));
+    }
+
+    if (const Status ok = parsed.config.validate(); !ok) {
+        return std::unexpected(ok.error());
+    }
     parsed.commit = std::string(args.text("commit", "unknown"));
     parsed.out_path = std::string(args.text("out", ""));
     parsed.quiet = args.has("quiet");
@@ -285,9 +338,9 @@ Expected<SweepArgs> parse_sweep_args(const ArgMap& args) {
 // Reporting
 // ---------------------------------------------------------------------------
 
-void print_point_header() {
-    std::println("{:>9}  {:>9}  {:>13}  {:>12}  {:>14}  {:>8}", "SNR dB", "trials", "bits", "errors", "BER",
-                 "decoded");
+void print_point_header(const SweepArgs& parsed) {
+    std::println("{:>9}  {:>9}  {:>13}  {:>12}  {:>14}  {:>8}", "SNR dB", "trials", parsed.unit + "s", "errors",
+                 "error rate", "decoded");
 }
 
 void print_point(const bench::SweepPoint& point) {
@@ -296,11 +349,14 @@ void print_point(const bench::SweepPoint& point) {
 }
 
 void print_sweep_banner(const SweepArgs& parsed) {
-    std::println("seed {}  trials/point {}  payload {} bytes ({} bits)  batch {}  early stop at {} bit errors",
+    std::println("seed {}  trials/point {}  payload {} bytes ({} bits)  batch {}  early stop at {} {} errors",
                  parsed.config.base_seed, parsed.config.trials_per_point, parsed.config.payload_bytes,
-                 parsed.config.payload_bytes * 8, parsed.config.trial_batch, parsed.config.min_bit_errors);
-    std::println("sweep {:.3f} to {:.3f} dB Eb/N0 in {:.3f} dB steps, {} points", parsed.config.snr_start_db,
-                 parsed.config.snr_stop_db, parsed.config.snr_step_db, parsed.config.point_count());
+                 parsed.config.payload_bytes * 8, parsed.config.trial_batch, parsed.config.min_bit_errors,
+                 parsed.unit);
+    std::println("subject: {}", parsed.subject);
+    std::println("sweep {:.3f} to {:.3f} dB {} in {:.3f} dB steps, {} points", parsed.config.snr_start_db,
+                 parsed.config.snr_stop_db, parsed.axis, parsed.config.snr_step_db, parsed.config.point_count());
+    std::println("error rate: wrong {}s over {}s sent", parsed.unit, parsed.unit);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,14 +377,22 @@ int command_sweep(const ArgMap& args) {
 
     if (!parsed->quiet) {
         print_sweep_banner(*parsed);
-        print_point_header();
+        print_point_header(*parsed);
     }
 
     const bool rds = parsed->mode == "rds";
-    const bench::Subject subject =
-        rds ? bench::make_rds_subject() : bench::make_bpsk_reference_subject(parsed->reference);
-    const bench::Generator generator =
-        rds ? bench::make_rds_generator() : bench::make_bpsk_awgn_generator(parsed->reference);
+    bench::Subject subject;
+    bench::Generator generator;
+    if (parsed->decoder) {
+        subject = parsed->decoder->score;
+        generator = parsed->decoder->generator;
+    } else if (rds) {
+        subject = bench::make_rds_subject();
+        generator = bench::make_rds_generator();
+    } else {
+        subject = bench::make_bpsk_reference_subject(parsed->reference);
+        generator = bench::make_bpsk_awgn_generator(parsed->reference);
+    }
     const bench::ProgressFn progress =
         parsed->quiet ? bench::ProgressFn{}
                       : bench::ProgressFn{[](std::size_t, const bench::SweepPoint& point) { print_point(point); }};
@@ -343,14 +407,14 @@ int command_sweep(const ArgMap& args) {
     const bench::Curve curve =
         bench::make_curve(parsed->mode, parsed->subject, parsed->commit, parsed->config, *points);
 
-    const bench::RegressionOptions defaults;
-    const double sensitivity = bench::sensitivity_db(curve.points, defaults.ber_threshold);
+    const double sensitivity = bench::sensitivity_db(curve.points, parsed->threshold);
     if (!parsed->quiet) {
         if (std::isnan(sensitivity)) {
-            std::println("sensitivity: the curve does not cross a BER of {:g} inside this range",
-                         defaults.ber_threshold);
+            std::println("sensitivity: the curve does not cross a {} error rate of {:g} inside this range",
+                         parsed->unit, parsed->threshold);
         } else {
-            std::println("sensitivity: {:.3f} dB at a BER of {:g}", sensitivity, defaults.ber_threshold);
+            std::println("sensitivity: {:.3f} dB {} at a {} error rate of {:g}", sensitivity, parsed->axis,
+                         parsed->unit, parsed->threshold);
         }
     }
 
@@ -822,8 +886,8 @@ usage:
   bench help
 
 sweep options (validate takes the same set):
-  --snr-start DB          first Eb/N0 point            (default -4)
-  --snr-stop DB           last Eb/N0 point             (default 10)
+  --snr-start DB          first point                  (default -4)
+  --snr-stop DB           last point                   (default 10)
   --snr-step DB           step between points          (default 1)
   --trials N              trials per point             (default 1000)
   --payload-bytes N       payload per trial            (default 64)
@@ -835,7 +899,18 @@ sweep options (validate takes the same set):
   --mode NAME             bpsk, the reference detector, or rds, the RDS
                           decoder against its transmitter (default bpsk).
                           Recorded in the curve. rds defaults
-                          --payload-bytes to 512 and needs at least 128
+                          --payload-bytes to 512 and needs at least 128.
+                          Both sweep Eb/N0 and count bits.
+                          Or a decoder against its transmitter, swept in SNR
+                          in 2500 Hz and counted in its own unit:
+                            rtty sitor-b psk31 psk63 qpsk31 cw   characters
+                            ax25 m17                             frames
+                            pocsag-512 pocsag-1200 pocsag-2400   pages
+                            navtex                               messages
+                            p25p1 dstar tetra                    bits
+                          Each has its own grid, trial count and payload,
+                          the ones its nightly baseline was made with, used
+                          unless the options above say otherwise
   --subject NAME          recorded in the curve
   --commit SHA            recorded in the curve        (default unknown)
   --out FILE              write the curve here, otherwise stdout
