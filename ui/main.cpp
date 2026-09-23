@@ -15,7 +15,8 @@
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
 // another, loads the QML, runs for N seconds and exits, 0 if the QML loaded
 // and logged no warning and 1 otherwise. It writes no settings, so a run on a
-// developer's machine leaves their remembered engine and windows alone. The
+// developer's machine leaves their remembered engine and windows alone, and
+// it opens no sound card, so it makes no noise on one either. The
 // engine need not be running: a window waiting for one is a state the QML
 // has to draw too.
 //
@@ -453,7 +454,14 @@ int main(int argc, char* argv[])
     // being destroyed, which is a crash on exit that only happens while
     // audio is actually playing.
     revenant::ui::AudioPlayer player(link);
-    player.start();
+
+    // Not in a smoke run, which opens no sound card. The listen switch is
+    // remembered, so a smoke run against a live engine on a machine whose
+    // operator had it on played that engine's receiver through their
+    // speakers: found on 2026-09-23 photographing the decode section.
+    if (!smoke) {
+        player.start();
+    }
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("engineLink"), &link);
