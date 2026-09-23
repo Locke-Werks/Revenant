@@ -1218,6 +1218,79 @@ TEST_CASE("a dongle with no centre frequency is refused rather than left at DC",
     CHECK(std::abs(*landed - 95'100'000) <= 95'100'000 / 10'000);
 }
 
+TEST_CASE("a dongle already held is refused by name and its holder keeps streaming",
+          "[source][rtlsdr][device]") {
+    if (!a_dongle_is_attached()) {
+        SKIP(kNoDongle);
+    }
+
+    // THE CONTENTION CI WAS SUSPECTED OF, from a second handle in this process.
+    // A second process gets the same answer: a revenant-cli started on
+    // rtlsdr://0 while this suite held it printed "usb_open error -3" and was
+    // refused with LIBUSB_ERROR_ACCESS, and the holder's retune passed. So a
+    // second opener is refused at rtlsdr_open and never reaches the device the
+    // first one is using, and what this pins is that the refusal arrives as an
+    // Error naming the index and the call, not as a crash, and that the holder
+    // is untouched by it.
+    auto holder = source::open_source("rtlsdr://0?rate=2400000&freq=98.1M&gain=20");
+    if (!holder) {
+        SKIP("the dongle could not be opened, so something else holds it: " +
+             holder.error().message);
+    }
+    source::Source& radio = **holder;
+
+    Collected collected;
+    REQUIRE(radio.start(source::StreamOptions{}, collecting_sink(collected)).has_value());
+    const auto wait_for = [&collected](std::uint64_t samples) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::scoped_lock guard(collected.lock);
+                if (collected.samples >= samples) {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    };
+    REQUIRE(wait_for(300'000));
+
+    // A different centre and gain, so an open that got through would have
+    // retuned and re-gained the device the holder is streaming from.
+    auto second = source::open_source("rtlsdr://0?rate=2400000&freq=96.5M&gain=10");
+    REQUIRE_FALSE(second.has_value());
+    INFO(second.error().message);
+    CHECK(second.error().message.find("could not open the RTL-SDR at index 0") !=
+          std::string::npos);
+    CHECK(second.error().message.find("rtlsdr_open returned") != std::string::npos);
+    CHECK(second.error().code != 0);
+
+    // Describing is the picker's path, and it opens the device too.
+    source::RtlSdrSourceConfig config;
+    config.uri = "rtlsdr://0";
+    config.index = 0;
+    auto described = source::describe_rtlsdr_source(config);
+    REQUIRE_FALSE(described.has_value());
+    CHECK(described.error().message.find("rtlsdr_open returned") != std::string::npos);
+
+    // THE HOLDER IS UNTOUCHED: still streaming, still tunable, stops cleanly.
+    const std::uint64_t before = [&collected] {
+        std::scoped_lock guard(collected.lock);
+        return collected.samples;
+    }();
+    REQUIRE(wait_for(before + 300'000));
+    REQUIRE(radio.running());
+
+    auto landed = radio.tune(96'500'000);
+    INFO((landed ? std::string("tuned") : landed.error().message));
+    REQUIRE(landed.has_value());
+
+    const auto stopped = radio.stop();
+    INFO((stopped ? std::string("stopped") : stopped.error().message));
+    REQUIRE(stopped.has_value());
+}
+
 TEST_CASE("a dongle streaming for minutes can still be tuned", "[.probe][source][rtlsdr][device]") {
     if (!a_dongle_is_attached()) {
         SKIP(kNoDongle);
