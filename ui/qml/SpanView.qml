@@ -55,9 +55,11 @@ ColumnLayout {
             link: engineLink
             mapPins: ScaleSettings
             selectedDetection: span.selection.selectedDetection
-            onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted) =>
+            onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
                              span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
-                                                     rank, exhausted)
+                                                     rank, exhausted, pointerHz)
+            onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
+                            span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
         }
 
         // The ends the trace was drawn against, which include the
@@ -165,7 +167,8 @@ ColumnLayout {
     Ruler {
         Layout.fillWidth: true
         Layout.preferredHeight: implicitHeight
-        onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false)
+        onPicked: (hz) => span.selection.takeTune(0, hz, 0.0, 0, 0, false, hz)
+        onAdded: (hz) => span.selection.takeAdd(0, hz, 0.0, hz)
     }
 
     // ------------------------------------------------------------------
@@ -202,8 +205,10 @@ ColumnLayout {
         link: engineLink
         mapPins: ScaleSettings
         selectedDetection: span.selection.selectedDetection
-        onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted) =>
+        onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
                          span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
-                                                 rank, exhausted)
+                                                 rank, exhausted, pointerHz)
+        onAddRequested: (id, centerHz, bandwidthHz, pointerHz) =>
+                        span.selection.takeAdd(id, centerHz, bandwidthHz, pointerHz)
     }
 }

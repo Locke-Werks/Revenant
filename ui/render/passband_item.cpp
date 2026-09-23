@@ -20,24 +20,38 @@
 
 #include "models/key_actions.h"
 #include "models/key_map.h"
+#include "models/receiver_palette.h"
 
 namespace revenant::ui {
 namespace {
 
 // The overlay's colours.
 //
+// The band and its edges are in the focused receiver's rack colour, the one
+// its strip and its marker on the span wear, so the filter being dragged here
+// and the band on the span read as one object. models/receiver_palette.h has
+// the eight. These are the alphas.
+//
 // The fill is deliberately faint. It marks the band without competing with
 // the trace underneath, and the trace is what the operator is judging the
 // edges against: a fill dark enough to read on its own would hide the edge of
 // the signal it is there to be lined up with.
-const QColor kBandFill{96, 176, 255, 42};
+constexpr int kBandFillAlpha = 42;
 
 // The fill while the auto filter's fit is being shown: a little stronger, for
 // the few hundred milliseconds kFitShowMs allows, so the new band reads as
 // the thing that just changed.
-const QColor kFitFill{96, 176, 255, 72};
-const QColor kEdgeRule{128, 196, 255, 220};
-const QColor kEdgeRuleActive{184, 226, 255, 255};
+constexpr int kFitFillAlpha = 72;
+constexpr int kEdgeRuleAlpha = 220;
+
+// An edge under the pointer or selected by key, lifted towards white.
+constexpr int kEdgeActiveLighter = 135;
+
+[[nodiscard]] QColor receiver_tint(std::size_t slot, int alpha)
+{
+    const Rgb8 c = receiver_colour(slot);
+    return QColor(c.r, c.g, c.b, alpha);
+}
 
 // What the engine granted, when it differs from what was asked. Dimmer than
 // the requested rule and drawn under it, so the pair reads as "asked for
@@ -295,11 +309,17 @@ void PassbandItem::rebuildQuads()
     const double low_px = pixelAtOffset(drawnLow());
     const double high_px = pixelAtOffset(drawnHigh());
 
+    const auto slot = static_cast<std::size_t>(link_->focusedSlot());
+    const QColor edge_rule = receiver_tint(slot, kEdgeRuleAlpha);
+    QColor edge_active = receiver_tint(slot, 255).lighter(kEdgeActiveLighter);
+    edge_active.setAlpha(255);
+
     const double left = std::max(0.0, std::min(low_px, high_px));
     const double right = std::min(width(), std::max(low_px, high_px));
     if (right > left) {
-        fill_quads_.push_back(OverlayQuad{QRectF(left, 0.0, right - left, h),
-                                          showing_fit_ ? kFitFill : kBandFill});
+        fill_quads_.push_back(
+            OverlayQuad{QRectF(left, 0.0, right - left, h),
+                        receiver_tint(slot, showing_fit_ ? kFitFillAlpha : kBandFillAlpha)});
     }
 
     const auto rule = [&](double x, double thickness, const QColor& colour) {
@@ -330,9 +350,9 @@ void PassbandItem::rebuildQuads()
         }
         if (showing_fit_ || grab_ == which ||
             (grab_ == PassbandGrab::None && (hovered_ == which || selection_ == which))) {
-            return kEdgeRuleActive;
+            return edge_active;
         }
-        return kEdgeRule;
+        return edge_rule;
     };
 
     rule(low_px, kRuleWidthPx, rule_colour(PassbandGrab::LowEdge));

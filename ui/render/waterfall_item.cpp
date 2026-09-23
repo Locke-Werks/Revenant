@@ -105,10 +105,8 @@ void WaterfallItem::setLink(EngineLink* link)
                 &WaterfallItem::onConnectionChanged);
         connect(link_, &EngineLink::detectionsChanged, this, &WaterfallItem::takeDetections);
 
-        // The same pair SpectrumItem connects, for the reason given there.
-        connect(link_, &EngineLink::receiverChanged, this, &WaterfallItem::takeReceiver);
-        connect(link_, &EngineLink::receiverStatusChanged, this,
-                &WaterfallItem::takeReceiver);
+        // The one signal SpectrumItem connects, for the reason given there.
+        connect(link_, &EngineLink::rackChanged, this, &WaterfallItem::takeReceiver);
     }
     // A different link is a different engine, so the pixels go with the
     // sample ranges. Leaving the pixels would show the previous engine's
@@ -483,7 +481,9 @@ void WaterfallItem::rebuildOverlay()
         // there at a time nothing was recorded. Seen on 2026-09-22 as a blue
         // box hanging below the end of the picture.
         const double drawn = height() * historyFraction();
-        build_receiver_quads(build_receiver_marker(*link_, width()), drawn, quads_);
+        for (const PlacedReceiverMarker& placed : build_receiver_markers(*link_, width())) {
+        build_receiver_quads(placed, drawn, quads_);
+    }
     }
 
     placeLabels();
@@ -628,6 +628,9 @@ void WaterfallItem::mousePressEvent(QMouseEvent* event)
     // its own pointer and "the same place" is a fact about one of them. See
     // ClickCycle in render/spectrum_item.h.
     const double x = event->position().x();
+    const double fraction = width() > 0.0 ? x / width() : 0.0;
+    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+
     const ClickResult hit = detection_clicked(boxes_, x, click_cycle_);
     if (hit.id != 0) {
         const auto found =
@@ -636,15 +639,38 @@ void WaterfallItem::mousePressEvent(QMouseEvent* event)
         if (found != boxes_.end()) {
             emit tuneRequested(hit.id, static_cast<double>(found->center_hz),
                                static_cast<double>(found->bandwidth_hz), hit.candidates,
-                               hit.rank, hit.exhausted);
+                               hit.rank, hit.exhausted, hz);
             event->accept();
             return;
         }
     }
 
+    emit tuneRequested(0, hz, 0.0, 0, 0, false, hz);
+    event->accept();
+}
+
+void WaterfallItem::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+
+    // The box under the pointer without stepping the cycle, which the first
+    // press already stepped: the second press of a double click is not a
+    // request for the next box down.
+    const double x = event->position().x();
     const double fraction = width() > 0.0 ? x / width() : 0.0;
     const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
-    emit tuneRequested(0, hz, 0.0, 0, 0, false);
+    const std::uint64_t id = detection_at(boxes_, x);
+    const auto found = std::find_if(boxes_.begin(), boxes_.end(),
+                                    [id](const DetectionBox& box) { return box.id == id; });
+    if (id != 0 && found != boxes_.end()) {
+        emit addRequested(id, static_cast<double>(found->center_hz),
+                          static_cast<double>(found->bandwidth_hz), hz);
+    } else {
+        emit addRequested(0, hz, 0.0, hz);
+    }
     event->accept();
 }
 

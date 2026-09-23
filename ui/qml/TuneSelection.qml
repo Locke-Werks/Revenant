@@ -42,8 +42,7 @@ QtObject {
     property int tunedRank: 0
     property bool tunedExhausted: false
 
-    // One click, whichever display it came from.
-    function takeTune(id, centerHz, bandwidthHz, candidates, rank, exhausted) {
+    function record(id, centerHz, bandwidthHz, candidates, rank, exhausted) {
         selection.selectedDetection = id
         selection.tuned = true
         selection.tunedId = id
@@ -52,34 +51,51 @@ QtObject {
         selection.tunedCandidates = candidates
         selection.tunedRank = rank
         selection.tunedExhausted = exhausted
-
-        // And the receiver actually moves, which it did not before this.
-        //
-        // The passband is NOT taken from the detection's measured width.
-        // The detector reports the band that has energy in it, and on USB
-        // that band is entirely above the suppressed carrier, so handing it
-        // over as a width parks the filter straddling a carrier that is not
-        // being transmitted. The engine's own per-mode default is used
-        // instead, which is what an empty passband on VrxParams asks for,
-        // and the operator drags from there.
-        //
-        // The measured width IS handed over, on a separate entry point,
-        // and it is not used as a passband for the reason just given. It
-        // does two other things. It says whether the filter the engine
-        // built fits the signal that was clicked on, which is the only
-        // moment in the whole window where both numbers are in one place.
-        // And it CHOOSES THE MODE.
-        //
-        // The empty string used to mean "leave the mode alone", and that
-        // is what gave a 145 kHz broadcast block a 16 kHz NFM receiver: a
-        // paragraph here once argued the mode should not be guessed from
-        // the bandwidth, and the bandwidth was the only evidence anybody
-        // had. It now means "choose from the measurement", which
-        // EngineLink::tuneReceiverToDetection does through
-        // ui::demod_for_detection. A named mode still wins, for a caller
-        // that knows something the detector does not.
-        engineLink.tuneReceiverToDetection(centerHz, "", bandwidthHz)
     }
+
+    // One click, whichever display it came from. pointerHz is the frequency
+    // under the pointer, which EngineLink::spanClick reads to tell a click
+    // inside another receiver's band, which focuses that receiver and tunes
+    // nothing, from a click anywhere else. Only a click that tuned is a new
+    // reading for the readout.
+    function takeTune(id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) {
+        if (engineLink.spanClick(pointerHz, centerHz, bandwidthHz))
+            selection.record(id, centerHz, bandwidthHz, candidates, rank, exhausted)
+    }
+
+    // The second click of a double click: a new receiver there, when
+    // EngineLink::spanDoubleClick adds one.
+    function takeAdd(id, centerHz, bandwidthHz, pointerHz) {
+        if (engineLink.spanDoubleClick(pointerHz, centerHz, bandwidthHz))
+            selection.record(id, centerHz, bandwidthHz, 0, 0, false)
+    }
+
+    // WHAT takeTune USED TO DO: record the click and then call
+    // engineLink.tuneReceiverToDetection(centerHz, "", bandwidthHz) itself.
+    // spanClick makes that call now, after deciding the click was not a
+    // focus, and this note is about that call.
+    //
+    // The passband is NOT taken from the detection's measured width. The
+    // detector reports the band that has energy in it, and on USB that band
+    // is entirely above the suppressed carrier, so handing it over as a width
+    // parks the filter straddling a carrier that is not being transmitted.
+    // The engine's own per-mode default is used instead, which is what an
+    // empty passband on VrxParams asks for, and the operator drags from
+    // there.
+    //
+    // The measured width IS handed over, on a separate entry point, and it is
+    // not used as a passband for the reason just given. It does two other
+    // things. It says whether the filter the engine built fits the signal
+    // that was clicked on, which is the only moment in the whole window where
+    // both numbers are in one place. And it CHOOSES THE MODE.
+    //
+    // The empty string used to mean "leave the mode alone", and that is what
+    // gave a 145 kHz broadcast block a 16 kHz NFM receiver: a paragraph here
+    // once argued the mode should not be guessed from the bandwidth, and the
+    // bandwidth was the only evidence anybody had. It now means "choose from
+    // the measurement", which EngineLink::tuneReceiverToDetection does
+    // through ui::demod_for_detection. A named mode still wins, for a caller
+    // that knows something the detector does not.
 
     // Put the readout away without changing the selection.
     function dismiss() {

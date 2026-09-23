@@ -173,12 +173,16 @@ signals:
     // carries the note about the measured centre not being the logical one
     // and what the three counts are.
     void tuneRequested(qulonglong id, double center_hz, double bandwidth_hz, int candidates,
-                       int rank, bool exhausted);
+                       int rank, bool exhausted, double pointer_hz);
+
+    // The same as SpectrumItem::addRequested.
+    void addRequested(qulonglong id, double center_hz, double bandwidth_hz, double pointer_hz);
 
 protected:
     QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void hoverMoveEvent(QHoverEvent* event) override;
     void hoverLeaveEvent(QHoverEvent* event) override;
 

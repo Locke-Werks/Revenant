@@ -31,6 +31,8 @@
 #include "models/frequency_dial.h"
 #include "models/level_meter.h"
 #include "models/mode_choice.h"
+#include "models/receiver_palette.h"
+#include "models/receiver_rack.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
 #include "models/status_summary.h"
@@ -197,6 +199,33 @@ public:
     [[nodiscard]] Q_INVOKABLE bool meterHasReading(double dbfs) const
     {
         return meter_has_reading(dbfs);
+    }
+
+    // ---------------------------------------------------------------------
+    // The receiver rack. See models/receiver_rack.h and
+    // models/receiver_palette.h.
+    // ---------------------------------------------------------------------
+
+    // One "#rrggbb" per rack slot, in slot order.
+    [[nodiscard]] Q_INVOKABLE QStringList receiverColours() const
+    {
+        QStringList out;
+        for (const Rgb8& colour : kReceiverPalette) {
+            out.append(QString::fromStdString(rgb8_hex(colour)));
+        }
+        return out;
+    }
+
+    // What a click on the span does, as the rack's hint line says it.
+    [[nodiscard]] Q_INVOKABLE QString spanClickHint() const
+    {
+        return QString::fromUtf8(kSpanClickHint);
+    }
+
+    // What the rack says where the strips would be.
+    [[nodiscard]] Q_INVOKABLE QString rackEmptyText() const
+    {
+        return QString::fromUtf8(kRackEmptyText);
     }
 
     // ---------------------------------------------------------------------

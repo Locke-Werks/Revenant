@@ -27,6 +27,8 @@
 #include <QString>
 #include <QWheelEvent>
 
+#include "models/receiver_palette.h"
+
 namespace revenant::ui {
 namespace {
 
@@ -66,20 +68,29 @@ namespace {
     return QColor(255, 88, 200);
 }
 
-// THE RECEIVER MARKER WEARS THE VFO PANE'S COLOURS, DELIBERATELY
+// EACH RECEIVER'S MARKER WEARS ITS RACK COLOUR
 //
-// render/passband_item.cpp draws this same filter in a pale azure fill with
-// brighter rules at its edges and a white rule at the tuned frequency. These
-// are those colours, so the band highlighted on the span displays and the
-// band being dragged in the detail pane read as one object rather than as two
-// overlays that happen to be near the same frequency.
+// models/receiver_palette.h has the eight and why they are those eight; the
+// strip in the rack, the ruler's band and this marker all take the slot's
+// colour from there, so the three read as one receiver. The first is the
+// azure this marker was drawn in before there was a rack, which
+// render/passband_item.cpp's fill still uses.
 //
-// It is also a hue the level map cannot make. render/spectrum_scale.cpp runs
-// dark blue through teal and yellow-green to cream, and nothing in it reaches
-// a saturated azure, so the mark is not read as a loud column. The same test
-// the detection magenta had to pass.
-const QColor kReceiverFill{96, 176, 255, 42};
-const QColor kReceiverEdge{128, 196, 255, 220};
+// The fill is faint and the edges are strong on the focused receiver, which
+// is the one the controls act on. A held receiver gets a fainter fill, its
+// bar and its tick, and no edge rules: eight sets of full-height rules on a
+// crowded band would be a fence in front of the signals.
+constexpr int kReceiverFillAlpha = 42;
+constexpr int kHeldFillAlpha = 26;
+constexpr int kReceiverEdgeAlpha = 220;
+constexpr int kHeldBarAlpha = 170;
+constexpr int kHeldCentreAlpha = 110;
+
+[[nodiscard]] QColor receiver_qcolour(std::size_t slot, int alpha)
+{
+    const Rgb8 c = receiver_colour(slot);
+    return QColor(c.r, c.g, c.b, alpha);
+}
 
 // The bar along the bottom edge of the band, which is what makes a narrow
 // filter findable. A 16 kHz receiver on a 2.4 MHz span is ten pixels wide and
@@ -90,7 +101,7 @@ const QColor kReceiverEdge{128, 196, 255, 220};
 // its brackets are drawn from y = 0 and its labels are painted from
 // kLabelTopPx down. A receiver bar up there would sit under a plate naming
 // some other signal.
-const QColor kReceiverBar{150, 210, 255, 235};
+constexpr int kReceiverBarAlpha = 235;
 
 // The tuned frequency. White because it has to stay legible against the fill
 // and both rules, and faint because it is the extra rather than the point:
@@ -653,39 +664,34 @@ double overlay_label_height()
     return metrics.height() + 2.0;
 }
 
-ReceiverMarker build_receiver_marker(const EngineLink& link, double width_px)
+std::vector<PlacedReceiverMarker> build_receiver_markers(const EngineLink& link,
+                                                        double width_px)
 {
+    std::vector<PlacedReceiverMarker> out;
+
     // No receiver is the ordinary state on a window that has not been clicked
-    // in yet, and receiver ids are issued from one, so zero is not a receiver.
-    // A highlight at 0 Hz would be a mark on the left edge of every display
-    // before anybody has tuned anything.
-    if (!link.connected() || link.receiverId() == 0) {
-        return {};
+    // in yet. rackMarkers answers nothing while disconnected, and a band with
+    // no width plans to an invisible marker, so neither needs a test here.
+    for (const RackMarker& one : link.rackMarkers()) {
+        // The band is absolute, which is the frame spanLowHz and spanHighHz
+        // are in. See the note on the declaration for why the grant is
+        // preferred and why there is a fallback at all.
+        PlacedReceiverMarker placed;
+        placed.marker =
+            plan_receiver_marker(one.band, link.spanLowHz(), link.spanHighHz(), width_px);
+        placed.slot = one.slot;
+        placed.focused = one.focused;
+        if (placed.marker.visible) {
+            out.push_back(placed);
+        }
     }
-
-    // See the note on the declaration for why the grant is preferred and why
-    // there is a fallback at all. The validity test is the same one
-    // classify_fit uses: a granted width of zero is a receiver the engine has
-    // not answered about, not a filter of no width.
-    double low_hz = static_cast<double>(link.receiverGrantedLow());
-    double high_hz = static_cast<double>(link.receiverGrantedHigh());
-    if (!(high_hz > low_hz)) {
-        low_hz = static_cast<double>(link.receiverPassbandLow());
-        high_hz = static_cast<double>(link.receiverPassbandHigh());
-    }
-
-    // receiverCenterHz is absolute, which is the frame spanLowHz and
-    // spanHighHz are in. The passband pair is signed hertz from it, per
-    // rpc::VrxParams, so the addition happens here and once.
-    const double centre = link.receiverCenterHz();
-    const ReceiverBand band{centre + low_hz, centre + high_hz, centre};
-
-    return plan_receiver_marker(band, link.spanLowHz(), link.spanHighHz(), width_px);
+    return out;
 }
 
-void build_receiver_quads(const ReceiverMarker& marker, double height_px,
+void build_receiver_quads(const PlacedReceiverMarker& placed, double height_px,
                           std::vector<OverlayQuad>& out)
 {
+    const ReceiverMarker& marker = placed.marker;
     if (!marker.visible || height_px <= 0.0) {
         return;
     }
@@ -697,7 +703,9 @@ void build_receiver_quads(const ReceiverMarker& marker, double height_px,
     // filter against, and a fill dark enough to read on its own would hide
     // the signal it is there to be lined up with. On the waterfall that
     // matters more, because the history under it is the picture.
-    push_quad(out, QRectF(marker.fill_left_px, 0.0, fill_wide, height_px), kReceiverFill);
+    push_quad(out, QRectF(marker.fill_left_px, 0.0, fill_wide, height_px),
+              receiver_qcolour(placed.slot,
+                               placed.focused ? kReceiverFillAlpha : kHeldFillAlpha));
 
     // The bar, along the clipped extent rather than the true one, because it
     // is the "listening here" cue and has to be on screen to be one. It says
@@ -706,7 +714,8 @@ void build_receiver_quads(const ReceiverMarker& marker, double height_px,
     push_quad(out,
               QRectF(marker.fill_left_px, bar_top, std::max(fill_wide, 1.0),
                      std::min(kReceiverBarHeightPx, height_px)),
-              kReceiverBar);
+              receiver_qcolour(placed.slot,
+                               placed.focused ? kReceiverBarAlpha : kHeldBarAlpha));
 
     // The tuned frequency, before the edges so an edge sitting on the carrier
     // stays the readable one. That ordering is passband_item.cpp's and the
@@ -715,16 +724,22 @@ void build_receiver_quads(const ReceiverMarker& marker, double height_px,
     if (marker.center_visible) {
         const double tick = std::min(kReceiverCentreTickPx, height_px);
         push_quad(out, QRectF(marker.center_px - 0.5, height_px - tick, 1.0, tick),
-                  kReceiverCentre);
+                  placed.focused ? kReceiverCentre
+                                 : QColor(255, 255, 255, kHeldCentreAlpha));
+    }
+
+    if (!placed.focused) {
+        return;
     }
 
     // The edges, at the frequencies they actually name and only when those
     // are on screen. An off-span edge is left undrawn rather than pinned to
     // the boundary; models/receiver_marker.h has the argument.
-    const auto rule = [&out, height_px](double x_px) {
+    const QColor edge = receiver_qcolour(placed.slot, kReceiverEdgeAlpha);
+    const auto rule = [&out, height_px, &edge](double x_px) {
         push_quad(out, QRectF(x_px - kReceiverEdgeWidthPx / 2.0, 0.0, kReceiverEdgeWidthPx,
                               height_px),
-                  kReceiverEdge);
+                  edge);
     };
     if (marker.low_edge_visible) {
         rule(marker.low_edge_px);
@@ -980,9 +995,11 @@ void SpectrumItem::setLink(EngineLink* link)
         // the granted width the marker prefers comes from. Neither covers the
         // other: a mode change moves the centre before the engine has said
         // anything, and a clamp changes the width with the centre unmoved.
-        connect(link_, &EngineLink::receiverChanged, this, &SpectrumItem::takeReceiver);
-        connect(link_, &EngineLink::receiverStatusChanged, this,
-                &SpectrumItem::takeReceiver);
+        //
+        // Both arrive through rackChanged, which EngineLink raises for each
+        // of them and for every held receiver's news as well, so that is the
+        // one connection. Connecting all three drew every pane change twice.
+        connect(link_, &EngineLink::rackChanged, this, &SpectrumItem::takeReceiver);
     }
     have_frame_ = false;
     boxes_.clear();
@@ -1130,7 +1147,9 @@ void SpectrumItem::rebuildOverlay()
     // one geometry node is one draw call at one depth, so what is drawn over
     // what is decided by position in this vector.
     if (link_ != nullptr) {
-        build_receiver_quads(build_receiver_marker(*link_, width()), height(), quads_);
+        for (const PlacedReceiverMarker& placed : build_receiver_markers(*link_, width())) {
+        build_receiver_quads(placed, height(), quads_);
+    }
     }
 
     // The labels are a child item, so they are placed here on the Qt thread
@@ -1220,6 +1239,13 @@ void SpectrumItem::mousePressEvent(QMouseEvent* event)
     }
 
     const double x = event->position().x();
+
+    // The frequency under the pointer, through the same mapping the boxes
+    // were placed with. It goes out with every click, because whether the
+    // click landed inside another receiver's band is decided on it.
+    const double fraction = width() > 0.0 ? x / width() : 0.0;
+    const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
+
     const ClickResult hit = detection_clicked(boxes_, x, click_cycle_);
     if (hit.id != 0) {
         const auto found =
@@ -1228,19 +1254,41 @@ void SpectrumItem::mousePressEvent(QMouseEvent* event)
         if (found != boxes_.end()) {
             emit tuneRequested(hit.id, static_cast<double>(found->center_hz),
                                static_cast<double>(found->bandwidth_hz), hit.candidates,
-                               hit.rank, hit.exhausted);
+                               hit.rank, hit.exhausted, hz);
             event->accept();
             return;
         }
     }
 
-    // Nothing there. The frequency still goes out, through the same mapping
-    // the boxes were placed with, so a click on bare spectrum reads back as
-    // a frequency rather than as nothing happening. Zero for the id, because
-    // track ids start at one.
+    // Nothing there. The frequency still goes out, so a click on bare
+    // spectrum reads back as a frequency rather than as nothing happening.
+    // Zero for the id, because track ids start at one.
+    emit tuneRequested(0, hz, 0.0, 0, 0, false, hz);
+    event->accept();
+}
+
+void SpectrumItem::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        event->ignore();
+        return;
+    }
+
+    // The box under the pointer without stepping the cycle, which the first
+    // press already stepped: the second press of a double click is not a
+    // request for the next box down.
+    const double x = event->position().x();
     const double fraction = width() > 0.0 ? x / width() : 0.0;
     const double hz = link_ == nullptr ? 0.0 : link_->frequencyAtFraction(fraction);
-    emit tuneRequested(0, hz, 0.0, 0, 0, false);
+    const std::uint64_t id = detection_at(boxes_, x);
+    const auto found = std::find_if(boxes_.begin(), boxes_.end(),
+                                    [id](const DetectionBox& box) { return box.id == id; });
+    if (id != 0 && found != boxes_.end()) {
+        emit addRequested(id, static_cast<double>(found->center_hz),
+                          static_cast<double>(found->bandwidth_hz), hz);
+    } else {
+        emit addRequested(0, hz, 0.0, hz);
+    }
     event->accept();
 }
 

@@ -58,14 +58,18 @@
 //
 // THE RECEIVER MARKER IS THE SAME ARRANGEMENT AND IS DRAWN THE SAME ON BOTH
 //
-// build_receiver_marker and build_receiver_quads are below, beside the
+// build_receiver_markers and build_receiver_quads are below, beside the
 // detection overlay and for the same reason: one mapping from hertz to
-// pixels. Unlike a detection the receiver's mark is identical on the two
-// displays, because there is exactly one of it. The argument that made a
-// detection a bracket on one display and a rectangle on the other was that
-// twenty of them composite to something that hides the picture; one faint
-// band does not, and where the receiver is listening is worth saying in the
-// same place on both displays so the eye does not have to learn two marks.
+// pixels. Unlike a detection a receiver's mark is identical on the two
+// displays. The argument that made a detection a bracket on one display and
+// a rectangle on the other was that twenty of them composite to something
+// that hides the picture; up to eight faint bands in eight colours do not,
+// and where each receiver is listening is worth saying in the same place on
+// both displays so the eye does not have to learn two marks.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: that the mark is identical on the two
+// displays "because there is exactly one of it". There are as many as the
+// rack holds.
 
 #pragma once
 
@@ -264,24 +268,37 @@ inline constexpr double kLabelTopPx = 9.0;
 // are what turns it into quads: which of EngineLink's numbers the band comes
 // off, and what the mark looks like.
 
-// The receiver's granted passband against this display's geometry, or an
-// invisible marker when there is nothing to mark.
+// One rack receiver's marker, in its colour.
+struct PlacedReceiverMarker {
+    ReceiverMarker marker;
+    std::size_t slot = 0;
+    bool focused = false;
+};
+
+// Every receiver in the rack against this display's geometry, focused one
+// last, leaving out any with nothing to mark.
 //
 // THE GRANTED PAIR AND NOT THE REQUEST, with one fallback. VrxPlacement is
 // what the engine actually built and is the only pair that answers "does the
-// filter cover this signal". The fallback is the pane's own request, and it
-// covers the round trip between a tune and the first status: the client sends
-// an empty passband to ask for the mode's default, so during that window the
-// grant is a pair of zeros while the request may already hold edges the
-// operator dragged. Drawing nothing there would blink the marker off at every
-// mode change.
-[[nodiscard]] ReceiverMarker build_receiver_marker(const EngineLink& link, double width_px);
+// filter cover this signal". The fallback is the request, and it covers the
+// round trip between a tune and the first status: the client sends an empty
+// passband to ask for the mode's default, so during that window the grant is
+// a pair of zeros while the request may already hold edges the operator
+// dragged. Drawing nothing there would blink the marker off at every mode
+// change. EngineLink::rackMarkers applies it.
+//
+// WHAT THIS USED TO BE: build_receiver_marker, one marker for the pane's one
+// receiver, always in the azure.
+[[nodiscard]] std::vector<PlacedReceiverMarker> build_receiver_markers(const EngineLink& link,
+                                                                       double width_px);
 
-// The marker's rectangles, APPENDED rather than assigned, so the receiver
-// draws over the detection overlay that is already in out. The receiver is
-// the one mark the operator put there on purpose; a detection bracket drawn
-// over it would hide the answer to the question the bracket raised.
-void build_receiver_quads(const ReceiverMarker& marker, double height_px,
+// The marker's rectangles in its receiver's colour, APPENDED rather than
+// assigned, so the receivers draw over the detection overlay that is already
+// in out. A receiver is a mark the operator put there on purpose; a detection
+// bracket drawn over it would hide the answer to the question the bracket
+// raised. A receiver that is not focused is drawn fainter and without its
+// edge rules, so the one the controls act on is the one that stands out.
+void build_receiver_quads(const PlacedReceiverMarker& placed, double height_px,
                           std::vector<OverlayQuad>& out);
 
 // ---------------------------------------------------------------------------
@@ -567,13 +584,23 @@ signals:
     // belong to that one click: a poll arriving a frame later changes the
     // boxes and would change the counts under a reading the operator is still
     // looking at. All three are empty for a click on bare spectrum.
+    //
+    // pointer_hz is the frequency under the pointer, which is what decides
+    // whether the click landed inside another receiver's band and focuses it
+    // instead of tuning; see EngineLink::spanClick.
     void tuneRequested(qulonglong id, double center_hz, double bandwidth_hz, int candidates,
-                       int rank, bool exhausted);
+                       int rank, bool exhausted, double pointer_hz);
+
+    // The second press of a double click, resolved the same way without
+    // advancing the cycle through overlapping boxes. See
+    // EngineLink::spanDoubleClick.
+    void addRequested(qulonglong id, double center_hz, double bandwidth_hz, double pointer_hz);
 
 protected:
     QSGNode* updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* data) override;
     void geometryChange(const QRectF& newGeometry, const QRectF& oldGeometry) override;
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void hoverMoveEvent(QHoverEvent* event) override;
     void hoverLeaveEvent(QHoverEvent* event) override;
 
