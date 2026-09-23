@@ -8,10 +8,10 @@
 // carries. The libraries in core/decode are pure functions of a span of
 // samples and know nothing of receivers, chunks or the wire; an adapter below
 // is the few dozen lines between one of them and this interface, and it is
-// the only thing a new decoder needs in order to be served. PSK31, CW and M17
-// are being written as such libraries, and each of them lands as one more
-// adapter and one more registry row, naming the modes whose audio it reads,
-// with nothing in the schema, the client or the server changing for it.
+// the only thing a new decoder needs in order to be served. The next one lands
+// as one more adapter and one more registry row, naming the modes whose output
+// it reads, with nothing in the schema, the client or the server changing for
+// it; PSK31, CW and M17 were the first three to arrive that way.
 //
 // WHAT THIS PARAGRAPH USED TO SAY, until the audio-domain decoders arrived on
 // 2026-09-22: that RTTY, APRS and POCSAG would each land "with nothing in the
@@ -410,7 +410,7 @@ private:
 //
 // A MESSAGE PER CHARACTER WOULD FILL THE QUEUE, which is why this exists.
 // RTTY runs at six characters a second and a subscription holds 256 messages,
-// so a client that stalled for 43 seconds would lose text, and a person reads
+// so a client that stalled for 42 seconds would lose text, and a person reads
 // a line rather than a character. A line ends at a carriage return or line
 // feed, at kMaxLineCharacters, when the transmitter goes quiet for
 // kIdleCharacters character times, or when the decoder has a reason to think

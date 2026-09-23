@@ -826,9 +826,17 @@ instead: Either end can be pinned from the plates on the spectrum, and the
     pins are remembered across launches.
 
 phrase: with nothing in the schema, the client or the server moving
+phrase: with nothing in the schema, types.h, the client or the server moving
 retired: 2026-09-22
-commit: the change that put RTTY, AX.25, POCSAG, SITOR-B and NAVTEX on the seam
+commit: 2fdaa85
 instead: The schema and the client did not move for the audio decoders, and the
     server did once: DecoderSpec::modes, so subscribeDecoded refuses an audio
     decoder on a receiver whose demodulator does not produce what it reads,
     naming the modes. A decoder added after that is one adapter and one row.
+
+phrase: an optimised build was not measured
+retired: 2026-09-22
+commit: the docs/rpc.md change that recorded the audio decoders' measurements
+instead: The P25 adapter spent 21.50 to 24.53 ms of one core per second of
+    48000 S/s input over three runs of the ci preset's RelWithDebInfo build,
+    against 83.58 ms in Debug.

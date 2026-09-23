@@ -601,11 +601,32 @@ what that bought.
 
 `Session::decoders` lists what the engine can attach and
 `Session::subscribeDecoded(vrx, decoder, receiver)` attaches one to a receiver
-and streams what it recovers as `DecodedMessage`s. P25 Phase 1, D-STAR and
-TETRA report through it as of 2026-09-22; RTTY, APRS, POCSAG, PSK31, CW and M17
-are being written as pure libraries in `core/decode` and each reaches the wire
-as one adapter and one registry row in `core/rpc/decoders.h`, with nothing in
-the schema, `types.h`, the client or the server moving.
+and streams what it recovers as `DecodedMessage`s. Thirteen decoders report
+through it as of 2026-09-22, each one adapter and one registry row in
+`core/rpc/decoders.h`, with the keys it emits listed above its adapter:
+
+| Name | What comes out | What it needs from its receiver |
+| --- | --- | --- |
+| `p25p1` | NAC and DUID of every data unit; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband: a `p25p1` receiver, or any complex tap |
+| `dstar` | The radio header's four callsigns, suffix and flags | Complex baseband: a `dstar` receiver, or any complex tap |
+| `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband: a `tetra` receiver, or any complex tap |
+| `m17` | Each link setup whose CRC checked: callsigns, type, encrypted flag; each stream's end; end of transmission | Complex baseband of a `p25p1` receiver, 48000 S/s in its 12.5 kHz channel, or a `raw` tap |
+| `rtty` | Lines of ITA2 text, 45.45 baud, 170 Hz shift, mark on 2125 Hz | Audio of a `usb` or `lsb` receiver; the sideband sets the polarity |
+| `sitor_b` | Lines of text, each character from whichever of its two copies arrived | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
+| `navtex` | Each message with its B1 to B4 letters, serial and whether the preamble was clean | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
+| `psk31`, `psk63`, `qpsk31` | Lines of Varicode text, with the measured tone offset | Audio of a `usb` or `lsb` receiver, tone at 1000 Hz; QPSK31 takes its sideband from the receiver |
+| `cw` | Lines of Morse text with the dots and dashes, character and overall speed | Audio of a `cw` receiver at its default 700 Hz pitch, or a `usb` or `lsb` one with the tone at 700 Hz |
+| `ax25` | Every AX.25 frame whose FCS checked, with its APRS position, Mic-E, status or message parsed when it is APRS | Audio of an `nfm` receiver |
+| `pocsag` | Pages at 512, 1200 and 2400 bit/s at once: address, function, numeric or alphanumeric message | Audio of an `nfm` receiver |
+
+WHAT THIS PARAGRAPH USED TO SAY: that RTTY, APRS, POCSAG, PSK31, CW and M17
+would each reach the wire "as one adapter and one registry row in
+`core/rpc/decoders.h`, with nothing in the schema, `types.h`, the client or the
+server moving". The schema, `types.h` and the client did not move. The server
+did, once, for the list of modes in the right-hand column: before it, a
+decoder said only whether it read complex baseband or audio, so RTTY on a `wfm`
+receiver was accepted and would have printed broadcast audio as teleprinter
+noise. A decoder added now is one adapter and one row again.
 
 **One message shape and not a struct per mode.** A message carries the
 receiver, the decoder's registry name, a `kind` within that decoder, a sample
@@ -627,10 +648,14 @@ leaving takes it off, which is `subscribePassband`'s and `subscribeAudio`'s
 rule and for their reason: a decoder costs the completion thread on every chunk.
 An empty decoder name means the one named after the receiver's mode and
 `decoderResolved` says which ran; the mode chooses the channel filter and the
-decoder what is read out of it, so they are separate, and an AFSK decoder when
-one exists will read an `nfm` receiver's audio. Refused in words for a receiver
-that is not there, a name the engine does not have, and an input the receiver
-cannot give.
+decoder what is read out of it, so they are separate, and `ax25` reads an `nfm`
+receiver's audio. On a `usb`, `lsb` or `nfm` receiver, which no decoder is
+named after, an empty name is refused with the list of decoders that read it,
+because a sideband receiver may be carrying any of seven. Refused in words for
+a receiver that is not there, a name the engine does not have, an input the
+receiver cannot give, and a receiver outside the decoder's modes: `rtty` on a
+`wfm` receiver is told it needs `usb` or `lsb`, and `m17` on a `dstar` one that
+it needs `p25p1` or `raw`.
 
 **Where it runs.** On the engine's completion thread inside an audio sink
 joined through `attach_audio_sink`, exactly as the RDS decoder does, with the
@@ -640,6 +665,29 @@ built on the first chunk at the rate that chunk carries and never from
 `VrxStatus`, because the two complex paths deliver at different rates: a
 digital voice receiver's fine stage at 48000 or 72000, which `demodRate` states,
 and a raw tap at the channel rate, which `demodRate` does not.
+
+**The audio decoders take the same path.** To the engine a demodulator's audio
+and a complex tap are both a receiver's output through the same sink, one float
+a frame or two, so an audio decoder is fed the mono audio a `usb`, `lsb`, `cw`
+or `nfm` receiver produces, at the receiver's resolved audio rate, 48000 unless
+it asked for another, behind the same fence and into the same 256-message
+queue. The adapter refuses a chunk of any other channel count, which is what a
+stereo `wfm` receiver would deliver, and the mode check above stops it getting
+that far. The factory is told the receiver's mode as well as the rate, because
+the sideband decides which audio tone the higher radio frequency lands on: it
+sets RTTY's polarity, the polarity SITOR-B and NAVTEX try first, and the phase
+direction QPSK31 reads.
+
+**Text arrives as lines.** RTTY, SITOR-B, PSK and CW produce characters, and a
+message a character would fill a subscription's 256 in 42 seconds of RTTY, so
+their adapters hand out a line: at a line end, at 80 characters, or when the
+channel has been quiet for ten characters, measured from when the last
+character arrived rather than from where it sits, because PSK31 and CW release
+their first characters in one batch once they have found the tone. Every line
+carries `began_sample`, the receiver-stream index where it started, alongside
+the span of the chunk that completed it. A start-stop receiver on noise frames
+characters out of it, as a teleprinter does, so an RTTY line carries
+`min_margin` for a client to judge it by.
 
 **Delivery queues, as audio's does.** A message is the only copy of an event,
 so each subscription holds up to 256 and evicts the oldest when full, and
@@ -669,7 +717,70 @@ key id and encrypted flag intact, from both of two subscribers under the same
 sequence numbers. A D-STAR header crossed with every callsign and the flags.
 TETRA crossed at least nine of eighteen synchronisation bursts, with MCC, MNC,
 colour code and timeslot. The P25 adapter spent 83.58 ms of one core per second
-of 48000 S/s input in a Debug build; an optimised build was not measured.
+of 48000 S/s input in a Debug build, and 21.50 to 24.53 ms over three runs of
+the ci preset's RelWithDebInfo build. WHAT THIS SENTENCE USED TO SAY after the
+Debug figure: "an optimised build was not measured".
+
+**The audio decoders, measured** by `tests/rpc/test_rpc_decode_audio.cpp` on
+2026-09-22 against the RTX 4090, on the same grid. Each transmitter from
+`core/dsp/synth` is put on a carrier the way a station would: by single
+sideband for the HF modes, as a keyed carrier for CW, by FM for AFSK and as
+direct FSK for POCSAG, and M17 as its own 4FSK. Noise is stated in 2500 Hz at
+the radio frequency and covers the silence either side of the transmission.
+At 30 dB every decoder's content crossed exactly: both RTTY lines on `usb` and
+on `lsb`, both SITOR-B lines, the NAVTEX message with `EA07` and a clean
+preamble, all four AX.25 frames with the APRS position, status and message
+parsed and the plain I frame reported as one, all four POCSAG pages including
+the one at 512 bit/s, both lines of PSK31, PSK63 and QPSK31 on `lsb`, CW at
+20.0 WPM, and M17's link setup, stream end and end of transmission through a
+`p25p1` receiver. At a lower point near where each library test says it
+degrades:
+
+| Decoder | Point, dB in 2500 Hz | What crossed |
+| --- | --- | --- |
+| `rtty` on `usb` | -8 | character error rate 0.097; none at -5, 0.45 at -10 |
+| `sitor_b` | -5 | character error rate 0.097 |
+| `navtex` | -5 | the message exact with a clean preamble; damaged at -6, nothing at -8 |
+| `psk31` | -10 | both lines exact |
+| `psk63` | -7 | both lines exact |
+| `qpsk31` on `lsb` | -11 | character error rate 0.10; at -12 it never acquired and printed nothing |
+| `cw` | -10 | character error rate 0.059, read at 19.1 WPM |
+| `ax25` | 16 | two of four frames; none at 14, all four at 20. Noise ahead of the discriminator, which has a threshold, unlike the library test's noise on the audio |
+| `pocsag` | 8 | four of four pages, one with an uncorrectable codeword; all intact at 10 |
+| `m17` | 15.6 | the link setup, stream end and end of transmission; 15.6 dB is `test_m17.cpp`'s 10 dB in the 9 kHz channel |
+
+Two properties of the libraries, found through the receiver and not fixed
+here because `core/decode` is not this seam's to change. POCSAG at 6 and 4 dB
+reports pages for addresses nobody sent, several with no uncorrectable
+codeword, which is the BCH code correcting noise into an address; the page's
+`corrected_bits` is how a client weighs one. M17 in the silence after a 30 dB
+transmission found two link setups whose CRC failed, one BERT burst and two
+packet bursts in 2.5 s, so the adapter drops all three kinds and counts the
+failed link setups on the next good one.
+
+What they cost, read off `revenant-cli` in the RelWithDebInfo build as the wall
+time of a whole run with one decoder attached, not a per-decoder profile, the
+sideband decoders on the 9.95 s RTTY capture and the FM ones on the 9.54 s
+POCSAG capture: RTTY, SITOR-B and NAVTEX
+0.031 s, AX.25 0.031 s, POCSAG 0.021 s, M17 0.041 s over its own 4.12 s,
+PSK31 0.323 s, PSK63 0.353 s, CW 0.372 s and QPSK31 0.888 s. The last four mix
+and filter every audio sample before decimating, and QPSK31 runs a Viterbi
+decoder besides, all on the completion thread.
+
+**P25 voice is not on the wire.** `core/decode/p25p1.h`'s `P25Voice` turns a
+clear call's LDU voice frames into 8 kHz PCM, and nothing serves it. It is audio
+out rather than events, so it belongs on `subscribeAudio` rather than this seam,
+and `subscribeAudio` refuses a `p25p1` receiver today because its output is a
+complex tap. Serving it is a design decision rather than an adapter, and the
+questions it has to answer are: what the chunk's `sampleIndex` counts, when the
+receiver's own stream is the tap at 48000 and the voice is 8000; whether the
+gaps between calls, and a withheld encrypted call, are silence on the wire or no
+chunks at all; and whether the refusal on a `p25p1` receiver becomes a voice
+subscription or a second method. The smallest change that answers them is an
+audio route in `core/rpc/server.cpp` for a `p25p1` receiver that runs
+`P25Phase1` and `P25Voice` in the sink and queues 8000 S/s mono chunks with an
+8000-rate index of their own, zeros between calls, under the fence the decoder
+routes use, with no schema change because `AudioChunk` carries its own rate.
 
 **Two things found on the way, both in `core/decode/p25p1.cpp`.** A Header Data
 Unit whose sync and NID arrived in one call and whose body arrived in the next
