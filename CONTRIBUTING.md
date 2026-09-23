@@ -75,12 +75,18 @@ All three must build and pass before a pull request. The `ci` preset carries
 `/WX`, so a warning that the `dev` preset tolerated is a failure there, and
 finding that out from CI rather than locally wastes a round trip.
 
-If you have more than one Vulkan device, run the suite against each:
+If you have more than one supported Vulkan device, run the suite against each,
+by index:
 
 ```
 .\scripts\build.ps1 -Preset ci -Gpu 0
-.\scripts\build.ps1 -Preset ci -Gpu 1
 ```
+
+and again with `-Gpu` set to each other index. `revenant-devices` lists them;
+docs/building.md has how. Leave out the Radeon integrated graphics in a Ryzen 9
+7950X: it is not supported, its driver corrupts the spectrum kernel, and a
+failure there says nothing about your change. This section used to say to run
+`-Gpu 1` as well, which on the machine it was written on was that device.
 
 Vendors disagree about floating point in ways that only appear on hardware, so
 a bit-exactness change verified on one GPU is verified on one GPU. Say in the
