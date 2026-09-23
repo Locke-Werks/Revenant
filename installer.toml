@@ -28,13 +28,17 @@ icon        = "assets/revenant.ico"
 # and a toast working across an upgrade. docs/config-schema.md, [product].
 aumid = "LockeWerks.Revenant"
 
-# upgrade_code IS DELIBERATELY ABSENT AND HAS TO BE CHOSEN ONCE.
+# upgrade_code MUST NEVER CHANGE.
 #
-# It is stable across versions and keys the single-instance mutex, so it is
-# fixed forever the first time an installer carrying it reaches anybody.
-# Nothing has been released, so leaving it out costs only exit code 1618 when
-# two installers race, and writing a placeholder now would be the one mistake
-# that cannot be taken back. Choose it before the first release.
+# It is stable across versions and keys the single-instance mutex
+# (Global\lwi-<upgrade_code> in the stub), so two Revenant installers of any
+# version refuse to run at once with exit code 1618 instead of racing over one
+# install directory. Changing it after an installer carrying it has reached
+# anybody makes the new installer a stranger to the old one: both would run at
+# once again. Generated fresh on 2026-09-22 with [guid]::NewGuid(), before any
+# release, which is the one moment it could be chosen. Nothing else in this
+# file or in Forge derives from it, so there is no second copy to keep in step.
+upgrade_code = "d4be342a-9c6c-4c6b-9fd7-848637a79967"
 
 [install]
 scope = "machine"
@@ -62,9 +66,12 @@ This program is distributed in the hope that it will be useful, but WITHOUT
 ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS
 FOR A PARTICULAR PURPOSE. See the GNU General Public License for more detail.
 
-The complete licence text is installed as LICENSE.txt beside the programs, and
-the source for this build is published at
-https://github.com/Locke-Werks/Revenant.
+The complete licence text is installed as LICENSE.txt beside the programs.
+The components Revenant includes from other projects, and their licences, are
+listed in THIRD-PARTY-NOTICES-engine.txt and THIRD-PARTY-NOTICES-client.txt
+beside it. The corresponding source of this release, with the copyleft
+libraries it links, is published beside the installer on the release page at
+https://github.com/Locke-Werks/Revenant/releases.
 """
 
 # ---------------------------------------------------------------------------
