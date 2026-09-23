@@ -129,15 +129,27 @@ the terminal, auto-scaling measured on the device, the per-receiver passband
 spectrum, the wideband detector, the RDS and RBDS decoder, the Cap'n Proto
 session that carries all of it to another process, the Qt client that draws it
 and plays its audio, and the conformance suite that diffs every GPU kernel
-against a scalar twin and demands identical bits. 547 tests on an RTX 4090,
-0 failures; a few of them skip without an RTL-SDR plugged in. `ui/` is a
-separate CMake project with a suite of its own, 84 tests, and CI configures,
-builds and runs both trees.
+against a scalar twin and demands identical bits. A few of those tests skip
+without an RTL-SDR plugged in. `ui/` is a separate CMake project with a suite
+of its own, and CI configures, builds and runs both trees. The counts move
+with nearly every commit, so they are dated rather than kept current: on
+2026-09-22 `ctest -N` listed 590 tests in the engine tree and 141 in `ui/`.
 
-What does not: every decoder but RDS. `docs/modes.md` is the scoped list and
-none of the rest of it is written. Nothing saves a set of receivers across a
-restart; that one is in `docs/rpc.md` with what it would take and what the gap
-costs meanwhile.
+What does not: a decoder on a live signal, other than RDS. P25 Phase 1, D-STAR
+and TETRA are written as far as their framing, and P25's IMBE voice beside
+them, each checked by a round trip through a transmitter written from the same
+clauses. Nothing in the engine or the command line runs them on a receiver
+yet: their demodulator modes hand out a raw tap and nothing reads it.
+`docs/modes.md` is the scoped list and says where each one stops. Nothing saves
+a set of receivers across a restart; that one is in `docs/rpc.md` with what it
+would take and what the gap costs meanwhile.
+
+This paragraph used to read "What does not: every decoder but RDS.
+`docs/modes.md` is the scoped list and none of the rest of it is written." The
+framing decoders for three voice modes and the IMBE vocoder were written after
+it, so a reader following it would not have looked for them. The two counts
+above it, 547 engine tests and 84 in `ui/`, were each true on the day they were
+written and read as current long after.
 
 This paragraph used to read "WFM is mono and has no de-emphasis, so broadcast
 stations decode bright and one channel only." Both halves stopped being true in

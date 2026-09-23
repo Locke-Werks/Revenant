@@ -151,19 +151,31 @@ declarations in `models/engine_link.h` that nothing else in CI reaches. `qt_add_
 runs `qmlcachegen` over `qml/Main.qml`, so a syntax error there is a red build; nothing
 checks what the QML does.
 
-`revenant_ui_tests` passes: 26 Catch2 cases in two files.
+`revenant_ui_tests` passes. It holds the pieces of the client that were lifted out of Qt
+types so they can be asserted without a window, and the source list in
+`ui/CMakeLists.txt` is the authority on which files those are. On 2026-09-22 it was 141
+Catch2 cases in 14 files, in three groups:
 
-- `tests/test_audio_ring.cpp`, 20 cases over `audio/audio_ring.cpp`. Gap fill, resync past
-  a ring-length gap, overrun eviction, a starved read, a read at the wrong format, the
-  gate, stereo counted in frames, and the timeline accounting for every frame the engine
+- `tests/test_audio_ring.cpp` over `audio/audio_ring.cpp`. Gap fill, resync past a
+  ring-length gap, overrun eviction, a starved read, a read at the wrong format, the gate,
+  stereo counted in frames, and the timeline accounting for every frame the engine
   indexed.
-- `tests/test_history_resize.cpp`, 6 cases over `render/history_resize.h`. The waterfall's
-  ring arithmetic across a grow, a shrink and a no-op resize, including after the cursor
-  has wrapped.
+- `tests/test_history_resize.cpp` over `render/history_resize.h`. The waterfall's ring
+  arithmetic across a grow, a shrink and a no-op resize, including after the cursor has
+  wrapped.
+- Twelve files over the model logic that sits in Qt-free headers under `models/`:
+  bookmarks, the RDS text mapping, frequency entry, scroll tuning, receiver matching and
+  markers, what happens when a receiver goes away, source choice and pacing, gain
+  control, the front-end note and the composite probe.
 
-WHAT THIS SECTION USED TO SAY: "`revenant_ui_tests` is one file over `AudioRing`." Two
-files, and the second is not `AudioRing`. The job and `test_history_resize.cpp` were
-written thirteen minutes apart on separate lanes and met in a merge.
+The count is dated rather than kept current because it moves with nearly every commit.
+`ctest --preset vs -N` from `ui/` prints today's.
+
+WHAT THIS SECTION USED TO SAY, twice. First "`revenant_ui_tests` is one file over
+`AudioRing`." Two files, and the second is not `AudioRing`: the job and
+`test_history_resize.cpp` were written thirteen minutes apart on separate lanes and met
+in a merge. Then "`revenant_ui_tests` passes: 26 Catch2 cases in two files", which was
+true when written and stayed in place while twelve more files arrived beside them.
 
 ### What is still unguarded in `ui/`
 
@@ -191,8 +203,9 @@ only meaningful once something rasterises it.
 
 **`main.cpp` and `qml/Main.qml`.** Wiring and layout.
 
-None of this is covered by the engine tree's 361 tests: `ui/` links no part of the engine
-and talks to it over a socket.
+None of this is covered by the engine tree's tests, however many there are on the day:
+`ui/` links no part of the engine and talks to it over a socket. This sentence used to
+say "the engine tree's 361 tests", a count that was 590 by 2026-09-22.
 
 ## Coverage, stated honestly
 

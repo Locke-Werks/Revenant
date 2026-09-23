@@ -380,3 +380,38 @@ instead: Listed as tier-two work to be done, and all four are written and
     against the measured margin. What is unbuilt is the seam: it reads complex
     baseband, the detector reads spectrum frames, and Track::classification
     still has one enumerator.
+
+phrase: 26 Catch2 cases over two headless pieces
+phrase: revenant_ui_tests passes: 26 Catch2 cases in two files
+phrase: That is revenant_ui_tests, 26 cases over AudioRing
+retired: 2026-09-20
+commit: b731feb
+instead: revenant_ui_tests is every Qt-free piece of the client that has a test,
+    and ui/CMakeLists.txt's source list is the authority on which files. It was
+    141 cases in 14 files on 2026-09-22 and moves with nearly every commit, so
+    a count belongs beside a date. ctest --preset vs -N from ui/ prints it.
+
+phrase: ui/CMakePresets.json has no test preset
+retired: 2026-09-22
+commit: 122e7c0
+instead: Each configure preset in ui/CMakePresets.json has a test preset of the
+    same name, with noTestsAction set to error. ctest --preset vs from inside
+    ui/ runs the client's suite, and the ui job in ci.yml does exactly that.
+
+phrase: None of this is covered by the engine tree's 361 tests
+phrase: 547 tests on an RTX 4090, 0 failures
+phrase: separate CMake project with a suite of its own, 84 tests
+retired: 2026-09-22
+commit: dfb822d
+instead: Both suites grow with nearly every commit. On 2026-09-22 ctest -N
+    listed 590 tests in the engine tree and 141 in ui/; state a count with the
+    date it was taken, or point at ctest -N, rather than as a standing fact.
+
+phrase: What does not: every decoder but RDS
+retired: 2026-09-21
+commit: dfb822d
+instead: P25 Phase 1, D-STAR DV and TETRA V+D are written as far as their
+    framing, and IMBE as a voice decoder, each tested by a round trip through
+    core/dsp/synth/dv_mod.cpp. What none of them has yet is a live path: their
+    demodulator modes hand out a raw tap and nothing in the engine or the
+    command line reads it. docs/modes.md under Done says where each one stops.
