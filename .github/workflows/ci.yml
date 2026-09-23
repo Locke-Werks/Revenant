@@ -483,29 +483,38 @@ jobs:
       - name: Build
         run: cmake --build --preset vs
 
-      # revenant_ui_tests only: 26 Catch2 cases over two headless pieces,
-      # AudioRing in tests/test_audio_ring.cpp and the waterfall ring
-      # arithmetic in tests/test_history_resize.cpp. That is thin and saying
-      # so here is the point. It proves nothing about the QML, the scene
-      # graph items or the audio device, none of which a headless agent can
-      # open, and nothing about render/spectrum_scale.cpp, which is pure
-      # arithmetic with no Qt type in it and simply has no test yet.
-      # docs/ci.md lists what is unguarded, file by file.
+      # revenant_ui_tests only: the pieces of the client that were lifted out
+      # of Qt types so they could be asserted without a window. AudioRing, the
+      # waterfall ring arithmetic, and the model logic that sits in headers
+      # with no Qt type in them. The source list in ui/CMakeLists.txt is the
+      # authority on which files those are; no count is written here, because
+      # every count this comment has carried went stale. It proves nothing
+      # about the QML, the scene graph items or the audio device, none of
+      # which a headless agent can open, and nothing about
+      # render/spectrum_scale.cpp, which is pure arithmetic with no Qt type in
+      # it and simply has no test yet. docs/ci.md lists what is unguarded,
+      # file by file.
       #
-      # WHAT THIS COMMENT USED TO SAY: "one file over AudioRing". There are
-      # two files and the second is not AudioRing. The job and the second test
-      # file were written thirteen minutes apart on two separate lanes and met
-      # in a merge, so neither author was wrong when they wrote it and nothing
-      # re-read the sentence afterwards. That is the ordinary way a count on
-      # one side stops matching the thing on the other.
+      # WHAT THIS COMMENT USED TO SAY, twice. First "one file over AudioRing",
+      # when there were two files and the second was not AudioRing: the job
+      # and that file were written thirteen minutes apart on separate lanes
+      # and met in a merge. Then "26 Catch2 cases over two headless pieces",
+      # which was true when written and stayed in place while the target grew
+      # to 141 cases in 14 files (counted 2026-09-22). That is the ordinary
+      # way a count on one side stops matching the thing on the other.
       #
       # --no-tests=error for the reason given on the engine's Test step, and
       # it matters more here: ui/ has exactly ONE test target, so the empty
       # set is one deleted add_test away rather than six. The step as first
       # written would have gone green on it, which would have undone the point
       # of adding this job at all.
+      #
+      # The vs test preset in ui/CMakePresets.json carries the same setting as
+      # noTestsAction, and the flag stays here as well. A preset edit that
+      # dropped the key would otherwise turn this back into a compile check
+      # with nothing in the diff of this file to show it.
       - name: Test
-        run: ctest --test-dir build/vs -C RelWithDebInfo --output-on-failure --no-tests=error
+        run: ctest --preset vs --no-tests=error
 
       - name: CTest output
         if: failure()

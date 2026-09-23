@@ -47,5 +47,26 @@
     { "name": "vs", "configurePreset": "vs", "configuration": "RelWithDebInfo" },
     { "name": "ninja", "configurePreset": "ninja" },
     { "name": "ninja-debug", "configurePreset": "ninja-debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "vs",
+      "configurePreset": "vs",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "ninja",
+      "configurePreset": "ninja",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "ninja-debug",
+      "configurePreset": "ninja-debug",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    }
   ]
 }

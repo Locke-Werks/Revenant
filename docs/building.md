@@ -239,17 +239,23 @@ were true until the client was built and none is now.
 
 ### Running the client's tests
 
-`ui/CMakePresets.json` has no test preset, so `ctest` needs the build directory
-by hand. From inside `ui/`:
+From inside `ui/`:
 
 ```powershell
 cmake --preset vs
 cmake --build --preset vs
-ctest --test-dir build\vs -C RelWithDebInfo --output-on-failure
+ctest --preset vs
 ```
 
-That is `revenant_ui_tests`, 26 cases over `AudioRing` and the waterfall's
-resize arithmetic. It links no Qt: the rule in `ui/CMakeLists.txt` is that
+Each configure preset in `ui/CMakePresets.json` has a test preset of the same
+name, and each one fails on an empty test set rather than reporting success
+with nothing run. The paragraph here used to say `ui/CMakePresets.json` has no
+test preset and give the build directory and configuration by hand; that was
+true until the presets were added on 2026-09-22.
+
+That is `revenant_ui_tests`: the pieces of the client lifted out of Qt types so
+they can be asserted without a window. On 2026-09-22 it was 141 cases in 14
+files, and docs/ci.md says what they cover. It links no Qt: the rule in `ui/CMakeLists.txt` is that
 anything pulled out for a test goes in a header or a `.cpp` with no Qt type in
 it, so a test target that started linking Qt would be the sign that rule had
 been broken. The target is skipped, with a message, when Catch2 is missing from
