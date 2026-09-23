@@ -12,6 +12,7 @@
 
 #include "core/decode/ax25.h"
 #include "core/decode/cw.h"
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/dv_phy.h"
 #include "core/decode/m17.h"
@@ -32,6 +33,7 @@ constexpr std::uint32_t kP25Required = 2;
 constexpr std::uint32_t kDStarRequired = 2;
 constexpr std::uint32_t kTetraRequired = 1;
 constexpr std::uint32_t kM17Required = 2;
+constexpr std::uint32_t kDmrRequired = 3;
 constexpr std::uint32_t kPocsagRequired = 2;
 constexpr std::uint32_t kAx25Required = 1;
 constexpr std::uint32_t kRttyRequired = 10;
@@ -178,13 +180,16 @@ struct Counted {
     return counted;
 }
 
-// DMR. The one line to change when core/decode/dmr.h lands: build its decoder
-// here, feed it the samples, and count what its sync and its own codes verify,
-// the way the P25 row above counts NIDs. Until then there is nothing in this
-// tree that can verify a DMR burst, and a row that claimed one on its
-// modulation alone would be the thing identify.h rules out.
-[[nodiscard]] Expected<Counted> attempt_dmr(dsp::ConstComplexSpan, dsp::SampleRate) {
-    return fail("core/decode/dmr.h does not exist yet");
+// DMR, through core/decode/dmr.h's own front end and sync search: a sync of
+// TS 102 361-1 Table 9.2 found at the decoder's own threshold, counted only
+// where it sits a whole number of 144-symbol slots from the best one, which
+// is clause 4.2's TDMA structure and not something noise reproduces.
+[[nodiscard]] Expected<Counted> attempt_dmr(dsp::ConstComplexSpan samples, dsp::SampleRate rate) {
+    auto score = decode::dmr_sync_score(samples, rate);
+    if (!score) {
+        return std::unexpected(score.error());
+    }
+    return Counted{.verified = static_cast<std::uint32_t>(score->hits_on_slot_grid)};
 }
 
 [[nodiscard]] Expected<Counted> attempt_pocsag(dsp::ConstComplexSpan samples,
@@ -388,13 +393,13 @@ struct Counted {
         case Protocol::DStar: return kDStarRequired;
         case Protocol::Tetra: return kTetraRequired;
         case Protocol::M17: return kM17Required;
+        case Protocol::Dmr: return kDmrRequired;
         case Protocol::Pocsag: return kPocsagRequired;
         case Protocol::Ax25: return kAx25Required;
         case Protocol::Rtty: return kRttyRequired;
         case Protocol::SitorB: return kSitorRequired;
         case Protocol::Psk31: return kPsk31Required;
         case Protocol::Cw: return kCwRequired;
-        case Protocol::Dmr:
         case Protocol::Rds:
         case Protocol::None: return 0;
     }

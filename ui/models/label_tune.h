@@ -14,9 +14,8 @@
 // core/rpc/decoders.h registers them: P25 to p25p1 and the p25p1 decoder,
 // D-STAR and TETRA to their own modes, M17 to p25p1, whose 48000 S/s complex
 // baseband is what the m17 decoder reads, POCSAG and AX.25 to nfm, RTTY,
-// SITOR-B and PSK31 to usb, CW to cw. DMR goes to p25p1 with no decoder until
-// core/decode/dmr.h lands; RDS goes to wfm, whose RDS pane is where RDS is
-// decoded, not the decoder seam.
+// SITOR-B and PSK31 to usb, CW to cw, DMR to dmr and the dmr decoder. RDS
+// goes to wfm, whose RDS pane is where RDS is decoded, not the decoder seam.
 //
 // An analogue label is the mode by name: AM, NFM, WFM and CW. A CW label is a
 // carrier, not a Morse decode, so it attaches nothing; a CW PROTOCOL is Morse
@@ -77,7 +76,7 @@ inline constexpr std::array<Row, 12> kProtocols = {{
     {"D-STAR", "dstar", "dstar"},
     {"TETRA", "tetra", "tetra"},
     {"M17", "p25p1", "m17"},
-    {"DMR", "p25p1", ""},
+    {"DMR", "dmr", "dmr"},
     {"POCSAG", "nfm", "pocsag"},
     {"AX.25", "nfm", "ax25"},
     {"RTTY", "usb", "rtty"},

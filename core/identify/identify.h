@@ -59,11 +59,16 @@
 //                 M.1677-1 table, with the timing locked and at most one
 //                 unrecognised. Four. Single elements do not count, because
 //                 a fading carrier keys itself into E and T.
-//   DMR           PENDING. The owner put DMR back in scope on 2026-09-23 and
-//                 another lane writes core/decode/dmr.* from TS 102 361-1 and
-//                 -2, sync included. attempt_dmr in identify.cpp is the one
-//                 place that calls it, and it reports Unavailable until then.
+//   DMR           a TS 102 361-1 Table 9.2 sync at core/decode/dmr.h's own
+//                 threshold that sits a whole number of 144-symbol slots from
+//                 the best one, clause 4.2's TDMA frame. Three. The owner put
+//                 DMR back in scope on 2026-09-23 and its decoder landed the
+//                 same day; attempt_dmr calls dmr_sync_score and nothing else.
 //                 IdentifyConfig::dmr switches the row off whole.
+//
+//                 WHAT THIS ROW USED TO SAY: "PENDING", reporting Unavailable
+//                 until core/decode/dmr.* existed. No structure-only fallback
+//                 was ever built, so none is left behind.
 //   RDS           NOT THROUGH A PROBE. RDS rides a WFM composite at 57 kHz,
 //                 and a WFM carrier is wider than the largest probe bucket can
 //                 hold at a quarter of its rate. The row exists so the answer
@@ -92,7 +97,7 @@
 
 namespace revenant::identify {
 
-// The protocols this tree has decoders for, plus DMR, whose decoder is coming.
+// The protocols this tree has decoders for.
 // Appended only: the value crosses a ring as plain data and reaches the wire
 // through core/rpc's own mirror of it.
 enum class Protocol : std::uint8_t {
@@ -122,8 +127,8 @@ enum class AttemptResult : std::uint8_t {
     // The hints put the signal outside what this protocol can be. Not run.
     NotPlausible = 0,
 
-    // Plausible, and nothing in this tree can verify it yet (DMR), or the
-    // extract cannot carry it (RDS through a probe). Not run.
+    // Plausible, and the extract cannot carry it (RDS through a probe), or
+    // the decoder could not be built at this rate. Not run.
     Unavailable,
 
     // Run, and the decoder verified fewer than the row needs.
@@ -157,8 +162,9 @@ struct IdentifyConfig {
     dsp::SampleRate rate = 0;
 
     // The DMR row, on by default. One flag so the row can be removed cleanly
-    // if the owner's decision on US8306071 changes: with it off the row is
-    // never attempted and never listed.
+    // if the owner's decision on US8306071 changes, since the row correlates
+    // DMR's sync patterns: with it off the row is never attempted and never
+    // listed.
     bool dmr = true;
 };
 

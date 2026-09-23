@@ -18,7 +18,7 @@
 //   P25 Phase 1 voice        -150 kHz    D-STAR                 +100 kHz
 //   TETRA sync bursts        +250 kHz    M17 stream             +400 kHz
 //   AX.25 on NFM             +550 kHz    RTTY at 45.45 baud     +700 kHz
-//   USB, voice-shaped        +850 kHz
+//   USB, voice-shaped        +850 kHz    DMR base station idle  -950 kHz
 //
 // "Voice-shaped" is Gaussian noise band-limited to 300 to 3000 Hz, so the
 // analogue emitters fill their bands the way speech does rather than

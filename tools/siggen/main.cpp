@@ -1719,7 +1719,7 @@ void print_usage()
         "                    --noise-dbfs X (-60) --truth PATH\n"
         "                    cf32 at 2160000 S/s with one emitter of each kind the\n"
         "                    span's labels name: AM, NFM, CW, BPSK, P25, D-STAR,\n"
-        "                    TETRA, M17, AX.25, RTTY and USB, each at --snr in\n"
+        "                    TETRA, M17, DMR, AX.25, RTTY and USB, each at --snr in\n"
         "                    2500 Hz. tools/siggen/labelled.h has the offsets.\n"
         "\n"
         "  wideband          --emitters N --bursts N --span-low N --span-high N\n"

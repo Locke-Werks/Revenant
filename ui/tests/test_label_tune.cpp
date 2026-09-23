@@ -65,11 +65,10 @@ TEST_CASE("a protocol sets its decoder's mode and attaches the decoder", "[label
     CHECK(m17.mode == "p25p1");
     CHECK(m17.decoder == "m17");
 
-    // DMR has a mode and, until core/decode/dmr.h lands, no decoder.
     const LabelTune dmr = label_tune(labelled(LabelKind::Protocol, "DMR"), 8'100.0);
     CHECK(dmr.drives);
-    CHECK(dmr.mode == "p25p1");
-    CHECK(dmr.decoder.empty());
+    CHECK(dmr.mode == "dmr");
+    CHECK(dmr.decoder == "dmr");
 }
 
 // REJECTS: an analogue CW label that attaches the Morse decoder to a carrier

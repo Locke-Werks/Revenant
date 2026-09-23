@@ -2285,11 +2285,12 @@ unidentified signal means hold still, not guess.
     decided     DMR is back in scope and its frame sync may be correlated; the
                 risk on US8306071 is accepted. Another lane writes
                 core/decode/dmr.* from TS 102 361-1 and -2.
-    here        a pending row in core/identify: plausible on a 4FSK-wide
-                signal, reporting unavailable until the decoder lands, behind
-                IdentifyConfig::dmr. Wiring it is attempt_dmr in
-                core/identify/identify.cpp. docs/modes.md's exclusion text is
-                the DMR lane's to retract.
+    here        a row in core/identify that counts core/decode/dmr.h's
+                syncs lying on the 144-symbol slot grid and needs three,
+                behind IdentifyConfig::dmr. It was a pending row reporting
+                unavailable until the decoder landed the same day; what this
+                used to say was that wiring it would be attempt_dmr in
+                core/identify/identify.cpp, which is where it is.
 
 ### What the label is
 
@@ -2339,6 +2340,7 @@ it needs:
 | SITOR-B | 12000, 5 s | 29 characters | 8 |
 | PSK31 | 12000, 5 s | 16 characters | 6 |
 | CW | 12000, 5 s | 10 characters | 4 |
+| DMR | 48000 | 65 syncs on the slot grid | 3 |
 
 Noise, three draws at each of seven widths covering every row: nothing
 verified. A steady carrier: not CW.
@@ -2405,27 +2407,29 @@ decode of what each one keyed is the next measurement, not a conclusion.
 
 `siggen labelled` renders one emitter of each kind the labels name, from each
 protocol's own transmitter, onto one 2.16 MS/s capture at 25 dB in 2500 Hz
-each; `tools/siggen/labelled.h` has the offsets. Through `revenant-cli
---detect --channels 16`, 40 s at twice realtime, pool of four, 131.8 Hz a bin,
-the label each emitter's tracks ended with:
+each, twelve emitters since DMR's decoder landed and it joined;
+`tools/siggen/labelled.h` has the offsets. Through `revenant-cli --detect
+--channels 16`, 40 s at twice realtime, pool of four, 131.8 Hz a bin, the
+label each emitter's tracks ended with:
 
 | emitter | tracks | label | right |
 | --- | --- | --- | --- |
 | AM, speech-shaped | 3 | AM on the carrier, CW on each sideband | carrier only |
-| NFM, speech-shaped | 3 | NFM, NFM, one still probing | yes |
+| NFM, speech-shaped | 3 | NFM on two lines, CW on the weakest, at 10.8 dB | two of three |
 | CW at 20 WPM | 1 | CW, Morse verified | yes |
 | BPSK at 2400 baud | 1 | BPSK | yes |
 | P25 | 1 | P25 | yes |
 | D-STAR | 1 | D-STAR | yes |
-| TETRA | 1 | TETRA, over a family call of OFDM | yes |
+| TETRA | 1 | TETRA, over a family call of PSK at 18000 baud, or of OFDM on another run | yes |
 | M17 | 1 | M17 | yes |
+| DMR, a base station idling | 1 | DMR | yes |
 | AX.25 | 1 | AX.25 | yes |
 | RTTY | 1 | RTTY | yes |
-| USB, speech-shaped | 1 | BPSK, from PSK at 2293 baud and 0.68 | **no** |
+| USB, speech-shaped | 1 | BPSK, from PSK at 2246 to 2293 baud and 0.68 | **no** |
 
-**Two wrong labels and what they are.** The AM emitter's sidebands are
-separate tracks, and a probe centred on one sees the carrier 1.5 kHz off with
-one sideband beside it, which is a carrier: the problem "And the lines as a set
+**Three wrong labels and what they are.** The AM emitter's sidebands are
+separate tracks, and so is the NFM emitter's weakest line, and a probe centred on one sees the carrier 1.5 kHz off with
+one sideband beside it, which is a carrier, and the NFM line reads the same way: the problem "And the lines as a set
 do separate them" describes, unsolved here. And speech-shaped USB is called PSK
 at 2293 baud. Where the symbol-rate detector found that line in band-limited
 noise has not been established; a corner at the band's edge, of the kind the

@@ -1309,7 +1309,7 @@ is, "not identified yet" or "probed 2 times, nothing identified".
 **On a click.** The label chooses the mode where the width rule used to, on
 the same condition, so a mode the operator named on the receiver still wins. A
 protocol sets its decoder's mode and attaches that decoder with the decode
-switch on: P25 and M17 to p25p1, D-STAR and TETRA to their own, POCSAG and
+switch on: P25 and M17 to p25p1, D-STAR, TETRA and DMR to their own, POCSAG and
 AX.25 to nfm, RTTY, SITOR-B and PSK31 to usb, CW to cw. An analogue label sets
 its own mode and attaches nothing. A digital family with no protocol sets usb
 when it is 3 kHz wide or less and otherwise leaves the width rule to choose.
@@ -1317,8 +1317,12 @@ The filter is one auto filter fit, ticked or not. A label that is unknown or
 may not drive changes nothing about a click.
 
 **What it cannot do yet.** Label USB or LSB, which the engine cannot tell
-apart; attach a DMR decoder, which does not exist yet; fit a filter when the
-receiver window's pane is not open, because the fit reads the pane.
+apart; fit a filter when the receiver window's pane is not open, because the
+fit reads the pane.
+
+WHAT THE LIST USED TO SAY after "apart": "attach a DMR decoder, which does
+not exist yet". It landed the same day, and a DMR label sets the dmr mode and
+attaches the dmr decoder.
 
 ## Decoding
 

@@ -15,11 +15,13 @@
 #include <string_view>
 #include <vector>
 
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/m17.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/tetra.h"
 #include "core/dsp/synth/channel.h"
+#include "core/dsp/synth/dmr_mod.h"
 #include "core/dsp/synth/dv_mod.h"
 #include "core/dsp/synth/fsk_mod.h"
 #include "core/dsp/synth/m17_mod.h"
@@ -362,6 +364,26 @@ template <typename T>
             return std::unexpected(audio.error());
         }
         out.push_back({"RTTY", 700'000, kVoiceRate, audio_to_baseband(*audio, kVoiceRate, 2210.0)});
+    }
+    {
+        // A base station's channel with nothing to say: every slot an idle
+        // burst behind its CACH, which is what a repeater keys up to between
+        // calls, from the transmitter tests/decode/test_dmr.cpp uses.
+        std::vector<siggen::DmrSlot> slots;
+        const std::array<std::uint8_t, decode::kDmrCachPayloadBits> payload{};
+        for (std::size_t i = 0; i < 144; ++i) {
+            siggen::DmrSlot slot;
+            slot.cach = siggen::dmr_cach(false, i % 2 == 0 ? 1 : 2, 0, payload);
+            slot.burst = siggen::dmr_idle_burst(decode::DmrSyncType::BsData, 1);
+            slots.push_back(slot);
+        }
+        siggen::DmrModConfig mod;
+        mod.rate = kVoiceRate;
+        auto made = must(siggen::dmr_render_slots(mod, slots), "the DMR emitter");
+        if (!made) {
+            return std::unexpected(made.error());
+        }
+        out.push_back({"DMR", -950'000, kVoiceRate, std::move(*made)});
     }
     {
         common.seed = next_seed();

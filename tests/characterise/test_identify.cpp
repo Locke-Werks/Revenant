@@ -33,6 +33,7 @@
 #include "core/decode/tetra.h"
 #include "core/dsp/synth/channel.h"
 #include "core/dsp/synth/cw_mod.h"
+#include "core/dsp/synth/dmr_mod.h"
 #include "core/dsp/synth/dv_mod.h"
 #include "core/dsp/synth/fsk_mod.h"
 #include "core/dsp/synth/m17_mod.h"
@@ -458,26 +459,41 @@ TEST_CASE("a steady carrier is not CW", "[characterise][identify]") {
     CHECK(result.protocol == Protocol::None);
 }
 
-// The DMR row is present, plausible on a 4FSK-wide signal, and unavailable
-// until core/decode/dmr.h lands; with IdentifyConfig::dmr off it is gone.
-TEST_CASE("the DMR row waits for its decoder and can be switched off", "[characterise][identify]") {
+// A base station's channel, every slot an idle burst behind its CACH, is DMR;
+// with IdentifyConfig::dmr off the row is gone and nothing else claims it.
+//
+// REJECTS: a DMR row left reporting Unavailable after its decoder landed, and
+// a flag that stops the row verifying but still lists it.
+TEST_CASE("DMR is identified from its slot-aligned syncs, and the flag removes the row",
+          "[characterise][identify]") {
     constexpr dsp::SampleRate kRate = 48000;
-    const auto noise = characterise_test::gaussian_noise(2 * kRate, 1.0, kSeed + 30);
+    std::vector<siggen::DmrSlot> slots;
+    for (std::size_t i = 0; i < 72; ++i) {
+        siggen::DmrSlot slot;
+        const std::array<std::uint8_t, decode::kDmrCachPayloadBits> payload{};
+        slot.cach = siggen::dmr_cach(false, i % 2 == 0 ? 1 : 2, 0, payload);
+        slot.burst = siggen::dmr_idle_burst(decode::DmrSyncType::BsData, 1);
+        slots.push_back(slot);
+    }
+    auto rendered = siggen::dmr_render_slots(siggen::DmrModConfig{}, slots);
+    REQUIRE(rendered.has_value());
+    rendered->resize(std::min<std::size_t>(rendered->size(), 2 * kRate));
+    const auto samples = in_noise(std::move(*rendered), kRate, kSnrDb, kSeed + 30);
+
     identify::IdentifyHints hints;
     hints.occupied_hz = 8100.0;
     identify::IdentifyConfig config;
     config.rate = kRate;
 
-    auto on = identify::identify(dsp::ConstComplexSpan(noise), hints, config);
+    auto on = identify::identify(dsp::ConstComplexSpan(samples), hints, config);
     REQUIRE(on.has_value());
-    const auto dmr = std::find_if(on->attempts.begin(), on->attempts.end(),
-                                  [](const identify::Attempt& a) { return a.protocol == Protocol::Dmr; });
-    REQUIRE(dmr != on->attempts.end());
-    CHECK(dmr->result == identify::AttemptResult::Unavailable);
+    check_identified("dmr", *on, Protocol::Dmr);
 
     config.dmr = false;
-    auto off = identify::identify(dsp::ConstComplexSpan(noise), hints, config);
+    auto off = identify::identify(dsp::ConstComplexSpan(samples), hints, config);
     REQUIRE(off.has_value());
+    print_attempts("dmr off", *off);
+    CHECK(off->protocol == Protocol::None);
     CHECK(std::none_of(off->attempts.begin(), off->attempts.end(),
                        [](const identify::Attempt& a) { return a.protocol == Protocol::Dmr; }));
 }
