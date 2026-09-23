@@ -21,9 +21,17 @@
 namespace revenant::ui {
 namespace {
 
-// Dark enough that an empty band is not a grey wall and not pure black, so
-// the bottom of the colour map is still distinguishable from nothing drawn.
-const QColor kBackground(4, 6, 16);
+// Rows never written, which is the bottom of the colour map and the window's
+// own background: render/colour_map.h starts the map there so an empty band
+// recedes into the window. A row that has not arrived yet and a row of
+// nothing look alike on purpose, and the line SpanView.qml draws at the
+// history's edge is what tells them apart while the ring is filling.
+//
+// WHAT THIS USED TO SAY. "Dark enough that an empty band is not a grey wall
+// and not pure black, so the bottom of the colour map is still
+// distinguishable from nothing drawn." It was (4, 6, 16), which was also the
+// old map's own bottom stop, so the two were never distinguishable.
+const QColor kBackground(colour_map::kBottom.r, colour_map::kBottom.g, colour_map::kBottom.b);
 
 // The item's own node, so the parts are named rather than fetched back out
 // of the child list by index.

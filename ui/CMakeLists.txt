@@ -170,6 +170,7 @@ qt_add_executable(revenant_ui
     models/rds_link.cpp
     models/receiver_link.cpp
     models/source_link.cpp
+    render/colour_map.h
     render/passband_item.cpp
     render/passband_item.h
     render/spectrum_item.cpp
@@ -480,6 +481,7 @@ if(REVENANT_UI_TESTS)
             tests/test_audio_ring.cpp
             tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
+            tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp

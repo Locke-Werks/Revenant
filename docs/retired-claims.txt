@@ -814,9 +814,10 @@ instead: M17's randomiser is the 46-byte sequence of Appendix B, Table B.1, XORe
 phrase: chosen for monotone luminance
 retired: 2026-09-22
 commit: Pin either end of the span colour map, and test the scale arithmetic
-instead: Rec. 709 luma rises to about 182 at the yellow-green stop and falls
-    to about 168 at the orange one before climbing to the white. The map is
-    monotone below 0.72 and above 0.86, which is what ui/tests asserts.
+instead: It was not: Rec. 709 luma fell from about 182 at the yellow-green stop
+    to about 168 at the orange one. The map is now render/colour_map.h, with
+    OKLab lightness rising linearly from Theme.background to 0.97, and
+    ui/tests asserts that across 1024 samples.
 
 phrase: There is no pin control in this client yet
 retired: 2026-09-22

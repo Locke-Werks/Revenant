@@ -48,6 +48,8 @@
 #include <cstdint>
 #include <span>
 
+#include "render/colour_map.h"
+
 namespace revenant::ui {
 
 // Duplicated from core/dsp/spectrum_levels_reference.h,
@@ -251,66 +253,23 @@ struct Rgb {
     std::uint8_t b = 0;
 };
 
-namespace detail {
-
-// Stops for the colour map, darkest first. A dark blue through teal to a warm
-// white. A ramp that dips in brightness puts a false edge in the middle of an
-// otherwise smooth region, and on a waterfall that reads as a band boundary.
+// THE MAP ITSELF IS render/colour_map.h, with lightness rising in a straight
+// line in OKLab from the window's background to a warm near-white. Both span
+// displays read it through colour_at below, so there is one source of colour.
 //
-// WHAT THIS PARAGRAPH USED TO SAY. It said the stops were "chosen for monotone
-// luminance". They are not quite: Rec. 709 luma rises to about 182 at the
-// yellow-green stop and falls to about 168 at the orange one before climbing
-// to the white, measured when ui/tests/test_spectrum_scale.cpp was written on
-// 2026-09-22. The dip is among strong signals, not in the noise floor, and it
-// is left for the owner to decide on because it changes what every pixel of
-// both displays looks like.
-struct ColourStop {
-    float position;
-    Rgb colour;
-};
-
-inline constexpr std::array<ColourStop, 7> kColourStops{{
-    {0.00F, {4, 6, 16}},
-    {0.18F, {18, 30, 92}},
-    {0.38F, {24, 86, 160}},
-    {0.56F, {34, 160, 148}},
-    {0.72F, {176, 196, 64}},
-    {0.86F, {244, 158, 48}},
-    {1.00F, {255, 246, 214}},
-}};
-
-[[nodiscard]] inline std::uint8_t mix_channel(std::uint8_t low, std::uint8_t high, float t)
-{
-    const float value = static_cast<float>(low) +
-                        (static_cast<float>(high) - static_cast<float>(low)) * t;
-    return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 255.0F)));
-}
-
-}  // namespace detail
+// WHAT THIS PARAGRAPH USED TO SAY. The map was seven sRGB stops here, "chosen
+// for monotone luminance", and they were not: Rec. 709 luma fell from about
+// 182 at the yellow-green stop to about 168 at the orange one. The retraction
+// of that claim was recorded here on 2026-09-22, and the owner asked the same
+// day for the map to be made monotone, which colour_map.h does.
 
 // Darkest to brightest, for a level already normalised to [0, 1]. Values
 // outside that range are clamped rather than wrapped: a frame briefly above
 // its own ceiling should saturate white, not fold back to black.
 [[nodiscard]] inline Rgb colour_at(float level)
 {
-    const auto& stops = detail::kColourStops;
-    const float position = std::clamp(level, 0.0F, 1.0F);
-
-    std::size_t upper = 1;
-    while (upper + 1 < stops.size() && stops[upper].position < position) {
-        ++upper;
-    }
-
-    const detail::ColourStop& low = stops[upper - 1];
-    const detail::ColourStop& high = stops[upper];
-    const float width = high.position - low.position;
-    const float t = width <= 0.0F ? 0.0F : (position - low.position) / width;
-
-    return Rgb{
-        detail::mix_channel(low.colour.r, high.colour.r, t),
-        detail::mix_channel(low.colour.g, high.colour.g, t),
-        detail::mix_channel(low.colour.b, high.colour.b, t),
-    };
+    const colour_map::Srgb8 c = colour_map::colour_at(level);
+    return Rgb{c.r, c.g, c.b};
 }
 
 // The same map as a 0xAARRGGBB word, which is what QImage::Format_RGB32 and

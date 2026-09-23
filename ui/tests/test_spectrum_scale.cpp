@@ -204,34 +204,8 @@ TEST_CASE("the colour map clamps at its ends", "[scale]")
     CHECK(above.b == white.b);
 }
 
-// Rejects a ramp that dips in brightness, which puts a false edge in a smooth
-// noise floor and reads on a waterfall as a band boundary. Rec. 709 luma is
-// the measure.
-//
-// NOT ACROSS THE WHOLE MAP, which is what the map's own comment claimed until
-// this test was written. Luma rises from the dark blue to the yellow-green
-// stop at 0.72, about 182, and then FALLS to about 168 at the orange stop at
-// 0.86 before rising again to the warm white. The dip is at the top of the
-// map, among strong signals rather than in the noise floor, which is where
-// the false edge the comment warns about would matter most, and it is
-// recorded rather than repaired here because the colour map is a visual
-// decision for the owner. The two monotone stretches are what is asserted.
-TEST_CASE("the colour map brightens monotonically below yellow and above orange",
-          "[scale]")
-{
-    const auto luma_at = [](int hundredths) {
-        const auto rgb = colour_at(static_cast<float>(hundredths) / 100.0F);
-        return 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
-    };
-    for (const auto [from, to] : {std::array<int, 2>{0, 72}, std::array<int, 2>{86, 100}}) {
-        double previous = -1.0;
-        for (int step = from; step <= to; ++step) {
-            INFO(step);
-            CHECK(luma_at(step) >= previous - 0.5);
-            previous = luma_at(step);
-        }
-    }
-}
+// Whether the map rises in lightness is ui/tests/test_colour_map.cpp, beside
+// the map, which is render/colour_map.h since 2026-09-22.
 
 TEST_CASE("the packed colour is the same colour", "[scale]")
 {
