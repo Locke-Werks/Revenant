@@ -824,3 +824,11 @@ retired: 2026-09-22
 commit: Pin either end of the span colour map, and test the scale arithmetic
 instead: Either end can be pinned from the plates on the spectrum, and the
     pins are remembered across launches.
+
+phrase: with nothing in the schema, the client or the server moving
+retired: 2026-09-22
+commit: the change that put RTTY, AX.25, POCSAG, SITOR-B and NAVTEX on the seam
+instead: The schema and the client did not move for the audio decoders, and the
+    server did once: DecoderSpec::modes, so subscribeDecoded refuses an audio
+    decoder on a receiver whose demodulator does not produce what it reads,
+    naming the modes. A decoder added after that is one adapter and one row.

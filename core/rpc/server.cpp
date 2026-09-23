@@ -889,10 +889,15 @@ struct DecodedNode : std::enable_shared_from_this<DecodedNode> {
 // finds live memory, and `owner` is cleared under `lock` so that such a
 // dispatch finds null rather than a server that has gone.
 struct DecodeRoute {
-    DecodeRoute(engine::VrxId which, const DecoderSpec& what) : vrx(which), spec(what) {}
+    DecodeRoute(engine::VrxId which, const DecoderSpec& what, engine::Demod demod)
+        : vrx(which), spec(what), mode(engine::demod_name(demod)) {}
 
     const engine::VrxId vrx;
     const DecoderSpec& spec;
+
+    // The receiver's demodulator, which the engine never changes in place,
+    // for DecoderBuild: the sideband decides an RTTY decoder's polarity.
+    const std::string_view mode;
 
     // Loop thread only: the token that detaches the sink, and whether the
     // fault below has already been turned into ended() calls.
@@ -2216,6 +2221,18 @@ public:
             find_decoder(asked.empty() ? std::string_view(engine::demod_name(mode)) : asked);
         if (spec == nullptr) {
             if (asked.empty()) {
+                // A usb or nfm receiver has no decoder named after its mode
+                // and may well have several that read it, and naming those
+                // is the answer the operator was looking for.
+                const std::string readers = decoders_reading(engine::demod_name(mode));
+                if (!readers.empty()) {
+                    return to_exception(Error{std::format(
+                        "receiver {} is {} and no decoder is named after that mode, so there is "
+                        "nothing to attach by default: a {} receiver can carry more than one "
+                        "protocol. Name one; the decoders that read {} audio are {}",
+                        id->value, engine::demod_name(mode), engine::demod_name(mode),
+                        engine::demod_name(mode), readers)});
+                }
                 return to_exception(Error{std::format(
                     "receiver {} is {} and no decoder is named after that mode, so there is "
                     "nothing to attach by default. Name one; this engine has {}",
@@ -2223,6 +2240,19 @@ public:
             }
             return to_exception(Error{std::format(
                 "this engine has no decoder named '{}'. It has {}", asked, decoder_names())});
+        }
+
+        // The modes an audio decoder reads, asked before the input check
+        // below because it is the more specific answer: RTTY on a wfm
+        // receiver and RTTY on a raw tap are both refused here, naming the
+        // sideband the decoder needs, rather than one of them being told only
+        // that a complex tap has no audio.
+        if (!decoder_accepts(*spec, engine::demod_name(mode))) {
+            return to_exception(Error{std::format(
+                "the {} decoder reads the audio of a {} receiver and receiver {} is {}. Add a "
+                "receiver in {} on the signal",
+                spec->name, decoder_modes_text(*spec), id->value, engine::demod_name(mode),
+                decoder_modes_text(*spec))});
         }
 
         // The input the decoder reads against what the receiver gives. Checked
@@ -4127,7 +4157,7 @@ void ServerImpl::on_decoded_chunk(DecodeRoute& route, const engine::AudioChunk& 
     }
 
     if (route.decoder == nullptr) {
-        auto made = route.spec.make(chunk.rate);
+        auto made = route.spec.make(DecoderBuild{.rate = chunk.rate, .mode = route.mode});
         if (!made) {
             route.fault = made.error().message;
             wake_loop();
@@ -4178,7 +4208,7 @@ Status ServerImpl::add_decoded(std::shared_ptr<DecodedNode> node,
             return fail("this server is stopping and will install no further sinks");
         }
 
-        auto route = std::make_shared<DecodeRoute>(node->vrx, spec);
+        auto route = std::make_shared<DecodeRoute>(node->vrx, spec, status.params.demod);
         route->owner = this;
 
         // The fence starts where the receiver is, on start_rds's argument: a

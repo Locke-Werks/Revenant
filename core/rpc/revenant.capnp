@@ -2936,13 +2936,15 @@ interface Session {
     # receiver gets the p25p1 decoder, and it is refused on a mode no decoder
     # is named after. decoderResolved says which ran. The mode chooses the
     # channel filter and the decoder chooses what is read out of it, so they
-    # are separate on purpose: an AFSK decoder, when one exists, reads an nfm
-    # receiver's audio.
+    # are separate on purpose: the ax25 decoder reads an nfm receiver's audio
+    # and rtty a usb or lsb one's, and an empty name on those modes is refused
+    # with the list of decoders that read them.
     #
     # REFUSED, in words, for a receiver that does not exist, for a decoder
     # this engine does not have, and for an input the receiver cannot give:
-    # a complex-baseband decoder needs a receiver whose mode is a complex tap
-    # and an audio decoder needs one whose mode is not. The rate is NOT
+    # a complex-baseband decoder needs a receiver whose mode is a complex tap,
+    # and an audio decoder needs one of the modes its description names, which
+    # the refusal names again. The rate is NOT
     # checked here. The decoder is built on the first chunk at the rate that
     # chunk carries, because the rate a complex tap delivers is the engine's
     # business and is changing, and a decoder that cannot run at it says so

@@ -601,7 +601,8 @@ TEST_CASE("a P25 header crosses the wire as a decoded message", "[gpu][rpc][deco
     // the same transmission fed to the adapter directly, off the engine, in
     // chunks of one engine block's worth at the tap's rate, 16384 source
     // samples at 288000 being 2731 at 48000. Printed for docs/rpc.md.
-    auto decoder = rpc::P25p1Decoder::make(kP25TapRate);
+    auto decoder =
+        rpc::P25p1Decoder::make(rpc::DecoderBuild{.rate = kP25TapRate, .mode = "p25p1"});
     REQUIRE(decoder.has_value());
     constexpr std::size_t kStep = static_cast<std::size_t>(kFileRate / kP25TapRate);
     std::vector<float> interleaved;
