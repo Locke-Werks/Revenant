@@ -78,6 +78,7 @@ add_library(revenant_core STATIC
     decode/sitor_b.cpp
     decode/tetra.cpp
     decode/tone_frontend.cpp
+    decode/varicode.cpp
     decode/vocoder.cpp
     decode/vocoder_plugin.cpp
     detect/detector.cpp
