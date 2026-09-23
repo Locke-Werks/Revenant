@@ -205,6 +205,60 @@ struct CharacteriseConfig {
     // and a real carrier reported at an alias is still a real carrier.
     double psk_carrier_level_fraction = 0.5;
 
+    // The occupied bandwidth the DETECTOR measured for the signal this extract
+    // was taken to look at, in hertz, or zero when there is no detection
+    // behind the extract. core/engine/probe.cpp passes ProbeRequest::
+    // occupied_hz; a caller characterising a file by hand passes nothing.
+    //
+    // THE RULE IT FEEDS. A family whose symbol rate is wider than that
+    // bandwidth is refused. A linear modulation occupies its symbol rate times
+    // one plus its rolloff, and an FSK signal at least its symbol rate plus
+    // its shift, so a signal cannot be keyed faster than it is wide. What the
+    // characteriser reads at a rate like that is something else: a modulating
+    // tone, or the gap between two lines.
+    //
+    // docs/detection.md measured the case on 2026-09-23. The detector reports
+    // an NFM emitter as its Bessel comb, one track per line 146 to 183 Hz
+    // wide, a probe sized to one line sees a fragment of an 11 kHz signal, and
+    // it came back PSK or FSK at 1000 and 2000 baud, the modulating tone and
+    // its double: 57 wrong calls of 57 on NFM tracks and 33 of 33 on the
+    // two-tone SSB lines. This rule refuses every one of them, because every
+    // one names a rate five to fourteen times its track's width.
+    //
+    // The detector's reported width is its 99 percent occupied-power span,
+    // which on a raised-cosine signal is 0.87 of the nominal occupied band
+    // (docs/detection.md, "What the wide end costs"). At rolloff 0.35 that is
+    // still 1.17 times the symbol rate, so a real PSK track clears the rule
+    // by 17 percent and no tolerance is added to it.
+    double detection_bandwidth_hz = 0.0;
+
+    // THE TONE-PAIR CHECK, in the PSK branch.
+    //
+    // Two tones of comparable level square to a line at their difference,
+    // which the squared-envelope detector reads as a symbol clock, and they
+    // light the M-th power law at exponent two. So two carriers pass every
+    // test the PSK branch makes. Measured on 2026-09-23 through the probe
+    // pool: two-tone SSB at 700 and 1900 Hz came back PSK of order 2 at
+    // 1200.1 baud and confidence 1.00, at every level from 5 to 30 dB.
+    //
+    // What separates them is the spectrum. A PSK signal is filled: its three
+    // strongest adjacent bins hold 0.06 of its power. Two tones are two lines,
+    // each holding about half. So the branch is refused when the two strongest
+    // three-bin windows, taken at least four bins apart, hold at least this
+    // share of the band's excess power over its floor, the third strongest
+    // holds under tone_pair_third_fraction of the weaker of the two, and the
+    // two sit the claimed symbol rate apart, to within two bins or
+    // tone_pair_rate_tolerance of the rate, whichever is wider.
+    //
+    // A half, because real BPSK and QPSK at 1200 baud read 0.065 to 0.075 for
+    // the same two windows and two-tone SSB 0.82 at 5 dB in 2500 Hz rising to
+    // 0.997 at 30 dB, with the third line under 0.005 of the weaker tone;
+    // tests/characterise/test_consistency.cpp measures both sides at the
+    // probe pool's 12000 S/s floor bucket.
+    double tone_pair_fraction = 0.5;
+    double tone_pair_third_fraction = 0.25;
+    double tone_pair_rate_tolerance = 0.02;
+
     // Transform length for the averaged spectrum, or zero to let
     // analysis_segment pick one from the sample count.
     //
@@ -269,6 +323,22 @@ struct Characterisation {
     double psk_carrier_level = -1.0;
     bool psk_carrier_outside_band = false;
 
+    // The tone-pair measurement, CharacteriseConfig::tone_pair_fraction's
+    // rule: the share of the band's excess power in its two strongest
+    // three-bin windows, the third strongest over the weaker of those two, and
+    // how far apart the two sit. Negative when the spectrum had no excess to
+    // share out. psk_tone_pair is set when the rule refused the PSK branch.
+    double tone_pair_share = -1.0;
+    double tone_pair_third = -1.0;
+    double tone_pair_spacing_hz = 0.0;
+    bool psk_tone_pair = false;
+
+    // Set when CharacteriseConfig::detection_bandwidth_hz was given and the
+    // family's own symbol rate was wider than it. The family is then refused,
+    // Unknown with the reason in the refusal, and symbol_rate keeps the rate
+    // that was measured so a reader can see what was refused.
+    bool symbol_rate_exceeds_detection = false;
+
     // True when nothing at all was established: no family and no frame
     // period either. A frame period without a family is still a finding,
     // because a repeat is a repeat whatever is repeating, so it is not a
@@ -322,7 +392,9 @@ struct Characterisation {
 //
 // NECESSARY, NOT SUFFICIENT. It refuses an Unknown family and a flagged PSK
 // call, which are the two cases with a stated reason to refuse, and it
-// certifies nothing else. docs/detection.md measured that the family call on
+// certifies nothing else. The two rules of 2026-09-23, a symbol rate wider
+// than the detection and a PSK call that is two tones, refuse inside
+// characterise() and so arrive here as Unknown. docs/detection.md measured that the family call on
 // real HF cannot carry a detection decision on its own; a caller that routes a
 // family into detection passes through here first and still owes its own
 // measurement of what it is doing.

@@ -88,6 +88,71 @@ namespace {
     return best / typical;
 }
 
+// The two strongest lines and the third, for the tone-pair rule on
+// CharacteriseConfig::tone_pair_fraction. Each line is a three-bin window of
+// excess power over the band's floor, wrapping on a two-sided spectrum, and
+// each later window is taken at least four bins from every earlier one so a
+// line's own skirt is not counted as its neighbour.
+struct TonePair {
+    double share = -1.0;
+    double third = -1.0;
+    double spacing_hz = 0.0;
+};
+
+[[nodiscard]] TonePair tone_pair(const PowerSpectrum& spectrum, const OccupiedBand& band)
+{
+    TonePair out;
+    const std::size_t size = spectrum.bins.size();
+    if (size < 16) {
+        return out;
+    }
+    const double floor = band.found ? band.noise_floor : 0.0;
+    std::vector<double> excess(size);
+    double total = 0.0;
+    for (std::size_t k = 0; k < size; ++k) {
+        excess[k] = std::max(spectrum.bins[k] - floor, 0.0);
+        total += excess[k];
+    }
+    if (!(total > 0.0)) {
+        return out;
+    }
+
+    const auto window = [&](std::size_t k) {
+        return excess[(k + size - 1) % size] + excess[k] + excess[(k + 1) % size];
+    };
+    const auto apart = [size](std::size_t a, std::size_t b) {
+        const std::size_t d = a > b ? a - b : b - a;
+        return std::min(d, size - d) >= 4;
+    };
+
+    std::size_t picked[3] = {size, size, size};
+    double power[3] = {0.0, 0.0, 0.0};
+    for (std::size_t line = 0; line < 3; ++line) {
+        for (std::size_t k = 0; k < size; ++k) {
+            bool clear = true;
+            for (std::size_t earlier = 0; earlier < line; ++earlier) {
+                clear = clear && apart(k, picked[earlier]);
+            }
+            if (!clear) {
+                continue;
+            }
+            const double here = window(k);
+            if (picked[line] == size || here > power[line]) {
+                picked[line] = k;
+                power[line] = here;
+            }
+        }
+    }
+    if (picked[1] == size) {
+        return out;
+    }
+    out.share = (power[0] + power[1]) / total;
+    out.third = power[1] > 0.0 ? power[2] / power[1] : 1.0;
+    out.spacing_hz = std::abs(spectrum.frequency_at(static_cast<double>(picked[0])) -
+                              spectrum.frequency_at(static_cast<double>(picked[1])));
+    return out;
+}
+
 }  // namespace
 
 Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
@@ -174,6 +239,26 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
     out.psk_carrier_level = carrier_level(out.order, out.band, *spectrum);
     out.psk_carrier_outside_band =
         out.psk_carrier_level >= 0.0 && out.psk_carrier_level < config.psk_carrier_level_fraction;
+
+    // Whether what the PSK branch would call a symbol clock is the gap between
+    // two lines. See CharacteriseConfig::tone_pair_fraction. The rate is the
+    // one the branch would report, so the test is against the claim it would
+    // make rather than against either detector on its own.
+    {
+        const TonePair pair = tone_pair(*spectrum, out.band);
+        out.tone_pair_share = pair.share;
+        out.tone_pair_third = pair.third;
+        out.tone_pair_spacing_hz = pair.spacing_hz;
+        const SymbolRateEstimate& claimed =
+            out.squared_envelope.found ? out.squared_envelope : out.frequency_transition;
+        if (claimed.found && pair.share >= config.tone_pair_fraction &&
+            pair.third < config.tone_pair_third_fraction) {
+            const double tolerance =
+                std::max(2.0 * spectrum->bin_width_hz,
+                         config.tone_pair_rate_tolerance * claimed.symbol_rate_hz);
+            out.psk_tone_pair = std::abs(pair.spacing_hz - claimed.symbol_rate_hz) <= tolerance;
+        }
+    }
 
     ProtocolQuery query;
     query.bandwidth_hz = out.band.found ? out.band.bandwidth_hz : 0.0;
@@ -263,7 +348,8 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             "extract cannot separate{}{}",
             hertz(out.tones.frequency_spread_hz), hertz(out.band.bandwidth_hz), cycle,
             candidate_clause(out.candidates));
-    } else if (out.order.found && !constant_envelope && !out.psk_carrier_outside_band) {
+    } else if (out.order.found && !constant_envelope && !out.psk_carrier_outside_band &&
+               !out.psk_tone_pair) {
         out.family = ModulationFamily::Psk;
         out.family_confidence = out.order.confidence;
         out.symbol_rate =
@@ -294,6 +380,22 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
                 "and not to be used to drive detection",
                 kPskWithoutRateConfidence);
         }
+    }
+
+    // A signal cannot be keyed faster than it is wide. See
+    // CharacteriseConfig::detection_bandwidth_hz for the measurement. Applied
+    // to whatever family carried a rate, which is PSK and FSK: the others
+    // never report one.
+    double refused_rate = 0.0;
+    if (config.detection_bandwidth_hz > 0.0 && out.symbol_rate.found &&
+        out.symbol_rate.symbol_rate_hz > config.detection_bandwidth_hz &&
+        (out.family == ModulationFamily::Psk || out.family == ModulationFamily::Fsk)) {
+        refused_rate = out.symbol_rate.symbol_rate_hz;
+        out.symbol_rate_exceeds_detection = true;
+        out.family = ModulationFamily::Unknown;
+        out.family_confidence = 0.0;
+        out.psk_without_symbol_rate = false;
+        out.candidates.clear();
     }
 
     if (out.family == ModulationFamily::Unknown) {
@@ -327,6 +429,28 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
                 "made from it.",
                 out.order.order, out.order.margin_db, hertz(out.order.carrier_offset_hz),
                 out.psk_carrier_level, config.psk_carrier_level_fraction);
+        }
+
+        if (out.psk_tone_pair) {
+            out.refusal += std::format(
+                " The M-th power law found an order-{} line and a symbol clock was read at {}, "
+                "but {:.2f} of the band's excess power is in two lines {} apart, with the next "
+                "line at {:.2f} of the weaker. Two tones square to a line at their difference, so "
+                "that clock is the gap between two carriers, not a symbol rate, and no PSK call "
+                "was made from it.",
+                out.order.order,
+                hertz(out.squared_envelope.found ? out.squared_envelope.symbol_rate_hz
+                                                 : out.frequency_transition.symbol_rate_hz),
+                out.tone_pair_share, hertz(out.tone_pair_spacing_hz), out.tone_pair_third);
+        }
+
+        if (out.symbol_rate_exceeds_detection) {
+            out.refusal += std::format(
+                " A family was found at a symbol rate of {}, wider than the {} the detection it "
+                "was asked about occupies. A signal cannot be keyed faster than it is wide, so "
+                "the rate is a modulating tone or the gap between lines, and the family was "
+                "refused.",
+                hertz(refused_rate), hertz(config.detection_bandwidth_hz));
         }
 
         if (out.frame.found) {

@@ -505,6 +505,11 @@ struct ProbePool::Impl {
             characterise::CharacteriseConfig asked;
             asked.rate = capture.rate;
 
+            // The detection's own width, so a family keyed faster than the
+            // track is wide is refused rather than reported. See
+            // CharacteriseConfig::detection_bandwidth_hz.
+            asked.detection_bandwidth_hz = static_cast<double>(slot.request.occupied_hz);
+
             const auto began = std::chrono::steady_clock::now();
             auto result = characterise::characterise(
                 dsp::ConstComplexSpan(capture.samples.data(), capture.filled), asked);
@@ -531,6 +536,8 @@ struct ProbePool::Impl {
                 outcome.concentration = found.spectral_concentration;
                 outcome.may_drive_detection = characterise::may_drive_detection(found);
                 outcome.psk_without_symbol_rate = found.psk_without_symbol_rate;
+                outcome.psk_tone_pair = found.psk_tone_pair;
+                outcome.symbol_rate_exceeds_detection = found.symbol_rate_exceeds_detection;
             }
         }
 

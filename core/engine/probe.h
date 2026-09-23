@@ -47,9 +47,10 @@
 //   characterise::kMinCharacteriseSamples. kProbeFloorRate is the lowest
 //   bucket that holds that many in the stated dwell, so on a grid whose
 //   channel rate allows it every probe is exactly the stated dwell. A grid too
-//   fine to carry the floor, the 3000 S/s channels revenant-cli pins at 96 kS/s
-//   of HF, stretches the dwell to reach the sample floor instead and says so on
-//   the outcome.
+//   fine to carry the floor, the 3000 S/s channels of a 96 kS/s HF source
+//   over 64 channels, stretches the dwell to reach the sample floor instead
+//   and says so on the outcome. revenant-cli asked for that grid on HF until
+//   2026-09-23 and asks for the engine's own, 16 channels there, now.
 //
 // THREADING
 //
@@ -192,6 +193,14 @@ struct ProbeOutcome {
     // family the detector reports.
     bool may_drive_detection;
     bool psk_without_symbol_rate;
+
+    // The two refusals of 2026-09-23, carried so a survey can say which rule
+    // turned a call into Unknown: the PSK branch refused as two tones, and a
+    // family refused for a symbol rate wider than occupied_hz. See
+    // characterise::CharacteriseConfig::tone_pair_fraction and
+    // detection_bandwidth_hz.
+    bool psk_tone_pair;
+    bool symbol_rate_exceeds_detection;
 
     // What was asked and what was built for it.
     dsp::Hertz center;

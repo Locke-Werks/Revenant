@@ -115,23 +115,23 @@ constexpr Family kFamilies[] = {
 };
 constexpr std::size_t kSlots = std::size(kFamilies);
 
-// What the characteriser says about the two sideband emitters, which is wrong
-// and is pinned here as wrong rather than hidden.
+// What the characteriser says about the two sideband emitters: unknown, and
+// the refusal names the tone pair.
 //
-// Measured 2026-09-23 through a 12000 S/s probe at 30 dB in the occupied band:
-// usb and lsb both come back PSK of order 2 at 1200.1 baud and confidence
-// 1.00, which characterise::may_drive_detection accepts. 1200 Hz is the gap
-// between the scene's two tones, 700 and 1900 Hz. Two tones make a squared
-// envelope with one pure line at their difference, which the symbol-rate
-// detector reads as a symbol clock, and squaring them lights the M-th power
-// law at exponent two. Everything it checks is satisfied and none of it is
-// PSK. Its own spectral concentration says so, 0.50 against the 0.06 real
-// BPSK and QPSK read in the same run, and nothing in the PSK branch reads it.
+// Measured 2026-09-23 through a 12000 S/s probe at 30 dB in the occupied band,
+// before the tone-pair rule: usb and lsb both came back PSK of order 2 at
+// 1200.1 baud and confidence 1.00, which characterise::may_drive_detection
+// accepted. 1200 Hz is the gap between the scene's two tones, 700 and 1900 Hz.
+// Two tones make a squared envelope with one pure line at their difference,
+// which the symbol-rate detector reads as a symbol clock, and squaring them
+// lights the M-th power law at exponent two. CharacteriseConfig::
+// tone_pair_fraction now refuses the PSK branch when the two strongest lines
+// hold the band's power and sit the claimed rate apart.
 //
-// So the assertion for these two rows is "unknown, or this exact wrong call",
-// and the case prints which. The rule that would refuse it is a change to
-// core/characterise that docs/detection.md leaves open, with the options.
-constexpr ModulationFamily kTwoToneCall = ModulationFamily::Psk;
+// WHAT THE LAST PARAGRAPH USED TO SAY after the measurement: "So the
+// assertion for these two rows is 'unknown, or this exact wrong call', and the
+// case prints which. The rule that would refuse it is a change to
+// core/characterise that docs/detection.md leaves open, with the options."
 
 [[nodiscard]] bool is_sideband(std::string_view name) { return name == "usb" || name == "lsb"; }
 
@@ -498,12 +498,13 @@ struct PoolRun {
 
 [[nodiscard]] std::string describe(const engine::ProbeOutcome& outcome) {
     return std::format("{} {} conf {:.2f} rate {:.1f} Bd order {} tones {} conc {:.3f} drive {} "
-                       "flag {} at {} S/s, {} samples, slot {}{}, {:.1f} ms",
+                       "flag {} pair {} too fast {} at {} S/s, {} samples, slot {}{}, {:.1f} ms",
                        engine::probe_status_name(outcome.status),
                        characterise::modulation_family_name(outcome.family), outcome.confidence,
                        outcome.symbol_rate_hz, outcome.order, outcome.tone_count,
                        outcome.concentration, outcome.may_drive_detection,
-                       outcome.psk_without_symbol_rate, outcome.rate, outcome.samples,
+                       outcome.psk_without_symbol_rate, outcome.psk_tone_pair,
+                       outcome.symbol_rate_exceeds_detection, outcome.rate, outcome.samples,
                        outcome.slot, outcome.built ? " built" : "", outcome.characterise_ms);
 }
 
@@ -529,7 +530,8 @@ TEST_CASE("a probe's bucket and dwell follow the detection and the grid", "[engi
         CHECK_FALSE(engine::probe_shape(12'001, 75'000).has_value());
     }
     SECTION("a grid under the floor stretches the dwell to the sample floor") {
-        // 96 kS/s over the 64 channels revenant-cli pins is 3000 S/s channels.
+        // 96 kS/s over 64 channels is 3000 S/s channels, the grid revenant-cli
+        // asked for on HF until it gave way to the engine's own.
         const auto shape = engine::probe_shape(15, 3'000);
         REQUIRE(shape.has_value());
         CHECK(shape->rate == 3'000);
@@ -589,7 +591,8 @@ TEST_CASE("a probe names each synthetic family or says unknown, and noise stays 
         INFO(truth.name << ": " << describe(outcome));
         CHECK(outcome.status == engine::ProbeStatus::Characterised);
         if (is_sideband(truth.name)) {
-            CHECK((outcome.family == ModulationFamily::Unknown || outcome.family == kTwoToneCall));
+            CHECK(outcome.family == ModulationFamily::Unknown);
+            CHECK(outcome.psk_tone_pair);
             continue;
         }
         CHECK((outcome.family == truth.right || outcome.family == ModulationFamily::Unknown));
