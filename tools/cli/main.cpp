@@ -432,6 +432,12 @@ struct Options {
     double pace = -1.0;
 
     std::uint32_t channels = 64;
+
+    // Whether --channels was given. When it was not, 64 is a default that
+    // gives way to the engine's own choice on a source that states the
+    // resolution it needs, which is HF: EngineConfig::channels_yield_to_source.
+    bool channels_given = false;
+
     SampleRate audio_rate = 48'000;
     int gpu = -1;
 
@@ -795,11 +801,12 @@ void print_usage()
         "                      is the default without --play and is what makes an\n"
         "                      hour of capture take a minute. A live radio sets its\n"
         "                      own rate and ignores both of these.\n"
-        "  --channels <n>      Channelizer channel count, default 64. Zero lets the\n"
-        "                      engine size the grid from the source, which is the only\n"
-        "                      way to get the fine grid an HF recording asks for: a\n"
-        "                      2 MS/s capture at 7.1 MHz then opens on 256 channels and\n"
-        "                      7.6 Hz bins instead of 30.5. More channels is a narrower\n"
+        "  --channels <n>      Channelizer channel count, default 64 above 30 MHz and\n"
+        "                      the engine's own choice below it. Zero lets the engine\n"
+        "                      size the grid from the source everywhere: a 2 MS/s\n"
+        "                      capture at 7.1 MHz opens on 256 channels and 7.6 Hz\n"
+        "                      bins, a 96 kS/s one on 16 channels and 5.9 Hz. A number\n"
+        "                      pins the count on any band. More channels is a narrower\n"
         "                      widest receiver, and the two trade directly.\n"
         "  --audio-rate <hz>   Default 48000.\n"
         "  --gpu <n>           Device index, default -1, which honours\n"
@@ -1280,14 +1287,22 @@ void print_usage()
                 // pins it, deliberately, so without a zero there was no way to
                 // ask from here.
                 //
-                // The DEFAULT stays 64. docs/detection.md's measurements are
-                // all taken at 64 channels over 2.4 MS/s, and moving the
-                // default would invalidate a table rather than add an option.
+                // The DEFAULT stays 64 on VHF, where docs/detection.md's
+                // measurements were all taken at 64 channels over 2.4 MS/s.
+                // Below 30 MHz it gives way to the engine's own choice unless
+                // a count was given here; Options::channels_given.
+                //
+                // WHAT THIS PARAGRAPH USED TO SAY: "The DEFAULT stays 64.
+                // docs/detection.md's measurements are all taken at 64
+                // channels over 2.4 MS/s, and moving the default would
+                // invalidate a table rather than add an option." True of VHF
+                // still. On HF the pin cost tier two 57 of 126 answers.
                 if (*number != 0 && (*number < 2 || *number > 65'536)) {
                     return fail("--channels is a power of two between 2 and 65536, or 0 to let "
                                 "the engine size the grid from the source");
                 }
                 options.channels = static_cast<std::uint32_t>(*number);
+                options.channels_given = true;
             } else if (arg == "--gpu") {
                 if (*number < -1 || *number > 1'000) {
                     return fail("--gpu is a device index, or -1 to choose");
@@ -3223,6 +3238,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
     engine::EngineConfig config;
     config.gpu_index = options.gpu;
     config.channels = options.channels;
+    config.channels_yield_to_source = !options.channels_given;
     config.audio_rate = options.audio_rate;
 
     // Chosen before the engine is created, because the spectrum stage is part

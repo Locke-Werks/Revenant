@@ -116,9 +116,15 @@ The file carries no centre frequency, so the URI has to:
 Without `center=` the stream sits at 0 Hz and `source::resolution_for_span`
 returns an unstated request. `--channels 0` then takes the engine's default of
 2 channels at 96 kS/s, 46.875 Hz per bin; with `center=14175000` the same run
-is widened to 16 channels and 5.859 Hz, and says so. `revenant-cli` pins 64
-channels unless told otherwise, which at 96 kS/s is 1.465 Hz per bin whatever
-the centre, and every run below uses that.
+is widened to 16 channels and 5.859 Hz, and says so. Every run below was taken
+at 64 channels, which at 96 kS/s is 1.465 Hz per bin whatever the centre.
+
+WHAT THE LAST SENTENCE USED TO SAY: "`revenant-cli` pins 64 channels unless
+told otherwise, which at 96 kS/s is 1.465 Hz per bin whatever the centre, and
+every run below uses that." Since 2026-09-23 it leaves the count to the engine
+below 30 MHz unless `--channels` names one, so with `center=` given the same
+command now opens on 16 channels. Pass `--channels 64` to reproduce the runs
+below.
 
 **`center=` is an assumption here, not a measurement.** Neither the file nor the
 dataset's Zenodo record (10.5281/zenodo.846442) states where the receiver was

@@ -730,10 +730,11 @@ struct DetectorConfig {
     // margin. An HF source asking for PSK31 at four bins across does not get a
     // longer transform: dsp::kMaxSpectrumTransform is 2048 and the shipped
     // default is already there. The CHANNEL COUNT is where HF resolution comes
-    // from. On the 96 kS/s recordings in docs/recordings.md, at the 64
-    // channels revenant-cli pins, the grid is 1.465 Hz per bin and 170 Hz is
-    // 116 bins; left to Engine::open_source they open on 16 channels at
-    // 5.86 Hz, where it is 29. Either way eight is a gap RTTY's own two tones
+    // from. On the 96 kS/s recordings in docs/recordings.md, at 64 channels,
+    // which revenant-cli asked for there until 2026-09-23, the grid is
+    // 1.465 Hz per bin and 170 Hz is 116 bins; left to Engine::open_source,
+    // as revenant-cli now leaves them, they open on 16 channels at 5.86 Hz,
+    // where it is 29. Either way eight is a gap RTTY's own two tones
     // clear, and docs/detection.md has the synthetic RTTY that does split.
     //
     // WHAT THIS PARAGRAPH USED TO SAY: "An HF recording asking for PSK31 at

@@ -247,7 +247,13 @@ public:
         // that can be right on both a 2.4 MS/s dongle and a 20 MS/s capture.
         // See default_channel_count. A caller that names a count gets
         // exactly that count, clamped only by the device.
-        const bool channels_chosen_here = grid.channels == 0;
+        //
+        // A caller that marked its count as a default gives it up to a source
+        // that states the resolution it needs. See
+        // EngineConfig::channels_yield_to_source.
+        const bool channels_chosen_here =
+            grid.channels == 0 || (config_.channels_yield_to_source &&
+                                   source->capabilities().resolution.stated());
         if (channels_chosen_here) {
             grid.channels = default_channel_count(rate);
         }

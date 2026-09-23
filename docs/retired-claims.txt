@@ -1629,3 +1629,13 @@ retired: 2026-09-23
 commit: "Play a client's recording at realtime and change its pace from the strip"
 instead: The file source holds its pace in an atomic read once a block, and
     set_pace changes it while the stream runs, restarting the stopwatch there.
+
+phrase: pins 64 channels by default and takes `--channels 0` to ask for this
+phrase: `revenant-cli` pins 64 channels unless told otherwise
+phrase: the 3000 S/s channels revenant-cli pins at 96 kS/s
+phrase: 96 kS/s over the 64 channels revenant-cli pins is 3000 S/s channels
+retired: 2026-09-23
+commit: "Let the engine choose the channel count on HF in revenant-cli"
+instead: revenant-cli's 64 channels are a default that gives way below 30 MHz,
+    through EngineConfig::channels_yield_to_source, so a 96 kS/s HF recording
+    opens on the engine's 16 channels unless --channels names a count.

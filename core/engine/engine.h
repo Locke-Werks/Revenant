@@ -159,6 +159,22 @@ struct EngineConfig {
     // and every existing caller, every test and every benchmark was written
     // against a fixed grid. revenant-engine passes zero.
     std::uint32_t channels = 64;
+
+    // True when `channels` is the caller's default rather than its choice, and
+    // should give way to the engine's own when the source states a resolution
+    // it needs, which source::resolution_for_span does below 30 MHz. The count
+    // is then chosen exactly as for zero: default_channel_count, widened until
+    // the stated resolution is met.
+    //
+    // revenant-cli sets it when --channels was not given. Its 64-channel
+    // default was pinned for docs/detection.md's VHF tables, and on a 96 kS/s
+    // HF recording that same pin made 3000 S/s channels: nothing wider than
+    // 750 Hz could be probed and a dwell took 5.46 s, which lost 57 of 126
+    // tier-two answers to tracks that had gone. The engine's own choice there
+    // is 16 channels and lost none. Above 30 MHz no source states a
+    // resolution, so this changes nothing on VHF.
+    bool channels_yield_to_source = false;
+
     std::uint32_t taps_per_branch = 17;
 
     // Audio rate every receiver resamples to unless it asks for another.

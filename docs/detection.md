@@ -683,8 +683,14 @@ with the channelizer rather than a device one, so raising it is a change to
 **What it costs is a narrower widest receiver,** and the two trade directly.
 7.8 kHz of channel spacing is right for HF, where the widest thing in the band
 plan is a few kilohertz, and would refuse a 12.5 kHz NFM channel on VHF.
-`revenant-engine` prints the substitution under the ring line; `revenant-cli`
-pins 64 channels by default and takes `--channels 0` to ask for this.
+`revenant-engine` prints the substitution under the ring line, and so does
+`revenant-cli`, which leaves the choice to the engine on HF unless
+`--channels` names a count.
+
+WHAT THE LAST SENTENCE USED TO SAY: "`revenant-cli` pins 64 channels by
+default and takes `--channels 0` to ask for this." Since "Let the engine
+choose the channel count on HF in revenant-cli" the 64 holds above 30 MHz
+only; "The probe receiver, built and measured" has what the pin cost tier two.
 
 **One constant here does not follow the grid.** `DetectorConfig::split_gap_bins`
 is eight bins and its justification is a frequency: RTTY's two tones 170 Hz
@@ -2166,10 +2172,73 @@ Three things this lane measured and did not decide, each with the options:
    would not touch the FSK tones read as carriers, and would not catch SSB probed
    at its own 2.7 kHz width; or leave the unit a track, as the task that built it
    asked.
-3. **The HF grid revenant-cli pins is a poor one for probes.** At 64 channels a
-   96 kS/s source runs 3000 S/s channels, so nothing wider than 750 Hz can be
-   probed and a dwell is 5.46 s; `--channels 0` gives 16 channels and 12000 S/s
-   at a coarser 5.86 Hz a bin.
+3. **The HF grid revenant-cli pinned was a poor one for probes.** At 64
+   channels a 96 kS/s source runs 3000 S/s channels, so nothing wider than
+   750 Hz can be probed and a dwell is 5.46 s; `--channels 0` gives 16 channels
+   and 12000 S/s at a coarser 5.86 Hz a bin.
+
+**The owner took all three on 2026-09-23**, as the integrator recommended: the
+tone-pair check for the first, the symbol-rate rule for the second, and the
+engine's own grid on HF for the third. The next section is the re-measurement.
+
+#### The three fixes, re-measured
+
+`CharacteriseConfig::tone_pair_fraction` refuses the PSK branch when the two
+strongest three-bin lines hold at least half the band's excess power, the third
+holds under a quarter of the weaker, and the two sit the claimed symbol rate
+apart. `CharacteriseConfig::detection_bandwidth_hz`, which the probe pool fills
+from the track, refuses any family whose symbol rate is wider than the track.
+`EngineConfig::channels_yield_to_source` lets revenant-cli's 64 give way below
+30 MHz. `tests/characterise/test_consistency.cpp` measures the first two either
+side of their bars: at 12000 S/s two-tone SSB holds 0.82 of its excess power in
+its two lines at 5 dB in 2500 Hz and 0.997 at 30 dB, real BPSK and QPSK 0.065
+to 0.075.
+
+The first survey table, one probe per emitter, re-run: usb and lsb go from
+0/3/0 at every level to 0/0/3 at every level, and every other row is unchanged.
+
+The second, tier two on the detector's tracks, before and after:
+
+| family | tracks | before, correct/wrong/unknown | after |
+| --- | --- | --- | --- |
+| nfm | 57 | 0/57/0 | 0/11/46 |
+| usb | 18 | 0/18/0 | 0/0/18 |
+| lsb | 15 probed | 0/15/0 | 0/0/15 |
+| fsk2 | 15 probed | 1/8/6 | 1/8/6 |
+| cw, am, bpsk, qpsk, ofdm | | all correct | unchanged |
+
+**The eleven NFM tracks still wrong are a different wrong.** Every one is a
+line 146 to 183 Hz wide now named an unmodulated carrier at 0.50 to 0.62, where
+before they were PSK or FSK at 1000 or 2000 baud. A probe sized to one line of a
+Bessel comb sees that line as a carrier, which it is; the rule cannot reach it,
+because a carrier carries no symbol rate to compare. The FSK tones are the same
+case from the other side and are unchanged for the same reason.
+
+The HF corpus through the 24-bit path, the same six recordings, 120 s each at
+four times realtime, pool of four. With no `--channels`, which on HF is now the
+engine's 16:
+
+| band, hour | born | characterised | too wide | lost with the track | answers named | first family |
+| --- | --- | --- | --- | --- | --- | --- |
+| 40 m 1359 | 16 | 15 | 2 | 0 | carrier 6, ofdm 5, psk 2 (1), unknown 2 | 4.95 s |
+| 40 m 1501 | 13 | 9 | 15 | 0 | carrier 7, unknown 2 | 5.56 s |
+| 40 m 1603 | 23 | 21 | 6 | 0 | carrier 15, psk 1 (0), unknown 5 | 5.55 s |
+| 20 m 1359 | 10 | 3 | 10 | 0 | carrier 3 | 4.10 s |
+| 20 m 1501 | 33 | 27 | 23 | 0 | carrier 16, psk 7 (0), unknown 4 | 9.22 s |
+| 20 m 1603 | 59 | 50 | 19 | 0 | carrier 33, psk 10 (1), unknown 7 | 5.38 s |
+
+Against the 16-channel rows of the table above: 8 of 26 PSK calls were reported
+before and 2 of 20 are now, unknown rose by 0 to 3 answers a band and carrier by
+0 to 2, and OFDM stayed at five on 40 m at 1359 UT. The run summary does not say
+which rule refused each call, and whether the refused ones were real PSK is not
+known, because nothing in this corpus has ground truth. The first-family times
+moved by up to 2.1 s, and a probe is placed on the wall clock, so that column
+varies run to run as well as rule to rule.
+
+With `--channels 64` the six runs reproduce the old 64-channel rows to within a
+run's variation, lost answers included: 9, 4, 6, 1, 19 and 17 came back after
+their track had gone. That is the pin's cost, and the default no longer pays it
+on HF.
 
 ### Confidence, and "unknown" as a real answer
 
