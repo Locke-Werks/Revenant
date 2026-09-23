@@ -2399,18 +2399,21 @@ std::string describe_audio_chain(const VrxPlan& plan) {
 // Per-block parameters
 // ---------------------------------------------------------------------------
 
-Expected<VrxFineBlock> fine_block(const VrxPlan& plan, std::uint32_t channel_base,
-                                  std::uint32_t channel_mask, std::uint32_t fine_mask,
-                                  SampleIndex first_output, std::uint32_t count) {
-    if (plan.channel_rate <= 0 || plan.demod_rate <= 0) {
-        return fail("fine_block: the plan carries no rates");
-    }
-    if (count == 0) {
-        return fail("fine_block: a dispatch of zero outputs has nothing to do");
-    }
+namespace {
 
-    const auto channel_rate = static_cast<SampleIndex>(plan.channel_rate);
-    const auto demod_rate = static_cast<SampleIndex>(plan.demod_rate);
+// The push constants for one dispatch of core/shaders/vrx_fine.comp, from the
+// absolute index alone. Shared by the fine stream and the display stream,
+// which are the same kernel over the same channel at different output rates.
+[[nodiscard]] Expected<VrxFineBlock> resample_block(const VrxFineConfig& config,
+                                                   SampleRate in_rate, SampleRate out_rate,
+                                                   std::uint64_t nco_delta,
+                                                   std::uint32_t channel_base,
+                                                   std::uint32_t channel_mask,
+                                                   std::uint32_t out_mask,
+                                                   SampleIndex first_output,
+                                                   std::uint32_t count) {
+    const auto channel_rate = static_cast<SampleIndex>(in_rate);
+    const auto demod_rate = static_cast<SampleIndex>(out_rate);
 
     const SampleIndex step_whole = channel_rate / demod_rate;
     const SampleIndex step_rem = channel_rate % demod_rate;
@@ -2434,8 +2437,8 @@ Expected<VrxFineBlock> fine_block(const VrxPlan& plan, std::uint32_t channel_bas
     out.chan_base = channel_base;
     out.chan_mask = channel_mask;
     out.in_offset = static_cast<std::uint32_t>(first_input & static_cast<SampleIndex>(channel_mask));
-    out.out_offset = static_cast<std::uint32_t>(first_output & static_cast<SampleIndex>(fine_mask));
-    out.out_mask = fine_mask;
+    out.out_offset = static_cast<std::uint32_t>(first_output & static_cast<SampleIndex>(out_mask));
+    out.out_mask = out_mask;
     out.count = count;
     out.step_whole = static_cast<std::uint32_t>(step_whole);
     out.step_rem = static_cast<std::uint32_t>(step_rem);
@@ -2446,14 +2449,14 @@ Expected<VrxFineBlock> fine_block(const VrxPlan& plan, std::uint32_t channel_bas
     // The phase at this block's first output, from the absolute index alone.
     // The uint64 product wraps modulo 2^64, which is the reduction modulo one
     // turn, so no block boundary can move it.
-    const std::uint64_t phase = nco_phase(plan.fine_nco_delta, first_output);
+    const std::uint64_t phase = nco_phase(nco_delta, first_output);
     out.nco_phase_high = static_cast<std::uint32_t>(phase >> 32U);
     out.nco_phase_low = static_cast<std::uint32_t>(phase);
-    out.nco_delta_high = static_cast<std::uint32_t>(plan.fine_nco_delta >> 32U);
-    out.nco_delta_low = static_cast<std::uint32_t>(plan.fine_nco_delta);
+    out.nco_delta_high = static_cast<std::uint32_t>(nco_delta >> 32U);
+    out.nco_delta_low = static_cast<std::uint32_t>(nco_delta);
 
-    if (const Status valid = validate(plan.fine, out); !valid) {
-        return std::unexpected(with_context(valid.error(), "fine_block"));
+    if (const Status valid = validate(config, out); !valid) {
+        return std::unexpected(valid.error());
     }
 
     // The window this dispatch touches. The newest sample is the last
@@ -2463,8 +2466,28 @@ Expected<VrxFineBlock> fine_block(const VrxPlan& plan, std::uint32_t channel_bas
         frac0 + static_cast<SampleIndex>(count - 1U) * step_rem;
     block.newest_input = first_input + static_cast<SampleIndex>(count - 1U) * step_whole +
                          last_accumulated / demod_rate;
-    block.oldest_input = first_input - static_cast<SampleIndex>(plan.fine.taps - 1U);
+    block.oldest_input = first_input - static_cast<SampleIndex>(config.taps - 1U);
 
+    return block;
+}
+
+}  // namespace
+
+Expected<VrxFineBlock> fine_block(const VrxPlan& plan, std::uint32_t channel_base,
+                                  std::uint32_t channel_mask, std::uint32_t fine_mask,
+                                  SampleIndex first_output, std::uint32_t count) {
+    if (plan.channel_rate <= 0 || plan.demod_rate <= 0) {
+        return fail("fine_block: the plan carries no rates");
+    }
+    if (count == 0) {
+        return fail("fine_block: a dispatch of zero outputs has nothing to do");
+    }
+    auto block = resample_block(plan.fine, plan.channel_rate, plan.demod_rate,
+                                plan.fine_nco_delta, channel_base, channel_mask, fine_mask,
+                                first_output, count);
+    if (!block) {
+        return std::unexpected(with_context(block.error(), "fine_block"));
+    }
     return block;
 }
 
@@ -2503,6 +2526,144 @@ Expected<VrxDemodBlock> demod_block(const VrxPlan& plan, std::uint32_t fine_mask
     // agreeing is the whole point and they now agree by construction.
     block.oldest_fine = first_fine - static_cast<SampleIndex>(demod_fine_history(plan.demod));
 
+    return block;
+}
+
+// ---------------------------------------------------------------------------
+// The display tap
+// ---------------------------------------------------------------------------
+
+std::uint32_t display_max_decimation() {
+    // The transition is Fdisp/2 = Fc/(2R), so the fraction of the channel
+    // rate it spans falls as R rises and the reachable depth falls with it.
+    std::uint32_t best = 1;
+    for (std::uint32_t r = 1; r <= kMaxFinePhases; ++r) {
+        const double fraction = 1.0 / (2.0 * static_cast<double>(r));
+        if (attenuation_reachable(kDisplayTaps, fraction) < kDisplayAttenuationDb) {
+            break;
+        }
+        best = r;
+    }
+    return best;
+}
+
+std::vector<std::uint32_t> display_ladder(SampleRate channel_rate) {
+    std::vector<std::uint32_t> rungs{1U};
+    if (channel_rate <= 0) {
+        return rungs;
+    }
+    const std::uint32_t cap = display_max_decimation();
+    for (;;) {
+        std::uint32_t next = 0;
+        for (std::uint32_t d = 2U * rungs.back(); d <= cap; ++d) {
+            if (channel_rate % static_cast<SampleRate>(d) == 0) {
+                next = d;
+                break;
+            }
+        }
+        if (next == 0) {
+            return rungs;
+        }
+        rungs.push_back(next);
+    }
+}
+
+std::uint32_t display_decimation(SampleRate channel_rate, Hertz reach_hz) {
+    if (channel_rate <= 0 || reach_hz <= 0) {
+        return 1U;
+    }
+    // Fdisp/4 >= 2 * reach, so the pane is at least four reaches across.
+    const SampleRate wanted = channel_rate / (8 * reach_hz);
+    std::uint32_t chosen = 1U;
+    for (const std::uint32_t rung : display_ladder(channel_rate)) {
+        if (static_cast<SampleRate>(rung) <= wanted) {
+            chosen = rung;
+        }
+    }
+    return chosen;
+}
+
+Expected<VrxDisplayPlan> plan_vrx_display(const VrxPlan& plan) {
+    if (plan.channel_rate <= 0) {
+        return fail("plan_vrx_display: the plan carries no channel rate");
+    }
+    if (plan.mix_denominator == 0 || plan.placement.residual_denominator == 0) {
+        return fail("plan_vrx_display: the plan carries no mix frequency");
+    }
+
+    // The passband in the frame the fine stage mixes to DC. Its edges are
+    // stated about the tuned frequency, which sits (residual - mix) above the
+    // mix: zero for seven modes and the operator's pitch for CW. Only the
+    // rate rule reads this, so a double is exact enough.
+    const double shift =
+        static_cast<double>(plan.placement.residual_numerator) /
+            static_cast<double>(plan.placement.residual_denominator) -
+        static_cast<double>(plan.mix_numerator) / static_cast<double>(plan.mix_denominator);
+    const double reach = std::max(std::abs(static_cast<double>(plan.passband.low) + shift),
+                                  std::abs(static_cast<double>(plan.passband.high) + shift));
+
+    VrxDisplayPlan out;
+    out.channel_rate = plan.channel_rate;
+    out.reach_hz = std::max<Hertz>(1, static_cast<Hertz>(std::ceil(reach)));
+    out.decimation = display_decimation(plan.channel_rate, out.reach_hz);
+    out.display_rate = plan.channel_rate / static_cast<SampleRate>(out.decimation);
+    out.fine.taps = kDisplayTaps;
+    out.fine.phases = 1U;
+    out.fine.nco_log2 = plan.fine.nco_log2;
+    out.group_delay_channel_samples = (static_cast<double>(kDisplayTaps) - 1.0) / 2.0;
+
+    // Flat to the pane's edge at Fdisp/4, and in stopband by the first
+    // frequency that folds back inside it, 3*Fdisp/4. Nothing exists past
+    // Fc/2, so at R = 1 that is the bound instead.
+    const auto channel_rate = static_cast<double>(plan.channel_rate);
+    const auto display_rate = static_cast<double>(out.display_rate);
+    out.pass_hz = 0.25 * display_rate;
+    out.stop_hz = std::min(0.75 * display_rate, 0.5 * channel_rate);
+
+    const double reachable =
+        attenuation_reachable(kDisplayTaps, (out.stop_hz - out.pass_hz) / channel_rate);
+    if (reachable < kDisplayAttenuationDb) {
+        return fail(std::format(
+            "plan_vrx_display: {} taps reach {:.1f} dB across {:.0f} to {:.0f} Hz at {} S/s, "
+            "short of {:.0f} dB. display_decimation should not have chosen R = {}",
+            kDisplayTaps, reachable, out.pass_hz, out.stop_hz, plan.channel_rate,
+            kDisplayAttenuationDb, out.decimation));
+    }
+    out.attenuation_db = std::min(kDisplayAttenuationCeilingDb, reachable);
+
+    // The cutoff sits midway between the two edges, so a design sharper than
+    // the budget needs is flat past the pane's edge rather than short of it.
+    const auto half_width = static_cast<Hertz>(0.5 * (out.pass_hz + out.stop_hz));
+    auto taps = design_fine_taps(out.fine, plan.channel_rate, half_width, plan.mix_numerator,
+                                 plan.mix_denominator, out.attenuation_db);
+    if (!taps) {
+        return std::unexpected(with_context(taps.error(), "plan_vrx_display"));
+    }
+    out.taps = std::move(*taps);
+
+    auto delta = nco_delta(plan.mix_numerator, plan.mix_denominator, out.display_rate);
+    if (!delta) {
+        return std::unexpected(with_context(delta.error(), "plan_vrx_display mixer"));
+    }
+    out.nco_delta = *delta;
+    return out;
+}
+
+Expected<VrxFineBlock> display_block(const VrxDisplayPlan& plan, std::uint32_t channel_base,
+                                     std::uint32_t channel_mask, std::uint32_t display_mask,
+                                     SampleIndex first_output, std::uint32_t count) {
+    if (plan.channel_rate <= 0 || plan.display_rate <= 0) {
+        return fail("display_block: the plan carries no rates");
+    }
+    if (count == 0) {
+        return fail("display_block: a dispatch of zero outputs has nothing to do");
+    }
+    auto block = resample_block(plan.fine, plan.channel_rate, plan.display_rate,
+                                plan.nco_delta, channel_base, channel_mask, display_mask,
+                                first_output, count);
+    if (!block) {
+        return std::unexpected(with_context(block.error(), "display_block"));
+    }
     return block;
 }
 

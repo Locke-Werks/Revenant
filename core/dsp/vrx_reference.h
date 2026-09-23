@@ -1339,4 +1339,135 @@ struct VrxDemodBlock {
                                                   SampleIndex first_audio,
                                                   std::uint32_t count);
 
+// ---------------------------------------------------------------------------
+// The display tap
+// ---------------------------------------------------------------------------
+//
+// What the passband pane transforms. It is core/shaders/vrx_fine.comp again,
+// specialized a second time with a different tap table, reading the same
+// channel and writing a ring of its own.
+//
+// WHY IT EXISTS. The pane used to transform the fine ring, which is written
+// AFTER the channel filter. The pane is wider than the filter, so the noise
+// floor carried the filter's own magnitude response: full level inside the
+// passband, stopband level outside, and a skirt that moved whenever the
+// operator dragged an edge. Measured on white noise at -40 dBFS with a
+// 6 kHz NFM filter, the floor read -84.2 dB inside the passband and fell to
+// -170 dB at the edges of the pane, and a tone 2 kHz outside the passband
+// read 83.6 dB below an identical tone inside it. docs/ui-spectrum.md has the
+// before and after figures.
+//
+// This tap reads the channel BEFORE any receiver filter: the same mix the
+// fine stage applies, so the axis is the fine stream's to the hertz, then a
+// fixed anti-alias lowpass and an integer decimation, nothing else. The
+// filter the operator is dragging is drawn over the result by the client.
+//
+// THE RATE RULE.
+//
+// The pane keeps the central half of the transform, which is what
+// core/shaders/spectrum.comp keeps natively, so it spans half the display
+// rate: [dc - Fdisp/4, dc + Fdisp/4]. The anti-alias filter is flat to that
+// edge and in its stopband by 3*Fdisp/4, which is the nearest frequency that
+// folds back inside the pane, so nothing aliases into what is shown.
+//
+// Fdisp is Fc/R for an integer R, so the resampler is a pure decimator: its
+// fractional phase is zero at every output, one polyphase branch is the whole
+// table, and the recurrence is exact integer arithmetic with no remainder.
+// R is the largest rung of the channel rate's ladder (display_ladder) that
+// keeps the pane at least four passband reaches wide, where the reach is how
+// far the passband's further edge sits from the pane's centre. A symmetric
+// band B wide therefore gets a pane of at least 2B, a one-sided band such as
+// USB's [0, B] at least 4B, and neither more than twice that, because rungs
+// are at least a factor of two apart.
+//
+// R is also capped by the tap budget. The table is kDisplayTaps long whatever
+// R is, so that a change of R is a new table and new push constants rather
+// than a new pipeline, and 256 taps at the channel rate reach
+// kDisplayAttenuationDb across a transition of Fdisp/2 only while R stays at
+// or below display_max_decimation(). At the canonical 625 kS/s channel that
+// is R = 25; the ladder's top rung there is 20, so the narrowest pane is
+// 15.6 kHz.
+//
+// WHY THE PANE HOLDS STILL DURING A DRAG. R changes only when the reach
+// crosses a rung, and adjacent rungs are at least a factor of two apart, so
+// an edge dragged across most of a pane moves nothing and the pane changes
+// span only when the passband has roughly doubled or halved. A retune that
+// keeps R keeps the display stream running; one that moves R restarts it,
+// and the graph counts the frames skipped while the new window fills.
+//
+// Written from the same published mathematics as the fine stage: Crochiere
+// and Rabiner, "Multirate Digital Signal Processing", chapter 2 for
+// decimation by an integer and the alias bound above, and Oppenheim and
+// Schafer section 7.5.3 for the Kaiser design.
+
+// Taps in the display filter's one branch. kMaxFineTaps, which is what
+// dsp::validate lets the kernel run.
+inline constexpr std::uint32_t kDisplayTaps = kMaxFineTaps;
+
+// The anti-alias stopband the display filter has to reach before the fold,
+// and the most it is designed for when the tap budget would allow more. The
+// ceiling is the fine stage's own spur floor: the 16-bit NCO table puts
+// spurs near -96 dBc, so designing past 100 dB buys nothing visible.
+inline constexpr double kDisplayAttenuationDb = 80.0;
+inline constexpr double kDisplayAttenuationCeilingDb = 100.0;
+
+// The rungs R may take for a channel rate, ascending from 1. Each rung after
+// the first is the smallest divisor of the channel rate that is at least
+// twice the rung below it, and none exceeds display_max_decimation(), so
+// every rung divides the rate exactly and rungs are at least a factor of two
+// apart. A rate with few small divisors has few rungs, down to 1 alone. At
+// 625 kS/s and at 75 kS/s alike the ladder is 1, 2, 4, 8, 20.
+[[nodiscard]] std::vector<std::uint32_t> display_ladder(SampleRate channel_rate);
+
+// The largest R at which kDisplayTaps reach kDisplayAttenuationDb across a
+// transition of Fdisp/2, by Kaiser's order estimate. Independent of the rate
+// itself because the transition is a fixed fraction of it: 25.
+[[nodiscard]] std::uint32_t display_max_decimation();
+
+// The decimation the rule above picks for a passband whose further edge sits
+// reach_hz from the display centre.
+[[nodiscard]] std::uint32_t display_decimation(SampleRate channel_rate, Hertz reach_hz);
+
+struct VrxDisplayPlan {
+    SampleRate channel_rate = 0;
+    SampleRate display_rate = 0;
+    std::uint32_t decimation = 1;
+
+    // What the rate was chosen from, in the frame the fine stage mixes to DC.
+    Hertz reach_hz = 0;
+
+    // taps = kDisplayTaps, phases = 1, and the receiver's own NCO table.
+    VrxFineConfig fine{};
+    std::vector<Complex32> taps;
+
+    // The fine stage's mix frequency at the display rate, from the plan's
+    // exact rational, so the display's DC is the fine stream's DC.
+    std::uint64_t nco_delta = 0;
+
+    // The design, in hertz from the display's DC. Flat to pass_hz, which is
+    // the pane's own edge; in stopband by stop_hz, which is the nearest
+    // frequency that folds into the pane; attenuation_db is what the Kaiser
+    // design was asked for between them.
+    double pass_hz = 0.0;
+    double stop_hz = 0.0;
+    double attenuation_db = 0.0;
+
+    // Delay from the channel stream to the display stream, in channel
+    // samples: the one branch's centre, (kDisplayTaps - 1) / 2.
+    double group_delay_channel_samples = 0.0;
+};
+
+// The display tap for a receiver's plan. Pure, like plan_vrx, and cheap
+// enough to call on every retune: one Kaiser-windowed sinc of kDisplayTaps.
+[[nodiscard]] Expected<VrxDisplayPlan> plan_vrx_display(const VrxPlan& plan);
+
+// Push constants for display outputs [first_output, first_output + count),
+// by the same exact arithmetic fine_block uses for the fine stream.
+[[nodiscard]] Expected<VrxFineBlock> display_block(const VrxDisplayPlan& plan,
+                                                   std::uint32_t channel_base,
+                                                   std::uint32_t channel_mask,
+                                                   std::uint32_t display_mask,
+                                                   SampleIndex first_output,
+                                                   std::uint32_t count);
+
 }  // namespace revenant::dsp

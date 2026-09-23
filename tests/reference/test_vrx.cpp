@@ -35,6 +35,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <span>
 #include <string>
 #include <vector>
@@ -1312,6 +1313,274 @@ TEST_CASE("the fine stage is bit-exact three hours into a stream", "[gpu][vrx][m
 }
 
 // ---------------------------------------------------------------------------
+// The display tap: the fine kernel again, with one 256-tap branch
+// ---------------------------------------------------------------------------
+//
+// What the passband pane transforms. The kernel is vrx_fine.comp and the twin
+// is reference_vrx_fine, both refereed above, but the configuration is new:
+// one polyphase branch, so the interpolation always reads the guard entry
+// with a blend of exactly zero, 256 taps, and an integer rate ratio, so the
+// resampler's remainder is zero at every output. Each of those is a path the
+// fine plans never take, so each gets a bit-exact case of its own.
+
+namespace {
+
+dsp::VrxDisplayPlan make_display(const dsp::VrxPlan& plan) {
+    auto planned = dsp::plan_vrx_display(plan);
+    INFO(test::message_of(planned));
+    REQUIRE(planned.has_value());
+    return *planned;
+}
+
+dsp::VrxPlan make_cw_plan(dsp::Hertz centre, dsp::Hertz bandwidth, dsp::Hertz pitch) {
+    engine::VrxParams request;
+    request.center = centre;
+    request.bandwidth = bandwidth;
+    request.demod = engine::Demod::Cw;
+    request.cw_pitch = pitch;
+
+    auto placed = engine::place(kGrid, kSourceRate, request);
+    INFO(test::message_of(placed));
+    REQUIRE(placed.has_value());
+    auto planned = dsp::plan_vrx(kGrid, kSourceRate, request, *placed);
+    INFO(test::message_of(planned));
+    REQUIRE(planned.has_value());
+    return *planned;
+}
+
+// One plan per rung of the canonical 75 kS/s channel's ladder, 1, 2, 4, 8
+// and 20, plus CW, whose display is centred a pitch below the carrier, and
+// an asymmetric USB band, whose reach is its far edge rather than half its
+// width.
+struct DisplayCase {
+    const char* name;
+    dsp::VrxPlan plan;
+    std::uint32_t decimation;
+};
+
+std::vector<DisplayCase> display_cases() {
+    return {
+        {"nfm 16 kHz", make_plan(engine::Demod::Nfm, 196'500, 16'000, kGrid), 1},
+        {"nfm 9 kHz", make_plan(engine::Demod::Nfm, 196'500, 9'000, kGrid), 2},
+        {"nfm 4 kHz", make_plan(engine::Demod::Nfm, 196'500, 4'000, kGrid), 4},
+        {"am 2 kHz", make_plan(engine::Demod::Am, 196'500, 2'000, kGrid), 8},
+        {"nfm 900 Hz", make_plan(engine::Demod::Nfm, 196'500, 900, kGrid), 20},
+        {"cw 500 Hz at 700", make_cw_plan(196'500, 500, 700), 8},
+        {"usb 300 to 2700", make_edge_plan(engine::Demod::Usb, 196'500, 300, 2'700, kGrid), 2},
+    };
+}
+
+}  // namespace
+
+TEST_CASE("the display rate is a rung of the channel rate's ladder", "[vrx][m1]") {
+    // 256 taps reach 80 dB across Fdisp/2 up to R = 25 by Kaiser's estimate:
+    // 2.285 * 2*pi * 255 / (2R) + 8 >= 80.
+    CHECK(dsp::display_max_decimation() == 25U);
+
+    const std::vector<std::uint32_t> canonical{1, 2, 4, 8, 20};
+    CHECK(dsp::display_ladder(625'000) == canonical);
+    CHECK(dsp::display_ladder(75'000) == canonical);
+
+    // A prime rate divides by nothing but itself, so the display runs at the
+    // channel rate and the pane is one channel spacing whatever the band.
+    CHECK(dsp::display_ladder(75'011) == std::vector<std::uint32_t>{1});
+
+    for (const dsp::SampleRate rate : {dsp::SampleRate{625'000}, dsp::SampleRate{75'000},
+                                       dsp::SampleRate{300'000}, dsp::SampleRate{187'500},
+                                       dsp::SampleRate{64'000}}) {
+        const auto ladder = dsp::display_ladder(rate);
+        INFO("channel rate " << rate << ", " << ladder.size() << " rungs");
+        REQUIRE(!ladder.empty());
+        CHECK(ladder.front() == 1U);
+        for (std::size_t i = 0; i < ladder.size(); ++i) {
+            CHECK(rate % static_cast<dsp::SampleRate>(ladder[i]) == 0);
+            CHECK(ladder[i] <= dsp::display_max_decimation());
+            if (i > 0) {
+                CHECK(ladder[i] >= 2U * ladder[i - 1]);
+            }
+        }
+
+        // The pane is at least four reaches wide unless even R = 1 cannot
+        // make it so, and never wider than the next rung up would have made
+        // it had that rung still been wide enough.
+        for (dsp::Hertz reach = 50; reach < rate; reach += reach / 7 + 1) {
+            const std::uint32_t r = dsp::display_decimation(rate, reach);
+            const double pane = static_cast<double>(rate) / static_cast<double>(r) / 2.0;
+            INFO("reach " << reach << " Hz gives R " << r << " and a pane of " << pane << " Hz");
+            CHECK((pane >= 4.0 * static_cast<double>(reach) || r == 1U));
+
+            const auto at = std::find(ladder.begin(), ladder.end(), r);
+            REQUIRE(at != ladder.end());
+            if (std::next(at) != ladder.end()) {
+                const double narrower =
+                    static_cast<double>(rate) / static_cast<double>(*std::next(at)) / 2.0;
+                CHECK(narrower < 4.0 * static_cast<double>(reach));
+            }
+        }
+    }
+}
+
+TEST_CASE("the display pane moves only when a dragged edge crosses a rung", "[vrx][m1]") {
+    // docs/ui-spectrum.md: the pane must hold still while an operator drags
+    // an edge. Dragging the high edge of a USB filter from 1 kHz to 20 kHz,
+    // twenty times wider, in 250 Hz steps, which is coarser than a real drag
+    // and plenty to find every change.
+    std::vector<dsp::SampleRate> rates;
+    for (dsp::Hertz high = 1'000; high <= 20'000; high += 250) {
+        const auto plan = make_edge_plan(engine::Demod::Usb, 196'500, 300, high, kGrid);
+        const auto display = make_display(plan);
+        if (rates.empty() || rates.back() != display.display_rate) {
+            rates.push_back(display.display_rate);
+        }
+    }
+
+    std::string steps;
+    for (const dsp::SampleRate rate : rates) {
+        steps += " " + std::to_string(rate);
+    }
+    WARN("display rates across a 1 to 20 kHz USB edge drag:" << steps);
+
+    // 77 edge positions, and the pane changed at most once per rung.
+    CHECK(rates.size() <= dsp::display_ladder(75'000).size());
+
+    // And every change it did make was at least a doubling.
+    for (std::size_t i = 1; i < rates.size(); ++i) {
+        CHECK(rates[i] >= 2 * rates[i - 1]);
+    }
+}
+
+TEST_CASE("the display tap matches its CPU twin bit-exactly on every rung", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    constexpr std::uint64_t kSeed = 0x5652580000000020ULL;
+    constexpr dsp::SampleIndex kFirstOutput = 3'000'000'017ULL;
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+
+    for (const DisplayCase& item : display_cases()) {
+        const auto display = make_display(item.plan);
+        INFO(item.name << ": R " << display.decimation << ", display rate "
+                       << display.display_rate << ", reach " << display.reach_hz << " Hz, "
+                       << display.attenuation_db << " dB");
+        CHECK(display.decimation == item.decimation);
+        REQUIRE(display.fine.taps == dsp::kDisplayTaps);
+        REQUIRE(display.fine.phases == 1U);
+        REQUIRE(display.taps.size() == dsp::fine_tap_table_size(display.fine));
+
+        const auto nco = make_nco(item.plan);
+        auto block = dsp::display_block(display, kChanBase, kChanMask, kFineMask, kFirstOutput,
+                                        1024);
+        INFO(test::message_of(block));
+        REQUIRE(block.has_value());
+        CHECK(block->params.step_rem == 0U);
+        CHECK(block->params.frac0 == 0U);
+        CHECK(block->params.step_whole == display.decimation);
+
+        const auto gpu_result =
+            run_fine_on_gpu(display.fine, block->params, channel_ring, display.taps, nco, 64);
+
+        std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+        const auto computed = dsp::reference_vrx_fine(display.fine, block->params, channel_ring,
+                                                      display.taps, nco, cpu_result);
+        INFO(test::message_of(computed));
+        REQUIRE(computed.has_value());
+
+        REQUIRE(nonzero_count(std::span<const dsp::Complex32>(cpu_result)) > 512U);
+        REQUIRE(nonzero_count(std::span<const dsp::Complex32>(gpu_result)) > 512U);
+
+        const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+        INFO(comparison.report);
+        CHECK(comparison.identical);
+        CHECK(comparison.max_ulp_error == 0);
+    }
+}
+
+TEST_CASE("the display tap is bit-exact on rounding-hostile values at every workgroup size",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    auto& context = test::shared_context();
+    INFO("running on " << test::shared_context_description());
+
+    // 256 taps is the longest accumulation any plan hands this kernel, and
+    // the longest one is where a fused multiply-add a compiler slipped in
+    // has the most terms to show up in. A small in_offset so the read wraps
+    // from the bottom of the ring.
+    constexpr std::uint64_t kSeed = 0x5652580000000021ULL;
+
+    const auto plan = make_plan(engine::Demod::Nfm, 196'500, 4'000, kGrid);
+    const auto display = make_display(plan);
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.adversarial_complexes(kChanBase + kChanCapacity);
+
+    auto block = dsp::display_block(display, kChanBase, kChanMask, kFineMask, 1, 1000);
+    INFO(test::message_of(block));
+    REQUIRE(block.has_value());
+    REQUIRE(block->params.in_offset < display.fine.taps);
+
+    std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+    REQUIRE(dsp::reference_vrx_fine(display.fine, block->params, channel_ring, display.taps, nco,
+                                    cpu_result)
+                .has_value());
+
+    for (const std::uint32_t local_size : {32U, 64U, 128U, 256U}) {
+        if (local_size > context.info().max_workgroup_size_x) {
+            continue;
+        }
+        const auto gpu_result =
+            run_fine_on_gpu(display.fine, block->params, channel_ring, display.taps, nco,
+                            local_size);
+        const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+        INFO("local_size_x = " << local_size);
+        INFO(comparison.report);
+        CHECK(comparison.identical);
+    }
+}
+
+TEST_CASE("the display tap gives the same samples however the stream is blocked",
+          "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The same property the fine stage has, and needed for the same reason:
+    // the display stream is a pure function of the absolute index, so a
+    // retune that keeps the rate carries on the same stream.
+    constexpr std::uint64_t kSeed = 0x5652580000000022ULL;
+    constexpr dsp::SampleIndex kFirstOutput = 7'000'000'003ULL;
+    constexpr std::uint32_t kTotal = 900;
+    constexpr std::uint32_t kPiece = 300;
+
+    const auto plan = make_cw_plan(196'500, 500, 700);
+    const auto display = make_display(plan);
+    const auto nco = make_nco(plan);
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+
+    auto whole_block =
+        dsp::display_block(display, kChanBase, kChanMask, kFineMask, kFirstOutput, kTotal);
+    REQUIRE(whole_block.has_value());
+    const auto whole =
+        run_fine_on_gpu(display.fine, whole_block->params, channel_ring, display.taps, nco, 64);
+
+    for (std::uint32_t piece = 0; piece < kTotal / kPiece; ++piece) {
+        auto part = dsp::display_block(display, kChanBase, kChanMask, kFineMask,
+                                       kFirstOutput + piece * kPiece, kPiece);
+        REQUIRE(part.has_value());
+        const auto partial =
+            run_fine_on_gpu(display.fine, part->params, channel_ring, display.taps, nco, 64);
+        for (std::uint32_t i = 0; i < kPiece; ++i) {
+            const std::uint32_t slot = (part->params.out_offset + i) & kFineMask;
+            INFO("piece " << piece << " sample " << i << " at ring slot " << slot);
+            CHECK(partial[slot] == whole[slot]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The demodulators, bit for bit
 // ---------------------------------------------------------------------------
 
@@ -1547,7 +1816,117 @@ std::vector<dsp::Complex32> fine_tone_response(const dsp::VrxPlan& plan, double 
                                        ring.begin() + start + kToneOutputs);
 }
 
+// The same for a receiver's display tap. The block starts with its first
+// input at about 512 channel samples, clear of the 256-tap support, and is
+// as long as the channel ring allows at this decimation.
+std::vector<dsp::Complex32> display_tone_response(const dsp::VrxPlan& plan,
+                                                  const dsp::VrxDisplayPlan& display,
+                                                  double tone_hz) {
+    const auto nco = make_nco(plan);
+
+    std::vector<dsp::Complex32> channel_ring(kToneChanCapacity);
+    for (std::size_t n = 0; n < channel_ring.size(); ++n) {
+        channel_ring[n] = tone_at(tone_hz, static_cast<double>(plan.channel_rate), n);
+    }
+
+    const std::uint32_t r = display.decimation;
+    const dsp::SampleIndex first_output = (512U + r - 1U) / r;
+    const auto outputs = std::min<std::uint32_t>(kToneOutputs, (kToneChanCapacity - 1024U) / r);
+
+    auto block = dsp::display_block(display, 0, kToneChanMask, kToneFineMask, first_output,
+                                    outputs);
+    INFO(test::message_of(block));
+    REQUIRE(block.has_value());
+    REQUIRE(block->first_input >= display.fine.taps);
+    REQUIRE(block->newest_input < kToneChanCapacity);
+    REQUIRE(block->params.in_offset == block->first_input);
+
+    const auto ring = run_fine_on_gpu(display.fine, block->params, channel_ring, display.taps,
+                                      nco, 64);
+    const auto start = static_cast<std::ptrdiff_t>(block->params.out_offset);
+    REQUIRE(block->params.out_offset + outputs <= kToneFineCapacity);
+    return std::vector<dsp::Complex32>(ring.begin() + start, ring.begin() + start + outputs);
+}
+
 }  // namespace
+
+TEST_CASE("the display tap is flat across the pane and deep past the fold", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // What the passband pane needs of it: every frequency the pane shows
+    // comes through at unit gain, whatever the receiver's own filter does
+    // to it, and every frequency that would fold into the pane is gone.
+    // A 6 kHz NFM receiver 9 kHz off its channel centre, on the rung R = 2:
+    // a 37.5 kS/s display stream and a pane of plus and minus 9375 Hz.
+    const auto plan = make_plan(engine::Demod::Nfm, 196'500, 6'000, kGrid);
+    const auto display = make_display(plan);
+    const double mix = static_cast<double>(plan.mix_numerator) /
+                       static_cast<double>(plan.mix_denominator);
+    const double rate = static_cast<double>(display.display_rate);
+    INFO("R " << display.decimation << ", display rate " << display.display_rate
+              << ", flat to " << display.pass_hz << " Hz, stopband from " << display.stop_hz
+              << " Hz at " << display.attenuation_db << " dB");
+    REQUIRE(display.decimation == 2U);
+
+    double worst_ripple_db = 0.0;
+    for (const double offset : {-9'300.0, -9'000.0, -6'000.0, -4'000.0, -3'100.0, -1'000.0, 0.0,
+                                1'000.0, 3'100.0, 4'000.0, 6'000.0, 9'000.0, 9'300.0}) {
+        const auto out = display_tone_response(plan, display, mix + offset);
+        const auto fit = test::measure_complex_tone(out, rate);
+        const double level_db = 20.0 * std::log10(fit.magnitude);
+        INFO("a tone " << offset << " Hz from the display's DC: " << level_db << " dB at "
+                       << fit.frequency_hz << " Hz");
+        CHECK(fit.frequency_hz == Approx(offset).margin(0.5));
+        worst_ripple_db = std::max(worst_ripple_db, std::abs(level_db));
+    }
+
+    // Several of those tones are well outside the receiver's 3 kHz edge,
+    // where the fine stage attenuates by 80 dB. None of them is attenuated
+    // here, which is the whole of the change. 0.01 dB is ten times the
+    // Kaiser design's own ripple at the depth this rung is designed for.
+    WARN("display tap passband ripple across the pane: " << worst_ripple_db << " dB");
+    CHECK(worst_ripple_db < 0.01);
+
+    // Past the fold. Each of these, with no filter, would alias to offset
+    // plus or minus 37500, which is inside the pane for every one of them:
+    // the band that folds in starts 28125 Hz from the display's DC. The
+    // channel stream reaches 37.5 kHz either side of its own centre, which
+    // is 9 kHz below the display's, so the positive side has room for one.
+    double shallowest_db = -std::numeric_limits<double>::infinity();
+    for (const double offset : {-45'000.0, -40'000.0, -35'000.0, -30'000.0, 28'400.0}) {
+        const auto out = display_tone_response(plan, display, mix + offset);
+        const auto fit = test::measure_complex_tone(out, rate);
+        const double level_db = 20.0 * std::log10(std::max(fit.magnitude, 1.0e-12));
+        INFO("a tone " << offset << " Hz from the display's DC folds in at " << level_db << " dB");
+        CHECK(level_db < -80.0);
+        shallowest_db = std::max(shallowest_db, level_db);
+    }
+    WARN("display tap rejection of the frequencies that fold into the pane: at least "
+         << -shallowest_db << " dB");
+}
+
+TEST_CASE("a CW receiver's display is centred a pitch below the carrier", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The display mixes by the fine stage's own mix frequency, so its DC is
+    // the fine stream's DC to the hertz, which PassbandGeometry's bin zero
+    // is built from. On CW that is a pitch below the tuned frequency, so a
+    // carrier at the tuned frequency comes out at plus the pitch, at unit
+    // magnitude because no receiver filter is in the way.
+    const auto plan = make_cw_plan(196'500, 500, 700);
+    const auto display = make_display(plan);
+    const double residual = static_cast<double>(plan.placement.residual_numerator) /
+                            static_cast<double>(plan.placement.residual_denominator);
+
+    const auto out = display_tone_response(plan, display, residual);
+    const auto fit = test::measure_complex_tone(out, static_cast<double>(display.display_rate));
+    INFO("magnitude " << fit.magnitude << " at " << fit.frequency_hz << " Hz, R "
+                      << display.decimation);
+    CHECK(fit.magnitude == Approx(1.0).margin(0.001));
+    CHECK(fit.frequency_hz == Approx(700.0).margin(0.5));
+}
 
 TEST_CASE("a tone at the receiver's centre arrives at DC with unit magnitude",
           "[gpu][vrx][m1]") {
