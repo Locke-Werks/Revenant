@@ -710,8 +710,10 @@ TEST_CASE("one receiver's passband streams and carries its own axis",
     INFO("running on " << test::shared_context_description());
 
     // The surface an operator drags a filter edge over. It has to arrive with
-    // its own geometry rather than the span's, because its width is the
-    // receiver's demodulation rate and moves whenever the filter does.
+    // its own geometry rather than the span's, because its width is set by
+    // the receiver's passband and steps when the passband crosses a rung of
+    // the display rate's ladder. (That width "is the receiver's demodulation
+    // rate and moves whenever the filter does", this used to say.)
     constexpr std::uint32_t kPassbandTransform = 512;
     constexpr std::int64_t kLow = 300;
     constexpr std::int64_t kHigh = 2'700;
@@ -791,27 +793,39 @@ TEST_CASE("one receiver's passband streams and carries its own axis",
 
         CHECK(frame.vrx == *id);
         CHECK(frame.geometry.transform == kPassbandTransform);
-        CHECK(frame.geometry.bins == kPassbandTransform);
+        CHECK(frame.geometry.bins == kPassbandTransform / 2);
         CHECK(frame.power_db.size() == frame.geometry.bins);
 
-        // The axis is the receiver's own. Its width is the demodulation rate
-        // vrxStatus reported, which is the check that the two surfaces agree
-        // about how wide this receiver is: a display drawing filter edges
-        // against a frame whose span it had guessed would put them in the
-        // wrong place by whatever the guess was out by.
-        CHECK(frame.geometry.rate == demod_rate);
+        // The axis is the receiver's own and crosses the wire whole: the
+        // frame is the central half of a transform of the display stream,
+        // so it spans half the rate it carries, and bin zero sits a quarter
+        // of that rate below what the fine stage mixed to DC, which for USB
+        // is the receiver's own centre.
+        //
+        // WHAT THIS USED TO CHECK: that the frame's rate was the
+        // demodulation rate vrxStatus reported, and that the frame spanned
+        // all of it. The pane was the fine stream then. The display stream
+        // runs at a rate of its own, chosen from the passband by the rule in
+        // core/dsp/vrx_reference.h, and the frame's geometry is the only
+        // place it is reported, which is why a client reads the axis from
+        // the frame and never from vrxStatus.
+        REQUIRE(frame.geometry.rate > 0);
         REQUIRE(frame.geometry.bin_width.denominator != 0);
         const double bin_width = frame.geometry.bin_width.hertz();
-        CHECK(bin_width * static_cast<double>(frame.geometry.bins) ==
-              Approx(static_cast<double>(demod_rate)).epsilon(1.0e-9));
+        const double span = bin_width * static_cast<double>(frame.geometry.bins);
+        CHECK(span == Approx(0.5 * static_cast<double>(frame.geometry.rate)).epsilon(1.0e-9));
 
-        // Bin zero sits half a demodulation rate below what the fine stage
-        // mixed to DC, which for USB is the receiver's own centre.
         REQUIRE(frame.geometry.bin_zero.denominator != 0);
         CHECK(frame.geometry.bin_zero.hertz() ==
               Approx(static_cast<double>(params.center) -
-                     0.5 * static_cast<double>(demod_rate))
+                     0.25 * static_cast<double>(frame.geometry.rate))
                   .margin(1.0));
+
+        // And the pane holds the whole passband with room either side, which
+        // is what a display dragging its edges needs of it.
+        const double pane_low = frame.geometry.bin_zero.hertz() - 0.5 * bin_width;
+        CHECK(pane_low < static_cast<double>(params.center + kLow));
+        CHECK(pane_low + span > static_cast<double>(params.center + kHigh));
 
         CHECK(frame.count > 0);
         CHECK(std::ranges::all_of(frame.power_db, [](float value) {

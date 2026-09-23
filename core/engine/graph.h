@@ -125,12 +125,17 @@ struct VrxStageRequest {
     // Points in a passband transform, or 0 when the graph has no passband
     // stage. See GraphConfig::passband_transform.
     //
-    // A stage that keeps a fine ring has to hold a whole window of this
-    // length below everything the frames in flight are writing, or the
-    // transform reads slots a later dispatch has already overwritten. That
-    // is a sizing decision made once at construction, which is why it is
-    // here rather than on StageRecord: growing a ring mid-stream would mean
-    // freeing a buffer an in-flight command buffer still names.
+    // Non-zero is what makes a stage build its display tap at all, and the
+    // display ring it writes has to hold a whole window of this length below
+    // everything the frames in flight are writing, or the transform reads
+    // slots a later dispatch has already overwritten. That is a sizing
+    // decision made once at construction, which is why it is here rather
+    // than on StageRecord: growing a ring mid-stream would mean freeing a
+    // buffer an in-flight command buffer still names.
+    //
+    // WHAT THIS USED TO SAY: "A stage that keeps a fine ring has to hold a
+    // whole window of this length". The passband no longer reads the fine
+    // ring, so the fine ring is sized for the demodulator alone.
     std::uint32_t passband_transform = 0;
 };
 
@@ -172,36 +177,47 @@ struct StageOutput {
 
     dsp::SampleRate rate = 0;
 
-    // How far the stage's own complex baseband has got after this dispatch,
-    // as a half-open range of absolute fine-stream indices: [fine_from,
-    // fine_next) are the receiver's samples and are live in the ring
-    // fine_output() names.
+    // How far the stage's display stream has got after this dispatch, as a
+    // half-open range of absolute display-stream indices: [display_from,
+    // display_next) are the receiver's samples at display_rate and are live
+    // in the ring display_output() names.
     //
     // Both, and not just the end, because the passband transform's window
     // reaches back over several dispatches and the bottom of the ring is not
-    // the stream. Below fine_from is whatever the stage cleared the ring to,
-    // and a window straddling that boundary transforms a step that was never
-    // on the air. It is the same gate the full-span spectrum applies against
+    // the stream. Below display_from is what the ring held before this run
+    // of the stream began: the stage's clear, samples from before the sink
+    // was attached, or samples at a display rate a retune has since left.
+    // A window straddling that boundary transforms a step that was never on
+    // the air. It is the same gate the full-span spectrum applies against
     // blocks_contiguous_from, one stream down.
     //
-    // Left zero by a stage with no fine ring, which is what an empty
-    // fine_output() already says.
-    dsp::SampleIndex fine_from = 0;
-    dsp::SampleIndex fine_next = 0;
+    // All three stay zero on a dispatch that was not asked for the display,
+    // and on a stage with no display tap, which is what an empty
+    // display_output() already says.
+    //
+    // WHAT THESE USED TO BE: fine_from and fine_next, the same range over the
+    // fine ring. The passband transformed the fine stream, which is after
+    // the receiver's own filter, so the pane showed the filter's shape where
+    // the neighbourhood should have been. core/dsp/vrx_reference.h, "The
+    // display tap", has the measurement.
+    dsp::SampleIndex display_from = 0;
+    dsp::SampleIndex display_next = 0;
+    dsp::SampleRate display_rate = 0;
 
     // Where the fine stream's DC sits in the SOURCE's baseband frame, as an
     // exact rational in hertz: the coarse channel's centre plus the residual
-    // the stage mixes out.
+    // the stage mixes out. The display stream is mixed by the same
+    // frequency, so this is its DC too.
     //
     // Not the receiver's centre. CW translates the carrier to the operator's
     // pitch instead of to DC, so the two differ by the pitch there and agree
     // on the other seven modes. The stage is the only thing that knows which,
     // so the stage is what reports it.
     //
-    // Here rather than on StageFineOutput because a retune moves it, and
+    // Here rather than on StageDisplayOutput because a retune moves it, and
     // this is the one surface the graph reads on the recording thread only.
-    // Everything on StageFineOutput is fixed at construction, which is what
-    // lets the control plane read that struct while a block is being
+    // Everything on StageDisplayOutput is fixed at construction, which is
+    // what lets the control plane read that struct while a block is being
     // recorded.
     std::int64_t fine_dc_numerator = 0;
     std::int64_t fine_dc_denominator = 1;
@@ -224,19 +240,26 @@ struct StageOutput {
     std::uint64_t reanchor_frames_skipped = 0;
 };
 
-// A stage's own complex baseband on the device, for a second transform over
-// the receiver's passband.
+// A stage's display stream on the device, for a second transform over the
+// receiver's neighbourhood.
 //
-// The fine stage already writes exactly this: mixed to DC, limited to the
-// requested bandwidth, at the demodulation rate. docs/ui-spectrum.md calls
-// that the reason the fine-tuning display is cheap, since the expensive part
-// is already paid for by the demodulator. This is the seam that lets the
-// graph reach it without owning the demodulator's arithmetic.
+// The receiver's channel mixed to the fine stream's DC and decimated behind
+// a fixed anti-alias filter, with NO receiver filter in it: core/dsp/
+// vrx_reference.h, "The display tap", has the design and the rate rule. A
+// stage writes it only on dispatches whose StageRecord::display is set, so a
+// receiver nobody is looking at pays for the ring and not for the work.
 //
 // Everything here is fixed for the life of the stage. A retune moves where
-// the receiver points and changes no field below, which is what lets the
+// the receiver points and can move the display rate, which is why the rate
+// is on StageOutput instead; no field below changes, which is what lets the
 // graph write a descriptor set once.
-struct StageFineOutput {
+//
+// WHAT THIS USED TO BE: StageFineOutput, the fine ring itself, "mixed to DC,
+// limited to the requested bandwidth, at the demodulation rate", with the
+// rate here as "the width of a passband frame". That ring is after the
+// receiver's filter, which is the whole of why the pane showed a hump that
+// moved with the filter.
+struct StageDisplayOutput {
     // VK_NULL_HANDLE when the stage keeps no such ring, which is how a stage
     // declines a passband rather than by failing one.
     VkBuffer ring = VK_NULL_HANDLE;
@@ -245,16 +268,10 @@ struct StageFineOutput {
     std::uint32_t capacity = 0;
     std::uint32_t mask = 0;
 
-    // The fine stream's rate, which is the width of a passband frame.
-    dsp::SampleRate rate = 0;
-
-    // Delay from the channel stream to the fine stream, in channel samples,
-    // so the graph can say when a window's energy was on the air rather than
-    // when its samples reached this stage. Fractional because an
-    // interpolating prototype's centre is.
-    //
-    // Fixed like the rest: a retune that would change the filter's shape is
-    // refused outright, so the delay a shape implies cannot move either.
+    // Delay from the channel stream to the display stream, in channel
+    // samples, so the graph can say when a window's energy was on the air
+    // rather than when its samples reached this stage. The display filter's
+    // length is fixed whatever the rate, so this is too.
     double group_delay_channel_samples = 0.0;
 };
 
@@ -280,6 +297,12 @@ struct StageRecord {
     // size audio_bytes_for(max_blocks_per_dispatch) asked for.
     VkBuffer audio_destination = VK_NULL_HANDLE;
     VkDeviceSize audio_bytes = 0;
+
+    // Whether anybody is looking at this receiver's passband, which is the
+    // only reason to run its display tap. False costs nothing; the first
+    // dispatch after it turns true restarts the display stream, because the
+    // ring below that point is stale.
+    bool display = false;
 };
 
 // One receiver's fine stage and demodulator, recorded into the graph's command
@@ -322,16 +345,16 @@ public:
     [[nodiscard]] virtual Status retune(const VrxParams& params,
                                         const VrxPlacement& placement) = 0;
 
-    // The stage's own complex baseband, or an empty record when it keeps
-    // none. Called on the control plane, once, when a passband sink is
-    // attached, and never on the sample path.
+    // The stage's display stream, or an empty record when it keeps none.
+    // Called on the control plane, once, when a passband sink is attached,
+    // and never on the sample path.
     //
     // Defaulted rather than pure so that a stage written before the passband
     // existed still compiles and simply declines one. The graph's raw tap is
     // that case and stays that case: it copies a coarse channel out of the
     // channel ring without mixing or filtering, so it has no per-receiver
     // baseband of its own to transform.
-    [[nodiscard]] virtual StageFineOutput fine_output() const { return {}; }
+    [[nodiscard]] virtual StageDisplayOutput display_output() const { return {}; }
 
 protected:
     VrxStage() = default;
@@ -403,9 +426,13 @@ struct GraphConfig {
     // stage. See EngineConfig::passband_transform, which is where this comes
     // from and where the reasoning is.
     //
-    // A non-zero value enlarges every receiver's fine ring by a window's
-    // worth, whether or not that receiver ever attaches a sink, because the
-    // ring is sized once when the stage is built.
+    // A non-zero value gives every receiver a display ring a window deep and
+    // a 256-entry display tap table, whether or not that receiver ever
+    // attaches a sink, because both are sized once when the stage is built.
+    // The work is only done while a sink is attached.
+    //
+    // WHAT THIS USED TO SAY: "A non-zero value enlarges every receiver's fine
+    // ring by a window's worth". The window is in the display ring now.
     std::uint32_t passband_transform = 0;
 };
 

@@ -866,14 +866,14 @@ public:
     [[nodiscard]] Status set_passband_sink(VrxId id, PassbandSink sink) override {
         if (graph_ == nullptr) {
             return fail("Engine::set_passband_sink before a source is open: a passband's width "
-                        "is the receiver's demodulation rate, and there is no receiver until "
-                        "the source's rate is known");
+                        "is set by the receiver's channel and its filter, and there is no "
+                        "receiver until the source's rate is known");
         }
         if (config_.passband_transform == 0) {
             return fail("this engine was created with EngineConfig::passband_transform at "
                         "zero, so no passband stage was built. Set it before Engine::create: "
-                        "it sizes every receiver's fine ring, and a ring cannot be grown while "
-                        "a command buffer names it");
+                        "it sizes every receiver's display ring, and a ring cannot be grown "
+                        "while a command buffer names it");
         }
         return graph_->set_passband_sink(id, std::move(sink));
     }

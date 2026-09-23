@@ -1,9 +1,16 @@
 // The per-receiver passband spectrum, end to end on a real device.
 //
 // test_engine_spectrum.cpp covers the full-span chain. This is the other
-// transform: one receiver's own fine stream, at the demodulation rate, which
-// docs/ui-spectrum.md calls the fine-tuning display and the thing that makes
-// parking a filter on a signal precise rather than approximate.
+// transform: one receiver's own display stream, which docs/ui-spectrum.md
+// calls the fine-tuning display and the thing that makes parking a filter on
+// a signal precise rather than approximate.
+//
+// WHAT THIS FILE USED TO SAY IT TRANSFORMED: "one receiver's own fine
+// stream, at the demodulation rate". The fine stream is after the receiver's
+// filter, so the pane showed the filter's shape where the neighbourhood
+// should have been; the display stream is the same channel mixed the same
+// way with no receiver filter in it. core/dsp/vrx_reference.h, "The display
+// tap", and the neighbourhood case at the end of this file.
 //
 // WHAT IS NEW HERE, AND THEREFORE WHAT THESE CASES ARE FOR
 //
@@ -39,21 +46,15 @@
 //
 // Three things ARE new, and each one fails quietly:
 //
-//   The two-pass reconstruction. spectrum.comp keeps the central half of its
-//   transform, because that is what tiles a channel bank. A passband needs
-//   every bin: the demodulation rate is only 1.5 times the receiver's
-//   bandwidth at plan_vrx's shared floor, so the central half is 0.75 of the
-//   bandwidth and cuts into the signal rather than into the guard. The other
-//   half comes back from the same kernel under a window whose odd taps are
-//   negated, which shifts the transform by exactly N/2 bins, and the graph
-//   reassembles the two central halves into one ascending frame with three
-//   copy regions. Get the window wrong and half the frame mirrors the other
-//   half; get a copy region wrong and the frame is a plausible spectrum with
-//   a quarter of it in the wrong place.
+//   The display tap. A second specialization of the fine kernel per
+//   receiver, refereed bit for bit in tests/reference/test_vrx.cpp, and a
+//   ring the graph transforms. What this file checks is that the pane shows
+//   the air around the filter: a carrier outside the receiver's passband
+//   reads at the same level as one inside it, and white noise reads flat.
 //
-//   The frequency axis. It is the fine stream's and not the receiver's
-//   request: bin zero sits half a demodulation rate below whatever the fine
-//   stage mixed to DC, which for CW is one audio pitch away from
+//   The frequency axis. It is the display stream's and not the receiver's
+//   request: bin zero sits a quarter of the display rate below whatever the
+//   fine stage mixed to DC, which for CW is one audio pitch away from
 //   VrxParams::center. An axis a fixed offset out draws a correct spectrum
 //   under wrong labels, which is worse than no spectrum.
 //
@@ -64,8 +65,15 @@
 // So the cases that carry the weight put a generated emitter at a frequency
 // this file chose, park several receivers at chosen offsets from it, and
 // check each passband puts the energy where the scene's own truth record
-// says it is. One of those offsets is deliberately in the outer quarter of
-// the passband, where a single pass of the kernel writes no bin at all.
+// says it is. Two of those offsets put the carrier outside the receiver's
+// own filter, where the fine stream would have attenuated it by 80 dB.
+//
+// WHAT THE FIRST OF THOSE THREE USED TO BE: "The two-pass reconstruction",
+// a second pass of the spectrum kernel under a window with its odd taps
+// negated, reassembled with three copy regions, because the pane then
+// needed every bin of a transform of the fine stream. The display stream is
+// oversampled by two on purpose, so one pass and its central half is the
+// whole pane.
 //
 // AND SIGNALS THAT START AND STOP
 //
@@ -85,10 +93,13 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <filesystem>
 #include <format>
 #include <limits>
 #include <mutex>
 #include <numbers>
+#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -111,13 +122,14 @@ namespace {
 constexpr dsp::SampleRate kSourceRate = 2'400'000;
 constexpr std::uint32_t kChannels = 64;
 
-// 512 points of a 48 kHz fine stream is 93.75 Hz per bin. Both devices in the
-// conformance matrix hold a 512-point complex transform in one workgroup's
-// shared memory many times over; the engine clamps to what the device offers
-// and reports the clamp, and the geometry case checks that no clamp happened,
-// because one would mean this number was chosen for a machine that is no
-// longer the one being tested.
+// A 512-point transform keeps 256 bins. Both devices in the conformance
+// matrix hold a 512-point complex transform in one workgroup's shared memory
+// many times over; the engine clamps to what the device offers and reports
+// the clamp, and the geometry case checks that no clamp happened, because
+// one would mean this number was chosen for a machine that is no longer the
+// one being tested.
 constexpr std::uint32_t kPassbandTransform = 512;
+constexpr std::uint32_t kPassbandBins = kPassbandTransform / 2;
 
 // Small on purpose, as in test_engine_spectrum.cpp: 8192 source samples is
 // 256 coarse blocks at D = 32, which is about 164 fine samples at 48 kHz, so
@@ -125,20 +137,20 @@ constexpr std::uint32_t kPassbandTransform = 512;
 // satisfied by the very first one.
 constexpr std::size_t kBlockSamples = 8'192;
 
-// THE GEOMETRY THAT LETS A SIGNAL REACH THE OUTER QUARTER AT ALL
+// THE GEOMETRY THE CARRIER CASE PUTS A SIGNAL OUTSIDE THE FILTER WITH
 //
-// A signal outside the receiver's own filter is not in the passband to be
-// found, so putting one where a single pass of the kernel writes no bin
-// needs the filter to pass further out than Fd/4. plan_vrx sets
-// Fd = ceil(minimum_demod_rate / Fa) * Fa and the NFM minimum is the shared
-// floor of 1.5B, so B/Fd can be at most 2/3 and B/2 at most Fd/3. The window
-// that is both inside the filter and outside the central half is therefore
-// Fd/4 to Fd/3, which is a twelfth of the band and nothing wider.
+// A 6 kHz NFM receiver's further edge is 3 kHz from its centre, so the
+// display rule wants a pane at least 12 kHz wide: Fdisp of 24 kHz or more.
+// The 75 kS/s channel's ladder is 1, 2, 4, 8, 20, and the largest rung that
+// gives that is R = 2, so the display runs at 37.5 kS/s and the pane is
+// plus and minus 9375 Hz. An offset of 7 kHz is then 4 kHz outside the
+// receiver's own edge and 2.4 kHz inside the pane's.
 //
-// At Fa = 8 kHz and B = 16 kHz the minimum is 24 kHz, which is three audio
-// rates exactly, so Fd = 24 kHz, the filter passes to 8 kHz and the outer
-// quarter starts at 6 kHz. An offset of 7 kHz sits in the middle of that
-// window with a kilohertz of margin either side.
+// WHAT THIS PARAGRAPH USED TO WORK OUT: how to reach the OUTER QUARTER of a
+// transform of the fine stream, which needed a 16 kHz receiver so that the
+// filter passed further out than Fd/4, "a twelfth of the band and nothing
+// wider". A signal outside the receiver's filter could not be found at all
+// then, which is what this file now checks it can.
 //
 // A SECOND CONSTRAINT, AND IT IS THE ONE THAT CAUGHT THIS FILE OUT
 //
@@ -153,7 +165,8 @@ constexpr std::size_t kBlockSamples = 8'192;
 // and nothing reports it, so the cases below check it themselves.
 constexpr dsp::SampleRate kAudioRate = 8'000;
 constexpr dsp::Hertz kWideBandwidth = 16'000;
-constexpr dsp::SampleRate kExpectedDemodRate = 24'000;
+constexpr dsp::Hertz kNarrowBandwidth = 6'000;
+constexpr dsp::SampleRate kExpectedDisplayRate = 37'500;
 constexpr dsp::Hertz kOuterOffset = 7'000;
 
 constexpr dsp::Hertz kChannelSpacing = kSourceRate / kChannels;
@@ -531,30 +544,30 @@ TEST_CASE("a raw tap has no fine stream and the refusal says so",
     CHECK(unknown.error().message.find("9999") != std::string::npos);
 }
 
-TEST_CASE("a carrier lands where the passband's own axis says, in every quarter of the band",
+TEST_CASE("a carrier lands where the passband's own axis says, inside and outside the filter",
           "[gpu][engine][passband][m1]") {
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
 
     // The case the rest of the file is scaffolding for.
     //
-    // Four receivers on one emitter, at four offsets chosen so that the
-    // carrier lands in each of the three regions the frame is assembled
-    // from. Pass A supplies the central half; pass B supplies both outer
-    // quarters, and its output is split across two copy regions, so the two
-    // wide offsets below exercise different regions of the same pass.
+    // Four 6 kHz receivers on one emitter, at four offsets:
     //
     //   +7 kHz  the receiver sits above the carrier, so the carrier is at
-    //           -7 kHz: the NEGATIVE outer quarter, the upper half of pass
-    //           B's output copied to the bottom of the frame.
-    //   +2 kHz  carrier at -2 kHz, central half, pass A.
-    //   -2 kHz  carrier at +2 kHz, central half, pass A.
-    //   -7 kHz  carrier at +7 kHz: the POSITIVE outer quarter, the lower
-    //           half of pass B's output copied to the top of the frame.
+    //           -7 kHz, 4 kHz OUTSIDE the receiver's lower edge.
+    //   +2 kHz  carrier at -2 kHz, inside the passband.
+    //   -2 kHz  carrier at +2 kHz, inside the passband.
+    //   -7 kHz  carrier at +7 kHz, 4 kHz outside the upper edge.
     //
-    // A single-pass implementation writes no bin at all at plus or minus
-    // 7 kHz, so it cannot pass this by being off by a little; it reports the
-    // peak somewhere in the central half and misses by seven kilohertz.
+    // The two outside offsets are where the fine stage's filter is 80 dB
+    // down. A pane that still transformed the fine stream would report the
+    // peak somewhere else in the frame, or report it tens of decibels below
+    // the inside ones; the display stream reports it at the same level.
+    //
+    // WHAT THIS CASE USED TO BE: four 16 kHz receivers at the same offsets,
+    // all four carriers inside their filters, chosen so the carrier landed
+    // in each of the three regions a two-pass reassembly built the frame
+    // from.
     const SceneRequest scene{.span_low = kSceneCentre - kSceneSlack,
                              .span_high = kSceneCentre + kSceneSlack,
                              .samples = 700'000};
@@ -569,10 +582,10 @@ TEST_CASE("a carrier lands where the passband's own axis says, in every quarter 
                      carrier, carrier - kSceneCentre));
 
     const std::vector<Parked> parked{
-        {.receiver_above_carrier = kOuterOffset},
-        {.receiver_above_carrier = 2'000},
-        {.receiver_above_carrier = -2'000},
-        {.receiver_above_carrier = -kOuterOffset},
+        {.receiver_above_carrier = kOuterOffset, .bandwidth = kNarrowBandwidth},
+        {.receiver_above_carrier = 2'000, .bandwidth = kNarrowBandwidth},
+        {.receiver_above_carrier = -2'000, .bandwidth = kNarrowBandwidth},
+        {.receiver_above_carrier = -kOuterOffset, .bandwidth = kNarrowBandwidth},
     };
 
     // Every one of them has to be looking at its channel's clean band, or
@@ -595,11 +608,8 @@ TEST_CASE("a carrier lands where the passband's own axis says, in every quarter 
     REQUIRE(captured.frames.size() > 4 * 8);
     REQUIRE(captured.settled.size() == parked.size());
 
-    // Nobody's bandwidth was cut down to fit its channel. A clamp here would
-    // pull the filter's edge inside the offsets chosen above and the outer
-    // quarter would hold nothing but stopband, which reads as a broken
-    // reassembly rather than as a receiver that did not get what it asked
-    // for.
+    // Nobody's bandwidth was cut down to fit its channel. A clamp would move
+    // the edge the two outside offsets are measured against.
     for (const engine::VrxStatus& status : captured.settled) {
         INFO(std::format("receiver {} asked for {} Hz on channel {}", status.id.value,
                          status.params.bandwidth, status.placement.channel));
@@ -614,6 +624,10 @@ TEST_CASE("a carrier lands where the passband's own axis says, in every quarter 
                      captured.frames.size()));
     CHECK(total_non_finite == 0);
 
+    // The mean peak level each receiver saw, for the comparison after the
+    // loop between carriers inside and outside the filter.
+    std::vector<double> mean_peak_db(parked.size(), 0.0);
+
     for (std::size_t i = 0; i < parked.size(); ++i) {
         const engine::VrxId id = captured.ids[i];
         const dsp::Hertz offset = parked[i].receiver_above_carrier;
@@ -625,26 +639,31 @@ TEST_CASE("a carrier lands where the passband's own axis says, in every quarter 
         // Every frame this receiver delivered carries the same axis, so any
         // one of them will do for the geometry.
         engine::PassbandGeometry geometry{};
+        double peak_sum = 0.0;
+        std::size_t peak_count = 0;
         for (const CapturedFrame& frame : captured.frames) {
             if (frame.vrx == id) {
                 geometry = frame.geometry;
-                break;
+                peak_sum += static_cast<double>(frame.peak_db);
+                ++peak_count;
             }
         }
+        mean_peak_db[i] = peak_sum / static_cast<double>(peak_count);
 
-        INFO(std::format("{} bins of {} Hz from {} Hz, at a demodulation rate of {}",
+        INFO(std::format("{} bins of {} Hz from {} Hz, at a display rate of {}",
                          geometry.bins, geometry.bin_width_hz(), geometry.bin_zero_hz(),
                          geometry.rate));
 
         CHECK(geometry.enabled());
         CHECK(geometry.transform == kPassbandTransform);
-        CHECK(geometry.bins == kPassbandTransform);
-        CHECK(geometry.rate == kExpectedDemodRate);
+        CHECK(geometry.bins == kPassbandBins);
+        CHECK(geometry.rate == kExpectedDisplayRate);
 
-        // The frame is the whole demodulation rate wide, edge to edge. Half
-        // of it would be the central-half selection left in place.
+        // The frame is half the display rate wide: the central half of the
+        // transform, which is the part of the display stream that is flat
+        // and free of aliases.
         const double span = static_cast<double>(geometry.bins) * geometry.bin_width_hz();
-        CHECK(span == Approx(static_cast<double>(kExpectedDemodRate)));
+        CHECK(span == Approx(0.5 * static_cast<double>(kExpectedDisplayRate)));
 
         // And the axis is centred on the receiver, which for every mode but
         // CW is where the fine stage mixed to DC.
@@ -663,16 +682,27 @@ TEST_CASE("a carrier lands where the passband's own axis says, in every quarter 
         // Three bins. The carrier is exactly where the truth record says and
         // the receiver is tuned in whole hertz, so the only slack is half a
         // bin of quantisation plus the window's own spread. The failures
-        // this is aimed at are not close: a missing second pass misses by
-        // 14 kHz, a mirrored assembly by twice the offset, and an axis
-        // centred on the channel rather than on the receiver by up to half a
-        // channel spacing.
+        // this is aimed at are not close: a mirrored axis misses by twice
+        // the offset, and an axis centred on the channel rather than on the
+        // receiver by up to half a channel spacing.
         CHECK(std::abs(peak_hz - static_cast<double>(carrier)) <
               3.0 * geometry.bin_width_hz());
 
         // Most frames agree. Deliberately not all of them; see Vote.
         CHECK(vote.agreement() > 0.5);
     }
+
+    // The same carrier, seen from inside two receivers' filters and from
+    // outside two others'. With no receiver filter in the display stream the
+    // four read the same level to within the window's scalloping, which for
+    // a carrier landing anywhere in a bin is under a decibel and a half. A
+    // pane of the fine stream put the two outside ones 80 dB down.
+    const double inside_db = 0.5 * (mean_peak_db[1] + mean_peak_db[2]);
+    const double outside_db = 0.5 * (mean_peak_db[0] + mean_peak_db[3]);
+    INFO(std::format("the carrier reads {:.2f} dB from inside the filter and {:.2f} dB from 4 kHz "
+                     "outside it",
+                     inside_db, outside_db));
+    CHECK(std::abs(inside_db - outside_db) < 1.5);
 }
 
 TEST_CASE("a passband frame's window and sequence place it in the stream",
@@ -696,10 +726,10 @@ TEST_CASE("a passband frame's window and sequence place it in the stream",
     REQUIRE(captured.run_status.has_value());
     REQUIRE(captured.frames.size() > 8);
 
-    // The window is N fine samples, which at Fd = 48 kHz against a source at
-    // 2.4 MS/s is N * 50 source samples. Checked against the frame's own
-    // rate rather than against 50, so a receiver whose plan chose a
-    // different decimation is covered by the same relation.
+    // The window is N display samples, which for this 16 kHz receiver at a
+    // display rate of 75 kS/s against a source at 2.4 MS/s is N * 32 source
+    // samples. Checked against the frame's own rate rather than against 32,
+    // so a receiver on a different rung is covered by the same relation.
     const auto& first = captured.frames.front();
     const dsp::SampleIndex expected_count =
         static_cast<dsp::SampleIndex>(kPassbandTransform) *
@@ -719,7 +749,7 @@ TEST_CASE("a passband frame's window and sequence place it in the stream",
         CHECK(frame.sequence == expected_sequence);
         ++expected_sequence;
 
-        CHECK(frame.bins_seen == kPassbandTransform);
+        CHECK(frame.bins_seen == kPassbandBins);
         CHECK(frame.count == expected_count);
 
         // Inside the stream. The start is the window's first fine sample
@@ -905,9 +935,10 @@ TEST_CASE("a passband follows an emitter that starts and stops",
                      inside.size(), outside.size(), straddling));
 
     // Both groups have to be populated or the assertion below proves
-    // nothing. A window is N*50 source samples, which is 25600 at this
+    // nothing. A window is N*32 source samples, which is 16384 at this
     // geometry, so a 0.1 second burst holds several of them and so does the
-    // gap after it.
+    // gap after it. (N*50 and 25600, this used to say, while the window was
+    // N samples of a 48 kS/s fine stream.)
     REQUIRE(inside.size() > 4);
     REQUIRE(outside.size() > 4);
 
@@ -941,20 +972,20 @@ TEST_CASE("a passband follows an emitter that starts and stops",
     CHECK(weakest_on > loudest_off);
 }
 
-TEST_CASE("two central halves under the two windows reconstruct the whole band",
+TEST_CASE("one pass's central half puts a tone in the bin the passband axis names",
           "[engine][passband][m1]") {
-    // No device. This is the identity the graph's reassembly rests on,
-    // refereed against dsp::reference_spectrum, which is the bit-exact twin
-    // of the kernel the graph dispatches.
+    // No device. The identity the graph's frame rests on, refereed against
+    // dsp::reference_spectrum, which is the bit-exact twin of the kernel the
+    // graph dispatches: the pass keeps transform bins -N/4 to N/4, the graph
+    // copies them to the frame in ascending order, and frame bin b holds
+    // signed transform bin b - N/4, which is what passband_geometry_for's
+    // bin zero of DC minus a quarter of the display rate says.
     //
-    //     sum_n w[n] x[n] (-1)^n e^(-j2*pi*k*n/N) = X_w((k + N/2) mod N)
-    //
-    // The kernel keeps the central half, so the ordinary window hands back
-    // bins -N/4 to N/4 and the negated-odd window hands back the two outer
-    // quarters. Three copy regions put them in ascending order. If either
-    // the window or a region is wrong, a tone in the outer quarter of the
-    // band lands in the wrong bin or in no bin at all, and that is what this
-    // asserts against tones placed in each of the three regions.
+    // WHAT THIS CASE USED TO BE: "two central halves under the two windows
+    // reconstruct the whole band", the identity behind a second pass under
+    // a window with its odd taps negated. The frame no longer needs the
+    // outer quarters, because the display stream puts its own anti-alias
+    // skirt there.
     constexpr std::uint32_t kTransform = 256;
     constexpr std::uint32_t kRingBlocks = 1024;
 
@@ -962,21 +993,16 @@ TEST_CASE("two central halves under the two windows reconstruct the whole band",
     INFO(test::message_of(twiddles));
     REQUIRE(twiddles.has_value());
 
-    // Built the way core/engine/graph.cpp builds them: the shipped window
+    // Built the way core/engine/graph.cpp builds it: the shipped window
     // followed by a correction half of unity, because a passband has no
-    // channel shape to divide out. The second table is the first one's bits
-    // with the odd taps' signs flipped, which is exact.
+    // channel shape to divide out.
     auto base = dsp::build_spectrum_window(kTransform);
     INFO(test::message_of(base));
     REQUIRE(base.has_value());
 
-    std::vector<float> window_a = *base;
+    std::vector<float> window = *base;
     for (std::uint32_t bin = 0; bin < kTransform / 2; ++bin) {
-        window_a[kTransform + bin] = 1.0F;
-    }
-    std::vector<float> window_b = window_a;
-    for (std::uint32_t n = 1; n < kTransform; n += 2) {
-        window_b[n] = -window_b[n];
+        window[kTransform + bin] = 1.0F;
     }
 
     // The kernel is specialized at two channels because that is the smallest
@@ -995,10 +1021,9 @@ TEST_CASE("two central halves under the two windows reconstruct the whole band",
     const std::size_t half = kTransform / 2;
     const std::size_t quarter = kTransform / 4;
 
-    // One tone per region of the assembled frame: the negative outer
-    // quarter, the central half, and the positive outer quarter. Integer
-    // bins, so the answer is a single bin rather than a spread.
-    for (const int tone_bin : {-100, -30, 17, 100}) {
+    // Both ends of the kept half and points between. Integer bins, so the
+    // answer is a single bin rather than a spread.
+    for (const int tone_bin : {-64, -30, 0, 17, 63}) {
         INFO(std::format("a tone at transform bin {}", tone_bin));
 
         std::vector<dsp::Complex32> ring(2 * kRingBlocks, dsp::Complex32{});
@@ -1009,24 +1034,18 @@ TEST_CASE("two central halves under the two windows reconstruct the whole band",
                                      static_cast<float>(std::sin(phase))};
         }
 
-        std::vector<float> pass_a(2 * half, 0.0F);
-        std::vector<float> pass_b(2 * half, 0.0F);
-        REQUIRE(dsp::reference_spectrum(params, ring, *twiddles, window_a, pass_a).has_value());
-        REQUIRE(dsp::reference_spectrum(params, ring, *twiddles, window_b, pass_b).has_value());
+        std::vector<float> pass(2 * half, 0.0F);
+        REQUIRE(dsp::reference_spectrum(params, ring, *twiddles, window, pass).has_value());
 
-        // The graph's three copy regions, in the same order and with the
-        // same offsets record_passband() records them with.
-        std::vector<float> frame(kTransform, 0.0F);
+        // The graph's one copy region, with the offsets record_passbands()
+        // records it with.
+        std::vector<float> frame(half, 0.0F);
         for (std::size_t j = 0; j < half; ++j) {
-            frame[quarter + j] = pass_a[half + j];
-        }
-        for (std::size_t j = 0; j < quarter; ++j) {
-            frame[3 * quarter + j] = pass_b[half + j];
-            frame[j] = pass_b[half + quarter + j];
+            frame[j] = pass[half + j];
         }
 
-        // Ascending frame bin b holds signed frequency b - N/2.
-        const auto expected = static_cast<std::size_t>(tone_bin + static_cast<int>(half));
+        // Ascending frame bin b holds signed transform bin b - N/4.
+        const auto expected = static_cast<std::size_t>(tone_bin + static_cast<int>(quarter));
 
         std::size_t peak = 0;
         float best = -std::numeric_limits<float>::infinity();
@@ -1051,7 +1070,7 @@ TEST_CASE("two central halves under the two windows reconstruct the whole band",
     }
 }
 
-TEST_CASE("a passband over a real radio shows the filter's own edges",
+TEST_CASE("a passband over a real radio shows the station above the corners",
           "[.][gpu][engine][passband][rtlsdr]") {
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
@@ -1067,21 +1086,19 @@ TEST_CASE("a passband over a real radio shows the filter's own edges",
     // samples came off hardware through the convert kernel and the
     // channelizer rather than out of an arithmetic expression.
     //
-    // The assertion is one that holds whatever is on the air. The receiver's
-    // fine filter passes to B/2 and the frame reaches Fd/2 either side, so
-    // the bins beyond B/2 are that filter's stopband and have to be far below
-    // the ones inside it. A dead band makes both of them noise and the margin
-    // is the filter's attenuation; a live band makes the inside a signal and
-    // widens it. Either way the display is showing where the filter's edges
-    // are, which is what docs/ui-spectrum.md says the fine-tuning display is
-    // for.
+    // WHAT THIS CASE USED TO ASSERT, AND WHY IT CANNOT NOW. That the bins
+    // beyond the receiver's B/2 were "that filter's stopband and have to be
+    // far below the ones inside it", so that "the display is showing where
+    // the filter's edges are". That was the fault the display tap removed:
+    // the pane no longer carries the receiver's filter at all, so what sits
+    // beyond B/2 is whatever is on the air there. A broadcast station is
+    // 200 kHz wide and this receiver is 120, so the corners of the pane are
+    // the station's own outer sidebands and the old margin is not a
+    // property of anything.
     //
-    // That sentence said "the frame is Fd/2 wide" until 2026-09-20, which
-    // this file's own assertion contradicts: the case above CHECKs that the
-    // span equals kExpectedDemodRate, so the frame is Fd wide edge to edge.
-    // The old figure also made the assertion below impossible. Fd is 1.5
-    // times B at plan_vrx's floor, so a frame Fd/2 wide would reach only
-    // 0.375 B either side and hold no stopband bins at all.
+    // What it reports instead, with no threshold, is the level inside the
+    // receiver's band against the level in the corners, which on a strong
+    // station is the station's own spectral shape.
     auto attached = source::enumerate_rtlsdr_devices();
     if (!attached.has_value() || attached->empty()) {
         SKIP("no RTL-SDR is attached to this machine");
@@ -1153,10 +1170,9 @@ TEST_CASE("a passband over a real radio shows the filter's own edges",
                                inside += static_cast<double>(frame.power_db[bin]);
                                ++inside_bins;
                            } else if (std::abs(hz) >=
-                                      0.85 * 0.5 * static_cast<double>(frame.geometry.rate)) {
-                               // The far corners only. Between the passband
-                               // edge and here is the transition, which is
-                               // neither one thing nor the other.
+                                      0.85 * 0.25 * static_cast<double>(frame.geometry.rate)) {
+                               // The far corners of the pane, which is a
+                               // quarter of the display rate either side.
                                outside += static_cast<double>(frame.power_db[bin]);
                                ++outside_bins;
                            }
@@ -1208,17 +1224,269 @@ TEST_CASE("a passband over a real radio shows the filter's own edges",
                          kept.front().geometry.bin_width_hz(),
                      kept.front().geometry.bin_width_hz(), kWfmBandwidth, inside, outside));
 
-    CHECK(kept.front().geometry.bins == kRadioTransform);
+    CHECK(kept.front().geometry.bins == kRadioTransform / 2);
     CHECK(kept.front().geometry.rate > kWfmBandwidth);
 
-    // The filter is there and the display shows it. Twenty decibels is well
-    // under what a Kaiser design at this transition reaches and well over
-    // anything a frame of stale memory or a mirrored assembly would produce.
-    CHECK(inside - outside > 20.0);
+    WARN(std::format("98.1 MHz: inside the passband {:.1f} dB, in the corners {:.1f} dB, across "
+                     "{} frames",
+                     inside, outside, kept.size()));
+}
 
-    WARN(std::format("98.1 MHz: inside the passband {:.1f} dB, in the corners {:.1f} dB, so "
-                     "{:.1f} dB of filter edge across {} frames",
-                     inside, outside, inside - outside, kept.size()));
+namespace {
+
+// The owner's question, as a measurement: white noise, one tone inside the
+// passband and one just outside it, and what the pane makes of both.
+constexpr dsp::SampleRate kHoodRate = 2'400'000;
+constexpr dsp::Hertz kHoodCentre = 188'500;
+constexpr dsp::Hertz kHoodEdge = 3'000;
+constexpr dsp::Hertz kHoodInsideTone = -1'000;
+constexpr dsp::Hertz kHoodOutsideTone = 5'000;
+constexpr double kHoodToneAmplitude = 0.01;
+constexpr double kHoodNoiseDbfs = -40.0;
+constexpr std::size_t kHoodSamples = 2'400'000;
+constexpr std::uint64_t kHoodSeed = 20'260'922;
+
+struct Neighbourhood {
+    engine::PassbandGeometry geometry{};
+    std::size_t frames = 0;
+    std::vector<double> power;  // summed linear power per bin
+    std::vector<double> offset_hz;
+
+    [[nodiscard]] double mean_db(double from_hz, double to_hz) const {
+        double sum = 0.0;
+        std::size_t used = 0;
+        for (std::size_t bin = 0; bin < power.size(); ++bin) {
+            const double hz = offset_hz[bin];
+            const double magnitude = std::abs(hz);
+            if (magnitude < from_hz || magnitude > to_hz) {
+                continue;
+            }
+            if (std::abs(hz - kHoodInsideTone) < 400.0 || std::abs(hz - kHoodOutsideTone) < 400.0) {
+                continue;
+            }
+            sum += power[bin] / static_cast<double>(frames);
+            ++used;
+        }
+        return used == 0 ? std::numeric_limits<double>::quiet_NaN()
+                         : 10.0 * std::log10(sum / static_cast<double>(used));
+    }
+
+    [[nodiscard]] double tone_db(double at_hz) const {
+        double best = 0.0;
+        for (std::size_t bin = 0; bin < power.size(); ++bin) {
+            if (std::abs(offset_hz[bin] - at_hz) <= 200.0) {
+                best = std::max(best, power[bin] / static_cast<double>(frames));
+            }
+        }
+        return best > 0.0 ? 10.0 * std::log10(best) : -std::numeric_limits<double>::infinity();
+    }
+
+    // The tone's power summed across its main lobe, which unlike the peak
+    // bin does not depend on where in a bin the tone happens to fall. Two
+    // tones of one amplitude read the same here whatever their frequencies;
+    // their peaks differ by the window's scalloping.
+    [[nodiscard]] double tone_energy_db(double at_hz) const {
+        double sum = 0.0;
+        for (std::size_t bin = 0; bin < power.size(); ++bin) {
+            if (std::abs(offset_hz[bin] - at_hz) <= 300.0) {
+                sum += power[bin] / static_cast<double>(frames);
+            }
+        }
+        return sum > 0.0 ? 10.0 * std::log10(sum) : -std::numeric_limits<double>::infinity();
+    }
+
+    // Mean noise in each of `bands` equal slices of the pane, tones excluded.
+    [[nodiscard]] std::vector<double> slices_db(std::size_t bands) const {
+        std::vector<double> out;
+        const std::size_t per = power.size() / bands;
+        for (std::size_t band = 0; band < bands; ++band) {
+            double sum = 0.0;
+            std::size_t used = 0;
+            for (std::size_t bin = band * per; bin < (band + 1) * per; ++bin) {
+                const double hz = offset_hz[bin];
+                if (std::abs(hz - kHoodInsideTone) < 400.0 ||
+                    std::abs(hz - kHoodOutsideTone) < 400.0) {
+                    continue;
+                }
+                sum += power[bin] / static_cast<double>(frames);
+                ++used;
+            }
+            out.push_back(used == 0 ? std::numeric_limits<double>::quiet_NaN()
+                                    : 10.0 * std::log10(sum / static_cast<double>(used)));
+        }
+        return out;
+    }
+};
+
+[[nodiscard]] Neighbourhood measure_neighbourhood() {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() /
+        std::format("revenant_test_passband_hood_{}.cf32", stamp);
+
+    {
+        std::mt19937_64 generator(kHoodSeed);
+        const double sigma = std::sqrt(0.5 * std::pow(10.0, kHoodNoiseDbfs / 10.0));
+        std::normal_distribution<double> normal(0.0, sigma);
+
+        std::FILE* file = std::fopen(path.string().c_str(), "wb");
+        REQUIRE(file != nullptr);
+        std::vector<dsp::Complex32> chunk(65'536);
+        for (std::size_t done = 0; done < kHoodSamples; done += chunk.size()) {
+            const std::size_t count = std::min(chunk.size(), kHoodSamples - done);
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto n = static_cast<double>(done + i);
+                double re = normal(generator);
+                double im = normal(generator);
+                for (const dsp::Hertz offset : {kHoodInsideTone, kHoodOutsideTone}) {
+                    const double turns = std::fmod(
+                        static_cast<double>(kHoodCentre + offset) * n /
+                            static_cast<double>(kHoodRate),
+                        1.0);
+                    re += kHoodToneAmplitude * std::cos(2.0 * std::numbers::pi * turns);
+                    im += kHoodToneAmplitude * std::sin(2.0 * std::numbers::pi * turns);
+                }
+                chunk[i] = dsp::Complex32{static_cast<float>(re), static_cast<float>(im)};
+            }
+            REQUIRE(std::fwrite(chunk.data(), sizeof(dsp::Complex32), count, file) == count);
+        }
+        std::fclose(file);
+    }
+    struct Remove {
+        std::filesystem::path path;
+        ~Remove() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } remove{path};
+
+    Neighbourhood out;
+    std::mutex lock;
+
+    engine::EngineConfig config;
+    config.channels = kChannels;
+    config.taps_per_branch = 17;
+    config.ring_seconds = 0.5;
+    config.block_samples = kBlockSamples;
+    config.audio_rate = 48'000;
+    config.passband_transform = 1'024;
+    config.gpu_index = -1;
+
+    auto created = engine::Engine::create(config);
+    INFO(test::message_of(created));
+    REQUIRE(created.has_value());
+    auto& eng = **created;
+
+    const std::string uri = "file:///" + path.generic_string() +
+                            "?rate=" + std::to_string(kHoodRate) + "&format=cf32";
+    const auto opened = eng.open_source(uri);
+    INFO(test::message_of(opened));
+    REQUIRE(opened.has_value());
+
+    engine::VrxParams params;
+    params.center = kHoodCentre;
+    params.passband_low = -kHoodEdge;
+    params.passband_high = kHoodEdge;
+    params.demod = engine::Demod::Nfm;
+    params.squelch_dbfs = -300.0;
+    auto added = eng.add_vrx(params);
+    INFO(test::message_of(added));
+    REQUIRE(added.has_value());
+
+    REQUIRE(eng.set_passband_sink(*added,
+                                  [&](const engine::PassbandFrame& frame) -> Status {
+                                      const std::lock_guard<std::mutex> guard(lock);
+                                      if (out.power.size() != frame.power_db.size()) {
+                                          out.power.assign(frame.power_db.size(), 0.0);
+                                          out.frames = 0;
+                                      }
+                                      out.geometry = frame.geometry;
+                                      for (std::size_t bin = 0; bin < frame.power_db.size();
+                                           ++bin) {
+                                          out.power[bin] += std::pow(
+                                              10.0,
+                                              static_cast<double>(frame.power_db[bin]) / 10.0);
+                                      }
+                                      ++out.frames;
+                                      return {};
+                                  })
+                .has_value());
+
+    const Status ran = eng.run();
+    INFO(test::message_of(ran));
+    REQUIRE(ran.has_value());
+
+    out.offset_hz.resize(out.power.size());
+    for (std::size_t bin = 0; bin < out.power.size(); ++bin) {
+        out.offset_hz[bin] = out.geometry.bin_zero_hz() +
+                             static_cast<double>(bin) * out.geometry.bin_width_hz() -
+                             static_cast<double>(kHoodCentre);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("the passband pane shows the neighbourhood rather than the filter",
+          "[gpu][engine][passband][neighbourhood][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // The owner's question, "why does the detail spectrum have a massive hump
+    // that moves with the filter", as a measurement. White noise at
+    // -40 dBFS across the whole source, one tone 1 kHz inside a 6 kHz NFM
+    // receiver's passband and one 2 kHz outside it, both at -40 dBFS.
+    //
+    // Before the display tap, with the pane a transform of the fine stream,
+    // this printed a floor of -84.18 dB inside the passband and -120.41 dB
+    // averaged outside it, eighths of the pane from -88.47 to -175.43 dB, an
+    // 88.69 dB spread, and the outside tone at -123.98 dB against the inside
+    // one's -40.36: the filter's own shape, with the neighbour 83.6 dB under
+    // where it was. docs/ui-spectrum.md has both sets of figures.
+    const Neighbourhood hood = measure_neighbourhood();
+    REQUIRE(hood.frames > 16);
+
+    const double span = static_cast<double>(hood.geometry.bins) * hood.geometry.bin_width_hz();
+    const double inside = hood.mean_db(0.0, static_cast<double>(kHoodEdge) - 500.0);
+    const double outside = hood.mean_db(static_cast<double>(kHoodEdge) + 500.0, 0.5 * span);
+    const double tone_in = hood.tone_db(kHoodInsideTone);
+    const double tone_out = hood.tone_db(kHoodOutsideTone);
+    const double energy_in = hood.tone_energy_db(kHoodInsideTone);
+    const double energy_out = hood.tone_energy_db(kHoodOutsideTone);
+    const auto slices = hood.slices_db(8);
+    const auto [low, high] = std::minmax_element(slices.begin(), slices.end());
+
+    std::string sliced;
+    for (const double value : slices) {
+        sliced += std::format(" {:.2f}", value);
+    }
+    WARN(std::format(
+        "{} frames of {} bins at {:.2f} Hz, {:.0f} Hz across at a stream rate of {}. Noise "
+        "inside the passband {:.2f} dB, outside it {:.2f} dB. Tone inside at {} Hz {:.2f} dB "
+        "peak and {:.2f} dB across its lobe, tone outside at {} Hz {:.2f} dB peak and {:.2f} dB "
+        "across its lobe. Noise by eighths of the pane:{} (spread {:.2f} dB)",
+        hood.frames, hood.geometry.bins, hood.geometry.bin_width_hz(), span, hood.geometry.rate,
+        inside, outside, kHoodInsideTone, tone_in, energy_in, kHoodOutsideTone, tone_out,
+        energy_out, sliced, *high - *low));
+
+    // The pane is wide enough to show the neighbourhood at all: at least
+    // four times the passband's reach, which here is its 3 kHz edge.
+    CHECK(span >= 4.0 * static_cast<double>(kHoodEdge));
+    CHECK(static_cast<double>(kHoodOutsideTone) < 0.5 * span);
+
+    // The floor is the same inside and outside the passband. The display
+    // filter's own ripple is under 0.01 dB (tests/reference/test_vrx.cpp);
+    // what this tolerance allows for is the estimate itself, a mean of a
+    // few hundred overlapping frames of noise.
+    CHECK(std::abs(inside - outside) < 0.2);
+
+    // Flat across the whole pane: no eighth of it is more than half a
+    // decibel from any other, where the fine stream's pane spread 88.69 dB.
+    CHECK(*high - *low < 0.5);
+
+    // And the tone outside the passband is where it is on the air, at the
+    // same level as the one inside, rather than 83.6 dB down.
+    CHECK(std::abs(energy_in - energy_out) < 0.2);
 }
 
 TEST_CASE("what a passband costs per block", "[.][gpu][engine][passband][cost]") {
@@ -1335,16 +1603,24 @@ TEST_CASE("what a passband costs per block", "[.][gpu][engine][passband][cost]")
     const double source_seconds =
         static_cast<double>(scene.samples) / static_cast<double>(kBenchRate);
 
+    // Three runs per point: no passband stage at all, the stage built with
+    // every sink detached, and every sink attached. The first delta is what
+    // a receiver nobody is looking at pays for the display tap existing,
+    // which should be nothing but memory; the second is what looking costs.
     const auto report = [&](std::uint32_t transform, std::size_t receivers) {
+        const double none = measure(0, receivers, 0);
         const double bare = measure(transform, receivers, 0);
         const double with = measure(transform, receivers, receivers);
+        const double detached_us = 1e6 * (bare - none) / blocks;
         const double per_block_us = 1e6 * (with - bare) / blocks;
 
         WARN(std::format(
-            "N {}, {} receivers: {:.3f} s bare, {:.3f} s with every passband on, so {:.2f} us "
-            "per block for all of them and {:.2f} us each. Realtime multiple {:.2f}x bare, "
-            "{:.2f}x with.",
-            transform, receivers, bare, with, per_block_us,
+            "N {}, {} receivers: {:.3f} s with no passband stage, {:.3f} s built and detached, "
+            "{:.3f} s with every passband on. Detached costs {:.2f} us per block for all of them "
+            "and {:.2f} us each; attached costs {:.2f} us per block for all of them and {:.2f} "
+            "us each. Realtime multiple {:.2f}x detached, {:.2f}x with.",
+            transform, receivers, none, bare, with, detached_us,
+            detached_us / static_cast<double>(receivers), per_block_us,
             per_block_us / static_cast<double>(receivers), source_seconds / bare,
             source_seconds / with));
     };

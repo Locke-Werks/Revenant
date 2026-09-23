@@ -861,3 +861,25 @@ commit: "Say on the wire docs that P25 no longer depends on its blocking"
 instead: P25 carries its filter and discriminator state across calls and
     slices each data unit against a fit of its own sync word, so its output
     is the same in every blocking. D-STAR still takes each call's mean.
+
+phrase: covers one receiver's whole demodulation rate
+phrase: which is also the bin count: the whole band is kept
+retired: 2026-09-23
+commit: Transform a display tap in the passband pane, not the fine ring
+instead: A passband frame is the central half of a transform of the
+    receiver's display stream: passband_transform / 2 bins spanning half the
+    display rate, which core/dsp/vrx_reference.h's rate rule picks.
+
+phrase: A stage that keeps a fine ring has to hold a whole window
+phrase: enlarges every receiver's fine ring by a window's worth
+retired: 2026-09-23
+commit: Transform a display tap in the passband pane, not the fine ring
+instead: The passband window lives in each receiver's display ring, which
+    build_display sizes; the fine ring is sized for the demodulator alone.
+
+phrase: this is strictly redundant today and is recorded anyway
+retired: 2026-09-23
+commit: Transform a display tap in the passband pane, not the fine ring
+instead: The barrier before the passband transforms is load-bearing: a stage
+    records its display dispatch beside its fine dispatch and fences only
+    what its own demodulator reads.

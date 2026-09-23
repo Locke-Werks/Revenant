@@ -1,5 +1,5 @@
 // The fine stage, the seven demodulators and the three digital voice taps,
-// recorded into the graph's command buffer.
+// recorded into the graph's command buffer, and the display tap beside them.
 //
 // Two dispatches per receiver per block. core/shaders/vrx_fine.comp mixes the
 // residual to DC, filters to the requested bandwidth and resamples the coarse
@@ -10,6 +10,14 @@
 // the graph's readback buffer. Both kernels are
 // proved bit-exact against their twins in tests/reference/test_vrx.cpp; this
 // file is the plumbing that gets them the right push constants.
+//
+// A third dispatch on the blocks where the graph asks for the display, and
+// only on those: vrx_fine.comp again, specialized with the display tap's one
+// 256-tap branch, reading the same channel and writing the ring the passband
+// transform reads. It carries the fine stage's mix and none of its filter,
+// so the pane shows what is around the receiver rather than the receiver's
+// own filter shape. core/dsp/vrx_reference.h, "The display tap", has the
+// design and the rate rule.
 //
 // WHAT THIS FILE OWNS AND WHY.
 //
@@ -285,22 +293,24 @@ public:
 
     // Every field of this is written in build() and never again, which is
     // what lets the graph read it from the control plane while the recording
-    // thread is inside record(). A retune cannot change any of them: it is
-    // refused outright unless the filter's shape, the tap count and both
-    // rates are identical, and the ring was sized against those.
+    // thread is inside record(). The ring and its size are fixed, and so is
+    // the group delay, because the display filter's length does not depend
+    // on the display rate.
     //
-    // Where the fine stream's DC sits DOES move on a retune, so it is not
-    // here. It rides back on StageOutput, which only the recording thread
-    // reads.
-    [[nodiscard]] StageFineOutput fine_output() const override { return fine_output_; }
+    // Where the stream's DC sits and the rate it runs at DO move on a
+    // retune, so they are not here. They ride back on StageOutput, which
+    // only the recording thread reads.
+    [[nodiscard]] StageDisplayOutput display_output() const override { return display_output_; }
 
 private:
     DemodStage() = default;
 
     [[nodiscard]] Status build(const VrxStageRequest& request);
+    [[nodiscard]] Status build_display(const VrxStageRequest& request, std::uint64_t blocks);
     [[nodiscard]] Status build_pipelines();
     [[nodiscard]] Status build_buffers(VkBuffer channel_ring);
     [[nodiscard]] Status build_descriptors(VkBuffer channel_ring);
+    [[nodiscard]] Status record_display(const StageRecord& record, StageOutput& out);
 
     [[nodiscard]] std::uint64_t outputs_for(std::uint64_t blocks) const {
         // Each channel sample advances the output instant by Fd/Fc outputs,
@@ -327,8 +337,6 @@ private:
     std::uint32_t frames_in_flight_ = 1;
     std::uint32_t local_size_x_ = gpu::kDefaultLocalSizeX;
 
-    StageFineOutput fine_output_{};
-
     std::uint32_t fine_capacity_ = 0;
     std::uint32_t fine_mask_ = 0;
     std::uint32_t fine_history_ = 0;
@@ -350,16 +358,53 @@ private:
     VkDescriptorSet fine_set_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> demod_sets_;
 
+    // The display tap. Built when the graph has a passband stage at all,
+    // dispatched only on blocks whose StageRecord::display is set.
+    bool display_built_ = false;
+    dsp::VrxDisplayPlan display_;
+    StageDisplayOutput display_output_{};
+    std::uint32_t display_capacity_ = 0;
+    std::uint32_t display_mask_ = 0;
+    std::uint32_t max_display_outputs_ = 0;
+    VkDeviceSize display_taps_bytes_ = 0;
+    gpu::ComputePipeline display_pipeline_;
+    gpu::Buffer display_taps_;
+    std::vector<gpu::Buffer> display_taps_staging_;
+    gpu::Buffer display_ring_;
+    VkDescriptorSet display_set_ = VK_NULL_HANDLE;
+
+    // Where the display stream starts again, given the oldest channel block
+    // the graph is offering. Called when the display is switched on, when a
+    // retune moves the display rate, and when a discontinuity has put the
+    // inputs it wanted out of the ring. The ring below display_from_ is then
+    // somebody else's samples, and StageOutput::display_from is what tells
+    // the graph not to transform them.
+    void anchor_display(dsp::SampleIndex first_block) {
+        const dsp::SampleIndex needed =
+            first_block + static_cast<dsp::SampleIndex>(display_.fine.taps - 1U);
+        display_from_ =
+            lowest_output_for(needed, display_.channel_rate, display_.display_rate);
+        next_display_ = display_from_;
+    }
+
+    bool display_running_ = false;
+    dsp::SampleIndex display_from_ = 0;
+    dsp::SampleIndex next_display_ = 0;
+
     // Where this receiver starts filtering, given the oldest channel block the
     // graph is offering. Called once when the stage first records, and again
     // whenever a discontinuity has put the inputs it wanted out of the ring.
     //
     // All three cursors move together, which is why this is one function rather
-    // than three assignments at each site: first_output_ is what the passband
-    // window is drawn from, next_output_ is the fine stage's read cursor, and
-    // next_audio_ is the demodulator's. Moving one without the others is a
-    // receiver whose display and whose audio disagree about which samples they
-    // are looking at.
+    // than three assignments at each site: first_output_ is the oldest fine
+    // sample this receiver produced, next_output_ is the fine stage's read
+    // cursor, and next_audio_ is the demodulator's. Moving one without the
+    // others is a demodulator reading samples the fine stage never wrote.
+    //
+    // WHAT THIS USED TO SAY: that first_output_ "is what the passband window
+    // is drawn from" and that moving one cursor alone left "a receiver whose
+    // display and whose audio disagree". The passband reads the display ring
+    // now, which keeps cursors of its own; see anchor_display.
     void anchor_to(dsp::SampleIndex first_block) {
         // The first output whose filter support is entirely inside samples this
         // graph has actually channelized. Starting lower would filter zeros and
@@ -451,29 +496,12 @@ Status DemodStage::build(const VrxStageRequest& request) {
     // detector's history, plus the one the recording thread is filling. A
     // ring exactly one dispatch long would have the detector reading samples
     // the next fine dispatch had already overwritten, which is silent.
-    std::uint64_t wanted =
-        static_cast<std::uint64_t>(max_outputs_) * (frames_in_flight_ + 1U) + fine_history_ + 2U;
-
-    // A passband transform reaches further back than the detector does: its
-    // window is the last N fine samples of the dispatch that recorded it,
-    // and every frame submitted behind that one writes above it. So the ring
-    // has to hold the window plus a frame's worth for each of them, or the
-    // transform reads slots a later dispatch has already overwritten and the
-    // display shows a splice of two eras.
     //
-    // Paid by every receiver, not only by the ones somebody is examining,
-    // because a ring cannot be resized while a command buffer names it. That
-    // is memory and not work: the transform itself is still allocated and
-    // dispatched only when a sink is attached. A 2048-point window is 16 KiB
-    // of complex samples, and the ring is rounded up to a power of two
-    // around whichever of the two bounds is larger, so what a receiver
-    // actually pays is a doubling or nothing.
-    if (request.passband_transform != 0) {
-        wanted = std::max(wanted, static_cast<std::uint64_t>(request.passband_transform) +
-                                      static_cast<std::uint64_t>(max_outputs_) *
-                                          frames_in_flight_ +
-                                      2U);
-    }
+    // WHAT THIS USED TO ADD: room for a passband window, because the
+    // passband transformed this ring. It transforms the display ring now,
+    // which build_display sizes, so this ring is the demodulator's alone.
+    const std::uint64_t wanted =
+        static_cast<std::uint64_t>(max_outputs_) * (frames_in_flight_ + 1U) + fine_history_ + 2U;
     if (wanted > kMaxFineCapacity) {
         return fail(std::format(
             "this receiver would need a fine ring of {} samples and the limit is {}",
@@ -513,6 +541,12 @@ Status DemodStage::build(const VrxStageRequest& request) {
         }
     }
 
+    if (request.passband_transform != 0) {
+        if (auto built = build_display(request, blocks); !built) {
+            return built;
+        }
+    }
+
     if (auto built = build_pipelines(); !built) {
         return built;
     }
@@ -520,13 +554,82 @@ Status DemodStage::build(const VrxStageRequest& request) {
         return built;
     }
 
-    fine_output_.ring = fine_ring_.handle();
-    fine_output_.capacity = fine_capacity_;
-    fine_output_.mask = fine_mask_;
-    fine_output_.rate = plan_.demod_rate;
-    fine_output_.group_delay_channel_samples = plan_.fine_group_delay_channel_samples;
+    if (display_built_) {
+        display_output_.ring = display_ring_.handle();
+        display_output_.capacity = display_capacity_;
+        display_output_.mask = display_mask_;
+        display_output_.group_delay_channel_samples = display_.group_delay_channel_samples;
+    }
 
     return build_descriptors(request.channel_ring);
+}
+
+Status DemodStage::build_display(const VrxStageRequest& request, std::uint64_t blocks) {
+    auto planned = dsp::plan_vrx_display(plan_);
+    if (!planned) {
+        return std::unexpected(with_context(planned.error(), "receiver display tap"));
+    }
+    display_ = std::move(*planned);
+
+    // The display filter reaches back further than most fine filters do,
+    // kDisplayTaps channel samples, and both have to be live in the channel
+    // ring with a whole dispatch above them.
+    const std::uint64_t channel_span = blocks + display_.fine.taps;
+    if (channel_span > channel_ring_blocks_) {
+        return fail(std::format(
+            "the {} tap display filter over a {} block dispatch needs {} channel samples live "
+            "and the channel ring holds {}. The engine's ring_seconds is too short for a "
+            "passband stage",
+            display_.fine.taps, blocks, channel_span, channel_ring_blocks_));
+    }
+
+    // Sized for R = 1, one display output per channel sample, which is the
+    // most any rung produces. A retune can move R and cannot resize a ring a
+    // command buffer names, so the ring is built for the widest rate the
+    // stage could ever be retuned to rather than the one it starts at.
+    max_display_outputs_ = static_cast<std::uint32_t>(blocks + 1U);
+
+    // The transform's window is the last N display samples of the dispatch
+    // that recorded it, and every frame submitted behind that one writes
+    // above it. So the ring holds the window plus a frame's worth for each
+    // of them, or the transform reads slots a later dispatch has already
+    // overwritten and the display shows a splice of two eras.
+    const std::uint64_t wanted = static_cast<std::uint64_t>(request.passband_transform) +
+                                 static_cast<std::uint64_t>(max_display_outputs_) *
+                                     frames_in_flight_ +
+                                 2U;
+    if (wanted > kMaxFineCapacity) {
+        return fail(std::format(
+            "this receiver would need a display ring of {} samples and the limit is {}", wanted,
+            kMaxFineCapacity));
+    }
+    display_capacity_ =
+        std::bit_ceil(std::max<std::uint64_t>(wanted, kMinFineCapacity)) & 0xFFFF'FFFFU;
+    display_mask_ = display_capacity_ - 1U;
+
+    // The kernel's 32-bit arithmetic at the worst case, R = 1: a step of one
+    // whole channel sample, no remainder, and the largest output rate.
+    dsp::VrxFineParams probe;
+    probe.chan_base = chan_base_;
+    probe.chan_mask = channel_ring_mask_;
+    probe.out_mask = display_mask_;
+    probe.count = max_display_outputs_;
+    probe.out_rate = static_cast<std::uint32_t>(plan_.channel_rate);
+    probe.step_whole = 1U;
+    probe.step_rem = 0U;
+    probe.frac0 = 0U;
+    probe.inv_out_rate = 1.0F / static_cast<float>(plan_.channel_rate);
+    if (auto valid = dsp::validate(display_.fine, probe); !valid) {
+        return std::unexpected(with_context(valid.error(), "receiver display tap"));
+    }
+    if (display_.taps.size() != dsp::fine_tap_table_size(display_.fine)) {
+        return fail(std::format("the display tap table holds {} entries and its config implies "
+                                "{}",
+                                display_.taps.size(), dsp::fine_tap_table_size(display_.fine)));
+    }
+    display_taps_bytes_ = dsp::fine_tap_table_size(display_.fine) * sizeof(dsp::Complex32);
+    display_built_ = true;
+    return {};
 }
 
 // Where the fine stream's DC sits in the source's baseband frame: the coarse
@@ -581,6 +684,26 @@ Status DemodStage::build_pipelines() {
             return std::unexpected(with_context(pipeline.error(), "receiver demod pipeline"));
         }
         demod_pipeline_ = std::move(*pipeline);
+    }
+    if (display_built_) {
+        // The fine kernel again. One branch and no fractional phase, because
+        // the display rate divides the channel rate; the tap count is fixed
+        // so that a retune which moves the rate is a table and not a
+        // pipeline.
+        const std::uint32_t constants[] = {display_.fine.taps, display_.fine.phases,
+                                           display_.fine.nco_log2};
+        gpu::ComputePipeline::Options options;
+        options.spirv = gpu::shaders::vrx_fine();
+        options.storage_buffer_count = 4;
+        options.local_size_x = local_size_x_;
+        options.push_constant_bytes = sizeof(dsp::VrxFineParams);
+        options.grid_constants = constants;
+
+        auto pipeline = gpu::ComputePipeline::create(*context_, options);
+        if (!pipeline) {
+            return std::unexpected(with_context(pipeline.error(), "receiver display pipeline"));
+        }
+        display_pipeline_ = std::move(*pipeline);
     }
     return {};
 }
@@ -640,6 +763,38 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
     }
     fine_ring_ = std::move(*fine);
 
+    if (display_built_) {
+        auto display_taps = make_device(display_taps_bytes_, "receiver display taps");
+        if (!display_taps) {
+            return std::unexpected(display_taps.error());
+        }
+        display_taps_ = std::move(*display_taps);
+
+        auto display_ring = make_device(
+            static_cast<VkDeviceSize>(display_capacity_) * kComplexBytes, "receiver display ring");
+        if (!display_ring) {
+            return std::unexpected(display_ring.error());
+        }
+        display_ring_ = std::move(*display_ring);
+
+        display_taps_staging_.reserve(frames_in_flight_);
+        for (std::uint32_t i = 0; i < frames_in_flight_; ++i) {
+            auto staging = gpu::Buffer::create(*context_, display_taps_bytes_,
+                                               VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                               gpu::MemoryKind::Upload);
+            if (!staging) {
+                return std::unexpected(
+                    with_context(staging.error(), "receiver display tap staging"));
+            }
+            display_taps_staging_.push_back(std::move(*staging));
+        }
+        if (auto wrote = display_taps_staging_[0].write(
+                std::as_bytes(std::span<const dsp::Complex32>(display_.taps)));
+            !wrote) {
+            return std::unexpected(with_context(wrote.error(), "receiver display taps"));
+        }
+    }
+
     // One staging buffer per frame in flight, and it is the frame index that
     // makes writing it on the recording thread safe: the graph does not reuse
     // a frame slot until that slot's previous submission has completed, so
@@ -691,8 +846,11 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
     // whatever the allocator last had in that memory would otherwise be
     // demodulated.
     std::vector<gpu::CommandRunner::BufferClear> clears;
-    clears.reserve(1 + audio_.size());
+    clears.reserve(2 + audio_.size());
     clears.push_back({fine_ring_.handle(), fine_ring_.size()});
+    if (display_built_) {
+        clears.push_back({display_ring_.handle(), display_ring_.size()});
+    }
     for (auto& buffer : audio_) {
         clears.push_back({buffer.handle(), buffer.size()});
     }
@@ -700,10 +858,14 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
         return std::unexpected(with_context(cleared.error(), "receiver clear"));
     }
 
-    const gpu::CommandRunner::BufferCopy copies[] = {
+    std::vector<gpu::CommandRunner::BufferCopy> copies{
         {taps_staging_[0].handle(), taps_.handle(), taps_bytes_},
         {weight_staging->handle(), weights_.handle(), weight_bytes},
     };
+    if (display_built_) {
+        copies.push_back(
+            {display_taps_staging_[0].handle(), display_taps_.handle(), display_taps_bytes_});
+    }
     if (auto copied = runner->copy(copies); !copied) {
         return std::unexpected(with_context(copied.error(), "receiver upload"));
     }
@@ -712,10 +874,11 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
 
 Status DemodStage::build_descriptors(VkBuffer channel_ring) {
     // The fine set binds nothing that varies per frame, so there is one of
-    // it. The detector writes into a per-frame scratch buffer, so there is
-    // one of those per frame in flight.
-    const std::uint32_t sets = 1U + frames_in_flight_;
-    const std::uint32_t buffers = 4U + 3U * frames_in_flight_;
+    // it, and the display set is the same shape. The detector writes into a
+    // per-frame scratch buffer, so there is one of those per frame in flight.
+    const std::uint32_t display_sets = display_built_ ? 1U : 0U;
+    const std::uint32_t sets = 1U + display_sets + frames_in_flight_;
+    const std::uint32_t buffers = 4U + 4U * display_sets + 3U * frames_in_flight_;
 
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -751,6 +914,26 @@ Status DemodStage::build_descriptors(VkBuffer channel_ring) {
                                   fine_ring_.handle()};
         if (auto wrote = write_storage_set(device_, fine_set_, bound); !wrote) {
             return std::unexpected(with_context(wrote.error(), "receiver fine set"));
+        }
+    }
+
+    if (display_built_) {
+        VkDescriptorSetLayout layout = display_pipeline_.descriptor_layout();
+        VkDescriptorSetAllocateInfo alloc{};
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = descriptors_;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &layout;
+        result = vkAllocateDescriptorSets(device_, &alloc, &display_set_);
+        if (result != VK_SUCCESS) {
+            return fail(std::format("vkAllocateDescriptorSets failed for a receiver display ({})",
+                                    gpu::result_name(result)),
+                        result);
+        }
+        const VkBuffer bound[] = {channel_ring, display_taps_.handle(), nco_->handle(),
+                                  display_ring_.handle()};
+        if (auto wrote = write_storage_set(device_, display_set_, bound); !wrote) {
+            return std::unexpected(with_context(wrote.error(), "receiver display set"));
         }
     }
 
@@ -826,6 +1009,20 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
         region.size = taps_bytes_;
         vkCmdCopyBuffer(record.commands, taps_staging_[frame].handle(), taps_.handle(), 1,
                         &region);
+
+        // The display table moves with the mix, so it rides the same pair of
+        // barriers rather than paying for its own.
+        if (display_built_) {
+            if (auto wrote = display_taps_staging_[frame].write(
+                    std::as_bytes(std::span<const dsp::Complex32>(display_.taps)));
+                !wrote) {
+                return std::unexpected(with_context(wrote.error(), "receiver display retune"));
+            }
+            VkBufferCopy display_region{};
+            display_region.size = display_taps_bytes_;
+            vkCmdCopyBuffer(record.commands, display_taps_staging_[frame].handle(),
+                            display_taps_.handle(), 1, &display_region);
+        }
 
         record_barrier(record.commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -914,21 +1111,24 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
         record_dispatch(record.commands, fine_pipeline_, fine_set_,
                         std::as_bytes(std::span<const dsp::VrxFineParams>(&block->params, 1)),
                         group_count(count, local_size_x_));
-        record_barrier(record.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_ACCESS_SHADER_READ_BIT);
         next_output_ += count;
         out.dispatches += 1;
     }
 
-    // What a passband transform may look at. first_output_ and not a live
-    // floor: the ring is sized in build() to hold a whole window below
-    // everything the frames in flight are writing, so liveness is a sizing
-    // guarantee rather than something to re-check per block. What this bound
-    // is actually for is the other end of the ring, the cleared samples
-    // below the first output this receiver ever produced.
-    out.fine_from = first_output_;
-    out.fine_next = next_output_;
+    // Recorded between the fine dispatch and the barrier that fences it, so
+    // the two overlap: both read the channel ring and each writes its own.
+    // The display ring's reader is the graph's transform, which records its
+    // own barrier ahead of it.
+    if (auto displayed = record_display(record, out); !displayed) {
+        return std::unexpected(displayed.error());
+    }
+
+    if (count > 0) {
+        record_barrier(record.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT);
+    }
+
     const auto dc = fine_dc_of(plan_);
     out.fine_dc_numerator = dc.first;
     out.fine_dc_denominator = dc.second;
@@ -993,6 +1193,57 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     return out;
 }
 
+Status DemodStage::record_display(const StageRecord& record, StageOutput& out) {
+    if (!display_built_ || !record.display) {
+        // Off costs nothing, and the next time it is on the ring below the
+        // cursor is whatever was there, so it starts again.
+        display_running_ = false;
+        return {};
+    }
+    if (!display_running_) {
+        anchor_display(record.first_block);
+        display_running_ = true;
+    }
+
+    const dsp::SampleIndex newest = record.first_block + record.block_count - 1U;
+    const dsp::SampleIndex limit =
+        highest_output_for(newest, display_.channel_rate, display_.display_rate);
+
+    std::uint32_t count = 0;
+    if (limit >= next_display_) {
+        const dsp::SampleIndex available = limit + 1U - next_display_;
+        count = static_cast<std::uint32_t>(
+            std::min<dsp::SampleIndex>(available, max_display_outputs_));
+    }
+
+    if (count > 0) {
+        auto block = dsp::display_block(display_, chan_base_, channel_ring_mask_, display_mask_,
+                                        next_display_, count);
+        if (!block) {
+            return std::unexpected(with_context(block.error(), "receiver display block"));
+        }
+        if (newest - block->oldest_input >= channel_ring_blocks_) {
+            // The inputs are gone, for the same reasons the fine stage's can
+            // be. Nothing audible is lost here, so this is not counted as a
+            // re-anchor: the display restarts from what the ring still holds
+            // and the graph counts the frames it skips while the window
+            // refills.
+            anchor_display(record.first_block);
+        } else {
+            record_dispatch(record.commands, display_pipeline_, display_set_,
+                            std::as_bytes(std::span<const dsp::VrxFineParams>(&block->params, 1)),
+                            group_count(count, local_size_x_));
+            next_display_ += count;
+            out.dispatches += 1;
+        }
+    }
+
+    out.display_from = display_from_;
+    out.display_next = next_display_;
+    out.display_rate = display_.display_rate;
+    return {};
+}
+
 Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement) {
     VrxParams resolved = params;
     if (resolved.audio_rate == 0) {
@@ -1041,6 +1292,28 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
     // audio would carry the damage rather than a refusal.
     if (const Status sized = fine_taps_match_config(next); !sized) {
         return std::unexpected(with_context(sized.error(), "receiver retune"));
+    }
+
+    // The display tap follows the tuning. Its pipeline, its table's length
+    // and its ring are fixed whatever the rate, so this never needs a
+    // rebuild; a new rate does need a new stream, because a transform window
+    // cannot straddle two rates.
+    if (display_built_) {
+        auto display = dsp::plan_vrx_display(next);
+        if (!display) {
+            return std::unexpected(with_context(display.error(), "receiver display retune"));
+        }
+        if (display->fine != display_.fine || display->taps.size() != display_.taps.size()) {
+            return fail(std::format(
+                "a retune changed the display tap's shape from {} taps of {} phases to {} of "
+                "{}, which the display pipeline was not built for",
+                display_.fine.taps, display_.fine.phases, display->fine.taps,
+                display->fine.phases));
+        }
+        if (display->display_rate != display_.display_rate) {
+            display_running_ = false;
+        }
+        display_ = std::move(*display);
     }
 
     // Everything that survives is the tuning: the tap table's modulation, the
