@@ -984,10 +984,11 @@ TEST_CASE("an audio decoder on the wrong receiver is refused naming the mode it 
     INFO(nfm_default);
     CHECK(nfm_default.find("ax25, pocsag") != std::string::npos);
 
-    // A complex decoder on an audio receiver is still refused in its own words.
+    // A complex decoder on an audio receiver is still refused in its own
+    // words, which since p25p1 named its modes are the modes it reads.
     const std::string p25_on_usb = refusal(usb, "p25p1");
     INFO(p25_on_usb);
-    CHECK(p25_on_usb.find("reads complex baseband") != std::string::npos);
+    CHECK(p25_on_usb.find("reads the complex baseband of a p25p1 or raw") != std::string::npos);
 
     CHECK_FALSE(log->ended());
 }

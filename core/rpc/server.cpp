@@ -2300,6 +2300,18 @@ public:
                 spec->name, id->value, engine::demod_name(mode))});
         }
 
+        // A raw tap runs at the grid's channel rate, which is known now, so
+        // one too fast for a complex decoder is refused here, in the words
+        // its adapter would use one chunk later. decoders_detail::
+        // kRawTapRateCap has the measurement behind the limit.
+        if (mode == engine::Demod::Raw && spec->input == DecoderInput::ComplexBaseband) {
+            if (auto allowed = decoders_detail::raw_tap_allowed(
+                    spec->name, engine::demod_name(mode), owner_.engine().info().channel_rate);
+                !allowed) {
+                return to_exception(allowed.error());
+            }
+        }
+
         auto node = std::make_shared<DecodedNode>(request.getReceiver(), *id, spec->name);
 
         // The sink goes on before the capability exists, so a refusal comes

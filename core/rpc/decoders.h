@@ -72,7 +72,8 @@
 //   rate, with the carrier wherever the grid left it. VrxStatus::demod_rate
 //   is the planner's figure there and is NOT the rate the tap delivers;
 //   core/engine/vrx.h says so. A decoder attached to one runs at the channel
-//   rate and hears the residual as a carrier offset. The P25 path removes
+//   rate, no faster than decoders_detail::kRawTapRateCap, and hears the
+//   residual as a carrier offset. The P25 path removes
 //   it per data unit, from a least-squares fit of that unit's sync word, and
 //   the D-STAR path per transmission, from a fit of its frame sync refreshed
 //   on every resynchronisation signal, so neither answer depends on how the
@@ -204,9 +205,13 @@ struct DecoderSpec {
     DecoderFactory make = nullptr;
 
     // The demodulators whose output this decoder reads, by demod_name. Empty
-    // means any receiver whose output is `input`, which is how the three
-    // complex decoders have always been attached: p25p1 on a raw tap is a
-    // choice an operator can make on purpose.
+    // means any receiver whose output is `input`, and no row uses it today:
+    // every complex decoder names its own mode and raw, and a raw tap is held
+    // to decoders_detail::kRawTapRateCap.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY after "is `input`": "which is how the
+    // three complex decoders have always been attached: p25p1 on a raw tap is
+    // a choice an operator can make on purpose." It still is, below the cap.
     //
     // ON THE WIRE AS DecoderInfo::modes since 2026-09-23, written out whole by
     // core/rpc/convert.cpp so empty never crosses as "any". The receiver
@@ -299,8 +304,8 @@ namespace decoders_detail {
 // with the square of the rate: the P25 filter is 121 multiplies a sample at
 // 48000, 5.8 million a second, and 363 at 144000, 52.3 million a second, on
 // the engine's completion thread. A raw tap at a coarse channel's full rate
-// is the expensive case; a p25p1 receiver's fine stage delivers the design
-// rate.
+// is the expensive case, and kRawTapRateCap below is where it stops being
+// allowed; a p25p1 receiver's fine stage delivers the design rate.
 [[nodiscard]] inline std::size_t scaled_taps(std::size_t design_taps,
                                              dsp::SampleRate design_rate,
                                              dsp::SampleRate rate) {
@@ -368,6 +373,78 @@ inline constexpr std::string_view kCwModes[] = {"cw", "usb", "lsb"};
 // M17 is complex baseband like P25 and has no demodulator of its own; see its
 // adapter for why these two and not dstar or tetra.
 inline constexpr std::string_view kM17Modes[] = {"p25p1", "raw"};
+
+// The three digital voice decoders read their own mode's fine stage, which
+// delivers the rate each was written at, or a raw tap at no more than
+// kRawTapRateCap.
+//
+// WHAT THIS USED TO BE: no list, which reads as any complex tap, so p25p1
+// was offered on a dstar or tetra receiver's tap as well as its own, and on a
+// raw tap at whatever rate the grid gave it.
+inline constexpr std::string_view kP25Modes[] = {"p25p1", "raw"};
+inline constexpr std::string_view kDStarModes[] = {"dstar", "raw"};
+inline constexpr std::string_view kTetraModes[] = {"tetra", "raw"};
+
+// THE FASTEST RAW TAP A COMPLEX DECODER WILL READ.
+//
+// A raw tap is one coarse channel at the grid's channel rate, which the
+// source and the grid decide and nothing here caps. The receive filters in
+// core/decode are sized at 48000 or 72000 S/s and scaled_taps grows them with
+// the rate to hold their span, so a decoder's work grows with the square of
+// the rate, and it is done on the engine's completion thread, which delivers
+// every receiver's output. A tap fast enough to stall that thread makes the
+// source drop samples for every receiver, not only this one.
+//
+// Measured on 2026-09-23 on the RTX 4090 machine, one core, milliseconds per
+// second of a raw tap of noise fed a twentieth of a second at a time:
+//
+//   rate       p25p1   m17    dstar  tetra
+//   48000        5.6    5.7    3.9    4.3
+//   144000      38.8   30.2   23.2   17.4
+//   192000      66.2   54.3   39.0   29.4
+//   288000     145.8  116.4   81.3   57.1
+//   600000     601.6  488.0  324.8  249.1
+//
+// AN ENGINEERING CHOICE AND NOT A CITATION: 192000 is four times the 48000
+// that P25, D-STAR and M17 were written at, and there the costliest of the
+// four takes under a fifteenth of a core. Above it a raw tap is refused in
+// words naming the mode that feeds the decoder at its own rate.
+inline constexpr dsp::SampleRate kRawTapRateCap = 192'000;
+
+// The mode and rate that feed `decoder` without a raw tap, for the refusal.
+struct OwnTap {
+    std::string_view mode;
+    dsp::SampleRate rate = 0;
+};
+
+[[nodiscard]] inline OwnTap own_tap(std::string_view decoder) {
+    if (decoder == "tetra") {
+        return {"tetra", 72'000};
+    }
+    if (decoder == "dstar") {
+        return {"dstar", 48'000};
+    }
+    // p25p1 and m17, which reads a p25p1 receiver's fine stage.
+    return {"p25p1", 48'000};
+}
+
+// Whether a complex decoder may read a receiver in `mode` delivering `rate`.
+// Only a raw tap is ever refused here; a mode's own fine stage runs at the
+// rate its decoder was written at.
+[[nodiscard]] inline Status raw_tap_allowed(std::string_view decoder, std::string_view mode,
+                                            dsp::SampleRate rate) {
+    if (mode != "raw" || rate <= kRawTapRateCap) {
+        return {};
+    }
+    const OwnTap own = own_tap(decoder);
+    return fail(std::format(
+        "the {} decoder reads a raw tap at no more than {} S/s, and this one runs at {}, the "
+        "grid's channel rate. Its receive filter grows with the rate and runs on the engine's "
+        "completion thread, which delivers every receiver's output, so a tap this fast would "
+        "slow them all. Add a receiver in {} on the signal instead: its fine stage mixes the "
+        "carrier to DC and resamples to the {} S/s this decoder was written for",
+        decoder, kRawTapRateCap, rate, own.mode, own.rate));
+}
 
 // The shape check every audio adapter makes, in words naming both halves.
 [[nodiscard]] inline Status require_audio(std::string_view decoder, const DecoderChunk& chunk,
@@ -595,6 +672,10 @@ public:
     static constexpr std::string_view kName = "p25p1";
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
         const dsp::SampleRate rate = build.rate;
         decode::P25Config config;
         config.filter_taps =
@@ -747,6 +828,10 @@ public:
     static constexpr std::string_view kName = "dstar";
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
         const dsp::SampleRate rate = build.rate;
         decode::DStarConfig config;
         config.filter_taps =
@@ -923,6 +1008,10 @@ public:
     static constexpr std::string_view kName = "tetra";
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
         const dsp::SampleRate rate = build.rate;
         decode::TetraConfig config;
         config.filter_taps =
@@ -2314,6 +2403,10 @@ public:
     static constexpr std::string_view kName = "m17";
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        if (auto allowed = decoders_detail::raw_tap_allowed(kName, build.mode, build.rate);
+            !allowed) {
+            return std::unexpected(allowed.error());
+        }
         decode::M17Config config;
         config.rate = build.rate;
         auto built = decode::M17::create(config);
@@ -2476,22 +2569,28 @@ private:
 // decoders() looks".
 [[nodiscard]] inline std::span<const DecoderSpec> decoder_registry() {
     using decoders_detail::kCwModes;
+    using decoders_detail::kDStarModes;
     using decoders_detail::kFmModes;
     using decoders_detail::kM17Modes;
+    using decoders_detail::kP25Modes;
     using decoders_detail::kSidebandModes;
+    using decoders_detail::kTetraModes;
     static constexpr DecoderSpec kRegistry[] = {
         {P25p1Decoder::kName, DecoderInput::ComplexBaseband,
          "P25 Phase 1 C4FM framing, TIA-102.BAAA-A: NAC and DUID of every data unit, and the "
-         "Header Data Unit's talkgroup, algorithm, key and encrypted flag",
-         &P25p1Decoder::make, {}},
+         "Header Data Unit's talkgroup, algorithm, key and encrypted flag. Reads the complex "
+         "baseband of a p25p1 receiver, or a raw tap up to 192000 S/s",
+         &P25p1Decoder::make, kP25Modes},
         {DStarDecoder::kName, DecoderInput::ComplexBaseband,
          "D-STAR DV, JARL Ver 7.0: the radio header's four callsigns, suffix and flags, then "
-         "one message per superframe of voice frames",
-         &DStarDecoder::make, {}},
+         "one message per superframe of voice frames. Reads the complex baseband of a dstar "
+         "receiver, or a raw tap up to 192000 S/s",
+         &DStarDecoder::make, kDStarModes},
         {TetraDecoder::kName, DecoderInput::ComplexBaseband,
          "TETRA V+D synchronisation bursts, EN 300 392-2: colour code, MCC, MNC, timeslot and "
-         "the frame and multiframe numbers",
-         &TetraDecoder::make, {}},
+         "the frame and multiframe numbers. Reads the complex baseband of a tetra receiver, or "
+         "a raw tap up to 192000 S/s",
+         &TetraDecoder::make, kTetraModes},
         {RttyChunkDecoder::kName, DecoderInput::RealAudio,
          "RTTY, ITA2 over start-stop FSK, ITU-T S.1 and S.3: lines of text at 45.45 baud and "
          "170 Hz shift with mark on 2125 Hz. Reads a usb or lsb receiver's audio",
@@ -2536,7 +2635,8 @@ private:
         {M17ChunkDecoder::kName, DecoderInput::ComplexBaseband,
          "M17, Protocol Specification Part I 2.0.4: each link setup frame's callsigns, type and "
          "encrypted flag, the end of each stream, and the end of transmission. Reads the complex "
-         "baseband of a p25p1 receiver, 48000 S/s in a 12.5 kHz channel, or a raw tap",
+         "baseband of a p25p1 receiver, 48000 S/s in a 12.5 kHz channel, or a raw tap up to "
+         "192000 S/s",
          &M17ChunkDecoder::make, kM17Modes},
     };
     return kRegistry;

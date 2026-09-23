@@ -1190,3 +1190,12 @@ commit: "Flush POCSAG, NAVTEX, CW and the text lines when the stream ends"
 instead: The POCSAG, NAVTEX, CW, RTTY, SITOR-B and PSK adapters override
     ChunkDecoder::flush and hand over the page, message or line they hold,
     flagged flushed or ended stream_end.
+
+phrase: the three complex decoders, which read any complex tap
+phrase: which is how the three complex decoders have always been attached
+phrase: a `p25p1` receiver, or any complex tap
+retired: 2026-09-23
+commit: "Hold the complex decoders to their own mode or a raw tap under a cap"
+instead: p25p1, dstar and tetra read their own mode or raw, m17 reads p25p1 or
+    raw, and a raw tap above kRawTapRateCap, 192000 S/s, is refused naming
+    the mode to use instead.

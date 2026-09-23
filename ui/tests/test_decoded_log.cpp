@@ -47,16 +47,17 @@ using Strings = std::vector<std::string>;
 }
 
 // The engine's registry as Session.decoders answers it on 2026-09-23, in its
-// order, with the modes core/rpc/convert.cpp writes out.
+// order, with the modes core/rpc/convert.cpp writes out. The three digital
+// voice decoders name their own mode and raw since the raw tap cap; before
+// it they crossed with every complex tap mode, "raw, p25p1, dstar, tetra".
 [[nodiscard]] std::vector<revenant::rpc::DecoderInfo> engine_list()
 {
     using revenant::rpc::DecoderInput;
-    const Strings complex = {"raw", "p25p1", "dstar", "tetra"};
     const Strings sideband = {"usb", "lsb"};
     return {
-        info_of("p25p1", DecoderInput::ComplexBaseband, complex),
-        info_of("dstar", DecoderInput::ComplexBaseband, complex),
-        info_of("tetra", DecoderInput::ComplexBaseband, complex),
+        info_of("p25p1", DecoderInput::ComplexBaseband, {"p25p1", "raw"}),
+        info_of("dstar", DecoderInput::ComplexBaseband, {"dstar", "raw"}),
+        info_of("tetra", DecoderInput::ComplexBaseband, {"tetra", "raw"}),
         info_of("rtty", DecoderInput::RealAudio, sideband),
         info_of("ax25", DecoderInput::RealAudio, {"nfm"}),
         info_of("pocsag", DecoderInput::RealAudio, {"nfm"}),
@@ -173,17 +174,14 @@ TEST_CASE("a raw tap is offered the complex decoders and no auto", "[decoded]")
 // Rejects treating the digital modes as a raw tap, with no auto, which is
 // what they were while the window could only reach them as one. A p25p1
 // receiver's auto is the decoder named after it, and so for dstar and tetra;
-// the others the engine lists as reading the tap stay in the menu, M17 on
-// p25p1 among them, because the engine says they read it.
+// M17 stays in the p25p1 menu because the engine lists it as reading one.
 TEST_CASE("a digital receiver's auto is the decoder named after its mode", "[decoded]")
 {
-    CHECK(decoder_choices(engine_list(), "p25p1") ==
-          Strings{"auto", "p25p1", "dstar", "tetra", "m17"});
+    CHECK(decoder_choices(engine_list(), "p25p1") == Strings{"auto", "p25p1", "m17"});
     CHECK(auto_decoders(engine_list(), "p25p1") == Strings{"p25p1"});
     CHECK(resolve_decoder_choice("auto", engine_list(), "p25p1") == Strings{"p25p1"});
-    CHECK(auto_decoders(engine_list(), "dstar") == Strings{"dstar"});
-    CHECK(auto_decoders(engine_list(), "tetra") == Strings{"tetra"});
-    CHECK(decoder_choices(engine_list(), "tetra") == Strings{"auto", "p25p1", "dstar", "tetra"});
+    CHECK(decoder_choices(engine_list(), "dstar") == Strings{"auto", "dstar"});
+    CHECK(decoder_choices(engine_list(), "tetra") == Strings{"auto", "tetra"});
 }
 
 // Rejects a section drawn for a mode nothing reads. WFM keeps its RDS

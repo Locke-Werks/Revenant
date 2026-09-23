@@ -624,10 +624,10 @@ through it as of 2026-09-22, each one adapter and one registry row in
 
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
-| `p25p1` | NAC and DUID of every data unit, with the carrier offset and deviation its sync word measured; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband: a `p25p1` receiver, or any complex tap |
-| `dstar` | The radio header's four callsigns, suffix and flags, then one message per superframe of voice frames | Complex baseband: a `dstar` receiver, or any complex tap |
-| `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband: a `tetra` receiver, or any complex tap |
-| `m17` | Each link setup whose CRC checked: callsigns, type, encrypted flag; each stream's end; end of transmission | Complex baseband of a `p25p1` receiver, 48000 S/s in its 12.5 kHz channel, or a `raw` tap |
+| `p25p1` | NAC and DUID of every data unit, with the carrier offset and deviation its sync word measured; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband of a `p25p1` receiver, or a `raw` tap up to 192000 S/s |
+| `dstar` | The radio header's four callsigns, suffix and flags, then one message per superframe of voice frames | Complex baseband of a `dstar` receiver, or a `raw` tap up to 192000 S/s |
+| `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband of a `tetra` receiver, or a `raw` tap up to 192000 S/s |
+| `m17` | Each link setup whose CRC checked: callsigns, type, encrypted flag; each stream's end; end of transmission | Complex baseband of a `p25p1` receiver, 48000 S/s in its 12.5 kHz channel, or a `raw` tap up to 192000 S/s |
 | `rtty` | Lines of ITA2 text, 45.45 baud, 170 Hz shift, mark on 2125 Hz | Audio of a `usb` or `lsb` receiver; the sideband sets the polarity |
 | `sitor_b` | Lines of text, each character from whichever of its two copies arrived | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
 | `navtex` | Each message with its B1 to B4 letters, serial and whether the preamble was clean | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
@@ -647,11 +647,23 @@ noise. A decoder added now is one adapter and one row again.
 
 **`DecoderInfo::modes` names the right-hand column as a list**, since
 2026-09-23, for a client that offers an operator only the decoders a receiver
-can feed. It is always the whole list: the three complex decoders, which read
-any complex tap, cross as `raw`, `p25p1`, `dstar` and `tetra` rather than as an
-empty list meaning "any", because empty is what an engine older than the field
-sends and a client has to be able to tell the two apart. The descriptions
-still say the modes in words, for a person reading the list.
+can feed. It is always the whole list, never empty for "any", because empty is
+what an engine older than the field sends and a client has to be able to tell
+the two apart. The descriptions still say the modes in words, for a person
+reading the list.
+
+**A raw tap is held to 192000 S/s for the complex decoders.** `p25p1`, `dstar`
+and `tetra` read their own mode's fine stage, at the rate each was written for,
+or a `raw` tap, and `m17` a `p25p1` receiver or a `raw` tap. A raw tap runs at
+the grid's channel rate, which nothing else caps, and a decoder's receive
+filter grows with the rate and runs on the completion thread that delivers
+every receiver's output: at 600 kS/s P25 took 602 ms of a core per second of
+input on the RTX 4090 machine, against 66 ms at 192000. So `subscribeDecoded`
+refuses a raw tap above `kRawTapRateCap` in `core/rpc/decoders.h`, naming the
+cap and the mode to use instead, and the adapter refuses the same on its first
+chunk for `revenant-cli`. WHAT THIS PARAGRAPH'S PREDECESSOR USED TO SAY: "the
+three complex decoders, which read any complex tap, cross as `raw`, `p25p1`,
+`dstar` and `tetra`".
 
 **One message shape and not a struct per mode.** A message carries the
 receiver, the decoder's registry name, a `kind` within that decoder, a sample

@@ -44,6 +44,7 @@
 #include <memory>
 #include <mutex>
 #include <numbers>
+#include <random>
 #include <set>
 #include <span>
 #include <string>
@@ -394,6 +395,96 @@ TEST_CASE("the decoder registry crosses the wire", "[gpu][rpc][decode]") {
 }
 
 // ---------------------------------------------------------------------------
+// A raw tap's rate
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::string_view kComplexDecoders[] = {"p25p1", "dstar", "tetra", "m17"};
+
+// A twentieth of a second at a time, which is about what one engine block
+// gives a raw tap on the grids this suite runs.
+[[nodiscard]] double adapter_ms_per_second(rpc::ChunkDecoder& decoder, dsp::SampleRate rate,
+                                           std::uint64_t seed) {
+    std::mt19937_64 random(seed);
+    std::normal_distribution<float> gauss(0.0F, 0.1F);
+    const auto frames = static_cast<std::size_t>(rate);
+    std::vector<float> interleaved(frames * 2);
+    for (float& value : interleaved) {
+        value = gauss(random);
+    }
+    const auto chunk = static_cast<std::size_t>(rate / 20);
+    std::vector<rpc::DecodedMessage> scratch;
+    const auto started = std::chrono::steady_clock::now();
+    for (std::size_t at = 0; at < frames; at += chunk) {
+        const std::size_t count = std::min(chunk, frames - at);
+        const rpc::DecoderChunk in{
+            .samples = std::span<const float>(interleaved).subspan(at * 2, count * 2),
+            .channels = 2,
+            .rate = rate,
+            .start = at,
+        };
+        REQUIRE(decoder.consume(in, scratch).has_value());
+    }
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+        .count();
+}
+
+}  // namespace
+
+// Rejects the unbounded raw tap this replaced. A complex decoder's filter
+// grows with its input's rate and runs on the engine's completion thread, so
+// a tap at a coarse channel's full rate, 600 kS/s on an eight-channel grid at
+// 2.4 MS/s, cost P25 about 600 ms of a core per second of input and could make
+// the source drop samples for every receiver.
+TEST_CASE("a complex decoder refuses a raw tap above the cap, naming the mode to use",
+          "[rpc][decode]") {
+    constexpr dsp::SampleRate kCap = rpc::decoders_detail::kRawTapRateCap;
+    for (const std::string_view name : kComplexDecoders) {
+        INFO(name);
+        const rpc::DecoderSpec* spec = rpc::find_decoder(name);
+        REQUIRE(spec != nullptr);
+
+        CHECK(spec->make(rpc::DecoderBuild{.rate = kCap, .mode = "raw"}).has_value());
+
+        auto refused = spec->make(rpc::DecoderBuild{.rate = 600'000, .mode = "raw"});
+        REQUIRE_FALSE(refused.has_value());
+        INFO(refused.error().message);
+        CHECK(refused.error().message.find("no more than 192000 S/s") != std::string::npos);
+        CHECK(refused.error().message.find("runs at 600000") != std::string::npos);
+        const std::string_view own = name == "m17" ? "p25p1" : name;
+        CHECK(refused.error().message.find(std::format("Add a receiver in {} on the signal", own)) !=
+              std::string::npos);
+
+        // The receiver's own mode is never held to it: its fine stage
+        // delivers the rate the decoder was written at.
+        CHECK(spec->make(rpc::DecoderBuild{.rate = 600'000, .mode = own}).has_value());
+    }
+}
+
+// What the cap buys, measured rather than asserted closely: each adapter fed
+// a second of noise at the cap, a twentieth of a second at a time. On the
+// RTX 4090 machine on 2026-09-23 the costliest, p25p1, took 66 ms. The bound
+// is four times the measurement, loose enough for a loaded machine and tight
+// enough to fail if a filter's cost stops being bounded by the rate.
+TEST_CASE("a complex decoder at the raw tap cap costs a fraction of a core", "[rpc][decode]") {
+    constexpr dsp::SampleRate kCap = rpc::decoders_detail::kRawTapRateCap;
+    constexpr std::uint64_t kSeed = 20'260'923;
+    INFO("seed " << kSeed);
+    for (const std::string_view name : kComplexDecoders) {
+        INFO(name);
+        const rpc::DecoderSpec* spec = rpc::find_decoder(name);
+        REQUIRE(spec != nullptr);
+        auto made = spec->make(rpc::DecoderBuild{.rate = kCap, .mode = "raw"});
+        REQUIRE(made.has_value());
+        const double ms = adapter_ms_per_second(**made, kCap, kSeed);
+        WARN(std::format("{} on a raw tap at {} S/s: {:.1f} ms of one core per second of input",
+                         name, kCap, ms));
+        CHECK(ms < 265.0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------
 
@@ -418,11 +509,13 @@ TEST_CASE("a decoder the receiver cannot feed is refused in words", "[gpu][rpc][
     INFO(test::message_of(audio));
     REQUIRE(audio.has_value());
 
-    // A complex decoder on an audio receiver, naming both halves.
+    // A complex decoder on an audio receiver, naming both halves. Its mode
+    // list answers first now that p25p1 has one, with the modes it reads.
     auto wrong_input = harness.client().subscribe_decoded(*audio, "p25p1", into(log), ending(log));
     REQUIRE_FALSE(wrong_input.has_value());
     INFO(wrong_input.error().message);
-    CHECK(wrong_input.error().message.find("reads complex baseband") != std::string::npos);
+    CHECK(wrong_input.error().message.find("reads the complex baseband of a p25p1 or raw") !=
+          std::string::npos);
     CHECK(wrong_input.error().message.find("nfm") != std::string::npos);
 
     // A name this engine does not have, listing the ones it does.
@@ -442,6 +535,48 @@ TEST_CASE("a decoder the receiver cannot feed is refused in words", "[gpu][rpc][
     // None of those left anything to hold.
     auto stats = harness.client().decoded_stats(*audio, "p25p1");
     CHECK_FALSE(stats.has_value());
+    CHECK_FALSE(log->ended());
+}
+
+// The same refusal at subscribeDecoded, where the channel rate is already
+// known, so it arrives as the call's answer rather than as an ended() one
+// chunk after the engine starts. Eight channels of the suite's source put the
+// raw tap near 600 kS/s.
+TEST_CASE("a raw tap too fast for a complex decoder is refused at subscribe", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    HarnessOptions options;
+    options.channels = 8;
+    const auto ready = harness.open(options);
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+
+    auto raw = harness.client().add_vrx(
+        rpc::VrxParams{.center = 131'072, .bandwidth = 12'000, .demod = rpc::Demod::Raw});
+    INFO(test::message_of(raw));
+    REQUIRE(raw.has_value());
+
+    auto log = std::make_shared<MessageLog>();
+    for (const std::string_view name : {"p25p1", "m17"}) {
+        auto refused = harness.client().subscribe_decoded(*raw, name, into(log), ending(log));
+        REQUIRE_FALSE(refused.has_value());
+        INFO(refused.error().message);
+        CHECK(refused.error().message.find("no more than 192000 S/s") != std::string::npos);
+        CHECK(refused.error().message.find("Add a receiver in p25p1 on the signal") !=
+              std::string::npos);
+    }
+
+    // And a p25p1 decoder on a dstar receiver is refused by its mode list,
+    // which used to be empty and read as any complex tap.
+    auto dstar = harness.client().add_vrx(
+        rpc::VrxParams{.center = 131'072, .bandwidth = 0, .demod = rpc::Demod::Dstar});
+    INFO(test::message_of(dstar));
+    REQUIRE(dstar.has_value());
+    auto crossed = harness.client().subscribe_decoded(*dstar, "p25p1", into(log), ending(log));
+    REQUIRE_FALSE(crossed.has_value());
+    INFO(crossed.error().message);
+    CHECK(crossed.error().message.find("a p25p1 or raw receiver") != std::string::npos);
     CHECK_FALSE(log->ended());
 }
 
