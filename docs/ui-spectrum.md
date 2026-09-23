@@ -1699,17 +1699,30 @@ The work per frame is unchanged: sync about 0.1 ms, render 0.3 and the GPU
 two waits, `request` 8.3 and `begin` 7.7 ms on average in run 1, where before
 they were all `request`, 14.9 ms.
 
+### The long run
+
+`.\scripts\frame-budget.ps1 -Seconds 300 -Visible -OnTop` on 2026-09-23, from
+commit "Record the frame budget with the two windows paced", with the owner
+away from the desktop, no CI run and no build going, the stream to the virtual
+display connected (2202x1626 logical at 1.25, 120 Hz), and the engine at
+1.000x realtime over 301 s:
+
+| window | frames | interval mean | p50 | p95 | p99 | max | over budget |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| main | 36107 | 8.336 ms | 8.447 | 8.809 | 10.630 | 38.226 | 154 of 36106, 0.43% |
+| receivers | 36046 | 8.350 ms | 8.448 | 8.852 | 11.009 | 31.742 | 233 of 36045, 0.65% |
+
+Engine frames: 90442 received, 1407 dropped by the engine, 3625 replaced in the
+client's latest-wins slot (4.0%), 86817 to the display. The main window's late
+frames waited in `request`, 14.2 ms on average, and hardly at all in `begin`
+(p50 0.009 ms); sync, render and GPU work stayed at 0.07, 0.23 and 0.10 ms.
+
+With both windows open at full target load the main window misses a refresh
+on 0.43% of frames over five minutes, under the one-in-a-hundred line and
+about what it misses alone.
+
 ### What is still open
 
-With both windows open the main window now misses a refresh about as often as
-it does alone, 0.4% and 1.0% of frames in two clean 60 s runs against 16.9%
-before. **That is at the M2 line, not clearly under it**: run 1 was 75 of 7259,
-1.03%, one interval in a hundred and so just over, and the only long run was
-disturbed. The single-window and trivial-window results, 0.4 to 0.6%, say the
-remainder is mostly this display's own pacing. What would settle it:
-
-- a long run, 300 s or more, `-Visible -OnTop`, at a time agreed with the
-  owner, since `-OnTop` takes the screen for the length of the run;
 - the same on a physical monitor on the 4090. None is part of the desktop:
   `display_info` lists only the virtual display, and Windows reports a
   Hisense connected over HDMI but not in the desktop, which would take a

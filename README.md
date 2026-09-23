@@ -287,9 +287,11 @@ millisecond. The cause was Qt's threaded loop holding the one GUI thread
 through each window's vsync wait in turn. The receiver window now presents
 without waiting and is drawn after each main-window frame, and with both
 windows kept in front the main window missed 0.4% and 1.0% of refreshes in two
-60 s runs against 16.9% before, about what it misses alone. That is at the
-line of one frame in a hundred rather than clearly under it, and a long
-undisturbed run is still to do. The display is the streamed virtual one, and
+60 s runs against 16.9% before, about what it misses alone. An undisturbed
+300 s run on an idle machine then gave 154 of 36106 main-window frames over
+budget, 0.43%, and 233 of 36045 in the receiver window, 0.65%, with the engine
+at 1.000x realtime: under one in a hundred. The display is the streamed
+virtual one, and a physical monitor is still to measure, and
 `docs/ui-spectrum.md`, "Frame budget", has the numbers, the command and what
 is still open.
 

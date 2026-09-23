@@ -1673,3 +1673,14 @@ commit: "Record the frame budget with the two windows paced"
 instead: Kept on top of other windows, the main window alone missed 0.4% and
     0.5%, and a one-rectangle Qt Quick window 0.64%. The earlier runs did not
     control the stacking order, and a covered window is not paced at all.
+
+phrase: That is at the M2 line, not clearly under it
+phrase: the only long run was disturbed
+phrase: at the line of one frame in a hundred rather than clearly under it
+phrase: a long undisturbed run is still to do
+retired: 2026-09-23
+commit: "Measure the frame budget over five undisturbed minutes"
+instead: An undisturbed 300 s run on an idle machine, both windows open and
+    kept on top, engine at 1.000x, gave the main window 154 of 36106 frames
+    over budget, 0.43%, and the receiver window 0.65%. docs/ui-spectrum.md,
+    "The long run".
