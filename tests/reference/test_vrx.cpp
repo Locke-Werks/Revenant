@@ -39,6 +39,9 @@
 #include <string>
 #include <vector>
 
+#include "core/decode/dstar.h"
+#include "core/decode/p25p1.h"
+#include "core/decode/tetra.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/wfm_mod.h"
@@ -681,6 +684,14 @@ TEST_CASE("the cheap demodulation rate query answers what the planner builds",
         // decides, and asymmetric so the two edges cannot cancel.
         {engine::Demod::Nfm, 1'000, 9'000, 16'000},
         {engine::Demod::Usb, -9'000, -1'000, 12'000},
+
+        // The digital voice modes, which step in their decoder's rate and
+        // not the audio rate. The audio rates here are chosen so the two
+        // would give different answers: TETRA against 48000 of audio would
+        // land on 48000 if it stepped in the audio rate.
+        {engine::Demod::P25p1, -6'250, 6'250, 48'000},
+        {engine::Demod::Dstar, -3'000, 3'000, 16'000},
+        {engine::Demod::Tetra, -12'500, 12'500, 48'000},
     };
 
     for (const auto& want : cases) {
@@ -707,8 +718,11 @@ TEST_CASE("the cheap demodulation rate query answers what the planner builds",
         CHECK(*cheap == planned->demod_rate);
 
         // A whole multiple of the audio rate, which is the property that
-        // makes the decimation an integer.
-        CHECK(*cheap % want.audio_rate == 0);
+        // makes the decimation an integer, or for a digital voice mode of
+        // the rate its decoder was measured at.
+        const dsp::SampleRate step =
+            dsp::complex_tap_rate_step(static_cast<std::uint32_t>(want.mode));
+        CHECK(*cheap % (step > 0 ? step : want.audio_rate) == 0);
     }
 }
 
@@ -880,6 +894,9 @@ TEST_CASE("a plan's fine tap table is exactly the length its config implies", "[
         {engine::Demod::Lsb, 2'700, &kGrid},       {engine::Demod::Lsb, 1'800, &kGrid},
         {engine::Demod::Dsb, 6'000, &kGrid},       {engine::Demod::Dsb, 3'000, &kGrid},
         {engine::Demod::Cw, 500, &kGrid},          {engine::Demod::Cw, 250, &kGrid},
+        {engine::Demod::P25p1, 12'500, &kGrid},    {engine::Demod::P25p1, 9'000, &kGrid},
+        {engine::Demod::Dstar, 6'000, &kGrid},     {engine::Demod::Dstar, 4'000, &kGrid},
+        {engine::Demod::Tetra, 25'000, &kGrid},    {engine::Demod::Tetra, 20'000, &kGrid},
     };
 
     for (const Case& want : cases) {
@@ -893,6 +910,143 @@ TEST_CASE("a plan's fine tap table is exactly the length its config implies", "[
         const dsp::VrxShape shape = dsp::shape_of(plan);
         CHECK(dsp::fine_tap_table_size(shape.fine) == plan.fine_taps.size());
     }
+}
+
+// ---------------------------------------------------------------------------
+// The digital voice modes, which the planner turned away until 2026-09-22
+// ---------------------------------------------------------------------------
+
+TEST_CASE("every enumerator is a known mode and nothing past the last one is",
+          "[vrx][m1]") {
+    // The guard this replaces was `mode > kDemodCw` in four places, written
+    // before the three digital voice modes were appended and never moved
+    // after. Every enumerator is asked here so that the next one appended
+    // is either covered by the switch or fails this case.
+    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodTetra; ++mode) {
+        INFO("mode " << mode);
+        CHECK(dsp::is_known_mode(mode));
+    }
+    CHECK_FALSE(dsp::is_known_mode(dsp::kDemodTetra + 1U));
+
+    // 257 truncates to 1 in the enum's 8-bit underlying type, which is Am.
+    // The guard reads the word, not the truncation.
+    CHECK_FALSE(dsp::is_known_mode(257U));
+    CHECK_FALSE(dsp::is_complex_output(257U));
+
+    // The four complex taps, and only those four.
+    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodTetra; ++mode) {
+        INFO("mode " << mode);
+        const bool expected = mode == dsp::kDemodRaw || mode == dsp::kDemodP25p1 ||
+                              mode == dsp::kDemodDstar || mode == dsp::kDemodTetra;
+        CHECK(dsp::is_complex_output(mode) == expected);
+    }
+}
+
+TEST_CASE("the digital voice modes plan as complex taps at their decoders' rates",
+          "[vrx][m1]") {
+    // THE MAJOR THIS CLOSES. core/dsp/vrx_reference.cpp refused any mode above
+    // Cw in validate, demod_rate_for, plan_vrx and the shorthand
+    // minimum_demod_rate, so a P25, D-STAR or TETRA receiver could not be
+    // planned through the reference path at all, and Graph::set_vrx_params,
+    // which asks vrx_shape_for, refused every retune of one.
+    struct Case {
+        engine::Demod mode;
+        dsp::SampleRate rate;
+        double symbol_rate;
+        dsp::SampleRate decoder_rate;
+    };
+    const Case cases[] = {
+        {engine::Demod::P25p1, 48'000, decode::kP25SymbolRate, decode::P25Config{}.rate},
+        {engine::Demod::Dstar, 48'000, decode::kDStarBitRate, decode::DStarConfig{}.rate},
+        {engine::Demod::Tetra, 72'000, decode::kTetraSymbolRate, decode::TetraConfig{}.rate},
+    };
+
+    for (const Case& want : cases) {
+        const auto mode = static_cast<std::uint32_t>(want.mode);
+        INFO("mode " << engine::demod_name(want.mode));
+
+        // The copy in core/dsp against the decoder it was copied for. A
+        // decoder retuned to another default rate, or a symbol rate edited
+        // on one side only, fails here rather than as a receiver that hands
+        // a decoder a rate nobody measured it at.
+        CHECK(dsp::complex_tap_rate_step(mode) == want.rate);
+        CHECK(want.decoder_rate == want.rate);
+        const double per_symbol = static_cast<double>(want.rate) / want.symbol_rate;
+        INFO(per_symbol << " samples per symbol");
+        CHECK(per_symbol == std::floor(per_symbol));
+
+        // Planned at every audio rate an engine can be configured with, and
+        // the answer does not move: the rate belongs to the decoder. 171000
+        // is the composite rate tools/cli --rds opens, and an engine built at
+        // it hands every receiver that names no rate that audio rate.
+        for (const dsp::SampleRate audio_rate : {16'000, 48'000, 96'000, 171'000}) {
+            INFO("audio rate " << audio_rate);
+            engine::VrxParams params;
+            params.center = 196'500;
+            params.demod = want.mode;
+            params.bandwidth = 0;
+            params.audio_rate = audio_rate;
+
+            auto placed = engine::place(kGrid, kSourceRate, params);
+            INFO(test::message_of(placed));
+            REQUIRE(placed.has_value());
+
+            auto planned = dsp::plan_vrx(kGrid, kSourceRate, params, *placed);
+            INFO(test::message_of(planned));
+            REQUIRE(planned.has_value());
+
+            CHECK(planned->mode == mode);
+            CHECK(planned->demod.mode == mode);
+            CHECK(planned->demod_rate == want.rate);
+            CHECK(planned->output_rate == want.rate);
+
+            // The raw tap's shape: a complex pair out, unscaled, with no
+            // detector history and no audio filter.
+            CHECK(planned->demod.channels == 2U);
+            CHECK(planned->demod.decimation == 1U);
+            CHECK(planned->demod.audio_taps == 1U);
+            CHECK(planned->demod.dc_taps == 1U);
+            CHECK(planned->demod.pilot_taps == 0U);
+            CHECK(planned->demod_gain == 1.0F);
+            CHECK(planned->deviation == 0);
+            CHECK(planned->deemphasis == engine::Deemphasis::None);
+            CHECK_FALSE(planned->stereo);
+            CHECK(dsp::demod_fine_history(planned->demod) == 0U);
+
+            // The mode's own channel, which the request left to the table.
+            CHECK(planned->passband == dsp::default_passband(want.mode));
+            CHECK_FALSE(planned->bandwidth_clamped);
+
+            // The cheap query and the control plane's shape agree with it.
+            auto cheap = dsp::demod_rate_for(params, *placed, audio_rate);
+            REQUIRE(cheap.has_value());
+            CHECK(*cheap == want.rate);
+            auto shape = dsp::vrx_shape_for(kGrid, kSourceRate, params, *placed);
+            INFO(test::message_of(shape));
+            REQUIRE(shape.has_value());
+            CHECK(*shape == dsp::shape_of(*planned));
+
+            const std::string chain = dsp::describe_audio_chain(*planned);
+            INFO(chain);
+            CHECK(chain.find("tap") != std::string::npos);
+            CHECK(chain.find(std::to_string(want.rate)) != std::string::npos);
+        }
+    }
+
+    // A passband wider than one step can carry moves the rate up by whole
+    // steps, so the ratio to the symbol rate stays an integer. 40 kHz of
+    // P25 needs 60 kS/s by the shape floor, which is 96000.
+    engine::VrxParams wide;
+    wide.center = 196'500;
+    wide.demod = engine::Demod::P25p1;
+    wide.passband_low = -20'000;
+    wide.passband_high = 20'000;
+    auto wide_place = engine::place(kGrid, kSourceRate, wide);
+    REQUIRE(wide_place.has_value());
+    auto wide_rate = dsp::demod_rate_for(wide, *wide_place, 48'000);
+    INFO(test::message_of(wide_rate));
+    REQUIRE(wide_rate.has_value());
+    CHECK(*wide_rate == 96'000);
 }
 
 // ---------------------------------------------------------------------------
@@ -943,6 +1097,61 @@ TEST_CASE("the fine stage matches its CPU twin bit-exactly", "[gpu][vrx][m1]") {
     INFO(comparison.report);
     CHECK(comparison.identical);
     CHECK(comparison.max_ulp_error == 0);
+}
+
+TEST_CASE("the fine stage is bit-exact on the digital voice modes' plans", "[gpu][vrx][m1]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // Nothing in the kernel changed for these modes. What is new is the
+    // configurations they bring it. P25 and D-STAR resample a 75 kS/s channel
+    // to 48000 as the narrowband voice modes already do, with tap counts of
+    // their own; TETRA resamples it to 72000, a step of one whole input
+    // sample plus 3000/72000 of one, which no other plan in this file builds.
+    // The recurrence's carry is what a new step shape can get wrong on one
+    // driver and not the other.
+    constexpr std::uint64_t kSeed = 0x5652580000000010ULL;
+
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz bandwidth;
+    };
+    const Case cases[] = {
+        {engine::Demod::P25p1, 12'500},
+        {engine::Demod::Dstar, 6'000},
+        {engine::Demod::Tetra, 25'000},
+    };
+
+    test::SeededInput input(kSeed);
+    const auto channel_ring = input.complexes(kChanBase + kChanCapacity);
+
+    for (const Case& item : cases) {
+        const auto plan = make_plan(item.mode, 196'500, item.bandwidth, kGrid);
+        INFO("mode " << engine::demod_name(item.mode) << ", taps " << plan.fine.taps
+                     << ", channel rate " << plan.channel_rate << ", demod rate "
+                     << plan.demod_rate);
+        REQUIRE(plan.demod_rate < plan.channel_rate);
+
+        const auto nco = make_nco(plan);
+        const auto params = fine_params(plan, kChanCapacity - 40U, 1024, 7'654'321);
+
+        const auto gpu_result =
+            run_fine_on_gpu(plan.fine, params, channel_ring, plan.fine_taps, nco, 64);
+
+        std::vector<dsp::Complex32> cpu_result(kFineCapacity, dsp::Complex32{});
+        const auto computed = dsp::reference_vrx_fine(plan.fine, params, channel_ring,
+                                                      plan.fine_taps, nco, cpu_result);
+        INFO(test::message_of(computed));
+        REQUIRE(computed.has_value());
+
+        REQUIRE(nonzero_count(std::span<const dsp::Complex32>(cpu_result)) > params.count / 2);
+        REQUIRE(nonzero_count(std::span<const dsp::Complex32>(gpu_result)) > params.count / 2);
+
+        const auto comparison = test::diff(gpu_result, cpu_result, kSeed);
+        INFO(comparison.report);
+        CHECK(comparison.identical);
+        CHECK(comparison.max_ulp_error == 0);
+    }
 }
 
 TEST_CASE("the fine stage is bit-exact on values chosen to provoke rounding",
@@ -1123,6 +1332,14 @@ TEST_CASE("every demodulator matches its CPU twin bit-exactly", "[gpu][vrx][m1]"
         {engine::Demod::Nfm, 12'000, &kGrid},   {engine::Demod::Wfm, 200'000, &kWideGrid},
         {engine::Demod::Usb, 3'000, &kGrid},    {engine::Demod::Lsb, 3'000, &kGrid},
         {engine::Demod::Dsb, 6'000, &kGrid},    {engine::Demod::Cw, 500, &kGrid},
+
+        // The digital voice modes, which are specialization constants 8, 9
+        // and 10 and reach the kernel's complex passthrough through its own
+        // copies of those values. A kernel that listed only the raw tap
+        // would send them to the product detector and write one real float
+        // per frame, which this diff would catch as half the buffer zero.
+        {engine::Demod::P25p1, 12'500, &kGrid}, {engine::Demod::Dstar, 6'000, &kGrid},
+        {engine::Demod::Tetra, 25'000, &kGrid},
     };
 
     test::SeededInput input(kSeed);
@@ -1672,27 +1889,50 @@ TEST_CASE("the raw tap hands back exactly what it was given", "[gpu][vrx][m1]") 
     // The raw tap is not a demodulator. Its gain is one and its job is to hand
     // out the complex baseband unchanged, so the right assertion is equality
     // and not a tolerance.
+    //
+    // The three digital voice modes take the same branch since they got a
+    // fine stage, and are held to the same equality: what their decoders
+    // are handed is the fine stage's output to the bit, with nothing
+    // between.
     constexpr std::uint64_t kSeed = 0x5652580000000009ULL;
 
-    const auto plan = make_plan(engine::Demod::Raw, 196'500, 12'000, kGrid);
-    REQUIRE(plan.demod.mode == dsp::kDemodRaw);
-    REQUIRE(plan.demod.decimation == 1U);
-    REQUIRE(plan.demod_gain == 1.0F);
+    struct Case {
+        engine::Demod mode;
+        dsp::Hertz bandwidth;
+    };
+    const Case cases[] = {
+        {engine::Demod::Raw, 12'000},
+        {engine::Demod::P25p1, 12'500},
+        {engine::Demod::Dstar, 6'000},
+        {engine::Demod::Tetra, 25'000},
+    };
 
     test::SeededInput input(kSeed);
     const auto fine_ring = input.complexes(kFineCapacity);
 
-    constexpr std::uint32_t kCount = 1024;
-    const auto params = demod_params(plan, 900, kCount);
+    for (const Case& item : cases) {
+        INFO("mode " << engine::demod_name(item.mode));
+        const auto plan = make_plan(item.mode, 196'500, item.bandwidth, kGrid);
+        REQUIRE(plan.demod.mode == static_cast<std::uint32_t>(item.mode));
+        REQUIRE(plan.demod.decimation == 1U);
+        REQUIRE(plan.demod.channels == 2U);
+        REQUIRE(plan.demod_gain == 1.0F);
 
-    const auto audio = run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
-    REQUIRE(audio.size() == 2U * kCount);
+        constexpr std::uint32_t kCount = 1024;
+        const auto params = demod_params(plan, 900, kCount);
 
-    for (std::uint32_t i = 0; i < kCount; ++i) {
-        const auto& expected = fine_ring[(params.in_offset + i) & kFineMask];
-        INFO("sample " << i);
-        CHECK(audio[2U * i] == expected.real());
-        CHECK(audio[2U * i + 1U] == expected.imag());
+        const auto audio =
+            run_demod_on_gpu(plan.demod, params, fine_ring, plan.demod_weights, 64);
+        REQUIRE(audio.size() == 2U * kCount);
+
+        std::size_t mismatched = 0;
+        for (std::uint32_t i = 0; i < kCount; ++i) {
+            const auto& expected = fine_ring[(params.in_offset + i) & kFineMask];
+            mismatched += static_cast<std::size_t>(audio[2U * i] != expected.real());
+            mismatched += static_cast<std::size_t>(audio[2U * i + 1U] != expected.imag());
+        }
+        INFO(mismatched << " of " << 2U * kCount << " values differ from the fine ring");
+        CHECK(mismatched == 0);
     }
 }
 

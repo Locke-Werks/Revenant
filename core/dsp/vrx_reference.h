@@ -305,10 +305,18 @@ inline constexpr std::uint32_t kDemodLsb = 5;
 inline constexpr std::uint32_t kDemodDsb = 6;
 inline constexpr std::uint32_t kDemodCw = 7;
 
-// The digital voice modes. These never reach the kernel: engine::is_complex_tap
-// routes them down the raw tap's path, which is a buffer copy and no
-// specialization constant at all. The values exist so the enum and this list
-// stay in step if one of them ever does get a kernel.
+// The digital voice modes. Since 2026-09-22 these DO reach both kernels: the
+// fine stage mixes, filters and resamples them like any other receiver, and
+// core/shaders/vrx_demod.comp hands the result out unchanged through the same
+// passthrough branch the raw tap's constant selects. So these three values are
+// specialization constants now, and the kernel's own copies of them are what
+// route the three to that branch.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "These never reach the kernel:
+// engine::is_complex_tap routes them down the raw tap's path, which is a
+// buffer copy and no specialization constant at all." That was true while
+// core/engine/vrx_stage.cpp declined every complex tap. It declines only
+// Demod::Raw now.
 inline constexpr std::uint32_t kDemodP25p1 = 8;
 inline constexpr std::uint32_t kDemodDstar = 9;
 inline constexpr std::uint32_t kDemodTetra = 10;
@@ -341,6 +349,85 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Tetra) == kDemodTetra);
 // label, which is the one shape /w14062 diagnoses. Adding a mode is a build
 // error in all three. Keep them that way; a default label in any of them
 // puts the silent answer back.
+
+// Whether a 32-bit mode word names an enumerator of engine::Demod at all.
+//
+// THE RANGE GUARD THIS REPLACES WAS ONE MODE LIST SHORT FOR A DAY. validate,
+// demod_rate_for, plan_vrx and the shorthand minimum_demod_rate each refused
+// any mode above kDemodCw, written as `mode > kDemodCw`, after the three
+// digital voice modes had been appended at 8, 9 and 10. Nothing could plan a
+// P25, D-STAR or TETRA receiver through this file, and Graph::set_vrx_params,
+// which asks vrx_shape_for, refused every retune of one. A comparison against
+// the last enumerator is a hand-kept number and it went stale the day the
+// enum grew; this is a switch with no default label, so the next mode appended
+// is a /w14062 diagnostic here instead of a refusal somewhere downstream.
+//
+// The word is checked against the enum's 8-bit range before the cast, because
+// a scoped enum with a fixed underlying type converts an out-of-range integer
+// by truncation, and 257 would otherwise read as Demod::Am.
+[[nodiscard]] constexpr bool is_known_mode(std::uint32_t mode) {
+    if (mode > 0xFFU) {
+        return false;
+    }
+    switch (static_cast<engine::Demod>(mode)) {
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw:
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+        case engine::Demod::Tetra: return true;
+    }
+    return false;
+}
+
+// Whether a mode hands out complex baseband rather than detected audio:
+// engine::is_complex_tap, asked of the 32-bit word the planner and the kernel
+// hold. False for a word that is no mode at all.
+//
+// This is the predicate every "is this the raw tap" test in this file used to
+// be. The raw tap was the only complex output until the three digital voice
+// modes got a fine stage, and a check written as `mode == kDemodRaw` would
+// hand a P25 receiver an audio decimation filter and a mono detector.
+[[nodiscard]] constexpr bool is_complex_output(std::uint32_t mode) {
+    return is_known_mode(mode) && engine::is_complex_tap(static_cast<engine::Demod>(mode));
+}
+
+// The rate a digital voice receiver delivers its complex baseband at, which is
+// also the step its demodulation rate is rounded up in. Zero for every mode
+// that is not one of the three, whose demodulation rate is rounded up in
+// steps of the audio rate instead.
+//
+// A whole number of samples per symbol for each, and not a rate chosen here:
+// each is the decoder's own default, the rate its filter lengths were sized
+// at and its round trip in tests/decode was measured at. A receiver handing
+// a decoder any other rate is asking it to run outside what was measured.
+//
+//   P25p1   48000 S/s, 10 per symbol. TIA-102.BAAA-A clause 9.2, 4800
+//           symbols per second. decode::P25Config::rate.
+//   Dstar   48000 S/s, 10 per bit. JARL Ver 7.0 clause 4.1.2 b, 96 bits
+//           every 20 ms, so 4800 bits per second of GMSK.
+//           decode::DStarConfig::rate.
+//   Tetra   72000 S/s, 4 per symbol. EN 300 392-2 clause 5.3, 36 kbit/s of
+//           pi/4-DQPSK at two bits per symbol, so 18000 symbols per second.
+//           decode::TetraConfig::rate.
+//
+// The figures are stated here rather than read from core/decode, for the
+// reason core/engine/vrx.h gives for kCompositeAudioRateHz: nothing in the
+// engine's DSP depends on core/decode and three constants are not worth the
+// edge. tests/reference/test_vrx.cpp asserts all three against the decoders'
+// own defaults and symbol rates, so the copies cannot drift apart silently.
+//
+// The audio rate is not the step for these modes, and that is deliberate
+// rather than an omission. A receiver asking for no audio rate is handed the
+// engine's default, 48000 on the shipped configuration, and a TETRA receiver
+// rounded up in steps of that would run at 48000, which is 2.67 samples per
+// symbol.
+[[nodiscard]] SampleRate complex_tap_rate_step(std::uint32_t mode);
 
 // The longest audio FIR the kernel may be asked to run, and the longest the
 // DECIMATION DESIGN is allowed to spend on its own.
@@ -419,9 +506,9 @@ struct VrxDemodConfig {
     // Floats per output FRAME, which is one for a mono detector and two for
     // an interleaved pair.
     //
-    // Two means different things in the two modes that use it and the
-    // difference is in the mode, not here: the raw tap writes I then Q, a
-    // stereo WFM receiver writes L then R. A consumer that only needs to
+    // Two means different things in the modes that use it and the
+    // difference is in the mode, not here: the four complex taps write I then
+    // Q, a stereo WFM receiver writes L then R. A consumer that only needs to
     // size a buffer reads this and does not have to know which.
     //
     // WHAT THIS FIELD REPLACES. Until 2026-09-20 the raw tap's second
@@ -783,7 +870,12 @@ struct Passband {
 //
 // Split out of plan_vrx so the rate a caller can get cheaply and the rate
 // the planner builds a filter for are one piece of arithmetic rather than
-// two copies of it. plan_vrx calls this; so does vrx_shape_for, which is
+// two copies of it.
+//
+// The three digital voice modes round up in steps of complex_tap_rate_step
+// rather than of the audio rate, so for them `audio_rate` is checked and
+// otherwise not read: a P25 receiver lands on 48000 and a TETRA one on 72000
+// whatever audio rate the engine was configured with. plan_vrx calls this; so does vrx_shape_for, which is
 // what the graph and the stage ask.
 //
 // WHAT THIS PARAGRAPH USED TO SAY, AND WHY IT WAS NEVER TRUE. It called
@@ -975,11 +1067,13 @@ struct VrxPlan {
     SampleRate demod_rate = 0;
 
     // What actually comes out, which is the audio rate for every mode except
-    // the raw tap. The raw tap is not a demodulator: it hands out complex
-    // baseband at the receiver's bandwidth, so decimating it to 48 kHz would
-    // throw away most of what it exists to expose, and its output rate is the
-    // demodulation rate. This is the rate that belongs in an AudioChunk, and
-    // it is the rate the indices passed to demod_block are counted in.
+    // the four complex taps. The raw tap is not a demodulator: it hands out
+    // complex baseband at the receiver's bandwidth, so decimating it to 48 kHz
+    // would throw away most of what it exists to expose, and its output rate
+    // is the demodulation rate. The three digital voice modes are the same
+    // shape, at the rate complex_tap_rate_step names for each. This is the
+    // rate that belongs in an AudioChunk, and it is the rate the indices
+    // passed to demod_block are counted in.
     SampleRate output_rate = 0;
 
     // The passband after resolution and after fitting to what one channel

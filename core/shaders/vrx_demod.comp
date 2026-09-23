@@ -12,7 +12,9 @@
 // Input is this receiver's complex baseband out of core/shaders/vrx_fine.comp,
 // already mixed to DC, already limited to the requested bandwidth and already
 // resampled to the demodulation rate Fd. Output is real audio at Fa = Fd / R,
-// except for the raw tap, which hands out the complex baseband unchanged.
+// except for the four complex taps, which hand out the complex baseband
+// unchanged: the raw tap for whatever attaches to it, and the three digital
+// voice modes for core/decode to recover symbols from.
 //
 // WHAT THE MODE CONSTANT ACTUALLY SELECTS.
 //
@@ -145,7 +147,7 @@
 layout(local_size_x_id = 0) in;
 
 // revenant::engine::Demod's value. Not a private numbering: the twin static
-// asserts that these eight constants equal the enumerators.
+// asserts that these eleven constants equal the enumerators.
 layout(constant_id = 1) const uint kMode = 2;  // Demod::Nfm
 
 // Fd / Fa. One for every mode whose demodulation rate already is the audio
@@ -163,7 +165,7 @@ layout(constant_id = 3) const uint kAudioTaps = 1;
 layout(constant_id = 4) const uint kDcTaps = 256;
 
 // Floats per output frame: 1 for a mono detector, 2 for an interleaved pair.
-// Two means I and Q for the raw tap and L and R for a stereo WFM receiver,
+// Two means I and Q for a complex tap and L and R for a stereo WFM receiver,
 // which are different things carried the same way; the host decides which by
 // the mode, and nothing here has to ask.
 layout(constant_id = 5) const uint kChannels = 1;
@@ -180,6 +182,18 @@ const uint kModeUsb = 4u;
 const uint kModeLsb = 5u;
 const uint kModeDsb = 6u;
 const uint kModeCw = 7u;
+const uint kModeP25p1 = 8u;
+const uint kModeDstar = 9u;
+const uint kModeTetra = 10u;
+
+// The modes that hand out complex baseband rather than detected audio, which
+// is engine::is_complex_tap and dsp::is_complex_output on the host. Until
+// 2026-09-22 the raw tap was the only one this kernel ever saw, because the
+// three digital voice modes were declined before a pipeline was built; they
+// have a fine stage now and reach the same passthrough, since what their
+// decoders want is exactly what the fine stage wrote.
+const bool kComplexTap =
+    kMode == kModeRaw || kMode == kModeP25p1 || kMode == kModeDstar || kMode == kModeTetra;
 
 // Fitted against long-double atan over [0, 1] by least squares on the odd
 // basis t*(c0 + c1*u + ... + c9*u^9), u = t*t. Worst float32 error 9.6e-08
@@ -249,7 +263,7 @@ layout(std430, binding = 1) readonly buffer Weights {
 } weights;
 
 // Audio, kChannels floats per frame. One for a mono detector; an interleaved
-// pair for the raw tap, which writes I then Q, and for a stereo WFM
+// pair for a complex tap, which writes I then Q, and for a stereo WFM
 // receiver, which writes L then R. Linear rather than a ring: this is the
 // buffer that leaves the device, and audio PCM crossing the bus is one of
 // the three things core/engine/engine.h permits to come back.
@@ -449,9 +463,10 @@ float detect(uint index) {
         return det_atan2(product_imag, product_real);
     }
 
-    if (kMode == kModeRaw) {
-        // Unreachable: the raw tap is handled in main() because it writes two
-        // components. Present so every mode has a defined value here.
+    if (kComplexTap) {
+        // Unreachable: the complex taps are handled in main() because they
+        // write two components. Present so every mode has a defined value
+        // here.
         return sample_at(index).x;
     }
 
@@ -470,11 +485,14 @@ void main() {
 
     const uint index = params.in_offset + i * kDecimation;
 
-    if (kMode == kModeRaw) {
-        // The raw tap is not a demodulator. It hands out complex baseband at
-        // the receiver's bandwidth, which is what lets external tooling and
-        // the decoder framework attach before any decoder exists. See the
-        // comment on Demod in core/engine/vrx.h.
+    if (kComplexTap) {
+        // The complex taps are not demodulators. They hand out complex
+        // baseband at the receiver's bandwidth, which is what lets external
+        // tooling and the decoders in core/decode attach. See the comment on
+        // Demod in core/engine/vrx.h. The gain is one for all four, so the
+        // multiply is an identity to the bit; it is kept so the passthrough
+        // is the same arithmetic the twin performs and a gain that ever moved
+        // would show up in the diff rather than be ignored here.
         const vec2 z = sample_at(index);
         precise float raw_real = z.x * params.gain;
         precise float raw_imag = z.y * params.gain;

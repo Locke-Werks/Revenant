@@ -473,3 +473,28 @@ commit: 84a424d
 instead: build-and-test is one job on the RTX 4090 with REVENANT_GPU_INDEX
     pinned to 0 and REVENANT_REQUIRE_GPU set. Index 1 on the CI box is the
     integrated Radeon, which is not supported and not tested.
+
+phrase: These never reach the kernel: engine::is_complex_tap routes them down
+    the raw tap's path
+phrase: This value scales a kernel that these modes never reach
+retired: 2026-09-22
+commit: "Plan the digital voice modes through the VRX reference path"
+instead: P25p1, Dstar and Tetra are specialization constants 8, 9 and 10 of
+    core/shaders/vrx_demod.comp and take its complex passthrough, the branch
+    the raw tap takes. dsp::is_complex_output is the host predicate and the
+    kernel's kComplexTap is the device one.
+
+phrase: The timing recovery in core/decode/dv_phy.cpp is a Gardner detector
+retired: 2026-09-22
+commit: "Plan the digital voice modes through the VRX reference path"
+instead: A Gardner loop was written first and did not converge on C4FM's four
+    levels; what shipped is a feedforward square-law estimator over a Farrow
+    interpolator, core/decode/dv_phy.h. The two-sample-per-symbol floor
+    minimum_demod_rate states is each decoder's own check in its create().
+
+phrase: is not one of the eight demodulators
+retired: 2026-09-22
+commit: "Plan the digital voice modes through the VRX reference path"
+instead: There are eleven modes and validate, demod_rate_for, plan_vrx and the
+    shorthand minimum_demod_rate all accept every one of them through
+    dsp::is_known_mode, a switch with no default label.

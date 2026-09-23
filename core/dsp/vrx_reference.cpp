@@ -619,10 +619,15 @@ Status reference_vrx_fine(const VrxFineConfig& config, const VrxFineParams& para
 // ---------------------------------------------------------------------------
 
 Status validate(const VrxDemodConfig& config, const VrxDemodParams& params) {
-    if (config.mode > kDemodCw) {
-        return fail(std::format("vrx demod: mode {} is not one of the eight demodulators",
+    // WHAT THIS CHECK USED TO SAY, until 2026-09-22: every mode above
+    // kDemodCw was refused as "is not one of the eight demodulators". There
+    // were eleven, and the three it turned away are the digital voice modes.
+    // See is_known_mode in the header for why the guard is a switch now.
+    if (!is_known_mode(config.mode)) {
+        return fail(std::format("vrx demod: mode {} is not an enumerator of engine::Demod",
                                 config.mode));
     }
+    const bool complex_output = is_complex_output(config.mode);
     if (config.decimation == 0) {
         return fail("vrx demod: audio decimation is zero");
     }
@@ -634,18 +639,22 @@ Status validate(const VrxDemodConfig& config, const VrxDemodParams& params) {
         return fail(std::format("vrx demod: {} DC-removal taps is outside [1, {}]",
                                 config.dc_taps, kMaxDcTaps));
     }
-    if (config.mode == kDemodRaw && (config.decimation != 1U || config.audio_taps != 1U)) {
-        return fail("vrx demod: the raw tap hands out complex baseband unchanged, so it "
-                    "cannot carry an audio decimation filter");
+    if (complex_output && (config.decimation != 1U || config.audio_taps != 1U)) {
+        return fail(std::format(
+            "vrx demod: mode {} is a complex tap and hands out its baseband unchanged, so it "
+            "cannot carry an audio decimation filter",
+            config.mode));
     }
     if (config.channels != 1U && config.channels != 2U) {
         return fail(std::format(
             "vrx demod: {} channels is neither a mono detector nor an interleaved pair",
             config.channels));
     }
-    if (config.mode == kDemodRaw && config.channels != 2U) {
-        return fail("vrx demod: the raw tap hands out a complex pair, so it is two channels "
-                    "and never one");
+    if (complex_output && config.channels != 2U) {
+        return fail(std::format(
+            "vrx demod: mode {} is a complex tap and hands out a complex pair, so it is two "
+            "channels and never one",
+            config.mode));
     }
     if (config.pilot_taps > kMaxPilotTaps) {
         return fail(std::format("vrx demod: {} pilot taps is above the {} the kernel holds",
@@ -662,7 +671,7 @@ Status validate(const VrxDemodConfig& config, const VrxDemodParams& params) {
         return fail("vrx demod: a pilot bandpass with one output channel decodes a stereo "
                     "difference channel and then throws it away");
     }
-    if (config.channels == 2U && config.mode != kDemodRaw && config.pilot_taps == 0) {
+    if (config.channels == 2U && !complex_output && config.pilot_taps == 0) {
         return fail(std::format(
             "vrx demod: mode {} was asked for two channels with no pilot bandpass, so both "
             "would carry the same sum channel and the receiver would report stereo it never "
@@ -803,7 +812,11 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
     for (std::uint32_t i = 0; i < params.count; ++i) {
         const std::uint32_t index = params.in_offset + i * config.decimation;
 
-        if (config.mode == kDemodRaw) {
+        // The four complex taps, on the same branch because they are the same
+        // arithmetic: the kernel's kComplexTap is true for exactly the modes
+        // is_complex_output is, and both multiply by a gain the planner holds
+        // at one.
+        if (is_complex_output(config.mode)) {
             const Complex32 z = sample_at(index);
             audio[static_cast<std::size_t>(2U * i)] = z.real() * params.gain;
             audio[static_cast<std::size_t>(2U * i) + 1U] = z.imag() * params.gain;
@@ -1144,12 +1157,16 @@ Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
 
         // Zero for the digital modes even though two of the three are
         // frequency modulations, and the reason is where the discriminator
-        // sits rather than whether there is one. This value scales a kernel
-        // that these modes never reach: engine::is_complex_tap routes them
-        // down the raw tap, and core/decode/dv_phy.cpp discriminates after
-        // its own receive filter, which is where TIA-102.BAAA-A clause 9.6
-        // puts it. A deviation here would scale nothing and would read as a
-        // claim that the kernel detects them.
+        // sits rather than whether there is one. core/decode/dv_phy.cpp
+        // discriminates after its own receive filter, which is where
+        // TIA-102.BAAA-A clause 9.6 puts it, and the kernel hands these modes
+        // out through its complex passthrough, which reads no deviation. A
+        // deviation here would scale nothing and would read as a claim that
+        // the kernel detects them.
+        //
+        // WHAT THIS PARAGRAPH USED TO SAY: "This value scales a kernel that
+        // these modes never reach: engine::is_complex_tap routes them down
+        // the raw tap". They reach it since 2026-09-22, as a passthrough.
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
         case engine::Demod::Tetra: return 0;
@@ -1237,15 +1254,23 @@ Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame) {
 
         // The three digital modes are complex taps, so nothing detects them
         // here and the reach term would be the whole story, except that the
-        // thing on the other end of the tap has a floor of its own. The
-        // timing recovery in core/decode/dv_phy.cpp is a Gardner detector,
-        // which needs a sample halfway between symbol instants to look at,
-        // so it needs two samples per symbol and refuses below that.
+        // thing on the other end of the tap has a floor of its own. Each
+        // decoder in core/decode refuses fewer than two samples per symbol,
+        // and this states that floor so a plan below it fails here, naming
+        // the rate, rather than at the decoder's create().
         //
-        // Putting that here rather than leaving the decoder to complain is
-        // what makes a receiver opened at 8 kHz for P25 fail at the plan
-        // instead of at the first block, where the error would name the
-        // decoder and not the rate the operator chose.
+        // It is a floor and not the rate these modes run at.
+        // demod_rate_for rounds them up in steps of complex_tap_rate_step,
+        // which is ten or four samples per symbol, so a plan that reaches
+        // the decoder is always well above it.
+        //
+        // WHAT THIS PARAGRAPH USED TO SAY: "The timing recovery in
+        // core/decode/dv_phy.cpp is a Gardner detector, which needs a sample
+        // halfway between symbol instants to look at". core/decode/dv_phy.h
+        // records that a Gardner loop was written first and did not converge
+        // on C4FM's four levels, and what shipped is a feedforward square-law
+        // estimator over a Farrow interpolator. The two-sample floor is each
+        // decoder's own check in its create(), whatever the estimator.
         case engine::Demod::P25p1:
             // TIA-102.BAAA-A clause 9.2: 4800 symbols per second.
             return std::max<Hertz>(floor_rate, 9'600);
@@ -1284,7 +1309,7 @@ Hertz minimum_demod_rate(std::uint32_t mode, Hertz bandwidth, Hertz cw_pitch) {
     engine::VrxParams shorthand;
     shorthand.bandwidth = bandwidth;
     shorthand.cw_pitch = pitch;
-    if (mode <= kDemodCw) {
+    if (is_known_mode(mode)) {
         shorthand.demod = static_cast<engine::Demod>(mode);
     }
 
@@ -1304,8 +1329,9 @@ Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
     }
 
     const auto mode = static_cast<std::uint32_t>(params.demod);
-    if (mode > kDemodCw) {
-        return fail(std::format("demod_rate_for: demodulator {} is not one of the eight",
+    if (!is_known_mode(mode)) {
+        return fail(std::format("demod_rate_for: demodulator {} is not an enumerator of "
+                                "engine::Demod",
                                 mode));
     }
 
@@ -1320,9 +1346,46 @@ Expected<SampleRate> demod_rate_for(const engine::VrxParams& params,
 
     const Hertz required =
         minimum_demod_rate(mode, mix_frame(granted, mode, std::max<Hertz>(0, params.cw_pitch)));
-    const auto decimation =
-        std::max<std::int64_t>(1, (required + audio_rate - 1) / audio_rate);
-    return static_cast<SampleRate>(decimation * audio_rate);
+
+    // A whole multiple of the audio rate for every mode that ends in audio,
+    // so the decimation is an integer. The digital voice modes end in a
+    // decoder instead, and step in the rate that decoder was measured at.
+    const SampleRate tap_step = complex_tap_rate_step(mode);
+    const SampleRate step = (tap_step > 0) ? tap_step : audio_rate;
+    const auto multiple = std::max<std::int64_t>(1, (required + step - 1) / step);
+    return static_cast<SampleRate>(multiple * step);
+}
+
+SampleRate complex_tap_rate_step(std::uint32_t mode) {
+    if (!is_known_mode(mode)) {
+        return 0;
+    }
+    // Over the enum with no default, for the reason the three functions
+    // around it give: a twelfth mode has to say whether it ends in a decoder.
+    switch (static_cast<engine::Demod>(mode)) {
+        // Ten samples per symbol of TIA-102.BAAA-A clause 9.2's 4800.
+        case engine::Demod::P25p1: return 48'000;
+
+        // Ten samples per bit of JARL Ver 7.0 clause 4.1.2 b's 4800.
+        case engine::Demod::Dstar: return 48'000;
+
+        // Four samples per symbol of EN 300 392-2 clause 5.3's 18000.
+        case engine::Demod::Tetra: return 72'000;
+
+        // The raw tap is a complex tap too and is not here. It has no
+        // decoder behind it to size a rate for, and it has always stepped in
+        // the audio rate; a caller wanting it at some other rate names that
+        // rate as the audio rate.
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw: return 0;
+    }
+    return 0;
 }
 
 float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation) {
@@ -1343,8 +1406,10 @@ float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation)
         case engine::Demod::Cw:
 
         // Unity for the digital modes, on the same reasoning as Raw: they
-        // are taps and the samples they hand out are the channel's, at the
-        // channel's own level. Scaling them would put a constant between
+        // are taps and the samples they hand out are the fine stage's, at
+        // the channel's own level. The kernel's complex passthrough is the
+        // one place this number is applied to them, and a gain of exactly
+        // one is what makes that passthrough an identity to the bit. Scaling them would put a constant between
         // core/decode's slicers and the deviation figures their standards
         // state, which is the one thing those slicers are entitled to
         // assume about their input.
@@ -1840,10 +1905,16 @@ namespace {
     plan.channel_rate = placement.channel_rate;
     plan.audio_rate = (params.audio_rate > 0) ? params.audio_rate : kDefaultAudioRate;
 
-    if (plan.mode > kDemodCw) {
-        return fail(std::format("plan_vrx: demodulator {} is not one of the eight",
+    // WHAT THIS CHECK USED TO SAY, until 2026-09-22: any mode above
+    // kDemodCw was "not one of the eight". That was every digital voice
+    // mode, so none of them could be planned, and vrx_shape_for, which is
+    // this function, refused every retune of one on the control plane.
+    if (!is_known_mode(plan.mode)) {
+        return fail(std::format("plan_vrx: demodulator {} is not an enumerator of "
+                                "engine::Demod",
                                 plan.mode));
     }
+    const bool complex_output = is_complex_output(plan.mode);
 
     // The request resolved into two edges, once, here. resolve_passband is
     // the only place a shorthand is ever expanded and place() calls the same
@@ -1996,13 +2067,18 @@ namespace {
     // The demodulator.
     plan.demod.mode = plan.mode;
 
-    // The raw tap is not a demodulator and does not land on the audio rate.
-    // It hands out complex baseband at the receiver's bandwidth, so its
-    // output rate is the demodulation rate: decimating it to 48 kHz would
-    // throw away most of what it exists to expose. Everything else resamples
-    // to the audio rate, by a whole factor after the detector.
-    plan.demod.decimation = (plan.mode == kDemodRaw) ? 1U : decimation;
-    plan.output_rate = (plan.mode == kDemodRaw) ? plan.demod_rate : plan.audio_rate;
+    // The complex taps are not demodulators and do not land on the audio
+    // rate. They hand out complex baseband at the receiver's bandwidth, so
+    // their output rate is the demodulation rate: decimating the raw tap to
+    // 48 kHz would throw away most of what it exists to expose, and a digital
+    // voice mode's rate is its decoder's rather than the audio's. Everything
+    // else resamples to the audio rate, by a whole factor after the detector.
+    //
+    // `decimation` above is demod_rate over audio_rate and is not a whole
+    // number for a TETRA receiver at 72000 against 48000 of audio. It is not
+    // read on this branch, which is why it can be wrong there.
+    plan.demod.decimation = complex_output ? 1U : decimation;
+    plan.output_rate = complex_output ? plan.demod_rate : plan.audio_rate;
 
     // The audio band this receiver is delivering, which is not always "as
     // much as the rate carries".
@@ -2082,11 +2158,11 @@ namespace {
     // Stereo, and the channel count, which is the one number every consumer
     // sizing a buffer reads.
     //
-    // The raw tap is two channels for a different reason and has always
-    // written two floats per frame; saying so here rather than at four
+    // The complex taps are two channels for a different reason and have
+    // always written two floats per frame; saying so here rather than at four
     // call sites is what stopped stereo being a fifth place to remember.
     plan.stereo = engine::resolve_stereo(params.demod, params.stereo, plan.audio_rate);
-    if (plan.mode == kDemodRaw) {
+    if (complex_output) {
         plan.demod.channels = 2U;
         plan.demod.pilot_taps = 0U;
     } else if (plan.stereo) {
@@ -2148,8 +2224,13 @@ Expected<VrxPlan> plan_vrx(const GridParams& grid, SampleRate rate,
 
     const double audio_cutoff_hz =
         (plan.audio_stop_hz > 0.0) ? 0.5 * (plan.audio_pass_hz + plan.audio_stop_hz) : 0.0;
+    // The output rate rather than the audio rate, which is the same number
+    // for every mode that ends in audio. For a digital voice mode it is the
+    // decoder's rate, and passing the engine's audio rate there refused a
+    // P25 receiver on any engine configured above 48000 of audio, for being
+    // an interpolation, on a table of one unit tap that interpolates nothing.
     auto decimation_table = design_audio_taps(plan.audio_decimation_taps, plan.demod_rate,
-                                              plan.audio_rate, kAudioAttenuationDb,
+                                              plan.output_rate, kAudioAttenuationDb,
                                               audio_cutoff_hz);
     if (!decimation_table) {
         return std::unexpected(with_context(decimation_table.error(), "plan_vrx audio taps"));
@@ -2246,6 +2327,13 @@ std::string describe_audio_chain(const VrxPlan& plan) {
             "raw tap: complex baseband at {} S/s, no detector, no audio filter and no "
             "de-emphasis. This is the composite a decoder attaches to, not programme audio",
             plan.output_rate);
+    }
+    if (is_complex_output(plan.mode)) {
+        return std::format(
+            "{} tap: complex baseband mixed to DC and filtered to {} to {} Hz, at {} S/s for "
+            "the decoder, no detector, no audio filter and no de-emphasis",
+            engine::demod_name(static_cast<engine::Demod>(plan.mode)), plan.passband.low,
+            plan.passband.high, plan.output_rate);
     }
 
     std::string text =
