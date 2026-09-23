@@ -97,30 +97,122 @@ the one job pinning has.
 
 ## The fine-tuning display
 
-A second spectrum and waterfall showing the receiver's own passband rather
-than the wide span, in the manner of SDRuno's second spectrum window. It is
+A second spectrum and waterfall showing the receiver's passband and what is
+around it rather than the wide span, in the manner of SDRuno's second
+spectrum window. It is
 what makes parking a filter on a signal precise rather than approximate, and
 it is where a drifting carrier is visible as drift rather than as the audio
 slowly going wrong.
 
-**It is a transform of the fine stream, not a zoom of the wide one.** The
-per-receiver fine stage in `core/engine/vrx_stage.cpp` already writes complex
-baseband at the demodulation rate into a ring on the device, mixed to DC and
-limited to the requested bandwidth. Its span is the demodulation rate, which
-`plan_vrx` rounds up to a whole multiple of the audio rate, so it is somewhat
-wider than the receiver's own bandwidth rather than equal to it. Wider is the
-right direction for this: the display shows the filter's skirts and what sits
-just outside them, which is where an adjacent signal about to become a problem
-is visible. One small FFT of that ring gives native resolution across the
-passband. Zooming the wide transform gives whatever its bins are worth there
-instead, and the comparison is the point: a 4096-point transform of a 48 kS/s
-fine ring resolves 11.7 Hz, where a 2^18 transform of a 20 MHz span resolves
-76 Hz. Six times coarser, from a transform sixty-four times larger, and no
-amount of interpolation puts the difference back.
+**It is a transform of the receiver's own display stream, not a zoom of the
+wide one, and the receiver's filter is not in it.** The pane shows the
+neighbourhood the way SDRuno's does: an honest spectrum of what is on the air
+around the receiver, with the filter drawn over it by the client as two rules
+and a fill. `core/engine/vrx_stage.cpp` runs a display tap beside each
+receiver's fine stage: the same kernel, `core/shaders/vrx_fine.comp`, reading
+the same coarse channel and mixing by the same exact rational frequency, so
+the pane's DC is the fine stream's DC to the hertz, then a fixed anti-alias
+lowpass and an integer decimation, and none of the receiver's own filter.
+`core/dsp/vrx_reference.h`, "The display tap", has the design; it is proved
+bit-exact against its CPU twin on every rung in
+`tests/reference/test_vrx.cpp`.
 
-This is also why the feature is cheap. The expensive part, getting a
-receiver's baseband onto the device at the right bandwidth, is already paid
-for by the demodulator.
+One small FFT of that stream gives native resolution across the pane.
+Zooming the wide transform gives whatever its bins are worth there instead,
+and the comparison is the point: at 20 MS/s on 64 channels the narrowest
+display rate is 31.25 kS/s, where a 4096-point transform resolves 7.6 Hz,
+and a 2^18 transform of the 20 MHz span resolves 76 Hz. Ten times coarser,
+from a transform sixty-four times larger, and no amount of interpolation puts
+the difference back.
+
+**The rate rule.** The pane is the central half of the transform, which is
+what `core/shaders/spectrum.comp` keeps natively, so it spans half the display
+rate. The anti-alias filter is flat to the pane's edge and in its stopband by
+three quarters of the display rate, the nearest frequency that folds back into
+the pane, so nothing is aliased into what is shown. The display rate is the
+channel rate divided by an integer R, which makes the resampler a pure
+decimator with no fractional phase. R is the largest rung of the channel
+rate's ladder that keeps the pane at least four passband reaches wide, where
+the reach is how far the passband's further edge sits from the pane's centre:
+a symmetric band B wide gets a pane of at least 2B, a one-sided USB band
+[0, B] at least 4B. Each rung is the smallest divisor of the channel rate at
+least twice the one below it, and the 256-tap filter reaches 80 dB across the
+transition only up to R = 25, so at the canonical 75 kS/s and 625 kS/s
+channels alike the ladder is 1, 2, 4, 8, 20. The narrowest pane at 625 kS/s is
+therefore 15.6 kHz, and the widest, at R = 1, is one channel spacing.
+
+**The pane holds still while an edge is dragged.** The display rate does not
+track the passband; it steps only when the reach crosses a rung, and rungs
+are at least a factor of two apart. Dragging a USB filter's high edge from
+1 kHz to 20 kHz, twenty times wider, in 250 Hz steps on a 75 kS/s channel
+moves the display rate three times, 9375 to 18750 to 37500 to 75000 S/s, and
+at none of the other 73 positions. A retune that keeps the rate keeps the
+display stream running, because the stream is a pure function of the
+absolute sample index; one that changes it restarts the stream, and the graph
+counts the frames it skips while the new window fills. The client's frozen
+mapping below covers the drag itself.
+
+**What it shows, measured.** White noise at -40 dBFS across a 2.4 MS/s
+source, a 6 kHz NFM receiver 1 kHz off a 75 kS/s channel's centre, one tone at
+-40 dBFS 1 kHz inside its passband and one 2 kHz outside it, a 1024-point
+transform, one second of signal. `tests/engine/test_engine_passband.cpp`,
+"the passband pane shows the neighbourhood rather than the filter", prints
+both sets of figures.
+
+| | fine stream, before | display tap, after |
+| --- | --- | --- |
+| pane | 48 kHz, 1024 bins at 46.88 Hz | 18.75 kHz, 512 bins at 36.62 Hz |
+| noise floor inside the passband | -84.18 dB | -85.06 dB |
+| noise floor outside it, averaged | -120.41 dB | -85.16 dB |
+| noise floor by eighths of the pane | -88.47 to -175.43 dB, 88.69 dB spread | -85.01 to -85.42 dB, 0.41 dB spread |
+| tone inside, peak bin | -40.36 dB | -40.31 dB |
+| tone 2 kHz outside, peak bin | -123.98 dB | -40.72 dB |
+| the two tones' main-lobe power | | -36.97 and -36.98 dB |
+
+The display filter's own passband ripple, measured on the device with tones
+across the pane at R = 2, is 1.8e-5 dB, and tones at the frequencies that
+would fold into that pane came out at least 127 dB down, against a design
+floor of 80 dB. The 0.41 dB spread across the eighths is the estimate's own
+scatter: eight means of 64 correlated bins over one second of noise, by a
+rough count of about 37 independent windows and 32 independent bins in each,
+are expected to range over about 0.36 dB. The peak-bin difference between the
+two tones is the analysis window's scalloping, since they fall at different
+fractions of a bin; summed across their main lobes they agree to 0.01 dB.
+
+What the pane still shows is the coarse channel's own shape. A receiver near
+the edge of its channel, or one whose pane is a whole channel spacing wide,
+sees the channelizer's prototype roll off at one side. That is what the
+receiver's channel holds, and the fine stage filters the same samples.
+
+**What it costs.** A receiver with no sink attached records no display
+dispatch and no transform; what it holds is a display ring a window deep and
+a 257-entry tap table. Attached, the display tap is one more dispatch of the
+fine kernel beside the fine stage, and the transform is one pass where it
+used to be two. Measured at 20 MS/s, 64 channels and 65536-sample blocks on
+the RTX 4090 by the hidden cost case, each figure the minimum of five
+end-to-end runs, twice over. Attached, per receiver per block with a
+2048-point transform: 15.2 and 16.1 us at eight receivers, 20.0 and 15.3 at
+thirty-two; with 512 points, 13.3 and 15.1 at eight. One receiver does not
+repeat, 14.7 and 5.3, for the reason core/engine/graph.cpp gives. The
+two-pass stage over the fine ring measured 14.6 to 16.2 us at eight, so
+attaching a sink costs what it did before, within what this measurement
+repeats to.
+Detached, against an engine with no passband stage at all: -2.0 to 11.6 us
+in the first set and -0.6 to 0.8 in the second, which is the wall clock's
+own noise around zero.
+
+WHAT THIS SECTION USED TO SAY. "It is a transform of the fine stream", whose
+ring is "mixed to DC and limited to the requested bandwidth", with "Its span
+is the demodulation rate" and "Wider is the right direction for this: the
+display shows the filter's skirts and what sits just outside them". It showed
+the skirts, and they were the fault the owner saw: a pane wider than the
+filter carried the filter's own magnitude response in its noise floor, full
+level inside the passband and stopband level outside, and the hump moved with
+every dragged edge. The resolution figure was "a 4096-point transform of a
+48 kS/s fine ring resolves 11.7 Hz". And the section closed "This is also why
+the feature is cheap. The expensive part, getting a receiver's baseband onto
+the device at the right bandwidth, is already paid for by the demodulator":
+the display tap is a second dispatch, measured above.
 
 ### The filter is dragged here
 
@@ -137,14 +229,20 @@ a sidetone below the receiver's centre, and a display that derived the axis
 from `VrxParams::center` would draw the filter one pitch out of place there
 and correctly on the other seven.
 
-**The mapping freezes for the length of a gesture.** The pane's span is the
-demodulation rate and the demodulation rate is derived from the passband, so
-widening the filter widens the pane. Left alone, the handle jumps backwards
-out from under the pointer, which is unusable. The pixel-to-hertz mapping is
+**The mapping freezes for the length of a gesture.** The pane's span is half
+the display rate, and the display rate steps when the passband's reach
+crosses a rung, so a drag across a rung widens or narrows the pane by a
+factor of two or more. Left alone, the handle jumps out from under the
+pointer at that moment, which is unusable. The pixel-to-hertz mapping is
 therefore taken at drag start and held; frames arriving during the drag are
 drawn into it by their own axis, so a narrower frame letterboxes and a wider
 one is cropped, and neither is stretched. On release the axis eases back to
 the live span over about 150 ms, so the change is seen rather than jumped.
+
+WHAT THAT PARAGRAPH USED TO SAY: that the pane's span was the demodulation
+rate, which is derived from the passband, "so widening the filter widens the
+pane". The demodulation rate still moves that way; the pane no longer
+follows it.
 
 **Two shades, not one.** The requested edges are drawn from the client's own
 copy of the request and move with the pointer. What the engine granted comes

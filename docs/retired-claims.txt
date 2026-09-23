@@ -883,3 +883,22 @@ commit: Transform a display tap in the passband pane, not the fine ring
 instead: The barrier before the passband transforms is load-bearing: a stage
     records its display dispatch beside its fine dispatch and fences only
     what its own demodulator reads.
+
+phrase: the display shows the filter's skirts and what sits just outside them
+retired: 2026-09-23
+commit: Transform a display tap in the passband pane, not the fine ring
+instead: The pane shows no filter at all: it is the receiver's display stream,
+    flat across the pane, and the client draws the filter over it. The
+    skirts in the noise floor were the fault the owner saw.
+
+phrase: a 4096-point transform of a 48 kS/s fine ring resolves 11.7 Hz
+retired: 2026-09-23
+commit: Transform a display tap in the passband pane, not the fine ring
+instead: The pane transforms the display stream. At 20 MS/s on 64 channels
+    its narrowest rate is 31.25 kS/s, where 4096 points resolve 7.6 Hz.
+
+phrase: is already paid for by the demodulator
+retired: 2026-09-23
+commit: Transform a display tap in the passband pane, not the fine ring
+instead: The display tap is a dispatch of its own on blocks with a sink
+    attached. docs/ui-spectrum.md has what attaching one costs.
