@@ -802,3 +802,11 @@ commit: 6da6c80
 instead: revenant-engine binds 17690 by default, the port revenant-ui looks for,
     and tools/engined/main.cpp cites ui/main.cpp's kDefaultPort. --port 0 still
     binds whatever is free.
+
+phrase: 384-bit 40 ms frames, PRBS9 randomiser
+retired: 2026-09-22
+commit: 68e058a
+instead: M17's randomiser is the 46-byte sequence of Appendix B, Table B.1, XORed
+    into each frame's 368 payload bits per section 1.4.4 of the v2.0.4
+    specification. PRBS9 is Appendix G's fill for BERT frames and randomises
+    nothing. core/decode/m17.h carries the table.

@@ -130,7 +130,7 @@ what these systems carry in the clear.
 | TEDS | pi/8-D8PSK and 4/16/64-QAM in 25, 50, 100 and 150 kHz, 2.7 kHz subcarrier spacing | ETSI EN 300 392-2 V3.x, free | Large |
 | D-STAR DV | GMSK BT 0.5, 4800 bit/s, 6.25 kHz; 2400 AMBE plus 1200 FEC plus 1200 data | JARL "アマチュア無線のデジタル化技術の標準方式" Ver 7.0, free at `jarl.com/d-star/STD7_0.pdf`. Japanese only: the English edition this row used to name is gone, see the note below the table | Small |
 | D-STAR DD | GMSK 128 kbit/s on 23 cm, Ethernet frames, roughly 150 kHz | Same JARL standard | Medium |
-| M17 | 4FSK, 4800 sym/s, h=1/3, 9 kHz occupied, 384-bit 40 ms frames, PRBS9 randomiser, Golay(24,12), punctured r=1/2 K=5, QPP interleaver, CRC-16 0x5935 init 0xFFFF | M17 Protocol Specification Part I, free at spec.m17project.org, complete to bit level | Medium |
+| M17 | 4FSK, 4800 sym/s, h=1/3, 9 kHz occupied, 384-bit 40 ms frames, a 368-bit randomiser table (PRBS9 fills BERT frames only), Golay(24,12), punctured r=1/2 K=5, QPP interleaver, CRC-16 0x5935 init 0xFFFF | M17 Protocol Specification Part I, free at spec.m17project.org, complete to bit level | Medium |
 | FreeDV 1600, 700C, 700D, 700E | OFDM in an SSB passband; 1600 is 16 DQPSK carriers in about 1.1 kHz; 700D is 17 coherent QPSK carriers at 25 baud, 160 ms frame, 2 ms cyclic prefix, LDPC | No standards document. Project design notes and the FreeDV user manual, cited per file with a retrieval date | Large |
 | FreeDV 2400A, 2400B, 800XA | 4FSK; 2400A at 2400 bit/s in about 5 kHz of RF, 2400B through an analogue FM audio path, 800XA at 800 bit/s | As above | Medium |
 | Opulent Voice | 40 ms frames of 134 bytes, CCSDS K=7 r=1/2 to 268 bytes, 67x32 interleaver, 24-bit sync 0x02B8DB, roughly 81.3 kHz | `opulent_voice_protocol.md` in OpenResearchInstitute/interlocutor, free and public | Medium |
@@ -970,6 +970,46 @@ and 33.3 for 35 at -8 dB, and the reason has not been found. The decoder holds
 the first characters back until it has seen runs of two different lengths,
 then decodes them, so text whose marks and spaces are all one length, a row
 of T's with letter spaces between them, is never decoded at all.
+
+**M17, link setup and stream frames.** `core/decode/m17.cpp`, on the same
+complex baseband input as P25 and D-STAR and through the same
+`core/decode/dv_phy.cpp` discriminator, root raised cosine and square-law
+timing. Written from the M17 Protocol Specification Part I, version 2.0.4 of 21
+January 2026, from its prose, tables and equations; the specification's own
+Licenses page puts the document under the GNU Free Documentation License 1.3
+or later and the software listings inside it under GPL-2.0-or-later, and none
+of those listings was used.
+
+What comes out: every frame with its sync burst's sample position and
+correlation. From a Link Setup Frame, the destination and source callsigns
+decoded from Appendix A's base-40 addresses, the TYPE field of Table 3.2, the
+META bytes and whether the CRC checked. From a stream frame, the frame number
+and its end-of-stream bit, the 128 payload bits and the LICH chunk and counter;
+a receiver that joins mid-stream rebuilds the LSF from six LICH chunks and
+reports it once the CRC checks. The End of Transmission marker is reported.
+Discriminator polarity is found from the sync burst, and the symbol level and a
+carrier offset are calibrated per frame against the burst's known symbols. The
+tests regenerate the specification's CRC test vectors, its AB1CD address
+example, its 0xB4 symbol example, the Golay generator matrix and the first rows
+of the interleaver table.
+
+Measured over 100 stream frames, signal to noise in the 9 kHz channel
+bandwidth: no frame errors at 14 dB and above, a stream frame error rate of
+0.01 at 12 dB and 0.18 at 10 dB, with raw symbol error rates of 1.7e-3, 1.0e-2
+and 6.2e-2 at those three points. Clipping the soft values before the Viterbi
+decoder is what makes 10 dB usable; unclipped it was 0.85, because a
+discriminator's clicks make symbols wrong with full confidence.
+`core/dsp/synth/m17_mod.cpp` is the transmitter and `tests/decode/test_m17.cpp`
+the round trips, at 48 and 24 kHz, 250 Hz off frequency and with the
+discriminator inverted.
+
+Not done, and why. Codec 2 voice in the stream payload is not decoded; the
+digital voice table above covers it. Packet and BERT frames are recognised by
+their sync bursts and not decoded. BERT's PRBS9 receiver in Appendix G was read
+in the specification's embedded GPL listing, figures G.3 to G.5, before the
+licence note was noticed, so it is left to somebody who has not read it, per
+docs/clean-room.md. The randomiser the M17 row above used to call PRBS9 is a
+fixed 368-bit table, Appendix B.
 
 ## What would change the list
 
