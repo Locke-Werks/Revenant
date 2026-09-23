@@ -200,10 +200,16 @@ blind cast would turn it into whichever mode happens to sit at that ordinal.
 
 ### Spectrum frames cross by copy
 
-`core/rpc/.gitkeep` planned a shared GPU texture handle for a local client, and
-that is still the right answer for a frame at the source's own rate. It is a
-deferred optimisation on a path that has to exist and be correct either way,
-not a missing feature.
+A shared GPU texture handle for a local client is still the right answer for a
+frame at the source's own rate. It is a deferred optimisation on a path that
+has to exist and be correct either way, not a missing feature.
+
+This paragraph used to say "`core/rpc/.gitkeep` planned a shared GPU texture
+handle for a local client". That file was deleted with the other placeholders
+in "Remove the placeholders from directories that have their contents", so the
+pointer led nowhere. What the placeholder used to say was "Spectrum frames to
+a local client pass by shared GPU texture handle, not by copy", which was the
+plan and not the build.
 
 The arithmetic that makes deferring it safe, from the shipped defaults in
 `core/engine/engine.h`: 64 channels at a 2048-point per-channel transform,
@@ -1579,11 +1585,11 @@ already holds both halves: `openSource` is given a URI the client composed, and
 in `ui/` compares its own `SourceChoice` against them. A wire field would be the
 engine re-deriving a request the client never forgot.
 
-**Nothing pairs the two processes automatically, and CI never builds the
-client.** This entry used to say that nothing served or drove the wire and that
-none of the threading or backpressure behaviour had been exercised. Neither
-claim is true any more, and the replacement is narrower rather than equally
-sweeping.
+**The two processes are paired in CI now, and what is left is narrow.** This
+entry's heading used to read "Nothing pairs the two processes automatically,
+and CI never builds the client" until 2026-09-22, and before that it said
+nothing served or drove the wire at all. Both headings are retired; the
+paragraphs below say what replaced each.
 
 What exists: `tools/engined` builds `revenant-engine`, which links
 `revenant_rpc_server`, binds a port, prints it, and serves a real engine until
@@ -1616,18 +1622,29 @@ well: `ui/build/vs/RelWithDebInfo/revenant-ui.exe` imports five Qt DLLs plus
 checked with `dumpbin /dependents` on 2026-09-19, and `client.obj` in that
 project's object tree is `core/rpc/client.cpp` compiled `/MD`.
 
-What has not happened: nothing in the tree runs the client and the engine as
-two processes. Every RPC case puts the engine, the server and the client in one
-address space, talking over a real socket but sharing one heap, so nothing here
-has yet allocated on the static core's heap and freed on the UCRT's, which is
-the failure the split exists to prevent. The only cross-process CTest entry
-starts `revenant-engine` on its own and matches the port line it prints. CI does not configure `ui/` at
-all: `.github/workflows/ci.yml` runs the `ci` and `headless` presets from the
-root and both stop at the engine tree, so a change to `core/rpc/client.cpp` or
-to the schema can break the `/MD` build and nothing will say so until somebody
-runs `cmake --preset vs` in `ui/` by hand. Nothing binds off loopback, which is
-still the right default now that there is a token, because the wire is
-plaintext and a token crossing a network is readable and replayable. Nothing
-exercises the off-loopback warning `revenant-engine` prints either: it is a
-property of that program's stderr rather than of this library, and would need
-another CTest entry.
+The two processes run together as well. `tests/twoprocess` is a small CMake
+project of its own that compiles `core/rpc/client.cpp` `/MD`, the way `ui/`
+does, into a client that logs in, lists sources, takes spectrum frames and a
+receiver's audio, and tears down; `scripts/two-process-smoke.ps1` starts the
+`/MT` `revenant-engine` with `--port 0`, reads the port it prints and runs that
+client against it. CI's `two-process` job runs it against the engine binary
+that ships, and CI's `ui` job configures and builds `ui/` with warnings as
+errors, so a change to `core/rpc/client.cpp` or to the schema that breaks the
+`/MD` build stops the line. `package` and `release` wait for both.
+
+**WHAT THIS PARAGRAPH USED TO SAY, until 2026-09-22:** "What has not happened:
+nothing in the tree runs the client and the engine as two processes. Every RPC
+case puts the engine, the server and the client in one address space ... CI does
+not configure `ui/` at all: `.github/workflows/ci.yml` runs the `ci` and
+`headless` presets from the root and both stop at the engine tree". Both halves
+were answered by the change that added `tests/twoprocess` and the two jobs. The
+in-process part of it is still true of `tests/rpc`: every case there shares one
+heap between engine, server and client, which is why the two-process job exists
+rather than a reason to doubt it.
+
+What is still absent: nothing binds off loopback, which is still the right
+default now that there is a token, because the wire is plaintext and a token
+crossing a network is readable and replayable. Nothing exercises the
+off-loopback warning `revenant-engine` prints either: it is a property of that
+program's stderr rather than of this library, and would need another CTest
+entry.

@@ -30,12 +30,16 @@
 # exactness for those two either, and a reader entitled to assume otherwise
 # would be wrong. The fields that are exact say so by being a Rational.
 #
-# Spectrum frames cross by copy. core/rpc/.gitkeep planned a shared GPU
-# texture handle for a local client, and that is still the right answer for a
-# frame at the source's own rate. It is not required first: a display asks
-# for time decimation and takes 30 frames a second, which is 7.5 MB/s at the
-# shipped geometry against the 80 MB/s the engine produces. The handle is an
-# optimisation on a path that has to exist and be correct either way.
+# Spectrum frames cross by copy. A shared GPU texture handle for a local
+# client is still the right answer for a frame at the source's own rate. It is
+# not required first: a display asks for time decimation and takes 30 frames a
+# second, which is 7.5 MB/s at the shipped geometry against the 80 MB/s the
+# engine produces. The handle is an optimisation on a path that has to exist
+# and be correct either way.
+#
+# This paragraph used to say "core/rpc/.gitkeep planned a shared GPU texture
+# handle", naming a placeholder that has since been deleted. docs/rpc.md
+# quotes what it said.
 #
 # Audio crosses as raw float32 PCM, per receiver and opt in, and the codec
 # question has been answered rather than deferred: there is no codec. About

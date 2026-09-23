@@ -630,3 +630,20 @@ commit: "Remove a session's receivers when it ends, unless it asked to keep them
 instead: SessionImpl also holds its login number, and its destructor removes
     the receivers that session created and did not keep. A second one still
     costs nothing, and two of them now differ in what they own.
+
+phrase: nothing in the tree runs the client and the engine as two processes
+phrase: CI does not configure ui/ at all
+phrase: Nothing pairs the two processes automatically, and CI never builds the client
+retired: 2026-09-22
+commit: "Run the engine and a /MD client as two processes in CI"
+instead: tests/twoprocess builds core/rpc/client.cpp /MD and
+    scripts/two-process-smoke.ps1 runs it against the /MT revenant-engine; CI's
+    two-process job runs that and its ui job builds ui/ with warnings as errors.
+    tests/rpc still shares one heap between engine, server and client.
+
+phrase: core/rpc/.gitkeep planned a shared GPU texture handle
+retired: 2026-09-22
+commit: "Remove the placeholders from directories that have their contents"
+instead: The placeholder is deleted. docs/rpc.md quotes what it said, that
+    frames to a local client pass by shared GPU texture handle, and still calls
+    that a deferred optimisation.
