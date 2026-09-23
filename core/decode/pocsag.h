@@ -179,8 +179,24 @@ struct PocsagConfig {
     // Bit errors allowed in a received synchronization codeword. An
     // engineering choice: two is what the codeword itself is corrected to,
     // and the chance that 32 bits of reversal preamble or data sit within
-    // two bits of the sync pattern is what keeps it from being higher.
+    // two bits of the sync pattern is what keeps it from being higher. The
+    // same tolerance applies to the 32 preamble bits clause 1.1 puts before
+    // the first synchronization codeword; see PocsagDecoder.
     int sync_tolerance = 2;
+
+    // Bits an address codeword may have corrected, the parity bit included,
+    // and still start a page. An engineering choice made from clause 1.4:
+    // the BCH(31,21) code with the even parity bit has distance 6, so a
+    // decoder that corrects t bits can also detect 5 - t. At two, the most
+    // it can correct, a word with four errors can land within two bits of a
+    // different code word and is read as that address; at one, every word
+    // with two to four errors is refused. Measured in
+    // tests/decode/test_pocsag_false_pages.cpp: at 6 dB in 2500 Hz, most of
+    // the addresses nobody sent had two bits corrected, many of them an idle
+    // codeword, which clause 1.3.4 says is never a pager's, read one code word
+    // over. Message codewords are corrected to two regardless: a wrong
+    // character is a wrong character, not a page for somebody else.
+    int address_correction_budget = 1;
 };
 
 struct PocsagStats {
@@ -188,22 +204,53 @@ struct PocsagStats {
     std::uint64_t codewords = 0;
     std::uint64_t corrected_bits = 0;
     std::uint64_t uncorrectable = 0;
+
+    // Address codewords the BCH decode corrected by more than
+    // PocsagConfig::address_correction_budget, and so refused.
+    std::uint64_t addresses_refused = 0;
+
+    // Batches synchronised without a preamble in front of them whose next
+    // synchronization codeword never came, and the pages found in them,
+    // which were dropped rather than reported; see PocsagDecoder.
+    std::uint64_t batches_unconfirmed = 0;
+    std::uint64_t pages_unconfirmed = 0;
 };
 
+// WHAT IT TAKES TO BE SYNCHRONISED
+//
+// A synchronization codeword found by search, within sync_tolerance bits, is
+// taken at once when the 32 bits before it are the clause 1.1 preamble of
+// reversals within the same tolerance: that is how a transmission starts, and
+// clause 1.1 says the preamble is there to help a pager acquire batch
+// synchronization. Found without one, the batch is provisional. Clause 2.3
+// asks that a receiver which lost synchronization, or started after the
+// preamble, "achieve synchronization on receipt of a number of valid
+// batches", so the pages in a provisional batch are held until the next
+// synchronization codeword arrives where clause 1.2 puts it, 17 codewords on,
+// and dropped if it does not. One is the number taken here.
+//
+// That rule is what stops noise alone paging anyone. Noise sits within two
+// bits of the synchronization codeword about once an hour at 1200 bit/s, and
+// the batch that follows is sixteen random words, a quarter of which the code
+// accepts: tests/decode/test_pocsag_false_pages.cpp measured 8.1 pages an
+// hour across the three rates before it, and none after.
 class PocsagDecoder {
 public:
     [[nodiscard]] static Expected<PocsagDecoder> create(const PocsagConfig& config);
 
     // Consumes audio and appends every page whose end has been seen: the
     // next address or idle codeword, two indecipherable message codewords in
-    // a row (clause 2.5.1), or the loss of batch synchronization.
+    // a row (clause 2.5.1), or the loss of batch synchronization. A page
+    // found in a provisional batch is appended once the batch is confirmed.
     void process(ConstRealSpan audio, std::vector<PocsagPage>& out);
 
     // The stream has ended. Emits a page still open, because the codeword
     // that would have ended it is not coming: clause 1.2 has a transmission
     // end on an idle codeword, and when that codeword is the last thing in a
     // capture the receiver's own filter and clock delay leave it a bit short
-    // of complete. The next process() call starts a fresh search for sync.
+    // of complete. Pages still held in a provisional batch are dropped, since
+    // nothing now can confirm it. The next process() call starts a fresh
+    // search for sync.
     void flush(std::vector<PocsagPage>& out);
 
     [[nodiscard]] const PocsagStats& stats() const { return stats_; }
@@ -217,16 +264,30 @@ private:
     void on_codeword(std::uint32_t word, SampleIndex sample, std::vector<PocsagPage>& out);
     void finish(std::vector<PocsagPage>& out);
 
+    // Synchronisation is lost or the stream ended: held pages are dropped.
+    void lose_sync();
+
+    // The provisional batch is confirmed: held pages go out.
+    void confirm(std::vector<PocsagPage>& out);
+
     PocsagConfig config_{};
     LevelDiscriminator discriminator_{};
     BitClock clock_{};
     std::vector<float> soft_;
     std::vector<SoftBit> bits_;
 
-    // The last 32 bits, most recent in bit 0, and how many bits have been
-    // seen, so the sync search does not fire on a register not yet full.
-    std::uint32_t shift_ = 0;
+    // The last 64 bits, most recent in bit 0: the low 32 are the codeword
+    // being assembled or searched for, the high 32 what came before it. And
+    // how many bits have been seen, so the sync search does not fire on a
+    // register not yet full.
+    std::uint64_t shift_ = 0;
     std::uint64_t bit_count_ = 0;
+
+    // False while the batch in hand was found without a preamble and its
+    // next synchronization codeword has not yet arrived; the pages finished
+    // meanwhile wait in held_.
+    bool confirmed_ = false;
+    std::vector<PocsagPage> held_;
 
     bool synced_ = false;
     bool inverted_ = false;

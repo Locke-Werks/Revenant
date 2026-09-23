@@ -1,6 +1,7 @@
 #include "core/decode/pocsag.h"
 
 #include <bit>
+#include <iterator>
 
 namespace revenant::decode {
 
@@ -154,6 +155,11 @@ Expected<PocsagDecoder> PocsagDecoder::create(const PocsagConfig& config) {
     if (config.sync_tolerance < 0 || config.sync_tolerance > 4) {
         return fail("a POCSAG sync tolerance above four bits would find sync in noise");
     }
+    if (config.address_correction_budget < 0 || config.address_correction_budget > 2) {
+        return fail(
+            "the M.584-2 clause 1.4 code corrects at most two bits, so an address correction "
+            "budget must be 0, 1 or 2");
+    }
     LevelDiscriminatorConfig level;
     level.rate = config.rate;
     level.symbol_rate = config.bit_rate;
@@ -191,6 +197,8 @@ void PocsagDecoder::reset() {
     consecutive_bad_ = 0;
     stats_ = {};
     bit_count_ = 0;
+    confirmed_ = false;
+    held_.clear();
 }
 
 void PocsagDecoder::process(ConstRealSpan audio, std::vector<PocsagPage>& out) {
@@ -208,29 +216,60 @@ void PocsagDecoder::process(ConstRealSpan audio, std::vector<PocsagPage>& out) {
 
 void PocsagDecoder::flush(std::vector<PocsagPage>& out) {
     finish(out);
-    synced_ = false;
+    lose_sync();
     bit_in_word_ = 0;
     expecting_sync_ = false;
+}
+
+void PocsagDecoder::lose_sync() {
+    if (synced_ && !confirmed_) {
+        ++stats_.batches_unconfirmed;
+    }
+    synced_ = false;
+    stats_.pages_unconfirmed += held_.size();
+    held_.clear();
+    confirmed_ = false;
+}
+
+void PocsagDecoder::confirm(std::vector<PocsagPage>& out) {
+    out.insert(out.end(), std::make_move_iterator(held_.begin()),
+               std::make_move_iterator(held_.end()));
+    held_.clear();
+    confirmed_ = true;
 }
 
 void PocsagDecoder::on_bit(std::uint8_t raw, SampleIndex sample, std::vector<PocsagPage>& out) {
     shift_ = (shift_ << 1U) | raw;
     ++bit_count_;
     const auto tolerance = config_.sync_tolerance;
+    const auto codeword = static_cast<std::uint32_t>(shift_);
 
     if (!synced_) {
         if (bit_count_ < kPocsagCodewordBits) {
             return;
         }
-        if (std::popcount(shift_ ^ kPocsagSync) <= tolerance) {
+        if (std::popcount(codeword ^ kPocsagSync) <= tolerance) {
             synced_ = true;
             inverted_ = false;
-        } else if (std::popcount(shift_ ^ ~kPocsagSync) <= tolerance) {
+        } else if (std::popcount(codeword ^ ~kPocsagSync) <= tolerance) {
             synced_ = true;
             inverted_ = true;
         } else {
             return;
         }
+        // Clause 1.1: a transmission starts with at least 576 bits of
+        // reversals, 101010, to help the receiver acquire batch
+        // synchronization. The 32 before this codeword being reversals is
+        // that preamble, and the batch is taken at once. A reversal
+        // complemented is a reversal, so the polarity does not enter into
+        // it; either phase is accepted, since the clause does not say which
+        // bit the preamble ends on.
+        const auto before = static_cast<std::uint32_t>(shift_ >> 32U);
+        const bool preamble = bit_count_ >= 2 * kPocsagCodewordBits &&
+                              (std::popcount(before ^ 0xAAAA'AAAAU) <= tolerance ||
+                               std::popcount(before ^ 0x5555'5555U) <= tolerance);
+        confirmed_ = preamble;
+        held_.clear();
         ++stats_.batches;
         bit_in_word_ = 0;
         word_in_batch_ = 0;
@@ -246,7 +285,7 @@ void PocsagDecoder::on_bit(std::uint8_t raw, SampleIndex sample, std::vector<Poc
         return;
     }
     bit_in_word_ = 0;
-    const std::uint32_t word = inverted_ ? ~shift_ : shift_;
+    const std::uint32_t word = inverted_ ? ~codeword : codeword;
 
     if (expecting_sync_) {
         // Clause 1.2: every batch begins with the synchronization codeword.
@@ -257,13 +296,19 @@ void PocsagDecoder::on_bit(std::uint8_t raw, SampleIndex sample, std::vector<Poc
             ++stats_.batches;
             expecting_sync_ = false;
             word_in_batch_ = 0;
+            if (!confirmed_) {
+                // Clause 2.3: a valid batch has followed, so the provisional
+                // one was real and its pages go out.
+                confirm(out);
+            }
             return;
         }
         // Clause 1.2 lets a transmission end at the end of any batch; this is
         // that, or a lost lock. Either way the page in progress is done, and
-        // the search starts again from the bits already in the register.
+        // the search starts again from the bits already in the register. A
+        // provisional batch ends here unconfirmed, and its pages with it.
         finish(out);
-        synced_ = false;
+        lose_sync();
         return;
     }
 
@@ -317,6 +362,17 @@ void PocsagDecoder::on_codeword(std::uint32_t received, SampleIndex sample,
 
     // Clause 1.2: a message also ends at the next address codeword.
     finish(out);
+
+    // Clause 1.3.2 and 1.4: an address codeword is the BCH(31,21) block and
+    // an even parity bit, distance 6 together. Corrected past the budget,
+    // it is as likely another code word's errors as this one's; see
+    // PocsagConfig::address_correction_budget. It still ends the message
+    // before it, since whatever it was, it was not that message's text.
+    if (c.corrected_bits > config_.address_correction_budget) {
+        ++stats_.addresses_refused;
+        return;
+    }
+
     PocsagPage page;
     // Clause 1.3.2: bits 2 to 19 are the 18 most significant bits of the
     // identity, and clause 1.2 puts the 3 least significant in the frame.
@@ -345,7 +401,11 @@ void PocsagDecoder::finish(std::vector<PocsagPage>& out) {
         page.format = PocsagPage::Format::Alphanumeric;
         page.text = pocsag_alphanumeric(page.message_bits);
     }
-    out.push_back(std::move(page));
+    if (confirmed_) {
+        out.push_back(std::move(page));
+    } else {
+        held_.push_back(std::move(page));
+    }
 }
 
 }  // namespace revenant::decode

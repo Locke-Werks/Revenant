@@ -292,6 +292,12 @@ TEST_CASE("POCSAG through an FM receiver against noise, measured", "[decode][poc
     // any of which loses it, which is why the page loss is what it is. At
     // 4 dB the discriminator is below its threshold and the loss is total.
     // The allowances sit above the measurements.
+    //
+    // Since 2026-09-23 an address codeword is refused past one corrected bit,
+    // PocsagConfig::address_correction_budget, and 8 dB loses 0.475 of the
+    // pages rather than the 0.40 above: three more addresses of the forty
+    // had two bits wrong. Nothing else in the table moved.
+    // tests/decode/test_pocsag_false_pages.cpp has what that buys.
     const Point points[] = {
         {20.0, 0, 0.0}, {20.0, 1000, 0.0}, {12.0, 0, 0.2}, {8.0, 0, 0.6}, {4.0, 0, 1.0}};
 
