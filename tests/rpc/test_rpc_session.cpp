@@ -667,6 +667,93 @@ TEST_CASE("every receiver parameter survives a round trip", "[gpu][rpc][m1]") {
     CHECK(after_pan->demod_rate == unchanged->demod_rate);
 }
 
+TEST_CASE("the noise fields cross the wire both ways and ride a retune", "[gpu][rpc][noise]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    bring_up(harness, HarnessOptions{});
+
+    // A USB receiver, which offers all three stages, with every noise figure
+    // moved off its default and exactly representable, for the reason
+    // distinctive_params gives.
+    rpc::VrxParams sent = distinctive_params();
+    sent.nb_enabled = true;
+    sent.nb_threshold_db = 17.5;
+    sent.notch_enabled = true;
+    sent.notch_hz = 1'234;
+    sent.notch_depth_db = 33.25;
+    sent.notch_width_hz = 75;
+    sent.auto_notch_enabled = true;
+    sent.nr_enabled = true;
+    sent.nr_strength = 0.625;
+
+    auto check_noise = [](const rpc::VrxParams& got, const rpc::VrxParams& want) {
+        CHECK(got.nb_enabled == want.nb_enabled);
+        CHECK(got.nb_threshold_db == want.nb_threshold_db);
+        CHECK(got.notch_enabled == want.notch_enabled);
+        CHECK(got.notch_hz == want.notch_hz);
+        CHECK(got.notch_depth_db == want.notch_depth_db);
+        CHECK(got.notch_width_hz == want.notch_width_hz);
+        CHECK(got.auto_notch_enabled == want.auto_notch_enabled);
+        CHECK(got.nr_enabled == want.nr_enabled);
+        CHECK(got.nr_strength == want.nr_strength);
+    };
+
+    auto id = harness.client().add_vrx(sent);
+    INFO(test::message_of(id));
+    REQUIRE(id.has_value());
+    auto added = harness.client().vrx_status(*id);
+    REQUIRE(added.has_value());
+    check_params_match(added->params, sent);
+    check_noise(added->params, sent);
+
+    // A retune that moves the dial and changes every noise figure, which is
+    // tuning and never shape, so it is taken in place.
+    rpc::VrxParams changed = sent;
+    changed.center += 250;
+    changed.nb_enabled = false;
+    changed.nb_threshold_db = 9.5;
+    changed.notch_hz = 2'000;
+    changed.notch_depth_db = 60.0;
+    changed.notch_width_hz = 150;
+    changed.auto_notch_enabled = false;
+    changed.nr_strength = 0.25;
+    const auto applied = harness.client().set_vrx_params(*id, changed);
+    INFO(test::message_of(applied));
+    REQUIRE(applied.has_value());
+
+    auto after = harness.client().vrx_status(*id);
+    REQUIRE(after.has_value());
+    check_noise(after->params, changed);
+
+    // And the engine holds what the wire said it does.
+    auto local = harness.engine().vrx_status(engine::VrxId{static_cast<std::uint32_t>(*id)});
+    REQUIRE(local.has_value());
+    CHECK(local->params.nb_enabled == changed.nb_enabled);
+    CHECK(local->params.nb_threshold_db == changed.nb_threshold_db);
+    CHECK(local->params.notch_enabled == changed.notch_enabled);
+    CHECK(local->params.notch_hz == changed.notch_hz);
+    CHECK(local->params.notch_depth_db == changed.notch_depth_db);
+    CHECK(local->params.notch_width_hz == changed.notch_width_hz);
+    CHECK(local->params.auto_notch_enabled == changed.auto_notch_enabled);
+    CHECK(local->params.nr_enabled == changed.nr_enabled);
+    CHECK(local->params.nr_strength == changed.nr_strength);
+
+    // A refusal reaches the client in the engine's words: the automatic
+    // notch on CW, where the steady tone is the signal.
+    rpc::VrxParams cw = changed;
+    cw.demod = rpc::Demod::Cw;
+    cw.bandwidth = 500;
+    cw.passband_low = 0;
+    cw.passband_high = 0;
+    cw.notch_hz = 0;
+    cw.auto_notch_enabled = true;
+    const auto refused = harness.client().add_vrx(cw);
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find("automatic notch") != std::string::npos);
+}
+
 TEST_CASE("all eight demodulator modes survive a round trip", "[gpu][rpc][m1]") {
     REVENANT_NEEDS_GPU();
 

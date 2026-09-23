@@ -448,6 +448,19 @@ struct VrxParams {
     double agc_decay_ms = 500.0;
     bool agc_enabled = true;
     std::int64_t cw_pitch = 700;
+
+    // Noise mitigation, each stage off by default and every figure at the
+    // engine's default. core/engine/vrx.h states the ranges and which modes
+    // offer which stage; docs/noise.md has what they do.
+    bool nb_enabled = false;
+    double nb_threshold_db = 12.0;
+    bool notch_enabled = false;
+    std::int64_t notch_hz = 1'000;
+    double notch_depth_db = 40.0;
+    std::int64_t notch_width_hz = 100;
+    bool auto_notch_enabled = false;
+    bool nr_enabled = false;
+    double nr_strength = 0.5;
 };
 
 struct VrxPlacement {

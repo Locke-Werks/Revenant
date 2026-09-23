@@ -511,6 +511,15 @@ void write_vrx_params(schema::VrxParams::Builder out, const engine::VrxParams& i
     out.setCwPitch(in.cw_pitch);
     out.setPassbandLow(in.passband_low);
     out.setPassbandHigh(in.passband_high);
+    out.setNoiseBlanker(in.nb_enabled);
+    out.setNoiseBlankerThresholdDb(in.nb_threshold_db);
+    out.setNotch(in.notch_enabled);
+    out.setNotchHz(in.notch_hz);
+    out.setNotchDepthDb(in.notch_depth_db);
+    out.setNotchWidthHz(in.notch_width_hz);
+    out.setAutoNotch(in.auto_notch_enabled);
+    out.setNoiseReduction(in.nr_enabled);
+    out.setNoiseReductionStrength(in.nr_strength);
 }
 
 void write_vrx_placement(schema::VrxPlacement::Builder out, const engine::VrxPlacement& in,
@@ -795,6 +804,15 @@ Expected<engine::VrxParams> read_vrx_params(schema::VrxParams::Reader in) {
     out.cw_pitch = in.getCwPitch();
     out.passband_low = in.getPassbandLow();
     out.passband_high = in.getPassbandHigh();
+    out.nb_enabled = in.getNoiseBlanker();
+    out.nb_threshold_db = in.getNoiseBlankerThresholdDb();
+    out.notch_enabled = in.getNotch();
+    out.notch_hz = in.getNotchHz();
+    out.notch_depth_db = in.getNotchDepthDb();
+    out.notch_width_hz = in.getNotchWidthHz();
+    out.auto_notch_enabled = in.getAutoNotch();
+    out.nr_enabled = in.getNoiseReduction();
+    out.nr_strength = in.getNoiseReductionStrength();
     return out;
 }
 

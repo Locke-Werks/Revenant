@@ -888,6 +888,39 @@ struct VrxParams {
     # something was.
     passbandLow @9 :Int64;
     passbandHigh @10 :Int64;
+
+    # Noise mitigation, three stages, each off by default. docs/noise.md says
+    # what each does and carries the measured figures, and core/engine/vrx.h
+    # states the ranges. All of them are tuning, never shape: changing any of
+    # them is setVrxParams on the running receiver, not a remove and an add.
+    # A value out of range, or a stage the mode does not offer, is refused by
+    # name on the call.
+    #
+    # The defaults below are the engine's, so a client that has never heard of
+    # these fields sends a request that means exactly what it meant before
+    # they existed: every stage off.
+
+    # The impulse blanker, on the receiver's channel ahead of its filter.
+    # Threshold in dB above the running background power, in [3, 40].
+    noiseBlanker @11 :Bool = false;
+    noiseBlankerThresholdDb @12 :Float64 = 12.0;
+
+    # The manual notch, at signed hertz from `center` in the same frame as
+    # passbandLow and passbandHigh, so a display draws it where the
+    # interference is. AM, USB, LSB, DSB and CW. Depth in [3, 80] dB, width
+    # in [10, 2000] Hz.
+    notch @13 :Bool = false;
+    notchHz @14 :Int64 = 1000;
+    notchDepthDb @15 :Float64 = 40.0;
+    notchWidthHz @16 :Int64 = 100;
+
+    # The automatic notch, which removes steady tones. AM, USB, LSB and DSB;
+    # refused on CW, where the steady tone is the signal.
+    autoNotch @17 :Bool = false;
+
+    # Spectral noise reduction, with one strength in [0, 1].
+    noiseReduction @18 :Bool = false;
+    noiseReductionStrength @19 :Float64 = 0.5;
 }
 
 struct VrxPlacement {
