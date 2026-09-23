@@ -167,6 +167,7 @@ qt_add_executable(revenant_ui
     models/band_plan.h
     models/frequency_dial.h
     models/level_meter.h
+    models/mode_choice.h
     models/receiver_scroll.h
     models/status_summary.h
     models/ruler.h
@@ -509,6 +510,7 @@ if(REVENANT_UI_TESTS)
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp
             tests/test_history_shift.cpp
+            tests/test_mode_choice.cpp
             tests/test_frequency_dial.cpp
             tests/test_frequency_entry.cpp
             tests/test_gain_control.cpp

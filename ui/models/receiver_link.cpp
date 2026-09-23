@@ -310,9 +310,8 @@ void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
             }
         }
     } else {
-        receiver_fault_ = QStringLiteral("'%1' is not one of raw, am, nfm, wfm, usb, lsb, "
-                                         "dsb, cw")
-                              .arg(mode);
+        receiver_fault_ = QStringLiteral("'%1' is not one of %2")
+                              .arg(mode, QString::fromStdString(demod_names_text()));
         emit receiverFaultChanged();
         return;
     }
@@ -428,9 +427,8 @@ void EngineLink::setReceiverDemod(const QString& mode)
 
     auto parsed = demod_from_name(mode);
     if (!parsed) {
-        receiver_fault_ =
-            QStringLiteral("'%1' is not one of raw, am, nfm, wfm, usb, lsb, dsb, cw")
-                .arg(mode);
+        receiver_fault_ = QStringLiteral("'%1' is not one of %2")
+                              .arg(mode, QString::fromStdString(demod_names_text()));
         emit receiverFaultChanged();
         return;
     }

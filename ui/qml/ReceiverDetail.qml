@@ -80,7 +80,8 @@ ColumnLayout {
                  : engineLink.aftState === "correcting" ? Theme.accent
                  : engineLink.aftState === "holding, signal jumped" ? Theme.inkWarn
                  : Theme.inkDim
-            label: !engineLink.aftOffered ? "no AFT on " + engineLink.receiverDemod
+            label: !engineLink.aftOffered
+                   ? "no AFT on " + UiRules.modeLabel(engineLink.receiverDemod)
                    : !engineLink.aftEnabled ? "AFT off"
                    : engineLink.aftState
                      + (engineLink.aftHasError
@@ -113,7 +114,8 @@ ColumnLayout {
             ink: !engineLink.autoFilterEnabled ? Theme.inkDim
                  : engineLink.autoFilterState.startsWith("fitted") ? Theme.accent
                  : Theme.inkDim
-            label: !engineLink.autoFilterOffered ? "no auto filter on " + engineLink.receiverDemod
+            label: !engineLink.autoFilterOffered
+                   ? "no auto filter on " + UiRules.modeLabel(engineLink.receiverDemod)
                    : engineLink.autoFilterState
             detail: "Auto filter fits the filter to the signal once, when you click a "
                     + "detection to tune it and when you switch it on, from half a second "
@@ -141,12 +143,18 @@ ColumnLayout {
         Layout.minimumWidth: 0
         spacing: 12
 
-        // The mode, as the eight choices an operator actually reaches for.
-        // Changing one is a remove and an add underneath, because the
-        // demodulator is the stage; the receiver keeps its identity across
-        // that and the operator sees a mode change.
+        // The mode: the eight choices an operator reaches for on every band
+        // as a row, and P25, D-STAR and TETRA behind a "digital" segment at
+        // its end, which reads the digital mode in force when there is one.
+        // models/mode_choice.h holds the lists and the labels. Changing one
+        // is a remove and an add underneath, because the demodulator is the
+        // stage; the receiver keeps its identity across that and the
+        // operator sees a mode change.
         RSegmented {
-            options: ["am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw"]
+            options: UiRules.rowModes()
+            overflow: UiRules.digitalModes()
+            overflowText: UiRules.digitalGroupLabel(engineLink.receiverDemod)
+            overflowChosen: UiRules.modeIsDigital(engineLink.receiverDemod)
             current: engineLink.receiverDemod
             tint: detail.tint
             onPicked: (mode) => engineLink.setReceiverDemod(mode)

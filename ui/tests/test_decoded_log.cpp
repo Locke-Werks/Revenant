@@ -167,6 +167,22 @@ TEST_CASE("a raw tap is offered the complex decoders and no auto", "[decoded]")
     CHECK(auto_decoders(engine_list(), "raw").empty());
 }
 
+// Rejects treating the digital modes as a raw tap, with no auto, which is
+// what they were while the window could only reach them as one. A p25p1
+// receiver's auto is the decoder named after it, and so for dstar and tetra;
+// the others the engine lists as reading the tap stay in the menu, M17 on
+// p25p1 among them, because the engine says they read it.
+TEST_CASE("a digital receiver's auto is the decoder named after its mode", "[decoded]")
+{
+    CHECK(decoder_choices(engine_list(), "p25p1") ==
+          Strings{"auto", "p25p1", "dstar", "tetra", "m17"});
+    CHECK(auto_decoders(engine_list(), "p25p1") == Strings{"p25p1"});
+    CHECK(resolve_decoder_choice("auto", engine_list(), "p25p1") == Strings{"p25p1"});
+    CHECK(auto_decoders(engine_list(), "dstar") == Strings{"dstar"});
+    CHECK(auto_decoders(engine_list(), "tetra") == Strings{"tetra"});
+    CHECK(decoder_choices(engine_list(), "tetra") == Strings{"auto", "p25p1", "dstar", "tetra"});
+}
+
 // Rejects a section drawn for a mode nothing reads. WFM keeps its RDS
 // section and has no decoder here; AM and DSB have neither.
 TEST_CASE("am, dsb and wfm are offered nothing", "[decoded]")

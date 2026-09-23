@@ -56,7 +56,7 @@ Rectangle {
             }
 
             Label {
-                text: engineLink.receiverDemod.toUpperCase()
+                text: UiRules.modeLabel(engineLink.receiverDemod).toUpperCase()
                 color: Theme.inkDim
                 font.pixelSize: Theme.sizeSmall
             }

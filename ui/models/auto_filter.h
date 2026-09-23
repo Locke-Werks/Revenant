@@ -53,6 +53,10 @@
 //   nfm, wfm  The measured occupied width, symmetric about the receiver's
 //   dsb       centre, or the detection's width if that is wider.
 //   raw       No demodulator, so no statement of what the signal is. Nothing.
+//   p25p1, dstar, tetra
+//             Nothing. Each mode's channel is its standard's, and the engine
+//             answers with it when the edges are left unstated; a fit
+//             narrower than that cuts the signal the decoder needs.
 //
 // Every fit is clamped to the channel's edge limit, which is what the engine
 // grants, and to the minimum width. A fit is only made once that limit and

@@ -138,6 +138,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -159,6 +160,7 @@
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/decoded_model.h"
+#include "models/mode_choice.h"
 #include "models/receiver_gone.h"
 #include "models/receiver_scroll.h"
 #include "models/scroll_tune.h"
@@ -447,32 +449,28 @@ inline constexpr int kPassbandStepHz = 10;
 inline constexpr int kPassbandCoarseStepHz = 100;
 inline constexpr int kPassbandFineStepHz = 1;
 
-// The demodulator names, in the ordinal order rpc::Demod declares them, so
-// the table and the enum cannot drift the way two hand-written lists would.
+// The demodulator names, kDemodNames in models/mode_choice.h, which has why
+// they are a copy of engine::demod_name and what pins them.
 //
-// A copy of engine::demod_name, and a copy on purpose: this process links no
-// part of the engine, which is the whole reason ui/CMakeLists.txt exists.
-// core/rpc/convert.h holds the static_asserts that keep rpc::Demod ordinal
-// for ordinal with engine::Demod, so the ORDINALS here are pinned by the
-// engine's own build even though the spellings are not.
-inline constexpr const char* kDemodNames[] = {"raw", "am",  "nfm", "wfm",
-                                              "usb", "lsb", "dsb", "cw"};
-
+// WHAT THE TABLE USED TO HOLD: eight names, raw to cw, and not p25p1, dstar
+// or tetra, so a receiver in one of those read "unknown" here.
 [[nodiscard]] inline QString demod_name(rpc::Demod mode) {
     const auto index = static_cast<std::size_t>(mode);
-    if (index >= std::size(kDemodNames)) {
+    if (index >= kDemodNames.size()) {
         return QStringLiteral("unknown");
     }
-    return QString::fromLatin1(kDemodNames[index]);
+    const std::string_view name = kDemodNames[index];
+    return QString::fromLatin1(name.data(), static_cast<qsizetype>(name.size()));
 }
 
-// The name back to an ordinal, or nothing when it is not one of the eight.
+// The name back to an ordinal, or nothing when it is not one of the eleven.
 // Nothing rather than a default, because a mode nobody meant is a receiver
 // tuned to something nobody asked for, and the mode is the one parameter
 // where being wrong is inaudible until the recording turns out unusable.
 [[nodiscard]] inline std::optional<rpc::Demod> demod_from_name(const QString& name) {
-    for (std::size_t i = 0; i < std::size(kDemodNames); ++i) {
-        if (name == QLatin1StringView(kDemodNames[i])) {
+    for (std::size_t i = 0; i < kDemodNames.size(); ++i) {
+        const std::string_view known = kDemodNames[i];
+        if (name == QLatin1StringView(known.data(), static_cast<qsizetype>(known.size()))) {
             return static_cast<rpc::Demod>(i);
         }
     }
@@ -992,7 +990,8 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool aftEnabled READ aftEnabled WRITE setAftEnabled NOTIFY aftChanged)
 
     // Whether the receiver's mode has a centre AFT can aim at. False on
-    // usb, lsb, dsb and raw, where the toggle is shown disabled.
+    // usb, lsb, dsb, raw and the three digital modes, where the toggle is
+    // shown disabled.
     Q_PROPERTY(bool aftOffered READ aftOffered NOTIFY aftChanged)
 
     // What the loop is doing, as a word or two for a chip, and the signal's
@@ -1824,9 +1823,9 @@ public:
     // live in dsp::default_passband, this process links no part of the DSP,
     // and a copy here would be a second table to keep in step.
     //
-    // mode is a demodulator name as core/engine/vrx.h spells it: raw, am,
-    // nfm, wfm, usb, lsb, dsb, cw. An empty string keeps the mode the pane
-    // already has.
+    // mode is a demodulator name as core/engine/vrx.h spells it, one of
+    // kDemodNames in models/mode_choice.h. An empty string keeps the mode
+    // the pane already has.
     Q_INVOKABLE void tuneReceiver(double absolute_hz, const QString& mode);
 
     // The same, from a click on a detection, carrying the bandwidth the

@@ -17,9 +17,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
+#include <vector>
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QVariantList>
 #include <QVariantMap>
 #include <QtQmlIntegration>
@@ -28,6 +30,7 @@
 #include "models/composite_probe.h"
 #include "models/frequency_dial.h"
 #include "models/level_meter.h"
+#include "models/mode_choice.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
 #include "models/status_summary.h"
@@ -196,6 +199,41 @@ public:
         return meter_has_reading(dbfs);
     }
 
+    // ---------------------------------------------------------------------
+    // The mode selector. See models/mode_choice.h.
+    // ---------------------------------------------------------------------
+
+    // The names on the selector's row, in order.
+    [[nodiscard]] Q_INVOKABLE QStringList rowModes() const { return names(mode_names(false)); }
+
+    // The digital group's entries, each a map of name and label, in order.
+    [[nodiscard]] Q_INVOKABLE QVariantList digitalModes() const
+    {
+        QVariantList out;
+        for (const std::string_view name : mode_names(true)) {
+            out.append(QVariantMap{{QStringLiteral("name"), to_qstring(name)},
+                                   {QStringLiteral("label"), to_qstring(mode_label(name))}});
+        }
+        return out;
+    }
+
+    // What a mode is shown as: "P25" for p25p1, the name itself for the row.
+    [[nodiscard]] Q_INVOKABLE QString modeLabel(const QString& demod) const
+    {
+        return to_qstring(mode_label(demod.toStdString()));
+    }
+
+    [[nodiscard]] Q_INVOKABLE bool modeIsDigital(const QString& demod) const
+    {
+        return mode_is_digital(demod.toStdString());
+    }
+
+    // The digital segment's text while `demod` is in force.
+    [[nodiscard]] Q_INVOKABLE QString digitalGroupLabel(const QString& demod) const
+    {
+        return to_qstring(digital_group_label(demod.toStdString()));
+    }
+
     // Whether the receiver window shows its RDS section at all. See
     // rds_offered in models/composite_probe.h, which only ever offers it on
     // wfm, so the name is compared against that one mode here.
@@ -218,6 +256,16 @@ private:
     [[nodiscard]] static QString to_qstring(std::string_view text)
     {
         return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+    }
+
+    [[nodiscard]] static QStringList names(const std::vector<std::string_view>& list)
+    {
+        QStringList out;
+        out.reserve(static_cast<qsizetype>(list.size()));
+        for (const std::string_view name : list) {
+            out.append(to_qstring(name));
+        }
+        return out;
     }
 
     [[nodiscard]] static std::int64_t to_hz(double hz)
