@@ -731,6 +731,34 @@ What the sweep does not show is a knee. Nothing in either band picks a value
 out, which is the same answer as before arrived at with better evidence: this
 wants ground truth rather than another sweep.
 
+**The whole files say the same, and supersede the one-minute table above.**
+Swept over 40 m at 1359 UT and 20 m at 1603 UT whole, from 2 bins to 32
+nothing moves by more than 5.1 percent, 20 m's splits going from 538 to 512;
+between 32 and 128 bins there is a step, merges climbing 25 percent on 40 m and
+50 percent on 20 m by 200 bins while births fall 3 to 6 percent, and there is
+no knee inside either range. `docs/recordings.md` has the table.
+
+**RTTY does what this section predicted, but only when it is strong.**
+Synthetic 45.45 baud, 170 Hz shift RTTY through the same HF path splits into
+two tracks 171 Hz apart at 15 dB in the 2500 Hz reference, and at 8 dB is one
+detection 163 to 238 Hz wide. `--characterise` at its centre calls the 15 dB
+signal 2-FSK with its tones 169.62 Hz apart but no symbol rate, so it never
+matches the catalogue's RTTY row, and calls the 8 dB one 4-PSK at 0.92, which
+is wrong. That second call is the kind the PSK rules further down were written
+for: if it carried no symbol rate it now reads 0.50 flagged and may not drive
+detection, and if it carried one only the carrier-power rule could refuse it.
+Which it was has not been measured. A synthetic RTTY signal made directly at
+the 3 kS/s channel rate at 15, 11 and 8 dB, nine extracts, came back unknown
+every time, so the 4-PSK call depends on something in the HF path that the
+direct extract does not have.
+
+**And none of the six recordings holds RTTY**, scanned whole for both shapes,
+a pair of lines a shift apart and one band 150 to 360 Hz wide. Every candidate
+that lasted was a carrier with sidebands, a PSK or voice signal, or a line with
+a neighbour merged into it; `docs/recordings.md` lists them. So
+`split_gap_bins` stays open: the RTTY case that would test it has been measured
+on a synthetic signal and does not exist in the corpus.
+
 ## Identification
 
 Two tiers, split on cost.
@@ -1091,10 +1119,16 @@ and catches it happening:
 | **-3 dB** | **PSK** | **0.98** | 0.333 | 0.885 |
 | -9 dB | PSK | 0.88 | 0.112 | 0.984 |
 
-The flip sits between +3 and -3 dB, and the wrong answer arrives at 0.98 while
-the right answer never got above 0.95. **An operator reading the confidence
-column would trust the wrong row harder**, which is the whole problem in one
-line. Concentration over the same rows is 0.998, 0.950, 0.664, 0.333, 0.112,
+The flip sits between +3 and -3 dB, and the wrong answer arrived at 0.98 while
+the right answer never got above 0.95. Both PSK rows carry no symbol rate, so
+since 2026-09-22 they read 0.50, flagged, under the rule the next sections
+record: the right rows now outrank the wrong ones.
+
+WHAT THIS PARAGRAPH USED TO SAY, when those rows read 0.98 and 0.88: "An
+operator reading the confidence column would trust the wrong row harder",
+which it called the whole problem in one line.
+
+Concentration over the same rows is 0.998, 0.950, 0.664, 0.333, 0.112,
 against the 1/(1+N) that S/(S+N) predicts at each step: it is measuring the
 signal-to-noise ratio and it keeps measuring it after the family name has
 stopped meaning anything.
@@ -1527,15 +1561,28 @@ to mean anything, and does nothing for the rest.
   weak carrier, and it says it confidently.
 - **`family_confidence` is not a quality measure** and ordering a list by it
   puts the worst signals at the top.
-- A PSK call carrying no symbol rate, or one implausible for its band, is the
-  shape of the artefact and is the cheapest thing to gate on if a gate is
-  wanted before the probe receiver exists.
+- **A PSK call carrying no symbol rate is kept, flagged and held to 0.50**, by
+  the owner's decision of 2026-09-22, and `characterise::may_drive_detection`
+  refuses it. It is not refused outright, because real BPSK loses its rate
+  before its order. "A PSK call with no symbol rate" below has the margins the
+  cap was read from.
+- **A PSK call whose carrier sits at its occupied band's edge is not made at
+  all.** That is the narrowed-noise artefact, and 22 of 62 such calls on
+  synthetic empty channels carried a symbol rate, so the flag alone would not
+  have caught them. "The empty-channel gate, run" below.
 - **And the detector does not have to wait for any of it.** `BandShape::
   concentration` is the same measurement off the spectrum the detector already
   holds, on every track, at no extra cost and with no receiver involved. The
   tier that needed a probe receiver is the one that names a family; the number
   that separates a station from a raised patch of floor was available all
   along.
+
+WHAT THE FOURTH BULLET USED TO SAY: "A PSK call carrying no symbol rate, or one
+implausible for its band, is the shape of the artefact and is the cheapest
+thing to gate on if a gate is wanted before the probe receiver exists." Over a
+third of the artefact carries a rate, and a missing rate is also the shape of
+a weak real signal; the two bullets that replace it are what the measurement
+supported instead.
 
 None of this is an argument against driving detection from modulation. It is
 the measurement of what the current extract supports.
@@ -1594,18 +1641,22 @@ which a corner defeats. The tap change was reverted, because the filter was
 made better at filtering and worse at the only job this flag has.
 
 **So the fault is a baseline estimate at a spectral discontinuity, and it lives
-in `core/characterise` rather than in the filter.** That is the same class as
-the OFDM branch below, and it gets the same treatment: written down rather than
-changed, because those constants were each measured against a signal and a
-theory-led edit to them is not an improvement.
+in `core/characterise` rather than in the filter.** No constant of the order
+estimator was changed for it, because each was measured against a signal. What
+was added instead is a rule about where the reading lands, stated from the
+physics and measured on both sides, in "The empty-channel gate, run" below.
+
+WHAT THIS PARAGRAPH USED TO SAY: "it gets the same treatment: written down
+rather than changed". The estimator is still unchanged; the characteriser now
+refuses the call the corner produces.
 
 #### What that does and does not say about the probe receiver
 
-It does not say a probe receiver would fail. The design section below already
-concluded that tier two has to use a real `DemodStage` rather than the raw tap,
+It does not say a probe receiver would fail. The design section below
+concludes that tier two needs the fine stage rather than the raw tap,
 precisely so the extract is mixed to DC and filtered near the signal's
-bandwidth, and that stage's fine filter is a planned polyphase one rather than
-a hundred taps of direct convolution. A different filter puts the corner
+bandwidth, and that stage's fine filter is a polyphase one rather than a
+hundred taps of direct convolution. A different filter puts the corner
 somewhere else.
 
 It does say **the payoff cannot be assumed, because it was assumed here and the
@@ -1619,6 +1670,87 @@ And it sharpens the standing conclusion rather than softening it. Two carriers
 were named correctly at every width; everything that was not a carrier moved
 around. The family call is the wrong thing to hang detection on, and narrowing
 the extract is not what fixes it.
+
+### The empty-channel gate, run
+
+The test the paragraph above asked for is
+`tests/characterise/test_empty_channel.cpp`. Synthetic noise, so every case
+knows there is nothing in it, narrowed exactly the way `--characterise-width`
+narrows, at the 3 kS/s HF channel rate: Gaussian, and Gaussian with an impulse
+of power 25 on one sample in a hundred, which puts the normalised power
+variance at 4.92 against the 4.79 and 4.82 empty 40 m reads. Unfiltered and at
+800, 300 and 100 Hz, 20 and 55 seconds, two levels eight decades apart as a
+control, three seeds a cell, 96 channels:
+
+| | unfiltered | 800 Hz | 300 Hz | 100 Hz |
+| --- | --- | --- | --- | --- |
+| before, named | 0 of 24 | 24 of 24 | 24 of 24 | 14 of 24 |
+| after, named | 0 of 24 | 0 of 24 | 0 of 24 | 0 of 24 |
+
+**The synthetic noise reproduces the real artefact exactly**: every call PSK
+of order 2, the carrier just past the cutoff, at ±422 Hz against 400, ±157 to
+±172 against 150 and ±63 to ±66 against 50. The two levels gave identical
+answers in every cell, and the impulsive noise changed nothing but the 100 Hz
+count. **And 22 of the 62 calls carried a symbol rate**, at up to 0.98, so the
+missing rate is not the shape of this artefact; the carrier's position is.
+
+So the rule is about where the carrier sits.
+`CharacteriseConfig::psk_carrier_level_fraction` refuses a PSK call when the
+extract's own power at the named carrier, at its loudest M-fold alias, is under
+half the median power across the occupied band. A linear modulation's spectrum
+peaks at its carrier; band-limited noise squared has a corner, not a line,
+where the band stops, and the carrier the power law reads off a corner sits
+where the band's power has already fallen away. Measured either side:
+
+| population | carrier's power over the band's median |
+| --- | --- |
+| the 62 order lines on empty channels | 0.195 at most |
+| real BPSK and QPSK at 0, +3 and -7 kHz, 30 to 0 dB in 2500 Hz | 0.88 at least; 2 to 110 once noise fills the extract |
+
+A half is a factor of 2.6 inside each. **A distance rule was tried first and
+refused a real signal**: the artefacts all sit 0.45 to 0.56 of the band's width
+from its centre, and real carriers mostly within 0.2, but BPSK at -7 kHz and
+20 dB came back with its noise-filled band centred at +6 kHz and its carrier
+0.34 of the width away. Power at the carrier does not move with where the
+noise drags the band.
+
+On real air, through the CLI at 55 seconds: empty 40 m at 30 kHz, which read
+PSK narrowed before, is unknown at 800 and 300 Hz with the carrier on 0.03 of
+the band's median, and the two 20 m carriers at -10.947 kHz and 2.520 kHz read
+unmodulated carrier at 0.68, 0.69, 0.61, 0.53 and 0.70, 0.70, 0.64, 0.51 across
+the four widths, identical to the table above.
+
+### A PSK call with no symbol rate: kept, flagged, capped
+
+The owner's decision of 2026-09-22: such a call is kept rather than refused,
+marked `Characterisation::psk_without_symbol_rate`, held to
+`kPskWithoutRateConfidence`, 0.5, and refused by
+`characterise::may_drive_detection`. The summary says so and
+`revenant-cli --characterise` prints a `flagged` line.
+
+Kept, because real PSK loses its rate before its order. 2400 baud BPSK at 48 kS/s:
+
+| population | rate | confidence uncapped | order margin |
+| --- | --- | --- | --- |
+| BPSK 30, 20, 10 dB in 2500 Hz | found | 0.982 to 0.999 | 26.0 to 47.0 dB |
+| QPSK 30, 20 dB | found | 0.972, 0.983 | 23.4, 26.4 dB |
+| **BPSK 5, 0 dB** | **none** | 0.929, 0.650 | 17.7, 8.1 dB |
+| **a carrier in noise, 0 to -12 dB** | **none** | 0.667 to 0.989 | 8.4 to 28.7 dB |
+
+Capped, because the last two rows overlap over their whole range: with no rate
+the call rests on the power law alone, a carrier whose envelope the noise has
+taken lights that line exactly as BPSK does, and the order's margin says
+nothing about which one a call is. No cap above a half separates them. A half
+is the bar the AnalogueFm branch already holds itself to for the same reason,
+an elimination between things the remaining test cannot tell apart, and the
+least `margin_confidence` gives any test that passed, so a capped call never
+outranks a PSK call that found its rate. The carrier walked down through noise
+earlier in this document now reads 0.50 flagged at -3 and -9 dB, under the
+0.66 the correctly named carrier reads at +3.
+
+`may_drive_detection` is necessary and not sufficient: it refuses Unknown and
+the flagged call, and certifies nothing else. Nothing routes a family into
+detection yet and nothing goes on the wire as one.
 
 ### The OFDM branch still fires on noise, and why that one is not mine to fix
 
@@ -1639,18 +1771,72 @@ measurement: on a one-eighth-guard burst at 48 kS/s, 0.01 reaches 5 dB in the
 reference bandwidth and 0.02 stops at 10 dB. Doubling it costs five decibels of
 reach on real OFDM to reject this.
 
-**What actually fails is the multiple.** Six times the median is a fixed bar
-against a maximum taken over every lag in the search, and the expected maximum
-of a set grows with the size of the set. More lags, which is what a longer
-extract buys, means a higher maximum from the same noise. That is why the call
-appears at forty seconds and not at eleven, twenty or fifty-eight: it is the
-tail of a distribution being sampled more times, not a property of the band.
+**What was argued to fail is the multiple.** Six times the median is a fixed
+bar against a maximum taken over every lag in the search, and the expected
+maximum of a set grows with the size of the set. More lags, which is what a
+longer extract buys, means a higher maximum from the same noise.
 
 A bar that held would have to grow with the lag count the way an extreme value
 does, rather than sit at a constant multiple of the middle of the distribution.
 That is a change to a tested library whose constants were each measured against
 a signal, and it wants the same treatment rather than an argument from theory,
 so it is written down here instead of made.
+
+WHAT THE FIRST PARAGRAPH USED TO SAY after "the same noise": "That is why the
+call appears at forty seconds and not at eleven, twenty or fifty-eight: it is
+the tail of a distribution being sampled more times, not a property of the
+band." The measurement below refuses the "why": forty and fifty-eight seconds
+search exactly the same number of lags.
+
+#### The bar against the lag count, measured and not changed
+
+The owner's call, so this measures and changes nothing: `floor_multiple` is
+still 6 and `min_prefix_ratio` still 0.01. `ofdm bar survey` in
+`tests/characterise/test_periodicity.cpp` holds the extract at the OFDM
+burst's 172800 samples and moves only `OfdmSearch::max_symbol_samples`, so the
+number of lags searched is the one thing that changes. Three noises, thirty
+draws a cell: Gaussian, Gaussian with an impulse of power 25 on one sample in a
+hundred, and Gaussian through a 101-tap low pass at a tenth of the rate and not
+decimated. The proposed bar is the Rayleigh extreme value,
+`sqrt(ln(L / alpha) / ln 2)` times the median, anchored to equal 6 at the
+default band's 8161 lags, which makes it 5.65 at 481 lags and 6.08 at 16353.
+
+The tallest isolated lag over the median, typical of the thirty and worst:
+
+| noise | 481 lags | 2017 lags | 8161 lags | 16353 lags |
+| --- | --- | --- | --- | --- |
+| gaussian | 3.15, 3.57 | 3.42, 3.87 | 3.77, 4.43 | 3.86, 4.48 |
+| impulsive | 2.99, 3.82 | 3.48, 4.07 | 3.65, 4.38 | 3.78, 4.32 |
+| coloured | 2.82, 3.82 | 3.27, 3.87 | 3.53, 3.95 | 3.66, 4.36 |
+
+False alarms were **0 of 30 in every cell under both bars**. Detections of the
+one-eighth-guard burst, ten noise draws a level, were identical at every lag
+count under both bars: 10 of 10 at 10 dB in 2500 Hz, 8 at 5, 1 at 3, 0 at 0.
+
+**The growth is real and it is the size the extreme value predicts.** The
+typical Gaussian reading rises from 3.15 to 3.86 across a 34-fold range of lag
+counts, against 2.98 to 3.74 from `sqrt(ln L / ln 2)`. But it is growth from
+under 4 towards a bar of 6, and no synthetic draw came within a factor of 1.3 of
+it.
+
+**Real 40 m did.** The empty channel at 30 kHz on 40 m at 1359 UT, through
+`revenant-cli --characterise`, which now prints this ratio:
+
+| extract | lags searched | tallest over median |
+| --- | --- | --- |
+| 11 s | 4094 | 4.7 |
+| 20 s | 7469 | 4.9 |
+| 40 s | 8161 | **6.0, taken as OFDM** |
+| 58 s | 8161 | 4.8 |
+
+Every real reading sits above the worst synthetic one at a comparable lag
+count, though from a different extract length, so the real noise's tail is
+heavier than any of the three models here. And the call at
+forty seconds is not a lag-count effect: fifty-eight seconds searched the same
+8161 lags and read 4.8. The Rayleigh bar is exactly 6 at that count, so **the
+proposed fix would not have refused the one call it was proposed for**. A bar
+that does has to be read off the real noise's own tail, from more than one
+extract, and that is the owner's to choose.
 
 **So none of this goes on the wire.** `core/rpc/revenant.capnp` already refuses
 `logicalCentreHz` on the grounds that a field nothing can fill is worse than no

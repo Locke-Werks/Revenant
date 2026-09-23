@@ -723,3 +723,24 @@ instead: What tier two needs is a complex-output mode routed through the fine
     stage, which mixes to DC, filters and resamples. P25p1, D-STAR and TETRA
     take vrx_demod's complex passthrough after vrx_fine; a probe could be Raw
     routed the same way, and that is a factory decision in core/engine.
+
+phrase: An operator reading the confidence column would trust the wrong row harder
+phrase: is the shape of the artefact and is the cheapest thing to gate on
+phrase: it gets the same treatment: written down rather than changed
+phrase: concluded that tier two has to use a real DemodStage rather than the raw tap
+retired: 2026-09-22
+commit: the change that capped a PSK call with no symbol rate
+instead: A PSK call with no symbol rate is kept, flagged and held to 0.5, and
+    may_drive_detection refuses it. A PSK call whose carrier sits where the
+    occupied band's power has fallen under half its median is not made: that
+    is the narrowed-noise artefact, 22 of whose 62 synthetic calls carried a
+    rate. Tier two needs the fine stage, not a demodulator.
+
+phrase: it is the tail of a distribution being sampled more times, not a property of the band
+retired: 2026-09-22
+commit: the change that measured the OFDM bar against lag count
+instead: Forty and fifty-eight seconds of the same empty 40 m channel search the
+    same 8161 lags and read 6.0 and 4.8 times the median, so the forty-second
+    OFDM call is not a lag-count effect. On three synthetic noises the ratio
+    grows with lag count as a Rayleigh extreme value does and never passes
+    4.48; the real tail is heavier. docs/detection.md has the table.
