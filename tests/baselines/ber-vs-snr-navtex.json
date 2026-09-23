@@ -1,0 +1,90 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 240,
+    "snr_start_db": -7.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 1.000000,
+    "trial_batch": 64,
+    "trials_per_point": 1024
+  },
+  "mode": "navtex",
+  "points": [
+    {
+      "ber": 1.000000000000e+00,
+      "bit_errors": 2048,
+      "bits_total": 2048,
+      "decoded_count": 0,
+      "snr_db": -7.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 9.985351562500e-01,
+      "bit_errors": 2045,
+      "bits_total": 2048,
+      "decoded_count": 0,
+      "snr_db": -6.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 8.554687500000e-01,
+      "bit_errors": 1752,
+      "bits_total": 2048,
+      "decoded_count": 18,
+      "snr_db": -5.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 2.773437500000e-01,
+      "bit_errors": 568,
+      "bits_total": 2048,
+      "decoded_count": 538,
+      "snr_db": -4.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 3.125000000000e-02,
+      "bit_errors": 64,
+      "bits_total": 2048,
+      "decoded_count": 962,
+      "snr_db": -3.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.464843750000e-03,
+      "bit_errors": 3,
+      "bits_total": 2048,
+      "decoded_count": 1021,
+      "snr_db": -2.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 2048,
+      "decoded_count": 1024,
+      "snr_db": -1.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 2048,
+      "decoded_count": 1024,
+      "snr_db": 0.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 2048,
+      "decoded_count": 1024,
+      "snr_db": 1.000000,
+      "trials": 1024
+    }
+  ],
+  "schema": 1,
+  "subject": "navtex on sitor-b at 48000 S/s, 72 phasing pairs, messages of 120 characters each its own transmission; message error rate against SNR in 2500 Hz"
+}

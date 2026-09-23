@@ -1,0 +1,138 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 1500,
+    "snr_start_db": 12.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 26.000000,
+    "trial_batch": 64,
+    "trials_per_point": 128
+  },
+  "mode": "p25p1",
+  "points": [
+    {
+      "ber": 4.824688097407e-01,
+      "bit_errors": 732901,
+      "bits_total": 1519064,
+      "decoded_count": 11,
+      "snr_db": 12.000000,
+      "trials": 128
+    },
+    {
+      "ber": 4.271575681450e-01,
+      "bit_errors": 648180,
+      "bits_total": 1517426,
+      "decoded_count": 44,
+      "snr_db": 13.000000,
+      "trials": 128
+    },
+    {
+      "ber": 2.788743828709e-01,
+      "bit_errors": 422517,
+      "bits_total": 1515080,
+      "decoded_count": 91,
+      "snr_db": 14.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.467794621337e-01,
+      "bit_errors": 222156,
+      "bits_total": 1513536,
+      "decoded_count": 122,
+      "snr_db": 15.000000,
+      "trials": 128
+    },
+    {
+      "ber": 5.644776509990e-02,
+      "bit_errors": 85418,
+      "bits_total": 1513222,
+      "decoded_count": 128,
+      "snr_db": 16.000000,
+      "trials": 128
+    },
+    {
+      "ber": 2.423576774794e-02,
+      "bit_errors": 36674,
+      "bits_total": 1513218,
+      "decoded_count": 128,
+      "snr_db": 17.000000,
+      "trials": 128
+    },
+    {
+      "ber": 8.626660040602e-03,
+      "bit_errors": 13054,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 18.000000,
+      "trials": 128
+    },
+    {
+      "ber": 2.739199162578e-03,
+      "bit_errors": 4145,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 19.000000,
+      "trials": 128
+    },
+    {
+      "ber": 7.421280240230e-04,
+      "bit_errors": 1123,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 20.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.698369565217e-04,
+      "bit_errors": 257,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 21.000000,
+      "trials": 128
+    },
+    {
+      "ber": 4.493740483844e-05,
+      "bit_errors": 68,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 22.000000,
+      "trials": 128
+    },
+    {
+      "ber": 2.643376755202e-05,
+      "bit_errors": 40,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 23.000000,
+      "trials": 128
+    },
+    {
+      "ber": 7.930130265606e-06,
+      "bit_errors": 12,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 24.000000,
+      "trials": 128
+    },
+    {
+      "ber": 9.251818643208e-06,
+      "bit_errors": 14,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 25.000000,
+      "trials": 128
+    },
+    {
+      "ber": 2.643376755202e-06,
+      "bit_errors": 4,
+      "bits_total": 1513216,
+      "decoded_count": 128,
+      "snr_db": 26.000000,
+      "trials": 128
+    }
+  ],
+  "schema": 1,
+  "subject": "p25p1 C4FM at 48000 S/s, a raw dibit stream through the demodulator, the first 64 symbols excluded; bit error rate against SNR in 2500 Hz"
+}

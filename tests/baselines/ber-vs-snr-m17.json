@@ -1,0 +1,98 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 400,
+    "snr_start_db": 13.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 22.000000,
+    "trial_batch": 64,
+    "trials_per_point": 512
+  },
+  "mode": "m17",
+  "points": [
+    {
+      "ber": 9.993750000000e-01,
+      "bit_errors": 12792,
+      "bits_total": 12800,
+      "decoded_count": 0,
+      "snr_db": 13.000000,
+      "trials": 512
+    },
+    {
+      "ber": 9.304687500000e-01,
+      "bit_errors": 11910,
+      "bits_total": 12800,
+      "decoded_count": 0,
+      "snr_db": 14.000000,
+      "trials": 512
+    },
+    {
+      "ber": 4.638281250000e-01,
+      "bit_errors": 5937,
+      "bits_total": 12800,
+      "decoded_count": 0,
+      "snr_db": 15.000000,
+      "trials": 512
+    },
+    {
+      "ber": 8.875000000000e-02,
+      "bit_errors": 1136,
+      "bits_total": 12800,
+      "decoded_count": 71,
+      "snr_db": 16.000000,
+      "trials": 512
+    },
+    {
+      "ber": 9.375000000000e-03,
+      "bit_errors": 120,
+      "bits_total": 12800,
+      "decoded_count": 419,
+      "snr_db": 17.000000,
+      "trials": 512
+    },
+    {
+      "ber": 1.640625000000e-03,
+      "bit_errors": 21,
+      "bits_total": 12800,
+      "decoded_count": 495,
+      "snr_db": 18.000000,
+      "trials": 512
+    },
+    {
+      "ber": 3.906250000000e-04,
+      "bit_errors": 5,
+      "bits_total": 12800,
+      "decoded_count": 508,
+      "snr_db": 19.000000,
+      "trials": 512
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 12800,
+      "decoded_count": 512,
+      "snr_db": 20.000000,
+      "trials": 512
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 12800,
+      "decoded_count": 512,
+      "snr_db": 21.000000,
+      "trials": 512
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 12800,
+      "decoded_count": 512,
+      "snr_db": 22.000000,
+      "trials": 512
+    }
+  ],
+  "schema": 1,
+  "subject": "m17 stream mode 4FSK at 48000 S/s, 16-byte stream frames after one LSF; frame error rate against SNR in 2500 Hz"
+}

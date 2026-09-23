@@ -1,0 +1,138 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 1500,
+    "snr_start_db": 10.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 24.000000,
+    "trial_batch": 64,
+    "trials_per_point": 128
+  },
+  "mode": "dstar",
+  "points": [
+    {
+      "ber": 4.728886619601e-01,
+      "bit_errors": 722406,
+      "bits_total": 1527645,
+      "decoded_count": 30,
+      "snr_db": 10.000000,
+      "trials": 128
+    },
+    {
+      "ber": 4.238302937294e-01,
+      "bit_errors": 647355,
+      "bits_total": 1527392,
+      "decoded_count": 68,
+      "snr_db": 11.000000,
+      "trials": 128
+    },
+    {
+      "ber": 3.884567660742e-01,
+      "bit_errors": 593257,
+      "bits_total": 1527215,
+      "decoded_count": 100,
+      "snr_db": 12.000000,
+      "trials": 128
+    },
+    {
+      "ber": 3.335088260389e-01,
+      "bit_errors": 509311,
+      "bits_total": 1527129,
+      "decoded_count": 114,
+      "snr_db": 13.000000,
+      "trials": 128
+    },
+    {
+      "ber": 2.838678962957e-01,
+      "bit_errors": 433487,
+      "bits_total": 1527073,
+      "decoded_count": 121,
+      "snr_db": 14.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.676179599278e-01,
+      "bit_errors": 255960,
+      "bits_total": 1527044,
+      "decoded_count": 126,
+      "snr_db": 15.000000,
+      "trials": 128
+    },
+    {
+      "ber": 5.026754216793e-02,
+      "bit_errors": 76761,
+      "bits_total": 1527049,
+      "decoded_count": 127,
+      "snr_db": 16.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.528382706663e-02,
+      "bit_errors": 23339,
+      "bits_total": 1527039,
+      "decoded_count": 128,
+      "snr_db": 17.000000,
+      "trials": 128
+    },
+    {
+      "ber": 4.189805113160e-03,
+      "bit_errors": 6398,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 18.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.290732397318e-03,
+      "bit_errors": 1971,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 19.000000,
+      "trials": 128
+    },
+    {
+      "ber": 3.333246018441e-04,
+      "bit_errors": 509,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 20.000000,
+      "trials": 128
+    },
+    {
+      "ber": 7.661881810562e-05,
+      "bit_errors": 117,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 21.000000,
+      "trials": 128
+    },
+    {
+      "ber": 1.047778709137e-05,
+      "bit_errors": 16,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 22.000000,
+      "trials": 128
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 23.000000,
+      "trials": 128
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1527040,
+      "decoded_count": 128,
+      "snr_db": 24.000000,
+      "trials": 128
+    }
+  ],
+  "schema": 1,
+  "subject": "dstar GMSK BT 0.5 at 48000 S/s, a raw bit stream through the demodulator, the first 64 bits excluded; bit error rate against SNR in 2500 Hz"
+}

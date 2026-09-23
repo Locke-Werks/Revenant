@@ -1,0 +1,154 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 60,
+    "snr_start_db": -13.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 3.000000,
+    "trial_batch": 64,
+    "trials_per_point": 256
+  },
+  "mode": "cw",
+  "points": [
+    {
+      "ber": 9.249836921070e-01,
+      "bit_errors": 14180,
+      "bits_total": 15330,
+      "decoded_count": 0,
+      "snr_db": -13.000000,
+      "trials": 256
+    },
+    {
+      "ber": 8.552502773608e-01,
+      "bit_errors": 13105,
+      "bits_total": 15323,
+      "decoded_count": 0,
+      "snr_db": -12.000000,
+      "trials": 256
+    },
+    {
+      "ber": 5.067876256363e-01,
+      "bit_errors": 7765,
+      "bits_total": 15322,
+      "decoded_count": 0,
+      "snr_db": -11.000000,
+      "trials": 256
+    },
+    {
+      "ber": 2.659664687847e-01,
+      "bit_errors": 4077,
+      "bits_total": 15329,
+      "decoded_count": 1,
+      "snr_db": -10.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.243475991649e-01,
+      "bit_errors": 1906,
+      "bits_total": 15328,
+      "decoded_count": 19,
+      "snr_db": -9.000000,
+      "trials": 256
+    },
+    {
+      "ber": 6.085139723165e-02,
+      "bit_errors": 932,
+      "bits_total": 15316,
+      "decoded_count": 77,
+      "snr_db": -8.000000,
+      "trials": 256
+    },
+    {
+      "ber": 3.346816283925e-02,
+      "bit_errors": 513,
+      "bits_total": 15328,
+      "decoded_count": 135,
+      "snr_db": -7.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.913406909162e-02,
+      "bit_errors": 293,
+      "bits_total": 15313,
+      "decoded_count": 173,
+      "snr_db": -6.000000,
+      "trials": 256
+    },
+    {
+      "ber": 8.475681314383e-03,
+      "bit_errors": 130,
+      "bits_total": 15338,
+      "decoded_count": 196,
+      "snr_db": -5.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.005025125628e-02,
+      "bit_errors": 154,
+      "bits_total": 15323,
+      "decoded_count": 206,
+      "snr_db": -4.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.318107667210e-02,
+      "bit_errors": 202,
+      "bits_total": 15325,
+      "decoded_count": 197,
+      "snr_db": -3.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.317419943912e-02,
+      "bit_errors": 202,
+      "bits_total": 15333,
+      "decoded_count": 199,
+      "snr_db": -2.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.396502218742e-02,
+      "bit_errors": 214,
+      "bits_total": 15324,
+      "decoded_count": 195,
+      "snr_db": -1.000000,
+      "trials": 256
+    },
+    {
+      "ber": 8.482317630171e-03,
+      "bit_errors": 130,
+      "bits_total": 15326,
+      "decoded_count": 194,
+      "snr_db": 0.000000,
+      "trials": 256
+    },
+    {
+      "ber": 8.415970772443e-03,
+      "bit_errors": 129,
+      "bits_total": 15328,
+      "decoded_count": 210,
+      "snr_db": 1.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.592481399295e-02,
+      "bit_errors": 244,
+      "bits_total": 15322,
+      "decoded_count": 196,
+      "snr_db": 2.000000,
+      "trials": 256
+    },
+    {
+      "ber": 9.398864303897e-03,
+      "bit_errors": 144,
+      "bits_total": 15321,
+      "decoded_count": 197,
+      "snr_db": 3.000000,
+      "trials": 256
+    }
+  ],
+  "schema": 1,
+  "subject": "cw 20 WPM standard spacing at 48000 S/s, tone 20 Hz off a 700 Hz centre; character error rate against SNR in 2500 Hz"
+}

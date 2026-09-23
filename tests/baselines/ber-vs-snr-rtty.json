@@ -1,0 +1,106 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 100,
+    "snr_start_db": -10.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 0.000000,
+    "trial_batch": 64,
+    "trials_per_point": 256
+  },
+  "mode": "rtty",
+  "points": [
+    {
+      "ber": 5.882421875000e-01,
+      "bit_errors": 15059,
+      "bits_total": 25600,
+      "decoded_count": 0,
+      "snr_db": -10.000000,
+      "trials": 256
+    },
+    {
+      "ber": 3.603906250000e-01,
+      "bit_errors": 9226,
+      "bits_total": 25600,
+      "decoded_count": 0,
+      "snr_db": -9.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.835156250000e-01,
+      "bit_errors": 4698,
+      "bits_total": 25600,
+      "decoded_count": 0,
+      "snr_db": -8.000000,
+      "trials": 256
+    },
+    {
+      "ber": 7.902343750000e-02,
+      "bit_errors": 2023,
+      "bits_total": 25600,
+      "decoded_count": 0,
+      "snr_db": -7.000000,
+      "trials": 256
+    },
+    {
+      "ber": 2.593750000000e-02,
+      "bit_errors": 664,
+      "bits_total": 25600,
+      "decoded_count": 57,
+      "snr_db": -6.000000,
+      "trials": 256
+    },
+    {
+      "ber": 7.734375000000e-03,
+      "bit_errors": 198,
+      "bits_total": 25600,
+      "decoded_count": 148,
+      "snr_db": -5.000000,
+      "trials": 256
+    },
+    {
+      "ber": 3.164062500000e-03,
+      "bit_errors": 81,
+      "bits_total": 25600,
+      "decoded_count": 217,
+      "snr_db": -4.000000,
+      "trials": 256
+    },
+    {
+      "ber": 5.468750000000e-04,
+      "bit_errors": 14,
+      "bits_total": 25600,
+      "decoded_count": 244,
+      "snr_db": -3.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.953125000000e-04,
+      "bit_errors": 5,
+      "bits_total": 25600,
+      "decoded_count": 251,
+      "snr_db": -2.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 25600,
+      "decoded_count": 256,
+      "snr_db": -1.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 25600,
+      "decoded_count": 256,
+      "snr_db": 0.000000,
+      "trials": 256
+    }
+  ],
+  "schema": 1,
+  "subject": "rtty 45.45 Bd 170 Hz shift at 48000 S/s; character error rate against SNR in 2500 Hz"
+}

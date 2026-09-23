@@ -1,0 +1,106 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 172,
+    "snr_start_db": 4.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 14.000000,
+    "trial_batch": 64,
+    "trials_per_point": 1024
+  },
+  "mode": "pocsag-512",
+  "points": [
+    {
+      "ber": 1.000000000000e+00,
+      "bit_errors": 4096,
+      "bits_total": 4096,
+      "decoded_count": 0,
+      "snr_db": 4.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 9.245605468750e-01,
+      "bit_errors": 3787,
+      "bits_total": 4096,
+      "decoded_count": 0,
+      "snr_db": 5.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 3.234863281250e-01,
+      "bit_errors": 1325,
+      "bits_total": 4096,
+      "decoded_count": 211,
+      "snr_db": 6.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 2.832031250000e-02,
+      "bit_errors": 116,
+      "bits_total": 4096,
+      "decoded_count": 911,
+      "snr_db": 7.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 7.324218750000e-04,
+      "bit_errors": 3,
+      "bits_total": 4096,
+      "decoded_count": 1021,
+      "snr_db": 8.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 9.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 10.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 11.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 12.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 13.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 14.000000,
+      "trials": 1024
+    }
+  ],
+  "schema": 1,
+  "subject": "pocsag 512 bit/s, 4.5 kHz FSK as complex baseband at 48000 S/s through a 7 kHz channel filter and FM discriminator, pages of 40 alphanumeric characters; page error rate against SNR in 2500 Hz"
+}

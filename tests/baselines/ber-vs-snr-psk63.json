@@ -1,0 +1,122 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 100,
+    "snr_start_db": -13.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": -1.000000,
+    "trial_batch": 64,
+    "trials_per_point": 512
+  },
+  "mode": "psk63",
+  "points": [
+    {
+      "ber": 9.916406250000e-01,
+      "bit_errors": 50772,
+      "bits_total": 51200,
+      "decoded_count": 0,
+      "snr_db": -13.000000,
+      "trials": 512
+    },
+    {
+      "ber": 8.117578125000e-01,
+      "bit_errors": 41562,
+      "bits_total": 51200,
+      "decoded_count": 0,
+      "snr_db": -12.000000,
+      "trials": 512
+    },
+    {
+      "ber": 4.218359375000e-01,
+      "bit_errors": 21598,
+      "bits_total": 51200,
+      "decoded_count": 0,
+      "snr_db": -11.000000,
+      "trials": 512
+    },
+    {
+      "ber": 2.110156250000e-01,
+      "bit_errors": 10804,
+      "bits_total": 51200,
+      "decoded_count": 0,
+      "snr_db": -10.000000,
+      "trials": 512
+    },
+    {
+      "ber": 1.252539062500e-01,
+      "bit_errors": 6413,
+      "bits_total": 51200,
+      "decoded_count": 0,
+      "snr_db": -9.000000,
+      "trials": 512
+    },
+    {
+      "ber": 7.125000000000e-02,
+      "bit_errors": 3648,
+      "bits_total": 51200,
+      "decoded_count": 5,
+      "snr_db": -8.000000,
+      "trials": 512
+    },
+    {
+      "ber": 3.558593750000e-02,
+      "bit_errors": 1822,
+      "bits_total": 51200,
+      "decoded_count": 53,
+      "snr_db": -7.000000,
+      "trials": 512
+    },
+    {
+      "ber": 1.240234375000e-02,
+      "bit_errors": 635,
+      "bits_total": 51200,
+      "decoded_count": 209,
+      "snr_db": -6.000000,
+      "trials": 512
+    },
+    {
+      "ber": 4.570312500000e-03,
+      "bit_errors": 234,
+      "bits_total": 51200,
+      "decoded_count": 374,
+      "snr_db": -5.000000,
+      "trials": 512
+    },
+    {
+      "ber": 9.765625000000e-04,
+      "bit_errors": 50,
+      "bits_total": 51200,
+      "decoded_count": 471,
+      "snr_db": -4.000000,
+      "trials": 512
+    },
+    {
+      "ber": 9.765625000000e-05,
+      "bit_errors": 5,
+      "bits_total": 51200,
+      "decoded_count": 508,
+      "snr_db": -3.000000,
+      "trials": 512
+    },
+    {
+      "ber": 3.906250000000e-05,
+      "bit_errors": 2,
+      "bits_total": 51200,
+      "decoded_count": 510,
+      "snr_db": -2.000000,
+      "trials": 512
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 51200,
+      "decoded_count": 512,
+      "snr_db": -1.000000,
+      "trials": 512
+    }
+  ],
+  "schema": 1,
+  "subject": "bpsk63 at 48000 S/s, tone 8 Hz off a 1500 Hz centre; character error rate against SNR in 2500 Hz"
+}

@@ -1,0 +1,106 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 240,
+    "snr_start_db": 6.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 16.000000,
+    "trial_batch": 64,
+    "trials_per_point": 1024
+  },
+  "mode": "ax25",
+  "points": [
+    {
+      "ber": 9.997558593750e-01,
+      "bit_errors": 4095,
+      "bits_total": 4096,
+      "decoded_count": 0,
+      "snr_db": 6.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 9.299316406250e-01,
+      "bit_errors": 3809,
+      "bits_total": 4096,
+      "decoded_count": 0,
+      "snr_db": 7.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 5.681152343750e-01,
+      "bit_errors": 2327,
+      "bits_total": 4096,
+      "decoded_count": 29,
+      "snr_db": 8.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.894531250000e-01,
+      "bit_errors": 776,
+      "bits_total": 4096,
+      "decoded_count": 457,
+      "snr_db": 9.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 3.613281250000e-02,
+      "bit_errors": 148,
+      "bits_total": 4096,
+      "decoded_count": 883,
+      "snr_db": 10.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 7.080078125000e-03,
+      "bit_errors": 29,
+      "bits_total": 4096,
+      "decoded_count": 995,
+      "snr_db": 11.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 4.882812500000e-04,
+      "bit_errors": 2,
+      "bits_total": 4096,
+      "decoded_count": 1022,
+      "snr_db": 12.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 13.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 14.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 15.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 4096,
+      "decoded_count": 1024,
+      "snr_db": 16.000000,
+      "trials": 1024
+    }
+  ],
+  "schema": 1,
+  "subject": "ax25 Bell 202 AFSK at 48000 S/s, UI frames of 60 information octets; frame error rate against SNR in 2500 Hz"
+}

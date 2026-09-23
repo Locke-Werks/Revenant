@@ -1,0 +1,122 @@
+{
+  "commit": "21a617e",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 100,
+    "snr_start_db": -10.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 2.000000,
+    "trial_batch": 64,
+    "trials_per_point": 1024
+  },
+  "mode": "sitor-b",
+  "points": [
+    {
+      "ber": 9.948969822304e-01,
+      "bit_errors": 103915,
+      "bits_total": 104448,
+      "decoded_count": 0,
+      "snr_db": -10.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 9.615406709559e-01,
+      "bit_errors": 100431,
+      "bits_total": 104448,
+      "decoded_count": 0,
+      "snr_db": -9.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 8.012312346814e-01,
+      "bit_errors": 83687,
+      "bits_total": 104448,
+      "decoded_count": 0,
+      "snr_db": -8.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 4.880323223039e-01,
+      "bit_errors": 50974,
+      "bits_total": 104448,
+      "decoded_count": 0,
+      "snr_db": -7.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 2.176489736520e-01,
+      "bit_errors": 22733,
+      "bits_total": 104448,
+      "decoded_count": 1,
+      "snr_db": -6.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 9.205537683824e-02,
+      "bit_errors": 9615,
+      "bits_total": 104448,
+      "decoded_count": 210,
+      "snr_db": -5.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 3.561580882353e-02,
+      "bit_errors": 3720,
+      "bits_total": 104448,
+      "decoded_count": 737,
+      "snr_db": -4.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.500268075980e-02,
+      "bit_errors": 1567,
+      "bits_total": 104448,
+      "decoded_count": 981,
+      "snr_db": -3.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.371017156863e-02,
+      "bit_errors": 1432,
+      "bits_total": 104448,
+      "decoded_count": 1007,
+      "snr_db": -2.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 9.631587009804e-03,
+      "bit_errors": 1006,
+      "bits_total": 104448,
+      "decoded_count": 1014,
+      "snr_db": -1.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.953125000000e-03,
+      "bit_errors": 204,
+      "bits_total": 104448,
+      "decoded_count": 1022,
+      "snr_db": 0.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 3.906250000000e-03,
+      "bit_errors": 408,
+      "bits_total": 104448,
+      "decoded_count": 1020,
+      "snr_db": 1.000000,
+      "trials": 1024
+    },
+    {
+      "ber": 1.953125000000e-03,
+      "bit_errors": 204,
+      "bits_total": 104448,
+      "decoded_count": 1022,
+      "snr_db": 2.000000,
+      "trials": 1024
+    }
+  ],
+  "schema": 1,
+  "subject": "sitor-b 100 Bd 170 Hz shift at 48000 S/s, 16 phasing pairs; character error rate against SNR in 2500 Hz"
+}
