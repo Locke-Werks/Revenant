@@ -35,8 +35,13 @@
 // the process often survives; that is the rate an operator meets. With it,
 // enable full page heap on this executable (gflags /p /enable
 // rtlsdr-cancel-trial.exe /full, elevated) and every access to a freed
-// transfer faults at once, so the crash count approaches the -5 count. The
-// report says which was measured only if the caller says so with --label.
+// transfer faults at once, so the crash count approaches the -5 count.
+// Nothing in the report can tell which of the two was measured, so say so in
+// --label.
+//
+// It also times each cancel, from rtlsdr_cancel_async being accepted to
+// rtlsdr_read_async returning, because that is the part of every control
+// call's pause the library decides.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -64,7 +69,8 @@
 
 namespace {
 
-constexpr std::string_view kUsage = R"(rtlsdr-cancel-trial: count bad cancels and crashes in librtlsdr
+constexpr std::string_view kUsage =
+    R"(rtlsdr-cancel-trial: count bad cancels and crashes in librtlsdr
 
 usage:
   rtlsdr-cancel-trial [options]
@@ -104,8 +110,7 @@ struct Options {
     bool child = false;
 };
 
-[[nodiscard]] std::optional<Options> parse(int argc, char** argv)
-{
+[[nodiscard]] std::optional<Options> parse(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -154,8 +159,8 @@ struct Options {
         }
     }
     if (options.cancels < 1 || options.per_child < 1 || options.transfers < 1 ||
-        options.transfer_bytes < 512 || options.transfer_bytes % 512 != 0 ||
-        options.step_ms < 0 || options.timeout_s < 1) {
+        options.transfer_bytes < 512 || options.transfer_bytes % 512 != 0 || options.step_ms < 0 ||
+        options.timeout_s < 1) {
         return std::nullopt;
     }
     return options;
@@ -168,8 +173,7 @@ struct Options {
 // Kept as short as the engine's own callback. The RTL-SDR lane found that
 // holding the callback after a cancel made the fault more frequent, so a
 // heavier callback here would measure a different thing.
-void on_samples(unsigned char* buffer, std::uint32_t length, void* context)
-{
+void on_samples(unsigned char* buffer, std::uint32_t length, void* context) {
     auto* bytes = static_cast<std::atomic<std::uint64_t>*>(context);
     bytes->fetch_add(length, std::memory_order_relaxed);
     if (length > 0) {
@@ -181,15 +185,20 @@ void on_samples(unsigned char* buffer, std::uint32_t length, void* context)
 }
 
 // One control call of the three kinds the engine makes, retried as the engine
-// retries, because the first control transfer after a cancel fails with
-// LIBUSB_ERROR_PIPE on Windows as a matter of course.
-int control_call(rtlsdr_dev_t* device, int round)
-{
-    constexpr int kAttempts = 4;
-    int rc = 0;
-    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+// retries, because with librtlsdr v2.0.2 the first control transfer after a
+// cancel failed with LIBUSB_ERROR_PIPE more often than not. Returns how many
+// attempts it took, or kControlAttempts + 1 when none succeeded, which is what
+// the report counts: whether the first transfer after a cancel goes through is
+// a property of the cancel.
+constexpr int kControlAttempts = 4;
+
+int control_call(rtlsdr_dev_t* device, int round) {
+    for (int attempt = 1; attempt <= kControlAttempts; ++attempt) {
+        int rc = 0;
         switch (round % 3) {
-            case 0: rc = rtlsdr_set_center_freq(device, round % 2 == 0 ? 96'500'000 : 98'100'000); break;
+            case 0:
+                rc = rtlsdr_set_center_freq(device, round % 2 == 0 ? 96'500'000 : 98'100'000);
+                break;
             case 1:
                 rc = rtlsdr_set_tuner_gain_mode(device, 1);
                 if (rc == 0) {
@@ -199,14 +208,13 @@ int control_call(rtlsdr_dev_t* device, int round)
             default: rc = rtlsdr_set_tuner_gain_mode(device, round % 2 == 0 ? 0 : 1); break;
         }
         if (rc == 0) {
-            break;
+            return attempt;
         }
     }
-    return rc;
+    return kControlAttempts + 1;
 }
 
-int run_child(const Options& options)
-{
+int run_child(const Options& options) {
     rtlsdr_dev_t* device = nullptr;
     if (const int rc = rtlsdr_open(&device, static_cast<std::uint32_t>(options.device));
         rc != 0 || device == nullptr) {
@@ -236,23 +244,31 @@ int run_child(const Options& options)
         // The engine's cancel: retried every 2 ms until accepted, because
         // rtlsdr_cancel_async refuses with -2 until read_async is running, and
         // then not again. See stop_transfers_locked in the backend.
+        auto accepted = std::chrono::steady_clock::now();
         while (!done.load()) {
             if (rtlsdr_cancel_async(device) == 0) {
+                accepted = std::chrono::steady_clock::now();
                 break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         usb.join();
 
+        // From the cancel being accepted to read_async having returned, which
+        // is the part of a control call's pause that belongs to librtlsdr.
+        const auto stopping_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - accepted)
+                                     .count();
         const int rc = read_rc.load();
-        std::println("cancel {}", rc);
+        std::println("cancel {} {}", rc, stopping_us);
         std::fflush(stdout);
 
         if (rc != 0 && !options.continue_after_error) {
             break;
         }
 
-        static_cast<void>(control_call(device, round));
+        std::println("control {}", control_call(device, round));
+        std::fflush(stdout);
         static_cast<void>(rtlsdr_reset_buffer(device));
     }
 
@@ -271,6 +287,8 @@ int run_child(const Options& options)
 struct ChildResult {
     int cancels = 0;
     std::map<int, int> by_rc;
+    std::vector<long long> stopping_us;
+    std::map<int, int> control_attempts;
     int last_rc = 0;
     bool opened = true;
     bool reached_close = false;
@@ -279,8 +297,7 @@ struct ChildResult {
     bool timed_out = false;
 };
 
-[[nodiscard]] std::optional<ChildResult> run_one_child(const Options& options, int cancels)
-{
+[[nodiscard]] std::optional<ChildResult> run_one_child(const Options& options, int cancels) {
     char self[MAX_PATH];
     if (GetModuleFileNameA(nullptr, self, MAX_PATH) == 0) {
         return std::nullopt;
@@ -330,10 +347,16 @@ struct ChildResult {
                     continue;
                 }
                 if (line.starts_with("cancel ")) {
-                    const int rc = std::atoi(line.c_str() + 7);
+                    char* after = nullptr;
+                    const int rc = static_cast<int>(std::strtol(line.c_str() + 7, &after, 10));
                     ++result.cancels;
                     ++result.by_rc[rc];
                     result.last_rc = rc;
+                    if (after != nullptr && *after == ' ') {
+                        result.stopping_us.push_back(std::strtoll(after + 1, nullptr, 10));
+                    }
+                } else if (line.starts_with("control ")) {
+                    ++result.control_attempts[std::atoi(line.c_str() + 8)];
                 } else if (line.starts_with("open ")) {
                     result.opened = false;
                 } else if (line.starts_with("closing ")) {
@@ -360,8 +383,7 @@ struct ChildResult {
     return result;
 }
 
-[[nodiscard]] std::string_view status_name(DWORD code)
-{
+[[nodiscard]] std::string_view status_name(DWORD code) {
     switch (code) {
         case 0xC0000005: return "access violation";
         case 0xC0000374: return "heap corruption";
@@ -381,8 +403,7 @@ struct ChildResult {
 // session 0 can still open and release.
 class RadioLock {
 public:
-    explicit RadioLock(DWORD wait_ms)
-    {
+    explicit RadioLock(DWORD wait_ms) {
         PSECURITY_DESCRIPTOR descriptor = nullptr;
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 L"D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x00100001;;;WD)S:(ML;;NW;;;LW)", SDDL_REVISION_1,
@@ -399,8 +420,7 @@ public:
         const DWORD waited = WaitForSingleObject(mutex_, wait_ms);
         held_ = waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED;
     }
-    ~RadioLock()
-    {
+    ~RadioLock() {
         if (held_) {
             ReleaseMutex(mutex_);
         }
@@ -418,12 +438,12 @@ private:
     bool held_ = false;
 };
 
-int run_parent(const Options& options)
-{
+int run_parent(const Options& options) {
     const RadioLock lock(60'000);
     if (!lock.held()) {
-        std::println(stderr, "another process has held Global\\Revenant.RtlSdr for a minute; "
-                             "not opening the dongle under it");
+        std::println(stderr,
+                     "another process has held Global\\Revenant.RtlSdr for a minute; "
+                     "not opening the dongle under it");
         return 2;
     }
 
@@ -442,9 +462,12 @@ int run_parent(const Options& options)
     std::map<int, int> by_rc;
     std::vector<Crash> crashes;
     int errors_survived = 0;
+    std::vector<long long> stopping_us;
+    std::map<int, int> control_attempts;
 
-    std::println(stderr, "rtlsdr-cancel-trial: {} cancels, {} per child, {} x {} B transfers, "
-                         "step {} ms, after an error: {}",
+    std::println(stderr,
+                 "rtlsdr-cancel-trial: {} cancels, {} per child, {} x {} B transfers, "
+                 "step {} ms, after an error: {}",
                  options.cancels, options.per_child, options.transfers, options.transfer_bytes,
                  options.step_ms, options.continue_after_error ? "continue" : "end");
 
@@ -472,8 +495,13 @@ int run_parent(const Options& options)
         for (const auto& [rc, count] : result->by_rc) {
             by_rc[rc] += count;
         }
-        const bool crashed = (result->exit_code & 0xC0000000U) == 0xC0000000U ||
-                             result->exit_code == 0x80000003U;
+        stopping_us.insert(stopping_us.end(), result->stopping_us.begin(),
+                           result->stopping_us.end());
+        for (const auto& [attempts, count] : result->control_attempts) {
+            control_attempts[attempts] += count;
+        }
+        const bool crashed =
+            (result->exit_code & 0xC0000000U) == 0xC0000000U || result->exit_code == 0x80000003U;
         if (result->timed_out) {
             ++hangs;
         } else if (crashed) {
@@ -498,8 +526,8 @@ int run_parent(const Options& options)
         }
     }
     const auto count_of = [&by_rc](int rc) { return by_rc.contains(rc) ? by_rc.at(rc) : 0; };
-    const int after_error = static_cast<int>(
-        std::count_if(crashes.begin(), crashes.end(), [](const Crash& c) { return c.last_rc != 0; }));
+    const int after_error = static_cast<int>(std::count_if(
+        crashes.begin(), crashes.end(), [](const Crash& c) { return c.last_rc != 0; }));
 
     std::println("label            {}", options.label.empty() ? "(none)" : options.label);
     std::println("cancels          {}", total);
@@ -511,6 +539,28 @@ int run_parent(const Options& options)
             std::println("  rc {:>4}        {}", rc, count);
         }
     }
+    // An element of the sorted list rather than an interpolation between two,
+    // so every figure printed is a time that was measured.
+    std::ranges::sort(stopping_us);
+    const auto percentile = [&stopping_us](double p) -> double {
+        if (stopping_us.empty()) {
+            return 0.0;
+        }
+        const auto rank = static_cast<std::size_t>(p * static_cast<double>(stopping_us.size() - 1));
+        return static_cast<double>(stopping_us[rank]) / 1000.0;
+    };
+    std::println("stopping, ms     median {:.1f}, 90th {:.1f}, max {:.1f}", percentile(0.5),
+                 percentile(0.9), percentile(1.0));
+    int controls = 0;
+    for (const auto& [attempts, count] : control_attempts) {
+        controls += count;
+    }
+    const auto attempts_of = [&control_attempts](int n) {
+        return control_attempts.contains(n) ? control_attempts.at(n) : 0;
+    };
+    std::println("control calls    {}, first attempt {}, second {}, later {}, never {}", controls,
+                 attempts_of(1), attempts_of(2), attempts_of(3) + attempts_of(kControlAttempts),
+                 attempts_of(kControlAttempts + 1));
     std::println("children         {}", children);
     std::println("crashes          {}", crashes.size());
     std::println("  after an error {}", after_error);
@@ -522,17 +572,17 @@ int run_parent(const Options& options)
                      crash.code, status_name(crash.code), crash.cancels_in_child, crash.last_rc,
                      crash.in_close ? ", inside rtlsdr_close" : "");
     }
-    std::println("SUMMARY {} cancels={} rc0={} rc-5={} rcother={} crashes={} crashes_after_error={} "
-                 "hangs={}",
-                 options.label.empty() ? "-" : options.label, total, count_of(0), count_of(-5),
-                 bad - count_of(-5), crashes.size(), after_error, hangs);
+    std::println(
+        "SUMMARY {} cancels={} rc0={} rc-5={} rcother={} crashes={} crashes_after_error={} "
+        "hangs={}",
+        options.label.empty() ? "-" : options.label, total, count_of(0), count_of(-5),
+        bad - count_of(-5), crashes.size(), after_error, hangs);
     return 0;
 }
 
 }  // namespace
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     const auto options = parse(argc, argv);
     if (!options) {
         std::print(stderr, "{}", kUsage);
