@@ -244,7 +244,8 @@ in the spectrum and the detector is right that they are.
 with interior nulls wide enough to matter, which is the RTTY case that document
 predicts: two tones 170 Hz apart is 116 bins at this grid, far over any gap in
 the sweep, so RTTY here should split into two detections and be visibly wrong.
-Nothing in this minute obviously is RTTY. Finding one is the next measurement.
+Nothing in this minute obviously is RTTY. Finding one is the next measurement;
+"RTTY: looked for over all six hours" below is it, and it found none.
 
 What is missing underneath all of it is what that document also says: nothing
 here knows which of those five detections are stations and which are artefacts,
@@ -387,6 +388,85 @@ by 25 percent on 40 m and 50 percent on 20 m at 200 bins, while births fall 3
 to 6 percent: a wider gap keeps candidates whole, so more tracks are gated to
 each. There is a step between 32 and 128 bins and no knee inside either range,
 so nothing here picks a value.
+
+## RTTY: looked for over all six hours, not found
+
+`docs/detection.md` says `split_gap_bins` cannot be settled without an RTTY
+signal, because the prediction it has to test is that RTTY splits into two
+detections on an HF grid. The excerpts had none. The whole files were searched
+for one here, and have none either, with the caveats below.
+
+**What RTTY looks like to this detector, measured first on a signal with a
+known answer.** `siggen fsk2` at 45.45 baud and 85 Hz deviation, which is
+170 Hz shift, at 96 kS/s, with white noise added to a stated SNR in the
+detector's 2500 Hz reference, run through the same command:
+
+| SNR in 2500 Hz | what the detector lists after 30 s |
+| --- | --- |
+| 15 dB | two tracks 171 Hz apart, 30 to 54 Hz wide each, 10.8 to 12.0 dB |
+| 8 dB | one track, 163 to 238 Hz wide across snapshots, 7.5 to 8.3 dB |
+
+So the prediction holds at 15 dB and fails at 8: a strong RTTY signal splits
+into its two tones at the default eight-bin gap, and a weak one is reported as
+one detection about as wide as the shift plus its keying. Both shapes are
+searchable. `--characterise` at the centre names the 15 dB signal 2-FSK with
+tones 169.62 Hz apart, at an unmeasured symbol rate, and so matches no
+catalogue row, although `core/characterise/catalogue.cpp` has one for RTTY; at
+8 dB it answers 4-PSK at 0.92 confidence, which is wrong.
+
+**The search.** Every periodic track table from the six whole-file runs, 3225
+tables, was scanned for both shapes: two tracks each under 150 Hz wide, listed
+together, whose centres differ by 170, 200, 425 or 850 Hz within 15 Hz; and one
+track 150 to 360 Hz wide listed in three or more tables.
+
+| file | pairs a shift apart | 150 to 360 Hz, 3 or more tables |
+| --- | --- | --- |
+| 40 m 1359 | 8, none in more than one table's time | 0 |
+| 40 m 1501 | 37, the longest over 13 s | 0 |
+| 40 m 1603 | 4, one table each | 0 |
+| 20 m 1359 | 1 | 2 |
+| 20 m 1501 | 2 | 3 |
+| 20 m 1603 | 19, one table each | 4 |
+
+A real RTTY contact keys for minutes, so a pair listed in a single table and
+gone by the next is not the shape of one. The candidates that lasted, and a sample of the
+rest, were cut out of the original files as bytes and put to
+`--characterise` at their centre, unfiltered and at 400 Hz:
+
+- 40 m 1501, four pairs at 2522 to 2920 s, each line 15 to 123 Hz wide:
+  every one is a carrier between the two lines, within 38 Hz of their
+  midpoint, with 69 to 74 percent of the extract's power in three bins, and
+  the "pair" is its sidebands. Asking 290 Hz to one side of the first finds the
+  same carrier to a tenth of a hertz, so it is in the band and not in the
+  extract. RTTY has no carrier between its tones, which is what rules these
+  out.
+- 40 m 1359 at 332 s and 511 s: carriers, 59 and 64 percent in three bins.
+- 40 m 1501 at 2160 s: 2-PSK at 187 baud unfiltered, unidentified at 400 Hz.
+- 20 m 1359, the 278 Hz track at 3292 s: a carrier, 95 percent in three bins
+  at 400 Hz. The pair at 318 s: 2-PSK unfiltered, no tone set at 400 Hz.
+- 20 m 1501, the three wide tracks: their centres wander 1.5 to 10 kHz across
+  the tables that list them, which is a voice signal's measured centre and not
+  a two-tone one.
+- 20 m 1603, the four wide tracks: each is anchored on a steady line, 10 to
+  30 Hz wide in its narrowest tables, and swings to hundreds of hertz or several
+  kilohertz in the tables where a neighbour was merged into it. Two of them are
+  the same line at -10.947 kHz that the excerpt table above shows as #2.
+
+None of them is FSK.
+
+**What this does not rule out.** The tables are printed on a wall-clock
+interval, about 6.8 seconds of source time apart at these speeds, and list
+only tracks over 0.5 confidence, so a transmission shorter than a table
+interval can fall between two of them. And the centre frequency is not known:
+if the receiver sat where `center=` puts it, the capture holds 7102 to
+7198 kHz and 14127 to 14223 kHz, which misses the usual RTTY frequencies on
+both bands entirely, and nothing in the files says it sat there.
+
+**So the `split_gap_bins` entry stays open, with one thing added.** The
+synthetic measurement settles what needs no ground truth: on this grid a
+strong RTTY signal does split at eight bins and a weak one does not. How often
+each happens on the air still needs a real one, and these six files do not
+have it.
 
 ## What they are not
 
