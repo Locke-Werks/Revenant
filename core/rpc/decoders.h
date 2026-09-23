@@ -72,9 +72,11 @@
 //   rate, with the carrier wherever the grid left it. VrxStatus::demod_rate
 //   is the planner's figure there and is NOT the rate the tap delivers;
 //   core/engine/vrx.h says so. A decoder attached to one runs at the channel
-//   rate and hears the residual as a carrier offset. The P25 and D-STAR
-//   paths remove a constant offset as the block mean of the discriminator;
-//   core/decode/tetra.cpp has no offset correction at all.
+//   rate and hears the residual as a carrier offset. The P25 path removes
+//   it per data unit, from a least-squares fit of that unit's sync word, so
+//   its answer does not depend on how the stream is blocked. The D-STAR path
+//   still removes a constant offset as each call's mean of the discriminator,
+//   and core/decode/tetra.cpp has no offset correction at all.
 
 #pragma once
 

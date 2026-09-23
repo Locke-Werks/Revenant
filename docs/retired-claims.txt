@@ -843,13 +843,21 @@ instead: The P25 adapter spent 21.50 to 24.53 ms of one core per second of
 
 phrase: Remove the carrier offset the same way the P25 path does
 retired: 2026-09-22
-commit: 12aa69d
+commit: "Decode P25 the same however its input is blocked"
 instead: P25 takes no block mean any more; it fits each data unit's sync word
     for offset and deviation. D-STAR still subtracts each call's mean, which
     makes its output depend on the blocking.
 
 phrase: Index into the symbol run at which this frame's sync word starts
 retired: 2026-09-22
-commit: 12aa69d
+commit: "Decode P25 the same however its input is blocked"
 instead: P25Frame::first_symbol counts from the start of the stream, however
     many process() calls it took, so it no longer moves with the blocking.
+
+phrase: The decoder subtracts each call's mean as
+phrase: remove a constant offset as the block mean
+retired: 2026-09-23
+commit: "Say on the wire docs that P25 no longer depends on its blocking"
+instead: P25 carries its filter and discriminator state across calls and
+    slices each data unit against a fit of its own sync word, so its output
+    is the same in every blocking. D-STAR still takes each call's mean.

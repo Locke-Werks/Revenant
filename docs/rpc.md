@@ -787,11 +787,17 @@ Unit whose sync and NID arrived in one call and whose body arrived in the next
 was reported without its header and never tried again, so through the engine a
 P25 stream reported NACs and no talkgroups; that is fixed and
 `tests/decode/test_p25p1.cpp` splits a header across two calls to hold it. The
-other is open: the decoder's output depends on how its input is blocked. The
+other was that the decoder's output depended on how its input was blocked: the
 same capture gave four of its six headers at 16384-sample engine blocks and one
-at 65536, `revenant-cli`'s default. The decoder subtracts each call's mean as
-its carrier offset estimate, which is one block-dependent step; whether it is
-the responsible one is not established.
+at 65536, `revenant-cli`'s default. Three steps restarted at every call: the
+receive filter from zeros, the discriminator against 1+0i, and each call's mean
+taken as the carrier offset, costing most to least in that order. The filter and
+discriminator now carry their state across calls, and each data unit is sliced
+against a least-squares fit of its own sync word, so no per-call estimate
+remains. The decoder's output is now identical in every blocking down to one
+sample per call, and this route recovers six of six at both block sizes.
+`docs/modes.md` has the measurements. D-STAR and TETRA still restart their
+state per call and have not been measured for it.
 
 ### The front end can be pointed somewhere else
 
