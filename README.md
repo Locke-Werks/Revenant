@@ -276,11 +276,19 @@ runtime and ships as one self-contained signed binary, and Qt is not.
 
 Measured against what M2 was set to deliver: the QML shell exists, and so do
 AM, FM and SSB demodulation and audio out. It asked for one receiver and the
-client holds eight. What it does not have is a measurement. M2 asks for the
-spectrum and waterfall at monitor refresh and closes when the render pipeline
-holds its frame budget at full target load, and nothing has measured the
-client's frame time, at full load or at any load, so neither can be claimed.
-That measurement is what M2 lacks.
+client holds eight. M2 asks for the spectrum and waterfall at monitor refresh
+and closes when the render pipeline holds its frame budget at full target
+load. That is now measured, and on 2026-09-23 it was not met: at 120 Hz with
+both windows open, 20.9% of the main window's frames missed a refresh (p95
+16.5 ms, p99 23.3 ms against 8.3), while drawing a frame took about half a
+millisecond. The misses are waits between the two windows and in the swap
+chain, the display was a virtual one, and `docs/ui-spectrum.md`, "Frame
+budget", has the numbers, the command and what is still open.
+
+WHAT THIS PARAGRAPH USED TO SAY. It ended "nothing has measured the client's
+frame time, at full load or at any load, so neither can be claimed. That
+measurement is what M2 lacks." `revenant-ui --frame-stats` and
+`scripts/frame-budget.ps1` measure it.
 
 **M3 is the first public release.** Until then the layout moves and there are
 no binaries. The repository is public because the licence made it the

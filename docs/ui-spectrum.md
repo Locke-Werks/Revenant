@@ -1068,3 +1068,147 @@ that has to run smoothly.
 What AFT does need is a defined answer for "not identified yet, and nobody
 told me". That answer is to hold still. An AFT that guesses a centre rule from
 an unidentified signal is the dancing behaviour with extra steps.
+
+## Frame budget
+
+M2's exit criterion is that "the render pipeline hits its frame budget with
+the full target load", with the spectrum and waterfall locked to monitor
+refresh, and "if monitor-refresh rendering is not achievable here, the
+architecture needs rethinking before more is built on it." This section is
+what measures it, how, and what the first measurement found.
+
+### What is measured
+
+`revenant-ui --frame-stats FILE` writes JSON to FILE on the way out and one
+line to stderr. `ui/models/frame_stats.h` holds the arithmetic, with cases in
+`ui/tests/test_frame_stats.cpp`; `ui/render/frame_probe.cpp` reads the
+timestamps off each `QQuickWindow`. Without the flag nothing is constructed,
+and the hooks in the display items are a relaxed atomic load and a branch.
+
+- **The budget** is one refresh period of the screen the main window is on,
+  1000 / `QScreen::refreshRate()` ms.
+- **Frame interval**, per window, from one `frameSwapped` to the next. An
+  interval over 1.5 periods missed at least one refresh and is counted over
+  budget; under vsync intervals land on whole periods plus jitter, and 1.5 is
+  the line between the two. The budget is **met** when at most one interval
+  in a hundred is over it, which is the same as a p99 under 1.5 periods.
+- **Where an interval went**: `sync` (beforeSynchronizing to
+  afterSynchronizing, the items' `updatePaintNode`), `render` (recording the
+  render pass), `gpu` (Qt's `lastCompletedGpuTime`, with timestamps switched
+  on through `QSG_RHI_PROFILE`), and three waits: `request` from the last swap
+  to `beforeFrameBegin`, the render thread waiting to be asked for a frame;
+  `begin`, from there to the sync, which is `QRhi::beginFrame` and where the
+  swap chain waits for the display; and `present`, from the end of recording
+  to the swap. Each is also summarised over the missed intervals alone, which
+  is what says where a late frame was late.
+- **Per item**, for the spectrum, the waterfall, the passband display and the
+  passband waterfall: the cost of taking a frame from the engine on the GUI
+  thread and of the sync on the render thread, and how many taken frames were
+  drawn and how many were replaced by a newer one first. The ruler is QML, so
+  what is timed for it is its tick plan, which runs on a retune or a resize
+  and not per frame.
+- **Engine frames**: received by the client, dropped by the engine, replaced
+  in the client's latest-wins slot, and handed to the display, all differenced
+  across the measured window.
+
+Mean, p50, p95, p99 and max for every series. Percentiles are nearest rank,
+so each one is a frame that happened. The first three seconds after the first
+engine frame are thrown away as warm-up.
+
+### Full target load
+
+The handoff's M1 exit load was fifty receivers on one 20 MS/s grid, which the
+engine runs at 3.28 times realtime (`docs/fft.md`). The client holds eight and
+draws one passband display, the focused receiver's, so the load on the client
+is:
+
+- a 20 MS/s grid, 64 channels, 65536 spectrum bins a frame and 65536-sample
+  blocks, about 305 frames a second offered and every one asked for;
+- eight receivers in the rack in five modes, the first focused, with the
+  passband display and passband waterfall live in the receiver window;
+- the detector running and its tracks drawn on both span displays;
+- the main window maximised and the receiver window open.
+
+The scene has two emitters. The synthetic source renders on one CPU thread and
+measured 1.42x realtime unthrottled with none, 1.08x with two, 0.96x with four,
+0.36x with eight and 0.02x with sixty-four; a source below realtime offers
+fewer frames than the screen refreshes and the interval is then the source's.
+The client's work per frame does not depend on the emitter count, only the
+number of detection boxes does, and the runs below had two tracks.
+
+One command runs it, from the repository root, with the engine built by
+`.\scripts\build.ps1 -Preset ci -NoTest` and the client from `ui\`:
+
+```
+.\scripts\frame-budget.ps1 -Seconds 60 -Visible
+```
+
+It refuses to start while a CI run is in progress, binds the engine to an
+ephemeral loopback port with a token file of its own, runs the client as a
+smoke run (no sound card, no settings written) that exits on its own, and
+stops the engine. Without `-Visible` it runs offscreen. `-NoReceiverWindow`
+leaves the receiver window closed, which is a control and not the load.
+
+### Measured on 2026-09-23
+
+Windows 11, RTX 4090, Qt 6.8.3, Direct3D 11, threaded render loop. The only
+display attached was a virtual one, the SudoMaker Virtual Display Adapter that
+streams the desktop, at 2752x2032, 120 Hz and 125% scaling; the frames were
+drawn on the 4090 and presented to it. That is the refresh the budget was
+taken from, 8.333 ms. The main window was maximised at 1614x1554 logical,
+about 2018x1943 pixels. The engine held 1.000x realtime and 292.7 frames a second
+reached the client over 61.1 s.
+
+**At full target load the budget was not met.**
+
+| window | frames | interval mean | p50 | p95 | p99 | max | over budget |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| main | 6591 | 9.250 ms | 8.480 | 16.474 | 23.268 | 33.757 | 1375 of 6590, 20.9% |
+| receivers | 7192 | 8.478 ms | 8.398 | 9.165 | 16.668 | 27.665 | 142 of 7191, 2.0% |
+| main, receiver window closed | 7159 | 8.515 ms | 8.400 | 9.022 | 16.856 | 21.367 | 170 of 7158, 2.4% |
+
+The drawing is not what misses. On the main window at full load, sync averaged
+0.115 ms (p99 0.352), render 0.383 ms (p99 0.762) and the GPU 0.085 ms (p99
+0.324): about half a millisecond of an 8.333 ms budget, and no frame's work
+exceeded it. Per item, taking a frame cost the spectrum 0.083 ms and the
+waterfall 0.074 ms on average (p99 0.157 and 0.316), and their syncs 0.027 and
+0.080 ms; the passband display and passband waterfall were under 0.05 ms each.
+
+The late frames are waits:
+
+- **With both windows open, the main window's late frames waited to be
+  asked.** Over its 1375 missed intervals `request` averaged 15.1 ms and
+  `begin` 0.05 ms. The receiver window's frames, meanwhile, spent 5.8 ms on
+  average in `begin`, waiting for the display. Qt's threaded loop blocks the
+  GUI thread while a window's render thread syncs, and Qt 6 begins the frame
+  before the sync, which the nonzero `begin` times confirm, so the reading consistent with these numbers is that the
+  GUI thread is held through the receiver window's vsync wait and asks the
+  main window for its frame late. That is an inference from the timings, not
+  something read out of Qt. The client's latest-wins slot replaced 8408 of
+  17871 frames in the same run against 130 of 17899 offscreen, which is the
+  GUI thread spending much of its time blocked.
+- **With the receiver window closed, the misses moved into `begin`.** 170
+  intervals missed, 2.4%, and over them `begin` averaged 12.7 ms against 3.2
+  ms of `request`: the swap chain waited a whole extra refresh. Whether that is
+  the virtual display or would happen on a monitor this run cannot say.
+
+Offscreen, the same load on Qt's software rasteriser with no vsync and the
+basic loop drew the main window 8181 times in 61 s, interval mean 7.452 ms,
+p95 12.531, p99 16.497, and its sync and render averaged 0.067 and 0.640 ms.
+Those are offscreen numbers only and say nothing about a refresh.
+
+### What is still open
+
+M2's criterion is measured and **not met** on this machine's display at full
+target load: one main-window frame in five misses a 120 Hz refresh. The
+render pipeline's own cost is about six percent of the budget, so the misses
+are pacing between two vsync-paced windows on one GUI thread, and the
+single-window control misses 2.4% in the swap chain. Both belong to the
+architecture question the criterion names: two top-level windows since
+2026-09-22 on Qt's threaded loop. What would settle it next:
+
+- the same command on a physical monitor on the 4090, which takes the virtual
+  display out of the single-window result;
+- the receiver window's content in the main window as a control for the
+  two-window reading;
+- `QSG_RENDER_LOOP=basic` against the threaded loop with both windows open.
