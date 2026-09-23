@@ -110,39 +110,14 @@ ColumnLayout {
             elide: Text.ElideRight
         }
 
-        // The bands somebody actually reaches for. Each one is the
-        // CENTRE the front end is put at, not the edge of the
-        // allocation: the span the engine captures is centred here and
-        // reaches half a source rate either side.
-        //
-        // 462.5625 MHz is the standing real-radio test band from
-        // docs/, which is why it is on this row rather than only in a
-        // document.
-        Repeater {
-            model: [
-                { "label": "FM", "hz": 98100000 },
-                { "label": "AIR", "hz": 124000000 },
-                { "label": "2m", "hz": 145000000 },
-                { "label": "70cm", "hz": 435000000 },
-                { "label": "GMRS", "hz": 462562500 }
-            ]
-
-            Label {
-                required property var modelData
-
-                text: modelData.label
-                color: engineLink.sourceCanRetune ? Theme.inkDim : Theme.inkOff
-                font.pixelSize: Theme.sizeBody
-
-                MouseArea {
-                    anchors.fill: parent
-                    anchors.margins: -3
-                    enabled: engineLink.sourceCanRetune
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: engineLink.tuneSourceHz(parent.modelData.hz)
-                }
-            }
-        }
+        // The bands somebody actually reaches for, as shortcuts, and the rest
+        // in a menu beside them. Each one is the CENTRE the front end is put
+        // at, not the edge of the allocation: the span the engine captures is
+        // centred there and reaches half a source rate either side. The table
+        // and where its edges came from are models/band_plan.h, and 462.5625
+        // MHz, the standing real-radio test band from docs/, is one of the
+        // shortcuts there as it was here.
+        BandPicker {}
 
         Item { Layout.fillWidth: true }
 

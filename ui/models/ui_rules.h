@@ -14,7 +14,9 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include <QObject>
 #include <QString>
@@ -22,6 +24,7 @@
 #include <QVariantMap>
 #include <QtQmlIntegration>
 
+#include "models/band_plan.h"
 #include "models/frequency_dial.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
@@ -114,6 +117,38 @@ public:
         return ruler_x(hz, low, high, width);
     }
 
+    // ---------------------------------------------------------------------
+    // The band plan. See models/band_plan.h.
+    // ---------------------------------------------------------------------
+
+    // Every band, in the table's order, as a map the menu can draw. The
+    // index is the band's position and is what bandReachable takes.
+    [[nodiscard]] Q_INVOKABLE QVariantList bands() const
+    {
+        QVariantList out;
+        for (const Band& band : kBands) {
+            out.append(QVariantMap{
+                {QStringLiteral("group"), to_qstring(band.group)},
+                {QStringLiteral("name"), to_qstring(band.name)},
+                {QStringLiteral("low"), static_cast<double>(band.low_hz)},
+                {QStringLiteral("high"), static_cast<double>(band.high_hz)},
+                {QStringLiteral("centre"), static_cast<double>(band.centre_hz)},
+                {QStringLiteral("mode"), to_qstring(band.mode)},
+                {QStringLiteral("favourite"), band.favourite}});
+        }
+        return out;
+    }
+
+    [[nodiscard]] Q_INVOKABLE bool bandReachable(int index, double tune_low,
+                                                 double tune_high) const
+    {
+        if (index < 0 || static_cast<std::size_t>(index) >= kBands.size()) {
+            return false;
+        }
+        return band_reachable(kBands[static_cast<std::size_t>(index)], to_hz(tune_low),
+                              to_hz(tune_high));
+    }
+
     // The wheel's two axes resolved to one, the way the span displays do it.
     // See models/scroll_tune.h.
     [[nodiscard]] Q_INVOKABLE double scrollEighths(double delta_x, double delta_y) const
@@ -122,6 +157,11 @@ public:
     }
 
 private:
+    [[nodiscard]] static QString to_qstring(std::string_view text)
+    {
+        return QString::fromUtf8(text.data(), static_cast<qsizetype>(text.size()));
+    }
+
     [[nodiscard]] static std::int64_t to_hz(double hz)
     {
         return static_cast<std::int64_t>(hz < 0.0 ? hz - 0.5 : hz + 0.5);

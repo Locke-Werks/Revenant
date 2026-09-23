@@ -160,6 +160,7 @@ qt_add_executable(revenant_ui
     models/bookmark_link.cpp
     models/engine_link.cpp
     models/engine_link.h
+    models/band_plan.h
     models/frequency_dial.h
     models/ruler.h
     models/ui_rules.h
@@ -201,6 +202,7 @@ qt_add_qml_module(revenant_ui
         qml/DetectionControls.qml
         qml/SpanView.qml
         qml/Ruler.qml
+        qml/BandPicker.qml
         qml/FrequencyDial.qml
         qml/VfoPane.qml
         qml/RdsPane.qml
@@ -453,6 +455,7 @@ if(REVENANT_UI_TESTS)
         add_executable(revenant_ui_tests
             audio/audio_ring.cpp
             tests/test_audio_ring.cpp
+            tests/test_band_plan.cpp
             tests/test_bookmarks.cpp
             tests/test_composite_probe.cpp
             tests/test_front_end_note.cpp
