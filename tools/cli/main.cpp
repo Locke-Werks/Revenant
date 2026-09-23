@@ -3681,18 +3681,15 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 why = std::format("No --vrx is in a mode a decoder is named after or reads; the "
                                   "decoders are {}.",
                                   rpc::decoder_names());
-            } else if (const rpc::DecoderSpec* spec = rpc::find_decoder(name);
-                       !spec->modes.empty()) {
+            } else {
+                // Every registry row names the modes it reads, the complex
+                // decoders included since each was held to its own mode or a
+                // raw tap, so the modes are the whole answer. A branch for a
+                // decoder with no modes, which told complex from audio by
+                // input alone, went when the last such row did.
+                const rpc::DecoderSpec* spec = rpc::find_decoder(name);
                 why = std::format("The {} decoder reads {}, and no --vrx is one.", name,
                                   rpc::decoder_needs_text(*spec));
-            } else {
-                const bool wants_complex = spec->input == rpc::DecoderInput::ComplexBaseband;
-                why = std::format(
-                    "The {} decoder reads {}, and no --vrx produces it.", name,
-                    wants_complex ? "complex baseband, which the raw, p25p1, dstar and tetra "
-                                    "modes produce"
-                                  : "audio, which every mode but raw, p25p1, dstar and tetra "
-                                    "produces");
             }
             return fail(std::format("--decode {} matched no receiver. {}", name, why));
         }
