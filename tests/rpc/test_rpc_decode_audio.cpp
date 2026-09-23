@@ -3,15 +3,17 @@
 //
 // WHAT THESE CASES CLAIM
 //
-// tests/decode scores RTTY, AX.25 with APRS, POCSAG, SITOR-B and NAVTEX each
-// against its transmitter in core/dsp/synth/fsk_mod.h, audio buffer to
-// decoder, with no receiver in the way. What these add is the receiver. Each
+// tests/decode scores RTTY, AX.25 with APRS, POCSAG, SITOR-B, NAVTEX, PSK31,
+// PSK63, QPSK31, CW and M17 each against its transmitter in core/dsp/synth,
+// sample buffer to decoder, with no receiver in the way. What these add is the receiver. Each
 // transmitter's audio is put on a radio carrier the way a station would put
-// it there, single sideband for the HF text modes and FM for AFSK, POCSAG
-// being direct FSK, and written to a file. The file is read back through the
-// channelizer, a usb, lsb or nfm receiver demodulates it on the device, the
-// decoder is attached over the wire to that receiver's audio, and what it
-// recovered is read back off the socket with its typed fields.
+// it there, single sideband for the HF text modes, a keyed carrier for CW and FM
+// for AFSK, POCSAG being direct FSK, and written to a file. The file is read
+// back through the channelizer, a usb, lsb, cw or nfm receiver demodulates it on
+// the device, the decoder is attached over the wire to that receiver's audio,
+// and what it recovered is read back off the socket with its typed fields. M17,
+// which has no demodulator of its own, is read from a p25p1 receiver's complex
+// baseband, the way the adapter says it should be.
 //
 // So a pass here says the audio-domain path in core/rpc/server.cpp feeds a
 // real demodulator's output to the adapters in core/rpc/decoders.h at the
@@ -30,7 +32,8 @@
 // to lose characters, where the case asserts little and prints what arrived.
 // For SSB the audio SNR in 2500 Hz is close to the RF figure, so the library
 // tests' points carry over. For FM they do not: the discriminator has a
-// threshold, so the AX.25 and POCSAG points were found by measuring here.
+// threshold, so the AX.25 and POCSAG points were found by measuring here, and
+// M17's is test_m17.cpp's 9 kHz figure restated in 2500 Hz.
 
 #include <algorithm>
 #include <chrono>
@@ -52,10 +55,16 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "core/decode/ax25.h"
+#include "core/decode/cw.h"
+#include "core/decode/m17.h"
 #include "core/decode/pocsag.h"
+#include "core/decode/psk31.h"
 #include "core/dsp/synth/channel.h"
+#include "core/dsp/synth/cw_mod.h"
 #include "core/dsp/synth/fsk_mod.h"
+#include "core/dsp/synth/m17_mod.h"
 #include "core/dsp/synth/modulators.h"
+#include "core/dsp/synth/psk31_mod.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 #include "core/rpc/client.h"
@@ -169,11 +178,13 @@ constexpr dsp::Hertz kVhfCentre = 145'000'000;
 
 // Complex baseband moved up to the carrier, with silence either side. The
 // phase is reduced exactly in integers so it does not drift with length.
-[[nodiscard]] std::vector<dsp::Complex32> on_the_carrier(std::span<const dsp::Complex32> signal) {
+[[nodiscard]] std::vector<dsp::Complex32> on_the_carrier(std::span<const dsp::Complex32> signal,
+                                                        dsp::Hertz shift_hz = kCarrierHz) {
     std::vector<dsp::Complex32> out(seconds_to_samples(kLeadSeconds), dsp::Complex32{});
     out.reserve(out.size() + signal.size() + seconds_to_samples(kTailSeconds));
     for (std::size_t n = 0; n < signal.size(); ++n) {
-        const std::int64_t turns = (kCarrierHz * static_cast<std::int64_t>(n)) % kFileRate;
+        const std::int64_t turns =
+            ((shift_hz % kFileRate + kFileRate) * static_cast<std::int64_t>(n)) % kFileRate;
         const double angle = 2.0 * std::numbers::pi * static_cast<double>(turns) /
                              static_cast<double>(kFileRate);
         const std::complex<double> moved =
@@ -211,6 +222,10 @@ struct Capture {
     std::vector<dsp::Complex32> samples;
     rpc::Demod demod = rpc::Demod::Usb;
     dsp::Hertz centre = kHfCentre;
+
+    // Where the receiver is tuned, in baseband. The carrier for every mode but
+    // CW, whose receiver sits on the keyed carrier.
+    dsp::Hertz receiver_hz = kCarrierHz;
 };
 
 // Starts and ends with a line end, as an operator's transmission does, so the
@@ -399,6 +414,113 @@ constexpr std::string_view kSlowText = "SLOW PAGE";
     return Capture{"pocsag_nfm", std::move(signal), rpc::Demod::Nfm, kVhfCentre};
 }
 
+// The analytic signal of a tone at an audio frequency is already the upper
+// sideband of a carrier at zero, so moving it up to the carrier is the whole
+// of a USB transmitter.
+//
+// FOR THE LOWER SIDEBAND IT IS MOVED, NOT MIRRORED. A PSK31 signal on the air
+// has one phase convention whichever sideband received it: QEX page 9's
+// advance is higher in radio frequency. So the same signal, placed below the
+// carrier where an lsb receiver reads it as a 1000 Hz tone, is the analytic
+// signal shifted down by twice the tone, and it is the lsb receiver that
+// mirrors it, which is what Psk31Config::lower_sideband undoes. Mirroring it
+// here as well would hand the receiver a signal that no station sends.
+[[nodiscard]] std::vector<dsp::Complex32> sideband_from_analytic(
+    std::span<const dsp::Complex32> analytic, dsp::Hertz tone_hz, bool upper) {
+    return on_the_carrier(analytic, upper ? kCarrierHz : kCarrierHz - 2 * tone_hz);
+}
+
+// Line ends either side, as for RTTY. The tone is Psk31Config's 1000 Hz.
+const std::string kPskText = "\r\nCQ DE N0CALL\r\nTEST 73\r\n";
+const std::vector<std::string> kPskLines = {"CQ DE N0CALL", "TEST 73"};
+
+[[nodiscard]] std::string psk_tag(decode::Psk31Mode mode) {
+    switch (mode) {
+        case decode::Psk31Mode::Bpsk31: return "psk31";
+        case decode::Psk31Mode::Bpsk63: return "psk63";
+        case decode::Psk31Mode::Qpsk31: return "qpsk31";
+    }
+    return "psk";
+}
+
+[[nodiscard]] Expected<Capture> psk_capture(decode::Psk31Mode mode, bool upper,
+                                            double snr_2500_db) {
+    siggen::Psk31ModConfig mod;
+    mod.rate = kFileRate;
+    mod.tone_hz = decode::Psk31Config{}.centre_hz;
+    mod.mode = mode;
+    auto bits = siggen::psk31_message_bits(mod, kPskText);
+    if (!bits) {
+        return std::unexpected(bits.error());
+    }
+    auto analytic = siggen::psk31_render_analytic(mod, *bits);
+    if (!analytic) {
+        return std::unexpected(analytic.error());
+    }
+    std::vector<dsp::Complex32> signal = sideband_from_analytic(*analytic, mod.tone_hz, upper);
+    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{psk_tag(mode) + (upper ? "_usb" : "_lsb"), std::move(signal),
+                   upper ? rpc::Demod::Usb : rpc::Demod::Lsb, kHfCentre};
+}
+
+// Keyed at 20 WPM on a carrier 700 Hz above kCarrierHz, which a cw receiver
+// tuned to the carrier at its default 700 Hz pitch turns into the 700 Hz tone
+// CwConfig looks for. The receiver is placed by the case.
+const std::string kCwText = "CQ CQ DE N0CALL K";
+constexpr dsp::Hertz kCwToneHz = 700;
+
+[[nodiscard]] Expected<Capture> cw_capture(double snr_2500_db) {
+    siggen::CwModConfig mod;
+    mod.rate = kFileRate;
+    mod.tone_hz = kCwToneHz;
+    mod.wpm = 20.0;
+    auto analytic = siggen::cw_render_analytic(mod, kCwText);
+    if (!analytic) {
+        return std::unexpected(analytic.error());
+    }
+    std::vector<dsp::Complex32> signal = on_the_carrier(*analytic);
+    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"cw", std::move(signal), rpc::Demod::Cw, kHfCentre, kCarrierHz + kCwToneHz};
+}
+
+constexpr std::string_view kM17Source = "N0CALL";
+constexpr std::string_view kM17Destination = "N0DEST";
+constexpr std::size_t kM17Frames = 25;
+
+// One second of stream, 25 frames, on a carrier at kCarrierHz, read through
+// a p25p1 receiver's fine stage.
+[[nodiscard]] Expected<Capture> m17_capture(double snr_2500_db) {
+    auto destination = decode::m17_encode_callsign(kM17Destination);
+    auto source = decode::m17_encode_callsign(kM17Source);
+    if (!destination || !source) {
+        return fail("the M17 test callsigns did not encode");
+    }
+    siggen::M17StreamMessage message;
+    message.destination = *destination;
+    message.source = *source;
+    message.payloads.resize(kM17Frames);
+    for (std::size_t frame = 0; frame < kM17Frames; ++frame) {
+        for (std::size_t i = 0; i < message.payloads[frame].size(); ++i) {
+            message.payloads[frame][i] = static_cast<std::uint8_t>(frame * 16 + i);
+        }
+    }
+    siggen::M17ModConfig mod;
+    mod.rate = kFileRate;
+    auto baseband = siggen::m17_render_stream(mod, message);
+    if (!baseband) {
+        return std::unexpected(baseband.error());
+    }
+    std::vector<dsp::Complex32> signal = on_the_carrier(*baseband);
+    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"m17_p25p1", std::move(signal), rpc::Demod::P25p1, kVhfCentre};
+}
+
 // ---------------------------------------------------------------------------
 // The file and the run
 // ---------------------------------------------------------------------------
@@ -480,7 +602,8 @@ struct Run {
     INFO(test::message_of(ready));
     REQUIRE(ready.has_value());
 
-    const rpc::VrxParams params{.center = kCarrierHz, .bandwidth = 0, .demod = capture.demod};
+    const rpc::VrxParams params{
+        .center = capture.receiver_hz, .bandwidth = 0, .demod = capture.demod};
     auto vrx = harness.client().add_vrx(params);
     INFO(test::message_of(vrx));
     REQUIRE(vrx.has_value());
@@ -610,7 +733,8 @@ TEST_CASE("the audio decoders are listed with the input they read", "[gpu][rpc][
             CHECK(info.description.find("Reads a") != std::string::npos);
         }
     }
-    CHECK(audio == std::set<std::string>{"rtty", "ax25", "pocsag", "sitor_b", "navtex"});
+    CHECK(audio == std::set<std::string>{"rtty", "ax25", "pocsag", "sitor_b", "navtex", "psk31",
+                                         "psk63", "qpsk31", "cw"});
 }
 
 TEST_CASE("an audio decoder on the wrong receiver is refused naming the mode it needs",
@@ -996,6 +1120,195 @@ TEST_CASE("POCSAG pages at two rates cross the wire from an nfm receiver",
     CHECK(sent_to >= 2);
 }
 
+namespace {
+
+// One PSK mode through its receiver at 30 dB and at `low_snr_db`, which is
+// where tests/decode/test_psk31.cpp measured it on audio alone.
+void check_psk(decode::Psk31Mode mode, bool upper, double low_snr_db) {
+    const std::string name = psk_tag(mode);
+    auto capture = psk_capture(mode, upper, kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, name);
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    check_common(run, name);
+    for (const std::string& expected : kPskLines) {
+        const rpc::DecodedMessage* line = line_reading(run, expected);
+        INFO("looking for \"" << expected << "\"");
+        REQUIRE(line != nullptr);
+        CHECK(integer_of(*line, "unrecognised") == 0);
+        CHECK(text_of(*line, "ended") == "line_end");
+        CHECK(flag_of(*line, "lower_sideband") == !upper);
+        CHECK(std::abs(real_of(*line, "frequency_offset_hz")) < 2.0);
+    }
+    const double cer = line_error_rate(run, kPskLines);
+    WARN(std::format("{} {} at {} dB/2500 Hz: {} messages, character error rate {:.4f}", name,
+                     upper ? "usb" : "lsb", kHighSnrDb, run.messages.size(), cer));
+    CHECK(cer == 0.0);
+
+    auto noisy = psk_capture(mode, upper, low_snr_db);
+    REQUIRE(noisy.has_value());
+    const Run low = run_capture(*noisy, name);
+    INFO(std::format("at {} dB, {} messages arrived:{}", low_snr_db, low.messages.size(),
+                     arrived(low)));
+    check_common(low, name);
+    const double low_cer = line_error_rate(low, kPskLines);
+    WARN(std::format("{} {} at {} dB/2500 Hz: {} messages, character error rate {:.4f}", name,
+                     upper ? "usb" : "lsb", low_snr_db, low.messages.size(), low_cer));
+    CHECK(low_cer <= 0.25);
+}
+
+}  // namespace
+
+TEST_CASE("PSK31 on a usb receiver crosses the wire as lines of text", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+    // test_psk31.cpp: a bit error rate of 2.5e-3 at -10 dB in 2500 Hz of audio.
+    // Through the receiver on 2026-09-22 both lines arrived exact there.
+    check_psk(decode::Psk31Mode::Bpsk31, true, -10.0);
+}
+
+TEST_CASE("PSK63 on a usb receiver crosses the wire as lines of text", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+    // test_psk31.cpp: 4.0e-3 at -7 dB. Exact through the receiver on 2026-09-22.
+    check_psk(decode::Psk31Mode::Bpsk63, true, -7.0);
+}
+
+TEST_CASE("QPSK31 on an lsb receiver takes its sideband from the receiver",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+    // test_psk31.cpp: 2.8e-2 at -12 dB on audio alone. Through the receiver on
+    // 2026-09-22 the decoder never acquired at -12 dB, so nothing printed;
+    // at -11 dB the character error rate was 0.10 and at -9 dB none. On lsb,
+    // because QPSK is the one mode whose decoding depends on the sideband and
+    // the adapter reads it from the receiver's mode.
+    check_psk(decode::Psk31Mode::Qpsk31, false, -11.0);
+}
+
+TEST_CASE("CW on a cw receiver crosses the wire with its speed", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = cw_capture(kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    // An empty name: cw is named after its demodulator, so it is what a cw
+    // receiver attaches by default.
+    const Run run = run_capture(*capture, "");
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    CHECK(run.resolved == "cw");
+    check_common(run, "cw");
+    REQUIRE(run.messages.size() == 1);
+    const rpc::DecodedMessage& line = run.messages.front();
+    CHECK(line.kind == "line");
+    CHECK(line.text == kCwText);
+    CHECK(text_of(line, "ended") == "idle");
+    CHECK(integer_of(line, "unrecognised") == 0);
+    CHECK(text_of(line, "code").starts_with("-.-. --.- / -.-. --.- /"));
+    CHECK(std::abs(real_of(line, "wpm") - 20.0) < 1.0);
+    CHECK(std::abs(real_of(line, "frequency_offset_hz")) < 10.0);
+    WARN(std::format("cw at {} dB/2500 Hz: \"{}\" at {:.1f} WPM", kHighSnrDb, line.text,
+                     real_of(line, "wpm")));
+
+    // test_cw.cpp: a character error rate of 0.086 at -10 dB in 2500 Hz of
+    // audio for 20 WPM. Through the receiver on 2026-09-22, 0.059, read at
+    // 19.1 WPM, which is the slow reading in noise docs/modes.md records.
+    constexpr double kLowSnrDb = -10.0;
+    auto noisy = cw_capture(kLowSnrDb);
+    REQUIRE(noisy.has_value());
+    const Run low = run_capture(*noisy, "cw");
+    INFO(std::format("at {} dB, {} messages arrived:{}", kLowSnrDb, low.messages.size(),
+                     arrived(low)));
+    check_common(low, "cw");
+    const double low_cer = line_error_rate(low, {kCwText});
+    double wpm = 0.0;
+    for (const rpc::DecodedMessage& message : low.messages) {
+        wpm = real_of(message, "wpm");
+    }
+    WARN(std::format("cw at {} dB/2500 Hz: {} messages, character error rate {:.4f}, {:.1f} "
+                     "WPM",
+                     kLowSnrDb, low.messages.size(), low_cer, wpm));
+    CHECK(low_cer <= 0.25);
+}
+
+TEST_CASE("M17 through a p25p1 receiver crosses the wire as its link setup",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = m17_capture(kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, "m17");
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    for (const rpc::DecodedMessage& message : run.messages) {
+        CHECK(message.decoder == "m17");
+        // The p25p1 fine stage's rate, which is the rate m17.h was measured at.
+        CHECK(message.sample_rate == 48'000);
+    }
+
+    std::set<std::string> kinds;
+    for (const rpc::DecodedMessage& message : run.messages) {
+        kinds.insert(message.kind);
+        if (message.kind == "lsf") {
+            CHECK(text_of(message, "source") == kM17Source);
+            CHECK(text_of(message, "destination") == kM17Destination);
+            CHECK(text_of(message, "source_kind") == "standard");
+            CHECK(integer_of(message, "lsf_crc_failures") == 0);
+            CHECK_FALSE(flag_of(message, "encrypted"));
+            CHECK(flag_of(message, "stream"));
+            CHECK(integer_of(message, "type") == siggen::M17StreamMessage{}.type);
+            CHECK(message.text.starts_with("N0CALL > N0DEST"));
+        } else if (message.kind == "stream_end") {
+            CHECK(integer_of(message, "frame_number") ==
+                  static_cast<std::int64_t>(kM17Frames - 1));
+        }
+    }
+    CHECK(kinds.contains("lsf"));
+    CHECK(kinds.contains("stream_end"));
+    CHECK(kinds.contains("eot"));
+    WARN(std::format("m17 at {} dB/2500 Hz: {} messages", kHighSnrDb, run.messages.size()));
+
+    // tests/decode/test_m17.cpp: a stream frame error rate of 0.18 at 10 dB in
+    // the 9 kHz channel, which is 15.6 dB in 2500 Hz. Through the p25p1
+    // receiver on 2026-09-22 the link setup, the stream end and the end of
+    // transmission all arrived there.
+    constexpr double kLowSnrDb = 15.6;
+    auto noisy = m17_capture(kLowSnrDb);
+    REQUIRE(noisy.has_value());
+    const Run low = run_capture(*noisy, "m17");
+    INFO(std::format("at {} dB, {} messages arrived:{}", kLowSnrDb, low.messages.size(),
+                     arrived(low)));
+    std::size_t lsf = 0;
+    for (const rpc::DecodedMessage& message : low.messages) {
+        if (message.kind == "lsf") {
+            ++lsf;
+            CHECK(text_of(message, "source") == kM17Source);
+        }
+    }
+    WARN(std::format("m17 at {} dB/2500 Hz: {} messages, {} link setup with its CRC", kLowSnrDb,
+                     low.messages.size(), lsf));
+}
+
+TEST_CASE("M17 is refused on a receiver whose channel cuts it", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    Harness harness;
+    const auto ready = harness.open(HarnessOptions{});
+    INFO(test::message_of(ready));
+    REQUIRE(ready.has_value());
+    auto dstar = harness.client().add_vrx(
+        rpc::VrxParams{.center = 131'072, .bandwidth = 0, .demod = rpc::Demod::Dstar});
+    INFO(test::message_of(dstar));
+    REQUIRE(dstar.has_value());
+
+    auto log = std::make_shared<MessageLog>();
+    auto refused = harness.client().subscribe_decoded(*dstar, "m17", into(log), ending(log));
+    REQUIRE_FALSE(refused.has_value());
+    INFO(refused.error().message);
+    CHECK(refused.error().message.find(
+              "the m17 decoder reads the complex baseband of a p25p1 or raw receiver") !=
+          std::string::npos);
+    CHECK(refused.error().message.find("is dstar") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // The captures revenant-cli is run on
 // ---------------------------------------------------------------------------
@@ -1024,6 +1337,11 @@ TEST_CASE("the audio decoder captures for revenant-cli", "[.][write-captures]") 
                                      kHighSnrDb));
     captures.push_back(ax25_capture(kHighSnrDb));
     captures.push_back(pocsag_capture(kHighSnrDb));
+    captures.push_back(psk_capture(decode::Psk31Mode::Bpsk31, true, kHighSnrDb));
+    captures.push_back(psk_capture(decode::Psk31Mode::Bpsk63, true, kHighSnrDb));
+    captures.push_back(psk_capture(decode::Psk31Mode::Qpsk31, false, kHighSnrDb));
+    captures.push_back(cw_capture(kHighSnrDb));
+    captures.push_back(m17_capture(kHighSnrDb));
     for (const Expected<Capture>& capture : captures) {
         INFO(test::message_of(capture));
         REQUIRE(capture.has_value());
