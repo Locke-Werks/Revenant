@@ -28,6 +28,12 @@
 # retyped correctly. The second is the round trip against the transmitters in
 # core/dsp/synth/dv_mod.cpp.
 #
+# test_p25p1_voice.cpp carries P25 voice end to end: the Logical Link Data
+# Units, Link Control and encryption sync through their Reed-Solomon codes,
+# and IMBE frames from the transmitter through the air interface into the
+# vocoder. Its frames are built by imbe_test_frames.h, which test_imbe.cpp
+# shares, so both suites agree on what a frame is.
+#
 # Every error rate in those three is measured and reported in an INFO line and
 # the assertion around it is loose. A bit error rate asserted to three decimal
 # places is a test that fails when somebody improves the receiver, and the
@@ -112,6 +118,7 @@ add_executable(revenant_decode_tests
     test_dstar.cpp
     test_imbe.cpp
     test_p25p1.cpp
+    test_p25p1_voice.cpp
     test_rds_bits.cpp
     test_rds_groups.cpp
     test_tetra.cpp

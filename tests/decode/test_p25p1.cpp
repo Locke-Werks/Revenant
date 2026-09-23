@@ -26,8 +26,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
+#include <ios>
+#include <print>
+#include <random>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -230,6 +236,392 @@ TEST_CASE("the shortened Golay code is systematic and has distance 8", "[decode]
         CHECK(decoded.information == information);
         CHECK(decoded.corrected_bits == 3);
     }
+}
+
+// ---------------------------------------------------------------------------
+// The voice code words, against the document
+// ---------------------------------------------------------------------------
+
+TEST_CASE("GF(2^6) reproduces the clause 5.9 exponential and logarithm tables",
+          "[decode][p25][rs]") {
+    // Clause 5.9 prints both tables in octal, eight to a row. Transcribed as
+    // printed; the field arithmetic builds its own from alpha^6 + alpha + 1.
+    constexpr std::uint8_t kExponential[64] = {
+        001, 002, 004, 010, 020, 040, 003, 006, 014, 030, 060, 043, 005, 012, 024, 050,
+        023, 046, 017, 036, 074, 073, 065, 051, 021, 042, 007, 016, 034, 070, 063, 045,
+        011, 022, 044, 013, 026, 054, 033, 066, 057, 035, 072, 067, 055, 031, 062, 047,
+        015, 032, 064, 053, 025, 052, 027, 056, 037, 076, 077, 075, 071, 061, 041, 001,
+    };
+    // Index is the field element; the table prints "-" for zero.
+    constexpr int kLogarithm[64] = {
+        -1, 0,  1,  6,  2,  12, 7,  26, 3,  32, 13, 35, 8,  48, 27, 18,
+        4,  24, 33, 16, 14, 52, 36, 54, 9,  45, 49, 38, 28, 41, 19, 56,
+        5,  62, 25, 11, 34, 31, 17, 47, 15, 23, 53, 51, 37, 44, 55, 40,
+        10, 61, 46, 30, 50, 22, 39, 43, 29, 60, 42, 21, 20, 59, 57, 58,
+    };
+    for (unsigned e = 0; e < 64U; ++e) {
+        INFO("alpha^" << e);
+        CHECK(decode::p25_gf64_exp(e) == kExponential[e]);
+    }
+    for (unsigned b = 0; b < 64U; ++b) {
+        INFO("log of octal " << std::oct << b);
+        CHECK(decode::p25_gf64_log(static_cast<std::uint8_t>(b)) == kLogarithm[b]);
+    }
+}
+
+namespace {
+
+// Octal hexbits separated by spaces, as clause 5.9 prints them.
+std::vector<std::uint8_t> from_octal_hexbits(const char* text) {
+    std::vector<std::uint8_t> out;
+    unsigned value = 0;
+    bool in_number = false;
+    for (const char* p = text;; ++p) {
+        if (*p >= '0' && *p <= '7') {
+            value = value * 8U + static_cast<unsigned>(*p - '0');
+            in_number = true;
+        } else {
+            if (in_number) {
+                out.push_back(static_cast<std::uint8_t>(value));
+            }
+            value = 0;
+            in_number = false;
+            if (*p == '\0') {
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+// Clause 5.9's generator matrices, the parity columns only; the identity
+// columns are the identity, which the case checks by construction. Extracted
+// from the PDF's text layer by script rather than retyped, like the IMBE
+// annexes in core/decode/imbe.cpp.
+constexpr const char* kGlcParity[12] = {
+    "62 44 03 25 14 16 27 03 53 04 36 47", "11 12 11 11 16 64 67 55 01 76 26 73",
+    "03 01 05 75 14 06 20 44 66 06 70 66", "21 70 27 45 16 67 23 64 73 33 44 21",
+    "30 22 03 75 15 15 33 15 51 03 53 50", "01 41 27 56 76 64 21 53 04 25 01 12",
+    "61 76 21 55 76 01 63 35 30 13 64 70", "24 22 71 56 21 35 73 42 57 74 43 76",
+    "72 42 05 20 43 47 33 56 01 16 13 76", "72 14 65 54 35 25 41 16 15 40 71 26",
+    "73 65 36 61 42 22 17 04 44 20 25 05", "71 05 55 03 71 34 60 11 74 02 41 50",
+};
+constexpr const char* kGesParity[16] = {
+    "51 45 67 15 64 67 52 12", "57 25 63 73 71 22 40 15", "05 01 31 04 16 54 25 76",
+    "73 07 47 14 41 77 47 11", "75 15 51 51 17 67 17 57", "20 32 14 42 75 42 70 54",
+    "02 75 43 05 01 40 12 64", "24 74 15 72 24 26 74 61", "42 64 07 22 61 20 40 65",
+    "32 32 55 41 57 66 21 77", "65 36 25 07 50 16 40 51", "64 06 54 32 76 46 14 36",
+    "62 63 74 70 05 27 37 46", "55 43 34 71 57 76 50 64", "24 23 23 05 50 70 42 23",
+    "67 75 45 60 57 24 06 26",
+};
+constexpr const char* kPhdrParity[20] = {
+    "74 37 34 06 02 07 44 64 26 14 26 44 54 13 77 05",
+    "04 17 50 24 11 05 30 57 33 03 02 02 15 16 25 26",
+    "07 23 37 46 56 75 43 45 55 21 50 31 45 27 71 62",
+    "26 05 07 63 63 27 63 40 06 04 40 45 47 30 75 07",
+    "23 73 73 41 72 34 21 51 67 16 31 74 11 21 12 21",
+    "24 51 25 23 22 41 74 66 74 65 70 36 67 45 64 01",
+    "52 33 14 02 20 06 14 25 52 23 35 74 75 75 43 27",
+    "55 62 56 25 73 60 15 30 13 17 20 02 70 55 14 47",
+    "54 51 32 65 77 12 54 13 35 32 56 12 75 01 72 63",
+    "74 41 30 41 43 22 51 06 64 33 03 47 27 12 55 47",
+    "54 70 11 03 13 22 16 57 03 45 72 31 30 56 35 22",
+    "51 07 72 30 65 54 06 21 36 63 50 61 64 52 01 60",
+    "01 65 32 70 13 44 73 24 12 52 21 55 12 35 14 72",
+    "11 70 05 10 65 24 15 77 22 24 24 74 07 44 07 46",
+    "06 02 65 11 41 20 45 42 46 54 35 12 40 64 65 33",
+    "34 31 01 15 44 64 16 24 52 16 06 62 20 13 55 57",
+    "63 43 25 44 77 63 17 17 64 14 40 74 31 72 54 06",
+    "71 21 70 44 56 04 30 74 04 23 71 70 63 45 56 43",
+    "02 01 53 74 02 14 52 74 12 57 24 63 15 42 52 33",
+    "34 35 02 23 21 27 22 33 64 42 05 73 51 46 73 60",
+};
+
+struct PrintedCode {
+    const char* name;
+    decode::P25ReedSolomon code;
+    std::span<const char* const> parity;
+    // Clause 5.9's printed generator polynomial, lowest degree first.
+    const char* generator;
+};
+
+std::array<PrintedCode, 3> printed_codes() {
+    return {{
+        {"(36,20,17) header", decode::kP25RsHeader, kPhdrParity,
+         "60 73 46 51 73 05 42 64 33 22 27 21 23 02 35 34 01"},
+        {"(24,12,13) Link Control", decode::kP25RsLinkControl, kGlcParity,
+         "50 41 02 74 11 60 34 71 03 55 05 71 01"},
+        {"(24,16,9) encryption sync", decode::kP25RsEncryptionSync, kGesParity,
+         "26 06 24 57 60 45 75 67 01"},
+    }};
+}
+
+}  // namespace
+
+TEST_CASE("the Reed-Solomon generators are the polynomials clause 5.9 prints",
+          "[decode][p25][rs]") {
+    for (const PrintedCode& printed : printed_codes()) {
+        INFO(printed.name);
+        CHECK(decode::p25_rs_generator(printed.code) == from_octal_hexbits(printed.generator));
+    }
+}
+
+TEST_CASE("the Reed-Solomon encoders regenerate the clause 5.9 generator matrices",
+          "[decode][p25][rs]") {
+    // Each matrix row is the code word for a single information hexbit of
+    // value 1, so a row is the document's own example of a code word, and
+    // the decoder must accept every one of them untouched.
+    for (const PrintedCode& printed : printed_codes()) {
+        REQUIRE(printed.parity.size() == printed.code.k);
+        for (std::size_t row = 0; row < printed.code.k; ++row) {
+            INFO(printed.name << ", row " << (row + 1));
+            std::vector<std::uint8_t> information(printed.code.k, 0);
+            information[row] = 1;
+            auto word = decode::p25_rs_encode(printed.code, information);
+            REQUIRE(word.has_value());
+
+            const std::vector<std::uint8_t> parity(word->begin() +
+                                                       static_cast<std::ptrdiff_t>(printed.code.k),
+                                                   word->end());
+            CHECK(parity == from_octal_hexbits(printed.parity[row]));
+            CHECK(std::equal(information.begin(), information.end(), word->begin()));
+
+            auto decoded = decode::p25_rs_decode(printed.code, *word);
+            REQUIRE(decoded.has_value());
+            CHECK(decoded->decoded);
+            CHECK(decoded->corrected == 0);
+            CHECK(decoded->codeword == *word);
+        }
+    }
+}
+
+TEST_CASE("the Reed-Solomon decoders correct everything within their distance",
+          "[decode][p25][rs]") {
+    // Exhaustive where it is cheap enough to be: every single hexbit error at
+    // every position with every non-zero value, and every pair of positions
+    // for double errors. Above that the patterns are drawn from a seeded
+    // generator, including every split of the redundancy between errors and
+    // erasures that 2v + f <= n - k allows.
+    constexpr std::uint64_t kSeed = 0x25'5EED'0005'2025ULL;
+    std::println("test_p25p1 Reed-Solomon sweep seed {}", kSeed);
+    std::mt19937_64 rng(kSeed);
+
+    for (const PrintedCode& printed : printed_codes()) {
+        const decode::P25ReedSolomon& code = printed.code;
+        const std::size_t parity = code.n - code.k;
+        INFO(printed.name);
+
+        std::vector<std::uint8_t> information(code.k, 0);
+        for (std::uint8_t& hexbit : information) {
+            hexbit = static_cast<std::uint8_t>(rng() & 0x3FU);
+        }
+        auto sent = decode::p25_rs_encode(code, information);
+        REQUIRE(sent.has_value());
+
+        std::size_t wrong = 0;
+        std::size_t tried = 0;
+        const auto attempt = [&](const std::vector<std::uint8_t>& received,
+                                 const std::vector<std::size_t>& erasures) {
+            auto decoded = decode::p25_rs_decode(code, received, erasures);
+            REQUIRE(decoded.has_value());
+            ++tried;
+            if (!decoded->decoded || decoded->codeword != *sent) {
+                ++wrong;
+            }
+        };
+
+        for (std::size_t position = 0; position < code.n; ++position) {
+            for (std::uint8_t value = 1; value < 64U; ++value) {
+                std::vector<std::uint8_t> received = *sent;
+                received[position] ^= value;
+                attempt(received, {});
+            }
+        }
+        for (std::size_t a = 0; a < code.n; ++a) {
+            for (std::size_t b = a + 1; b < code.n; ++b) {
+                for (int draw = 0; draw < 4; ++draw) {
+                    std::vector<std::uint8_t> received = *sent;
+                    received[a] ^= static_cast<std::uint8_t>(1U + rng() % 63U);
+                    received[b] ^= static_cast<std::uint8_t>(1U + rng() % 63U);
+                    attempt(received, {});
+                }
+            }
+        }
+        for (std::size_t erased = 0; erased <= parity; ++erased) {
+            const std::size_t errors = (parity - erased) / 2;
+            for (int draw = 0; draw < 300; ++draw) {
+                std::vector<std::size_t> positions(code.n);
+                for (std::size_t i = 0; i < code.n; ++i) {
+                    positions[i] = i;
+                }
+                std::shuffle(positions.begin(), positions.end(), rng);
+                std::vector<std::uint8_t> received = *sent;
+                std::vector<std::size_t> erasures(positions.begin(),
+                                                  positions.begin() +
+                                                      static_cast<std::ptrdiff_t>(erased));
+                // An erased hexbit may or may not be wrong; the decoder must
+                // not care which.
+                for (const std::size_t position : erasures) {
+                    received[position] ^= static_cast<std::uint8_t>(rng() % 64U);
+                }
+                for (std::size_t i = erased; i < erased + errors; ++i) {
+                    received[positions[i]] ^= static_cast<std::uint8_t>(1U + rng() % 63U);
+                }
+                attempt(received, erasures);
+            }
+        }
+        INFO("decoded wrongly or not at all: " << wrong << " of " << tried);
+        CHECK(wrong == 0);
+
+        // One error past the guarantee. The code cannot correct it, and what
+        // matters is that it says so rather than handing back a different
+        // code word as though it were the one sent.
+        std::size_t refused = 0;
+        std::size_t miscorrected = 0;
+        constexpr int kBeyond = 2000;
+        for (int draw = 0; draw < kBeyond; ++draw) {
+            std::vector<std::size_t> positions(code.n);
+            for (std::size_t i = 0; i < code.n; ++i) {
+                positions[i] = i;
+            }
+            std::shuffle(positions.begin(), positions.end(), rng);
+            std::vector<std::uint8_t> received = *sent;
+            for (std::size_t i = 0; i < parity / 2 + 1; ++i) {
+                received[positions[i]] ^= static_cast<std::uint8_t>(1U + rng() % 63U);
+            }
+            auto decoded = decode::p25_rs_decode(code, received);
+            REQUIRE(decoded.has_value());
+            refused += decoded->decoded ? 0U : 1U;
+            miscorrected += (decoded->decoded && decoded->codeword != *sent) ? 1U : 0U;
+        }
+        std::println("test_p25p1 {}: {} errors, refused {}, miscorrected {} of {}", printed.name,
+                     parity / 2 + 1, refused, miscorrected, kBeyond);
+        CHECK(miscorrected * 100 <= static_cast<std::size_t>(kBeyond));
+    }
+}
+
+TEST_CASE("the shortened Hamming code is Table 5-4 and flags what it cannot correct",
+          "[decode][p25]") {
+    // Table 5-4 prints the (15,11,3) code beside the (10,6,3) one and clause
+    // 5.8 says the short code is cut from it. Every short row's parity nibble
+    // must therefore be one of the long code's, which is a check on the
+    // transcription against the other column of the same table.
+    constexpr std::uint8_t kStandardParity[11] = {
+        0b1111, 0b1110, 0b1101, 0b1100, 0b1011, 0b1010, 0b1001, 0b0111, 0b0110, 0b0101, 0b0011,
+    };
+    for (const std::uint16_t row : decode::kP25Hamming10Rows) {
+        const auto nibble = static_cast<std::uint8_t>(row & 0xFU);
+        CHECK(std::find(std::begin(kStandardParity), std::end(kStandardParity), nibble) !=
+              std::end(kStandardParity));
+    }
+
+    std::uint32_t minimum = 10;
+    for (std::uint8_t hexbit = 0; hexbit < 64U; ++hexbit) {
+        const std::uint16_t word = decode::p25_hamming10_encode(hexbit);
+        CHECK(((word >> 4U) & 0x3FU) == hexbit);
+        if (hexbit != 0) {
+            minimum = std::min(minimum, static_cast<std::uint32_t>(std::popcount(word)));
+        }
+        for (unsigned bit = 0; bit < 10U; ++bit) {
+            const auto decoded =
+                decode::p25_hamming10_decode(static_cast<std::uint16_t>(word ^ (1U << bit)));
+            CHECK(decoded.information == hexbit);
+            CHECK(decoded.distance == 1);
+            CHECK_FALSE(decoded.detected);
+        }
+    }
+    CHECK(minimum == 3);
+
+    // Clause 5.8 gives error detection as the reason the rows were chosen the
+    // way they were. Measured over every code word and every double error:
+    // the share flagged rather than silently miscorrected.
+    std::uint32_t flagged = 0;
+    std::uint32_t doubles = 0;
+    for (std::uint8_t hexbit = 0; hexbit < 64U; ++hexbit) {
+        const std::uint16_t word = decode::p25_hamming10_encode(hexbit);
+        for (unsigned a = 0; a < 10U; ++a) {
+            for (unsigned b = a + 1; b < 10U; ++b) {
+                const auto decoded = decode::p25_hamming10_decode(
+                    static_cast<std::uint16_t>(word ^ (1U << a) ^ (1U << b)));
+                ++doubles;
+                flagged += decoded.detected ? 1U : 0U;
+            }
+        }
+    }
+    std::println("test_p25p1 (10,6,3) Hamming: double errors flagged {} of {}", flagged, doubles);
+    CHECK(flagged > 0);
+}
+
+TEST_CASE("the low speed data code regenerates Table 5-2 and the clause 5.6 example",
+          "[decode][p25]") {
+    // Table 5-2, the parity half of each row, row 1 the most significant bit.
+    constexpr std::uint8_t kTable52Parity[8] = {
+        0b0100'1110, 0b0010'0111, 0b1000'1111, 0b1101'1011,
+        0b1111'0001, 0b1110'0100, 0b0111'0010, 0b0011'1001,
+    };
+    for (std::size_t row = 0; row < 8; ++row) {
+        INFO("row " << (row + 1));
+        const std::uint16_t word = decode::p25_lsd_encode(static_cast<std::uint8_t>(0x80U >> row));
+        CHECK(static_cast<unsigned>(word >> 8U) == (0x80U >> row));
+        CHECK((word & 0xFFU) == static_cast<unsigned>(kTable52Parity[row]));
+    }
+
+    // Clause 5.6: '"A" = $41 encodes to $41 1e'.
+    CHECK(decode::p25_lsd_encode(0x41) == 0x411E);
+
+    std::uint32_t minimum = 16;
+    for (unsigned octet = 1; octet < 256U; ++octet) {
+        minimum = std::min(minimum, static_cast<std::uint32_t>(std::popcount(
+                                        decode::p25_lsd_encode(static_cast<std::uint8_t>(octet)))));
+    }
+    CHECK(minimum == 5);
+
+    // d = 5 corrects two.
+    const std::uint16_t damaged = static_cast<std::uint16_t>(0x411E ^ 0x8001U);
+    const decode::LsdDecode decoded = decode::p25_lsd_decode(damaged);
+    CHECK(decoded.octet == 0x41);
+    CHECK(decoded.distance == 2);
+}
+
+TEST_CASE("the LDU layout puts every field where the clause 10.3 and 10.4 annexes do",
+          "[decode][p25]") {
+    // The annexes number symbols absolutely, status symbols included. These
+    // are the symbols they label "IMBE 1" through "IMBE 9", the first symbol
+    // of each block of four Hamming words, and the first low speed data
+    // symbol, read off the LDU1 annex; the LDU2 annex has the same numbers
+    // 864 higher.
+    constexpr std::size_t kImbeStarts[9] = {57, 131, 226, 320, 415, 510, 604, 699, 789};
+    constexpr std::size_t kHammingBlockStarts[6] = {205, 300, 394, 489, 584, 678};
+    constexpr std::size_t kLowSpeedDataStart = 773;
+
+    // An absolute symbol number to its index among the information symbols.
+    const auto information_index = [](std::size_t absolute) {
+        std::size_t status = 0;
+        for (std::size_t s = decode::kP25FirstStatusSymbol; s < absolute;
+             s += decode::kP25StatusSymbolInterval) {
+            ++status;
+        }
+        return absolute - status;
+    };
+
+    constexpr decode::P25LduLayout layout = decode::p25_ldu_layout();
+    for (std::size_t frame = 0; frame < 9; ++frame) {
+        INFO("IMBE " << (frame + 1));
+        CHECK(layout.voice[frame] == information_index(kImbeStarts[frame]));
+    }
+    for (std::size_t block = 0; block < 6; ++block) {
+        INFO("Hamming block " << (block + 1));
+        CHECK(layout.hamming[block * 4] == information_index(kHammingBlockStarts[block]));
+        for (std::size_t w = 1; w < 4; ++w) {
+            CHECK(layout.hamming[block * 4 + w] ==
+                  layout.hamming[block * 4] + w * decode::kP25HammingWordSymbols);
+        }
+    }
+    CHECK(layout.low_speed_data == information_index(kLowSpeedDataStart));
+
+    // And the fields tile the unit: the last voice frame ends on the last
+    // information symbol.
+    CHECK(layout.voice[8] + decode::kP25VoiceFrameSymbols == decode::kP25LduInformationSymbols);
 }
 
 TEST_CASE("the frame sync pattern is Table 8-1 read through Table 9-1", "[decode][p25]") {
