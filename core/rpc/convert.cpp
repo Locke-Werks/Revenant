@@ -183,6 +183,44 @@ Expected<engine::Demod> from_schema(schema::Demod mode) {
 
 namespace {
 
+// What a truncated passband does to this mode, for the modes where it breaks
+// the output rather than narrowing it, and nothing for the rest.
+//
+// PER MODE, because the reason differs. This used to be one sentence about a
+// discriminator attached to every mode engine::clamp_breaks_demodulator
+// names, which was true when that meant NFM and WFM. The digital voice modes
+// joined the predicate with their fine stage on 2026-09-22, and TETRA is not
+// discriminated at all: it is pi/4-DQPSK read through a root raised cosine
+// matched filter, and what a clamp costs it is intersymbol interference.
+// Exhaustive with no default, so a twelfth mode has to say something here.
+[[nodiscard]] std::string_view clamp_consequence(engine::Demod mode) {
+    switch (mode) {
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm:
+            return "the discriminator recovers the instantaneous frequency of whatever reaches "
+                   "it, so what comes out is the wrong audio rather than less of the right "
+                   "audio";
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+            return "core/decode discriminates it to recover the symbols, so a cut sideband "
+                   "moves the symbol levels rather than lowering them, and the decoder reads "
+                   "wrong symbols from a carrier the waterfall shows as clean";
+        case engine::Demod::Tetra:
+            return "its receive filter is matched to the whole root raised cosine channel, so "
+                   "cutting into it spreads every symbol into its neighbours, and the decoder "
+                   "reads that intersymbol interference as bit errors on a carrier the "
+                   "waterfall shows as clean";
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Dsb:
+        case engine::Demod::Cw:
+            return {};
+    }
+    return {};
+}
+
 // The sentence VrxPlacement::clampReason carries, or nothing.
 //
 // Built from the request and the grant together, which is why this is here
@@ -227,10 +265,8 @@ namespace {
         if (engine::clamp_breaks_demodulator(request.demod)) {
             out += std::format(
                 ". A {} receiver on a truncated passband is not a narrower version of the "
-                "same receiver: the discriminator recovers the instantaneous frequency of "
-                "whatever reaches it, so what comes out is the wrong audio rather than less "
-                "of the right audio",
-                engine::demod_name(request.demod));
+                "same receiver: {}",
+                engine::demod_name(request.demod), clamp_consequence(request.demod));
         }
     }
 
