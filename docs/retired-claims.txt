@@ -840,3 +840,16 @@ commit: b575e40
 instead: The P25 adapter spent 21.50 to 24.53 ms of one core per second of
     48000 S/s input over three runs of the ci preset's RelWithDebInfo build,
     against 83.58 ms in Debug.
+
+phrase: Remove the carrier offset the same way the P25 path does
+retired: 2026-09-22
+commit: 12aa69d
+instead: P25 takes no block mean any more; it fits each data unit's sync word
+    for offset and deviation. D-STAR still subtracts each call's mean, which
+    makes its output depend on the blocking.
+
+phrase: Index into the symbol run at which this frame's sync word starts
+retired: 2026-09-22
+commit: 12aa69d
+instead: P25Frame::first_symbol counts from the start of the stream, however
+    many process() calls it took, so it no longer moves with the blocking.

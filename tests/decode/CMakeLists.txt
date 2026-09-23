@@ -34,6 +34,10 @@
 # vocoder. Its frames are built by imbe_test_frames.h, which test_imbe.cpp
 # shares, so both suites agree on what a frame is.
 #
+# test_p25p1_blocking.cpp decodes one P25 capture whole and in eight other
+# blockings, down to one sample a call, and requires every data unit to come
+# out identical, which is the property the engine's block-at-a-time feed needs.
+#
 # Every error rate in those three is measured and reported in an INFO line and
 # the assertion around it is loose. A bit error rate asserted to three decimal
 # places is a test that fails when somebody improves the receiver, and the

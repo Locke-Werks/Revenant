@@ -781,6 +781,30 @@ encryption sync word decodes, with a raw voice channel bit error rate of
 0.00019 and 0.0116 and no frame repeated or muted; at 3 dB one LDU of four
 frames, and the frame sync search is the limit there rather than any code.
 
+**P25 Phase 1 decodes the same however its input is blocked.** Until
+2026-09-22 it did not. `P25Phase1::process` restarted its discriminator
+against 1+0i and its receive filter from zeros at every call, and took each
+call's mean as the carrier offset, so the engine's block length changed what
+came out: through `tests/rpc/test_rpc_decode.cpp`'s engine and adapter, six
+headers sent gave four back at 16384-sample blocks and one at 65536. The
+discriminator and filter now carry their state across calls
+(`core/decode/dv_phy.h`, `FmDiscriminator` and `RealFir`), the sync search is
+a centred correlation that no carrier offset moves, and each data unit is
+sliced after a least-squares fit of its own 24 sync symbols gives the offset
+and the deviation. The same case now gives all six at both block sizes.
+`tests/decode/test_p25p1_blocking.cpp` decodes one capture, a carrier 350 Hz
+off with baseband DC and noise at 20 dB, whole, in eight blockings down to one
+sample a call, and holds every data unit identical to the whole-capture
+decode; its header records what each of the three steps cost, the filter
+restart most. A second case frames a carrier 1200 Hz off with no NID bit
+corrected, which the old search did not frame at all once the per-call mean
+was gone. `tests/engine/test_engine_dv.cpp` holds the fine stage's output
+identical at 16384 and 65536-sample engine blocks. What is still open: the
+first header of a transmission is lost in some captures, in every blocking,
+at decode level when baseband DC and noise are both present before it and
+through that engine case's 2.304 MS/s grid, and the cause is not
+established.
+
 The transmitter computes every parity the clauses specify, so its header and
 LDUs are what a radio expects to receive. What it lacks is an IMBE encoder:
 it carries frames a caller has built, the tests build theirs from chosen

@@ -268,9 +268,14 @@ Status DStar::process(ConstComplexSpan samples, std::vector<DStarTransmission>& 
         return std::unexpected(with_context(status.error(), "D-STAR receive filtering"));
     }
 
-    // Remove the carrier offset the same way the P25 path does. The bit sync
-    // is an alternating pattern and the scrambled body is balanced, so the
-    // block mean estimates the offset rather than the data.
+    // Remove the carrier offset as the block mean. The bit sync is an
+    // alternating pattern and the scrambled body is balanced, so the block
+    // mean estimates the offset rather than the data. That, like restarting
+    // the discriminator and the filter above at every call, makes the output
+    // depend on how the input is blocked; core/decode/p25p1.cpp stopped doing
+    // all three on 2026-09-22 and tests/decode/test_p25p1_blocking.cpp has
+    // what each cost there. WHAT THIS USED TO SAY: "Remove the carrier offset
+    // the same way the P25 path does", which the P25 path no longer does.
     double mean = 0.0;
     for (const float value : filtered_) {
         mean += static_cast<double>(value);
