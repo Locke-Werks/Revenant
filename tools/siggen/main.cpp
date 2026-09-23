@@ -1242,18 +1242,34 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
 
 [[nodiscard]] Expected<std::vector<Complex32>> render_dv(std::string_view mode, SampleRate rate,
                                                          std::int64_t frames, std::uint64_t seed,
-                                                         std::int64_t talkgroup, std::string& summary)
+                                                         std::int64_t talkgroup, std::int64_t algid,
+                                                         std::string& summary)
 {
     namespace decode = revenant::decode;
 
     if (mode == "p25p1") {
         // TIA-102.BAAA-A clause 10.2: a Header Data Unit and terminator,
-        // unencrypted, repeated. A receiver loses the tail of a capture to
-        // its filter and timing window, so each copy is what lets the one
-        // before it decode, which is the arrangement test_p25p1.cpp uses.
+        // repeated. A receiver loses the tail of a capture to its filter and
+        // timing window, so each copy is what lets the one before it decode,
+        // which is the arrangement test_p25p1.cpp uses.
+        //
+        // Unencrypted unless --algid names another algorithm. Then the header
+        // says the call is encrypted and nothing else about it changes: there
+        // is no voice in this signal to encrypt, and a decoder reporting the
+        // flag is all a client showing one needs to be shown.
         siggen::P25HeaderMessage message;
-        message.header.algorithm_id = decode::kP25AlgidUnencrypted;
+        message.header.algorithm_id = static_cast<std::uint8_t>(algid);
         message.header.talkgroup_id = static_cast<std::uint16_t>(talkgroup);
+        if (algid != decode::kP25AlgidUnencrypted) {
+            // TIA-102.BAAC clause 2.6: an encrypted call never carries the
+            // null message indicator, so one is made from the seed.
+            std::uint64_t state = seed ^ 0x5032'354D'4900'0000ULL;
+            for (std::uint8_t& byte : message.header.message_indicator) {
+                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                byte = static_cast<std::uint8_t>(state >> 56U);
+            }
+            message.header.key_id = 1;
+        }
         auto dibits = siggen::p25_header_message_dibits(message);
         if (!dibits) {
             return std::unexpected(dibits.error());
@@ -1264,8 +1280,9 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
         }
         siggen::P25ModConfig config;
         config.rate = rate;
-        summary = std::format("{} header data units and terminators, NAC 0x{:03X}, talkgroup {}", frames,
-                              message.network_access_code, talkgroup);
+        summary = std::format("{} header data units and terminators, NAC 0x{:03X}, talkgroup {}, "
+                              "ALGID 0x{:02X}",
+                              frames, message.network_access_code, talkgroup, algid);
         return siggen::p25_render_dibits(config, stream);
     }
 
@@ -1330,6 +1347,7 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
     auto frames = options.integer("frames", 4);
     auto seed = options.integer("seed", 0);
     auto talkgroup = options.integer("talkgroup", 0x2A7);
+    auto algid = options.integer("algid", revenant::decode::kP25AlgidUnencrypted);
     auto snr = options.text("snr", "");
     auto format = options.text("format", "cf32");
     auto scale = options.real("scale", 1.0);
@@ -1339,6 +1357,7 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
     if (!frames) { return std::unexpected(frames.error()); }
     if (!seed) { return std::unexpected(seed.error()); }
     if (!talkgroup) { return std::unexpected(talkgroup.error()); }
+    if (!algid) { return std::unexpected(algid.error()); }
     if (!snr) { return std::unexpected(snr.error()); }
     if (!format) { return std::unexpected(format.error()); }
     if (!scale) { return std::unexpected(scale.error()); }
@@ -1346,6 +1365,7 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
     if (out_path->empty()) { return fail("--out is required"); }
     if (*frames <= 0) { return fail("--frames must be positive"); }
     if (*talkgroup < 0 || *talkgroup > 0xFFFF) { return fail("--talkgroup must fit in 16 bits"); }
+    if (*algid < 0 || *algid > 0xFF) { return fail("--algid must fit in 8 bits"); }
     if (!std::isfinite(*scale) || *scale <= 0.0) { return fail("--scale must be positive"); }
 
     auto parsed_format = format_from_name(*format);
@@ -1358,7 +1378,8 @@ std::vector<std::array<std::uint8_t, revenant::decode::kDStarVoiceBits>> voice_f
     }
 
     std::string summary;
-    auto samples = render_dv(*mode, *rate, *frames, static_cast<std::uint64_t>(*seed), *talkgroup, summary);
+    auto samples = render_dv(*mode, *rate, *frames, static_cast<std::uint64_t>(*seed), *talkgroup,
+                             *algid, summary);
     if (!samples) {
         return std::unexpected(with_context(samples.error(), std::format("siggen dv {}", *mode)));
     }
@@ -1469,9 +1490,11 @@ void print_usage()
         "\n"
         "  dv                --mode p25p1|dstar|tetra --out PATH --frames N (4)\n"
         "                    --rate N (48000, 72000 for tetra) --seed N\n"
-        "                    --talkgroup N (p25p1) --snr X --format F --scale X\n"
+        "                    --talkgroup N (p25p1) --algid N (p25p1, 128 is clear)\n"
+        "                    --snr X --format F --scale X\n"
         "                    From core/dsp/synth/dv_mod.h. --snr adds noise at that\n"
-        "                    SNR in 2500 Hz.\n"
+        "                    SNR in 2500 Hz. An --algid other than 128 marks the\n"
+        "                    header encrypted; nothing is encrypted.\n"
         "\n"
         "  wideband          --emitters N --bursts N --span-low N --span-high N\n"
         "                    --noise-dbfs X --no-noise --snr-min X --snr-max X\n"
