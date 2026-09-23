@@ -609,6 +609,12 @@ void Cw::run(std::span<const Complex32> baseband, std::vector<CwCharacter>& out)
     const double hold = 1.0 / (kLevelHoldSeconds * rate);
     const double noise = 1.0 / (kNoiseSeconds * rate);
 
+    // Output samples until the front end's whole low-pass has seen input,
+    // and the boxcar after it. Counted from the start of the stream, which is
+    // where index_ counts from, so a stream acquired late has long passed it.
+    const auto settle = static_cast<SampleIndex>(
+        (2 * front_.group_delay() + front_.decimation() - 1) / front_.decimation() + boxcar_);
+
     for (const Complex32 sample : baseband) {
         const double cycles = std::fmod(offset_hz_ * static_cast<double>(index_) / rate, 1.0);
         const std::complex<double> value =
@@ -658,8 +664,20 @@ void Cw::run(std::span<const Complex32> baseband, std::vector<CwCharacter>& out)
             // a tracker started from one sample takes seconds to climb out of
             // wherever that sample happened to be, and decodes noise the
             // while.
+            //
+            // Nothing is learned before the front end's low-pass and the
+            // boxcar have filled. Until then the envelope is the filter's
+            // start-up transient, rising from zero, and at 48000 S/s that is
+            // 25 of the 125 warm samples. The first version sorted them in
+            // with the noise: the starting quartile came out 0.0090 where
+            // the noise's settles at 0.0180, so the open bar stood about 1.8
+            // noise deviations above the real mean rather than 5.5, and 19 of
+            // 200 transmissions at +10 dB began with characters keyed by the
+            // lead-in's noise. With the fill left out it was 1 of 200.
             const auto warm_samples = static_cast<std::size_t>(kWarmSeconds * rate);
-            if (warm_.size() < warm_samples) {
+            if (index_ < settle) {
+                // Still filling.
+            } else if (warm_.size() < warm_samples) {
                 warm_.push_back(envelope);
                 if (warm_.size() == warm_samples) {
                     std::vector<double> sorted = warm_;

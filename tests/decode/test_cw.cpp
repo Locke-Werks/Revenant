@@ -286,6 +286,35 @@ TEST_CASE("the timing decoder follows a hand sender and a change of speed",
 // The audio decoder against the keyer
 // ---------------------------------------------------------------------------
 
+TEST_CASE("CW keys nothing from the noise before a transmission", "[decode][cw]") {
+    // Half a second of noise, the keyer's own lead-in, before the first
+    // element, at +10 dB in 2500 Hz where nothing else goes wrong. The squelch
+    // opens 5.5 noise deviations above the noise's mean, so the lead-in
+    // should key nothing. It keyed characters in 19 of 200 transmissions of
+    // text like the sweep's at +10 dB, and in 4 of these 32, because the
+    // noise statistics started from a quarter of a second that included the
+    // front end's own start-up.
+    siggen::CwModConfig mod;
+    mod.tone_hz = 720;
+    mod.wpm = 20.0;
+    const std::string text = "CQ DE G3PLX";
+    std::size_t wrong = 0;
+    std::string first_wrong;
+    for (std::uint64_t seed = 1; seed <= 32; ++seed) {
+        const std::vector<float> audio = render(mod, text, 10.0, true, 0xC0DE'0000ULL + seed);
+        const AudioResult got = decode_audio(decode::CwConfig{}, audio, 4800);
+        if (got.text != text) {
+            ++wrong;
+            if (first_wrong.empty()) {
+                first_wrong = "seed " + std::to_string(seed) + " decoded '" + got.text +
+                              "' as " + got.coded;
+            }
+        }
+    }
+    INFO(wrong << " of 32 wrong; first " << first_wrong);
+    CHECK(wrong == 0);
+}
+
 TEST_CASE("CW round trips at 48 kHz with the tone off centre", "[decode][cw]") {
     siggen::CwModConfig mod;
     mod.rate = 48000;
