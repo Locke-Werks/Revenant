@@ -29,10 +29,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
 
+#include "core/decode/ax25.h"
 #include "core/decode/rtty.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
@@ -82,5 +84,64 @@ struct RttyModConfig {
 // first, and a stop element of stop_units at condition Z.
 [[nodiscard]] Expected<std::vector<float>> rtty_render(const RttyModConfig& config,
                                                        std::span<const std::uint8_t> combinations);
+
+// ---------------------------------------------------------------------------
+// AX.25 over Bell 202 AFSK
+// ---------------------------------------------------------------------------
+
+struct Ax25ModConfig {
+    SampleRate rate = 48000;
+    Hertz mark_hz = decode::kBell202MarkHz;
+    Hertz space_hz = decode::kBell202SpaceHz;
+    double baud = decode::kBell202Baud;
+
+    // Flags before the first frame, between frames and after the last.
+    // Finnegan and Benson section 3 find no document fixing any of the
+    // three and report a commercial TNC sending 3, 7 and 5; the lead here
+    // is longer because it stands in for the transmitter delay a receiver
+    // spends settling, which the paper puts at hundreds of milliseconds.
+    std::size_t leading_flags = 32;
+    std::size_t flags_between = 4;
+    std::size_t trailing_flags = 4;
+
+    double amplitude = 0.5;
+
+    // Level of the space tone relative to mark, in dB. Finnegan and Benson
+    // section 4 describe pre-emphasis and de-emphasis tilting the two tones
+    // by up to 10 dB either way on real stations; this reproduces it.
+    double space_gain_db = 0.0;
+
+    // Fractional error of the transmitter's bit clock, so the receiver's
+    // clock loop has something to track.
+    double baud_error = 0.0;
+};
+
+// Address through information for one frame, per AX.25 2.2 clause 3 and
+// Figure 3.1: destination, source, up to eight repeaters, control, the PID
+// where clause 3.4 puts one, and the information field.
+struct Ax25FrameSpec {
+    decode::Ax25Address destination;
+    decode::Ax25Address source;
+    std::vector<decode::Ax25Address> repeaters;
+    std::uint8_t control = decode::kAx25ControlUi;
+    std::optional<std::uint8_t> pid = decode::kAx25PidNoLayer3;
+    std::vector<std::uint8_t> information;
+};
+
+[[nodiscard]] Expected<std::vector<std::uint8_t>> ax25_frame_octets(const Ax25FrameSpec& frame);
+
+// The bits on the air before NRZI: flags, and each frame's octets with its
+// FCS appended, least significant bit first, bit stuffed per clause 3.6.
+[[nodiscard]] std::vector<std::uint8_t> hdlc_bits(
+    std::span<const std::vector<std::uint8_t>> frames, const Ax25ModConfig& config);
+
+// NRZI then AFSK: a zero changes tone and a one does not.
+[[nodiscard]] Expected<std::vector<float>> afsk_render_bits(const Ax25ModConfig& config,
+                                                            std::span<const std::uint8_t> bits);
+
+// hdlc_bits then afsk_render_bits, for frames given as address through
+// information.
+[[nodiscard]] Expected<std::vector<float>> ax25_render(
+    const Ax25ModConfig& config, std::span<const std::vector<std::uint8_t>> frames);
 
 }  // namespace revenant::siggen

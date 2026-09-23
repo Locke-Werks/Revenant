@@ -62,6 +62,7 @@ add_library(revenant_core STATIC
     characterise/periodicity.cpp
     characterise/tones.cpp
     characterise/transform.cpp
+    decode/ax25.cpp
     decode/dstar.cpp
     decode/dv_codes.cpp
     decode/dv_phy.cpp

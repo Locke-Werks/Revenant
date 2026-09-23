@@ -20,7 +20,7 @@ struct Segment {
 // through every change of tone, which is what a keyed oscillator does.
 std::vector<float> render_segments(std::span<const Segment> segments, SampleRate rate,
                                    double baud, double mark_hz, double space_hz,
-                                   double amplitude) {
+                                   double amplitude, double space_gain = 1.0) {
     double total_units = 0.0;
     for (const Segment& s : segments) {
         total_units += s.units;
@@ -40,7 +40,8 @@ std::vector<float> render_segments(std::span<const Segment> segments, SampleRate
             segment_end += segments[segment].units;
         }
         const double f = segments[segment].mark ? mark_hz : space_hz;
-        out.push_back(static_cast<float>(amplitude * std::cos(phase)));
+        const double gain = segments[segment].mark ? 1.0 : space_gain;
+        out.push_back(static_cast<float>(amplitude * gain * std::cos(phase)));
         phase = std::fmod(phase + kTwoPi * f / static_cast<double>(rate), kTwoPi);
     }
     return out;
@@ -103,6 +104,103 @@ Expected<std::vector<float>> rtty_render(const RttyModConfig& config,
     segments.push_back({true, config.tail_units});
 
     return render_segments(segments, config.rate, config.baud, mark, space, config.amplitude);
+}
+
+// ---------------------------------------------------------------------------
+// AX.25
+// ---------------------------------------------------------------------------
+
+Expected<std::vector<std::uint8_t>> ax25_frame_octets(const Ax25FrameSpec& frame) {
+    if (frame.repeaters.size() > decode::kAx25MaximumRepeaters) {
+        return fail("more AX.25 repeaters than the decoder accepts");
+    }
+    std::vector<std::uint8_t> out;
+    std::vector<const decode::Ax25Address*> order = {&frame.destination, &frame.source};
+    for (const auto& r : frame.repeaters) {
+        order.push_back(&r);
+    }
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        auto encoded = decode::ax25_encode_address(*order[i], i + 1 == order.size());
+        if (!encoded) {
+            return std::unexpected(encoded.error());
+        }
+        out.insert(out.end(), encoded->begin(), encoded->end());
+    }
+    out.push_back(frame.control);
+    if (frame.pid) {
+        out.push_back(*frame.pid);
+    }
+    out.insert(out.end(), frame.information.begin(), frame.information.end());
+    return out;
+}
+
+std::vector<std::uint8_t> hdlc_bits(std::span<const std::vector<std::uint8_t>> frames,
+                                    const Ax25ModConfig& config) {
+    std::vector<std::uint8_t> bits;
+    const auto flags = [&bits](std::size_t count) {
+        for (std::size_t f = 0; f < count; ++f) {
+            for (unsigned b = 0; b < 8; ++b) {
+                bits.push_back(static_cast<std::uint8_t>((decode::kAx25Flag >> b) & 1U));
+            }
+        }
+    };
+
+    flags(config.leading_flags);
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        std::vector<std::uint8_t> octets = frames[i];
+        // Clause 3.8 by way of Finnegan and Benson section 3.2: the FCS
+        // register holds the check bit-reversed, so low octet first, each
+        // least significant bit first, sends bit 15 first.
+        const std::uint16_t fcs = decode::ax25_fcs(octets);
+        octets.push_back(static_cast<std::uint8_t>(fcs & 0xFFU));
+        octets.push_back(static_cast<std::uint8_t>(fcs >> 8U));
+
+        int ones = 0;
+        for (const std::uint8_t octet : octets) {
+            for (unsigned b = 0; b < 8; ++b) {
+                const auto bit = static_cast<std::uint8_t>((octet >> b) & 1U);
+                bits.push_back(bit);
+                ones = bit != 0U ? ones + 1 : 0;
+                if (ones == decode::kAx25StuffAfterOnes) {
+                    bits.push_back(0);
+                    ones = 0;
+                }
+            }
+        }
+        flags(i + 1 == frames.size() ? config.trailing_flags : config.flags_between);
+    }
+    return bits;
+}
+
+Expected<std::vector<float>> afsk_render_bits(const Ax25ModConfig& config,
+                                              std::span<const std::uint8_t> bits) {
+    if (config.rate <= 0 || !(config.baud > 0.0)) {
+        return fail("AFSK needs a positive sample rate and baud");
+    }
+    if (config.mark_hz <= 0 || config.space_hz <= 0 || config.mark_hz * 2 >= config.rate ||
+        config.space_hz * 2 >= config.rate) {
+        return fail("AFSK tones must lie between zero and half the sample rate");
+    }
+
+    std::vector<Segment> segments;
+    segments.reserve(bits.size());
+    bool mark = true;
+    for (const std::uint8_t bit : bits) {
+        if (bit == 0U) {
+            mark = !mark;
+        }
+        segments.push_back({mark, 1.0});
+    }
+    return render_segments(segments, config.rate, config.baud * (1.0 + config.baud_error),
+                           static_cast<double>(config.mark_hz),
+                           static_cast<double>(config.space_hz), config.amplitude,
+                           std::pow(10.0, config.space_gain_db / 20.0));
+}
+
+Expected<std::vector<float>> ax25_render(const Ax25ModConfig& config,
+                                         std::span<const std::vector<std::uint8_t>> frames) {
+    const std::vector<std::uint8_t> bits = hdlc_bits(frames, config);
+    return afsk_render_bits(config, bits);
 }
 
 }  // namespace revenant::siggen
