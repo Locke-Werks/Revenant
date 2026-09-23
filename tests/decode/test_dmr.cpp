@@ -39,34 +39,37 @@ namespace {
 
 constexpr dsp::SampleRate kRate = 48'000;
 
-// A printed generator matrix, one row per line, as the table sets it.
-std::vector<std::uint32_t> matrix_rows(std::string_view text) {
-    std::vector<std::uint32_t> rows;
-    std::uint32_t row = 0;
-    bool any = false;
+// WHY THE PRINTED TABLES ARE FINGERPRINTS HERE AND NOT TRANSCRIPTIONS
+//
+// ETSI publishes TS 102 361 at no charge and keeps its copyright, and
+// docs/modes.md's rule for such a document is that a clause number goes in a
+// comment and a table does not go in the tree. So each table this suite
+// checks against was read out of the PDF's text layer by script on
+// 2026-09-23, compared row for row with what the code regenerates, and then
+// reduced to the FNV-1a 64-bit hash of its text: every row's digits with no
+// spaces, then a newline. The case below builds the same text from the
+// implementation and compares hashes, which fails on any single digit and
+// carries none of the table.
+std::uint64_t fnv1a(std::string_view text) {
+    std::uint64_t hash = 0xCBF2'9CE4'8422'2325ULL;
     for (const char c : text) {
-        if (c == '0' || c == '1') {
-            row = (row << 1U) | static_cast<std::uint32_t>(c - '0');
-            any = true;
-        } else if (c == '\n' && any) {
-            rows.push_back(row);
-            row = 0;
-            any = false;
-        }
+        hash = (hash ^ static_cast<std::uint8_t>(c)) * 0x0000'0100'0000'01B3ULL;
     }
-    if (any) {
-        rows.push_back(row);
-    }
-    return rows;
+    return hash;
 }
 
-void check_regenerates(const decode::DmrBlockCode& code, std::string_view printed) {
-    const std::vector<std::uint32_t> rows = matrix_rows(printed);
-    REQUIRE(rows.size() == code.k);
+// A code's generator matrix as that text: one row per information bit, most
+// significant first, each row the n bits of its code word.
+std::string generator_text(const decode::DmrBlockCode& code) {
+    std::string out;
     for (std::size_t i = 0; i < code.k; ++i) {
-        INFO("row " << i + 1);
-        CHECK(decode::dmr_block_encode(code, 1U << (code.k - 1 - i)) == rows[i]);
+        const std::uint32_t word = decode::dmr_block_encode(code, 1U << (code.k - 1 - i));
+        for (std::size_t bit = 0; bit < code.n; ++bit) {
+            out.push_back(((word >> (code.n - 1 - bit)) & 1U) != 0 ? '1' : '0');
+        }
+        out.push_back('\n');
     }
+    return out;
 }
 
 std::uint32_t minimum_distance(const decode::DmrBlockCode& code) {
@@ -84,95 +87,33 @@ std::uint32_t minimum_distance(const decode::DmrBlockCode& code) {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("the DMR block codes regenerate the Annex B.3 generator matrices", "[decode][dmr]") {
-    SECTION("Table B.11, Golay (20,8)") {
-        check_regenerates(decode::kDmrGolay20, R"(
-            1 0 0 0 0 0 0 0 0 0 1 1 1 1 0 1 1 0 1 0
-            0 1 0 0 0 0 0 0 1 1 0 1 1 0 0 1 1 0 0 1
-            0 0 1 0 0 0 0 0 0 1 1 0 1 1 0 0 1 1 0 1
-            0 0 0 1 0 0 0 0 0 0 1 1 0 1 1 0 0 1 1 1
-            0 0 0 0 1 0 0 0 1 1 0 1 1 1 0 0 0 1 1 0
-            0 0 0 0 0 1 0 0 1 0 1 0 1 0 0 1 0 1 1 1
-            0 0 0 0 0 0 1 0 1 0 0 1 0 0 1 1 1 1 1 0
-            0 0 0 0 0 0 0 1 1 0 0 0 1 1 1 0 1 0 1 1
-        )");
-    }
-    SECTION("Table B.12, quadratic residue (16,7,6)") {
-        check_regenerates(decode::kDmrQr16, R"(
-            1 0 0 0 0 0 0 0 0 1 0 0 1 1 1 1
-            0 1 0 0 0 0 0 1 0 0 0 1 1 1 1 0
-            0 0 1 0 0 0 0 1 1 0 1 1 0 1 1 1
-            0 0 0 1 0 0 0 1 1 1 1 0 0 0 1 0
-            0 0 0 0 1 0 0 1 1 1 0 0 1 0 0 1
-            0 0 0 0 0 1 0 0 1 1 1 0 0 1 0 1
-            0 0 0 0 0 0 1 0 0 1 1 1 0 0 1 1
-        )");
-    }
-    SECTION("Table B.13, Hamming (17,12,3)") {
-        check_regenerates(decode::kDmrHamming17, R"(
-            1 0 0 0 0 0 0 0 0 0 0 0 1 1 0 1 1
-            0 1 0 0 0 0 0 0 0 0 0 0 1 1 1 1 1
-            0 0 1 0 0 0 0 0 0 0 0 0 1 1 1 0 1
-            0 0 0 1 0 0 0 0 0 0 0 0 1 1 1 0 0
-            0 0 0 0 1 0 0 0 0 0 0 0 0 1 1 1 0
-            0 0 0 0 0 1 0 0 0 0 0 0 0 0 1 1 1
-            0 0 0 0 0 0 1 0 0 0 0 0 1 0 0 0 1
-            0 0 0 0 0 0 0 1 0 0 0 0 1 1 0 1 0
-            0 0 0 0 0 0 0 0 1 0 0 0 0 1 1 0 1
-            0 0 0 0 0 0 0 0 0 1 0 0 1 0 1 0 0
-            0 0 0 0 0 0 0 0 0 0 1 0 0 1 0 1 0
-            0 0 0 0 0 0 0 0 0 0 0 1 0 0 1 0 1
-        )");
-    }
-    SECTION("Table B.14, Hamming (13,9,3)") {
-        check_regenerates(decode::kDmrHamming13, R"(
-            1 0 0 0 0 0 0 0 0 1 1 1 1
-            0 1 0 0 0 0 0 0 0 1 1 1 0
-            0 0 1 0 0 0 0 0 0 0 1 1 1
-            0 0 0 1 0 0 0 0 0 1 0 1 0
-            0 0 0 0 1 0 0 0 0 0 1 0 1
-            0 0 0 0 0 1 0 0 0 1 0 1 1
-            0 0 0 0 0 0 1 0 0 1 1 0 0
-            0 0 0 0 0 0 0 1 0 0 1 1 0
-            0 0 0 0 0 0 0 0 1 0 0 1 1
-        )");
-    }
-    SECTION("Table B.15, Hamming (15,11,3)") {
-        check_regenerates(decode::kDmrHamming15, R"(
-            1 0 0 0 0 0 0 0 0 0 0 1 0 0 1
-            0 1 0 0 0 0 0 0 0 0 0 1 1 0 1
-            0 0 1 0 0 0 0 0 0 0 0 1 1 1 1
-            0 0 0 1 0 0 0 0 0 0 0 1 1 1 0
-            0 0 0 0 1 0 0 0 0 0 0 0 1 1 1
-            0 0 0 0 0 1 0 0 0 0 0 1 0 1 0
-            0 0 0 0 0 0 1 0 0 0 0 0 1 0 1
-            0 0 0 0 0 0 0 1 0 0 0 1 0 1 1
-            0 0 0 0 0 0 0 0 1 0 0 1 1 0 0
-            0 0 0 0 0 0 0 0 0 1 0 0 1 1 0
-            0 0 0 0 0 0 0 0 0 0 1 0 0 1 1
-        )");
-    }
-    SECTION("Table B.16, Hamming (16,11,4)") {
-        check_regenerates(decode::kDmrHamming16, R"(
-            1 0 0 0 0 0 0 0 0 0 0 1 0 0 1 1
-            0 1 0 0 0 0 0 0 0 0 0 1 1 0 1 0
-            0 0 1 0 0 0 0 0 0 0 0 1 1 1 1 1
-            0 0 0 1 0 0 0 0 0 0 0 1 1 1 0 0
-            0 0 0 0 1 0 0 0 0 0 0 0 1 1 1 0
-            0 0 0 0 0 1 0 0 0 0 0 1 0 1 0 1
-            0 0 0 0 0 0 1 0 0 0 0 0 1 0 1 1
-            0 0 0 0 0 0 0 1 0 0 0 1 0 1 1 0
-            0 0 0 0 0 0 0 0 1 0 0 1 1 0 0 1
-            0 0 0 0 0 0 0 0 0 1 0 0 1 1 0 1
-            0 0 0 0 0 0 0 0 0 0 1 0 0 1 1 1
-        )");
-    }
-    SECTION("Table B.17, Hamming (7,4,3)") {
-        check_regenerates(decode::kDmrHamming7, R"(
-            1 0 0 0 1 0 1
-            0 1 0 0 1 1 1
-            0 0 1 0 1 1 0
-            0 0 0 1 0 1 1
-        )");
+    // Tables B.11 to B.17, each as a fingerprint of its printed text.
+    struct Printed {
+        const char* table;
+        decode::DmrBlockCode code;
+        std::uint64_t fingerprint;
+    };
+    const Printed printed[] = {
+        {"Table B.11, Golay (20,8)", decode::kDmrGolay20, 0xBE94'8CCC'B332'3A53ULL},
+        {"Table B.12, quadratic residue (16,7,6)", decode::kDmrQr16, 0x0B68'FF48'49DA'090DULL},
+        {"Table B.13, Hamming (17,12,3)", decode::kDmrHamming17, 0xED21'F576'912B'AC05ULL},
+        {"Table B.14, Hamming (13,9,3)", decode::kDmrHamming13, 0xA77F'F331'F322'ADF3ULL},
+        {"Table B.15, Hamming (15,11,3)", decode::kDmrHamming15, 0x3966'1082'2FE0'3134ULL},
+        {"Table B.16, Hamming (16,11,4)", decode::kDmrHamming16, 0xC187'41AA'8578'F745ULL},
+        {"Table B.17, Hamming (7,4,3)", decode::kDmrHamming7, 0x6FBD'4695'B0DF'2C36ULL},
+    };
+    for (const Printed& table : printed) {
+        INFO(table.table);
+        const std::string regenerated = generator_text(table.code);
+        INFO("regenerated:\n" << regenerated);
+        CHECK(fnv1a(regenerated) == table.fingerprint);
+
+        // And systematic, which the fingerprint implies and a reader should
+        // not have to take from a hash: the identity is the first k columns.
+        for (std::size_t i = 0; i < table.code.k; ++i) {
+            const std::uint32_t word = decode::dmr_block_encode(table.code, 1U << (table.code.k - 1 - i));
+            CHECK((word >> (table.code.n - table.code.k)) == (1U << (table.code.k - 1 - i)));
+        }
     }
 }
 
@@ -227,18 +168,22 @@ TEST_CASE("GF(2^8) and the Reed-Solomon (12,9) code are what B.3.6 prints", "[de
     CHECK(g[2] == 0x0E);
     CHECK(g[3] == 0x01);
 
-    // Table B.18's parity columns, row by row.
-    const std::array<std::array<std::uint8_t, 3>, 9> printed = {{
-        {0x1C, 0xBC, 0xFD}, {0x89, 0x31, 0x08}, {0xAD, 0x41, 0x36},
-        {0x7D, 0x71, 0x16}, {0xF3, 0xA6, 0x3A}, {0x08, 0x83, 0x7B},
-        {0x3F, 0x6F, 0x02}, {0x6C, 0x0D, 0xA7}, {0x0E, 0x38, 0x40},
-    }};
+    // Table B.18's parity columns, the three octets of each row in hex, as a
+    // fingerprint for the reason the top of this file gives.
+    std::string parity_text;
     for (std::size_t row = 0; row < 9; ++row) {
         std::array<std::uint8_t, 9> message{};
         message[row] = 0x01;
-        INFO("row " << row + 1);
-        CHECK(decode::dmr_rs_parity(message) == printed[row]);
+        const auto parity = decode::dmr_rs_parity(message);
+        parity_text += std::format("{:02X}{:02X}{:02X}\n", parity[0], parity[1], parity[2]);
     }
+    INFO("regenerated:\n" << parity_text);
+    CHECK(fnv1a(parity_text) == 0x338D'EDA3'9BFF'702EULL);
+    // Row 9's parity is g(x) itself, x^3 mod g(x), which formula B.10 states
+    // outright.
+    std::array<std::uint8_t, 9> last{};
+    last[8] = 0x01;
+    CHECK(decode::dmr_rs_parity(last) == std::array<std::uint8_t, 3>{0x0E, 0x38, 0x40});
 
     // Distance 4 corrects one octet, anywhere and of any value.
     std::mt19937_64 random(0xD312'0002ULL);
@@ -279,35 +224,23 @@ TEST_CASE("the DMR CRCs and the checksum are the B.3.7, B.3.8 and B.3.11 formula
 }
 
 TEST_CASE("BPTC (196,96) encodes the Idle message to figure D.1", "[decode][dmr]") {
-    // Figure D.1, the 13 by 15 encoded matrix of the Table D.2 bits.
-    const std::vector<std::uint32_t> figure = matrix_rows(R"(
-        0 0 0 1 1 1 1 1 1 1 1 0 1 0 0
-        1 0 0 0 0 0 1 1 1 1 0 1 1 0 1
-        1 1 1 1 1 0 0 0 1 0 1 1 1 0 1
-        1 1 0 0 1 1 0 0 1 0 0 0 1 0 1
-        0 0 0 1 0 0 1 0 1 0 0 0 1 1 1
-        1 1 1 0 1 1 0 1 0 0 0 1 1 0 1
-        1 1 1 1 0 0 1 1 1 1 1 0 0 1 0
-        0 0 1 1 0 1 1 0 0 0 1 1 1 0 1
-        0 1 0 1 0 0 1 0 0 0 1 0 1 0 1
-        0 1 0 0 1 1 1 0 0 1 0 0 0 1 1
-        1 0 1 1 0 0 1 1 1 1 0 1 1 0 0
-        0 0 1 0 0 0 0 1 0 0 0 0 1 0 0
-        0 1 0 0 1 0 1 0 1 1 1 0 1 1 0
-    )");
-    REQUIRE(figure.size() == 13);
-
+    // Figure D.1, the 13 by 15 encoded matrix of the Table D.2 bits, as a
+    // fingerprint for the reason the top of this file gives.
     const auto encoded = decode::dmr_bptc196_encode(decode::dmr_idle_bits());
+    std::string matrix;
     for (std::size_t r = 0; r < 13; ++r) {
-        std::uint32_t row = 0;
         for (std::size_t c = 0; c < 15; ++c) {
             // Formula B.1: matrix bit n, counted from 1 behind R(3), goes to
             // n * 181 mod 196.
-            row = (row << 1U) | encoded[((1 + r * 15 + c) * 181U) % 196U];
+            matrix.push_back(encoded[((1 + r * 15 + c) * 181U) % 196U] != 0 ? '1' : '0');
         }
-        INFO("row " << r);
-        CHECK(row == figure[r]);
+        matrix.push_back('\n');
     }
+    INFO("regenerated:\n" << matrix);
+    CHECK(fnv1a(matrix) == 0x9406'2FF3'3216'2A67ULL);
+    // Its first row is R(2), R(1), R(0), I(95) to I(88), which Table D.2
+    // gives as eight ones, and then H_R1.
+    CHECK(matrix.substr(0, 11) == "00011111111");
     // R(3) is index 0 and goes to index 0.
     CHECK(encoded[0] == 0);
 
