@@ -88,10 +88,11 @@ if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
         TIMEOUT 120
         PASS_REGULAR_EXPRESSION "characterise +[0-9]+ samples collected")
 
-    # REJECTS a grouping that crashes or refuses on an ordinary run. It is a
-    # display arrangement over the track table, so what it draws is checked by
-    # reading it; what a test can add is that asking for it does not take the
-    # run down, which is the failure an operator would meet first.
+    # REJECTS a grouping that crashes or refuses on an ordinary run. What the
+    # groups contain is core/detect/groups.h's and tests/detect/test_groups.cpp
+    # checks it against the family scene; what this adds is that asking for it
+    # through the executable reaches the grouper and does not take the run
+    # down, which is the failure an operator would meet first.
     add_test(
         NAME cli_detect_groups
         COMMAND revenant-cli
@@ -101,14 +102,15 @@ if(REVENANT_BUILD_TOOLS AND TARGET revenant-cli)
     )
     # Same argument: an exit code cannot tell an option that ran from one that
     # was parsed and dropped, which is exactly the defect cli_characterise_zero
-    # above exists for. The grouping always says something, either a group or
-    # that there was no pair close enough, so either is the proof it ran. Which
-    # one appears depends on the track population at the instant the table is
-    # sampled and is not something to assert on.
+    # above exists for. The summary counts what the grouper did over the whole
+    # run and is printed whenever one was made, so it is the proof the option
+    # reached core/detect rather than being parsed and dropped. The tables
+    # above it depend on the instant each was sampled and are not something to
+    # assert on.
     set_tests_properties(cli_detect_groups PROPERTIES
         LABELS "tools"
         TIMEOUT 180
-        PASS_REGULAR_EXPRESSION "lines across|no two tracks within")
+        PASS_REGULAR_EXPRESSION "groups +[0-9]+ formed, [0-9]+ ended")
 endif()
 
 # The prose ratchet: no retired claim has come back anywhere in the tree.

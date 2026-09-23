@@ -42,6 +42,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -69,6 +70,7 @@
 #include "core/characterise/characterise.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
+#include "core/detect/groups.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/types.h"
 #include "core/dsp/vrx_reference.h"
@@ -459,13 +461,17 @@ struct Options {
     // frequency on purpose; see the flag's help text.
     std::uint32_t detect_split_gap = 0;
 
-    // How far apart two detections can sit and still be shown as one group, or
-    // zero for not asked.
+    // How far apart two tracks' centres can sit and still be followed as one
+    // group by detect::LineGrouper, or zero for not asked.
     //
-    // A DISPLAY GROUPING AND NOT A CLASSIFICATION. Nothing on the engine knows
-    // about it and no field carries it; this arranges rows on a terminal, the
-    // way the confidence bar filters them, and the distance is the operator's
-    // for the same reason both thresholds are.
+    // A GROUPING AND NOT A CLASSIFICATION. No field on the wire carries it,
+    // and the distance is the operator's for the same reason both thresholds
+    // are: no measurement has chosen one.
+    //
+    // WHAT THIS USED TO SAY: "Nothing on the engine knows about it and no
+    // field carries it; this arranges rows on a terminal". The arranging moved
+    // into core/detect/groups.h, where a group has an id that survives between
+    // decisions; the second half still holds.
     Hertz detect_groups = 0;
 
     // The ITU occupied-power fraction the reported bandwidth holds, or zero to
@@ -691,27 +697,31 @@ void print_usage()
         "                      so this costs the answers about noise rather than the answers\n"
         "                      about signals.\n"
         "  --detect-groups <hz>\n"
-        "                      Under the table, bracket tracks sitting within this of each\n"
-        "                      other and say where they sit relative to the strongest of\n"
-        "                      them, which is marked with an asterisk, with each line\'s\n"
-        "                      age beside it.\n"
-        "                      READ THE AGES FIRST. A group off one snapshot is the thing\n"
-        "                      most likely to be a coincidence. Lines that have all been\n"
-        "                      there half a minute are a structure; an old anchor with a\n"
-        "                      line a couple of seconds old is the track list moving under\n"
-        "                      you. On real HF that is mostly what these are.\n"
+        "                      Follow tracks whose centres chain within this of each other\n"
+        "                      as groups, through core/detect/groups.h, and print each under\n"
+        "                      the table: its id, which survives from one table to the next,\n"
+        "                      how long its current lines have all been in it, how far apart\n"
+        "                      their births were, and where each line sits relative to the\n"
+        "                      strongest, marked with an asterisk, with its own age beside it.\n"
+        "                      READ THE TWO GROUP AGES FIRST. Lines one emitter produces are\n"
+        "                      born together and stay together; an old carrier with a line\n"
+        "                      a few seconds old beside it is two things that sit close. On\n"
+        "                      real HF that is mostly what these are.\n"
+        "                      Every live and held track is grouped, not only the ones over\n"
+        "                      the confidence bar, so a group can name a line the table does\n"
+        "                      not list.\n"
         "                      WHAT IT IS FOR. Five of the eight families measured in\n"
         "                      tests/detect are reported as separate spectral lines, one\n"
         "                      detection each: an AM station is three rows in this table\n"
         "                      and a narrowband FM one is fifteen. The set of lines is what\n"
         "                      tells them apart and no single row can. On the scene, cw is\n"
         "                      one line, am is a carrier with a matched pair either side,\n"
-        "                      usb is two lines above its carrier and lsb the same two\n"
-        "                      below, and nfm is a comb at the modulation frequency.\n"
-        "                      IT DECIDES NOTHING and nothing on the engine knows about it.\n"
-        "                      The gap is an argument because no measurement has chosen one,\n"
-        "                      and a number chosen here would be a classification smuggled\n"
-        "                      in as a layout.\n"
+        "                      usb and lsb are two lines 1200 Hz apart, and nfm is a comb at\n"
+        "                      the modulation frequency.\n"
+        "                      IT DECIDES NOTHING and no field on the wire carries it. The\n"
+        "                      gap is an argument because no measurement has chosen one, and\n"
+        "                      a number chosen here would be a classification smuggled in as\n"
+        "                      a grouping rule.\n"
         "  --detect-occupied <fraction>\n"
         "                      The share of a detection's excess power its reported\n"
         "                      bandwidth holds, default 0.99, which is the ITU occupied\n"
@@ -1855,8 +1865,49 @@ public:
         double front_end_lift_db;
     };
 
+    // One member of one group from detect::LineGrouper, flattened so a
+    // group is the run of consecutive rows sharing an id. The group's own
+    // numbers are repeated on each of its rows for the same reason over_bar
+    // is: one write, so they cannot disagree with the members they describe.
+    static constexpr std::size_t kGroupRows = 128;
+    struct GroupRow {
+        std::uint64_t group;
+        std::uint64_t track;
+        double offset_hz;
+        double anchor_hz;
+        double span_hz;
+
+        // The member's own age, which is what the table beside it prints.
+        double age_seconds;
+
+        // The group's: how long its current members have all been in it,
+        // and how far apart their births were.
+        double together_seconds;
+        double births_seconds;
+
+        std::uint32_t members;
+        std::uint32_t state;
+    };
+
+    // What crosses the ring: the table and the groups of ONE decision. One
+    // element rather than two rings, so a drawing thread cannot print one
+    // decision's table under the next one's groups.
+    struct Snapshot {
+        std::array<Row, kRows> rows;
+        std::array<GroupRow, kGroupRows> groups;
+
+        // Groups at that decision, and how many were whole enough to fit
+        // above. A group that does not fit is left out entirely rather than
+        // cut, because a group with members missing is a different pattern.
+        std::uint32_t groups_total;
+        std::uint32_t groups_listed;
+    };
+
+    // group_gap is zero for no grouping, which is every run that did not ask
+    // for --detect-groups.
     [[nodiscard]] static Expected<std::unique_ptr<DetectView>> create(
-        const detect::DetectorConfig& config, const engine::SpectrumGeometry& geometry)
+        const detect::DetectorConfig& config, const engine::SpectrumGeometry& geometry,
+        Hertz group_gap)
     {
         auto detector = detect::Detector::create(config, geometry);
         if (!detector) {
@@ -1868,7 +1919,15 @@ public:
             return fail("could not allocate the track list");
         }
 
-        auto ring = engine::SpscRing<Row>::create(kRows * 8);
+        if (group_gap > 0) {
+            auto grouper = detect::LineGrouper::create(detect::LineGroupConfig{.gap_hz = group_gap});
+            if (!grouper) {
+                return std::unexpected(with_context(grouper.error(), "--detect-groups"));
+            }
+            view->grouper_ = std::move(*grouper);
+        }
+
+        auto ring = engine::SpscRing<Snapshot>::create(8);
         if (!ring) {
             return std::unexpected(with_context(ring.error(), "the track list's snapshot ring"));
         }
@@ -1876,9 +1935,6 @@ public:
         view->detector_ = std::move(*detector);
         view->ring_ = std::move(*ring);
         view->rate_ = config.source_rate;
-        view->produced_.assign(kRows, Row{});
-        view->consumed_.assign(kRows, Row{});
-        view->held_.assign(kRows, Row{});
         return view;
     }
 
@@ -1940,7 +1996,7 @@ public:
             if (used == kRows) {
                 continue;
             }
-            produced_[used] = Row{
+            produced_.rows[used] = Row{
                 .id = track.id,
                 .center_hz = static_cast<double>(track.center),
                 .bandwidth_hz = static_cast<double>(track.bandwidth),
@@ -1958,23 +2014,25 @@ public:
             ++used;
         }
         for (std::size_t i = used; i < kRows; ++i) {
-            produced_[i].id = 0;
+            produced_.rows[i].id = 0;
         }
         // Every slot, including the zeroed tail, so slot zero carries the
         // count even at a decision where nothing cleared the bar and there
         // are no rows to hang it off.
         for (std::size_t i = 0; i < kRows; ++i) {
-            produced_[i].over_bar = over_bar;
-            produced_[i].front_end = static_cast<std::uint32_t>(front_end.verdict);
-            produced_[i].front_end_slope = front_end.slope;
-            produced_[i].front_end_lift_db = front_end.floor_lift_db;
+            produced_.rows[i].over_bar = over_bar;
+            produced_.rows[i].front_end = static_cast<std::uint32_t>(front_end.verdict);
+            produced_.rows[i].front_end_slope = front_end.slope;
+            produced_.rows[i].front_end_lift_db = front_end.floor_lift_db;
         }
 
-        if (ring_->writable() < kRows) {
+        publish_groups(decided);
+
+        if (ring_->writable() < 1) {
             dropped_.fetch_add(1, std::memory_order_relaxed);
             return {};
         }
-        static_cast<void>(ring_->write(std::span<const Row>(produced_)));
+        static_cast<void>(ring_->write(std::span<const Snapshot>(&produced_, 1)));
         return {};
     }
 
@@ -1983,7 +2041,7 @@ public:
     [[nodiscard]] bool collect()
     {
         bool any = false;
-        while (ring_->read(std::span<Row>(consumed_)) == kRows) {
+        while (ring_->read(std::span<Snapshot>(&consumed_, 1)) == 1) {
             held_ = consumed_;
             any = true;
         }
@@ -1993,17 +2051,32 @@ public:
     [[nodiscard]] std::span<const Row> rows() const
     {
         std::size_t count = 0;
-        while (count < kRows && held_[count].id != 0) {
+        while (count < kRows && held_.rows[count].id != 0) {
             ++count;
         }
-        return std::span<const Row>(held_.data(), count);
+        return std::span<const Row>(held_.rows.data(), count);
     }
+
+    // The groups at the decision the held snapshot came from, one row per
+    // member. Empty when grouping was not asked for.
+    [[nodiscard]] std::span<const GroupRow> group_rows() const
+    {
+        std::size_t count = 0;
+        while (count < kGroupRows && held_.groups[count].group != 0) {
+            ++count;
+        }
+        return std::span<const GroupRow>(held_.groups.data(), count);
+    }
+
+    [[nodiscard]] std::uint32_t groups_total() const { return held_.groups_total; }
+    [[nodiscard]] std::uint32_t groups_listed() const { return held_.groups_listed; }
+    [[nodiscard]] bool grouping() const { return grouper_.has_value(); }
 
     // How many tracks cleared the confidence bar at the decision the held
     // snapshot came from. Never below rows().size() and above it whenever the
     // block filled, which is the only way an operator can tell a short list
     // from a truncated one.
-    [[nodiscard]] std::uint32_t over_bar() const { return held_[0].over_bar; }
+    [[nodiscard]] std::uint32_t over_bar() const { return held_.rows[0].over_bar; }
 
     // What the front end monitor said at the decision the held snapshot came
     // from. Reconstructed from the block rather than read off the monitor,
@@ -2011,13 +2084,19 @@ public:
     [[nodiscard]] detect::FrontEndObservation front_end() const
     {
         detect::FrontEndObservation out;
-        out.verdict = static_cast<detect::FrontEndVerdict>(held_[0].front_end);
-        out.slope = held_[0].front_end_slope;
-        out.floor_lift_db = held_[0].front_end_lift_db;
+        out.verdict = static_cast<detect::FrontEndVerdict>(held_.rows[0].front_end);
+        out.slope = held_.rows[0].front_end_slope;
+        out.floor_lift_db = held_.rows[0].front_end_lift_db;
         return out;
     }
 
     [[nodiscard]] const detect::DetectorStats& stats() const { return detector_->stats(); }
+
+    // Read after the engine has stopped, the same as stats() above.
+    [[nodiscard]] const detect::LineGrouper* grouper() const
+    {
+        return grouper_.has_value() ? &*grouper_ : nullptr;
+    }
 
     [[nodiscard]] std::uint64_t frames() const
     {
@@ -2051,16 +2130,60 @@ private:
         return rate_ > 0 ? static_cast<double>(samples) / static_cast<double>(rate_) : 0.0;
     }
 
+    // The completion thread. Feeds the grouper this decision's tracks and
+    // flattens what it says into the snapshot, whole groups only.
+    //
+    // THE GROUPER SEES EVERY TRACK and not only those over the confidence
+    // bar. The bar is the operator's filter on a display; which lines sit
+    // together is a question about the band, and a line that has faded under
+    // the bar while its neighbours hold is exactly the case a group exists to
+    // follow. So a group can name a track the table above it does not list.
+    void publish_groups(dsp::SampleIndex decided)
+    {
+        produced_.groups_total = 0;
+        produced_.groups_listed = 0;
+        std::size_t used = 0;
+        if (grouper_.has_value() && grouper_->observe(detector_->tracks(), decided)) {
+            const auto groups = grouper_->groups();
+            produced_.groups_total = static_cast<std::uint32_t>(groups.size());
+            for (const detect::LineGroup& group : groups) {
+                const auto members = grouper_->members(group);
+                if (used + members.size() > kGroupRows) {
+                    continue;
+                }
+                for (const detect::GroupMember& member : members) {
+                    produced_.groups[used++] = GroupRow{
+                        .group = group.id,
+                        .track = member.track,
+                        .offset_hz = static_cast<double>(member.offset),
+                        .anchor_hz = static_cast<double>(group.anchor_center),
+                        .span_hz = static_cast<double>(group.span),
+                        .age_seconds = seconds_of(decided - member.first_seen),
+                        .together_seconds = seconds_of(decided - group.together_since),
+                        .births_seconds = seconds_of(group.birth_spread),
+                        .members = group.member_count,
+                        .state = static_cast<std::uint32_t>(member.state),
+                    };
+                }
+                ++produced_.groups_listed;
+            }
+        }
+        for (std::size_t i = used; i < kGroupRows; ++i) {
+            produced_.groups[i].group = 0;
+        }
+    }
+
     std::optional<detect::Detector> detector_;
 
-    // Completion thread only, beside the detector whose arrays it reads.
+    // Completion thread only, beside the detector whose arrays they read.
     detect::FrontEndMonitor front_end_;
-    std::unique_ptr<engine::SpscRing<Row>> ring_;
+    std::optional<detect::LineGrouper> grouper_;
+    std::unique_ptr<engine::SpscRing<Snapshot>> ring_;
     SampleRate rate_ = 0;
 
-    std::vector<Row> produced_;  // completion thread only
-    std::vector<Row> consumed_;  // drawing thread only
-    std::vector<Row> held_;      // drawing thread only
+    Snapshot produced_{};  // completion thread only
+    Snapshot consumed_{};  // drawing thread only
+    Snapshot held_{};      // drawing thread only
 
     dsp::SampleIndex published_ = 0;  // completion thread only
 
@@ -2154,91 +2277,66 @@ struct CharacteriseCollector {
         row.margin, concentration, balance, row.age_seconds, channel, held);
 }
 
-// The track list arranged into groups of neighbours, one line per group.
+// The groups core/detect/groups.h is following, one line per group.
 //
 // WHY A GROUPING IS WORTH ANYTHING HERE. Five of the eight families in
 // tests/detect/test_front_end.cpp are reported as separate spectral lines, one
 // detection each, about five bins wide whatever the grid: an AM station is
 // three rows in this table and a narrowband FM one is fifteen. Measured on the
 // scene, the SET of lines is what tells them apart and no single row can:
-// cw is one line, am is a carrier with a matched pair either side, usb is two
-// lines above its carrier and lsb the same two below, nfm is a comb.
+// cw is one line, am is a carrier with a matched pair either side, usb and lsb
+// are two lines 1200 Hz apart, nfm is a comb. tests/detect/test_groups.cpp
+// pins that against the grouper this prints.
 //
-// docs/detection.md has the table. This puts the same view on real air, which
-// is the only place the question actually gets asked.
+// IT DECIDES NOTHING. The grouper chains tracks whose centres sit within the
+// operator's gap, gives the chain an id that survives between decisions, and
+// this prints where each line sits relative to the strongest of them.
 //
-// IT DECIDES NOTHING. It draws a bracket around rows that sit within a stated
-// gap of each other and prints where they sit relative to the strongest of
-// them. The gap is an argument because no measurement has chosen one, and a
-// number chosen here would be a classification smuggled in as a layout.
+// WHAT THIS USED TO BE: a bracket drawn round rows of one snapshot, here in
+// the display, with no identity from one table to the next. The HF corpus
+// showed what that cost: two runs over the same file grouped differently,
+// because the instant the table was sampled was not the same twice. The group
+// id and the "together" age are what a snapshot could not carry.
 [[nodiscard]] std::vector<std::string> track_groups(
-    const std::span<const DetectView::Row> rows, Hertz gap)
+    const std::span<const DetectView::GroupRow> rows)
 {
     std::vector<std::string> out;
-    if (rows.empty() || gap <= 0) {
-        return out;
-    }
-
-    // Ascending in frequency, which the engine already guarantees, but this
-    // reads a snapshot and a sort it does not need is cheaper than a bug it
-    // would hide.
-    std::vector<const DetectView::Row*> sorted;
-    sorted.reserve(rows.size());
-    for (const DetectView::Row& row : rows) {
-        sorted.push_back(&row);
-    }
-    std::sort(sorted.begin(), sorted.end(),
-              [](const DetectView::Row* a, const DetectView::Row* b) {
-                  return a->center_hz < b->center_hz;
-              });
-
     std::size_t first = 0;
-    while (first < sorted.size()) {
+    while (first < rows.size()) {
         std::size_t last = first;
-        while (last + 1 < sorted.size() &&
-               sorted[last + 1]->center_hz - sorted[last]->center_hz <=
-                   static_cast<double>(gap)) {
+        while (last + 1 < rows.size() && rows[last + 1].group == rows[first].group) {
             ++last;
         }
+        const DetectView::GroupRow& head = rows[first];
 
-        const std::size_t count = last - first + 1;
-        if (count > 1) {
-            // Offsets are from the STRONGEST line and not from the group's
-            // centre, because that is the one a reader can find again: on a
-            // carrier-plus-sidebands group it is the carrier, and the pattern
-            // an operator is matching against is stated that way.
-            std::size_t strongest = first;
-            for (std::size_t i = first; i <= last; ++i) {
-                if (sorted[i]->snr_db > sorted[strongest]->snr_db) {
-                    strongest = i;
-                }
-            }
-            const double anchor = sorted[strongest]->center_hz;
-
-            // AGE BESIDE EVERY OFFSET, because a group read off one
-            // snapshot is the thing most likely to be a coincidence. Lines
-            // that have all been there half a minute are a structure; an old
-            // anchor with two lines a couple of seconds old is the track list
-            // moving under the reader. Measured across the HF corpus, the
-            // second is what these mostly are.
-            std::string offsets;
-            for (std::size_t i = first; i <= last; ++i) {
-                const double delta = sorted[i]->center_hz - anchor;
-                // One decimal, which is what the table above uses. Rounding
-                // to whole seconds here printed "0s" beside a row reading
-                // "0.4s", and two numbers for one quantity disagreeing on the
-                // same screen is the kind of thing a reader stops to check.
-                offsets += std::format(
-                    " {}{}({:.1f}s)", delta == 0.0 ? "*" : "",
-                    format_hz(static_cast<Hertz>(std::llround(delta))),
-                    sorted[i]->age_seconds);
-            }
-            out.push_back(std::format(
-                "  {} lines across {}, from {}:{}", count,
-                format_hz(static_cast<Hertz>(
-                    std::llround(sorted[last]->center_hz - sorted[first]->center_hz))),
-                format_hz(static_cast<Hertz>(std::llround(anchor))), offsets));
+        // AGE BESIDE EVERY OFFSET, and the group's own two ages in front of
+        // them, because those are what separate a structure from a
+        // coincidence: lines one emitter produces are born together and stay
+        // together, and an old carrier with a line a few seconds old beside it
+        // is the track list moving under the reader.
+        std::string offsets;
+        for (std::size_t i = first; i <= last; ++i) {
+            const DetectView::GroupRow& member = rows[i];
+            // One decimal, which is what the table above uses. Rounding
+            // to whole seconds here printed "0s" beside a row reading
+            // "0.4s", and two numbers for one quantity disagreeing on the
+            // same screen is the kind of thing a reader stops to check.
+            const bool held = member.state == static_cast<std::uint32_t>(detect::TrackState::Held);
+            // A plus on the lines above the anchor, because which side a line
+            // sits is half of what a group says and a bare number reads as a
+            // distance.
+            const char* mark = member.offset_hz == 0.0 ? "*" : (member.offset_hz > 0.0 ? "+" : "");
+            offsets += std::format(
+                " {}{}({:.1f}s{})", mark,
+                format_hz(static_cast<Hertz>(std::llround(member.offset_hz))),
+                member.age_seconds, held ? " held" : "");
         }
+        out.push_back(std::format(
+            "  group #{}: {} lines across {}, from {}, together {:.1f}s, born {:.1f}s apart:{}",
+            head.group, last - first + 1,
+            format_hz(static_cast<Hertz>(std::llround(head.span_hz))),
+            format_hz(static_cast<Hertz>(std::llround(head.anchor_hz))), head.together_seconds,
+            head.births_seconds, offsets));
         first = last + 1;
     }
     return out;
@@ -3023,7 +3121,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             detect_config.occupied_power_fraction = options.detect_occupied;
         }
 
-        auto view = DetectView::create(detect_config, geometry);
+        auto view = DetectView::create(detect_config, geometry, options.detect_groups);
         if (!view) {
             return std::unexpected(view.error());
         }
@@ -3680,14 +3778,24 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                 for (const DetectView::Row& row : rows) {
                     std::println("{}", track_line(row));
                 }
-                if (options.detect_groups > 0) {
-                    const auto groups = track_groups(rows, options.detect_groups);
-                    if (groups.empty()) {
+                if (detector->grouping()) {
+                    const auto groups = track_groups(detector->group_rows());
+                    if (detector->groups_total() == 0) {
                         std::println("  no two tracks within {}",
                                      format_hz(options.detect_groups));
                     }
                     for (const std::string& group : groups) {
                         std::println("{}", group);
+                    }
+                    // Said rather than dropped, for the reason over_bar is
+                    // counted past the block: a short list and a truncated
+                    // one must not look the same.
+                    if (detector->groups_listed() < detector->groups_total()) {
+                        std::println("  {} more group{} than the snapshot holds",
+                                     detector->groups_total() - detector->groups_listed(),
+                                     detector->groups_total() - detector->groups_listed() == 1
+                                         ? ""
+                                         : "s");
                     }
                 }
 
@@ -4227,6 +4335,24 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                      detect_stats.tracks_dropped);
         std::println("  merge and split {} merges, {} splits", detect_stats.merges,
                      detect_stats.splits);
+        // The run's answer to whether any set of lines persisted, which no
+        // one table can give: a table is one decision, and the tables above
+        // are sampled at whatever instant the display thread woke.
+        if (const detect::LineGrouper* grouper = detector->grouper(); grouper != nullptr) {
+            const detect::LineGroupStats& groups = grouper->stats();
+            const SampleRate group_rate = eng.info().source_rate;
+            std::string longest = "no group outlasted the decision it formed at";
+            if (groups.longest_together_group != 0 && group_rate > 0) {
+                longest = std::format("the longest any group held all its lines was {:.1f} s, "
+                                      "group #{}",
+                                      static_cast<double>(groups.longest_together) /
+                                          static_cast<double>(group_rate),
+                                      groups.longest_together_group);
+            }
+            std::println("  groups          {} formed, {} ended, {} joins, {} leaves; {}",
+                         groups.groups_formed, groups.groups_ended, groups.joins, groups.leaves,
+                         longest);
+        }
         // The number core/detect/detector.h justifies running this on the
         // host at all, measured rather than asserted. It covers the whole
         // consume path, so the decisions are amortised into it.
