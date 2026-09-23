@@ -287,7 +287,7 @@ ColumnLayout {
         Label {
             Layout.minimumWidth: 0
             text: "drag an edge, shift-drag to widen both, [ ] \\ select, "
-                  + "arrows move, up and down widen, home resets"
+                  + "arrows move, up and down widen, home resets, the wheel tunes"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
             elide: Text.ElideRight

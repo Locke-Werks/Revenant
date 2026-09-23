@@ -156,6 +156,7 @@
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/receiver_gone.h"
+#include "models/receiver_scroll.h"
 #include "models/scroll_tune.h"
 #include "models/front_end_note.h"
 #include "models/gain_control.h"
@@ -1861,6 +1862,23 @@ public:
     // Takes the pane off its receiver and removes it from the engine.
     Q_INVOKABLE void removeReceiver();
 
+    // The wheel over the fine-tuning display: moves the receiver's centre by
+    // a round step sized to the display, one move per short interval however
+    // fast the wheel turns. See models/receiver_scroll.h.
+    Q_INVOKABLE void takeReceiverScroll(double angle_delta_eighths);
+
+    // Moves the receiver's centre and nothing else: the mode, the edges and
+    // the measurement the receiver was tuned from all stay. What the wheel
+    // and AFT use, as opposed to tuneReceiver, which is a new frequency typed
+    // or clicked and forgets the measurement.
+    //
+    // THE PASSBAND FRAME IN HAND IS KEPT, which tuneReceiver does not do. Its
+    // geometry is absolute, bin zero carried as the frequency the fine stage
+    // mixed to DC, so drawn against the moved centre it shows the signal
+    // where it now is relative to the receiver until the next frame arrives.
+    // Dropping it here would blank the display on every notch of the wheel.
+    Q_INVOKABLE void moveReceiverCentre(double absolute_hz);
+
     // Absolute hertz at a fraction across the passband frame, on the same
     // half-bin convention frequencyAtFraction uses for the span: 0 is the
     // outer edge of the first bin and 1 the outer edge of the last.
@@ -2506,6 +2524,11 @@ private:
     ScrollTuneState scroll_tune_;
     QElapsedTimer scroll_clock_;
     QTimer scroll_flush_;
+
+    // The same for the wheel over the fine-tuning display, which moves the
+    // receiver rather than the front end and settles far faster.
+    ReceiverScrollState receiver_scroll_;
+    QTimer receiver_scroll_flush_;
 
     // The timer came due with no wheel behind it: asks whether the accumulator
     // can be spent now.

@@ -9,6 +9,7 @@
 #include <QHoverEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QWheelEvent>
 #include <QQuickWindow>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
@@ -811,6 +812,20 @@ void PassbandItem::widenPassband(int step_hz)
     rebuildQuads();
     rebuildReadout();
     update();
+}
+
+void PassbandItem::wheelEvent(QWheelEvent* event)
+{
+    const double eighths = scroll_tune_eighths(event->angleDelta().x(), event->angleDelta().y());
+    if (link_ == nullptr || link_->receiverId() == 0 || eighths == 0.0 ||
+        grab_ != PassbandGrab::None) {
+        // Not during a drag: the mapping is frozen for the gesture and a move
+        // under it would put the handle somewhere the pointer is not.
+        event->ignore();
+        return;
+    }
+    link_->takeReceiverScroll(eighths);
+    event->accept();
 }
 
 void PassbandItem::keyPressEvent(QKeyEvent* event)

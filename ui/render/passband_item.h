@@ -70,6 +70,7 @@
 class QMouseEvent;
 class QHoverEvent;
 class QKeyEvent;
+class QWheelEvent;
 
 namespace revenant::ui {
 
@@ -174,6 +175,11 @@ protected:
     void hoverMoveEvent(QHoverEvent* event) override;
     void hoverLeaveEvent(QHoverEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+
+    // The wheel moves the receiver, one round step a notch; see
+    // EngineLink::takeReceiverScroll and models/receiver_scroll.h. Either
+    // axis, vertical first, the way the span displays resolve it.
+    void wheelEvent(QWheelEvent* event) override;
 
 signals:
     void linkChanged();

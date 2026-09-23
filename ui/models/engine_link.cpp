@@ -140,6 +140,9 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     scroll_clock_.start();
     scroll_flush_.setSingleShot(true);
     connect(&scroll_flush_, &QTimer::timeout, this, &EngineLink::flush_scroll_tune);
+    receiver_scroll_flush_.setSingleShot(true);
+    connect(&receiver_scroll_flush_, &QTimer::timeout, this,
+            [this] { takeReceiverScroll(0.0); });
 }
 
 EngineLink::~EngineLink()

@@ -359,6 +359,52 @@ void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
     post_receiver_request(receiver_id_ == 0);
 }
 
+void EngineLink::moveReceiverCentre(double absolute_hz)
+{
+    if (receiver_id_ == 0) {
+        return;
+    }
+    const std::int64_t absolute = static_cast<std::int64_t>(std::llround(absolute_hz));
+    const std::int64_t center = absolute - info_.source_center;
+    if (center == wanted_.center) {
+        return;
+    }
+    wanted_.center = center;
+    receiver_absolute_hz_ = absolute;
+
+    // An in-place retune, which the engine takes as a push constant and a new
+    // tap table with no break in the audio.
+    post_receiver_request(false);
+}
+
+void EngineLink::takeReceiverScroll(double angle_delta_eighths)
+{
+    if (receiver_id_ == 0) {
+        receiver_scroll_ = ReceiverScrollState{};
+        receiver_scroll_flush_.stop();
+        return;
+    }
+
+    ReceiverScrollRequest request;
+    request.angle_delta_eighths = angle_delta_eighths;
+    request.span_hz = passbandOffsetAtFraction(1.0) - passbandOffsetAtFraction(0.0);
+    request.centre_hz = receiverCenterHz();
+    request.low_hz = spanLowHz();
+    request.high_hz = spanHighHz();
+    request.now_ms = static_cast<double>(scroll_clock_.elapsed());
+
+    const ReceiverScrollPlan plan = plan_receiver_scroll(receiver_scroll_, request);
+    receiver_scroll_ = plan.state;
+    if (plan.tune) {
+        moveReceiverCentre(plan.centre_hz);
+    }
+    if (plan.wait_ms > 0.0) {
+        receiver_scroll_flush_.start(static_cast<int>(std::ceil(plan.wait_ms)));
+    } else {
+        receiver_scroll_flush_.stop();
+    }
+}
+
 void EngineLink::setReceiverDemod(const QString& mode)
 {
     auto parsed = demod_from_name(mode);
