@@ -228,13 +228,19 @@ def check(data: bytes, algorithm: str, expected: str, what: str) -> None:
         raise SourceError(f"{what}: {algorithm} is {actual}, and the build recorded {expected}")
 
 
-def overlay_file(ref: str, path: str) -> bytes:
+def overlay_file(revenant_ref: str, path: str) -> bytes:
     # From git at the commit being archived rather than from the working tree,
     # so the recipe published is the one in Revenant's own source archive.
-    return subprocess.run(["git", "-C", str(REPO), "show", f"{ref}:{path}"], check=True, capture_output=True).stdout
+    shown = subprocess.run(["git", "-C", str(REPO), "show", f"{revenant_ref}:{path}"], capture_output=True)
+    if shown.returncode != 0:
+        raise SourceError(f"{path} is not in Revenant at {revenant_ref}: {shown.stderr.decode(errors='replace').strip()}")
+    return shown.stdout
 
 
-def bundle_port(port: dict, out: Path, lines: list[str], ref: str = "HEAD") -> None:
+# revenant_ref rather than ref, because the upstream loop below unpacks each
+# archive's own ref, and a shared name sent the overlay lookup to osmocom's
+# commit instead of Revenant's.
+def bundle_port(port: dict, out: Path, lines: list[str], revenant_ref: str = "HEAD") -> None:
     name = port["name"]
     lines.append(f"{name} {port['version']}, {port['licence']}")
 
@@ -261,7 +267,7 @@ def bundle_port(port: dict, out: Path, lines: list[str], ref: str = "HEAD") -> N
         overlay = port["recipe_overlay"]
         for recipe_file in port["recipe_files"]:
             file_name = recipe_file["name"]
-            data = overlay_file(ref, f"{overlay}/{file_name}")
+            data = overlay_file(revenant_ref, f"{overlay}/{file_name}")
             check(data, "sha256", recipe_file["sha256"], f"{name}/{file_name}")
             (recipe_dir / file_name).write_bytes(data)
         lines.append(f"  vcpkg-port-{name}/: {', '.join(f['name'] for f in port['recipe_files'])}")
