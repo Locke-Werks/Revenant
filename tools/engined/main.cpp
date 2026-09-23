@@ -1087,13 +1087,19 @@ void print_engine_block(const engine::Engine& eng)
     // ONE SOURCE PER run(), AND THIS PROGRAM NOW SERVES MORE THAN ONE
     //
     // run() returns when the stream ends, and since Session.closeSource landed
-    // that has three causes rather than one. Two of them are this process
-    // finishing and one of them is an operator changing radios, so a single
+    // that has four causes rather than one. Two of them are this process
+    // finishing and two of them are an operator using a client, so a single
     // call would exit the program the first time somebody picked a different
     // dongle in the client.
     //
-    //   The source ran out, or --duration was reached, or Ctrl-C. Exit, which
-    //   is what every script and every test that drives this program expects.
+    //   The source the COMMAND LINE opened ran out, or --duration was reached,
+    //   or Ctrl-C. Exit, which is what every script and every test that drives
+    //   this program expects: each of them names its source on the command
+    //   line.
+    //
+    //   A source a CLIENT opened ran out, which is a recording played to its
+    //   end from the picker. Keep serving, with the ended source still open,
+    //   and wait for the client to close it or open another.
     //
     //   A client called closeSource. Wait for it to open another.
     //
@@ -1101,18 +1107,28 @@ void print_engine_block(const engine::Engine& eng)
     //   happened before this loop looked. There is a source open and it is not
     //   the one that just ended.
     //
-    // THE EPOCH IS WHAT SEPARATES THE LAST TWO FROM THE FIRST, and has_source
-    // on its own cannot. Reading only has_source would see the third case as a
-    // source that is open and running, conclude the stream ended by itself and
-    // exit, and changing radios is precisely the sequence that produces it.
-    // EngineInfo::source_epoch counts opens, so a number that moved means a
-    // client intervened however quickly it did so.
+    // WHAT THE FIRST CASE USED TO SAY, before 2026-09-23: "The source ran out,
+    // or --duration was reached, or Ctrl-C. Exit, which is what every script
+    // and every test that drives this program expects." With a recording
+    // opened from the client that exited the engine when the recording ended,
+    // measured with a 60 s excerpt opened over a synthetic scene: the client
+    // lost its engine, and going back to the dongle meant starting the engine
+    // again, which is the restart openSource was added to remove.
+    //
+    // THE EPOCH IS WHAT SEPARATES THESE, and has_source on its own cannot.
+    // Reading only has_source would see the last case as a source that is open
+    // and running, conclude the stream ended by itself and exit, and changing
+    // radios is precisely the sequence that produces it. EngineInfo::
+    // source_epoch counts opens, so a number that moved means a client
+    // intervened however quickly it did so, and a number past the command
+    // line's means the stream that ended was a client's.
     //
     // A refused run() is not special-cased, because it does not have to be: if
     // the source went between the has_source() below and the call, the engine
     // refuses with "before a source is open" and this loop finds has_source
     // false and goes back to waiting, which is the answer either way.
     constexpr auto kSourceWaitPoll = std::chrono::milliseconds(20);
+    const std::uint64_t command_line_epoch = eng.info().source_epoch;
     Status ran;
     for (;;) {
         if (g_stop_requested.load(std::memory_order_acquire)) {
@@ -1130,6 +1146,17 @@ void print_engine_block(const engine::Engine& eng)
             break;
         }
         if (!eng.has_source() || eng.info().source_epoch != epoch) {
+            continue;
+        }
+        if (epoch != command_line_epoch) {
+            // A client's recording ran out. Its source stays open, so a client
+            // reading sourceDescriptor still finds the file it was playing and
+            // sourceStats still says how far it got, until it closes it or
+            // opens another; run() is not called on it again.
+            while (!g_stop_requested.load(std::memory_order_acquire) && eng.has_source() &&
+                   eng.info().source_epoch == epoch) {
+                std::this_thread::sleep_for(kSourceWaitPoll);
+            }
             continue;
         }
         break;

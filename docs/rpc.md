@@ -1691,7 +1691,11 @@ not own, so the host runs it. `tools/engined/main.cpp` loops on it: `run()`
 returns when the stream ends, and `EngineInfo::sourceEpoch` is what tells that
 loop whether a client changed radios underneath it or the source simply ran out.
 `has_source()` alone cannot, because a close followed immediately by an open
-looks like a source that is open and running.
+looks like a source that is open and running. Since 2026-09-23 only the
+command line's source running out ends the process: a recording a client opened
+that plays to its end stays open, ended, and the engine waits for the client
+to close it or open another, so the window that opened it can go back to the
+radio without restarting the engine.
 
 ### What a source change costs, which is more than a retune
 
