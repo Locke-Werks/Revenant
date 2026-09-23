@@ -38,6 +38,17 @@ constexpr double kResidualLeak = 1.0 / 32.0;
 // anyway, at 6.2. Six sits between the two populations.
 constexpr double kAcquisitionLineRatio = 6.0;
 
+// The same test for the idle's two tones, estimate_tone_pair's weaker line over
+// the mean of its scan. Measured on 2026-09-23 over windows of 64 symbols slid
+// a quarter at a time through white audio: the largest was 3.39 in 10 hours at
+// PSK31's rate and 3.19 in 5 hours at PSK63's, where the squared line reached
+// 4.96 and 4.78. Over the 64 symbol idle preamble of ten QPSK31 transmissions,
+// which is BPSK31's reversals, it stood at 8.7 to 10.1 at -12 dB in 2500 Hz,
+// where the squared line of the same windows was 4.1 to 6.6 and turned down
+// eight of the ten, and at 5.4 to 6.8 at -16 dB. 4.5 sits between the noise and
+// -16 dB.
+constexpr double kIdlePairRatio = 4.5;
+
 // Bits the QPSK Viterbi decoder commits per run, beyond its decision delay.
 constexpr std::size_t kViterbiCommitBits = 32;
 
@@ -156,6 +167,7 @@ void Psk31::reset() {
     coarse_offset_hz_ = 0.0;
     acquisition_strength_ = 0.0;
     strongest_rejected_ = 0.0;
+    strongest_rejected_pair_ = 0.0;
     corrected_index_ = 0;
     sync_origin_ = 0;
     matched_history_.clear();
@@ -225,8 +237,29 @@ Status Psk31::process(ConstRealSpan audio, std::vector<Psk31Character>& out) {
                 estimate = fourth;
             }
         }
-        if (estimate->line_to_mean < kAcquisitionLineRatio) {
+        bool accepted = estimate->line_to_mean >= kAcquisitionLineRatio;
+        if (!accepted) {
             strongest_rejected_ = std::max(strongest_rejected_, estimate->line_to_mean);
+            // QEX page 5: the idle's reversals are two tones either side of
+            // the suppressed carrier, half the symbol rate away. Read as they
+            // are they stand clear of the noise several decibels before the
+            // squared line does, and only the idle makes them. Tried second,
+            // so a window the power law already accepts is decoded exactly as
+            // it was.
+            auto pair = estimate_tone_pair(window, front_.output_rate(), 0.5 * symbol_rate_,
+                                           config_.capture_hz);
+            if (!pair) {
+                return std::unexpected(
+                    with_context(pair.error(), "looking for the PSK31 idle's two tones"));
+            }
+            if (pair->line_to_mean >= kIdlePairRatio) {
+                estimate = pair;
+                accepted = true;
+            } else {
+                strongest_rejected_pair_ = std::max(strongest_rejected_pair_, pair->line_to_mean);
+            }
+        }
+        if (!accepted) {
             // No signal yet, or not enough of one. Slide by a quarter of a
             // window and look again, rather than decoding noise at a
             // frequency picked out of it.

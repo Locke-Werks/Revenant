@@ -259,4 +259,74 @@ Expected<ToneEstimate> estimate_tone_offset(ConstComplexSpan samples, SampleRate
     return estimate;
 }
 
+Expected<ToneEstimate> estimate_tone_pair(ConstComplexSpan samples, SampleRate rate,
+                                          double half_spacing_hz, double max_offset_hz) {
+    if (samples.size() < 16) {
+        return fail(std::format("estimate_tone_pair needs at least 16 samples; got {}",
+                                samples.size()));
+    }
+    if (rate <= 0 || !(half_spacing_hz > 0.0) || !(max_offset_hz > 0.0)) {
+        return fail(std::format(
+            "estimate_tone_pair needs a positive rate, spacing and range; got {}, {}, {}", rate,
+            half_spacing_hz, max_offset_hz));
+    }
+    const double rate_d = static_cast<double>(rate);
+    const double reach = max_offset_hz + half_spacing_hz;
+    if (reach >= 0.5 * rate_d) {
+        return fail(std::format(
+            "estimate_tone_pair cannot search +/- {} Hz for lines {} Hz either side: they would "
+            "sit at up to {} Hz, past the {} Hz Nyquist frequency, and alias",
+            max_offset_hz, half_spacing_hz, reach, 0.5 * rate_d));
+    }
+
+    const std::vector<Complex32> plain(samples.begin(), samples.end());
+
+    // A quarter of a bin, or a little less, so that the spacing is a whole
+    // number of steps and each pair is read off one scan.
+    const double bin = rate_d / static_cast<double>(samples.size());
+    const double spacing = 2.0 * half_spacing_hz;
+    const double apart = std::max(1.0, std::ceil(spacing / (0.25 * bin)));
+    const double step = spacing / apart;
+    const auto offset = static_cast<std::size_t>(apart);
+    const auto count = static_cast<std::size_t>(std::ceil(2.0 * reach / step)) + 1;
+    std::vector<double> magnitude(count, 0.0);
+    double total = 0.0;
+    for (std::size_t k = 0; k < count; ++k) {
+        magnitude[k] = line_magnitude(plain, -reach + step * static_cast<double>(k), rate_d);
+        total += magnitude[k];
+    }
+
+    // Pair k is the lines at scan points k and k + offset, centred halfway.
+    const std::size_t pairs = count > offset ? count - offset : 0;
+    if (pairs == 0) {
+        return fail("estimate_tone_pair found no centre to search");
+    }
+    std::size_t best = 0;
+    double best_weaker = -1.0;
+    for (std::size_t k = 0; k < pairs; ++k) {
+        const double weaker = std::min(magnitude[k], magnitude[k + offset]);
+        if (weaker > best_weaker) {
+            best_weaker = weaker;
+            best = k;
+        }
+    }
+    const auto sum = [&](std::size_t k) { return magnitude[k] + magnitude[k + offset]; };
+    double refined = -reach + step * static_cast<double>(best) + half_spacing_hz;
+    if (best > 0 && best + 1 < pairs) {
+        const double a = sum(best - 1);
+        const double b = sum(best);
+        const double c = sum(best + 1);
+        const double denominator = a - 2.0 * b + c;
+        if (std::abs(denominator) > 0.0) {
+            refined += step * 0.5 * (a - c) / denominator;
+        }
+    }
+
+    ToneEstimate estimate;
+    estimate.offset_hz = refined;
+    const double mean = total / static_cast<double>(count);
+    estimate.line_to_mean = (mean > 0.0) ? best_weaker / mean : 0.0;
+    return estimate;
+}
+
 }  // namespace revenant::decode

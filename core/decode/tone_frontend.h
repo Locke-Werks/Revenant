@@ -133,4 +133,23 @@ struct ToneEstimate {
                                                           SampleRate rate, unsigned power,
                                                           double max_offset_hz);
 
+// Where a pair of equal lines half_spacing_hz either side of a centre sits,
+// searching centres within +/- max_offset_hz, with no power law applied.
+//
+// A carrier reversed at every symbol is two tones either side of where the
+// carrier would be, so the pair is a suppressed carrier's idle seen directly.
+// Raising the signal to a power finds the same centre, but at a low signal to
+// noise ratio the noise multiplied by itself and by the signal spreads the
+// line's energy across the scan; reading the two tones as they are keeps it.
+//
+// The statistic is the weaker of the two lines over the mean magnitude of the
+// scan, so one strong line, an unmodulated carrier among them, does not pass
+// for a pair. The centre is refined by a parabola through the sum of the two
+// lines at the three best points. Returns an error on the same inputs
+// estimate_tone_offset does, and when the scan's reach, the offset plus half
+// the spacing, passes the Nyquist frequency.
+[[nodiscard]] Expected<ToneEstimate> estimate_tone_pair(ConstComplexSpan samples, SampleRate rate,
+                                                        double half_spacing_hz,
+                                                        double max_offset_hz);
+
 }  // namespace revenant::decode

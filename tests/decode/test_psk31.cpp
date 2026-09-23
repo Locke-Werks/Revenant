@@ -17,14 +17,17 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <format>
+#include <numbers>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "core/decode/dv_codes.h"
 #include "core/decode/psk31.h"
+#include "core/decode/tone_frontend.h"
 #include "core/decode/varicode.h"
 #include "core/dsp/synth/channel.h"
 #include "core/dsp/synth/psk31_mod.h"
@@ -64,6 +67,7 @@ struct Decoded {
     bool acquired = false;
     double strength = 0.0;
     double rejected = 0.0;
+    double rejected_pair = 0.0;
     std::size_t unrecognised = 0;
 };
 
@@ -91,6 +95,7 @@ Decoded decode_audio(const decode::Psk31Config& config, std::span<const float> a
     result.acquired = decoder->acquired();
     result.strength = decoder->acquisition_strength();
     result.rejected = decoder->strongest_rejected();
+    result.rejected_pair = decoder->strongest_rejected_pair();
     return result;
 }
 
@@ -393,11 +398,87 @@ TEST_CASE("the PSK31 receiver does not acquire on noise alone", "[decode][psk31]
         const Decoded got = decode_audio(config, audio, 9600);
         INFO("mode " << static_cast<int>(mode) << " acquired " << got.acquired << " strength "
                      << got.strength << ", strongest line in noise " << got.rejected
-                     << ", text '" << got.text << "'");
+                     << ", strongest pair " << got.rejected_pair << ", text '" << got.text << "'");
         WARN("PSK noise-only mode " << static_cast<int>(mode) << ": strongest line "
-                                    << got.rejected);
+                                    << got.rejected << ", strongest pair " << got.rejected_pair);
         CHECK(!got.acquired);
         CHECK(got.text.empty());
+    }
+}
+
+TEST_CASE("the idle's pair of tones is found and a lone carrier is not taken for one",
+          "[decode][psk31]") {
+    // 64 symbols at 16 samples a symbol, 500 S/s, as PSK31's acquisition
+    // window: a carrier 8 Hz up reversed every symbol, which is two tones at
+    // 8 +/- 15.625 Hz, and the same carrier unreversed.
+    constexpr double kRate = 500.0;
+    std::vector<dsp::Complex32> idle(1024);
+    std::vector<dsp::Complex32> carrier(1024);
+    for (std::size_t n = 0; n < idle.size(); ++n) {
+        const double t = static_cast<double>(n) / kRate;
+        const std::complex<double> tone = std::polar(1.0, 2.0 * std::numbers::pi * 8.0 * t);
+        const std::complex<double> reversed = tone * std::cos(std::numbers::pi * 31.25 * t);
+        idle[n] = dsp::Complex32(static_cast<float>(reversed.real()), static_cast<float>(reversed.imag()));
+        carrier[n] = dsp::Complex32(static_cast<float>(tone.real()), static_cast<float>(tone.imag()));
+    }
+    auto pair = decode::estimate_tone_pair(idle, 500, 15.625, 40.0);
+    auto lone = decode::estimate_tone_pair(carrier, 500, 15.625, 40.0);
+    REQUIRE(pair.has_value());
+    REQUIRE(lone.has_value());
+    INFO("idle: " << pair->line_to_mean << " at " << pair->offset_hz << " Hz; lone carrier: "
+                  << lone->line_to_mean);
+    CHECK(std::abs(pair->offset_hz - 8.0) < 0.05);
+    CHECK(pair->line_to_mean > 10.0);
+    CHECK(lone->line_to_mean < 2.0);
+    CHECK_FALSE(decode::estimate_tone_pair(idle, 500, 15.625, 240.0).has_value());
+}
+
+TEST_CASE("QPSK31 acquires on its idle preamble where the squared line falls short",
+          "[decode][psk31]") {
+    // At -12 dB in 2500 Hz the squared line of the 64 symbol idle often falls
+    // short of its threshold, and QPSK data after it carries no line the
+    // square or the fourth power can find at that level. Until the idle's two
+    // tones were read directly, such a transmission was acquired on its
+    // postamble and printed almost nothing: 11 of the bench sweep's first 16
+    // at this level. Each seed here is one the squared line turned down.
+    const std::string text = "the quick brown fox jumps over the lazy dog";
+    for (std::uint64_t seed = 0x53; seed < 0x5B; ++seed) {
+        siggen::Psk31ModConfig mod;
+        mod.rate = 48000;
+        mod.tone_hz = 1508;
+        mod.mode = decode::Psk31Mode::Qpsk31;
+        const std::vector<float> audio = render(mod, text, -12.0, seed, true);
+
+        decode::Psk31Config config;
+        config.rate = 48000;
+        config.centre_hz = 1500;
+        config.mode = decode::Psk31Mode::Qpsk31;
+        auto decoder = decode::Psk31::create(config);
+        REQUIRE(decoder.has_value());
+        std::vector<decode::Psk31Character> characters;
+        // The preamble and a tenth of a second more: acquisition has to
+        // happen in it.
+        const std::size_t preamble_samples = 64 * 48000 * 100 / 3125 + 4800;
+        const std::span<const float> all(audio);
+        REQUIRE(decoder->process(all.first(preamble_samples), characters).has_value());
+        const bool on_preamble = decoder->acquired();
+        REQUIRE(decoder->process(all.subspan(preamble_samples), characters).has_value());
+        std::string got;
+        for (const auto& character : characters) {
+            if (character.recognised) {
+                got.push_back(static_cast<char>(character.ascii));
+            }
+        }
+        const double cer = static_cast<double>(edit_distance(text, got)) / static_cast<double>(text.size());
+        INFO("seed " << seed << ": squared line turned down at " << decoder->strongest_rejected()
+                     << ", acquired on the preamble " << on_preamble << " at strength "
+                     << decoder->acquisition_strength() << ", offset " << decoder->frequency_offset_hz()
+                     << " Hz against 8, text '" << got << "'");
+        CHECK(decoder->strongest_rejected() > 0.0);
+        CHECK(on_preamble);
+        CHECK(cer <= 0.3);
+        // A quarter of the 3.9 Hz either way a QPSK31 decision tolerates.
+        CHECK(std::abs(decoder->frequency_offset_hz() - 8.0) < 1.0);
     }
 }
 

@@ -223,13 +223,20 @@ class Psk31 {
     [[nodiscard]] double frequency_offset_hz() const;
 
     // How far the carrier's spectral line stood above the mean of the search
-    // when it was accepted: core/decode/tone_frontend.h's line_to_mean.
+    // when it was accepted: core/decode/tone_frontend.h's line_to_mean. When
+    // the idle's two tones are what acquired it, the weaker of the two.
     [[nodiscard]] double acquisition_strength() const { return acquisition_strength_; }
 
-    // The strongest line among the windows turned down before acquisition,
-    // which on a quiet channel is the noise's own best effort and is what the
-    // acquisition threshold has to clear.
+    // The strongest squared or fourth-power line turned down before
+    // acquisition, including one whose window the idle's two tones then
+    // accepted. On a quiet channel it is the noise's own best effort and is
+    // what the acquisition threshold has to clear.
     [[nodiscard]] double strongest_rejected() const { return strongest_rejected_; }
+
+    // The same for the idle's two tones, core/decode/tone_frontend.h's
+    // estimate_tone_pair, which acquisition tries when the power law's line
+    // falls short: the strongest among the windows neither test accepted.
+    [[nodiscard]] double strongest_rejected_pair() const { return strongest_rejected_pair_; }
 
     // Every data bit decided during the last call to process, in order, with
     // the audio sample index of each. Exposed for bit error rate measurement.
@@ -260,6 +267,7 @@ class Psk31 {
     double coarse_offset_hz_ = 0.0;
     double acquisition_strength_ = 0.0;
     double strongest_rejected_ = 0.0;
+    double strongest_rejected_pair_ = 0.0;
 
     // Decimated index of the next sample into the frequency correction, and
     // the matched filter's history.
