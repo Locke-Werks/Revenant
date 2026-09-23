@@ -3,9 +3,15 @@
 // docs/detection.md is the design and this is the part of it that does not
 // need a classifier: find what is transmitting across the whole span, measure
 // where it is and how wide, and give each one an identity that survives the
-// gaps in its own transmission. Classification, probe receivers and
+// gaps in its own transmission. Probe receivers and click-to-tune are not
+// here. Track::classification is filled from outside, through record_probe,
+// by core/detect/tier_two.h driving core/engine/probe.h, and nothing in this
+// file reads it back: the detector decides exactly what it decided before a
+// family existed.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "Classification, probe receivers and
 // click-to-tune are not here. Track::classification exists and nothing fills
-// it, which is deliberate: the field is the seam, not a stub.
+// it, which is deliberate: the field is the seam, not a stub."
 //
 // WHY THIS RUNS ON THE HOST
 //
@@ -93,6 +99,7 @@
 #include <span>
 #include <vector>
 
+#include "core/characterise/catalogue.h"
 #include "core/detect/shape.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
@@ -157,12 +164,63 @@ inline constexpr std::size_t kResidualParts = 8;
 // stopped falling altogether.
 inline constexpr double kResidualPartFloor = 0.5;
 
-// What a track is, once something decides. Nothing in this file sets anything
-// but Unknown, and the detector does not infer one: docs/detection.md puts
-// identification in two tiers above this layer, and an unidentified signal is
-// a real answer rather than a gap to be filled with the nearest label.
+// What a track is, once something decides.
+//
+// The families core/characterise names, one for one, and no more: a family
+// the characteriser cannot name is not one this layer can carry. The detector
+// does not infer any of them. docs/detection.md puts identification in two
+// tiers above this layer, and the second tier answers through
+// Detector::record_probe. An unidentified signal is a real answer rather than
+// a gap to be filled with the nearest label, which is why Unknown stays the
+// value every track is born with and the one noise is supposed to keep.
+//
+// WHAT THIS USED TO BE: Unknown alone, under "Nothing in this file sets
+// anything but Unknown". Nothing in this file sets anything else now either;
+// record_probe copies what a probe found.
+//
+// INTERNAL. docs/detection.md settled that nothing goes on the wire as a
+// family, and core/rpc carries no field for this.
 enum class Classification : std::uint8_t {
     Unknown = 0,
+    Unmodulated,
+    AnalogueFm,
+    Fsk,
+    Psk,
+    Ofdm,
+};
+
+// How many values Classification has, for a table indexed by one.
+inline constexpr std::size_t kClassificationCount =
+    static_cast<std::size_t>(Classification::Ofdm) + 1;
+
+[[nodiscard]] const char* classification_name(Classification classification);
+
+// The characteriser's family, as a track carries it.
+[[nodiscard]] Classification classification_of(characterise::ModulationFamily family);
+
+// What one tier-two probe said about a track.
+//
+// Kept whole whether or not the family may drive anything, because a refused
+// answer is still evidence: a PSK call with no symbol rate is what the
+// characteriser says about a weak carrier and about weak BPSK alike, and a
+// reader deciding which one a track is wants to see that it was said.
+struct ProbeFinding {
+    Classification family = Classification::Unknown;
+    double confidence = 0.0;
+
+    // Zero when the family's own detector found none.
+    double symbol_rate_hz = 0.0;
+    std::uint32_t order = 0;
+    std::uint32_t tone_count = 0;
+    double concentration = 0.0;
+
+    // characterise::may_drive_detection on the full result, and the flag it
+    // most often refuses on.
+    bool may_drive_detection = false;
+    bool psk_without_symbol_rate = false;
+
+    // The decision at which it was recorded. record_probe sets it.
+    dsp::SampleIndex at = 0;
 };
 
 // Where a track is in its life.
@@ -268,7 +326,36 @@ struct Track {
     std::uint64_t id = 0;
 
     TrackState state = TrackState::Pending;
+
+    // What the detector reports this track to be: the family of the most
+    // recent probe characterise::may_drive_detection accepted, with that
+    // probe's confidence and symbol rate. Unknown, zero and zero until one
+    // has.
+    //
+    // A PROBE THAT WAS REFUSED DOES NOT MOVE THESE, whatever it said. That is
+    // the rule docs/detection.md asks of anything routing a family into the
+    // detector: Unknown is refused, and so is a PSK call with no symbol rate,
+    // because the characteriser says that about a weak carrier as confidently
+    // as about weak BPSK. The refused answer is in last_probe below.
+    //
+    // A later accepted probe replaces an earlier one. A later refused one
+    // leaves it: a transmission does not change modulation halfway through,
+    // so one probe that could not see the family is not evidence the family
+    // went away.
     Classification classification = Classification::Unknown;
+    double classification_confidence = 0.0;
+    double symbol_rate_hz = 0.0;
+
+    // The decision at which classification was first set, or zero. Against
+    // first_seen this is the time to first classification.
+    dsp::SampleIndex classified_at = 0;
+
+    // Every probe's answer lands here, accepted or not, and probes counts
+    // them. A track with probes at zero has not been looked at; one with
+    // probes above zero and classification Unknown has, and the answer was
+    // unknown, which is a different thing to tell an operator.
+    ProbeFinding last_probe;
+    std::uint32_t probes = 0;
 
     // Absolute, same frame as Candidate::center, lightly smoothed across
     // decisions so a display is not reading measurement noise.
@@ -708,8 +795,14 @@ struct DetectorConfig {
     // setting the hold from the mode means the mode is never learned. FT8 is
     // the case that fixes the number: it transmits 12.6 seconds in every 15
     // and is silent for 2.4, so anything under about three seconds kills the
-    // track before a classifier could ever run. It is narrowed once a
-    // classification exists, and nothing sets one yet.
+    // track before a classifier could ever run.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY AT ITS END: "It is narrowed once a
+    // classification exists, and nothing sets one yet." Tier two sets one
+    // now, through record_probe, and this is still not narrowed by it. A
+    // family is not a mode, a hold per mode is a table nobody has measured,
+    // and docs/detection.md records that nothing a probe finds changes what
+    // the detector does.
     double bootstrap_hold_seconds = 3.0;
 
     // ---- telling a stopped signal from its own echo -----------------------
@@ -1060,6 +1153,21 @@ public:
     // which way the comparison was written.
     [[nodiscard]] Status set_thresholds(double detection_threshold_db,
                                         double confidence_threshold);
+
+    // Records what a tier-two probe found on one track, by id, into
+    // Track::last_probe, and into Track::classification only when the
+    // finding may drive detection. See Track::classification for the rule.
+    //
+    // Visible in tracks() at once rather than at the next decision, and
+    // carried from decision to decision like every other field of a track.
+    // A merge or a split does not move it: a new id from a split starts
+    // Unknown, because the band it was measured over is not the band the
+    // new track describes.
+    //
+    // Refused for an id that is not a track any more, which is the ordinary
+    // case of a probe outliving its signal. Nothing the detector decides
+    // reads any of it.
+    [[nodiscard]] Status record_probe(std::uint64_t track_id, const ProbeFinding& finding);
 
     // The integrated power spectrum the decision works on, linear, one entry
     // per fine bin, and the noise floor estimated under it. Both are for

@@ -159,6 +159,30 @@ const char* track_state_name(TrackState state) {
     return "unknown";
 }
 
+const char* classification_name(Classification classification) {
+    switch (classification) {
+        case Classification::Unknown: return "unknown";
+        case Classification::Unmodulated: return "carrier";
+        case Classification::AnalogueFm: return "analogue fm";
+        case Classification::Fsk: return "fsk";
+        case Classification::Psk: return "psk";
+        case Classification::Ofdm: return "ofdm";
+    }
+    return "unknown";
+}
+
+Classification classification_of(characterise::ModulationFamily family) {
+    switch (family) {
+        case characterise::ModulationFamily::Unknown: return Classification::Unknown;
+        case characterise::ModulationFamily::Unmodulated: return Classification::Unmodulated;
+        case characterise::ModulationFamily::AnalogueFm: return Classification::AnalogueFm;
+        case characterise::ModulationFamily::Fsk: return Classification::Fsk;
+        case characterise::ModulationFamily::Psk: return Classification::Psk;
+        case characterise::ModulationFamily::Ofdm: return Classification::Ofdm;
+    }
+    return Classification::Unknown;
+}
+
 Expected<Detector> Detector::create(const DetectorConfig& config,
                                     const engine::SpectrumGeometry& geometry) {
     if (!geometry.enabled()) {
@@ -370,6 +394,48 @@ Status Detector::set_thresholds(double detection_threshold_db, double confidence
     config_.detection_threshold_db = detection_threshold_db;
     config_.confidence_threshold = confidence_threshold;
     threshold_linear_ = db_to_linear(detection_threshold_db);
+    return {};
+}
+
+Status Detector::record_probe(std::uint64_t track_id, const ProbeFinding& finding) {
+    ProbeFinding stamped = finding;
+    stamped.at = last_decision_;
+
+    // Both copies, because tracks() is a snapshot of all_ taken at the last
+    // decision and a caller reading it before the next one should see this.
+    const auto apply = [&](Track& track) {
+        track.last_probe = stamped;
+        ++track.probes;
+        if (!stamped.may_drive_detection) {
+            return;
+        }
+        if (track.classification == Classification::Unknown) {
+            track.classified_at = stamped.at;
+        }
+        track.classification = stamped.family;
+        track.classification_confidence = stamped.confidence;
+        track.symbol_rate_hz = stamped.symbol_rate_hz;
+    };
+
+    bool found = false;
+    for (Track& track : all_) {
+        if (track.id == track_id) {
+            apply(track);
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return fail(std::format("track {} is not a track any more, so there is nothing to "
+                                "record a probe against",
+                                track_id));
+    }
+    for (Track& track : tracks_) {
+        if (track.id == track_id) {
+            apply(track);
+            break;
+        }
+    }
     return {};
 }
 

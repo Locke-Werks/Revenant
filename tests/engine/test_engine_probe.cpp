@@ -60,6 +60,8 @@
 #include <vector>
 
 #include "core/characterise/catalogue.h"
+#include "core/detect/detector.h"
+#include "core/detect/tier_two.h"
 #include "core/dsp/synth/wideband.h"
 #include "core/engine/engine.h"
 #include "core/engine/probe.h"
@@ -725,4 +727,174 @@ TEST_CASE("probe survey: one probe per emitter at its own centre and width",
     for (const std::string& line : wrongs) {
         std::println("  wrong: {}", line);
     }
+}
+
+namespace {
+
+struct FamilyScore {
+    std::size_t tracks = 0;
+    std::size_t probed = 0;
+    std::size_t correct = 0;
+    std::size_t wrong = 0;
+    std::size_t unknown = 0;
+    std::size_t refused = 0;
+
+    // Seconds from the scene's start to the first accepted family on any of
+    // this emitter's tracks, summed over the runs that got one.
+    std::size_t emitters_named = 0;
+    double first_seconds_total = 0.0;
+    double first_seconds_worst = 0.0;
+};
+
+struct SurveyState {
+    std::unique_ptr<detect::Detector> detector;
+    std::unique_ptr<detect::TierTwo> tier_two;
+};
+
+}  // namespace
+
+TEST_CASE("probe survey: tier two across the synthetic families", "[.probe-survey]") {
+    const std::uint64_t seeds[] = {101, 202, 303};
+    const double levels[] = {30.0, 20.0, 10.0};
+
+    std::vector<FamilyScore> scores(kSlots);
+    std::vector<std::string> wrongs;
+    double characterise_ms = 0.0;
+    std::uint64_t characterised = 0;
+
+    for (const double level : levels) {
+        for (const std::uint64_t seed : seeds) {
+            const auto capture = make_capture(12.0, level, seed);
+
+            auto created = engine::Engine::create(probe_config(4, 2048));
+            REQUIRE(created.has_value());
+            auto& eng = **created;
+            REQUIRE(eng.open_source(capture->uri()).has_value());
+
+            detect::DetectorConfig config;
+            config.source_rate = kRate;
+            config.source_center = eng.info().source_center;
+            config.grid_channels = kChannels;
+            auto detector = detect::Detector::create(config, eng.info().spectrum);
+            REQUIRE(detector.has_value());
+            auto tier_two = detect::TierTwo::create(detect::TierTwoConfig{.source_rate = kRate});
+            REQUIRE(tier_two.has_value());
+
+            SurveyState state;
+            state.detector = std::make_unique<detect::Detector>(std::move(*detector));
+            state.tier_two = std::make_unique<detect::TierTwo>(std::move(*tier_two));
+
+            dsp::SampleIndex last = 0;
+            const auto sink = [&](const engine::SpectrumFrame& frame) -> Status {
+                if (auto fed = state.detector->consume(frame); !fed) {
+                    return fed;
+                }
+                if (state.detector->last_decision() == last) {
+                    return {};
+                }
+                last = state.detector->last_decision();
+                return state.tier_two->step(*state.detector, eng);
+            };
+            REQUIRE(eng.set_spectrum_sink(sink).has_value());
+
+            REQUIRE(eng.run().has_value());
+
+            const engine::ProbeStats pool = eng.probe_stats();
+            characterise_ms += pool.characterise_ms_total;
+            characterised += pool.characterised;
+
+            // Score the tracks alive at the end of the scene. A track is an
+            // emitter's when its centre is inside that emitter's occupied
+            // band widened by a kilohertz either side.
+            std::vector<bool> emitter_named(kSlots, false);
+            std::vector<double> emitter_first(kSlots, 0.0);
+            for (const detect::Track& track : state.detector->tracks()) {
+                const dsp::Hertz offset = track.center - kCentre;
+                std::size_t slot = kSlots;
+                for (std::size_t i = 0; i < kSlots; ++i) {
+                    if (offset >= capture->truth[i].low - 1'000 &&
+                        offset <= capture->truth[i].high + 1'000) {
+                        slot = i;
+                    }
+                }
+                if (slot == kSlots) {
+                    continue;
+                }
+                FamilyScore& score = scores[slot];
+                ++score.tracks;
+                if (track.probes == 0) {
+                    continue;
+                }
+                ++score.probed;
+                const ModulationFamily right = capture->truth[slot].right;
+                if (track.classification == detect::Classification::Unknown) {
+                    ++score.unknown;
+                    if (track.last_probe.family != detect::Classification::Unknown) {
+                        ++score.refused;
+                    }
+                } else if (track.classification == detect::classification_of(right)) {
+                    ++score.correct;
+                } else {
+                    ++score.wrong;
+                    wrongs.push_back(std::format(
+                        "{} at {:.0f} dB seed {}: track {} {} Hz wide called {} at {:.2f}, "
+                        "{:.1f} Bd",
+                        capture->truth[slot].name, level, seed, track.id, track.bandwidth,
+                        detect::classification_name(track.classification),
+                        track.classification_confidence, track.symbol_rate_hz));
+                }
+                if (track.classification != detect::Classification::Unknown) {
+                    const double seconds = static_cast<double>(track.classified_at) /
+                                           static_cast<double>(kRate);
+                    if (!emitter_named[slot] || seconds < emitter_first[slot]) {
+                        emitter_first[slot] = seconds;
+                    }
+                    emitter_named[slot] = true;
+                }
+            }
+            for (std::size_t i = 0; i < kSlots; ++i) {
+                if (emitter_named[i]) {
+                    ++scores[i].emitters_named;
+                    scores[i].first_seconds_total += emitter_first[i];
+                    scores[i].first_seconds_worst =
+                        std::max(scores[i].first_seconds_worst, emitter_first[i]);
+                }
+            }
+
+            const detect::TierTwoStats& stats = state.tier_two->stats();
+            std::println("  {:.0f} dB seed {}: {} submitted, {} recorded, {} accepted, {} "
+                         "refused by characterise, {} orphaned, {} too wide, first "
+                         "classification {:.2f} s mean over {} tracks ({:.2f} to {:.2f})",
+                         level, seed, stats.submitted, stats.recorded, stats.accepted,
+                         stats.refused_by_characterise, stats.orphaned, stats.too_wide,
+                         stats.first_classifications == 0
+                             ? 0.0
+                             : stats.first_classification_seconds_total /
+                                   static_cast<double>(stats.first_classifications),
+                         stats.first_classifications, stats.first_classification_seconds_min,
+                         stats.first_classification_seconds_max);
+        }
+    }
+
+    std::println("probe survey, {} runs, tracks alive at the end of each scene:",
+                 std::size(seeds) * std::size(levels));
+    std::println("  {:<6} {:>6} {:>6} {:>7} {:>5} {:>7} {:>7}  {}", "family", "tracks", "probed",
+                 "correct", "wrong", "unknown", "refused", "first named, mean and worst");
+    for (std::size_t i = 0; i < kSlots; ++i) {
+        const FamilyScore& score = scores[i];
+        std::println("  {:<6} {:>6} {:>6} {:>7} {:>5} {:>7} {:>7}  {} of {} emitters, {:.2f} s, "
+                     "{:.2f} s",
+                     kFamilies[i].name, score.tracks, score.probed, score.correct, score.wrong,
+                     score.unknown, score.refused, score.emitters_named,
+                     std::size(seeds) * std::size(levels),
+                     score.emitters_named == 0
+                         ? 0.0
+                         : score.first_seconds_total / static_cast<double>(score.emitters_named),
+                     score.first_seconds_worst);
+    }
+    for (const std::string& line : wrongs) {
+        std::println("  wrong: {}", line);
+    }
+    std::println("  characterise: {} extracts, {:.1f} ms each on average", characterised,
+                 characterised == 0 ? 0.0 : characterise_ms / static_cast<double>(characterised));
 }

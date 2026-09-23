@@ -439,8 +439,11 @@ void WaterfallItem::resolveRows()
         // The one thing that could ever justify bridging a silence is
         // knowing the signal's protocol implies one, because then the
         // transmission is continuing rather than the detector guessing.
-        // Nothing classifies yet, Classification is Unknown for everything,
-        // so there is no basis for it and none should be invented here.
+        // No protocol reaches this side: the engine's tier two names a
+        // family at most, never a protocol, and keeps it off the wire, so
+        // there is no basis for it and none should be invented here. (This
+        // used to say "Nothing classifies yet, Classification is Unknown for
+        // everything".)
         if (!rowsForSamples(box.first_seen, box.last_detected, top_row, bottom_row)) {
             box.time_bounded = false;
             continue;

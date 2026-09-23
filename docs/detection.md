@@ -10,8 +10,15 @@ the spectrum stage, which was the next thing to build. Since then the spectrum
 stage and `core/detect/detector.cpp` have both been written, so the sections
 that describe them now describe code rather than intent. Where a number
 appears below it was measured. The tracker is written too, in the same file,
-and click-to-tune is built in `ui/`; identification is the part that is still
-design, and `Track::classification` is the seam nothing fills.
+and click-to-tune is built in `ui/`. Identification's second tier is built as
+of 2026-09-23: `core/engine/probe.h` places probe receivers on detections,
+`core/detect/tier_two.h` schedules them, and `Track::classification` carries
+the family they find. "The probe receiver, built and measured" near the end
+has what it gets right and what it gets wrong.
+
+WHAT THE LAST SENTENCE OF THAT PARAGRAPH USED TO SAY: "identification is the
+part that is still design, and `Track::classification` is the seam nothing
+fills."
 
 That sentence read "the tracker, identification and click-to-tune are still
 design" until 2026-09-20, in the same breath as conceding that
@@ -890,12 +897,17 @@ margin above each test's threshold, which is the calibrated shape the section
 below asks for and the detector's stopwatch is not. The AnalogueFm branch caps
 itself at half because it is an elimination rather than a positive finding.
 
-So what is unbuilt is the seam and not the estimators: `characterise` reads
-complex baseband, the detector reads spectrum frames, and nothing routes a
+So what was unbuilt was the seam and not the estimators: `characterise` reads
+complex baseband and the detector reads spectrum frames. The probe receiver
+routes a narrowband extract from one to the other now, and
+`Track::classification` carries the families `characterise` names; "The probe
+receiver, built and measured" below is the record.
+
+WHAT THIS PARAGRAPH USED TO SAY, after its first clause: "nothing routes a
 narrowband extract from one to the other. `Track::classification` is the field
 that would carry the answer and its enum still has exactly one value. The
 probe-receiver argument below is the design for that seam and remains the
-part to do.
+part to do."
 
 ### The cheap half of the seam exists, and what it measured
 
@@ -1666,6 +1678,12 @@ on empty spectrum it made it confidently wrong. Anything built to feed
 nothing in it, that the answer stays "unknown". That is now a cheap test and it
 should be run before the seam is built, not after.
 
+It was run through the seam once it was built, on the probe receiver's own fine
+stage rather than a low pass on the host: the empty slot in
+`tests/engine/test_engine_probe.cpp` came back unknown in 12 of 12 runs, three
+seeds at each of four emitter levels. "The probe receiver, built and measured"
+below has the rest.
+
 And it sharpens the standing conclusion rather than softening it. Two carriers
 were named correctly at every width; everything that was not a carrier moved
 around. The family call is the wrong thing to hang detection on, and narrowing
@@ -1749,8 +1767,13 @@ earlier in this document now reads 0.50 flagged at -3 and -9 dB, under the
 0.66 the correctly named carrier reads at +3.
 
 `may_drive_detection` is necessary and not sufficient: it refuses Unknown and
-the flagged call, and certifies nothing else. Nothing routes a family into
-detection yet and nothing goes on the wire as one.
+the flagged call, and certifies nothing else. Tier two asks it of every probe:
+`Detector::record_probe` keeps every answer on the track and lets one change
+`Track::classification` only when this says yes, and nothing the detector
+decides reads that field. Nothing goes on the wire as a family.
+
+WHAT THE LAST SENTENCE USED TO SAY: "Nothing routes a family into detection
+yet and nothing goes on the wire as one."
 
 ### The OFDM branch still fires on noise, and why that one is not mine to fix
 
@@ -1967,8 +1990,12 @@ delivered. Click-to-tune has to read `placement.bandwidth_clamped` and say so.
 classifier.** `Engine::set_spectrum_sink` delivers the frames, the detector
 runs on them on the RPC server's side, and `Session::detections` publishes the
 track list a client filters by confidence. `ui/render/spectrum_item.cpp`
-resolves a click against it and tunes a receiver. What there is still no route
-for is complex baseband to a classifier.
+resolves a click against it and tunes a receiver. Complex baseband reaches a
+classifier through the engine's own probe receivers, and the answer stays on
+the detector's track rather than reaching a click.
+
+WHAT THE LAST SENTENCE USED TO SAY: "What there is still no route for is
+complex baseband to a classifier."
 
 This paragraph used to say there was no Engine surface for any of it and that
 the track list was exposed by nothing. That was true when it was written and

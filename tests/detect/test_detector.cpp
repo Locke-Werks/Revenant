@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "core/detect/detector.h"
+#include "core/detect/tier_two.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 
@@ -2219,4 +2220,172 @@ TEST_CASE("the margin does not decay while a track holds", "[detect][margin]") {
     CHECK(later->confidence < held_confidence);
     CHECK(held_confidence < confidence_while_live);
     CHECK(later->margin_confidence == Approx(held_margin));
+}
+
+// ---- tier two: what a probe's answer may and may not change ---------------
+//
+// core/detect/tier_two.h hands every probe core/engine/probe.h finishes to
+// Detector::record_probe. The rule docs/detection.md asks of that seam is the
+// one characterise::may_drive_detection states: an answer it refuses is kept
+// and changes nothing the detector reports. These cases hold both halves of
+// that, with the family written by hand so the rule is what is under test and
+// not the characteriser.
+
+namespace {
+
+[[nodiscard]] detect::ProbeFinding finding(detect::Classification family, double confidence,
+                                           double symbol_rate_hz, bool drives) {
+    detect::ProbeFinding out;
+    out.family = family;
+    out.confidence = confidence;
+    out.symbol_rate_hz = symbol_rate_hz;
+    out.may_drive_detection = drives;
+    out.psk_without_symbol_rate =
+        family == detect::Classification::Psk && symbol_rate_hz == 0.0;
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("a probe answer the characteriser refuses is kept and changes nothing reported",
+          "[detect][tier-two]") {
+    constexpr std::uint64_t kSeed = 31337;
+    INFO("seed " << kSeed);
+
+    // Two detectors on bit-identical frames: one is told what probes found and
+    // the control is not. Everything the detector decides has to come out the
+    // same in both, which is the whole of "a family does not drive anything".
+    Scene probed_scene(-90.0, kSeed);
+    Scene control_scene(-90.0, kSeed);
+    const std::vector<Emitter> emitters = {
+        Emitter{.centre_bin = 300, .width_bins = 5, .snr_2500_db = 25.0},
+        Emitter{.centre_bin = 700, .width_bins = 21, .snr_2500_db = 25.0},
+    };
+    probed_scene.set(emitters);
+    control_scene.set(emitters);
+
+    auto probed_made = detect::Detector::create(base_config(), probed_scene.geometry());
+    auto control_made = detect::Detector::create(base_config(), control_scene.geometry());
+    REQUIRE(probed_made);
+    REQUIRE(control_made);
+    detect::Detector& probed = *probed_made;
+    detect::Detector& control = *control_made;
+
+    run_for(probed, probed_scene, 3.0);
+    run_for(control, control_scene, 3.0);
+
+    const detect::Track* narrow = find_near(probed, probed_scene.frequency_of(300), 5000);
+    const detect::Track* wide = find_near(probed, probed_scene.frequency_of(700), 5000);
+    REQUIRE(narrow != nullptr);
+    REQUIRE(wide != nullptr);
+    const std::uint64_t narrow_id = narrow->id;
+    const std::uint64_t wide_id = wide->id;
+
+    // A PSK call with no symbol rate, which may_drive_detection refuses, on
+    // one; an unmodulated carrier it accepts, on the other.
+    REQUIRE(probed.record_probe(narrow_id,
+                                finding(detect::Classification::Psk, 0.5, 0.0, false)));
+    REQUIRE(probed.record_probe(wide_id,
+                                finding(detect::Classification::Unmodulated, 0.87, 0.0, true)));
+
+    // Visible at once, before another decision.
+    narrow = find_near(probed, probed_scene.frequency_of(300), 5000);
+    wide = find_near(probed, probed_scene.frequency_of(700), 5000);
+    REQUIRE(narrow != nullptr);
+    REQUIRE(wide != nullptr);
+    CHECK(narrow->classification == detect::Classification::Unknown);
+    CHECK(narrow->classified_at == 0);
+    CHECK(narrow->probes == 1);
+    CHECK(narrow->last_probe.family == detect::Classification::Psk);
+    CHECK(narrow->last_probe.psk_without_symbol_rate);
+    CHECK(wide->classification == detect::Classification::Unmodulated);
+    CHECK(wide->classification_confidence == Approx(0.87));
+    CHECK(wide->classified_at == probed.last_decision());
+
+    // And carried through the decisions after it.
+    run_for(probed, probed_scene, 2.0);
+    run_for(control, control_scene, 2.0);
+    wide = find_near(probed, probed_scene.frequency_of(700), 5000);
+    REQUIRE(wide != nullptr);
+    CHECK(wide->id == wide_id);
+    CHECK(wide->classification == detect::Classification::Unmodulated);
+
+    // A later refused answer leaves the accepted family alone; a later
+    // accepted one replaces it.
+    REQUIRE(probed.record_probe(wide_id, finding(detect::Classification::Unknown, 0.0, 0.0, false)));
+    wide = find_near(probed, probed_scene.frequency_of(700), 5000);
+    REQUIRE(wide != nullptr);
+    CHECK(wide->classification == detect::Classification::Unmodulated);
+    CHECK(wide->last_probe.family == detect::Classification::Unknown);
+    CHECK(wide->probes == 2);
+    REQUIRE(probed.record_probe(wide_id, finding(detect::Classification::Psk, 0.99, 1200.0, true)));
+    wide = find_near(probed, probed_scene.frequency_of(700), 5000);
+    REQUIRE(wide != nullptr);
+    CHECK(wide->classification == detect::Classification::Psk);
+    CHECK(wide->symbol_rate_hz == Approx(1200.0));
+
+    // Nothing the detector decided moved.
+    INFO("probed: " << describe(probed));
+    INFO("control: " << describe(control));
+    REQUIRE(probed.tracks().size() == control.tracks().size());
+    for (std::size_t i = 0; i < probed.tracks().size(); ++i) {
+        const detect::Track& a = probed.tracks()[i];
+        const detect::Track& b = control.tracks()[i];
+        CHECK(a.id == b.id);
+        CHECK(a.state == b.state);
+        CHECK(a.center == b.center);
+        CHECK(a.bandwidth == b.bandwidth);
+        CHECK(a.confidence == b.confidence);
+        CHECK(a.margin_confidence == b.margin_confidence);
+    }
+    CHECK(probed.stats().tracks_born == control.stats().tracks_born);
+    CHECK(probed.stats().tracks_dropped == control.stats().tracks_dropped);
+
+    // A probe that outlived its track is refused rather than filed anywhere.
+    CHECK_FALSE(probed.record_probe(999'999, finding(detect::Classification::Fsk, 1.0, 0.0, true)));
+}
+
+TEST_CASE("tier two probes the oldest unclassified live track first", "[detect][tier-two]") {
+    constexpr dsp::SampleRate kScheduleRate = 1'000'000;
+    const auto track = [](std::uint64_t id, dsp::SampleIndex born, detect::TrackState state,
+                          detect::Classification family) {
+        detect::Track out;
+        out.id = id;
+        out.state = state;
+        out.first_seen = born;
+        out.classification = family;
+        return out;
+    };
+
+    const std::vector<detect::Track> tracks = {
+        track(1, 5'000'000, detect::TrackState::Live, detect::Classification::Unknown),
+        track(2, 1'000'000, detect::TrackState::Live, detect::Classification::Unknown),
+        track(3, 2'000'000, detect::TrackState::Held, detect::Classification::Unknown),
+        track(4, 500'000, detect::TrackState::Live, detect::Classification::Psk),
+        track(5, 3'000'000, detect::TrackState::Merged, detect::Classification::Unknown),
+        track(6, 4'000'000, detect::TrackState::Live, detect::Classification::Unknown),
+        track(7, 100'000, detect::TrackState::Live, detect::Classification::Unknown),
+    };
+
+    SECTION("never probed, oldest first; held, merged and named tracks are left alone") {
+        const auto chosen =
+            detect::TierTwo::pick(tracks, {}, {}, 8, 10'000'000, kScheduleRate, 10.0);
+        CHECK(chosen == std::vector<std::uint64_t>{7, 2, 6, 1});
+    }
+    SECTION("no more than the pool has free, and not what is already in flight") {
+        const std::uint64_t in_flight[] = {7};
+        const std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts = {{7, 9'000'000}};
+        const auto chosen =
+            detect::TierTwo::pick(tracks, attempts, in_flight, 2, 10'000'000, kScheduleRate, 10.0);
+        CHECK(chosen == std::vector<std::uint64_t>{2, 6});
+    }
+    SECTION("a track already asked about waits out the interval, behind every new one") {
+        const std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts = {
+            {7, 1'000'000}, {2, 5'000'000}, {6, 12'000'000}};
+        // At 16 s: 7 was asked at 1 s and is due, 2 at 5 s and is due, 6 at
+        // 12 s and is not. 1 has never been asked and goes before both.
+        const auto chosen =
+            detect::TierTwo::pick(tracks, attempts, {}, 8, 16'000'000, kScheduleRate, 10.0);
+        CHECK(chosen == std::vector<std::uint64_t>{1, 7, 2});
+    }
 }

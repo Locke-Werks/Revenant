@@ -1100,3 +1100,27 @@ commit: "Add a pool of probe receivers the engine places for itself"
 instead: core/engine/probe.h calls characterise() on its probe receivers'
     extracts, on the pool's own worker thread. The library is still pure and
     knows nothing of the engine; the family stays off the wire.
+phrase: Track::classification exists and nothing fills it
+phrase: Track::classification is the seam nothing fills
+phrase: Track::classification as a deliberate seam that nothing fills
+phrase: Track::classification is the field that would carry the answer and its
+    enum still has exactly one value
+phrase: a classification enum with exactly one value in it
+phrase: the detector's only Classification value is Unknown
+phrase: Nothing classifies yet, Classification is Unknown for everything
+retired: 2026-09-23
+commit: "Record what a probe finds on the track it was placed on"
+instead: detect::Classification carries the families core/characterise names,
+    and Detector::record_probe fills Track::classification from tier two when
+    characterise::may_drive_detection allows. Nothing on the wire carries it.
+
+phrase: Nothing routes a family into detection yet
+phrase: Nothing in this tree routes one yet, and nothing goes on the wire as a family
+phrase: What there is still no route for is complex baseband to a classifier
+phrase: It is narrowed once a classification exists, and nothing sets one yet
+retired: 2026-09-23
+commit: "Record what a probe finds on the track it was placed on"
+instead: core/detect/tier_two.h routes a probe's family onto the track through
+    record_probe, which may_drive_detection gates. Nothing the detector
+    decides reads it, the hold is not narrowed by it, and it stays off the
+    wire.

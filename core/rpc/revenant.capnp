@@ -1036,10 +1036,15 @@ enum TrackState {
 # NOT EVERY FIELD OF revenant::detect::Track, WHICH IS THE POINT
 #
 # Track carries the tracker's own working state as well: hit and miss counts,
-# the signed pre-reduction channel index the hysteresis is carried in, and a
-# classification enum with exactly one value in it. None of that is something
-# a display draws or a click resolves against, and a schema is a contract
-# rather than a mirror. What is here is what docs/ui-spectrum.md asks for:
+# the signed pre-reduction channel index the hysteresis is carried in, and
+# what tier two's probes found. None of that is something a display draws or
+# a click resolves against, and a schema is a contract rather than a mirror.
+# The family in particular stays off the wire by docs/detection.md's own
+# decision, and a probe is not a receiver a client can see.
+#
+# WHAT THE FIRST SENTENCE USED TO SAY AT ITS END: "and a classification enum with
+# exactly one value in it". core/detect/detector.h carries the families
+# core/characterise names now, filled by tier two. What is here is what docs/ui-spectrum.md asks for:
 # draw every detection above an operator-set confidence, hold it while it
 # decays instead of flickering, and let a click tune to it.
 #
@@ -1055,10 +1060,14 @@ enum TrackState {
 # trying to hold sits at the edge of the passband rather than in it.
 #
 # The logical centre those cases want is a property of the MODULATION, and
-# deriving it needs a classification. core/detect/detector.h leaves
-# Track::classification as a deliberate seam that nothing fills, and
-# docs/ui-spectrum.md notes that the enumeration would have to grow before
-# RTTY and its shift were even expressible in VrxParams. So there is no
+# deriving it needs a classification. Track::classification names a family at
+# most, never a mode or a shift, and it stays inside the process that runs the
+# detector; docs/ui-spectrum.md notes that the enumeration would have to grow
+# before RTTY and its shift were even expressible in VrxParams.
+#
+# WHAT THE SECOND SENTENCE USED TO SAY: "core/detect/detector.h leaves
+# Track::classification as a deliberate seam that nothing fills". Tier two
+# fills it now, with a family and not a logical centre. So there is no
 # logicalCentreHz field here: it would be a field nothing could fill, and a
 # client reading a measured centre out of a field named "logical" would tune
 # wrong with the wire telling it it was right.

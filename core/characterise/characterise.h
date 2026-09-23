@@ -325,8 +325,13 @@ struct Characterisation {
 // certifies nothing else. docs/detection.md measured that the family call on
 // real HF cannot carry a detection decision on its own; a caller that routes a
 // family into detection passes through here first and still owes its own
-// measurement of what it is doing. Nothing in this tree routes one yet, and
-// nothing goes on the wire as a family.
+// measurement of what it is doing.
+//
+// core/engine/probe.h asks it of every probe, and detect::Detector::
+// record_probe lets a family change Track::classification only when it says
+// yes. Nothing the detector decides reads that field, and nothing goes on the
+// wire as a family. WHAT THIS PARAGRAPH USED TO SAY AT ITS END: "Nothing in this
+// tree routes one yet, and nothing goes on the wire as a family."
 [[nodiscard]] bool may_drive_detection(const Characterisation& result);
 
 }  // namespace revenant::characterise

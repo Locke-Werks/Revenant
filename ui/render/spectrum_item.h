@@ -554,9 +554,10 @@ signals:
     // wanders with what the speaker is saying.
     //
     // Nothing in the tree computes a logical centre. The schema leaves it
-    // out deliberately, the detector's only Classification value is Unknown,
-    // and docs/detection.md puts identification two tiers above the layer
-    // that would need it. So this is the known-approximate answer, it is
+    // out deliberately, the detector's classification is a family at most
+    // and never crosses the wire, and docs/detection.md puts identification
+    // two tiers above the layer that would need it. (This used to say "the
+    // detector's only Classification value is Unknown".) So this is the known-approximate answer, it is
     // correct today only for AM and for the modes whose energy centre is
     // their logical centre, and the window says so next to the number rather
     // than presenting it as a tuning solution.

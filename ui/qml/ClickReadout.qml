@@ -23,8 +23,10 @@
 // half a bandwidth from the suppressed carrier and moves with what
 // the speaker is saying. Nothing in the tree computes a logical
 // centre, the schema leaves it out on purpose, and the detector's
-// only Classification value is Unknown, so this is the
-// known-approximate answer rather than the intended one.
+// classification is a family at most and stays off the wire, so
+// this is the known-approximate answer rather than the intended
+// one. (This used to say "the detector's only Classification
+// value is Unknown".)
 
 import QtQuick
 import QtQuick.Controls
