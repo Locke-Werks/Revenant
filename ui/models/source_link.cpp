@@ -210,6 +210,9 @@ void EngineLink::probe_source_tuning()
         handover_tune_granted_ = 0;
         handover_tune_answered_ = false;
         has_tuned_info_ = false;
+
+        // Ids from the last connection's engine, which name nothing here.
+        handover_tune_removed_.clear();
     }
     QMetaObject::invokeMethod(
         this, [this] { adopt_source_tuning(); }, Qt::QueuedConnection);
@@ -238,7 +241,7 @@ void EngineLink::apply_source_tune()
     }
 
     const std::int64_t target = requested_center_hz_.load();
-    auto granted = seam_set_source_center(*client_, target);
+    auto granted = seam_retune_source(*client_, target);
 
     // The range fields are deliberately untouched. They belong to the
     // other handover, they are the Qt thread's to hold between
@@ -253,8 +256,14 @@ void EngineLink::apply_source_tune()
         has_tuned_info_ = false;
     } else {
         handover_tune_fault_.clear();
-        handover_tune_granted_ = *granted;
+        handover_tune_granted_ = granted->granted_hz;
         handover_tune_answered_ = true;
+
+        // Appended rather than assigned: two tunes can be answered before the
+        // Qt thread adopts either, and a removal the first one reported is
+        // still a removal.
+        handover_tune_removed_.insert(handover_tune_removed_.end(), granted->removed.begin(),
+                                      granted->removed.end());
 
         // The geometry the retune produced. A failure here is not a failed
         // retune: the radio moved, and the only cost is that the axis
@@ -450,9 +459,11 @@ void EngineLink::adopt_source_tuning()
     // rather than off tune_answered_ afterwards, because that member is also true
     // from an earlier tune nobody is waiting on.
     bool answered_a_tune = false;
+    std::vector<rpc::RetuneRemoval> removed;
 
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
+        removed.swap(handover_tune_removed_);
 
         if (handover_has_range_) {
             handover_has_range_ = false;
@@ -486,6 +497,23 @@ void EngineLink::adopt_source_tuning()
     }
 
     emit sourceTuningChanged();
+
+    // THE PANE'S RECEIVER, IF THE ENGINE SAYS THE RETUNE REMOVED IT. The answer
+    // names it and the frequency it was on, so the sentence states the cause
+    // rather than inferring one from the span, and the frequency is the
+    // engine's rather than this window's record of the tune. Before a recall
+    // below places a receiver, so the one torn down is the one that went. The
+    // inventory poll's own path, forget_removed_receiver, finds receiver_id_
+    // already moved on and does nothing.
+    for (const rpc::RetuneRemoval& gone : removed) {
+        if (receiver_id_ != 0 && gone.id == static_cast<std::uint64_t>(receiver_id_)) {
+            receiver_gone_text_ =
+                QString::fromStdString(receiver_retuned_away_sentence(gone.frequency_hz));
+            emit receiverGoneChanged();
+            removeReceiver();
+            break;
+        }
+    }
 
     // A bookmark waiting on this retune, placed now that source_center holds the
     // centre the radio actually landed on. THIS IS THE ONLY MOMENT IT IS RIGHT:

@@ -1,4 +1,4 @@
-// The four wire surfaces this client uses that the engine may not have
+// The wire surfaces this client uses that the engine may not have
 // yet, reached through one file so the merge is one file.
 //
 // WHY THIS EXISTS, AND WHY IT IS NOT A HACK
@@ -28,7 +28,7 @@
 // client was compiled against a wire with no retune call" rather than
 // blaming the engine.
 //
-// Fix it by correcting the four expressions in this file. Nothing else in
+// Fix it by correcting the expressions in this file. Nothing else in
 // ui/ names the methods.
 
 #pragma once
@@ -106,6 +106,27 @@ template <typename C = rpc::Client>
         static_cast<void>(hz);
         return fail("this client was built against an engine wire with no "
                     "setSourceCenter call, so it cannot retune the front end");
+    }
+}
+
+// The same retune, answering with the receivers it removed as well as the
+// centre it took. Session.setSourceCenter grew the removed list after the
+// call above had shipped, so a wire without retune_source falls back to it
+// and reports nothing removed; the client then finds a removal the old way,
+// by the inventory, and says less about why.
+template <typename C = rpc::Client>
+[[nodiscard]] Expected<rpc::SourceRetune> seam_retune_source(C& client, std::int64_t hz)
+{
+    if constexpr (requires { client.retune_source(hz); }) {
+        return client.retune_source(hz);
+    } else {
+        auto granted = seam_set_source_center(client, hz);
+        if (!granted) {
+            return std::unexpected(granted.error());
+        }
+        rpc::SourceRetune out;
+        out.granted_hz = *granted;
+        return out;
     }
 }
 

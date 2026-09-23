@@ -100,4 +100,18 @@ namespace revenant::ui {
     return where + ": the engine no longer has that receiver";
 }
 
+// The sentence when the ENGINE said the retune removed the receiver, which
+// Session.setSourceCenter now does: its answer lists every receiver the move
+// left outside the span, with the frequency each was on. Nothing here is
+// inferred, so the cause is stated outright and the frequency is the engine's
+// rather than the one this window recorded at tune time.
+[[nodiscard]] inline std::string receiver_retuned_away_sentence(std::int64_t frequency_hz)
+{
+    if (frequency_hz == 0) {
+        return {};
+    }
+    return "the front end moved off " + megahertz_text(frequency_hz) +
+           ", so the receiver there was let go";
+}
+
 }  // namespace revenant::ui

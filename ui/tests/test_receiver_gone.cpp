@@ -15,6 +15,7 @@
 
 using revenant::ui::megahertz_text;
 using revenant::ui::receiver_gone_sentence;
+using revenant::ui::receiver_retuned_away_sentence;
 
 namespace {
 
@@ -74,6 +75,18 @@ TEST_CASE("the span edges are inside the span", "[receivergone]")
           "96.899 MHz is outside the span now, so the receiver there was let go");
     CHECK(receiver_gone_sentence(99'300'001, kSpanLow, kSpanHigh) ==
           "99.300 MHz is outside the span now, so the receiver there was let go");
+}
+
+// The engine's own answer to a retune names the removed receiver and the
+// frequency it was on, so this sentence states the cause outright. Rejects
+// reading the frequency back off the window's own record, which is the guess
+// the inventory path has to make, and rejects a sentence for nothing.
+TEST_CASE("a receiver the retune removed is told so, at the engine's frequency",
+          "[receivergone]")
+{
+    CHECK(receiver_retuned_away_sentence(146'520'000) ==
+          "the front end moved off 146.520 MHz, so the receiver there was let go");
+    CHECK(receiver_retuned_away_sentence(0).empty());
 }
 
 // Nothing to say when there was no receiver. Zero is not a frequency the

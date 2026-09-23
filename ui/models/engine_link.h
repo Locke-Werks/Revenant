@@ -2849,6 +2849,10 @@ private:
     std::int64_t handover_tune_granted_ = 0;  // guarded by source_mutex_
     bool handover_tune_answered_ = false;     // guarded by source_mutex_
 
+    // The receivers the engine said the retune removed, with the frequency
+    // each was on. See adopt_source_tuning.
+    std::vector<rpc::RetuneRemoval> handover_tune_removed_;  // guarded by source_mutex_
+
     // The new geometry a granted retune produced, handed over with the
     // rest so the centre and the tuning state land in one adopt. Two
     // adopts would put the old centre on screen beside the new granted
