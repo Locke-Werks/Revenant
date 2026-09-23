@@ -1,5 +1,6 @@
-// EngineLink's audio half: the subscription, the two callbacks, and the
-// hand-off of everything the status strip shows.
+// EngineLink's audio half: the subscriptions, one per heard receiver in the
+// rack, the two callbacks, and the hand-off of everything the status strip
+// shows.
 //
 // Split out of engine_link.cpp the way receiver_link.cpp is, because these
 // are one object's members and three separate concerns, and a single file
@@ -11,10 +12,10 @@
 //   The SUPERVISOR thread owns the Client, so it is the only thread that
 //   may call subscribe_audio, unsubscribe_audio or audio_stats. All three
 //   block for a round trip. apply_audio_request, poll_audio_stats and
-//   stop_audio are its and only its.
+//   stop_audio_for, stop_audio_slot and forget_audio are its and only its.
 //
 //   The CAP'N PROTO EVENT LOOP thread runs on_audio_chunk and
-//   on_audio_ended. The first touches the ring and nothing else. The second
+//   on_audio_ended. The first touches its slot's ring and nothing else. The second
 //   writes a string under a mutex and raises a flag, because client.h
 //   forbids calling back into the Client from there and the teardown is a
 //   Client call.
@@ -38,8 +39,11 @@
 
 #include "models/engine_link.h"
 
+#include <algorithm>
+#include <array>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <QMetaObject>
 #include <QSettings>
@@ -126,22 +130,21 @@ void EngineLink::adopt_audio()
 // The Cap'n Proto event loop thread
 // ---------------------------------------------------------------------------
 
-void EngineLink::on_audio_chunk(const rpc::AudioChunk& chunk)
+void EngineLink::on_audio_chunk(std::size_t slot, const rpc::AudioChunk& chunk)
 {
     // The whole of what this thread does with audio. Everything the chunk
     // means, the gap in front of it and the state of the gate inside it,
     // is worked out in AudioRing::write under the ring's own lock. See the
     // block at the top of audio/audio_ring.h for what that lock costs this
     // thread and why it is the trade that was taken.
-    audio_ring_.write(chunk);
+    audio_rings_[slot].write(chunk);
 }
 
-void EngineLink::on_audio_ended(const std::string& reason)
+void EngineLink::on_audio_ended(std::size_t slot, qulonglong vrx, const std::string& reason)
 {
     {
         const std::lock_guard<std::mutex> lock(audio_mutex_);
-        audio_ended_pending_ = true;
-        audio_ended_text_ = reason;
+        audio_ended_.push_back(AudioEnded{slot, vrx, reason});
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -159,9 +162,10 @@ void EngineLink::on_audio_ended(const std::string& reason)
 // The supervisor thread
 // ---------------------------------------------------------------------------
 
-void EngineLink::stop_audio()
+void EngineLink::stop_audio_slot(std::size_t slot)
 {
-    if (live_audio_vrx_ == 0) {
+    const qulonglong vrx = live_audio_[slot].vrx;
+    if (vrx == 0) {
         return;
     }
 
@@ -179,12 +183,98 @@ void EngineLink::stop_audio()
         // when it returns the chunk callback has been erased and no
         // callback is in flight. That is what makes resetting the ring on
         // the next line safe from this thread.
-        client_->unsubscribe_audio(live_audio_vrx_);
+        client_->unsubscribe_audio(vrx);
     }
 
+    live_audio_[slot] = {};
+    audio_rings_[slot].reset();
+}
+
+void EngineLink::stop_audio_for(qulonglong vrx)
+{
+    if (vrx == 0) {
+        return;
+    }
+    for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
+        if (live_audio_[slot].vrx == vrx) {
+            stop_audio_slot(slot);
+        }
+    }
+    if (live_audio_vrx_ == vrx) {
+        live_audio_vrx_ = 0;
+        live_audio_granted_ = 0;
+    }
+}
+
+void EngineLink::forget_audio()
+{
+    // NOT stop_audio_slot. There is no engine to cancel against, and
+    // Client::unsubscribe_audio on a dead connection would block the
+    // supervisor for a round trip that cannot happen. The rings are emptied
+    // so that reconnecting does not play the previous engine's last quarter
+    // second before the new streams start.
+    for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
+        live_audio_[slot] = {};
+        audio_rings_[slot].reset();
+    }
     live_audio_vrx_ = 0;
     live_audio_granted_ = 0;
-    audio_ring_.reset();
+    work_audio_stats_ = {};
+    audio_ended_vrx_.clear();
+    {
+        const std::lock_guard<std::mutex> lock(audio_mutex_);
+        audio_ended_.clear();
+    }
+    publish_mix();
+}
+
+void EngineLink::publish_mix()
+{
+    std::uint32_t mask = 0;
+    int pane_slot = -1;
+    for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
+        if (live_audio_[slot].vrx == 0) {
+            continue;
+        }
+        mask |= 1U << slot;
+        if (live_audio_[slot].vrx == live_receiver_id_) {
+            pane_slot = static_cast<int>(slot);
+        }
+    }
+
+    // THE LEAD IS THE FOCUSED RECEIVER'S STREAM WHEN IT IS HEARD, and
+    // otherwise the first heard one down the rack. The lead decides the
+    // rate the sink is opened at, so it should be the receiver the operator
+    // is looking at; a lead that jumped to whichever slot was lowest would
+    // reopen the sink on every focus change between receivers at two rates.
+    int lead = pane_slot;
+    if (lead < 0) {
+        std::vector<AudioWant> wants;
+        {
+            const std::lock_guard<std::mutex> lock(audio_mutex_);
+            wants = requested_audio_wants_;
+        }
+        for (const AudioWant& want : wants) {
+            if (want.slot < live_audio_.size() && live_audio_[want.slot].vrx != 0) {
+                lead = static_cast<int>(want.slot);
+                break;
+            }
+        }
+    }
+    if (lead < 0 && mask != 0) {
+        for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
+            if ((mask & (1U << slot)) != 0) {
+                lead = static_cast<int>(slot);
+                break;
+            }
+        }
+    }
+
+    mix_granted_millis_.store(
+        lead < 0 ? 0U : live_audio_[static_cast<std::size_t>(lead)].granted,
+        std::memory_order_release);
+    mix_mask_.store(mask, std::memory_order_release);
+    mix_lead_slot_.store(lead, std::memory_order_release);
 }
 
 void EngineLink::apply_audio_request()
@@ -198,122 +288,165 @@ void EngineLink::apply_audio_request()
         audio_work_pending_ = false;
     }
 
-    // The ended arrival first, because it changes what is held before
-    // anything below asks what is held.
-    std::string ended;
-    bool had_ended = false;
+    std::vector<AudioEnded> ended;
+    std::vector<AudioWant> wants;
     {
         const std::lock_guard<std::mutex> lock(audio_mutex_);
-        if (audio_ended_pending_) {
-            audio_ended_pending_ = false;
-            ended = std::move(audio_ended_text_);
-            audio_ended_text_.clear();
-            had_ended = true;
+        ended.swap(audio_ended_);
+        wants = requested_audio_wants_;
+    }
+
+    // The ended arrivals first, because they change what is held before
+    // anything below asks what is held.
+    for (AudioEnded& one : ended) {
+        // NOT stop_audio_slot. core/rpc/client.cpp has already dropped this
+        // side's capability and the server has already ended its own, so
+        // there is nothing to cancel and a cancel would be refused. What is
+        // left is to stop claiming to hold a subscription.
+        if (one.slot < live_audio_.size() && live_audio_[one.slot].vrx == one.vrx) {
+            live_audio_[one.slot] = {};
+            audio_rings_[one.slot].reset();
+        }
+
+        // That receiver is not asked again. ended means the receiver went
+        // away or its stream failed, and asking again would be refused and
+        // write a second sentence over the engine's own.
+        audio_ended_vrx_.push_back(one.vrx);
+
+        if (one.vrx == live_receiver_id_) {
+            work_audio_ended_ =
+                one.reason.empty()
+                    ? QStringLiteral("the engine ended the audio stream and gave no reason")
+                    : QString::fromStdString(one.reason);
+            work_audio_fault_.clear();
+            work_audio_stats_ = {};
         }
     }
 
-    if (had_ended) {
-        // NOT stop_audio. core/rpc/client.cpp has already dropped this
-        // side's capability and the server has already ended its own, so
-        // there is nothing to cancel and a cancel would be refused. What
-        // is left is to stop claiming to hold a subscription.
-        live_audio_vrx_ = 0;
-        live_audio_granted_ = 0;
-        audio_ring_.reset();
+    // WHAT AN ENDED ARRIVAL USED TO DO: switch listening off, so the
+    // reconcile would not resubscribe on the pane's stale id. With a rack
+    // that silenced every other receiver for the sake of one, so the
+    // receiver whose stream ended is remembered instead and the switch stays
+    // where the operator put it.
 
-        // The switch goes OFF. ended means the receiver went away, so the
-        // reconcile below would otherwise resubscribe on the pane's stale
-        // id, be refused, and write a second error over the engine's own
-        // sentence about why the first one ended. The operator turns it
-        // back on when they have a receiver again, which is the same
-        // gesture as starting to listen in the first place.
-        audio_wanted_.store(false, std::memory_order_release);
-
-        work_audio_ended_ =
-            ended.empty()
-                ? QStringLiteral("the engine ended the audio stream and gave no reason")
-                : QString::fromStdString(ended);
-        work_audio_fault_.clear();
-        work_audio_stats_ = {};
-        note_audio();
-
-        // The Qt thread's own copy of the switch has to follow, and
-        // audioWanted reads the atomic directly, so the signal is all that
-        // is needed.
-        QMetaObject::invokeMethod(
-            this, [this] { emit audioChanged(); }, Qt::QueuedConnection);
+    // What should be subscribed, by slot. Nothing on a receiver that makes
+    // no audio: raw and the digital modes hand out complex baseband, the
+    // engine refuses audio on one in words, and that refusal would be the
+    // only thing the section had to show; the window hides the section
+    // there instead.
+    std::array<qulonglong, kMaxReceivers> desired{};
+    if (audio_wanted_.load(std::memory_order_acquire)) {
+        for (const AudioWant& want : wants) {
+            if (want.slot >= desired.size()) {
+                continue;
+            }
+            rpc::Demod demod = rpc::Demod::Nfm;
+            const qulonglong vrx = id_for_key(want.key, &demod);
+            if (vrx == 0 || !mode_makes_audio(demod_name(demod).toStdString())) {
+                continue;
+            }
+            if (std::find(audio_ended_vrx_.begin(), audio_ended_vrx_.end(), vrx) !=
+                audio_ended_vrx_.end()) {
+                continue;
+            }
+            desired[want.slot] = vrx;
+        }
     }
 
-    // Nothing on a receiver that makes no audio. raw and the digital modes
-    // hand out complex baseband, the engine refuses audio on one in words,
-    // and that refusal would be the only thing the section had to show; the
-    // window hides the section there instead. The switch stays as it was, so
-    // a change back to an audio mode starts listening again.
+    for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
+        if (live_audio_[slot].vrx != 0 && live_audio_[slot].vrx != desired[slot]) {
+            // Muted, soloed away, rebuilt under a new id, moved out of the
+            // rack, or the operator switched off. Either way the stream that
+            // is running is not one that is wanted.
+            stop_audio_slot(slot);
+        }
+    }
+
     const bool audible = mode_makes_audio(demod_name(live_receiver_demod_).toStdString());
-    const qulonglong want =
-        audio_wanted_.load(std::memory_order_acquire) && audible ? live_receiver_id_ : 0;
-
-    if (live_audio_vrx_ != 0 && live_audio_vrx_ != want) {
-        // The pane moved to another receiver, or the operator switched
-        // off. Either way the stream that is running is on the wrong
-        // receiver.
-        stop_audio();
-        work_audio_stats_ = {};
-    }
-
     if (live_receiver_id_ != 0 && !audible) {
         // A refusal from before the mode changed is about a receiver that
         // is not there any more.
         work_audio_fault_.clear();
     }
 
-    if (want == 0 || live_audio_vrx_ == want || client_ == nullptr) {
-        note_audio();
-        return;
+    if (client_ != nullptr) {
+        for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
+            const qulonglong want = desired[slot];
+            if (want == 0 || live_audio_[slot].vrx == want) {
+                continue;
+            }
+
+            // Counters restart with the subscription: they describe one
+            // stream and the previous receiver's gaps say nothing about
+            // this one's.
+            AudioRing& ring = audio_rings_[slot];
+            ring.reset_counts();
+            ring.set_depth_millis(kRequestedAudioMillis);
+
+            auto granted = client_->subscribe_audio(
+                want, kRequestedAudioMillis,
+                [this, slot](const rpc::AudioChunk& chunk) { on_audio_chunk(slot, chunk); },
+                [this, slot, want](const std::string& why) { on_audio_ended(slot, want, why); });
+            if (!granted) {
+                // The engine refused: no such receiver or a source that is
+                // not open, in its own words. Not routed into errorText, for
+                // the reason detectionFault is not: a refused subscription
+                // is not a lost engine and must not read as one. Said on the
+                // audio section when it is the focused receiver's, and
+                // asked again next pass either way.
+                if (want == live_receiver_id_) {
+                    work_audio_fault_ = QString::fromStdString(granted.error().message);
+                }
+                continue;
+            }
+
+            live_audio_[slot] = AudioSub{want, *granted};
+
+            // THE RING IS RESIZED FROM THE GRANT AND NOT FROM THE REQUEST,
+            // and the reset is what makes that stick. subscribe_audio
+            // installs the chunk callback BEFORE it sends the request, so a
+            // chunk can reach the ring while this call is still waiting for
+            // the answer, and that chunk would have established the ring at
+            // the provisional depth above. The reset clears the format, so
+            // the next chunk re-establishes at the depth the engine actually
+            // granted.
+            //
+            // It costs whatever arrived during the round trip, which on
+            // loopback is nothing and on a link slow enough to matter is a
+            // few chunks at the very start of a stream. The alternative is a
+            // ring whose depth silently differs from the grant, which is the
+            // failure the grant is reported to prevent.
+            ring.set_depth_millis(*granted);
+            ring.reset();
+
+            if (want == live_receiver_id_) {
+                work_audio_fault_.clear();
+                work_audio_ended_.clear();
+                work_audio_stats_ = {};
+            }
+        }
     }
 
-    // Counters restart with the subscription: they describe one stream and
-    // the previous receiver's gaps say nothing about this one's.
-    audio_ring_.reset_counts();
-    audio_ring_.set_depth_millis(kRequestedAudioMillis);
-
-    auto granted =
-        client_->subscribe_audio(want, kRequestedAudioMillis,
-                                 [this](const rpc::AudioChunk& chunk) { on_audio_chunk(chunk); },
-                                 [this](const std::string& why) { on_audio_ended(why); });
-    if (!granted) {
-        // The engine refused: no such receiver or a source that is not
-        // open, in its own words. A complex tap would be refused too and is
-        // never asked; see the gate above. Not routed into errorText, for
-        // the reason detectionFault is not: a refused subscription is not
-        // a lost engine and must not read as one.
-        work_audio_fault_ = QString::fromStdString(granted.error().message);
-        note_audio();
-        return;
+    // The focused receiver's subscription, which is what the audio section
+    // describes. Its counters go when it changes, because they were about
+    // another stream.
+    qulonglong pane_vrx = 0;
+    std::uint32_t pane_granted = 0;
+    if (live_receiver_id_ != 0) {
+        for (const AudioSub& sub : live_audio_) {
+            if (sub.vrx == live_receiver_id_) {
+                pane_vrx = sub.vrx;
+                pane_granted = sub.granted;
+            }
+        }
     }
+    if (pane_vrx != live_audio_vrx_) {
+        work_audio_stats_ = {};
+    }
+    live_audio_vrx_ = pane_vrx;
+    live_audio_granted_ = pane_granted;
 
-    live_audio_vrx_ = want;
-    live_audio_granted_ = *granted;
-
-    // THE RING IS RESIZED FROM THE GRANT AND NOT FROM THE REQUEST, and the
-    // reset is what makes that stick. subscribe_audio installs the chunk
-    // callback BEFORE it sends the request, so a chunk can reach the ring
-    // while this call is still waiting for the answer, and that chunk
-    // would have established the ring at the provisional depth above. The
-    // reset clears the format, so the next chunk re-establishes at the
-    // depth the engine actually granted.
-    //
-    // It costs whatever arrived during the round trip, which on loopback
-    // is nothing and on a link slow enough to matter is a few chunks at
-    // the very start of a stream. The alternative is a ring whose depth
-    // silently differs from the grant, which is the failure the grant is
-    // reported to prevent.
-    audio_ring_.set_depth_millis(*granted);
-    audio_ring_.reset();
-
-    work_audio_fault_.clear();
-    work_audio_ended_.clear();
-    work_audio_stats_ = {};
+    publish_mix();
     note_audio();
 }
 

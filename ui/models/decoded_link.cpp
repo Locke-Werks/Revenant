@@ -224,6 +224,34 @@ void EngineLink::place_startup_receiver()
         return;
     }
     tuneReceiver(startup_hz_, startup_mode_);
+
+    // The rest of the --receiver list, as held receivers in the rack. The
+    // first keeps the focus, so --decode and the grab both describe it.
+    for (const auto& [hz, mode] : startup_extra_) {
+        if (hz < spanLowHz() || hz > spanHighHz()) {
+            std::fprintf(stderr,
+                         "--receiver %.0f Hz is outside the span this source covers, so no "
+                         "receiver was opened there\n",
+                         hz);
+            continue;
+        }
+        const auto key = rack_.add();
+        if (!key) {
+            std::fputs("--receiver: the rack holds eight receivers, and the rest were not "
+                       "opened\n",
+                       stderr);
+            break;
+        }
+        rpc::VrxParams params;
+        params.demod = wanted_.demod;
+        if (auto parsed = demod_from_name(mode)) {
+            params.demod = *parsed;
+        }
+        add_held_receiver(*key, hz, params);
+    }
+    startup_extra_.clear();
+    post_audio_wants();
+    emit rackChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +306,7 @@ void EngineLink::stop_decoded()
 {
     if (client_ != nullptr) {
         // Cancelled by name before the receiver goes, which is what keeps
-        // ended() about somebody else's removal. See stop_audio.
+        // ended() about somebody else's removal. See stop_audio_for.
         for (const std::string& name : live_decoded_) {
             client_->unsubscribe_decoded(live_decoded_vrx_, name);
         }

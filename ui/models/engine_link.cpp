@@ -153,6 +153,20 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     // A receiver asked for on the command line is placed by the first
     // connection whose source can reach it. See setStartupReceiver.
     connect(this, &EngineLink::connectionChanged, this, &EngineLink::place_startup_receiver);
+
+    // The focused strip reads the pane, so every change to the pane is a
+    // change to the rack as well.
+    connect(this, &EngineLink::receiverChanged, this, &EngineLink::rackChanged);
+    connect(this, &EngineLink::receiverStatusChanged, this, &EngineLink::rackChanged);
+
+    // Unity until a strip says otherwise, so the first receiver plays at
+    // the level it always has.
+    for (std::atomic<float>& gain : mix_gain_) {
+        gain.store(1.0F, std::memory_order_relaxed);
+    }
+
+    // What a double click's second press measures its first against.
+    click_clock_.start();
 }
 
 EngineLink::~EngineLink()
@@ -233,6 +247,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             poll_receiver_status();
+            poll_held_status();
             poll_detections();
 
             // Only when the switch or the region has just moved. The
@@ -288,18 +303,17 @@ void EngineLink::supervise()
             // to stop claiming to be about a live receiver, and the next
             // engine will not have one at that id.
             live_receiver_id_ = 0;
+            live_pane_key_ = 0;
 
-            // The audio subscription goes the same way, and WITHOUT an
-            // unsubscribe: there is no engine to cancel against, and
-            // Client::unsubscribe_audio on a dead connection would block
-            // the supervisor for a round trip that cannot happen. The
-            // ring is emptied so that reconnecting does not play the
-            // previous engine's last quarter second before the new
-            // stream starts.
-            live_audio_vrx_ = 0;
-            live_audio_granted_ = 0;
-            audio_ring_.reset();
-            work_audio_stats_ = {};
+            // The held receivers went with it too, and the Qt thread puts
+            // them back on the next connection the way it puts back the
+            // pane's; see adopt().
+            forget_held(QString{});
+
+            // The audio subscriptions go the same way, and WITHOUT an
+            // unsubscribe: there is no engine to cancel against. See
+            // forget_audio.
+            forget_audio();
 
             // Every decoder subscription went with it, on the same terms.
             forget_decoded();
@@ -353,6 +367,7 @@ void EngineLink::supervise()
             apply_audio_request();
             apply_decode_request();
             poll_receiver_status();
+            poll_held_status();
 
             // On the probe pass only, so once a second. These are a
             // status line and nothing acts on them, so polling them at
@@ -561,17 +576,18 @@ bool EngineLink::attempt_connect()
 
     // The ended that the event loop thread raised and nobody picked up.
     // It is the only piece of audio state that survived a reconnect,
-    // because everything else here is the supervisor's own and this pair
+    // because everything else here is the supervisor's own and this list
     // is written from the Cap'n Proto thread under audio_mutex_. An ended
     // arriving just before the connection dropped would be found by the
-    // first apply_audio_request on the NEW engine, which would then switch
-    // the listen control off and put the previous engine's sentence about
-    // a receiver that no longer exists onto this connection's status line.
+    // first apply_audio_request on the NEW engine, which would then refuse
+    // to listen to a receiver id the new engine has reissued and put the
+    // previous engine's sentence about a receiver that no longer exists
+    // onto this connection's status line.
     {
         const std::lock_guard<std::mutex> lock(audio_mutex_);
-        audio_ended_pending_ = false;
-        audio_ended_text_.clear();
+        audio_ended_.clear();
     }
+    audio_ended_vrx_.clear();
     {
         const std::lock_guard<std::mutex> lock(swap_mutex_);
         has_ready_ = false;
@@ -756,8 +772,8 @@ void EngineLink::adopt()
     {
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
         has_pending_receiver_status_ = false;
-        has_pending_receiver_id_ = false;
-        pending_receiver_id_ = 0;
+        pending_receiver_ids_.clear();
+        handover_held_.clear();
     }
 
     // The audio goes with the connection on both edges, for the reason
@@ -802,7 +818,10 @@ void EngineLink::adopt()
     // Set and never cleared while the link is down, because adopt() runs
     // again on every failed reconnect and every later pass finds the id
     // already zero.
-    if (receiver_id_ != 0) {
+    //
+    // A rack entry with an add still in flight counts, which is what the
+    // pane's key says when its id has not come back yet.
+    if (receiver_id_ != 0 || pane_key_ != 0) {
         restore_receiver_ = true;
     }
     receiver_id_ = 0;
@@ -811,6 +830,10 @@ void EngineLink::adopt()
     static_cast<void>(reset_passband_display());
     emit receiverStatusChanged();
     emit passbandChanged();
+
+    // Every rack entry's id was issued by the engine that has gone, on the
+    // same argument as the pane's.
+    rack_.forget_engine_ids();
 
     if (connected_ && !was_connected && restore_receiver_) {
         // The pane had a receiver before the engine went away, so put it
@@ -822,10 +845,30 @@ void EngineLink::adopt()
         // leaving it set would recreate a receiver the operator removed
         // after the reconnection on whatever reconnection came next.
         restore_receiver_ = false;
-        post_receiver_request(true);
+        if (!ensure_pane_entry()) {
+            emit receiverChanged();
+        } else {
+            post_receiver_request(true);
+        }
     } else {
         emit receiverChanged();
     }
+
+    // And the rack's held receivers, on the same terms and for the same
+    // reason. Each goes back at the absolute frequency it was on, against
+    // the new engine's centre.
+    if (connected_ && !was_connected) {
+        for (const RackEntry& entry : rack_.entries()) {
+            if (entry.key == pane_key_) {
+                continue;
+            }
+            if (const HeldView* view = held_view(entry.key); view != nullptr) {
+                add_held_receiver(entry.key, static_cast<double>(view->absolute_hz),
+                                  view->params);
+            }
+        }
+    }
+    emit rackChanged();
 
     emit connectionChanged();
     if (engine_running_ != was_running) {

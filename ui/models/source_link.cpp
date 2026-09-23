@@ -518,6 +518,22 @@ void EngineLink::adopt_source_tuning()
         }
     }
 
+    // And any held receiver in the rack the retune took, which goes from the
+    // rack with a line saying where it was. Its strip is gone, so the line is
+    // the rack's.
+    for (const rpc::RetuneRemoval& gone : removed) {
+        for (const RackEntry& entry : rack_.entries()) {
+            if (entry.key != pane_key_ && entry.engine_id != 0 &&
+                entry.engine_id == static_cast<qulonglong>(gone.id)) {
+                const std::uint64_t key = entry.key;
+                set_rack_note(QString::fromStdString(receiver_gone_sentence(
+                    gone.frequency_hz, spanLowHz(), spanHighHz())));
+                removeRackReceiver(key);
+                break;
+            }
+        }
+    }
+
     // A bookmark waiting on this retune, placed now that source_center holds the
     // centre the radio actually landed on. THIS IS THE ONLY MOMENT IT IS RIGHT:
     // recallBookmark could not do it, because tuneSourceHz had not been answered
@@ -859,10 +875,9 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
     // server ended every subscription with the source and this client had no
     // reason to ask for another.
     live_receiver_id_ = 0;
-    live_audio_vrx_ = 0;
-    live_audio_granted_ = 0;
-    audio_ring_.reset();
-    work_audio_stats_ = {};
+    live_pane_key_ = 0;
+    forget_held(QStringLiteral("the source was replaced, and its receivers went with it"));
+    forget_audio();
     forget_decoded();
     clear_rds(QStringLiteral(
         "the source was replaced, so nothing is decoding RDS. The switch stays on and the "

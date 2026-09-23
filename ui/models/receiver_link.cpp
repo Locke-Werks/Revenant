@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cstdint>
 #include <utility>
+#include <vector>
 
 #include <QMetaObject>
 #include <QString>
@@ -235,9 +236,11 @@ void EngineLink::tuneReceiverToDetection(double absolute_hz, const QString& mode
     // still wins, because that is a caller saying something the detector
     // cannot: QML passes one when the operator picked a mode for this click
     // rather than asking for the signal." A named mode does still win. QML
-    // does not pass one: ui/qml/TuneSelection.qml's takeTune is the only call site and
-    // passes an empty string on every click, so that escape hatch never
-    // carried an operator's choice and never could. The choice arrives
+    // does not pass one: the callers are EngineLink::spanClick, for a click
+    // that tuned, and add_receiver_at, for a double click, both reached from
+    // ui/qml/TuneSelection.qml, and both pass an empty string on every click,
+    // so that escape hatch never carried an operator's choice and never
+    // could. The choice arrives
     // through setReceiverDemod, which is why the flag lives on the receiver
     // rather than on the call.
     QString chosen = mode;
@@ -324,6 +327,14 @@ void EngineLink::tune_receiver(double absolute_hz, const QString& mode,
         receiver_fault_ = QStringLiteral("'%1' is not one of %2")
                               .arg(mode, QString::fromStdString(demod_names_text()));
         emit receiverFaultChanged();
+        return;
+    }
+
+    // A receiver needs a place in the rack before it can be made, and an
+    // empty pane has none. A full rack with nothing in the pane cannot
+    // happen through the window, since the pane empties only when the rack
+    // does, and is refused rather than assumed.
+    if (!ensure_pane_entry()) {
         return;
     }
 
@@ -621,10 +632,46 @@ void EngineLink::resetReceiverPassband()
 
 void EngineLink::removeReceiver()
 {
-    if (receiver_id_ == 0) {
+    // THE PANE'S KEY AND NOT ITS ID, which is what this tested until the
+    // rack: a receiver whose add is still in flight has a rack entry and no
+    // id yet, and a remove that did nothing then left a strip behind for a
+    // receiver about to appear. With neither there is nothing to remove.
+    if (receiver_id_ == 0 && pane_key_ == 0) {
         return;
     }
 
+    const std::uint64_t gone = pane_key_;
+    clear_pane();
+
+    {
+        const std::lock_guard<std::mutex> lock(receiver_mutex_);
+        has_receiver_request_ = false;
+        receiver_request_recreates_ = false;
+        receiver_request_removes_ = true;
+        requested_pane_key_ = gone;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
+        receiver_work_pending_ = true;
+    }
+    supervisor_wake_.notify_all();
+
+    // Out of the rack, and the focus goes where closing a tab would send it.
+    // The remove just posted is the pane's outstanding request, so the focus
+    // operation carries it and the supervisor removes this receiver before
+    // it moves the pane onto the next one.
+    const std::uint64_t next = gone == 0 ? rack_.focused() : rack_.remove(gone);
+    pane_key_ = 0;
+    if (next != 0) {
+        focus_entry(next);
+    } else {
+        post_audio_wants();
+        emit rackChanged();
+    }
+}
+
+void EngineLink::clear_pane()
+{
     receiver_id_ = 0;
     static_cast<void>(reset_passband_display());
     cancel_auto_filter(AutoFilterOutcome::Idle);
@@ -649,8 +696,9 @@ void EngineLink::removeReceiver()
     // engine whether it can, which is the one thing the probe exists to avoid,
     // and an add that refuses leaves the operator's tune doing nothing.
     //
-    // No post_receiver_request here. This method is already posting a remove,
-    // and the next thing to tune posts a fresh request out of wanted_. The RDS
+    // No post_receiver_request here. The two callers are already posting a
+    // remove or a park, and the next thing to tune posts a fresh request out
+    // of wanted_. The RDS
     // switch stays where the operator put it, so the gate probes the next
     // receiver and raises it again; see EngineLink::ensure_composite_receiver.
     wanted_.audio_rate = 0;
@@ -672,17 +720,13 @@ void EngineLink::removeReceiver()
     // two-step gesture.
     audio_ended_reason_.clear();
 
-    {
-        const std::lock_guard<std::mutex> lock(receiver_mutex_);
-        has_receiver_request_ = false;
-        receiver_request_recreates_ = false;
-        receiver_request_removes_ = true;
-    }
-    {
-        const std::lock_guard<std::mutex> lock(supervisor_mutex_);
-        receiver_work_pending_ = true;
-    }
-    supervisor_wake_.notify_all();
+    // The wheel's backlog and a gesture in progress were about that receiver.
+    receiver_scroll_ = ReceiverScrollState{};
+    receiver_scroll_flush_.stop();
+    dragging_ = false;
+    width_uncommitted_ = false;
+    drag_changed_ = false;
+    receiver_drag_live_.store(false, std::memory_order_release);
 
     emit receiverChanged();
     emit receiverStatusChanged();
@@ -727,6 +771,7 @@ void EngineLink::post_receiver_request(bool recreate)
         // stage that was going to be rebuilt leaves the old mode running.
         receiver_request_recreates_ = receiver_request_recreates_ || recreate;
         receiver_request_removes_ = false;
+        requested_pane_key_ = pane_key_;
     }
     {
         const std::lock_guard<std::mutex> lock(supervisor_mutex_);
@@ -778,31 +823,59 @@ void EngineLink::apply_receiver_request()
         receiver_work_pending_ = false;
     }
 
-    rpc::VrxParams params;
-    bool wanted = false;
-    bool recreate = false;
-    bool remove = false;
+    // The rack's operations and then the slot, in the order RackOp's note
+    // gives, all taken under one lock so nothing the Qt thread posts can land
+    // between them.
+    std::vector<RackOp> ops;
+    PaneRequest slot;
     {
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
-        wanted = has_receiver_request_;
-        recreate = receiver_request_recreates_;
-        remove = receiver_request_removes_;
-        params = requested_params_;
-        has_receiver_request_ = false;
-        receiver_request_recreates_ = false;
-        receiver_request_removes_ = false;
+        ops.swap(rack_ops_);
+        slot = take_pane_request_locked();
     }
 
-    if (remove) {
+    for (const RackOp& op : ops) {
+        apply_pane_request(op.outgoing);
+        apply_rack_op(op);
+    }
+    apply_pane_request(slot);
+}
+
+EngineLink::PaneRequest EngineLink::take_pane_request_locked()
+{
+    PaneRequest out;
+    out.wanted = has_receiver_request_;
+    out.recreate = receiver_request_recreates_;
+    out.remove = receiver_request_removes_;
+    out.params = requested_params_;
+    out.key = requested_pane_key_;
+    has_receiver_request_ = false;
+    receiver_request_recreates_ = false;
+    receiver_request_removes_ = false;
+    return out;
+}
+
+void EngineLink::apply_pane_request(const PaneRequest& request)
+{
+    if (request.remove) {
         drop_receiver();
         return;
     }
-    if (!wanted) {
+    if (!request.wanted || client_ == nullptr) {
         return;
     }
+    const rpc::VrxParams& params = request.params;
 
-    if (recreate || live_receiver_id_ == 0) {
-        static_cast<void>(recreate_receiver(params));
+    // A request for a rack entry the pane is not on is a new receiver for
+    // that entry: the pane's own receiver was parked, or was never made.
+    if (request.recreate || live_receiver_id_ == 0 || request.key != live_pane_key_) {
+        if (live_receiver_id_ != 0 && request.key != live_pane_key_) {
+            // Nothing the Qt thread posts reaches here, since a park always
+            // comes first, and the receiver in the pane is somebody's. Kept
+            // rather than rebuilt over.
+            return;
+        }
+        static_cast<void>(recreate_receiver(params, request.key));
         return;
     }
 
@@ -842,7 +915,7 @@ void EngineLink::apply_receiver_request()
                 note_receiver_fault(QString{});
                 return;
             }
-            if (recreate_receiver(params)) {
+            if (recreate_receiver(params, request.key)) {
                 note_receiver_fault(QStringLiteral(
                     "the audio restarted: that filter width changed the demodulation rate, "
                     "which the engine cannot do in place"));
@@ -856,10 +929,11 @@ void EngineLink::apply_receiver_request()
     // Taken in place, so the receiver keeps its id and this is its mode now.
     // The decode reconcile reads it to know what the receiver can feed.
     live_receiver_demod_ = params.demod;
+    live_receiver_params_ = params;
     note_receiver_fault(QString{});
 }
 
-bool EngineLink::recreate_receiver(const rpc::VrxParams& params)
+bool EngineLink::recreate_receiver(const rpc::VrxParams& params, std::uint64_t key)
 {
     drop_receiver();
 
@@ -870,6 +944,8 @@ bool EngineLink::recreate_receiver(const rpc::VrxParams& params)
     }
     live_receiver_id_ = *added;
     live_receiver_demod_ = params.demod;
+    live_receiver_params_ = params;
+    live_pane_key_ = key;
 
     // The passband subscription is reattached with the receiver, because it
     // was keyed on the id that has just gone. A failure here is not fatal
@@ -885,13 +961,7 @@ bool EngineLink::recreate_receiver(const rpc::VrxParams& params)
         note_receiver_fault(QString{});
     }
 
-    {
-        const std::lock_guard<std::mutex> lock(receiver_mutex_);
-        pending_receiver_id_ = live_receiver_id_;
-        has_pending_receiver_id_ = true;
-    }
-    QMetaObject::invokeMethod(
-        this, [this] { adopt_receiver_status(); }, Qt::QueuedConnection);
+    post_settled_id(key, live_receiver_id_);
     return true;
 }
 
@@ -909,14 +979,15 @@ void EngineLink::drop_receiver()
     // Above the early return because the audio subscription and the
     // receiver id are separate pieces of state, and a path that clears one
     // without the other leaves a stream running against an id nothing is
-    // tracking. stop_audio returns immediately when there is nothing to
+    // tracking. stop_audio_for returns immediately when there is nothing to
     // stop.
-    stop_audio();
+    stop_audio_for(live_receiver_id_);
 
     // The decoders for the same reason and in the same place: cancelled
     // before the remove, so the engine does not send ended() for it.
     stop_decoded();
 
+    live_pane_key_ = 0;
     if (live_receiver_id_ == 0 || client_ == nullptr) {
         live_receiver_id_ = 0;
         return;
@@ -969,6 +1040,11 @@ void EngineLink::poll_receiver_status()
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
         pending_receiver_status_ = *status;
         has_pending_receiver_status_ = true;
+
+        // Which rack entry this is about. A focus change between this read
+        // and the Qt thread's adopt would otherwise hand the next receiver
+        // the last one's grant.
+        pending_receiver_status_key_ = live_pane_key_;
     }
     QMetaObject::invokeMethod(
         this, [this] { adopt_receiver_status(); }, Qt::QueuedConnection);
@@ -1032,7 +1108,7 @@ void EngineLink::forget_removed_receiver(const Error& failure)
     // behind it asks this question again.
     {
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
-        if (has_receiver_request_ || receiver_request_removes_) {
+        if (has_receiver_request_ || receiver_request_removes_ || !rack_ops_.empty()) {
             return;
         }
     }
@@ -1135,16 +1211,41 @@ void EngineLink::adopt_receiver_status()
 {
     rpc::VrxStatus status;
     bool have_status = false;
-    qulonglong id = 0;
-    bool have_id = false;
+    std::uint64_t status_key = 0;
+    std::vector<SettledId> settled;
     {
         const std::lock_guard<std::mutex> lock(receiver_mutex_);
         have_status = has_pending_receiver_status_;
         status = pending_receiver_status_;
+        status_key = pending_receiver_status_key_;
         has_pending_receiver_status_ = false;
-        have_id = has_pending_receiver_id_;
-        id = pending_receiver_id_;
-        has_pending_receiver_id_ = false;
+        settled.swap(pending_receiver_ids_);
+    }
+
+    // A status read before a focus change describes the receiver the pane
+    // held then, which is now a strip in the rack. Dropped rather than drawn:
+    // the held receiver's own poll carries it there.
+    if (have_status && status_key != pane_key_) {
+        have_status = false;
+    }
+
+    // Each id the supervisor settled, for whichever entry it belongs to. The
+    // pane's own is the last one for its key; a parked receiver the park
+    // rebuilt, or a held one made for a reconnect, lands on its strip.
+    bool have_id = false;
+    qulonglong id = 0;
+    bool rack_moved = false;
+    for (const SettledId& one : settled) {
+        if (one.key != 0 && one.key == pane_key_) {
+            have_id = true;
+            id = one.id;
+        } else if (RackEntry* entry = rack_.find(one.key); entry != nullptr) {
+            entry->engine_id = one.id;
+            rack_moved = true;
+        }
+    }
+    if (rack_moved) {
+        emit rackChanged();
     }
 
     bool identity_moved = false;
@@ -1160,6 +1261,20 @@ void EngineLink::adopt_receiver_status()
         if (reset_passband_display()) {
             emit passbandChanged();
         }
+    }
+    if (have_id) {
+        if (RackEntry* entry = rack_.find(pane_key_); entry != nullptr) {
+            entry->engine_id = id;
+        }
+        if (id == 0) {
+            // A focus the supervisor could not complete, because the held
+            // receiver had gone by the time it came to it. The strip goes
+            // with it, and focus moves on the way it does for any removal.
+            set_rack_note(QStringLiteral("that receiver had already gone from the engine"));
+            removeReceiver();
+            return;
+        }
+        emit rackChanged();
     }
 
     bool edges_resolved = false;
@@ -1381,12 +1496,15 @@ void EngineLink::adopt_receiver_inventory()
 
     engine_receiver_ids_ = std::move(ids);
 
-    // How many the engine holds that this window is not on. receiver_id_ is
-    // zero when the pane holds none, and zero is never a valid id, so the
-    // subtraction is the same arithmetic either way.
+    // How many the engine holds that this window is not on: not the pane's
+    // and not any the rack holds. receiver_id_ is zero when the pane holds
+    // none, and zero is never a valid id, so the subtraction is the same
+    // arithmetic either way.
     std::size_t others = 0;
     for (const qulonglong id : engine_receiver_ids_) {
-        if (id != receiver_id_) {
+        const bool racked = std::any_of(rack_.entries().begin(), rack_.entries().end(),
+                                        [id](const RackEntry& e) { return e.engine_id == id; });
+        if (id != receiver_id_ && !racked) {
             ++others;
         }
     }
@@ -1451,9 +1569,13 @@ void EngineLink::apply_stranded_release()
     // KEEP THIS WINDOW'S OWN. live_receiver_id_ is the supervisor's copy of
     // what the pane is on, which is the one this thread may compare against;
     // receiver_id_ belongs to the Qt thread.
+    // And every receiver the rack holds, which are this window's as much as
+    // the pane's is.
     const auto mine = static_cast<std::uint64_t>(live_receiver_id_);
     for (const std::uint64_t id : *now) {
-        if (id == mine) {
+        const bool held = std::any_of(held_.begin(), held_.end(),
+                                      [id](const HeldVrx& h) { return h.id == id; });
+        if (id == mine || held) {
             continue;
         }
         static_cast<void>(client_->remove_vrx(id));

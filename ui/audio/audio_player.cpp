@@ -39,8 +39,8 @@ constexpr int kMinSinkMillis = 20;
 // RingSource
 // ---------------------------------------------------------------------------
 
-RingSource::RingSource(AudioRing& ring, RingFormat stream, int out_channels, QObject* parent)
-    : QIODevice(parent), ring_(ring), stream_(stream), out_channels_(out_channels)
+RingSource::RingSource(EngineLink& link, RingFormat stream, int out_channels, QObject* parent)
+    : QIODevice(parent), link_(link), stream_(stream), out_channels_(out_channels)
 {
 }
 
@@ -72,17 +72,43 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
     if (scratch_.size() < floats) {
         scratch_.resize(floats);
     }
+    if (mix_.size() < floats) {
+        mix_.resize(floats);
+    }
+    std::fill(mix_.begin(), mix_.begin() + static_cast<std::ptrdiff_t>(floats), 0.0F);
 
-    // stream_ goes IN, so the ring compares it against its own format under
+    // stream_ goes IN, so each ring compares it against its own format under
     // the one lock it takes for the copy. Asking format() first and read()
     // second is two locked calls with a window between them, and the writer
     // is the Cap'n Proto event loop: a receiver that changed rate in that
     // window would be copied into scratch_ at the new channel count while
     // every length here was worked out from the old one.
-    const ReadResult result = ring_.read(scratch_.data(), frames, stream_);
-    last_source_.store(result.last_source, std::memory_order_relaxed);
+    const int lead = link_.mixLeadSlot();
+    const std::uint32_t mask = link_.mixMask();
+    bool lead_moved = false;
+    FrameSource lead_source = FrameSource::idle;
+    for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
+        if ((mask & (1U << slot)) == 0) {
+            continue;
+        }
+        const ReadResult result = link_.audioRingAt(slot).read(scratch_.data(), frames, stream_);
+        if (static_cast<int>(slot) == lead) {
+            lead_source = result.last_source;
+            lead_moved = result.format_moved;
+        }
+        if (result.format_moved) {
+            // A ring at another format is left out; see THE MIX in the
+            // header. Its buffer was not touched.
+            continue;
+        }
+        const float gain = link_.mixGain(slot);
+        for (std::size_t i = 0; i < floats; ++i) {
+            mix_[i] += gain * scratch_[i];
+        }
+    }
+    last_source_.store(lead_source, std::memory_order_relaxed);
 
-    if (result.format_moved) {
+    if (lead_moved) {
         // The stream changed shape under an open sink, which is one timer
         // tick at most: the ring re-establishes on the first chunk at the
         // new rate and tick() reopens the sink. The ring copied nothing and
@@ -106,21 +132,20 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
     }
 
     if (static_cast<std::size_t>(out_channels_) == in_channels) {
-        std::memcpy(data, scratch_.data(), floats * sizeof(float));
+        std::memcpy(data, mix_.data(), floats * sizeof(float));
         return frames * frame_bytes;
     }
 
-    // THE ONE CONVERSION THIS PLAYER DOES, and it is a copy rather than a
-    // decision. A mono frame is written to every output channel, which is
-    // what mono means; no gain is applied, nothing is mixed and nothing is
-    // resampled. open_sink is what guarantees this is only ever reached
-    // with one input channel.
+    // THE ONE CONVERSION THIS PLAYER DOES BESIDE THE MIX, and it is a copy
+    // rather than a decision. A mono frame is written to every output
+    // channel, which is what mono means; nothing is resampled. open_sink is
+    // what guarantees this is only ever reached with one input channel.
     const auto out_floats = frames * static_cast<std::size_t>(out_channels_);
     if (widened_.size() < out_floats) {
         widened_.resize(out_floats);
     }
     for (std::size_t frame = 0; frame < frames; ++frame) {
-        const float value = scratch_[frame];
+        const float value = mix_[frame];
         for (int channel = 0; channel < out_channels_; ++channel) {
             widened_[frame * static_cast<std::size_t>(out_channels_) +
                      static_cast<std::size_t>(channel)] = value;
@@ -470,7 +495,7 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
     // The sink's depth, derived from the grant. See THE THREE BUFFER DEPTHS
     // at the top of audio/audio_player.h for why it is a quarter and why it
     // comes off the grant rather than off the request.
-    const int granted = static_cast<int>(link_.audioGrantedMillis());
+    const int granted = static_cast<int>(link_.mixGrantedMillis());
     sink_millis_ = std::max(kMinSinkMillis, granted / kSinkDepthDivisor);
     const auto sink_frames =
         static_cast<qsizetype>((static_cast<std::uint64_t>(sink_millis_) *
@@ -483,7 +508,7 @@ void AudioPlayer::open_sink(RingFormat format, std::uint64_t generation)
     connect(sink_.get(), &QAudioSink::stateChanged, this,
             [this](QAudio::State state) { handle_sink_state(state); });
 
-    pull_ = std::make_unique<RingSource>(ring(), format, out_channels);
+    pull_ = std::make_unique<RingSource>(link_, format, out_channels);
     pull_->open(QIODevice::ReadOnly);
     sink_->start(pull_.get());
 
@@ -532,6 +557,7 @@ void AudioPlayer::close_sink()
     }
     pull_.reset();
     open_generation_ = 0;
+    open_lead_ = -1;
     active_device_.clear();
     sink_millis_ = 0;
 
@@ -630,7 +656,12 @@ void AudioPlayer::tick()
         close_sink();
     }
 
-    AudioRing& r = ring();
+    // The lead ring, which the sink's format follows. See THE MIX in the
+    // header for which one that is.
+    const int lead = link_.mixLeadSlot();
+    const AudioRing::Snapshot ring_state =
+        lead < 0 ? AudioRing::Snapshot{}
+                 : link_.audioRingAt(static_cast<std::size_t>(lead)).snapshot();
 
     // ONE CALL, BECAUSE THE FORMAT AND THE GENERATION HAVE TO AGREE.
     //
@@ -643,7 +674,6 @@ void AudioPlayer::tick()
     // recorded one and the recorded one was already current. Every pull
     // after that found the format moved and wrote silence, for as long as
     // the receiver stayed at that rate. See AudioRing::Snapshot.
-    const AudioRing::Snapshot ring_state = r.snapshot();
     const RingFormat format = ring_state.format;
     const std::uint64_t generation = ring_state.generation;
 
@@ -661,9 +691,13 @@ void AudioPlayer::tick()
     // TWO DIFFERENT QUESTIONS, READ FROM TWO DIFFERENT PROPERTIES.
     //
     // A stream exists, which is what decides whether a sink should be open
-    // at all. It goes false on its own: the pane's receiver is cleared, the
-    // engine tears the subscription down, the link reconnects.
-    const bool streaming = link_.audioActive();
+    // at all. It goes false on its own: every heard receiver is cleared or
+    // muted, the engine tears the subscriptions down, the link reconnects.
+    //
+    // WHAT THIS USED TO READ: link_.audioActive(), the pane's own
+    // subscription. With a rack the pane's receiver can be muted while
+    // another plays, so the question is whether the mix has a lead.
+    const bool streaming = lead >= 0;
 
     // The operator turned listening off, which is a deliberate act and is
     // the only one of the two that clears the latch below.
@@ -714,7 +748,14 @@ void AudioPlayer::tick()
         // cleared by the operator picking a device and by the device list
         // changing, which are the two things that make another attempt
         // worth making, and both are what the message asks for.
-    } else if (sink_ == nullptr || generation != open_generation_ ||
+    } else if (lead != open_lead_ && pull_ != nullptr && pull_->stream() == format) {
+        // The lead moved to another ring at the same format: the focus went
+        // to another heard receiver. The sink plays on, and the generation
+        // recorded is now the new ring's, which is the only one it can be
+        // compared with.
+        open_lead_ = lead;
+        open_generation_ = generation;
+    } else if (sink_ == nullptr || generation != open_generation_ || lead != open_lead_ ||
                (pull_ != nullptr && pull_->stream() != format)) {
         // A generation past the one the sink was opened for is a stream
         // that changed rate or channel count. Reopened rather than
@@ -737,6 +778,9 @@ void AudioPlayer::tick()
         // rewrites it either way, and device_fault_ outlives the open on
         // purpose.
         open_sink(format, generation);
+        if (sink_ != nullptr) {
+            open_lead_ = lead;
+        }
     }
 
     // THE MISMATCH, SAID IN WORDS RATHER THAN LEFT AS SILENCE.

@@ -1,14 +1,18 @@
 // Audio.
 //
-// ONE RECEIVER AT A TIME, AND IT IS THE PANE'S. The engine serves an
-// audio subscription per receiver and this window takes exactly one,
-// on whichever receiver the pane above holds. That is stated here
-// rather than left for an operator to infer from the absence of a
-// second control: it is the same decision the pane already makes,
-// that one pane shows one receiver, extended to the one pair of
-// speakers a machine has. Mixing two streams into them is a mixer
-// with a gain and a pan per source, and nothing here makes that
-// decision on the operator's behalf.
+// EVERY HEARD RECEIVER, MIXED. The engine serves an audio subscription
+// per receiver and this window takes one on every receiver in the rack
+// that is heard, and the player sums them with each strip's gain. This
+// section is the master: the listen switch, the output and its volume,
+// and the focused receiver's stream described in full. Mute, solo and
+// gain per receiver are on the strips. docs/ui-spectrum.md, "The
+// receiver rack", has what the mix decides and what it leaves open.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "ONE RECEIVER AT A TIME, AND IT IS
+// THE PANE'S. The engine serves an audio subscription per receiver and
+// this window takes exactly one, on whichever receiver the pane above
+// holds", and that "Mixing two streams into them is a mixer with a gain
+// and a pan per source". The rack is that mixer, with a gain and no pan.
 //
 // WHY THIS SECTION OUTLIVES THE PANE ABOVE IT. Its visibility is not
 // receiverId alone. A receiver removed out from under a live stream
@@ -67,18 +71,21 @@ ColumnLayout {
             checkable: true
             checked: engineLink.audioWanted
             text: engineLink.audioWanted ? "listening" : "listen"
-            tint: Theme.receiverColours[0]
+            tint: Theme.receiverColours[engineLink.focusedSlot]
             ink: Theme.inkDim
             onClicked: engineLink.audioWanted = !engineLink.audioWanted
         }
 
-        // Which receiver, named rather than assumed. The switch can
-        // be on with nothing subscribed, which is the ordinary
-        // state before anything is tuned.
+        // Which receiver, named rather than assumed, by the label its
+        // strip carries. The switch can be on with nothing subscribed,
+        // which is the ordinary state before anything is tuned, and the
+        // focused receiver can be the one not heard, muted or soloed away.
         Label {
             text: engineLink.audioActive
-                  ? "vfo " + engineLink.audioReceiverId
-                  : (engineLink.audioWanted ? "no receiver" : "")
+                  ? "RX " + (engineLink.focusedSlot + 1)
+                  : !engineLink.audioWanted ? ""
+                  : engineLink.rackCount > 0 ? "focused receiver not heard"
+                  : "no receiver"
             color: engineLink.audioActive ? Theme.ink : Theme.inkDim
             font.pixelSize: Theme.sizeBody
         }

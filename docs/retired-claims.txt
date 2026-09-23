@@ -1313,3 +1313,11 @@ commit: "Read CW's sensitivity at 0.01 now that its floor is gone"
 instead: CW's speed reads slow in noise because dots come out short and element
     spaces long by the same amount and the one-unit cluster holds more spaces
     than dots. tests/decode/test_cw.cpp has the measurement.
+
+phrase: this link takes exactly one, on whichever receiver the detail pane holds
+phrase: this window takes exactly one, on whichever receiver the pane above holds
+retired: 2026-09-23
+commit: "Hold up to eight receivers in the client and mix their audio"
+instead: The client subscribes to every heard receiver in the rack, each into
+    its own ring, and AudioPlayer sums them with each strip's gain. See
+    docs/ui-spectrum.md, "The receiver rack".

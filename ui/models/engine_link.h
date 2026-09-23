@@ -36,12 +36,12 @@
 // Client itself: it connects, subscribes, and from then on asks the engine
 // once a second whether it is still there and whether it is running.
 //
-// The fourth is the sound card's, and it touches audio_ring_ and nothing
-// else here. It is out of this block's scope rather than absent from the
-// object, which is a distinction this header used to lose by heading the
-// block THE THREE THREADS full stop. See audioRing() below and
-// audio/audio_ring.h, which counts all four because every one of them takes
-// that object's lock.
+// The fourth is the sound card's, and it touches audio_rings_, the mix mask,
+// the lead slot and the gains, and nothing else here. It is out of this
+// block's scope rather than absent from the object, which is a distinction
+// this header used to lose by heading the block THE THREE THREADS full stop.
+// See audioRingAt() below and audio/audio_ring.h, which counts all four
+// because every one of them takes that object's lock.
 //
 // Those are two questions and Client::running answers both in one call. An
 // Expected that failed is a connection that has gone; an Expected holding
@@ -127,6 +127,7 @@
 
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -162,6 +163,8 @@
 #include "models/decoded_model.h"
 #include "models/mode_choice.h"
 #include "models/receiver_gone.h"
+#include "models/receiver_marker.h"
+#include "models/receiver_rack.h"
 #include "models/receiver_scroll.h"
 #include "models/scroll_tune.h"
 #include "models/front_end_note.h"
@@ -476,6 +479,16 @@ inline constexpr int kPassbandFineStepHz = 1;
     }
     return std::nullopt;
 }
+
+// One receiver as the span displays mark it: its band in absolute hertz, its
+// colour slot, and whether it is the focused one. EngineLink::rackMarkers
+// hands these out, focused one last so it is drawn over the others.
+struct RackMarker {
+    std::uint64_t key = 0;
+    ReceiverBand band;
+    std::size_t slot = 0;
+    bool focused = false;
+};
 
 class EngineLink : public QObject {
     Q_OBJECT
@@ -1021,6 +1034,41 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool receiverPending READ receiverPending NOTIFY receiverChanged)
 
     // ------------------------------------------------------------------
+    // The rack: every receiver this window holds. Implemented in
+    // ui/models/rack_link.cpp, with the rules in models/receiver_rack.h.
+    // ------------------------------------------------------------------
+    //
+    // ONE PANE, SEVERAL RECEIVERS. Everything above this block is the
+    // FOCUSED receiver's, which the detail pane, the passband display, the
+    // decode section and the RDS section all read, and it is unchanged by
+    // there being others: focusing another receiver parks the pane's one
+    // among the held receivers and puts the chosen one in the pane. A held
+    // receiver keeps running on the engine with its own audio, and its strip
+    // shows its frequency, its mode and its level. It is not retuned while it
+    // is held, because nothing in the window is on it to retune it with.
+    //
+    // NOT KEPT ACROSS A RESTART. Session restore is the owner's decision and
+    // has not been taken, so the rack comes up empty and its empty state says
+    // so. A reconnect within a session puts every receiver back, the way the
+    // pane's one always has been.
+
+    // One map per strip, in rack order: key, slot, colour, label, frequency,
+    // mode, level, focused, muted, solo, heard, gain and the band's edges in
+    // absolute hertz. The ruler and the rack both draw from it.
+    Q_PROPERTY(QVariantList rackEntries READ rackEntries NOTIFY rackChanged)
+    Q_PROPERTY(int rackCount READ rackCount NOTIFY rackChanged)
+    Q_PROPERTY(bool rackFull READ rackFull NOTIFY rackChanged)
+
+    // The focused receiver's key and colour slot, zero and zero with none.
+    Q_PROPERTY(qulonglong focusedKey READ focusedKey NOTIFY rackChanged)
+    Q_PROPERTY(int focusedSlot READ focusedSlot NOTIFY rackChanged)
+
+    // The last thing the rack has to say that no strip carries: a receiver
+    // the engine let go, an add the engine refused, a double click on a full
+    // rack. Empty when there is nothing.
+    Q_PROPERTY(QString rackNote READ rackNote NOTIFY rackChanged)
+
+    // ------------------------------------------------------------------
     // Bookmarks: places the operator named
     // ------------------------------------------------------------------
     //
@@ -1274,20 +1322,26 @@ class EngineLink : public QObject {
     // Listening to the receiver the detail pane is on
     // ------------------------------------------------------------------
     //
-    // ONE RECEIVER AT A TIME, AND IT IS THE PANE'S. The engine will serve
-    // an audio subscription per receiver and this link takes exactly one,
-    // on whichever receiver the detail pane holds. That is not a limit the
-    // engine imposes: it is the same decision the pane above already makes
-    // and states, that one pane shows one receiver, extended to the one
-    // output device a machine has. Two streams mixed into one pair of
-    // speakers is a mixer with gains and a pan per source, and nothing here
-    // decides that on the operator's behalf.
+    // EVERY HEARD RECEIVER, MIXED AT THE CLIENT. The engine serves an audio
+    // subscription per receiver and this link takes one on every receiver
+    // in the rack that is heard: not muted, and soloed when anything is.
+    // Each lands in its own ring, one per rack slot, and the player sums
+    // them with each strip's gain. The properties in this block describe the
+    // FOCUSED receiver's subscription, which is the one the audio section
+    // sits under; the strips carry the rest.
     //
-    // So moving the pane moves the audio. apply_audio_request reconciles
-    // the subscription against receiverId on every supervisor pass rather
-    // than each call site remembering to, which is what makes a retune, a
-    // mode change, a clear, a reconnect and an ended arrival all one code
-    // path.
+    // WHAT THIS PARAGRAPH USED TO SAY. It was headed "ONE RECEIVER AT A
+    // TIME, AND IT IS THE PANE'S", said "this link takes exactly one, on
+    // whichever receiver the detail pane holds", and ended "Two streams
+    // mixed into one pair of speakers is a mixer with gains and a pan per
+    // source, and nothing here decides that on the operator's behalf." The
+    // rack is that mixer, with a gain per strip and no pan; the operator
+    // decides it with mute and solo.
+    //
+    // apply_audio_request reconciles the subscriptions against the rack on
+    // every supervisor pass rather than each call site remembering to, which
+    // is what makes a retune, a mode change, a clear, a focus change, a mute,
+    // a reconnect and an ended arrival all one code path.
 
     // What the operator asked for, which is a switch and not a state: it
     // stays on across a receiver change, a reconnect and a rebuild, and
@@ -2031,6 +2085,87 @@ public:
     [[nodiscard]] const rpc::PassbandFrame& passbandFrame() const { return passband_display_; }
 
     // ------------------------------------------------------------------
+    // The rack surface. Implemented in ui/models/rack_link.cpp.
+    // ------------------------------------------------------------------
+    //
+    // QT THREAD ONLY, and every write ends in a rack operation posted to the
+    // supervisor in order with the pane's own requests; see RackOp below for
+    // why the order is the whole of the design.
+
+    [[nodiscard]] QVariantList rackEntries() const;
+    [[nodiscard]] int rackCount() const { return static_cast<int>(rack_.size()); }
+    [[nodiscard]] bool rackFull() const { return rack_.full(); }
+    [[nodiscard]] qulonglong focusedKey() const { return pane_key_; }
+    [[nodiscard]] int focusedSlot() const;
+    [[nodiscard]] QString rackNote() const { return rack_note_; }
+
+    // Every receiver's band for the span displays, focused one last.
+    [[nodiscard]] std::vector<RackMarker> rackMarkers() const;
+
+    // Puts a held receiver in the pane and the pane's one among the held.
+    Q_INVOKABLE void focusReceiver(qulonglong key);
+
+    // The receiver step places down the rack from the focused one, wrapping.
+    Q_INVOKABLE void focusNextReceiver(int step);
+
+    // A new receiver at this frequency, in the pane, focused. An empty mode
+    // takes the focused receiver's, which is what an operator adding a second
+    // receiver on the same band wants. Refused in words when the rack is full.
+    Q_INVOKABLE void addReceiver(double absolute_hz, const QString& mode);
+
+    // A single click on the span at pointer_hz, which resolved to center_hz
+    // and a measured bandwidth when it was on a detection. Inside another
+    // receiver's band it focuses that receiver; anywhere else it tunes the
+    // focused one, or opens the first. Answers whether it tuned, which is
+    // whether the click readout has a new click to show.
+    Q_INVOKABLE bool spanClick(double pointer_hz, double center_hz, double bandwidth_hz);
+
+    // The second click of a double click at the same place. Adds a receiver
+    // there and puts the focused one back where the first click found it.
+    // See classify_span_click in models/receiver_rack.h. Answers whether it
+    // added one.
+    Q_INVOKABLE bool spanDoubleClick(double pointer_hz, double center_hz, double bandwidth_hz);
+
+    Q_INVOKABLE void setReceiverMuted(qulonglong key, bool muted);
+    Q_INVOKABLE void toggleReceiverSolo(qulonglong key);
+    Q_INVOKABLE void setReceiverGain(qulonglong key, double position);
+
+    // Removes any receiver in the rack, the focused one through
+    // removeReceiver, which then focuses the one that took its place.
+    Q_INVOKABLE void removeRackReceiver(qulonglong key);
+
+    // Another receiver for main()'s --receiver after the first, placed as a
+    // held receiver once the first connection with a source can reach it.
+    void addStartupReceiver(double absolute_hz, const QString& mode);
+
+    // ------------------------------------------------------------------
+    // The mix, for AudioPlayer. Any thread; see the members.
+    // ------------------------------------------------------------------
+
+    // One ring per rack slot. The ring for a slot outlives every
+    // subscription that writes into it, for the reason audioRing gave: the
+    // callback dies with the Client, which the supervisor owns.
+    [[nodiscard]] AudioRing& audioRingAt(std::size_t slot) { return audio_rings_[slot]; }
+
+    // The slot whose stream sets the sink's format and the player's status,
+    // or -1 when nothing is subscribed. The focused receiver's when it is
+    // heard, and otherwise the first heard one down the rack.
+    [[nodiscard]] int mixLeadSlot() const { return mix_lead_slot_.load(std::memory_order_acquire); }
+
+    // Which slots hold a live subscription, as bits.
+    [[nodiscard]] std::uint32_t mixMask() const { return mix_mask_.load(std::memory_order_acquire); }
+
+    // The strip gain for a slot, as an amplitude.
+    [[nodiscard]] float mixGain(std::size_t slot) const {
+        return mix_gain_[slot].load(std::memory_order_relaxed);
+    }
+
+    // The lead subscription's grant, which sizes the sink.
+    [[nodiscard]] std::uint32_t mixGrantedMillis() const {
+        return mix_granted_millis_.load(std::memory_order_acquire);
+    }
+
+    // ------------------------------------------------------------------
     // The bookmark surface. Implemented in ui/models/bookmark_link.cpp.
     // ------------------------------------------------------------------
     //
@@ -2172,15 +2307,16 @@ public:
         return static_cast<qulonglong>(audio_stats_.buffer_frames);
     }
 
-    // The hand-off the Cap'n Proto event loop thread writes chunks into
-    // and the sound card's thread drains. It lives HERE and not on the
-    // player, because the callback that writes it is owned by the Client,
-    // the Client is owned by the supervisor thread, and this destructor is
-    // what joins that thread. A ring owned by the player would be
-    // destroyed while a callback could still be writing to it, on an
-    // object-destruction order QML and main() both get to influence.
+    // The hand-offs the Cap'n Proto event loop thread writes chunks into
+    // and the sound card's thread drains, one per rack slot, reached through
+    // audioRingAt above. They live HERE and not on the player, because the
+    // callback that writes them is owned by the Client, the Client is owned
+    // by the supervisor thread, and this destructor is what joins that
+    // thread. A ring owned by the player would be destroyed while a callback
+    // could still be writing to it, on an object-destruction order QML and
+    // main() both get to influence.
     //
-    // Every thread that touches it holds its own lock, so this accessor
+    // Every thread that touches one holds its own lock, so the accessor
     // hands out a reference and not a copy. There are FOUR of them and
     // audio/audio_ring.h names them: the event loop writes chunks, the
     // sound card's pull thread reads, the Qt thread snapshots, and the
@@ -2188,7 +2324,9 @@ public:
     // 2026-09-20, which undercounted the writers by one and is corrected
     // rather than swapped, because the count is the whole of why the
     // accessor is shaped this way.
-    [[nodiscard]] AudioRing& audioRing() { return audio_ring_; }
+    //
+    // WHAT THE ACCESSOR USED TO BE: audioRing(), one ring, for the one
+    // receiver the pane was listening to.
 
     // ------------------------------------------------------------------
     // The decode surface. Implemented in ui/models/decoded_link.cpp.
@@ -2300,6 +2438,12 @@ signals:
     // The engine let the pane's receiver go, or the operator has tuned since
     // and the sentence about it has been cleared.
     void receiverGoneChanged();
+
+    // The rack changed: a receiver was added, removed, focused, muted,
+    // soloed or given a gain, a held receiver's level or frequency came back,
+    // or the focused one moved. Also emitted beside receiverChanged and
+    // receiverStatusChanged, because the focused strip reads the pane.
+    void rackChanged();
 
     // The engine's receiver inventory changed, or this window's place in it
     // did.
@@ -2582,9 +2726,9 @@ private:
     void forget_removed_receiver(const Error& failure);
 
     // Supervisor thread. Adds a receiver for the pane, subscribes its
-    // passband, and hands the id to the Qt thread. Removes the previous one
-    // first, because the pane holds one.
-    [[nodiscard]] bool recreate_receiver(const rpc::VrxParams& params);
+    // passband, and hands the id to the Qt thread under key, the rack entry
+    // it is for. Removes the previous one first, because the pane holds one.
+    [[nodiscard]] bool recreate_receiver(const rpc::VrxParams& params, std::uint64_t key);
     void drop_receiver();
 
     // Supervisor thread. Hands the Qt thread the engine's refusal, or an
@@ -2883,10 +3027,31 @@ private:
     bool has_receiver_request_ = false;    // guarded by receiver_mutex_
     bool receiver_request_recreates_ = false;  // guarded by receiver_mutex_
     bool receiver_request_removes_ = false;    // guarded by receiver_mutex_
+
+    // The rack entry the request above is for, which is the pane's key when
+    // it was posted. A request is always about the receiver the pane held
+    // at the time, and after a focus change that is not the receiver the
+    // pane holds now.
+    std::uint64_t requested_pane_key_ = 0;  // guarded by receiver_mutex_
+
     rpc::VrxStatus pending_receiver_status_;   // guarded by receiver_mutex_
     bool has_pending_receiver_status_ = false;  // guarded by receiver_mutex_
-    qulonglong pending_receiver_id_ = 0;        // guarded by receiver_mutex_
-    bool has_pending_receiver_id_ = false;      // guarded by receiver_mutex_
+    std::uint64_t pending_receiver_status_key_ = 0;  // guarded by receiver_mutex_
+
+    // Every engine id the supervisor has settled for a rack entry since the
+    // Qt thread last looked, in order: a rebuild, a focus, a park. A list and
+    // not one slot, because one supervisor pass can settle two of them, the
+    // outgoing receiver of a park and the new one the pane then opens, and a
+    // single slot kept only the second.
+    //
+    // WHAT THIS USED TO BE: pending_receiver_id_ and a flag, for the one
+    // receiver the pane held.
+    struct SettledId {
+        std::uint64_t key = 0;
+        qulonglong id = 0;
+    };
+    std::vector<SettledId> pending_receiver_ids_;  // guarded by receiver_mutex_
+
     QString pending_receiver_fault_;            // guarded by receiver_mutex_
     bool has_pending_receiver_fault_ = false;   // guarded by receiver_mutex_
 
@@ -2894,6 +3059,181 @@ private:
     // engine, and the fault last handed over so a repeat needs no lock.
     qulonglong live_receiver_id_ = 0;
     QString posted_receiver_fault_;
+
+    // Supervisor thread only: which rack entry the pane's receiver is, and
+    // the params it was last given, which a park carries into the held set.
+    std::uint64_t live_pane_key_ = 0;
+    rpc::VrxParams live_receiver_params_;
+
+    // ------------------------------------------------------------------
+    // The rack. Implemented in ui/models/rack_link.cpp.
+    // ------------------------------------------------------------------
+
+    // WHY EVERYTHING GOES THROUGH ONE QUEUE. The pane's request above is one
+    // slot, and whatever is in it is about the receiver the pane held when it
+    // was written. A focus change moves the pane to another receiver, so a
+    // request written before it and one written after it are about two
+    // different receivers, and a single slot would apply the second to the
+    // first. So a rack operation takes the pane's outstanding request with
+    // it, and the supervisor applies that request to the receiver it was
+    // about BEFORE it performs the operation, then the operations in the
+    // order they were posted, then whatever the slot holds by then.
+    struct PaneRequest {
+        bool wanted = false;
+        bool recreate = false;
+        bool remove = false;
+        rpc::VrxParams params;
+        std::uint64_t key = 0;
+    };
+
+    struct RackOp {
+        enum class Kind : std::uint8_t {
+            // The pane's receiver becomes a held one under key. It keeps
+            // running and keeps its audio; the pane lets go of its passband
+            // and its decoders.
+            Park,
+            // The held receiver under key becomes the pane's.
+            Focus,
+            // A new held receiver with these params, under key.
+            AddHeld,
+            // The held receiver under key is removed from the engine.
+            RemoveHeld,
+        };
+        Kind kind = Kind::Park;
+        std::uint64_t key = 0;
+        rpc::VrxParams params;
+        PaneRequest outgoing;
+    };
+
+    // Qt thread. Takes the pane's outstanding request into op and queues op.
+    void post_rack_op(RackOp op);
+
+    // Supervisor thread. The slot's content, taken and cleared, with the
+    // lock held by the caller.
+    [[nodiscard]] PaneRequest take_pane_request_locked();
+
+    // Supervisor thread. The body apply_receiver_request always had, for
+    // one request.
+    void apply_pane_request(const PaneRequest& request);
+    void apply_rack_op(const RackOp& op);
+
+    // Supervisor thread. Reads every held receiver's status, once per pass
+    // as the pane's is, and notices one the engine has let go.
+    void poll_held_status();
+
+    // Supervisor thread. Forgets every held receiver without asking the
+    // engine, because the engine or its source has gone and took them.
+    void forget_held(const QString& why);
+
+    // Supervisor thread. The engine id behind a rack key, and its mode, or
+    // zero.
+    [[nodiscard]] qulonglong id_for_key(std::uint64_t key, rpc::Demod* demod) const;
+
+    // Supervisor thread. Hands the Qt thread a settled id for a key.
+    void post_settled_id(std::uint64_t key, qulonglong id);
+
+    // Supervisor thread. Hands the Qt thread what it learned about held
+    // receivers. HeldReport is declared below with the rest of the rack.
+    struct HeldReport;
+    void post_held_reports(std::vector<HeldReport> reports);
+
+    // Qt thread.
+    void adopt_held_reports();
+
+    // Qt thread. Moves the pane onto the held receiver under key, parking
+    // the pane's own first. The one path every focus change takes.
+    void focus_entry(std::uint64_t key);
+
+    // Qt thread. Moves the pane's receiver into the held set and leaves the
+    // pane empty. Does nothing when the pane holds no rack entry.
+    void park_pane();
+
+    // Qt thread. Empties everything the pane holds about its receiver, which
+    // removeReceiver and park_pane share.
+    void clear_pane();
+
+    // Qt thread. A rack entry for the pane when it has none, so a tune on an
+    // empty pane has somewhere to put its receiver. False when the rack is
+    // full.
+    [[nodiscard]] bool ensure_pane_entry();
+
+    // Qt thread. A new receiver in the pane at this frequency, parking the
+    // focused one; detection_bandwidth_hz is zero for one placed by hand.
+    void add_receiver_at(double absolute_hz, const QString& mode, double detection_bandwidth_hz);
+
+    // Qt thread. A held receiver the rack does not show yet, made now: for
+    // the second and later --receiver, and for every held receiver a
+    // reconnection puts back.
+    void add_held_receiver(std::uint64_t key, double absolute_hz, const rpc::VrxParams& params);
+
+    // Qt thread. What the mix is asked for: which rack entries are heard, on
+    // which slot, at what gain.
+    void post_audio_wants();
+
+    void set_rack_note(const QString& note);
+
+    // Qt thread. What the rack shows for a receiver the pane does not hold.
+    struct HeldView {
+        rpc::VrxParams params;
+        std::int64_t absolute_hz = 0;
+        bool edges_touched = false;
+        bool demod_touched = false;
+        double detection_bandwidth_hz = 0.0;
+        int granted_low = 0;
+        int granted_high = 0;
+        int edge_limit = 0;
+        double level_dbfs = -200.0;
+    };
+
+    ReceiverRack rack_;
+    std::vector<std::pair<std::uint64_t, HeldView>> held_views_;
+    std::uint64_t pane_key_ = 0;
+    QString rack_note_;
+
+    [[nodiscard]] HeldView* held_view(std::uint64_t key);
+    [[nodiscard]] const HeldView* held_view(std::uint64_t key) const;
+
+    // Qt thread. The pane as the first click of a possible double click
+    // found it, so the second can put it back. See spanDoubleClick.
+    struct ClickSnapshot {
+        bool valid = false;
+        qint64 at_ms = 0;
+        bool had_receiver = false;
+        bool opened = false;
+        std::uint64_t key = 0;
+        rpc::VrxParams wanted;
+        std::int64_t absolute_hz = 0;
+        bool edges_touched = false;
+        bool demod_touched = false;
+        double detection_bandwidth_hz = 0.0;
+    };
+    ClickSnapshot click_snapshot_;
+    QElapsedTimer click_clock_;
+
+    // Startup receivers after the first, until a connection can place them.
+    std::vector<std::pair<double, QString>> startup_extra_;
+
+    // Guarded by receiver_mutex_. The operations the Qt thread has posted.
+    std::vector<RackOp> rack_ops_;
+
+    // Supervisor thread only. The receivers held and not in the pane.
+    struct HeldVrx {
+        std::uint64_t key = 0;
+        qulonglong id = 0;
+        rpc::VrxParams params;
+    };
+    std::vector<HeldVrx> held_;
+
+    // What the supervisor learned about held receivers, for the Qt thread.
+    struct HeldReport {
+        std::uint64_t key = 0;
+        qulonglong id = 0;
+        bool has_status = false;
+        rpc::VrxStatus status;
+        bool gone = false;
+        QString why;
+    };
+    std::vector<HeldReport> handover_held_;  // guarded by receiver_mutex_
 
     // Set by any write, cleared by the supervisor when it has applied one.
     // It is in the wait predicate, so a drag is applied on the next tick of
@@ -3325,31 +3665,41 @@ private:
     // Audio. Implemented in ui/models/audio_link.cpp.
     // ------------------------------------------------------------------
 
-    // Supervisor thread. Reconciles the subscription against what the
-    // operator asked for and which receiver the pane holds. Every audio
+    // Supervisor thread. Reconciles the subscriptions against what the
+    // operator asked for and which receivers the rack holds. Every audio
     // state change goes through this one function rather than being
     // applied at the site that caused it: a retune, a mode change that
-    // rebuilds the receiver, a clear, a reconnect and an ended arrival all
-    // change the same two inputs, and five call sites remembering to fix
-    // the subscription is five chances to forget one.
+    // rebuilds a receiver, a clear, a focus change, a mute, a solo, a
+    // reconnect and an ended arrival all change the same inputs, and call
+    // sites remembering to fix the subscriptions are chances to forget one.
     void apply_audio_request();
 
-    // Supervisor thread. Reads this subscription's counters off the
-    // engine, on the probe pass rather than every pass: they are a status
+    // Supervisor thread. Reads the pane receiver's subscription counters off
+    // the engine, on the probe pass rather than every pass: they are a status
     // line and a round trip four times a second buys nothing.
     void poll_audio_stats();
 
-    // Supervisor thread. Ends the subscription this client holds, if any,
-    // with an explicit unsubscribe.
+    // Supervisor thread. Ends the subscription on this receiver, if this
+    // client holds one, with an explicit unsubscribe.
     //
     // THE UNSUBSCRIBE IS WHAT KEEPS ended() MEANING WHAT IT SAYS. The
     // schema is explicit that a client is never sent ended for a cancel it
     // asked for, so removing a receiver without cancelling first would
     // deliver an ended for a removal this client performed, and the window
     // would announce that the receiver went away every time the operator
-    // changed mode. drop_receiver calls this before remove_vrx for exactly
-    // that reason.
-    void stop_audio();
+    // changed mode. drop_receiver and the removal of a held receiver call
+    // this before remove_vrx for exactly that reason.
+    void stop_audio_for(qulonglong vrx);
+
+    // Supervisor thread. The same for one slot, whatever it holds.
+    void stop_audio_slot(std::size_t slot);
+
+    // Supervisor thread. Every subscription forgotten without an unsubscribe,
+    // because the engine or its source has gone and took them.
+    void forget_audio();
+
+    // Supervisor thread. The mask and the lead slot the player reads.
+    void publish_mix();
 
     // Supervisor thread. Hands the Qt thread whatever changed. Posts only
     // when something did.
@@ -3358,23 +3708,51 @@ private:
     // Qt thread, queued from note_audio.
     void adopt_audio();
 
-    // Invoked on the Cap'n Proto event loop thread. Touches the ring and
-    // nothing else, which is the whole point of the ring.
-    void on_audio_chunk(const rpc::AudioChunk& chunk);
+    // Invoked on the Cap'n Proto event loop thread. Touches the slot's ring
+    // and nothing else, which is the whole point of the ring.
+    void on_audio_chunk(std::size_t slot, const rpc::AudioChunk& chunk);
 
     // Invoked on the Cap'n Proto event loop thread. Records the engine's
     // words and wakes the supervisor; the teardown itself happens there,
     // because client.h forbids calling back into the Client from here.
-    void on_audio_ended(const std::string& reason);
+    void on_audio_ended(std::size_t slot, qulonglong vrx, const std::string& reason);
 
-    AudioRing audio_ring_;
+    std::array<AudioRing, kMaxReceivers> audio_rings_;
 
     // Written by the Qt thread, read by the supervisor. A switch and not a
     // state; see audioWanted.
     std::atomic<bool> audio_wanted_{false};
 
-    // Supervisor thread only: the receiver it actually holds a
-    // subscription on, and the grant that came back with it.
+    // Supervisor thread only: the receiver each slot holds a subscription
+    // on, and the grant that came back with it.
+    struct AudioSub {
+        qulonglong vrx = 0;
+        std::uint32_t granted = 0;
+    };
+    std::array<AudioSub, kMaxReceivers> live_audio_{};
+
+    // Supervisor thread only: receivers whose stream the engine ended, which
+    // are not asked again. The ids of receivers that have gone, so the list
+    // only matters until the next connection and is cleared there.
+    std::vector<qulonglong> audio_ended_vrx_;
+
+    // Written by the Qt thread under audio_mutex_: which rack entries are
+    // heard, and on which slot.
+    struct AudioWant {
+        std::uint64_t key = 0;
+        std::size_t slot = 0;
+    };
+    std::vector<AudioWant> requested_audio_wants_;  // guarded by audio_mutex_
+
+    // What the player reads on its own threads. Written by the supervisor,
+    // except the gains, which are the Qt thread's.
+    std::atomic<int> mix_lead_slot_{-1};
+    std::atomic<std::uint32_t> mix_mask_{0};
+    std::atomic<std::uint32_t> mix_granted_millis_{0};
+    std::array<std::atomic<float>, kMaxReceivers> mix_gain_{};
+
+    // Supervisor thread only: the pane receiver's subscription, derived from
+    // live_audio_ on every pass, which is what the audio section describes.
     qulonglong live_audio_vrx_ = 0;
     std::uint32_t live_audio_granted_ = 0;
 
@@ -3404,8 +3782,12 @@ private:
     // Written by the EVENT LOOP thread in on_audio_ended and consumed by
     // the supervisor. Under the same lock rather than an atomic, because
     // the reason is a string and the flag is only meaningful with it.
-    bool audio_ended_pending_ = false;  // guarded by audio_mutex_
-    std::string audio_ended_text_;      // guarded by audio_mutex_
+    struct AudioEnded {
+        std::size_t slot = 0;
+        qulonglong vrx = 0;
+        std::string reason;
+    };
+    std::vector<AudioEnded> audio_ended_;  // guarded by audio_mutex_
 
     // Qt thread only: what the properties above hand out.
     qulonglong audio_vrx_ = 0;
@@ -3434,7 +3816,7 @@ private:
     // Supervisor thread. Cancels every decoder subscription this client
     // holds, before its receiver is removed, so the engine's ended() keeps
     // meaning a removal somebody else made. drop_receiver calls it beside
-    // stop_audio for that reason.
+    // stop_audio_for for that reason.
     void stop_decoded();
 
     // Supervisor thread. The engine or its source went, taking every

@@ -170,6 +170,15 @@ public:
         focused_ = 0;
     }
 
+    // The engine that issued every id has gone. The entries stay, because a
+    // reconnection puts their receivers back.
+    void forget_engine_ids()
+    {
+        for (RackEntry& e : entries_) {
+            e.engine_id = 0;
+        }
+    }
+
     // Solo on one entry is exclusive, as on a console's solo-in-place with
     // one channel soloed: turning it on turns every other solo off, and
     // turning it off leaves none. Answers the entry's new state.

@@ -3,9 +3,9 @@
 //
 // It owns no subscription. EngineLink does, because subscribe_audio is a
 // blocking RPC call and only the supervisor thread may make one, and
-// EngineLink owns the AudioRing for the same reason it owns the spectrum
-// hand-off: the RPC callback writes into it and the callback dies with the
-// Client, which the supervisor joins.
+// EngineLink owns the AudioRings, one per rack slot, for the same reason it
+// owns the spectrum hand-off: the RPC callback writes into them and the
+// callback dies with the Client, which the supervisor joins.
 //
 // SO THE SPLIT IS: THIS SAYS WHAT THE CARD IS DOING AND THE LINK SAYS WHAT
 // THE WIRE IS DOING. A starve and a wire drop both sound like a click and
@@ -104,16 +104,40 @@ namespace revenant::ui {
 
 // The QIODevice QAudioSink pulls through. Lives on the Qt thread and is
 // READ on the sink's own thread, which is the whole of why it touches
-// nothing but the ring and two atomics.
+// nothing but the rings and a handful of atomics.
+//
+// THE MIX. Every slot in EngineLink::mixMask holds a subscription on a
+// heard receiver, each in its own ring. A pull reads every one of those
+// rings at the sink's format and sums them, each scaled by its strip's gain.
+// The LEAD slot, EngineLink::mixLeadSlot, is the one the sink's format was
+// taken from and the one whose frames the status line describes.
+//
+// WHAT WAS CHOSEN, BECAUSE THE CODE COULD NOT SETTLE IT. The simplest mix
+// that is correct, and three decisions it makes:
+//
+//   Format: a ring at another rate or channel count than the lead's is left
+//   out of the mix rather than resampled, because this process holds no DSP.
+//   All receivers run at the engine's default 48000 unless RDS has raised
+//   the focused one to its composite rate, and that one is the multiplex,
+//   which nobody wants mixed under programme audio anyway.
+//
+//   Alignment: none. Each ring plays from its own head, so two receivers on
+//   the same transmission can be up to a ring's depth, 200 ms, apart. The
+//   chunks carry absolute sample indices and aligning on them is possible;
+//   it needs a policy for a ring that is behind, and that is the open point.
+//
+//   Level: a plain sum, so eight loud receivers can exceed full scale, which
+//   the float sink passes on and the device clips. The strip gains are the
+//   operator's control over it; no automatic normalisation.
 class RingSource final : public QIODevice {
     Q_OBJECT
 
 public:
-    // stream is the format the RING produces and out_channels is the
+    // stream is the format the LEAD ring produces and out_channels is the
     // channel count the SINK was opened at. They differ in exactly one
     // case, a mono stream on a device that will not take mono, and the
     // duplication that bridges them is in readData. See open_sink.
-    RingSource(AudioRing& ring, RingFormat stream, int out_channels,
+    RingSource(EngineLink& link, RingFormat stream, int out_channels,
                QObject* parent = nullptr);
 
     [[nodiscard]] bool isSequential() const override { return true; }
@@ -152,7 +176,7 @@ protected:
     qint64 writeData(const char*, qint64) override { return -1; }
 
 private:
-    AudioRing& ring_;
+    EngineLink& link_;
 
     // The format the sink was opened FOR, which is fixed for its life. The
     // ring's current format can differ from it for up to one timer tick
@@ -176,6 +200,10 @@ private:
     // QIODevice promises it. Sized on first use and reused, so the pull
     // path allocates once.
     std::vector<float> scratch_;
+
+    // The sum of every ring's frames, at the stream's channel count. Sized
+    // on first use beside scratch_ and for the same reason.
+    std::vector<float> mix_;
 
     // The mono frames widened to the sink's channel count, when those two
     // differ. Separate from scratch_ because the ring's read has to see a
@@ -342,11 +370,6 @@ private:
     // The linear gain the sink is given, from volume_ and muted_.
     [[nodiscard]] qreal sink_gain() const;
 
-    // The ring belongs to EngineLink, because the RPC callback writes into
-    // it and that callback dies with the Client the supervisor owns. This
-    // object only reads it.
-    [[nodiscard]] AudioRing& ring() const { return link_.audioRing(); }
-
     EngineLink& link_;
     QMediaDevices* devices_ = nullptr;
 
@@ -355,7 +378,13 @@ private:
 
     // The generation the open sink was built for. A ring generation past
     // this one is a stream that changed rate or channel count under it.
+    //
+    // Only comparable within one ring, so the lead slot it was read from
+    // goes with it. A lead that moves to another ring at the same format is
+    // a new pair of these and not a reopen: the mix goes on at the rate it
+    // was playing at.
     std::uint64_t open_generation_ = 0;
+    int open_lead_ = -1;
 
     // handle_sink_state saw QAudio::StoppedState with an error on it. It
     // cannot close the sink from inside that sink's own signal, so this

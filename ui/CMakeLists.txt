@@ -181,8 +181,11 @@ qt_add_executable(revenant_ui
     models/aft_link.cpp
     models/auto_filter.h
     models/auto_filter_link.cpp
+    models/rack_link.cpp
     models/rds_link.cpp
     models/receiver_link.cpp
+    models/receiver_palette.h
+    models/receiver_rack.h
     models/source_link.cpp
     render/colour_map.h
     render/history_shift.h

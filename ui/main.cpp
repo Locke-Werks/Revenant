@@ -9,7 +9,7 @@
 // USAGE
 //
 //   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
-//               [--receiver FREQ:MODE] [--decode NAME] [--rds]
+//               [--receiver FREQ:MODE ...] [--decode NAME] [--rds]
 //               [--grab-receivers FILE] [--palette QUERY] [--keymap]
 //               [--grab-main FILE]
 //
@@ -24,12 +24,14 @@
 //
 // --receiver opens a receiver at FREQ in MODE once a source is open that
 // reaches it, FREQ in the frequency box's grammar with bare numbers in hertz,
-// "14005000:usb" or "145.005M:nfm". --decode names a decoder to attach to it,
+// "14005000:usb" or "145.005M:nfm". It may be given up to eight times: the first
+// is the focused receiver and the rest are held in the rack, which is how the
+// rack is photographed. --decode names a decoder to attach to the first,
 // or auto, and switches decoding on. --rds switches the RDS section on for
-// that receiver, which on a wfm one raises it to the composite rate as the
-// switch in the window does. --grab-receivers writes the receiver window to
-// FILE as a PNG when a smoke run ends. Together they drive and photograph the
-// decode and RDS sections with nobody at the mouse, which is what they are
+// the first, which on a wfm one raises it to the composite rate as the switch
+// in the window does. --grab-receivers writes the receiver window to FILE as
+// a PNG when a smoke run ends. Together they drive and photograph the rack and
+// the decode and RDS sections with nobody at the mouse, which is what they are
 // for: a window on the offscreen platform takes no input from, and puts
 // nothing on, the desktop it runs beside.
 //
@@ -62,10 +64,13 @@
 
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <QFont>
 #include <QGuiApplication>
@@ -357,7 +362,7 @@ int main(int argc, char* argv[])
     }
     std::uint32_t every_nth = kDefaultEveryNth;
     std::uint32_t smoke_seconds = 0;
-    QString startup_receiver;
+    QStringList startup_receivers;
     QString startup_decoder;
     bool startup_rds = false;
     QString grab_receivers;
@@ -378,7 +383,7 @@ int main(int argc, char* argv[])
             continue;
         }
         if (args[i] == QStringLiteral("--receiver") && i + 1 < args.size()) {
-            startup_receiver = args[++i];
+            startup_receivers.append(args[++i]);
             continue;
         }
         if (args[i] == QStringLiteral("--decode") && i + 1 < args.size()) {
@@ -419,22 +424,22 @@ int main(int argc, char* argv[])
 
     // FREQ:MODE, split at the last colon so a frequency never has to avoid
     // one. The mode is checked by EngineLink against its own list when it is
-    // placed, and refused there in the receiver's fault line.
-    double startup_hz = 0.0;
-    QString startup_mode;
-    if (!startup_receiver.isEmpty()) {
-        const qsizetype colon = startup_receiver.lastIndexOf(QLatin1Char(':'));
-        const QString frequency = colon < 0 ? startup_receiver : startup_receiver.left(colon);
-        startup_mode = colon < 0 ? QString() : startup_receiver.mid(colon + 1);
+    // placed, and refused there in the receiver's fault line. Repeatable: the
+    // first is the focused receiver and the rest are held in the rack.
+    std::vector<std::pair<double, QString>> startup;
+    for (const QString& one : startup_receivers) {
+        const qsizetype colon = one.lastIndexOf(QLatin1Char(':'));
+        const QString frequency = colon < 0 ? one : one.left(colon);
+        const QString mode = colon < 0 ? QString() : one.mid(colon + 1);
         const auto parsed = revenant::ui::parse_frequency(frequency.toStdString(),
                                                           revenant::ui::BareNumber::Hertz);
         if (!parsed.has_value()) {
             std::fputs("--receiver wants FREQ:MODE, as 14005000:usb or 145.005M:nfm\n", stderr);
             return 2;
         }
-        startup_hz = static_cast<double>(parsed->hertz);
+        startup.emplace_back(static_cast<double>(parsed->hertz), mode);
     }
-    if (startup_rds && startup_receiver.isEmpty()) {
+    if (startup_rds && startup_receivers.isEmpty()) {
         std::fputs("--rds needs --receiver, which is the receiver it switches RDS on for\n",
                    stderr);
         return 2;
@@ -488,8 +493,12 @@ int main(int argc, char* argv[])
     // waiting for. Starting the engine second is a supported order, and so
     // is stopping and restarting it under a running window.
     link.start(address, port, every_nth);
-    if (!startup_receiver.isEmpty()) {
-        link.setStartupReceiver(startup_hz, startup_mode, startup_decoder);
+    if (!startup.empty()) {
+        for (std::size_t i = 1; i < startup.size(); ++i) {
+            link.addStartupReceiver(startup[i].first, startup[i].second);
+        }
+        link.setStartupReceiver(startup.front().first, startup.front().second,
+                                startup_decoder);
     }
     // The switch is sticky and asks nothing until the pane holds a receiver,
     // so setting it before the receiver is placed is the order the window's
