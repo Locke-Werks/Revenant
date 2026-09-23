@@ -7,9 +7,15 @@
 // The bootstrap capability is an Authenticator and not a Session. A caller
 // that has not passed ServerOptions::token holds one method and no radio, so
 // there is no Session in its capability table to refuse. login mints a fresh
-// Session per call, which costs nothing because that object is stateless: its
-// only member is a reference to this server. See core/rpc/revenant.capnp,
-// which has the argument for the shape.
+// Session per call, which costs a reference to this server and a login number.
+// See core/rpc/revenant.capnp, which has the argument for the shape.
+//
+// A SESSION OWNS THE RECEIVERS IT CREATES, and removes them when it ends,
+// unless addVrx was asked to keep one. That is the owner decision of
+// 2026-09-22 and core/rpc/server.cpp's SessionImpl destructor is where it is
+// enforced. This paragraph used to say that object was stateless and that its
+// only member is a reference to this server; it now carries the number that
+// VrxStatus::creatorSession reports.
 //
 // THREADING, WHICH IS THE ONLY HARD PART IN HERE
 //

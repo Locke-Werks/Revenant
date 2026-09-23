@@ -518,6 +518,10 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     // optional and no sentinel.
     out.reanchors = in.getReanchors();
     out.reanchor_frames_skipped = in.getReanchorFramesSkipped();
+
+    out.creator_session = in.getCreatorSession();
+    out.kept = in.getKept();
+    out.owned_by_caller = in.getOwnedByCaller();
     return out;
 }
 
@@ -973,7 +977,8 @@ public:
     [[nodiscard]] Status open_source(std::string_view uri) override;
     [[nodiscard]] Status close_source() override;
 
-    [[nodiscard]] Expected<std::uint64_t> add_vrx(const VrxParams& params) override;
+    [[nodiscard]] Expected<std::uint64_t> add_vrx(const VrxParams& params,
+                                                  VrxLifetime lifetime) override;
     [[nodiscard]] Status remove_vrx(std::uint64_t id) override;
     [[nodiscard]] Status set_vrx_params(std::uint64_t id, const VrxParams& params) override;
     [[nodiscard]] Expected<VrxStatus> vrx_status(std::uint64_t id) override;
@@ -1484,10 +1489,11 @@ Status ClientImpl::close_source() {
     });
 }
 
-Expected<std::uint64_t> ClientImpl::add_vrx(const VrxParams& params) {
-    return on_loop("add_vrx", [&params](LoopState& state) {
+Expected<std::uint64_t> ClientImpl::add_vrx(const VrxParams& params, VrxLifetime lifetime) {
+    return on_loop("add_vrx", [&params, lifetime](LoopState& state) {
         auto request = state.session.addVrxRequest();
         write_vrx_params(request.initParams(), params);
+        request.setKeep(lifetime == VrxLifetime::Kept);
         return request.send().then([](auto&& response) { return response.getId(); });
     });
 }

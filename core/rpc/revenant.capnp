@@ -913,6 +913,28 @@ struct VrxStatus {
     # default-constructed status. Both mean "nobody filled this in", not "this
     # receiver runs at no rate".
     resolvedAudioRate @10 :UInt32;
+
+    # WHO THIS RECEIVER BELONGS TO, which is the owner decision of 2026-09-22
+    # made visible: a receiver belongs to the session that created it and is
+    # removed when that session ends, unless addVrx was asked to keep it.
+    #
+    # creatorSession is a number the server gives each login, counted from
+    # one and never reused for the life of the server. Zero means no session
+    # created it: the process hosting the engine added it directly, and
+    # nothing on this wire will remove it except an explicit removeVrx. It is
+    # an identity for comparing two receivers' creators and nothing else, and
+    # a kept receiver goes on naming a session that has since ended.
+    #
+    # ownedByCaller is creatorSession compared against the session asking,
+    # which is what a client wants and could not otherwise work out: a client
+    # holds no session id of its own. A receiver that is neither the caller's
+    # nor kept belongs to another live session and will go when that one
+    # does; one that is kept belongs to nobody and stays until somebody
+    # removes it. Both zero and false from an engine built before these
+    # existed.
+    creatorSession @11 :UInt64;
+    kept @12 :Bool;
+    ownedByCaller @13 :Bool;
 }
 
 struct SpectrumFrame {
@@ -2213,7 +2235,26 @@ interface Session {
     listSources @2 () -> (sources :List(SourceDescriptor));
     sourceStats @3 () -> (stats :SourceStats);
 
-    addVrx @4 (params :VrxParams) -> (id :UInt64);
+    # A receiver BELONGS TO THE SESSION THAT CREATED IT and is removed when
+    # that session ends, which is the owner decision recorded on 2026-09-22.
+    # Ending is dropping this Session capability or losing the connection it
+    # travelled on, a crash included. The removal goes through the same path
+    # removeVrx does, so an audio subscriber on the receiver is sent ended()
+    # with the reason and an RDS decoder goes with it.
+    #
+    # keep asks for the other lifetime: the receiver survives its creator and
+    # stays until somebody calls removeVrx. It exists for a headless recorder,
+    # whose receivers must outlive a client restarting, and it is a field on
+    # this call rather than a separate one so that no receiver is ever briefly
+    # owned by a session that is about to let go of it. Appended to the
+    # parameters, so an older client sends false and gets the session
+    # lifetime.
+    #
+    # Nothing stops one session removing or retuning another's receiver. The
+    # lifetime rule decides what happens when a session ENDS, and a receiver
+    # is engine-wide state in every other respect, for the reason
+    # setRdsRegion states.
+    addVrx @4 (params :VrxParams, keep :Bool) -> (id :UInt64);
     removeVrx @5 (id :UInt64) -> ();
     setVrxParams @6 (id :UInt64, params :VrxParams) -> ();
     vrxStatus @7 (id :UInt64) -> (status :VrxStatus);

@@ -435,7 +435,24 @@ struct VrxStatus {
     // note, and core/engine/vrx.h says where the numbers come from.
     std::uint64_t reanchors = 0;
     std::uint64_t reanchor_frames_skipped = 0;
+
+    // Who this receiver belongs to. creator_session is the session that
+    // added it, zero when it was added by the process hosting the engine
+    // rather than over the wire. A receiver goes when its creator's session
+    // ends unless `kept` is set, which addVrx grants on request for a
+    // headless recorder. owned_by_caller is creator_session compared against
+    // the session asking, so a client can tell its own receivers from
+    // another operator's without holding a session id of its own.
+    std::uint64_t creator_session = 0;
+    bool kept = false;
+    bool owned_by_caller = false;
 };
+
+// What addVrx is asked to do with a receiver when the session that created
+// it ends. Session is the default and is the owner decision recorded on
+// 2026-09-22: a crashed window takes its receivers with it. Kept is for a
+// headless recorder, whose receivers have to survive a client restarting.
+enum class VrxLifetime : std::uint8_t { Session, Kept };
 
 // Mirrors revenant::detect::TrackState ordinal for ordinal, and the schema's
 // TrackState with it. core/rpc/convert.h holds the schema-to-engine asserts

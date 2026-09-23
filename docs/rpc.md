@@ -1130,8 +1130,15 @@ bought.
 capability grants it nothing it did not have, and refusing would need
 per-connection state that capnp 1.4.0's `TwoPartyServer` does not offer: it
 takes exactly one bootstrap capability and has no `BootstrapFactory`
-constructor. `SessionImpl` is stateless, its only member a reference to the
-server, so minting one per login costs nothing and two of them cannot disagree.
+constructor. A `SessionImpl` holds a reference to the server and a login
+number, so minting one per login costs nothing and two of them cannot disagree
+about the radio. What they can differ in is what they own: each takes the
+receivers it created with it when it ends, which is "Receivers belong to the
+session that made them" below.
+
+This paragraph used to say "`SessionImpl` is stateless, its only member a
+reference to the server". The login number arrived with the receiver lifetime
+rule on 2026-09-22.
 
 **A client pipelines.** `core/rpc/client.cpp` sends `login` and takes the
 `Session` off the unresolved promise, so `Session` calls travel behind the
@@ -1189,6 +1196,54 @@ an exception. `rpc.capnp` argues this under its own `Exception` struct:
 exceptions should not be used to flag conditions a client is expected to handle
 in an application-specific way.
 
+## Receivers belong to the session that made them
+
+The owner's decision, recorded 2026-09-22: a receiver belongs to the session
+that created it and is removed when that session ends, unless it was created
+with `keep` on `addVrx`. A desktop operator's crashed window takes its
+receivers with it; a headless recorder asks for `keep` and its receivers
+survive a client restarting.
+
+**A session ends when its `Session` capability is released**, which covers
+every way a client can leave: dropping the capability, closing the connection,
+the process dying with the socket open, and the server itself stopping.
+capnp 1.4.0's `TwoPartyServer` has no per-connection hook, as the login section
+above says, but it does release everything a connection exported when the
+connection goes, so `SessionImpl`'s destructor is the one event that happens
+exactly once for each of those. It calls `ServerImpl::end_session`, which
+removes the session's own non-kept receivers through the same path `removeVrx`
+takes: an audio subscriber on one is sent `ended()` with the reason, and its RDS
+decoder goes with it.
+
+**Ownership is creation and nothing else.** A session that retunes or listens
+to another session's receiver does not come to own it, and the reap leaves it
+alone. Nothing stops one session removing or retuning another's receiver
+either: the rule decides what happens when a session ends, and a receiver is
+engine-wide state in every other respect, for the reason the RDS region section
+gives. A receiver the host process added directly, with `Engine::add_vrx`, has
+no creator on this wire and is never reaped.
+
+**`VrxStatus` says whose a receiver is.** `creatorSession` is the creating
+login's number, counted from one and never reused for the life of the server;
+zero means the host added it. `kept` is the flag. `ownedByCaller` compares the
+creator against the session asking, which is what a client wants and could not
+otherwise work out, since it holds no session number of its own. A kept
+receiver goes on naming a session that has ended.
+
+Measured with `tests/rpc/test_rpc_lifetime.cpp` on 2026-09-22 against the RTX
+4090: the first `vrxIds` a surviving client sent after the other client's
+destructor returned already listed neither of the departed session's two
+receivers. The cases poll with a ten second deadline regardless, because how
+soon the server notices a closed socket is a property of the loopback stack
+and not of this code.
+
+**What this does not do.** A receiver the ENGINE removed on its own, which a
+front-end retune does to one whose centre falls outside the new span, leaves
+its ownership record behind until its session ends, when the removal is
+attempted, refused and dropped. Receiver ids are never reused, so a stale record
+cannot be mistaken for a live receiver. `closeSource` clears every record,
+because every receiver goes with the source.
+
 ## Not done yet
 
 **No session persistence.** Nothing here saves or restores a set of receivers.
@@ -1216,35 +1271,22 @@ somebody typed or clicked. A client finds out the way it finds out about any
 receiver that has gone, so check `vrxIds` after a retune rather than assuming
 the set is unchanged.
 
-**A receiver outlives the client that created it, and nothing reaps one whose
-client died.** Receivers belong to the engine rather than to a session, which is
-what lets several clients each hold their own: measured 2026-09-21 with two
-`revenant-ui` processes on one engine, each clicked a signal and engined reported
-`2 vrx`, neither disturbing the other's audio or passband. Closing a window
-releases its receiver and the count went back to `1 vrx`. A client killed
-outright does not: the count stayed at `1 vrx` indefinitely after a
-`taskkill /F`, with the disconnect itself plainly noticed, since the spectrum
-publisher counted its dropped subscriber and then stopped sending.
+**WHAT THIS ENTRY USED TO SAY, and the owner decided it on 2026-09-22.** It was
+headed "A receiver outlives the client that created it, and nothing reaps one
+whose client died", measured a `taskkill /F` leaving its receiver behind for
+good, and went on: "Whether that is a leak or a feature is an open decision
+rather than an oversight. A headless recorder wants receivers to survive a
+client restarting, and a desktop operator wants a crashed window to take its
+receiver with it." The decision is both, chosen per receiver, and it shipped:
+see "Receivers belong to the session that made them" above.
 
-Whether that is a leak or a feature is an open decision rather than an oversight.
-A headless recorder wants receivers to survive a client restarting, and a desktop
-operator wants a crashed window to take its receiver with it. That decision is
-still open and nothing below forecloses it.
-
-**What used to be missing either way was any means of recovery,** and this
-paragraph used to end "`vrxIds` is on this wire, so an orphan can be enumerated
-and removed by a later client, and no client does. Until one does, an engine
-accumulates a channelizer slot and its GPU work per crashed client, recoverable
-only by restarting the engine."
-
-`revenant-ui` does, as of 2026-09-22. It polls `vrxIds` once a second and says
-when the engine is holding receivers the window is not on, with an action that
-removes them. It is deliberately not a reaper: from a client an orphan and
-another operator's working receiver are indistinguishable, because nothing here
-says who created one, so the window reports and a person decides. Measured end
-to end the same day: a receiver made by one window survived that window being
-killed, a second window reported it, and the release took the engine back to
-zero.
+The entry then said the only recovery was `revenant-ui` polling `vrxIds` and
+offering to release what the window was not on, deliberately not as a reaper
+"because nothing here says who created one". That was true of the wire at the
+time and is not now: `VrxStatus` carries `creatorSession`, `kept` and
+`ownedByCaller`. The window's action still works unchanged, and what it finds
+has narrowed to kept receivers and other live sessions' receivers, because a
+crashed window's receivers are gone before it could report them.
 
 **Only starting a source is still the host's, and that is `run()` being a
 blocking call rather than a gap in this wire.**

@@ -252,7 +252,18 @@ public:
     [[nodiscard]] virtual Status open_source(std::string_view uri) = 0;
     [[nodiscard]] virtual Status close_source() = 0;
 
-    [[nodiscard]] virtual Expected<std::uint64_t> add_vrx(const VrxParams& params) = 0;
+    // A receiver added here belongs to this client's session and is removed
+    // when the session ends, which includes this Client being destroyed and
+    // this process dying. VrxLifetime::Kept is the exception, for a headless
+    // recorder: the receiver outlives this client and stays until something
+    // calls remove_vrx. VrxStatus::kept and owned_by_caller read it back.
+    //
+    // A default argument on a virtual, which binds statically. That is
+    // harmless here because ClientImpl is the only implementation and every
+    // caller reaches it through this interface, so the default is always
+    // this one.
+    [[nodiscard]] virtual Expected<std::uint64_t> add_vrx(
+        const VrxParams& params, VrxLifetime lifetime = VrxLifetime::Session) = 0;
     [[nodiscard]] virtual Status remove_vrx(std::uint64_t id) = 0;
     [[nodiscard]] virtual Status set_vrx_params(std::uint64_t id, const VrxParams& params) = 0;
     [[nodiscard]] virtual Expected<VrxStatus> vrx_status(std::uint64_t id) = 0;

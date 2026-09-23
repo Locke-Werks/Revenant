@@ -853,6 +853,17 @@ struct PassbandNode : std::enable_shared_from_this<PassbandNode> {
 
 class ServerImpl;
 
+// Whose a receiver is, for the lifetime rule the schema states on addVrx.
+//
+// session is the creating login's number, zero for a receiver this server did
+// not create: one the host process added directly, or one that predates the
+// server. keep is the flag addVrx was given. Loop thread only, like every map
+// that holds one.
+struct VrxOwner {
+    std::uint64_t session = 0;
+    bool keep = false;
+};
+
 // What the engine's sink reaches the server through.
 //
 // Heap-allocated and co-owned by the sink callable, because the callable
@@ -1074,6 +1085,28 @@ public:
     [[nodiscard]] Expected<std::shared_ptr<RdsRoute>> start_rds(
         const engine::VrxStatus& status, decode::Region region);
 
+    // Event loop thread, all of them. The receiver lifetime rule.
+    //
+    // open_session hands a new login its number. record_vrx notes who created
+    // a receiver and whether it asked to keep it; owner_of reads that back for
+    // VrxStatus. end_session is called by a session's destructor and removes
+    // every receiver that session created and did not keep.
+    [[nodiscard]] std::uint64_t open_session() { return next_session_++; }
+    void record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep);
+    [[nodiscard]] VrxOwner owner_of(engine::VrxId vrx) const;
+    void end_session(std::uint64_t session);
+
+    // Everything this server holds about a receiver the engine has just
+    // removed, taken down in one place so that removeVrx and a session ending
+    // cannot come to differ. Audio subscribers are told why; the RDS decoder
+    // goes; the ownership record goes.
+    //
+    // The two display streams need nothing here, because a receiver removed
+    // out from under one freezes a picture and a frozen picture is visible
+    // from across the room. Audio goes quiet instead, and a quiet channel with
+    // the squelch shut sounds identical, so the subscriber is told in words.
+    void after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason);
+
 private:
     void serve(ServerOptions options);
     void announce(Status status);
@@ -1247,6 +1280,20 @@ private:
     // by a caller naming an id it removed itself.
     std::map<std::uint32_t, std::shared_ptr<RdsRoute>> rds_routes_;
 
+    // Loop thread only. Who created each receiver this server added, and the
+    // counter the numbers come from. Counted from one so that zero can mean
+    // "no session", and never reused for the life of the server, on the
+    // ground receiver ids are never reused: a number that came back would
+    // make a stale comparison look current.
+    //
+    // Pruned by after_vrx_removed and by release_source_state. A receiver the
+    // engine removed on its own, which a front-end retune does to one it can
+    // no longer reach, leaves its entry here until its session ends and the
+    // removal is attempted, refused by the engine, and dropped. Ids are never
+    // reused, so the stale entry cannot be mistaken for a live receiver.
+    std::uint64_t next_session_ = 1;
+    std::map<std::uint32_t, VrxOwner> vrx_owners_;
+
     kj::TaskSet* sends_ = nullptr;
 };
 
@@ -1393,7 +1440,22 @@ private:
 
 class SessionImpl final : public schema::Session::Server {
 public:
-    explicit SessionImpl(ServerImpl& owner) : owner_(owner) {}
+    explicit SessionImpl(ServerImpl& owner) : owner_(owner), id_(owner.open_session()) {}
+
+    SessionImpl(const SessionImpl&) = delete;
+    SessionImpl& operator=(const SessionImpl&) = delete;
+
+    // THE RECEIVER LIFETIME RULE, and this destructor is the whole of how it
+    // is enforced. Not an override, for the reason SubscriptionImpl's
+    // destructor gives: capnp::Capability::Server has no virtual destructor,
+    // and kj::heap disposes through this concrete type.
+    //
+    // It runs on the loop thread for every way a session can end: the client
+    // dropping the capability, the connection closing cleanly, the connection
+    // dying with the process at the other end, and the server itself stopping,
+    // which tears down every connection it holds. ServerImpl::end_session has
+    // what is removed and what is not.
+    ~SessionImpl() { owner_.end_session(id_); }
 
     kj::Promise<void> info(InfoContext context) override {
         // Two reads and not one. info() is what the engine settled on when
@@ -1436,7 +1498,8 @@ public:
     }
 
     kj::Promise<void> addVrx(AddVrxContext context) override {
-        auto params = read_vrx_params(context.getParams().getParams());
+        auto request = context.getParams();
+        auto params = read_vrx_params(request.getParams());
         if (!params) {
             return to_exception(params.error());
         }
@@ -1444,6 +1507,12 @@ public:
         if (!id) {
             return to_exception(id.error());
         }
+
+        // Recorded before the answer goes out and on the same thread that
+        // will run this session's destructor, so there is no interleaving in
+        // which the receiver exists, the session ends, and nothing knew whose
+        // it was.
+        owner_.record_vrx(*id, id_, request.getKeep());
         context.getResults().setId(id->value);
         return kj::READY_NOW;
     }
@@ -1459,20 +1528,7 @@ public:
 
         // After the removal and not before: a removal that failed leaves the
         // receiver running and its subscribers listening to it.
-        //
-        // The two display streams need nothing here, because a receiver
-        // removed out from under one freezes a picture and a frozen picture
-        // is visible from across the room. Audio goes quiet instead, and a
-        // quiet channel with the squelch shut sounds identical, so the
-        // subscriber is told in words.
-        owner_.end_audio_for_vrx(*id, "the receiver was removed");
-
-        // And the decoder, which needs no message: rdsStation is a poll, so
-        // the next one answers with the engine's own "no receiver N is
-        // registered" rather than with a station that stopped moving. This
-        // call is what takes the sink off promptly; a removal that did not
-        // go through this session is cleaned up by that next poll instead.
-        owner_.end_rds_for_vrx(*id);
+        owner_.after_vrx_removed(*id, "the receiver was removed");
         return kj::READY_NOW;
     }
 
@@ -1531,7 +1587,15 @@ public:
         if (!status) {
             return to_exception(status.error());
         }
-        write_vrx_status(context.getResults().initStatus(), *status);
+        auto out = context.getResults().initStatus();
+        write_vrx_status(out, *status);
+
+        // The server's half, which convert.cpp cannot write because the
+        // engine does not know sessions exist.
+        const VrxOwner owner = owner_.owner_of(*id);
+        out.setCreatorSession(owner.session);
+        out.setKept(owner.keep);
+        out.setOwnedByCaller(owner.session != 0 && owner.session == id_);
         return kj::READY_NOW;
     }
 
@@ -1897,6 +1961,11 @@ public:
 
 private:
     ServerImpl& owner_;
+
+    // This login's number, which is what VrxStatus::creatorSession names. Not
+    // a capability and not a secret: a session proves itself by being held,
+    // and the number only lets two receivers' creators be compared.
+    const std::uint64_t id_;
 };
 
 // The bootstrap capability, and the only thing an unauthenticated connection
@@ -1915,13 +1984,24 @@ private:
 //
 // LOGIN MINTS A FRESH SESSION PER CALL
 //
-// SessionImpl's only member is ServerImpl&, so a second one costs nothing and
-// two of them cannot disagree. That is what makes a second login on one
-// connection an ordinary success rather than a case to defend against: the
-// caller has already proved it holds the token, and a second capability grants
-// it nothing it did not have. The Session's lifetime becomes the client's, and
-// any still alive at shutdown die with the TwoPartyServer local, on this
-// thread, exactly as the single bootstrap Session used to.
+// A SessionImpl holds a reference to the server and its own login number, so a
+// second one costs nothing and two of them cannot disagree about the radio.
+// That is what makes a second login on one connection an ordinary success
+// rather than a case to defend against: the caller has already proved it holds
+// the token, and a second capability grants it nothing it did not have. The
+// Session's lifetime becomes the client's, and any still alive at shutdown die
+// with the TwoPartyServer local, on this thread, exactly as the single
+// bootstrap Session used to.
+//
+// The two sessions differ in one respect since 2026-09-22, which is what they
+// own: each takes the receivers IT created with it when it ends, so dropping
+// one of two sessions on a connection removes that one's receivers and leaves
+// the other's. SessionImpl's destructor has the rule.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "SessionImpl's only member is ServerImpl&".
+// It gained the login number with the receiver lifetime rule, and a reader who
+// took the old sentence as licence to mint sessions freely inside the server
+// would now be minting owners.
 class AuthenticatorImpl final : public schema::Authenticator::Server {
 public:
     AuthenticatorImpl(ServerImpl& owner, Token token) : owner_(owner), token_(token) {}
@@ -2751,6 +2831,73 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
     // decode reaches nothing but itself, so a late call is harmless once
     // this has returned.
     const std::scoped_lock owned(route->lock);
+}
+
+// ---------------------------------------------------------------------------
+// Receiver lifetime
+// ---------------------------------------------------------------------------
+
+void ServerImpl::record_vrx(engine::VrxId vrx, std::uint64_t session, bool keep) {
+    vrx_owners_[vrx.value] = VrxOwner{.session = session, .keep = keep};
+}
+
+VrxOwner ServerImpl::owner_of(engine::VrxId vrx) const {
+    const auto found = vrx_owners_.find(vrx.value);
+    return found == vrx_owners_.end() ? VrxOwner{} : found->second;
+}
+
+void ServerImpl::after_vrx_removed(engine::VrxId vrx, kj::StringPtr reason) {
+    end_audio_for_vrx(vrx, reason);
+
+    // And the decoder, which needs no message: rdsStation is a poll, so the
+    // next one answers with the engine's own "no receiver N is registered"
+    // rather than with a station that stopped moving. This is what takes the
+    // sink off promptly; a removal that went through neither removeVrx nor a
+    // session ending is cleaned up by that next poll instead.
+    end_rds_for_vrx(vrx);
+
+    vrx_owners_.erase(vrx.value);
+}
+
+// WHAT A SESSION ENDING TAKES WITH IT, which is its own receivers and nothing
+// else.
+//
+// Not another session's, including one this session retuned or subscribed to:
+// creation is the only thing that confers ownership, because it is the only
+// thing a client does exactly once per receiver. Not a kept one, which is what
+// keep is for. Not one the host process added, which has no creator here. And
+// not the engine-wide state two sessions share, the detection threshold and
+// the RDS region among them, for the reason the schema gives on
+// setRdsRegion.
+//
+// The subscriptions this session held on OTHER receivers need nothing from
+// here. Each is a capability that died with the session's connection, and its
+// own destructor has already ended it by the time this runs, or will.
+//
+// WHY A DESTRUCTOR AND NOT A DISCONNECT HANDLER. capnp 1.4.0's TwoPartyServer
+// offers no per-connection hook, as AuthenticatorImpl's note says. It does
+// release every capability a connection exported when the connection goes,
+// however it goes, so the Session's destructor is the one event that
+// happens exactly once for every way a client can leave, a crash included.
+void ServerImpl::end_session(std::uint64_t session) {
+    std::vector<std::uint32_t> doomed;
+    for (const auto& [id, owner] : vrx_owners_) {
+        if (owner.session == session && !owner.keep) {
+            doomed.push_back(id);
+        }
+    }
+
+    for (const std::uint32_t id : doomed) {
+        const engine::VrxId vrx{id};
+
+        // Discarded, and the cleanup below runs either way. The engine refuses
+        // only a receiver it no longer holds, which a front-end retune or a
+        // closed source can have done already, and in that case the server's
+        // own state is the only thing left to take down.
+        static_cast<void>(engine_.remove_vrx(vrx));
+        after_vrx_removed(vrx, "the session that created this receiver ended, and it was not "
+                               "created with keep");
+    }
 }
 
 void ServerImpl::forget_across_retune() {
@@ -3654,6 +3801,12 @@ void ServerImpl::release_source_state(kj::StringPtr reason) {
     for (const std::uint32_t id : rds_ids) {
         end_rds_for_vrx(engine::VrxId{id});
     }
+
+    // Every receiver goes with the source, so nothing is left to own. A
+    // session ending later would otherwise try to remove ids that belonged to
+    // the old stream, which the engine refuses harmlessly and which would
+    // still be work done against a graph that no longer exists.
+    vrx_owners_.clear();
 
     // Every passband node, through end_passband so the per-receiver refcount
     // and the engine detach both happen exactly as they do for a cancel. A

@@ -612,3 +612,21 @@ retired: 2026-09-22
 commit: "Send P25 voice LDUs and the header's Reed-Solomon parity"
 instead: core/dsp/synth/dv_mod.cpp transmits P25 headers and voice LDUs. What
     the project lacks is the IMBE encoder, TIA-102.BABA sections 5 and 10.
+
+phrase: nothing reaps one whose client died
+phrase: Whether that is a leak or a feature is an open decision
+retired: 2026-09-22
+commit: 0000000
+instead: The owner decided it. A receiver belongs to the session that created
+    it and is removed when that session ends, a crash included, unless addVrx
+    was given keep. VrxStatus carries creatorSession, kept and ownedByCaller.
+    docs/rpc.md, "Receivers belong to the session that made them".
+
+phrase: its only member a reference to the server
+phrase: its only member is a reference to this server
+phrase: SessionImpl's only member is ServerImpl&
+retired: 2026-09-22
+commit: 0000000
+instead: SessionImpl also holds its login number, and its destructor removes
+    the receivers that session created and did not keep. A second one still
+    costs nothing, and two of them now differ in what they own.
