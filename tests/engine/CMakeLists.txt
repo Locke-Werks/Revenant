@@ -62,6 +62,11 @@
 # it a first_block that has jumped past its ring reaches the branch on a build
 # machine.
 
+# test_engine_dv.cpp is the three digital voice modes through the engine. It
+# needs a GPU because the receiver under test is a fine stage on the device,
+# and one of its cases does not: which truncated channels place() refuses is
+# integer arithmetic over the grid.
+
 # test_audio_fanout.cpp needs neither a GPU nor a sound card. AudioFanout is
 # the one part of core/engine/engine.h that is pure host code, and the wire
 # cases in tests/rpc rest on it, so its ordering and its failure semantics are
@@ -75,6 +80,7 @@ add_executable(revenant_engine_tests
     test_audio_fanout.cpp
     test_audio_wasapi.cpp
     test_engine.cpp
+    test_engine_dv.cpp
     test_engine_passband.cpp
     test_engine_spectrum.cpp
     test_ring.cpp

@@ -1,11 +1,13 @@
-// The fine stage and the seven demodulators, recorded into the graph's
-// command buffer.
+// The fine stage, the seven demodulators and the three digital voice taps,
+// recorded into the graph's command buffer.
 //
 // Two dispatches per receiver per block. core/shaders/vrx_fine.comp mixes the
 // residual to DC, filters to the requested bandwidth and resamples the coarse
 // channel to the demodulation rate, writing a per-receiver ring.
 // core/shaders/vrx_demod.comp detects out of that ring and writes real audio,
-// which is then copied into the graph's readback buffer. Both kernels are
+// or for P25p1, Dstar and Tetra hands the ring's complex baseband out
+// unchanged at the rate their decoder wants, and either is then copied into
+// the graph's readback buffer. Both kernels are
 // proved bit-exact against their twins in tests/reference/test_vrx.cpp; this
 // file is the plumbing that gets them the right push constants.
 //
@@ -782,6 +784,13 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     out.channels = plan_.demod.channels;
     out.rate = plan_.output_rate;
 
+    // A digital voice receiver's pair is one complex sample, not a stereo
+    // frame, and the signal meter divides by a different count for each.
+    // Left false it would average |z|^2 over two floats instead of one
+    // sample and read 3.01 dB low, the mirror of the error
+    // StageOutput::complex_iq was added to end for stereo WFM.
+    out.complex_iq = dsp::is_complex_output(plan_.demod.mode);
+
     if (record.block_count == 0) {
         return out;
     }
@@ -1049,13 +1058,22 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
 void install_default_vrx_stages() {
     install_vrx_stage_factory(
         [](const VrxStageRequest& request) -> Expected<std::unique_ptr<VrxStage>> {
-            if (is_complex_tap(request.params.demod)) {
+            if (request.params.demod == Demod::Raw) {
                 // Declined, not failed. The graph's own raw tap is a buffer
                 // copy of a channel that is already contiguous, and a null
-                // stage is how the seam says so. The digital voice modes
-                // decline here too: what they want is that same contiguous
-                // complex baseband, and core/decode does the rest on the
-                // host.
+                // stage is how the seam says so.
+                //
+                // WHAT THIS BRANCH USED TO SAY. Until 2026-09-22 it declined
+                // every complex tap and read "The digital voice modes decline
+                // here too: what they want is that same contiguous complex
+                // baseband, and core/decode does the rest on the host." It
+                // was not what they want. The raw tap hands a decoder one
+                // whole coarse channel at the channel rate with the carrier
+                // wherever the residual left it, and every decoder in
+                // core/decode assumes a carrier at DC, a channel filter and
+                // its own sample rate. They are built here now, as a fine
+                // stage and the kernel's complex passthrough, and deliver
+                // exactly that.
                 return std::unique_ptr<VrxStage>{};
             }
             return DemodStage::create(request);

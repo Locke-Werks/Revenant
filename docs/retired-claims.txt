@@ -498,3 +498,30 @@ commit: "Plan the digital voice modes through the VRX reference path"
 instead: There are eleven modes and validate, demod_rate_for, plan_vrx and the
     shorthand minimum_demod_rate all accept every one of them through
     dsp::is_known_mode, a switch with no default label.
+
+phrase: The digital voice modes decline here too: what they want is that same
+    contiguous complex baseband
+phrase: clamping cannot break a demodulator that does not exist
+phrase: A clamped passband costs them nothing at all
+phrase: Only the graph's own raw tap sets it
+phrase: The three digital voice modes are taps on the same terms
+phrase: which the digital voice modes share because they are taps too
+retired: 2026-09-22
+commit: "Give the digital voice modes a fine stage"
+instead: P25p1, Dstar and Tetra are DemodStage receivers: the residual mixed to
+    DC, the mode's channel filtered, resampled to 48000, 48000 and 72000 S/s,
+    handed out as complex pairs with StageOutput::complex_iq set. Only
+    Demod::Raw is the graph's RawTapStage. clamp_breaks_demodulator is true for
+    all three, and a truncated channel is refused by place().
+
+phrase: it is the FM modes and nothing else
+retired: 2026-09-22
+commit: "Give the digital voice modes a fine stage"
+instead: clamp_breaks_demodulator is true for Nfm, Wfm, P25p1, Dstar and Tetra.
+
+phrase: core/engine has no mode to name yet
+retired: 2026-09-22
+commit: "Give the digital voice modes a fine stage"
+instead: p25p1, dstar and tetra are Demod enumerators. demod_for_signal still
+    cannot choose one, because neither occupancy nor ModulationFamily names a
+    standard.

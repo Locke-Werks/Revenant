@@ -2964,10 +2964,19 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         // The raw tap is not a demodulator: it hands back one grid channel as
         // interleaved complex at the channel rate, so its stream is two
         // channels and is not at the audio rate. The three digital voice
-        // modes are taps on the same terms. Everything else is mono audio.
-        // Taken from the placement rather than assumed.
-        if (is_complex_tap(spec.demod)) {
+        // modes are two channels of complex too, but out of the fine stage,
+        // at the rate their decoder wants, which VrxStatus::demod_rate
+        // carries. Everything else is mono audio.
+        //
+        // WHAT THIS USED TO SAY: "The three digital voice modes are taps on
+        // the same terms", and it took their rate from the placement. They
+        // stopped being raw taps on 2026-09-22, and a recording labelled at
+        // the channel rate would play their 48000 or 72000 at the wrong speed.
+        if (spec.demod == Demod::Raw) {
             receiver.rate = status->placement.channel_rate;
+            receiver.channels = 2;
+        } else if (is_complex_tap(spec.demod)) {
+            receiver.rate = status->demod_rate;
             receiver.channels = 2;
         } else {
             receiver.rate = options.audio_rate;

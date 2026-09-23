@@ -101,7 +101,7 @@ enum class Demod : std::uint8_t {
 // True when the mode hands out complex baseband rather than real audio.
 //
 // The raw tap was the only one of these until the digital voice modes
-// arrived, and they join it rather than getting a kernel of their own. What
+// arrived, and they join it rather than getting a detector of their own. What
 // each of them needs from the receiver is a channel filter of the right width
 // and a sample rate above twice its symbol rate; the recovery, the framing
 // and the metadata are pure functions of a span of complex samples and live
@@ -109,9 +109,35 @@ enum class Demod : std::uint8_t {
 // core/decode/dv_phy.cpp has to do anyway, and doing it at the wrong rate:
 // P25 wants its discriminator after the receive filter, not before.
 //
+// THEY SHARE THE OUTPUT SHAPE AND NOT THE PATH. The raw tap is the graph's
+// own RawTapStage: one coarse channel copied out of the channel ring, at the
+// channel rate, with the carrier wherever the grid left it. The three digital
+// voice modes go through the fine stage like any demodulator: the residual
+// mixed to DC, the passband filtered to the mode's channel, and the result
+// resampled to the rate dsp::complex_tap_rate_step names, 48000 S/s for P25
+// and D-STAR and 72000 for TETRA, which is the rate each decoder in
+// core/decode was built and measured at. core/shaders/vrx_demod.comp then
+// hands that baseband out unchanged. VrxStatus::demod_rate and every
+// AudioChunk::rate carry the figure for these three.
+//
+// VrxStatus::demod_rate IS NOT THE RAW TAP'S RATE. It is the planner's
+// figure, and the raw tap never runs the plan: RawTapStage delivers at
+// VrxPlacement::channel_rate whatever the plan says. AudioChunk::rate is
+// right for all four.
+//
+// WHAT THIS PARAGRAPH USED TO SAY, until 2026-09-22: that they "join it" on
+// the raw tap's path, which they did, and that what they need is "a sample
+// rate above twice its symbol rate", which the raw tap met by accident of
+// the grid. It did not meet the rest of the sentence. A decoder handed the
+// raw tap got the whole coarse channel, the carrier off DC by the residual,
+// and a rate that moved with the source; tests/engine/test_engine_dv.cpp
+// measures what that cost against the fine stage, per mode.
+//
 // The consequence a caller has to know is that these four produce two floats
 // per sample and no audio. produces_audio below is the predicate for that and
-// this is the predicate for the tap path.
+// this is the predicate for the complex output. Neither says which path, and
+// a caller that needs the RATE reads it off the chunk rather than assuming
+// the channel rate.
 [[nodiscard]] constexpr bool is_complex_tap(Demod mode) {
     switch (mode) {
         case Demod::Raw:
@@ -649,25 +675,30 @@ struct VrxPlacement {
 // narrower raw tap is a narrower raw tap, and whatever is reading it knows
 // what to do about that.
 //
-// The digital modes are grouped there for a different reason than the
-// sentence here used to give.
+// The three digital voice modes are grouped with the FM modes, since
+// 2026-09-22, because they have a fine stage and so a clamped passband is
+// now actually applied to them. Two of them are frequency modulations that
+// core/decode discriminates, which is the NFM argument unchanged. The third,
+// TETRA, is a root raised cosine pulse whose receive filter is matched to
+// the whole 24.3 kHz it occupies; cutting into that turns every symbol into
+// intersymbol interference that a strong clean carrier on the waterfall does
+// nothing to reveal. All three decode worse on a truncated channel rather
+// than decoding a narrower version of the same thing.
 //
-// WHAT THIS PARAGRAPH USED TO SAY, and it described a path none of them take:
-// "Nothing in the engine demodulates them; the fine stage hands complex
-// baseband to core/decode, so a clamped passband costs intersymbol
-// interference rather than a different signal, and the decoder reports that as
-// a bit error rate instead of hiding it."
+// The refusal in place() still needs the grant to fall below the mode's own
+// channel plan, dsp::default_passband, so a P25 receiver asked for 14 kHz
+// and granted 13 is kept: it still holds the whole 12.5 kHz channel.
 //
-// There is no fine stage on any of them. is_complex_tap above is true for
-// P25p1, Dstar and Tetra as well as Raw, and the factory in
-// core/engine/vrx_stage.cpp declines every one of those, so they get the
-// graph's raw tap: one coarse channel, copied out of the channel ring,
-// unmixed and unfiltered. A clamped passband costs them nothing at all,
-// because the passband is not applied to a raw tap in the first place.
-//
-// What they are grouped with the false answers for is still right, and now
-// for the honest reason: clamping cannot break a demodulator that does not
-// exist.
+// WHAT THIS PARAGRAPH USED TO SAY. Its last version read "There is no fine
+// stage on any of them ... A clamped passband costs them nothing at all,
+// because the passband is not applied to a raw tap in the first place", and
+// ended "clamping cannot break a demodulator that does not exist". Both were
+// true of the raw-tap path they took until 2026-09-22 and neither is true of
+// the fine stage they take now. The version before that claimed a fine stage
+// that did not exist yet, "the fine stage hands complex baseband to
+// core/decode, so a clamped passband costs intersymbol interference rather
+// than a different signal", and the answer it gave, false, was wrong for the
+// reason this paragraph now gives.
 //
 // No default case. A twelfth demodulator has to answer this question here
 // rather than inherit an answer, which is the same rule
@@ -675,16 +706,16 @@ struct VrxPlacement {
 [[nodiscard]] constexpr bool clamp_breaks_demodulator(Demod mode) {
     switch (mode) {
         case Demod::Nfm:
-        case Demod::Wfm: return true;
+        case Demod::Wfm:
+        case Demod::P25p1:
+        case Demod::Dstar:
+        case Demod::Tetra: return true;
         case Demod::Raw:
         case Demod::Am:
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:
-        case Demod::Cw:
-        case Demod::P25p1:
-        case Demod::Dstar:
-        case Demod::Tetra: return false;
+        case Demod::Cw: return false;
     }
     return false;
 }

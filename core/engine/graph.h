@@ -157,7 +157,10 @@ struct StageOutput {
     std::uint32_t channels = 1;
 
     // Whether a pair of floats is one complex sample rather than two audio
-    // channels. Only the graph's own raw tap sets it.
+    // channels. The graph's own raw tap sets it, and so does a DemodStage
+    // for the three digital voice modes, which hand out complex baseband
+    // too. WHAT THIS USED TO SAY: "Only the graph's own raw tap sets it",
+    // true until those modes got a fine stage on 2026-09-22.
     //
     // A SEPARATE FIELD BECAUSE THE COUNT WAS OVERLOADED AND SOMETHING READ
     // IT. The signal meter branched on channels == 2 and metered a stereo

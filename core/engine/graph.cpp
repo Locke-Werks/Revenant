@@ -2985,13 +2985,19 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
         stage = std::move(*built);
     }
     if (stage == nullptr) {
-        if (!is_complex_tap(params.demod)) {
+        // Demod::Raw alone falls back to the graph's own copy. The digital
+        // voice modes used to share it, and handed a decoder one unmixed,
+        // unfiltered coarse channel at the channel rate. They need the fine
+        // stage, which arrives with the factory, so without one they are
+        // refused like every other demodulator rather than given a stream
+        // no decoder here was built for.
+        if (params.demod != Demod::Raw) {
             return fail(std::format(
                 "no stage factory is installed, so '{}' cannot be built. The graph ships one "
-                "stage of its own, the raw complex tap, which needs no kernel and which the "
-                "digital voice modes share because they are taps too. Every other "
-                "demodulator arrives with the fine-stage package and installs itself "
-                "through engine::install_vrx_stage_factory",
+                "stage of its own, the raw complex tap, which needs no kernel. Every other "
+                "mode, the digital voice taps included, needs the fine stage, which arrives "
+                "with the demodulator package and installs itself through "
+                "engine::install_vrx_stage_factory",
                 demod_name(params.demod)));
         }
         stage = std::make_unique<RawTapStage>(request);

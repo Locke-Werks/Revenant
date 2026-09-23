@@ -148,8 +148,14 @@ constexpr dsp::Hertz kNarrowbandChannelHz = 25'000;
 // Four: digital voice in a 25 kHz channel. DMR, P25 and the rest come back
 // Nfm, which is right about the front end and wrong about the result: the
 // discriminator output is correct and there is no vocoder behind it, so
-// what comes out is a buzz. docs/modes.md is the scope for that and
-// core/engine has no mode to name yet.
+// what comes out is a buzz. The modes exist, p25p1, dstar and tetra, and
+// neither input here can name one: occupancy does not separate a P25
+// carrier from an NFM one, and characterise::ModulationFamily says Fsk or
+// Psk but not which standard.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: it ended "core/engine has no mode to
+// name yet", written before the three digital voice modes were appended to
+// Demod.
 Demod demod_for_signal(const SignalEvidence& evidence) {
     switch (evidence.family) {
         case characterise::ModulationFamily::Unmodulated: return Demod::Cw;
@@ -336,9 +342,12 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
     //
     // TWO CONDITIONS, BOTH NEEDED.
     //
-    // clamp_breaks_demodulator is the first: it is the FM modes and nothing
-    // else, so a linear mode keeps the behaviour its callers already have
-    // and its tests already pin.
+    // clamp_breaks_demodulator is the first: it is the two FM modes and the
+    // three digital voice modes, so a linear mode keeps the behaviour its
+    // callers already have and its tests already pin. WHAT THIS USED TO SAY:
+    // "it is the FM modes and nothing else", which was the list until the
+    // digital voice modes got a fine stage on 2026-09-22 and a passband that
+    // is actually applied to them.
     //
     // The second is that the grant fell below the mode's OWN channel plan,
     // dsp::default_passband. A WFM receiver asking for 300 kHz and granted
@@ -390,16 +399,29 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
                     rate, static_cast<std::int64_t>(rate) / 2);
             }
 
+            // Two reasons, one per kind of receiver. The digital voice modes
+            // joined clamp_breaks_demodulator when they got a fine stage,
+            // and TETRA has no discriminator to blame, so the sentence that
+            // names one is kept for the modes that end in audio.
+            const std::string why =
+                produces_audio(params.demod)
+                    ? std::format("a discriminator recovers the instantaneous frequency of "
+                                  "whatever reaches it, so a {} receiver on a truncated "
+                                  "passband produces the wrong audio rather than less of the "
+                                  "right audio",
+                                  demod_name(params.demod))
+                    : std::format("its decoder's receive filter is matched to the whole "
+                                  "channel, so a {} receiver on a truncated passband hands it "
+                                  "symbols smeared into their neighbours rather than a weaker "
+                                  "copy of the same symbols",
+                                  demod_name(params.demod));
             return fail(std::format(
                 "place: a {} receiver needs {} Hz of passband and one channel of this {} "
                 "channel grid could carry {} Hz of it, {} to {} about the receiver's "
-                "centre. This is refused rather than narrowed because a discriminator "
-                "recovers the instantaneous frequency of whatever reaches it, so a {} "
-                "receiver on a truncated passband produces the wrong audio rather than "
-                "less of the right audio, at full strength and with nothing on the "
-                "display saying so. {}",
+                "centre. This is refused rather than narrowed because {}, at full strength "
+                "and with nothing on the display saying so. {}",
                 demod_name(params.demod), plan.width(), grid.channels, got, granted.low,
-                granted.high, demod_name(params.demod), advice));
+                granted.high, why, advice));
         }
     }
 
