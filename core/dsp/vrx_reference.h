@@ -321,6 +321,9 @@ inline constexpr std::uint32_t kDemodP25p1 = 8;
 inline constexpr std::uint32_t kDemodDstar = 9;
 inline constexpr std::uint32_t kDemodTetra = 10;
 
+// DMR, appended on 2026-09-23 and routed to the same passthrough.
+inline constexpr std::uint32_t kDemodDmr = 11;
+
 static_assert(static_cast<std::uint32_t>(engine::Demod::Raw) == kDemodRaw);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Am) == kDemodAm);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Nfm) == kDemodNfm);
@@ -332,6 +335,7 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Cw) == kDemodCw);
 static_assert(static_cast<std::uint32_t>(engine::Demod::P25p1) == kDemodP25p1);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Dstar) == kDemodDstar);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Tetra) == kDemodTetra);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Dmr) == kDemodDmr);
 
 // What those eight catch and what they do not, because the difference has
 // already been got wrong once in this tree.
@@ -380,7 +384,8 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Tetra) == kDemodTetra);
         case engine::Demod::Cw:
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
-        case engine::Demod::Tetra: return true;
+        case engine::Demod::Tetra:
+        case engine::Demod::Dmr: return true;
     }
     return false;
 }
@@ -415,11 +420,13 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Tetra) == kDemodTetra);
 //   Tetra   72000 S/s, 4 per symbol. EN 300 392-2 clause 5.3, 36 kbit/s of
 //           pi/4-DQPSK at two bits per symbol, so 18000 symbols per second.
 //           decode::TetraConfig::rate.
+//   Dmr     48000 S/s, 10 per symbol. ETSI TS 102 361-1 clause 10.2.1, 4800
+//           symbols per second. decode::DmrConfig::rate.
 //
 // The figures are stated here rather than read from core/decode, for the
 // reason core/engine/vrx.h gives for kCompositeAudioRateHz: nothing in the
-// engine's DSP depends on core/decode and three constants are not worth the
-// edge. tests/reference/test_vrx.cpp asserts all three against the decoders'
+// engine's DSP depends on core/decode and four constants are not worth the
+// edge. tests/reference/test_vrx.cpp asserts all four against the decoders'
 // own defaults and symbol rates, so the copies cannot drift apart silently.
 //
 // The audio rate is not the step for these modes, and that is deliberate

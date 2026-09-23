@@ -62,6 +62,8 @@ static_assert(static_cast<std::uint16_t>(schema::Demod::DSTAR) ==
               static_cast<std::uint16_t>(engine::Demod::Dstar));
 static_assert(static_cast<std::uint16_t>(schema::Demod::TETRA) ==
               static_cast<std::uint16_t>(engine::Demod::Tetra));
+static_assert(static_cast<std::uint16_t>(schema::Demod::DMR) ==
+              static_cast<std::uint16_t>(engine::Demod::Dmr));
 
 // The same check for the detector's track state. It matters less than the
 // demodulator's, because a state is read and never written back, but it fails

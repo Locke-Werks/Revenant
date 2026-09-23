@@ -101,6 +101,8 @@ static_assert(static_cast<std::uint16_t>(schema::Demod::DSTAR) ==
               static_cast<std::uint16_t>(Demod::Dstar));
 static_assert(static_cast<std::uint16_t>(schema::Demod::TETRA) ==
               static_cast<std::uint16_t>(Demod::Tetra));
+static_assert(static_cast<std::uint16_t>(schema::Demod::DMR) ==
+              static_cast<std::uint16_t>(Demod::Dmr));
 
 // The same pair for the RDS region, used by the cast in set_rds_region.
 //
@@ -277,7 +279,7 @@ struct PromiseValue<kj::Promise<T>> {
 // unintelligible.
 [[nodiscard]] Expected<Demod> read_demod(schema::Demod mode) {
     const auto ordinal = static_cast<std::uint16_t>(mode);
-    if (ordinal > static_cast<std::uint16_t>(Demod::Tetra)) {
+    if (ordinal > static_cast<std::uint16_t>(Demod::Dmr)) {
         return fail(std::format(
             "demodulator ordinal {} is not one this client knows; the engine was built against "
             "a newer schema",

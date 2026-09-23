@@ -40,6 +40,7 @@
 #include <string>
 #include <vector>
 
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/tetra.h"
@@ -693,6 +694,7 @@ TEST_CASE("the cheap demodulation rate query answers what the planner builds",
         {engine::Demod::P25p1, -6'250, 6'250, 48'000},
         {engine::Demod::Dstar, -3'000, 3'000, 16'000},
         {engine::Demod::Tetra, -12'500, 12'500, 48'000},
+        {engine::Demod::Dmr, -6'250, 6'250, 16'000},
     };
 
     for (const auto& want : cases) {
@@ -898,6 +900,7 @@ TEST_CASE("a plan's fine tap table is exactly the length its config implies", "[
         {engine::Demod::P25p1, 12'500, &kGrid},    {engine::Demod::P25p1, 9'000, &kGrid},
         {engine::Demod::Dstar, 6'000, &kGrid},     {engine::Demod::Dstar, 4'000, &kGrid},
         {engine::Demod::Tetra, 25'000, &kGrid},    {engine::Demod::Tetra, 20'000, &kGrid},
+        {engine::Demod::Dmr, 12'500, &kGrid},      {engine::Demod::Dmr, 9'000, &kGrid},
     };
 
     for (const Case& want : cases) {
@@ -923,22 +926,23 @@ TEST_CASE("every enumerator is a known mode and nothing past the last one is",
     // before the three digital voice modes were appended and never moved
     // after. Every enumerator is asked here so that the next one appended
     // is either covered by the switch or fails this case.
-    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodTetra; ++mode) {
+    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodDmr; ++mode) {
         INFO("mode " << mode);
         CHECK(dsp::is_known_mode(mode));
     }
-    CHECK_FALSE(dsp::is_known_mode(dsp::kDemodTetra + 1U));
+    CHECK_FALSE(dsp::is_known_mode(dsp::kDemodDmr + 1U));
 
     // 257 truncates to 1 in the enum's 8-bit underlying type, which is Am.
     // The guard reads the word, not the truncation.
     CHECK_FALSE(dsp::is_known_mode(257U));
     CHECK_FALSE(dsp::is_complex_output(257U));
 
-    // The four complex taps, and only those four.
-    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodTetra; ++mode) {
+    // The five complex taps, and only those five.
+    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodDmr; ++mode) {
         INFO("mode " << mode);
         const bool expected = mode == dsp::kDemodRaw || mode == dsp::kDemodP25p1 ||
-                              mode == dsp::kDemodDstar || mode == dsp::kDemodTetra;
+                              mode == dsp::kDemodDstar || mode == dsp::kDemodTetra ||
+                              mode == dsp::kDemodDmr;
         CHECK(dsp::is_complex_output(mode) == expected);
     }
 }
@@ -960,6 +964,7 @@ TEST_CASE("the digital voice modes plan as complex taps at their decoders' rates
         {engine::Demod::P25p1, 48'000, decode::kP25SymbolRate, decode::P25Config{}.rate},
         {engine::Demod::Dstar, 48'000, decode::kDStarBitRate, decode::DStarConfig{}.rate},
         {engine::Demod::Tetra, 72'000, decode::kTetraSymbolRate, decode::TetraConfig{}.rate},
+        {engine::Demod::Dmr, 48'000, decode::kDmrSymbolRate, decode::DmrConfig{}.rate},
     };
 
     for (const Case& want : cases) {
@@ -1121,6 +1126,7 @@ TEST_CASE("the fine stage is bit-exact on the digital voice modes' plans", "[gpu
         {engine::Demod::P25p1, 12'500},
         {engine::Demod::Dstar, 6'000},
         {engine::Demod::Tetra, 25'000},
+        {engine::Demod::Dmr, 12'500},
     };
 
     test::SeededInput input(kSeed);
@@ -1609,6 +1615,9 @@ TEST_CASE("every demodulator matches its CPU twin bit-exactly", "[gpu][vrx][m1]"
         // per frame, which this diff would catch as half the buffer zero.
         {engine::Demod::P25p1, 12'500, &kGrid}, {engine::Demod::Dstar, 6'000, &kGrid},
         {engine::Demod::Tetra, 25'000, &kGrid},
+
+        // DMR, specialization constant 11, appended 2026-09-23.
+        {engine::Demod::Dmr, 12'500, &kGrid},
     };
 
     test::SeededInput input(kSeed);
@@ -2284,6 +2293,7 @@ TEST_CASE("the raw tap hands back exactly what it was given", "[gpu][vrx][m1]") 
         {engine::Demod::P25p1, 12'500},
         {engine::Demod::Dstar, 6'000},
         {engine::Demod::Tetra, 25'000},
+        {engine::Demod::Dmr, 12'500},
     };
 
     test::SeededInput input(kSeed);

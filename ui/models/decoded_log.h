@@ -56,12 +56,13 @@ namespace revenant::ui {
 
 inline constexpr std::string_view kAutoDecoder = "auto";
 
-// The four modes whose output is complex baseband, as the schema's
+// The five modes whose output is complex baseband, as the schema's
 // DecoderInput names them. Only used for an engine older than
 // DecoderInfo::modes, which cannot say more than the input kind.
 [[nodiscard]] inline bool mode_is_complex_tap(std::string_view mode)
 {
-    return mode == "raw" || mode == "p25p1" || mode == "dstar" || mode == "tetra";
+    return mode == "raw" || mode == "p25p1" || mode == "dstar" || mode == "tetra" ||
+           mode == "dmr";
 }
 
 // Whether `info` reads a receiver in `mode`.

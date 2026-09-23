@@ -57,12 +57,14 @@
 #include <string>
 #include <vector>
 
+#include "core/decode/dmr.h"
 #include "core/decode/dstar.h"
 #include "core/decode/dv_phy.h"
 #include "core/decode/p25p1.h"
 #include "core/decode/tetra.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/synth/channel.h"
+#include "core/dsp/synth/dmr_mod.h"
 #include "core/dsp/synth/dv_mod.h"
 #include "core/engine/engine.h"
 #include "core/engine/vrx.h"
@@ -110,6 +112,7 @@ constexpr ModeRate kDigitalModes[] = {
     {engine::Demod::P25p1, 48'000},
     {engine::Demod::Dstar, 48'000},
     {engine::Demod::Tetra, 72'000},
+    {engine::Demod::Dmr, 48'000},
 };
 
 // ---------------------------------------------------------------------------
@@ -707,6 +710,8 @@ TEST_CASE("a digital voice receiver cut below its own channel is refused", "[eng
         {engine::Demod::P25p1, false},
         {engine::Demod::Dstar, true},
         {engine::Demod::Tetra, false},
+        // DMR's channel is P25's 12.5 kHz, TS 102 361-1 clause 10.1.2.
+        {engine::Demod::Dmr, false},
         // The raw tap is still not a demodulator and is narrowed rather
         // than refused.
         {engine::Demod::Raw, true},
@@ -984,6 +989,101 @@ TEST_CASE("TETRA through the engine, the fine stage against the raw tap",
 
         REQUIRE(fine.locked);
         CHECK(fine.rate() <= point.allowed_bit_error_rate);
+    }
+}
+
+TEST_CASE("DMR through the engine, the fine stage against the raw tap", "[gpu][engine][dv]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // A base station channel with a CSBK on every slot, each its own, behind
+    // its CACH: what a DMR receiver's fine stage has to hand the decoder
+    // whole. Scored as CSBKs that came back byte for byte, the frame error
+    // rate tests/decode/test_dmr.cpp measures.
+    constexpr std::size_t kCsbks = 40;
+    constexpr std::size_t kLead = 4;
+    std::vector<std::array<std::uint8_t, 10>> sent(kCsbks);
+    std::uint64_t state = 0xD312'E000'0000'0001ULL;
+    std::vector<siggen::DmrSlot> slots;
+    const std::array<std::uint8_t, decode::kDmrCachPayloadBits> null_payload{};
+    for (std::size_t i = 0; i < kCsbks + 4 * kLead; ++i) {
+        siggen::DmrSlot slot;
+        slot.cach = siggen::dmr_cach(true, i % 2 == 0 ? 1 : 2, decode::kDmrLcssSingle, null_payload);
+        if (i >= 2 * kLead && i - 2 * kLead < kCsbks) {
+            auto& octets = sent[i - 2 * kLead];
+            octets[0] = 0xBF;  // LB, CSBKO 111111
+            octets[1] = 0x10;  // a manufacturer's FID, so the rest is raw
+            for (std::size_t o = 2; o < octets.size(); ++o) {
+                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                octets[o] = static_cast<std::uint8_t>(state >> 40U);
+            }
+            auto burst = siggen::dmr_bptc_burst(decode::DmrSyncType::BsData, 1,
+                                                decode::DmrDataType::Csbk, octets);
+            REQUIRE(burst.has_value());
+            slot.burst = *burst;
+        } else {
+            slot.burst = siggen::dmr_idle_burst(decode::DmrSyncType::BsData, 1);
+        }
+        slots.push_back(slot);
+    }
+
+    constexpr dsp::SampleRate kNative = decode::DmrConfig{}.rate;
+    const auto score = [&](std::span<const dsp::Complex32> samples, dsp::SampleRate rate) {
+        decode::DmrConfig config;
+        config.rate = rate;
+        config.filter_taps = taps_for(config.filter_taps, kNative, rate);
+        auto decoder = decode::Dmr::create(config);
+        REQUIRE(decoder.has_value());
+        std::vector<decode::DmrBurst> bursts;
+        REQUIRE(decoder->process(samples, bursts).has_value());
+        std::size_t whole = 0;
+        for (const decode::DmrBurst& burst : bursts) {
+            if (burst.csbk && std::find(sent.begin(), sent.end(), burst.csbk->octets) != sent.end()) {
+                ++whole;
+            }
+        }
+        return whole;
+    };
+
+    struct Point {
+        double snr_db;
+        std::size_t minimum_whole;
+    };
+    // SNR across 48000 Hz, this file's convention, so 30 dB and 8 dB are 42.8
+    // and 20.8 dB in 2500 Hz. Measured 2026-09-23 on the RTX 4090, CSBKs
+    // whole of 40:
+    //
+    //                   fine stage       raw tap          raw tap mixed
+    //                   48000 S/s        144000 S/s       to DC on host
+    //   30 dB           40               40               40
+    //    8 dB           40               38               39
+    //
+    // Every burst fits its own sync's level, so the raw tap's 5 kHz offset
+    // costs the decoder nothing it cannot measure; what the fine stage buys
+    // at 8 dB is the noise outside the 12.5 kHz channel.
+    const Point points[] = {{30.0, kCsbks}, {8.0, kCsbks * 3 / 4}};
+    for (const Point& point : points) {
+        INFO("signal to noise " << point.snr_db << " dB across " << kNative << " Hz");
+        auto native = siggen::dmr_render_slots(siggen::DmrModConfig{}, slots);
+        INFO(test::message_of(native));
+        REQUIRE(native.has_value());
+
+        const auto capture = wideband_capture(*native, kNative, point.snr_db, 0xD312'E000'0000'0002ULL);
+        const Captured got =
+            through_engine(capture, engine::Demod::Dmr, std::format("dmr_{}", point.snr_db));
+        CHECK(got.fine_rate == kNative);
+        CHECK(got.raw_rate == 2 * kWideSpacing);
+
+        const std::size_t fine = score(got.fine, got.fine_rate);
+        const std::size_t raw = score(got.raw, got.raw_rate);
+        const std::size_t raw_mixed =
+            score(mixed_to_dc(got.raw, got.raw_rate, got.raw_residual_hz), got.raw_rate);
+        WARN(std::format(
+            "dmr at {} dB across {} Hz, CSBKs whole of {}. Fine stage at {} S/s: {}. Raw tap at "
+            "{} S/s as delivered, carrier {} Hz off DC: {}. Raw tap mixed to DC on the host: {}",
+            point.snr_db, kNative, kCsbks, got.fine_rate, fine, got.raw_rate, got.raw_residual_hz,
+            raw, raw_mixed));
+        CHECK(fine >= point.minimum_whole);
     }
 }
 

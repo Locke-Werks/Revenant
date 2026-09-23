@@ -38,8 +38,8 @@ ColumnLayout {
     // on screen that explains why. Observed 2026-09-20 by clearing
     // a receiver while listening.
     //
-    // HIDDEN ON A RECEIVER THAT MAKES NO AUDIO: raw, D-STAR and TETRA
-    // hand out complex baseband for a decoder, and the engine refuses
+    // HIDDEN ON A RECEIVER THAT MAKES NO AUDIO: raw, D-STAR, TETRA and
+    // DMR hand out complex baseband for a decoder, and the engine refuses
     // audio on them, so the section would only ever show the refusal.
     // The link does not subscribe there either. The switch keeps its
     // state underneath and is on screen again the moment the receiver

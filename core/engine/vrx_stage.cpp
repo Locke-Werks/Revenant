@@ -5,7 +5,7 @@
 // residual to DC, filters to the requested bandwidth and resamples the coarse
 // channel to the demodulation rate, writing a per-receiver ring.
 // core/shaders/vrx_demod.comp detects out of that ring and writes real audio,
-// or for P25p1, Dstar and Tetra hands the ring's complex baseband out
+// or for P25p1, Dstar, Tetra and Dmr hands the ring's complex baseband out
 // unchanged at the rate their decoder wants, and either is then copied into
 // the graph's readback buffer. Both kernels are
 // proved bit-exact against their twins in tests/reference/test_vrx.cpp; this

@@ -55,16 +55,18 @@ namespace revenant::engine {
 // it is selected the same way: it hands out complex baseband at the VRX's
 // bandwidth, which is what lets external tooling and the decoder framework
 // attach before any decoder exists.
-// The three digital voice modes are APPENDED, never inserted. Their ordinals
-// cross the wire and reach a specialization constant, and core/rpc/convert.h
+// The digital voice modes are APPENDED, never inserted. Their ordinals cross
+// the wire and reach a specialization constant, and core/rpc/convert.h
 // asserts every pair; a reorder would retune every receiver in a saved
-// session and nothing about the failure would point at this line.
+// session and nothing about the failure would point at this line. Dmr came
+// last, on 2026-09-23, after the other three.
 //
-// DMR is deliberately absent from a list that names its three neighbours.
-// ETSI TS 102 361 carries a live Motorola patent whose claim 1 receives a
-// burst and compares its synchronisation pattern, which is what a framing
-// decoder does. docs/modes.md has the query and the reasoning, and the
-// exclusion lifts on 2027-02-19 when that patent expires.
+// WHAT THIS PARAGRAPH USED TO SAY: "DMR is deliberately absent from a list
+// that names its three neighbours. ETSI TS 102 361 carries a live Motorola
+// patent whose claim 1 receives a burst and compares its synchronisation
+// pattern". The patent is still live until 2027-02-19; the owner put DMR back
+// in scope on 2026-09-23 and accepted that risk, and docs/modes.md records
+// both the query and the decision.
 enum class Demod : std::uint8_t {
     Raw,
     Am,
@@ -77,6 +79,7 @@ enum class Demod : std::uint8_t {
     P25p1,
     Dstar,
     Tetra,
+    Dmr,
 };
 
 [[nodiscard]] constexpr const char* demod_name(Demod mode) {
@@ -92,6 +95,7 @@ enum class Demod : std::uint8_t {
         case Demod::P25p1: return "p25p1";
         case Demod::Dstar: return "dstar";
         case Demod::Tetra: return "tetra";
+        case Demod::Dmr: return "dmr";
     }
     return "unknown";
 }
@@ -111,19 +115,19 @@ enum class Demod : std::uint8_t {
 //
 // THEY SHARE THE OUTPUT SHAPE AND NOT THE PATH. The raw tap is the graph's
 // own RawTapStage: one coarse channel copied out of the channel ring, at the
-// channel rate, with the carrier wherever the grid left it. The three digital
+// channel rate, with the carrier wherever the grid left it. The digital
 // voice modes go through the fine stage like any demodulator: the residual
 // mixed to DC, the passband filtered to the mode's channel, and the result
-// resampled to the rate dsp::complex_tap_rate_step names, 48000 S/s for P25
-// and D-STAR and 72000 for TETRA, which is the rate each decoder in
+// resampled to the rate dsp::complex_tap_rate_step names, 48000 S/s for P25,
+// D-STAR and DMR and 72000 for TETRA, which is the rate each decoder in
 // core/decode was built and measured at. core/shaders/vrx_demod.comp then
 // hands that baseband out unchanged. VrxStatus::demod_rate and every
-// AudioChunk::rate carry the figure for these three.
+// AudioChunk::rate carry the figure for these four.
 //
 // VrxStatus::demod_rate IS NOT THE RAW TAP'S RATE. It is the planner's
 // figure, and the raw tap never runs the plan: RawTapStage delivers at
 // VrxPlacement::channel_rate whatever the plan says. AudioChunk::rate is
-// right for all four.
+// right for all five.
 //
 // WHAT THIS PARAGRAPH USED TO SAY, until 2026-09-22: that they "join it" on
 // the raw tap's path, which they did, and that what they need is "a sample
@@ -133,7 +137,7 @@ enum class Demod : std::uint8_t {
 // and a rate that moved with the source; tests/engine/test_engine_dv.cpp
 // measures what that cost against the fine stage, per mode.
 //
-// The consequence a caller has to know is that these four produce two floats
+// The consequence a caller has to know is that these five produce two floats
 // per sample and no audio. produces_audio below is the predicate for that and
 // this is the predicate for the complex output. Neither says which path, and
 // a caller that needs the RATE reads it off the chunk rather than assuming
@@ -143,7 +147,8 @@ enum class Demod : std::uint8_t {
         case Demod::Raw:
         case Demod::P25p1:
         case Demod::Dstar:
-        case Demod::Tetra: return true;
+        case Demod::Tetra:
+        case Demod::Dmr: return true;
         case Demod::Am:
         case Demod::Nfm:
         case Demod::Wfm:
@@ -321,11 +326,12 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         case Demod::Dsb:
         case Demod::Cw:
 
-        // The three digital modes carry no analogue audio at all, so there is
-        // no curve to apply and no transmitter that applied one.
+        // The digital modes carry no analogue audio at all, so there is no
+        // curve to apply and no transmitter that applied one.
         case Demod::P25p1:
         case Demod::Dstar:
-        case Demod::Tetra: return Deemphasis::None;
+        case Demod::Tetra:
+        case Demod::Dmr: return Deemphasis::None;
     }
 
     // Not an enumerator at all. Nothing is known about the mode, so nothing
@@ -374,7 +380,8 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         case Demod::Cw:
         case Demod::P25p1:
         case Demod::Dstar:
-        case Demod::Tetra: return false;
+        case Demod::Tetra:
+        case Demod::Dmr: return false;
     }
     return false;
 }
@@ -724,7 +731,8 @@ struct VrxPlacement {
 // the whole 24.3 kHz it occupies; cutting into that turns every symbol into
 // intersymbol interference that a strong clean carrier on the waterfall does
 // nothing to reveal. All three decode worse on a truncated channel rather
-// than decoding a narrower version of the same thing.
+// than decoding a narrower version of the same thing. DMR, appended on
+// 2026-09-23, is 4FSK that core/decode discriminates, the NFM argument again.
 //
 // The refusal in place() still needs the grant to fall below the mode's own
 // channel plan, dsp::default_passband, so a P25 receiver asked for 14 kHz
@@ -750,7 +758,8 @@ struct VrxPlacement {
         case Demod::Wfm:
         case Demod::P25p1:
         case Demod::Dstar:
-        case Demod::Tetra: return true;
+        case Demod::Tetra:
+        case Demod::Dmr: return true;
         case Demod::Raw:
         case Demod::Am:
         case Demod::Usb:

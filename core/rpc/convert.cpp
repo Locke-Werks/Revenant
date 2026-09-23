@@ -87,6 +87,7 @@ schema::Demod to_schema(engine::Demod mode) {
         case engine::Demod::P25p1: return schema::Demod::P25P1;
         case engine::Demod::Dstar: return schema::Demod::DSTAR;
         case engine::Demod::Tetra: return schema::Demod::TETRA;
+        case engine::Demod::Dmr: return schema::Demod::DMR;
     }
     return schema::Demod::RAW;
 }
@@ -185,7 +186,7 @@ Expected<decode::Region> from_schema(schema::RdsRegion region) {
 
 Expected<engine::Demod> from_schema(schema::Demod mode) {
     const auto ordinal = static_cast<std::uint16_t>(mode);
-    if (ordinal > static_cast<std::uint16_t>(engine::Demod::Tetra)) {
+    if (ordinal > static_cast<std::uint16_t>(engine::Demod::Dmr)) {
         return fail(std::format(
             "demodulator ordinal {} is not one this engine knows; the caller was built "
             "against a newer schema",
@@ -215,6 +216,7 @@ namespace {
                    "audio";
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
+        case engine::Demod::Dmr:
             return "core/decode discriminates it to recover the symbols, so a cut sideband "
                    "moves the symbol levels rather than lowering them, and the decoder reads "
                    "wrong symbols from a carrier the waterfall shows as clean";
@@ -863,7 +865,7 @@ void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
     if (modes.empty()) {
         const bool complex = input == DecoderInput::ComplexBaseband;
         for (auto ordinal = static_cast<std::uint16_t>(engine::Demod::Raw);
-             ordinal <= static_cast<std::uint16_t>(engine::Demod::Tetra); ++ordinal) {
+             ordinal <= static_cast<std::uint16_t>(engine::Demod::Dmr); ++ordinal) {
             const auto mode = static_cast<engine::Demod>(ordinal);
             if (engine::is_complex_tap(mode) == complex) {
                 named.emplace_back(engine::demod_name(mode));

@@ -215,6 +215,8 @@ inline constexpr std::array kKeyActions{
               {"", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "dstar"},
     KeyAction{"mode.tetra", "switch the receiver to TETRA", "mode", "mode digital",
               {"", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "tetra"},
+    KeyAction{"mode.dmr", "switch the receiver to DMR", "mode", "mode digital dmr tier",
+              {"", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "dmr"},
 
     // The receiver's filter, from anywhere.
     KeyAction{"filter.widen", "widen the filter", "filter", "bandwidth passband wider",

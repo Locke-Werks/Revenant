@@ -6,15 +6,16 @@
 // names into rpc::Demod through kDemodNames, and UiRules hands the selector
 // its rows and labels.
 //
-// ELEVEN MODES, TWO ROWS OF THEM. The selector shows the eight an operator
-// reaches for on every band as one row of segments, and puts P25, D-STAR and
-// TETRA behind a ninth segment that opens a short list. All eleven are
-// demodulators the engine plans, and the three digital ones reach the
+// TWELVE MODES, TWO ROWS OF THEM. The selector shows the eight an operator
+// reaches for on every band as one row of segments, and puts P25, D-STAR,
+// TETRA and DMR behind a ninth segment that opens a short list. All twelve
+// are demodulators the engine plans, and the four digital ones reach the
 // decoders through the fine stage at the rate each was written for, so a raw
 // receiver is no longer the only way to them. Grouped rather than added to
 // the row, which it shares with the width controls and the level readout:
 // eight segments is what it held before, and one more for the group keeps it
-// close to that.
+// close to that. DMR joined the group on 2026-09-23, and until then this
+// paragraph counted eleven modes and three digital ones.
 //
 // WHAT THIS WINDOW USED TO OFFER: the row alone, "am, nfm, wfm, usb, lsb,
 // dsb, cw, raw", and a name table in models/engine_link.h that held those
@@ -42,10 +43,10 @@ namespace revenant::ui {
 // so the ORDINALS here are pinned by the engine's own build even though the
 // spellings are not. ui/tests/test_mode_choice.cpp pins each spelling to its
 // enumerator.
-inline constexpr std::array<std::string_view, 11> kDemodNames = {
-    "raw", "am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1", "dstar", "tetra"};
+inline constexpr std::array<std::string_view, 12> kDemodNames = {
+    "raw", "am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1", "dstar", "tetra", "dmr"};
 
-static_assert(kDemodNames.size() == static_cast<std::size_t>(rpc::Demod::Tetra) + 1,
+static_assert(kDemodNames.size() == static_cast<std::size_t>(rpc::Demod::Dmr) + 1,
               "a demodulator was added to rpc::Demod without a name here");
 
 struct ModeChoice {
@@ -55,9 +56,9 @@ struct ModeChoice {
 };
 
 // In the order the selector draws them. The row keeps the engine's lower-case
-// names, which is how it has always read; the digital three are known on the
+// names, which is how it has always read; the digital four are known on the
 // air by these spellings and not by the engine's.
-inline constexpr std::array<ModeChoice, 11> kModeChoices = {{
+inline constexpr std::array<ModeChoice, 12> kModeChoices = {{
     {"am", "am", false},
     {"nfm", "nfm", false},
     {"wfm", "wfm", false},
@@ -69,6 +70,7 @@ inline constexpr std::array<ModeChoice, 11> kModeChoices = {{
     {"p25p1", "P25", true},
     {"dstar", "D-STAR", true},
     {"tetra", "TETRA", true},
+    {"dmr", "DMR", true},
 }};
 
 // What the digital segment reads while the receiver is in none of them.
@@ -98,7 +100,7 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
     return choice != nullptr && choice->digital;
 }
 
-// The digital segment's text: the mode in force when it is one of the three,
+// The digital segment's text: the mode in force when it is one of the four,
 // so the operator sees which, and the group's name otherwise.
 [[nodiscard]] constexpr std::string_view digital_group_label(std::string_view current)
 {
@@ -120,8 +122,8 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 // Whether a receiver in this mode makes audio, which is whether the audio
 // section applies to it at all.
 //
-// engine::produces_audio's seven analogue modes, and p25p1. raw, dstar and
-// tetra hand out complex baseband, two floats a sample, for a decoder to
+// engine::produces_audio's seven analogue modes, and p25p1. raw, dstar, tetra
+// and dmr hand out complex baseband, two floats a sample, for a decoder to
 // read, and the engine refuses an audio subscription on one. So the window
 // neither asks nor shows a section that could only say it was refused. A
 // p25p1 receiver's audio is its decoded IMBE voice, which subscribeAudio

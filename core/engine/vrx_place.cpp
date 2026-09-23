@@ -60,7 +60,7 @@ namespace {
 constexpr Demod kAllDemods[] = {Demod::Raw,   Demod::Am,    Demod::Nfm,
                                 Demod::Wfm,   Demod::Usb,   Demod::Lsb,
                                 Demod::Dsb,   Demod::Cw,    Demod::P25p1,
-                                Demod::Dstar, Demod::Tetra};
+                                Demod::Dstar, Demod::Tetra, Demod::Dmr};
 
 // Rounds a quotient of integers to the nearest integer, halves away from zero.
 //
@@ -149,8 +149,8 @@ constexpr dsp::Hertz kNarrowbandChannelHz = 25'000;
 // Four: digital voice in a 25 kHz channel. DMR, P25 and the rest come back
 // Nfm, which is right about the front end and wrong about the result: the
 // discriminator output is correct and there is no vocoder behind it, so
-// what comes out is a buzz. The modes exist, p25p1, dstar and tetra, and
-// neither input here can name one: occupancy does not separate a P25
+// what comes out is a buzz. The modes exist, p25p1, dstar, tetra and dmr,
+// and neither input here can name one: occupancy does not separate a P25
 // carrier from an NFM one, and characterise::ModulationFamily says Fsk or
 // Psk but not which standard.
 //

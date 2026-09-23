@@ -128,6 +128,9 @@ void check_params_match(const rpc::VrxParams& got, const rpc::VrxParams& sent) {
         case rpc::Demod::P25p1: return 12'500;
         case rpc::Demod::Dstar: return 6'000;
         case rpc::Demod::Tetra: return 25'000;
+
+        // DMR, appended after them: 12.5 kHz, TS 102 361-1 clause 10.1.2.
+        case rpc::Demod::Dmr: return 12'500;
     }
     return 12'000;
 }
@@ -776,7 +779,7 @@ TEST_CASE("all eight demodulator modes survive a round trip", "[gpu][rpc][m1]") 
     constexpr rpc::Demod kModes[] = {rpc::Demod::Raw,   rpc::Demod::Am,    rpc::Demod::Nfm,
                                      rpc::Demod::Wfm,   rpc::Demod::Usb,   rpc::Demod::Lsb,
                                      rpc::Demod::Dsb,   rpc::Demod::Cw,    rpc::Demod::P25p1,
-                                     rpc::Demod::Dstar, rpc::Demod::Tetra};
+                                     rpc::Demod::Dstar, rpc::Demod::Tetra, rpc::Demod::Dmr};
 
     std::vector<std::uint64_t> ids;
     for (const rpc::Demod mode : kModes) {
@@ -841,7 +844,7 @@ TEST_CASE("a demodulator ordinal the engine does not know is refused, not cast",
     // instead of quietly testing a known one. It was the literal 9 until
     // the digital voice modes landed on 8, 9 and 10 and turned it into a
     // test that a valid mode is refused.
-    constexpr auto kUnknownOrdinal = static_cast<int>(rpc::Demod::Tetra) + 1;
+    constexpr auto kUnknownOrdinal = static_cast<int>(rpc::Demod::Dmr) + 1;
 
     rpc::VrxParams params = distinctive_params();
     params.demod = static_cast<rpc::Demod>(kUnknownOrdinal);

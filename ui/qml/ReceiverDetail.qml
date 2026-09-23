@@ -150,7 +150,7 @@ ColumnLayout {
         spacing: 12
 
         // The mode: the eight choices an operator reaches for on every band
-        // as a row, and P25, D-STAR and TETRA behind a "digital" segment at
+        // as a row, and P25, D-STAR, TETRA and DMR behind a "digital" segment at
         // its end, which reads the digital mode in force when there is one.
         // models/mode_choice.h holds the lists and the labels. Changing one
         // is a remove and an add underneath, because the demodulator is the

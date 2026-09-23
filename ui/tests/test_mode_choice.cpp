@@ -54,6 +54,7 @@ TEST_CASE("every demodulator name sits at its rpc::Demod ordinal", "[modes]")
     CHECK(name_of(Demod::P25p1) == "p25p1");
     CHECK(name_of(Demod::Dstar) == "dstar");
     CHECK(name_of(Demod::Tetra) == "tetra");
+    CHECK(name_of(Demod::Dmr) == "dmr");
 }
 
 // Rejects a selector that leaves a demodulator unreachable, which is what the
@@ -73,10 +74,10 @@ TEST_CASE("the selector offers every demodulator exactly once", "[modes]")
 
 // Rejects widening the row by the digital modes, and rejects a group that
 // holds anything the row already has.
-TEST_CASE("the row is the eight it was and the digital group is the other three", "[modes]")
+TEST_CASE("the row is the eight it was and the digital group is the other four", "[modes]")
 {
     CHECK(mode_names(false) == Names{"am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw"});
-    CHECK(mode_names(true) == Names{"p25p1", "dstar", "tetra"});
+    CHECK(mode_names(true) == Names{"p25p1", "dstar", "tetra", "dmr"});
 }
 
 // Rejects showing the engine's spellings for the digital modes, and rejects
@@ -86,11 +87,13 @@ TEST_CASE("the digital modes carry their on-air names", "[modes]")
     CHECK(mode_label("p25p1") == "P25");
     CHECK(mode_label("dstar") == "D-STAR");
     CHECK(mode_label("tetra") == "TETRA");
+    CHECK(mode_label("dmr") == "DMR");
     CHECK(mode_label("nfm") == "nfm");
     CHECK(mode_label("raw") == "raw");
 
     // A mode from a newer engine reads as itself rather than as nothing.
-    CHECK(mode_label("dmr") == "dmr");
+    // WHAT THE EXAMPLE USED TO BE: "dmr", which an engine now has.
+    CHECK(mode_label("nxdn") == "nxdn");
 }
 
 // Rejects a group segment that says "digital" while one of its modes is in
@@ -105,8 +108,9 @@ TEST_CASE("the digital segment names the digital mode in force", "[modes]")
     CHECK(digital_group_label("") == "digital");
 
     CHECK(mode_is_digital("tetra"));
+    CHECK(mode_is_digital("dmr"));
     CHECK_FALSE(mode_is_digital("raw"));
-    CHECK_FALSE(mode_is_digital("dmr"));
+    CHECK_FALSE(mode_is_digital("nxdn"));
 }
 
 // Rejects an audio section on a complex tap the engine refuses audio on,
@@ -123,7 +127,7 @@ TEST_CASE("the analogue demodulators and P25 make audio", "[modes]")
         INFO(name);
         CHECK(mode_makes_audio(name));
     }
-    for (const std::string_view name : {"raw", "dstar", "tetra", "dmr", ""}) {
+    for (const std::string_view name : {"raw", "dstar", "tetra", "dmr", "nxdn", ""}) {
         INFO(name);
         CHECK_FALSE(mode_makes_audio(name));
     }
@@ -139,7 +143,7 @@ TEST_CASE("the amplitude-detected modes are the ones levelled", "[modes]")
         INFO(name);
         CHECK(mode_needs_level(name));
     }
-    for (const std::string_view name : {"nfm", "wfm", "p25p1", "raw", "dstar", "tetra", ""}) {
+    for (const std::string_view name : {"nfm", "wfm", "p25p1", "raw", "dstar", "tetra", "dmr", ""}) {
         INFO(name);
         CHECK_FALSE(mode_needs_level(name));
     }
@@ -158,7 +162,7 @@ TEST_CASE("AFT holds and the auto filter does nothing on the digital modes", "[m
 }
 
 // Rejects a refusal that lists the eight the window used to know.
-TEST_CASE("a refused mode is answered with all eleven names", "[modes]")
+TEST_CASE("a refused mode is answered with all twelve names", "[modes]")
 {
-    CHECK(demod_names_text() == "raw, am, nfm, wfm, usb, lsb, dsb, cw, p25p1, dstar, tetra");
+    CHECK(demod_names_text() == "raw, am, nfm, wfm, usb, lsb, dsb, cw, p25p1, dstar, tetra, dmr");
 }

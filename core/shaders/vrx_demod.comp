@@ -12,8 +12,8 @@
 // Input is this receiver's complex baseband out of core/shaders/vrx_fine.comp,
 // already mixed to DC, already limited to the requested bandwidth and already
 // resampled to the demodulation rate Fd. Output is real audio at Fa = Fd / R,
-// except for the four complex taps, which hand out the complex baseband
-// unchanged: the raw tap for whatever attaches to it, and the three digital
+// except for the five complex taps, which hand out the complex baseband
+// unchanged: the raw tap for whatever attaches to it, and the four digital
 // voice modes for core/decode to recover symbols from.
 //
 // WHAT THE MODE CONSTANT ACTUALLY SELECTS.
@@ -185,15 +185,17 @@ const uint kModeCw = 7u;
 const uint kModeP25p1 = 8u;
 const uint kModeDstar = 9u;
 const uint kModeTetra = 10u;
+const uint kModeDmr = 11u;
 
 // The modes that hand out complex baseband rather than detected audio, which
 // is engine::is_complex_tap and dsp::is_complex_output on the host. Until
 // 2026-09-22 the raw tap was the only one this kernel ever saw, because the
 // three digital voice modes were declined before a pipeline was built; they
 // have a fine stage now and reach the same passthrough, since what their
-// decoders want is exactly what the fine stage wrote.
-const bool kComplexTap =
-    kMode == kModeRaw || kMode == kModeP25p1 || kMode == kModeDstar || kMode == kModeTetra;
+// decoders want is exactly what the fine stage wrote. DMR joined them on
+// 2026-09-23.
+const bool kComplexTap = kMode == kModeRaw || kMode == kModeP25p1 || kMode == kModeDstar ||
+                         kMode == kModeTetra || kMode == kModeDmr;
 
 // Fitted against long-double atan over [0, 1] by least squares on the odd
 // basis t*(c0 + c1*u + ... + c9*u^9), u = t*t. Worst float32 error 9.6e-08

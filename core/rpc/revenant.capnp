@@ -118,12 +118,17 @@ enum Demod {
     # core/decode recovers the symbols, so a client selecting one of these
     # gets two channels at the channel rate rather than mono audio.
     #
-    # DMR is absent on purpose. ETSI TS 102 361 carries a live patent whose
-    # claim receives a burst and compares its synchronisation pattern; see
-    # docs/modes.md. If it is ever added it goes after tetra, like these.
+    # dmr came after them, on 2026-09-23, the same kind of tap.
+    #
+    # WHAT THIS PARAGRAPH USED TO SAY: "DMR is absent on purpose. ETSI TS 102
+    # 361 carries a live patent whose claim receives a burst and compares its
+    # synchronisation pattern". The patent is live until 2027-02-19; the owner
+    # put DMR back in scope on 2026-09-23 and accepted that risk, which
+    # docs/modes.md records beside the query.
     p25p1 @8;
     dstar @9;
     tetra @10;
+    dmr @11;
 }
 
 struct DeviceInfo {
@@ -2515,7 +2520,7 @@ struct DecodedMessage {
 }
 
 enum DecoderInput {
-    # A receiver whose mode is a complex tap: raw, p25p1, dstar or tetra.
+    # A receiver whose mode is a complex tap: raw, p25p1, dstar, tetra or dmr.
     complexBaseband @0;
 
     # A receiver producing real audio: every other mode.

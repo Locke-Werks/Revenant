@@ -30,10 +30,10 @@
 //             so there is nothing to measure. Hold.
 //   dsb       the same, a suppressed carrier. Hold.
 //   raw       no demodulator, so no statement of what the signal is. Hold.
-//   p25p1, dstar, tetra
-//             a decoder's complex tap. The P25 and D-STAR decoders fit the
-//             carrier's offset from their own sync words, and no rule here
-//             has been measured on any of the three. Hold.
+//   p25p1, dstar, tetra, dmr
+//             a decoder's complex tap. The P25, D-STAR and DMR decoders fit
+//             the carrier's offset from their own sync words, and no rule
+//             here has been measured on any of the four. Hold.
 //
 // RTTY AND FSK ARE NOT HERE. Their logical centre is the midpoint of two tones,
 // derived from one tone and the shift, and the engine has neither an RTTY mode

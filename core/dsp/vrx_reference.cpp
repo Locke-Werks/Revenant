@@ -942,6 +942,12 @@ Passband default_passband(engine::Demod mode) {
         // through a root raised cosine of roll-off 0.35 (EN 300 392-2
         // clauses 5.3 and 5.5), which occupies 18000 * 1.35 = 24.3 kHz.
         case engine::Demod::Tetra: return Passband{-12'500, 12'500};
+
+        // DMR is a 12.5 kHz channel: TS 102 361-1 clause 10.1.2, "The radio
+        // system operates within a 12,5 kHz RF carrier bandwidth". Its 4FSK
+        // deviates 1944 Hz at the outer symbols (clause 10.2.2.1) at 4800
+        // symbols a second, about 9.5 kHz by Carson, inside it.
+        case engine::Demod::Dmr: return Passband{-6'250, 6'250};
     }
 
     // Not an enumerator. Nothing is known about the mode, so nothing is
@@ -1005,11 +1011,13 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
         case engine::Demod::Dsb:
         case engine::Demod::Cw:
 
-        // The three digital modes are symmetric about their carrier, like
-        // the four above, because a linear modulation's spectrum is.
+        // The digital modes are symmetric about their carrier, like the four
+        // above, because a linear modulation's spectrum is and an FM one's
+        // with a symmetric alphabet is.
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
-        case engine::Demod::Tetra: return Passband{-half, half};
+        case engine::Demod::Tetra:
+        case engine::Demod::Dmr: return Passband{-half, half};
         case engine::Demod::Usb: return Passband{0, params.bandwidth};
         case engine::Demod::Lsb: return Passband{-params.bandwidth, 0};
     }
@@ -1169,7 +1177,8 @@ Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
         // the raw tap". They reach it since 2026-09-22, as a passthrough.
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
-        case engine::Demod::Tetra: return 0;
+        case engine::Demod::Tetra:
+        case engine::Demod::Dmr: return 0;
     }
 
     // Not an enumerator at all. No mode, so no channel plan, so no deviation.
@@ -1280,6 +1289,9 @@ Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame) {
         case engine::Demod::Tetra:
             // EN 300 392-2 clause 5.3: 36 kbit/s at two bits per symbol.
             return std::max<Hertz>(floor_rate, 36'000);
+        case engine::Demod::Dmr:
+            // TS 102 361-1 clause 10.2.1: 4800 symbols per second.
+            return std::max<Hertz>(floor_rate, 9'600);
     }
 
     // Not an enumerator. Unreachable from plan_vrx, which range-checks the
@@ -1372,6 +1384,9 @@ SampleRate complex_tap_rate_step(std::uint32_t mode) {
         // Four samples per symbol of EN 300 392-2 clause 5.3's 18000.
         case engine::Demod::Tetra: return 72'000;
 
+        // Ten samples per symbol of TS 102 361-1 clause 10.2.1's 4800.
+        case engine::Demod::Dmr: return 48'000;
+
         // The raw tap is a complex tap too and is not here. It has no
         // decoder behind it to size a rate for, and it has always stepped in
         // the audio rate; a caller wanting it at some other rate names that
@@ -1416,6 +1431,7 @@ float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation)
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
         case engine::Demod::Tetra:
+        case engine::Demod::Dmr:
             // Raw is a passthrough, AM's envelope is already in the same
             // units as the input, and a product detector's real part is too.
             // Unity keeps every mode on the one convention: a unit-amplitude
