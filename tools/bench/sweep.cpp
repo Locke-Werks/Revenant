@@ -202,11 +202,18 @@ TrialResult run_trial(const SweepConfig& config,
                       std::size_t point_index,
                       std::uint64_t trial_index) {
     const std::uint64_t seed = trial_seed(config.base_seed, point_index, trial_index);
-    const std::vector<std::uint8_t> payload =
-        random_payload(config.payload_bytes, splitmix64(seed ^ kPayloadStreamTag));
-    const std::vector<dsp::Complex32> waveform =
-        generator(payload, config.snr_db_at(point_index), splitmix64(seed ^ kChannelStreamTag));
-    return subject(dsp::ConstComplexSpan(waveform), std::span<const std::uint8_t>(payload));
+    const TrialInput input = make_trial_input(generator, config.payload_bytes, config.snr_db_at(point_index), seed);
+    return subject(dsp::ConstComplexSpan(input.waveform), std::span<const std::uint8_t>(input.payload));
+}
+
+TrialInput make_trial_input(const Generator& generator,
+                            std::size_t payload_bytes,
+                            double snr_db,
+                            std::uint64_t trial_seed_value) {
+    TrialInput input;
+    input.payload = random_payload(payload_bytes, splitmix64(trial_seed_value ^ kPayloadStreamTag));
+    input.waveform = generator(input.payload, snr_db, splitmix64(trial_seed_value ^ kChannelStreamTag));
+    return input;
 }
 
 Expected<std::vector<SweepPoint>> run_sweep(const SweepConfig& config,

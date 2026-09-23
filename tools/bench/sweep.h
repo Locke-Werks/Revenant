@@ -155,6 +155,20 @@ using ProgressFn = std::function<void(std::size_t point_index, const SweepPoint&
                                     std::size_t point_index,
                                     std::uint64_t trial_index);
 
+// What a trial feeds its subject: the payload and the impaired waveform, from
+// the trial's seed as trial_seed derives it. run_trial goes through this, and
+// so does siggen when it writes a bench trial to a file, so the two cannot
+// derive the streams differently.
+struct TrialInput {
+    std::vector<std::uint8_t> payload;
+    std::vector<dsp::Complex32> waveform;
+};
+
+[[nodiscard]] TrialInput make_trial_input(const Generator& generator,
+                                          std::size_t payload_bytes,
+                                          double snr_db,
+                                          std::uint64_t trial_seed_value);
+
 // Payload bits are numbered MSB first within each byte, which is the ordering
 // every framed radio protocol worth naming uses on the wire.
 [[nodiscard]] bool payload_bit(std::span<const std::uint8_t> payload, std::size_t bit_index);
