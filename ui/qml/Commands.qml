@@ -9,7 +9,7 @@
 // the radio's dial, the receiver window's filter display, the panels.
 //
 // A HANDLER THE TABLE NAMES AND THIS FILE LACKS IS A FAILED SMOKE RUN.
-// main.cpp calls missingText() at the end of --smoke-seconds and exits 1 on
+// main.cpp calls missingText() as a --smoke-seconds run starts and exits 1 on
 // anything it returns, so a row added to the table without a line here is a
 // red CI run rather than a key that silently does nothing.
 

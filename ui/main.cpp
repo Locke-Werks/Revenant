@@ -10,6 +10,7 @@
 //
 //   revenant-ui [address] [port] [--every-nth N] [--smoke-seconds N]
 //               [--receiver FREQ:MODE] [--decode NAME] [--grab-receivers FILE]
+//               [--palette QUERY] [--keymap] [--grab-main FILE]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -28,6 +29,13 @@
 // photograph the decode section with nobody at the mouse, which is what they
 // are for: a window on the offscreen platform takes no input from, and puts
 // nothing on, the desktop it runs beside.
+//
+// --palette opens the main window's command palette with QUERY typed into it,
+// and --keymap opens its key map; --grab-main writes the main window to FILE
+// as a PNG when a smoke run ends. They photograph the keyboard's two overlays
+// the same way, without a key being pressed on anybody's desktop. A smoke run
+// also fails when ui/qml/Commands.qml lacks a handler the key table names,
+// which is the one check on that table that has to run the QML to be made.
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
@@ -349,6 +357,10 @@ int main(int argc, char* argv[])
     QString startup_receiver;
     QString startup_decoder;
     QString grab_receivers;
+    QString grab_main;
+    QString palette_query;
+    bool palette_wanted = false;
+    bool keymap_wanted = false;
 
     const QStringList args = QGuiApplication::arguments();
     QStringList positional;
@@ -371,6 +383,19 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--grab-receivers") && i + 1 < args.size()) {
             grab_receivers = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--grab-main") && i + 1 < args.size()) {
+            grab_main = args[++i];
+            continue;
+        }
+        if (args[i] == QStringLiteral("--palette") && i + 1 < args.size()) {
+            palette_query = args[++i];
+            palette_wanted = true;
+            continue;
+        }
+        if (args[i] == QStringLiteral("--keymap")) {
+            keymap_wanted = true;
             continue;
         }
         if (args[i] == QStringLiteral("--smoke-seconds")) {
@@ -403,6 +428,14 @@ int main(int argc, char* argv[])
     }
     if (!grab_receivers.isEmpty() && !smoke) {
         std::fputs("--grab-receivers needs --smoke-seconds, which is the run it ends\n", stderr);
+        return 2;
+    }
+    if (!grab_main.isEmpty() && !smoke) {
+        std::fputs("--grab-main needs --smoke-seconds, which is the run it ends\n", stderr);
+        return 2;
+    }
+    if (palette_wanted && keymap_wanted) {
+        std::fputs("--palette and --keymap are two overlays in one place; ask for one\n", stderr);
         return 2;
     }
 
@@ -487,6 +520,37 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    auto* root_window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
+    QObject* commands =
+        root_window != nullptr ? root_window->findChild<QObject*>(QStringLiteral("commands"))
+                               : nullptr;
+
+    // Every handler the key table names has to be in Commands.qml, and only
+    // the QML can say whether it is. Checked on every smoke run, which is
+    // every CI run, so a key added without its handler fails there.
+    if (smoke) {
+        QVariant missing;
+        if (commands == nullptr ||
+            !QMetaObject::invokeMethod(commands, "missingText", Q_RETURN_ARG(QVariant, missing))) {
+            std::fputs("smoke: this build of the QML has no Commands to check\n", stderr);
+            return 1;
+        }
+        if (!missing.toString().isEmpty()) {
+            std::fprintf(stderr, "smoke: the key table names handlers Commands.qml lacks: %s\n",
+                         qPrintable(missing.toString()));
+            return 1;
+        }
+    }
+
+    if ((palette_wanted || keymap_wanted) && commands != nullptr) {
+        if (palette_wanted) {
+            QMetaObject::invokeMethod(commands, "showPalette",
+                                      Q_ARG(QVariant, QVariant(palette_query)));
+        } else {
+            QMetaObject::invokeMethod(commands, "showKeyMap");
+        }
+    }
+
     if (smoke) {
         // The receiver window is shown for a grab, since nothing else in a
         // smoke run shows it, and grabbed as the run ends so what it holds is
@@ -503,12 +567,23 @@ int main(int argc, char* argv[])
             }
             receivers->setVisible(true);
         }
-        QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app, [receivers, grab_receivers] {
+        QTimer::singleShot(std::chrono::seconds(smoke_seconds), &app,
+                           [receivers, grab_receivers, root_window, grab_main] {
             if (receivers != nullptr) {
                 const QImage shot = receivers->grabWindow();
                 if (shot.isNull() || !shot.save(grab_receivers)) {
                     std::fprintf(stderr, "--grab-receivers: could not write %s\n",
                                  qPrintable(grab_receivers));
+                    QCoreApplication::exit(1);
+                    return;
+                }
+            }
+            if (!grab_main.isEmpty()) {
+                const QImage shot =
+                    root_window != nullptr ? root_window->grabWindow() : QImage();
+                if (shot.isNull() || !shot.save(grab_main)) {
+                    std::fprintf(stderr, "--grab-main: could not write %s\n",
+                                 qPrintable(grab_main));
                     QCoreApplication::exit(1);
                     return;
                 }
