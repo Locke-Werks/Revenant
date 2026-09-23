@@ -1,0 +1,108 @@
+#include "core/dsp/synth/fsk_mod.h"
+
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+
+namespace revenant::siggen {
+namespace {
+
+constexpr double kTwoPi = 2.0 * std::numbers::pi;
+
+// A run of one tone lasting a whole or fractional number of units.
+struct Segment {
+    bool mark = true;
+    double units = 0.0;
+};
+
+// Continuous-phase two-tone audio from a list of segments. Each sample takes
+// the tone of the segment its own instant falls in, and the phase carries
+// through every change of tone, which is what a keyed oscillator does.
+std::vector<float> render_segments(std::span<const Segment> segments, SampleRate rate,
+                                   double baud, double mark_hz, double space_hz,
+                                   double amplitude) {
+    double total_units = 0.0;
+    for (const Segment& s : segments) {
+        total_units += s.units;
+    }
+    const double samples_per_unit = static_cast<double>(rate) / baud;
+    const auto count = static_cast<std::size_t>(std::ceil(total_units * samples_per_unit));
+
+    std::vector<float> out;
+    out.reserve(count);
+    std::size_t segment = 0;
+    double segment_end = segments.empty() ? 0.0 : segments[0].units;
+    double phase = 0.0;
+    for (std::size_t n = 0; n < count; ++n) {
+        const double u = static_cast<double>(n) / samples_per_unit;
+        while (segment + 1 < segments.size() && u >= segment_end) {
+            ++segment;
+            segment_end += segments[segment].units;
+        }
+        const double f = segments[segment].mark ? mark_hz : space_hz;
+        out.push_back(static_cast<float>(amplitude * std::cos(phase)));
+        phase = std::fmod(phase + kTwoPi * f / static_cast<double>(rate), kTwoPi);
+    }
+    return out;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// RTTY
+// ---------------------------------------------------------------------------
+
+Expected<std::vector<std::uint8_t>> ita2_encode_text(std::u32string_view text) {
+    using Case = decode::Ita2Code::Case;
+    std::vector<std::uint8_t> out;
+    out.push_back(decode::kIta2LetterShift);
+    bool figures = false;
+    for (const char32_t c : text) {
+        const auto code = decode::ita2_encode(c);
+        if (!code) {
+            return fail("a character in the text has no ITA2 combination");
+        }
+        if (code->needs == Case::Figures && !figures) {
+            out.push_back(decode::kIta2FigureShift);
+            figures = true;
+        } else if (code->needs == Case::Letters && figures) {
+            out.push_back(decode::kIta2LetterShift);
+            figures = false;
+        }
+        out.push_back(code->combination);
+    }
+    return out;
+}
+
+Expected<std::vector<float>> rtty_render(const RttyModConfig& config,
+                                         std::span<const std::uint8_t> combinations) {
+    if (config.rate <= 0 || !(config.baud > 0.0)) {
+        return fail("RTTY needs a positive sample rate and baud");
+    }
+    const double mark = static_cast<double>(config.mark_hz) + config.tone_offset_hz;
+    const double space = config.space_above_mark ? mark + static_cast<double>(config.shift_hz)
+                                                 : mark - static_cast<double>(config.shift_hz);
+    if (!(space > 0.0) || !(mark > 0.0) || std::max(mark, space) * 2.0 >= static_cast<double>(config.rate)) {
+        return fail("RTTY tones must lie between zero and half the sample rate");
+    }
+    if (!(config.stop_units > 0.0)) {
+        return fail("RTTY needs a stop element");
+    }
+
+    std::vector<Segment> segments;
+    segments.push_back({true, config.lead_units});
+    for (const std::uint8_t combination : combinations) {
+        // S.1 clause 3.2: start polarity is condition A, which is space.
+        segments.push_back({false, 1.0});
+        // Table 1 note: code element 1 first. Condition Z, binary 1, is mark.
+        for (std::size_t unit = 0; unit < decode::kIta2Units; ++unit) {
+            segments.push_back({((combination >> unit) & 1U) != 0U, 1.0});
+        }
+        segments.push_back({true, config.stop_units});
+    }
+    segments.push_back({true, config.tail_units});
+
+    return render_segments(segments, config.rate, config.baud, mark, space, config.amplitude);
+}
+
+}  // namespace revenant::siggen

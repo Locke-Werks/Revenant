@@ -70,6 +70,7 @@ add_library(revenant_core STATIC
     decode/p25p1.cpp
     decode/rds_bits.cpp
     decode/rds_groups.cpp
+    decode/rtty.cpp
     decode/tetra.cpp
     decode/vocoder.cpp
     decode/vocoder_plugin.cpp
@@ -86,6 +87,7 @@ add_library(revenant_core STATIC
     dsp/vrx_reference.cpp
     dsp/synth/channel.cpp
     dsp/synth/dv_mod.cpp
+    dsp/synth/fsk_mod.cpp
     dsp/synth/modulators.cpp
     dsp/synth/rds_mod.cpp
     dsp/synth/wfm_mod.cpp

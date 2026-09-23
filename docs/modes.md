@@ -177,7 +177,7 @@ never paste a table, a figure or a paragraph.
 | Q65 | 65-FSK, 85 symbols with a 22-symbol sync vector, submodes 15 s to 300 s, QRA(65,15) over GF(64), CRC-12 | Quick-Start Guide to Q65 and "The Q65 Coding Process", G4JNT, both free | Large |
 | JS8 | 8-GFSK, 79 symbols, four speeds from 3.125 to 20 baud, 75-bit frames in six types | JS8Call User Guide, free; Appendix A prints the modified Huffman code. The dictionary compression table is not published | Medium |
 | PSK31, PSK63, QPSK31 | BPSK 31.25 or 62.5 baud, cosine envelope, roughly 60 Hz occupied; QPSK adds r=1/2 K=5 | G3PLX in RadCom Dec 1998 and Jan 1999, reprinted free by ARRL with the full varicode table | Small |
-| RTTY (ITA2) | 2-FSK, 45.45 baud, 170 Hz shift standard, 5-unit alphabet, 1.5 stop bits | ITU-T Recommendation S.1 for the alphabet, free; the 45.45/170 convention is practice and is cited as such | Small |
+| RTTY (ITA2) | 2-FSK, 45.45 baud, 170 Hz shift standard, 5-unit alphabet, 1.5 stop bits | ITU-T Recommendation S.1 for the alphabet and S.3 for the 7.5-unit character, free; the 45.45/170 convention is practice and is cited as such. Done, see below | Small |
 | AMTOR SITOR-A and SITOR-B | 2-FSK, 100 baud, 170 Hz shift, CCIR 476 7-unit 4/3 code, 450 ms ARQ cycle or 280 ms time-diversity FEC | ITU-R M.625-4 (03/2012, in force) and M.476-5, free | Small |
 | Olivia | MFSK 2 to 256 tones over 125 to 2000 Hz; default 32/1000 at 31.25 baud; Walsh FEC scrambled by 0xE257E6D0291574EC | "The Draft Specification For The Olivia HF Transmission System", SP9VRC, hosted free by ARRL | Medium |
 | Contestia | Olivia geometry, six-bit alphabet, half the FEC | fldigi mode documentation only. Cite the page and the retrieval date | Small |
@@ -815,6 +815,29 @@ and the RDS/RBDS split does not begin until the group layer.
 RDS2 is in the included list above and is the cheapest new capability here, for
 the same reason: the demodulator, the block synchroniser, the offset words and
 the CRC already work, and RDS2 reuses all four on three more subcarriers.
+
+**Two-level FSK text and data, from receiver audio.** Pure libraries over a
+span of real audio at the receiver's audio rate, the way RDS reads the WFM
+composite, so the Demod enum does not grow. Not wired to the engine or the
+wire yet; they report through the decoded-message seam once it exists.
+`core/decode/fsk.cpp` is the part with no standard in it: a tone-pair
+discriminator for audio that carries the shift as two tones, a level
+discriminator for audio that is already the data waveform, and a
+transition-tracking bit clock, which SITOR-B, NAVTEX and DSC can reuse.
+
+| Mode | File | Document | What comes out |
+| --- | --- | --- | --- |
+| RTTY | `core/decode/rtty.cpp` | ITU-T S.1 (03/93) clauses 3, 4.1 to 4.5 and Tables 1 and 2 for ITA2; ITU-T S.3 (11/88) clauses 1.3 and 1.4 and Table 1 for the 7.5-unit character | Characters with the sample index of their start element, letters and figures case tracked, a decision margin per character, and counts of framing errors and false starts |
+
+RTTY's 45.45 baud, 170 Hz shift and 2125 Hz mark are practice rather than
+anything S.1 or S.3 states, and all three are parameters along with the
+polarity. `core/dsp/synth/fsk_mod.cpp` is the transmitter and
+`tests/decode/test_rtty.cpp` the round trip, at 48 kHz and at 8 and 11.025 kHz.
+Measured through `add_real_awgn` over 300 characters: no errors at 10 dB in
+2500 Hz, a character error rate of 0.0033 at -5 dB and 0.14 at -8 dB, where
+the unit error rate is 0.0069 against 0.0064 for ideal non-coherent FSK. What
+it does not reach: no automatic frequency control, so the tones must be where
+the caller says, and no diversity or error correction, because ITA2 has none.
 
 ## What would change the list
 
