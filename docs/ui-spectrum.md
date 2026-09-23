@@ -188,6 +188,15 @@ half.
 | double click | away from every receiver but the focused one | adds a receiver there and focuses it; the focused one goes back to where the first click found it |
 | click | a strip in the rack | focuses that receiver |
 
+A click on the span that focuses, retunes, opens or adds a receiver also
+brings the receiver window to the front: raised if it is on screen, shown
+if it was closed, restored if it was minimised, and given the keyboard only
+in those last two cases. `ui/models/window_raise.h` has the rule and what
+Windows does with each call, with cases in `ui/tests/test_window_raise.cpp`.
+Every key is an application-wide shortcut and the wheel goes to the window
+under the pointer, so the next key or notch lands whichever window is
+active; what follows activation is where the command palette opens.
+
 A narrow receiver inside a wide one is the narrow one's band. The focused
 receiver's own band is never a focus target, so a click inside it is the fine
 retune it has always been. The first click of a double click has already

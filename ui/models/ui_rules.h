@@ -36,6 +36,7 @@
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
 #include "models/status_summary.h"
+#include "models/window_raise.h"
 
 namespace revenant::ui {
 
@@ -289,6 +290,20 @@ public:
     [[nodiscard]] Q_INVOKABLE double scrollEighths(double delta_x, double delta_y) const
     {
         return scroll_tune_eighths(delta_x, delta_y);
+    }
+
+    // What bringing the receiver window forward takes: {show, restore,
+    // raise, activate}. See models/window_raise.h.
+    [[nodiscard]] Q_INVOKABLE QVariantMap receiverWindowRaise(bool visible, bool minimised) const
+    {
+        const ReceiverWindowState state = !visible   ? ReceiverWindowState::Hidden
+                                          : minimised ? ReceiverWindowState::Minimised
+                                                      : ReceiverWindowState::OnScreen;
+        const ReceiverWindowRaise plan = plan_receiver_window_raise(state);
+        return QVariantMap{{QStringLiteral("show"), plan.show},
+                           {QStringLiteral("restore"), plan.restore},
+                           {QStringLiteral("raise"), plan.raise},
+                           {QStringLiteral("activate"), plan.activate}};
     }
 
 private:

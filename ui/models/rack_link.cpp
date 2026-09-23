@@ -34,6 +34,7 @@
 #include <QVariantMap>
 
 #include "models/receiver_palette.h"
+#include "models/window_raise.h"
 
 namespace revenant::ui {
 namespace {
@@ -432,6 +433,9 @@ bool EngineLink::spanClick(double pointer_hz, double center_hz, double bandwidth
     in.had_receiver = pane_key_ != 0;
     in.count = rack_.size();
     const SpanClick kind = classify_span_click(in);
+    if (click_brings_receivers_forward(kind)) {
+        emit receiverWindowWanted();
+    }
 
     // No default: a new kind of click is a warning the CI build stops on.
     switch (kind) {
@@ -482,8 +486,12 @@ bool EngineLink::spanDoubleClick(double pointer_hz, double center_hz, double ban
     in.had_receiver = pane_key_ != 0;
     in.first_click_opened = recent && first.opened;
     in.count = rack_.size();
+    const SpanClick kind = classify_span_click(in);
+    if (click_brings_receivers_forward(kind)) {
+        emit receiverWindowWanted();
+    }
 
-    switch (classify_span_click(in)) {
+    switch (kind) {
         case SpanClick::Nothing:
         case SpanClick::Focus:
         case SpanClick::Retune:

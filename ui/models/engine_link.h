@@ -2445,6 +2445,12 @@ signals:
     // receiverStatusChanged, because the focused strip reads the pane.
     void rackChanged();
 
+    // A click on the span focused, retuned, opened or added a receiver, so
+    // the receiver window comes forward. Emitted by spanClick and
+    // spanDoubleClick for the clicks click_brings_receivers_forward in
+    // models/window_raise.h names; Main.qml does the raising.
+    void receiverWindowWanted();
+
     // The engine's receiver inventory changed, or this window's place in it
     // did.
     void strandedReceiversChanged();

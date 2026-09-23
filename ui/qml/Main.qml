@@ -61,6 +61,15 @@ ApplicationWindow {
         commands: keyCommands
     }
 
+    // A click on a signal brings the receiver window forward. EngineLink
+    // decides which clicks, models/window_raise.h how.
+    Connections {
+        target: engineLink
+        function onReceiverWindowWanted() {
+            receiverWindow.bringForward()
+        }
+    }
+
     // Every key, and what each one does. See Commands.qml.
     Commands {
         id: keyCommands

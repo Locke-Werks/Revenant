@@ -51,6 +51,23 @@ Window {
         }
     }
 
+    // Brings the window to the front after a click on the span that tuned or
+    // focused a receiver: shown or restored if it has to be, raised, and
+    // activated only when it was shown or restored. What each step is for,
+    // and what Windows does with it, is models/window_raise.h.
+    function bringForward() {
+        const plan = UiRules.receiverWindowRaise(receivers.visible,
+                                                 receivers.visibility === Window.Minimized)
+        if (plan.show)
+            receivers.show()
+        if (plan.restore)
+            receivers.showNormal()
+        if (plan.raise)
+            receivers.raise()
+        if (plan.activate)
+            receivers.requestActivate()
+    }
+
     CommandPalette {
         id: commandPalette
         commands: receivers.commands

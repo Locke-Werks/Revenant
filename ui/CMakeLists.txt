@@ -187,6 +187,7 @@ qt_add_executable(revenant_ui
     models/receiver_palette.h
     models/receiver_rack.h
     models/source_link.cpp
+    models/window_raise.h
     render/colour_map.h
     render/history_shift.h
     render/passband_item.cpp
@@ -479,7 +480,8 @@ endif()
 # held to a minimum CIEDE2000 difference in normal and simulated protan, deutan
 # and tritan vision and to being the output of the search that chose them, and
 # the rack they are worn in: its slots, focus, mute and solo, the strip gain
-# and what a click on the span does (models/receiver_rack.h).
+# and what a click on the span does (models/receiver_rack.h), with when that
+# click brings the receiver window forward (models/window_raise.h).
 #
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
@@ -555,6 +557,7 @@ if(REVENANT_UI_TESTS)
             tests/test_source_pacing.cpp
             tests/test_spectrum_scale.cpp
             tests/test_status_summary.cpp
+            tests/test_window_raise.cpp
         )
 
         target_include_directories(revenant_ui_tests PRIVATE
