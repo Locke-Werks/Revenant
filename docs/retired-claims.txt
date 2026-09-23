@@ -678,7 +678,7 @@ phrase: the total solar eclipse across the United States, and the three times
 phrase: These three times run from mid-morning toward midday over North America
 phrase: six hours of HF across the 2017 eclipse
 retired: 2026-09-22
-commit: pending
+commit: 9512524
 instead: The six KF4FIC files are 13:59 to 17:05 UT, one continuous recording
     per band, 07:59 to 11:05 local at a receiver in the Salt Lake valley
     (Zenodo 10.5281/zenodo.846442). 1359 and 1501 precede the eclipse's first

@@ -317,6 +317,77 @@ from where the energy is. That document says a click landing on the measured
 centre wobbles with the content; here is the wobble, measured, on a real
 station.
 
+## Whole files, read natively
+
+All six, every sample, through `revenant-cli --detect` with default thresholds,
+the default 64-channel grid (1.465 Hz per bin) and `center=` as above, on the
+RTX 4090 on 2026-09-22. Each file is 357,739,520 samples, 5458 frames and 5457
+decisions, and each took 298 to 366 seconds of wall clock, 10.2 to 12.5 times
+realtime.
+
+| band | 1359 UT | 1501 UT | 1603 UT |
+| --- | --- | --- | --- |
+| 40 m, tracks born | 1430 | 548 | 443 |
+| 40 m, merges and splits | 780, 285 | 312, 125 | 164, 49 |
+| 20 m, tracks born | 1166 | 2174 | 2699 |
+| 20 m, merges and splits | 720, 212 | 1367, 455 | 1655, 519 |
+
+**The excerpts' direction holds over whole hours.** 40 m falls from 1430 births
+to 443 across the morning and 20 m rises from 1166 to 2699. The one-minute
+excerpts had the same order at every step but not the same proportions: the
+40 m 1603 minute had no track at all, and its hour has 443.
+
+Tracks listed in the periodic table, which is every track over 6 dB and 0.5
+confidence at that moment, averaged over each ten minutes of the file. The
+last column is the final two minutes.
+
+| file | 0-10 | 10-20 | 20-30 | 30-40 | 40-50 | 50-60 | 60-62 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 40 m 1359 | 4.8 | 5.8 | 5.6 | 3.2 | 4.2 | 3.3 | 2.7 |
+| 40 m 1501 | 1.6 | 1.6 | 2.0 | 1.8 | 5.0 | 3.0 | 1.7 |
+| 40 m 1603 | 2.2 | 0.9 | 1.4 | 2.9 | 2.5 | 2.1 | 2.6 |
+| 20 m 1359 | 3.3 | 3.7 | 3.9 | 5.6 | 5.2 | 3.8 | 4.2 |
+| 20 m 1501 | 4.8 | 6.9 | 6.1 | 6.4 | 7.2 | 7.7 | 7.7 |
+| 20 m 1603 | 9.9 | 9.8 | 8.5 | 9.9 | 7.1 | 4.7 | 5.0 |
+
+20 m at 1603 halves over its last twenty minutes, 16:43 to 17:05 UT, which is
+30 to 52 minutes into the partial eclipse at the receiver. That is one
+day, one receiver and an operating population nobody here controls, so it is
+recorded as a number and not read as an effect.
+
+### The split gap over whole files
+
+The sweeps the excerpts had, now over whole hours. Gap 8 is the default run
+above.
+
+40 m, 1359 UT:
+
+| gap | born | merges | splits |
+| --- | --- | --- | --- |
+| 2 bins, 2.9 Hz | 1430 | 761 | 279 |
+| 8 bins, 11.7 Hz | 1430 | 780 | 285 |
+| 32 bins, 47 Hz | 1432 | 770 | 278 |
+| 128 bins, 188 Hz | 1399 | 918 | 334 |
+| 200 bins, 293 Hz | 1384 | 975 | 338 |
+
+20 m, 1603 UT:
+
+| gap | born | merges | splits |
+| --- | --- | --- | --- |
+| 2 bins, 2.9 Hz | 2681 | 1658 | 538 |
+| 8 bins, 11.7 Hz | 2699 | 1655 | 519 |
+| 32 bins, 47 Hz | 2704 | 1628 | 512 |
+| 128 bins, 188 Hz | 2586 | 2217 | 704 |
+| 200 bins, 293 Hz | 2538 | 2486 | 767 |
+
+The same shape on both bands, and the same answer as the one-minute sweeps with
+sixty-two times the evidence. From 2 bins to 32 nothing moves by more than 5.1
+percent, which is 20 m's splits going from 538 to 512. Past 32, merges climb,
+by 25 percent on 40 m and 50 percent on 20 m at 200 bins, while births fall 3
+to 6 percent: a wider gap keeps candidates whole, so more tracks are gated to
+each. There is a step between 32 and 128 bins and no knee inside either range,
+so nothing here picks a value.
+
 ## What they are not
 
 Not a corpus. `tests/corpus/README.md` describes what a corpus entry is: a
