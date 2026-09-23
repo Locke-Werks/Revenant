@@ -461,7 +461,18 @@ TEST_CASE("CW character error rate against noise, measured", "[decode][cw]") {
     //   35 WPM: CER 0.005 at -4 dB, 0.022 at -6, 0.075 at -8, 0.34 at -10
     //
     // Speed reads slow in noise, 18.3 WPM for 20 at -10 dB, and 19.5 at 0 dB.
-    // Why is not established; the clean round trips read within 2 per cent.
+    // On 2026-09-23 this case printed CER 0.10 and 18.25 WPM for 20 at
+    // -10 dB, and 0.054 and 33.3 WPM for 35 at -8 dB.
+    //
+    // Why it reads slow, measured on 2026-09-23 over 40 transmissions of 60
+    // characters at 20 WPM, 60 ms a unit: in noise the mark threshold sits
+    // above the middle of the carrier's edges, so dots come out short and
+    // element spaces long by about the same amount, 50.5 and 69.1 ms at
+    // -8 dB, 55.6 and 64.4 at 0 dB, 58.6 and 61.4 at +10 dB. The one-unit
+    // cluster pools the two, and random text keys more element spaces than
+    // dots, so the pooled unit reads long: 61.5, 60.8 and 60.3 ms. Averaging
+    // the dots' mean with the spaces' would cancel it, since clause 2 makes
+    // both one unit. Not done yet.
     const Point points[] = {
         {20.0, 10.0, 0.0},
         {20.0, -10.0, 0.20},

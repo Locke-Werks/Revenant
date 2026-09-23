@@ -42,7 +42,9 @@ convention [snr-convention.md](snr-convention.md) fixes. For the audio modes
 it is the audio's SNR in 2500 Hz of one-sided spectrum; for the complex
 baseband modes, the RF signal's. RDS keeps the Eb/N0 axis its subject was
 written on. Measured on 2026-09-23 on the RTX 4090 workstation's CPU, commit
-"Read a decoder curve at its own mode's error rate in compare".
+"Read a decoder curve at its own mode's error rate in compare", except CW,
+measured again the same day at "Hold the start of a CW transmission until its
+spacing shows two clusters".
 
 | Mode | Unit counted | Error rate | SNR convention | Sensitivity | Command |
 | --- | --- | --- | --- | --- | --- |
@@ -56,7 +58,7 @@ written on. Measured on 2026-09-23 on the RTX 4090 workstation's CPU, commit
 | PSK31 | character | 0.01 | 2500 Hz | -8.8 dB | `bench sweep --mode psk31 --seed 20260918` |
 | PSK63 | character | 0.01 | 2500 Hz | -5.8 dB | `bench sweep --mode psk63 --seed 20260918` |
 | QPSK31 | character | 0.01 | 2500 Hz | -9.5 dB | `bench sweep --mode qpsk31 --seed 20260918` |
-| CW, 20 WPM | character | 0.05 | 2500 Hz | -7.7 dB | `bench sweep --mode cw --seed 20260918` |
+| CW, 20 WPM | character | 0.01 | 2500 Hz | -6.2 dB | `bench sweep --mode cw --seed 20260918` |
 | M17 stream mode | frame | 0.01 | 2500 Hz | 17.0 dB | `bench sweep --mode m17 --seed 20260918` |
 | P25 Phase 1, C4FM | bit | 0.01 | 2500 Hz | 17.9 dB | `bench sweep --mode p25p1 --seed 20260918` |
 | D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.3 dB | `bench sweep --mode dstar --seed 20260918` |
@@ -124,13 +126,31 @@ disagree, the curve is the better number: it averages hundreds of
 transmissions where the test measured one. Several disagreed by more than
 counting error, and each is recorded here rather than smoothed over.
 
-**CW has a floor, so it is read at 0.05.** From -5 to +3 dB its character
-error rate sits between 0.0084 and 0.016 and does not fall, and 24
-transmissions at +10 dB still gave 0.0028. What was seen at +10 dB: a spurious
-E before the first character, the first word space lost, and a dash read as a
-dot after a run of dashes. A crossing at 0.01 would be read inside that floor
-and move with the text rather than the channel. The test's fixed text happens
-to avoid all three.
+**CW had a floor near 0.01, and it came from the decoder.** The first
+baseline sat between 0.0084 and 0.016 from -5 to +3 dB, 0.0028 over 24
+transmissions at +10 dB, and was read at 0.05 for that reason. It had three
+causes, each fixed and each with a case in `tests/decode/test_cw.cpp`: the
+lead-in's noise keyed characters because the first noise estimate included the
+front end's start-up and came out about half the real one ("Leave the front
+end's start-up out of CW's first noise estimate"); a first word of one
+character lost the space after it, because that space was judged alone
+("Hold the start of a CW transmission until its spacing shows two clusters");
+and a run of T, M and O pulled the unit estimate onto a dash ("Keep the CW unit
+until a dash confirms a new one"). The curve now falls to 0.0077 at -6 dB and
+stays between 0 and 0.0010 from -5 to +3 dB, and 256 transmissions a point at
++4, +7 and +10 dB gave 0.00013, 0.00013 and 0.00091, so it is read at 0.01
+again: -6.2 dB, where the first baseline crossed at -5.2 inside its floor. At
+0.05 the crossing moved from -7.7 to -7.9 dB.
+
+What is left at high SNR is the first cause, less often: the first noise
+estimate comes from a quarter of a second of noise, about a dozen boxcar
+lengths, and when it lands low the lead-in can still key a character. All 18
+errors in those 768 transmissions from +4 to +10 dB were at the start of one.
+And the curve is worse than the first one below -8 dB, 0.61 against 0.51 at
+-11 dB. That is the first fix: at the start of a weak transmission the squelch
+used to open on the halved noise estimate, and now it waits for the real one.
+Swept from -11 to -8 dB with all three, -11 dB read 0.59; with that one
+turned off and the other two kept, 0.51 on the same trials.
 
 **SITOR-B loses whole transmissions.** At 0, +1 and +2 dB, 2, 4 and 2 of 1024
 transmissions of 100 characters printed none of their 102 characters, and

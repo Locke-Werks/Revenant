@@ -146,16 +146,9 @@ ModeSubject cw() {
     mode.axis = "SNR in 2500 Hz";
     mode.default_payload_bytes = 60;
     mode.minimum_payload_bytes = 16;
-    // Read at 0.05, not 0.01, because the curve does not come down cleanly
-    // through 0.01. In the committed baseline, 256 trials a point, it falls
-    // to 0.0085 at -5 dB and then sits between 0.0084 and 0.016 all the way
-    // to +3 dB, and 24 trials at +10 dB still gave 0.0028. That floor is
-    // what the decoder does at any SNR rather than the noise: a spurious E
-    // before the first character, a first word space lost, and a dash read as
-    // a dot after a run of dashes, all three seen at +10 dB. A crossing read
-    // inside it would move with the text rather than the channel.
-    // docs/sensitivity.md says so beside the figure.
-    mode.threshold = 0.05;
+    // Read at 0.01 like the other character modes. It was read at 0.05 while
+    // the curve had a floor near 0.01 from -5 dB up, which docs/sensitivity.md
+    // records with the three causes and the commits that removed them.
     mode.snr_start_db = -13.0;
     mode.snr_stop_db = 3.0;
     mode.trials = 256;

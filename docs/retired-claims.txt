@@ -1273,3 +1273,32 @@ retired: 2026-09-23
 commit: "Add a pool of probe receivers the engine places for itself"
 instead: core/engine/probe.h is the probe receiver pool, and
     core/detect/tier_two.h places its receivers on the detector's tracks.
+
+phrase: That floor is what the decoder does at any SNR rather than the noise
+phrase: and then a floor rather than zero, between 0.0084 and 0.016
+phrase: dashes, "OTTTB" printed "OTTTH". None has been looked into
+retired: 2026-09-23
+commit: "Hold the start of a CW transmission until its spacing shows two clusters"
+instead: CW's character error rate is between 0 and 0.0010 from -5 to +3 dB at
+    20 WPM. The three causes of the old floor near 0.01, a noise estimate
+    that included the front end's start-up, a lone first word space judged
+    alone, and a unit estimate a run of dashes could capture, each have a
+    case in tests/decode/test_cw.cpp. docs/sensitivity.md has the curve.
+
+phrase: CW has a floor, so it is read at 0.05
+phrase: So its sensitivity is read at 0.05
+phrase: 0.05 for cw and 0.01 for the rest
+phrase: own rate for a decoder mode: 0.05 for cw
+phrase: a caller comparing CW, which is read at 0.05
+retired: 2026-09-23
+commit: "Read CW's sensitivity at 0.01 now that its floor is gone"
+instead: CW is read at 0.01 like every other decoder mode: -6.2 dB in 2500 Hz
+    at 20 WPM, in tests/baselines/ber-vs-snr-cw.json.
+
+phrase: Why is not established; the clean round trips read within 2 per cent
+phrase: 33.3 for 35 at -8 dB, and the reason has not been found
+retired: 2026-09-23
+commit: "Read CW's sensitivity at 0.01 now that its floor is gone"
+instead: CW's speed reads slow in noise because dots come out short and element
+    spaces long by the same amount and the one-unit cluster holds more spaces
+    than dots. tests/decode/test_cw.cpp has the measurement.

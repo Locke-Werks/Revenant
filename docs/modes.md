@@ -1141,27 +1141,33 @@ a squelch that needs 5.5 noise deviations to open and 2 to stay open.
 
 Swept by `bench sweep --mode cw` at 20 WPM, 256 transmissions of 60 random
 letters and figures a point, signal to noise in 2500 Hz of audio: a character
-error rate of 0.05 at -7.7 dB, 0.27 at -10 dB, and then a floor rather than
-zero, between 0.0084 and 0.016 from -5 to +3 dB and 0.0028 over 24
-transmissions at +10 dB ([sensitivity.md](sensitivity.md)). So its
-sensitivity is read at 0.05. Measured over the test's fixed 186 characters: no
-errors down to -6 dB at 12 and 20 WPM; a character error rate of 0.086 at
--10 dB for 20 WPM, 0.10 for 12 WPM, and 0.075 at -8 dB for 35 WPM. It decodes
-nothing
-from a minute of noise after a transmission ends. `core/dsp/synth/cw_mod.cpp`
-is the keyer, with Farnsworth spacing and seeded hand-sending jitter, and
+error rate of 0.01 at -6.2 dB, 0.055 at -8 dB and 0.28 at -10 dB, and between
+0 and 0.0010 from -5 to +3 dB ([sensitivity.md](sensitivity.md)). Measured
+over the test's fixed 186 characters on 2026-09-22: no errors down to -6 dB at
+12 and 20 WPM; a character error rate of 0.086 at -10 dB for 20 WPM, 0.10 for
+12 WPM, and 0.075 at -8 dB for 35 WPM. It decodes nothing from a minute of
+noise after a transmission ends. `core/dsp/synth/cw_mod.cpp` is the keyer,
+with Farnsworth spacing and seeded hand-sending jitter, and
 `tests/decode/test_cw.cpp` the round trips at 48 kHz and 11025 Hz with the
 tone 50 and 30 Hz off centre.
 
-Not done: the floor above. At +10 dB random text shows three ways to lose a
-character that the fixed text never triggers: a spurious E before the first
-character, the first word space lost, and a dash read as a dot after a run of
-dashes, "OTTTB" printed "OTTTH". None has been looked into. And the measured
-speed reads slow in noise, 18.3 WPM for 20 at -10 dB
-and 33.3 for 35 at -8 dB, and the reason has not been found. The decoder holds
-the first characters back until it has seen runs of two different lengths,
-then decodes them, so text whose marks and spaces are all one length, a row
-of T's with letter spaces between them, is never decoded at all.
+The start of a transmission is held back until the dot length is known and
+its long spaces fall into letter spaces and word spaces, so a first word of
+one character keeps the space after it; a pause of twice the longest space so
+far prints what is held. A new dot length is taken only when a mark in the
+recent runs is a dash by it, so a run of T, M and O cannot pull the estimate
+onto a dash.
+
+Not done. The lead-in's noise still keys a character now and then: all 18
+errors in 768 transmissions from +4 to +10 dB were at the start of one, from a
+first noise estimate that landed low. The measured speed reads slow in noise,
+18.3 WPM for 20 at -10 dB and 33.3 for 35 at -8 dB, because dots come out
+short and element spaces long in noise and the one-unit cluster holds more
+spaces than dots; `tests/decode/test_cw.cpp` has the measurement and the fix
+it points to. The decoder holds the first characters back until it has seen
+runs of two different lengths, then decodes them, so text whose marks and
+spaces are all one length, a row of T's with letter spaces between them, is
+never decoded at all.
 
 **M17, link setup and stream frames.** `core/decode/m17.cpp`, on the same
 complex baseband input as P25 and D-STAR and through the same

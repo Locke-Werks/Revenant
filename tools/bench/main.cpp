@@ -479,8 +479,9 @@ int command_compare(const ArgMap& args) {
     }
 
     // A decoder curve is read at its own mode's error rate unless told
-    // otherwise, so a caller comparing CW, which is read at 0.05, cannot
-    // judge it at 0.01 by leaving the option off.
+    // otherwise, so a caller comparing a mode read at a rate of its own
+    // cannot judge it at 0.01 by leaving the option off. Every decoder mode
+    // is read at 0.01 today; CW was read at 0.05 until its floor was fixed.
     if (!args.has("ber-threshold")) {
         if (Expected<bench::ModeSubject> mode = bench::make_mode_subject(reference->mode); mode) {
             options.ber_threshold = mode->threshold;
@@ -934,7 +935,7 @@ validate also takes:
 compare options:
   --ber-threshold X            error rate at which sensitivity is measured
                                (default 0.01, or the reference curve's mode's
-                               own rate for a decoder mode: 0.05 for cw)
+                               own rate for a decoder mode)
   --ber-ratio X                per-point worsening factor           (default 1.5)
   --sensitivity-tolerance-db X allowed rightward shift              (default 0.2)
   --quiet                      suppress the per-point table

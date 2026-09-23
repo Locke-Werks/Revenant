@@ -163,7 +163,7 @@ jobs:
       # count, payload and early stop live in the subject, so the command is
       # the same for every mode and is the one docs/sensitivity.md gives; the
       # baselines were made with it and this seed. compare reads each curve at
-      # its mode's own error rate, 0.05 for cw and 0.01 for the rest.
+      # its mode's own error rate, 0.01 for every one of them today.
       #
       # A mode whose baseline is missing is skipped with a warning, as the RDS
       # step does. A mode that regresses does not stop the loop: every mode is

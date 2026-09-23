@@ -1,5 +1,5 @@
 {
-  "commit": "21a617e",
+  "commit": "5d60382",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -13,138 +13,138 @@
   "mode": "cw",
   "points": [
     {
-      "ber": 9.249836921070e-01,
-      "bit_errors": 14180,
+      "ber": 9.527071102414e-01,
+      "bit_errors": 14605,
       "bits_total": 15330,
       "decoded_count": 0,
       "snr_db": -13.000000,
       "trials": 256
     },
     {
-      "ber": 8.552502773608e-01,
-      "bit_errors": 13105,
+      "ber": 8.919271683091e-01,
+      "bit_errors": 13667,
       "bits_total": 15323,
       "decoded_count": 0,
       "snr_db": -12.000000,
       "trials": 256
     },
     {
-      "ber": 5.067876256363e-01,
-      "bit_errors": 7765,
+      "ber": 6.125179480486e-01,
+      "bit_errors": 9385,
       "bits_total": 15322,
       "decoded_count": 0,
       "snr_db": -11.000000,
       "trials": 256
     },
     {
-      "ber": 2.659664687847e-01,
-      "bit_errors": 4077,
+      "ber": 2.846239154544e-01,
+      "bit_errors": 4363,
       "bits_total": 15329,
-      "decoded_count": 1,
+      "decoded_count": 2,
       "snr_db": -10.000000,
       "trials": 256
     },
     {
-      "ber": 1.243475991649e-01,
-      "bit_errors": 1906,
+      "ber": 1.406576200418e-01,
+      "bit_errors": 2156,
       "bits_total": 15328,
-      "decoded_count": 19,
+      "decoded_count": 24,
       "snr_db": -9.000000,
       "trials": 256
     },
     {
-      "ber": 6.085139723165e-02,
-      "bit_errors": 932,
+      "ber": 5.543222773570e-02,
+      "bit_errors": 849,
       "bits_total": 15316,
-      "decoded_count": 77,
+      "decoded_count": 96,
       "snr_db": -8.000000,
       "trials": 256
     },
     {
-      "ber": 3.346816283925e-02,
-      "bit_errors": 513,
+      "ber": 2.381263048017e-02,
+      "bit_errors": 365,
       "bits_total": 15328,
-      "decoded_count": 135,
+      "decoded_count": 175,
       "snr_db": -7.000000,
       "trials": 256
     },
     {
-      "ber": 1.913406909162e-02,
-      "bit_errors": 293,
+      "ber": 7.705870828708e-03,
+      "bit_errors": 118,
       "bits_total": 15313,
-      "decoded_count": 173,
+      "decoded_count": 222,
       "snr_db": -6.000000,
       "trials": 256
     },
     {
-      "ber": 8.475681314383e-03,
-      "bit_errors": 130,
+      "ber": 1.955926457165e-04,
+      "bit_errors": 3,
       "bits_total": 15338,
-      "decoded_count": 196,
+      "decoded_count": 253,
       "snr_db": -5.000000,
       "trials": 256
     },
     {
-      "ber": 1.005025125628e-02,
-      "bit_errors": 154,
+      "ber": 1.044181948705e-03,
+      "bit_errors": 16,
       "bits_total": 15323,
-      "decoded_count": 206,
+      "decoded_count": 254,
       "snr_db": -4.000000,
       "trials": 256
     },
     {
-      "ber": 1.318107667210e-02,
-      "bit_errors": 202,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 15325,
-      "decoded_count": 197,
+      "decoded_count": 256,
       "snr_db": -3.000000,
       "trials": 256
     },
     {
-      "ber": 1.317419943912e-02,
-      "bit_errors": 202,
+      "ber": 1.043500945673e-03,
+      "bit_errors": 16,
       "bits_total": 15333,
-      "decoded_count": 199,
+      "decoded_count": 253,
       "snr_db": -2.000000,
       "trials": 256
     },
     {
-      "ber": 1.396502218742e-02,
-      "bit_errors": 214,
+      "ber": 2.610284521013e-04,
+      "bit_errors": 4,
       "bits_total": 15324,
-      "decoded_count": 195,
+      "decoded_count": 255,
       "snr_db": -1.000000,
       "trials": 256
     },
     {
-      "ber": 8.482317630171e-03,
-      "bit_errors": 130,
+      "ber": 1.304971943103e-04,
+      "bit_errors": 2,
       "bits_total": 15326,
-      "decoded_count": 194,
+      "decoded_count": 254,
       "snr_db": 0.000000,
       "trials": 256
     },
     {
-      "ber": 8.415970772443e-03,
-      "bit_errors": 129,
+      "ber": 6.524008350731e-05,
+      "bit_errors": 1,
       "bits_total": 15328,
-      "decoded_count": 210,
+      "decoded_count": 255,
       "snr_db": 1.000000,
       "trials": 256
     },
     {
-      "ber": 1.592481399295e-02,
-      "bit_errors": 244,
+      "ber": 6.526563111865e-05,
+      "bit_errors": 1,
       "bits_total": 15322,
-      "decoded_count": 196,
+      "decoded_count": 255,
       "snr_db": 2.000000,
       "trials": 256
     },
     {
-      "ber": 9.398864303897e-03,
-      "bit_errors": 144,
+      "ber": 6.526989099928e-05,
+      "bit_errors": 1,
       "bits_total": 15321,
-      "decoded_count": 197,
+      "decoded_count": 255,
       "snr_db": 3.000000,
       "trials": 256
     }
