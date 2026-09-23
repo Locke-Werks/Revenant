@@ -74,6 +74,7 @@ add_library(revenant_core STATIC
     decode/rds_bits.cpp
     decode/rds_groups.cpp
     decode/rtty.cpp
+    decode/sitor_b.cpp
     decode/tetra.cpp
     decode/vocoder.cpp
     decode/vocoder_plugin.cpp

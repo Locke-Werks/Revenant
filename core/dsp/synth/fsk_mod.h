@@ -31,12 +31,14 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
 #include "core/decode/ax25.h"
 #include "core/decode/pocsag.h"
 #include "core/decode/rtty.h"
+#include "core/decode/sitor_b.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
@@ -206,5 +208,56 @@ struct PocsagModConfig {
 // FM discriminator rather than after.
 [[nodiscard]] Expected<std::vector<dsp::Complex32>> pocsag_render_baseband(
     const PocsagModConfig& config, std::span<const std::uint8_t> bits);
+
+// ---------------------------------------------------------------------------
+// SITOR-B and NAVTEX
+// ---------------------------------------------------------------------------
+
+struct SitorModConfig {
+    SampleRate rate = 48000;
+    Hertz centre_hz = decode::kSitorCentreHz;
+    Hertz shift_hz = decode::kSitorShiftHz;
+
+    // Table 1 note 2 puts B on the higher emitted frequency; on a lower
+    // sideband receiver that becomes the lower audio tone.
+    bool upper_sideband = true;
+
+    // M.625-4 clause 4.4.2: at least sixteen phasing pairs. M.540-2 Annex
+    // II Figure 1 asks NAVTEX for at least 10 s, which is 72 pairs.
+    std::size_t phasing_pairs = 16;
+
+    // M.625-4 clause 4.6.1: carriage return and line feed immediately before
+    // the traffic. NAVTEX's Figure 1 starts with "ZCZC" instead.
+    bool line_end_first = true;
+
+    // Clause 4.6.7.1: at least 2 s of idle signal alpha to finish, which is
+    // 15 DX signals at 140 ms a pair.
+    std::size_t closing_alphas = 15;
+
+    double amplitude = 0.5;
+    double tone_offset_hz = 0.0;
+};
+
+// The 7-unit signals on the air, in slot order: DX and RX alternating, each
+// traffic signal in its DX slot and again five slots later in RX per clause
+// 4.2, phasing signal 2 in DX and phasing signal 1 in RX during phasing per
+// clause 4.4.2.
+[[nodiscard]] std::vector<std::uint8_t> sitor_b_signals(const SitorModConfig& config,
+                                                        std::span<const std::uint8_t> combinations);
+
+// Renders slot-ordered signals as FSK audio, bit position 1 first, Y on the
+// lower emitted frequency.
+[[nodiscard]] Expected<std::vector<float>> sitor_b_render_signals(const SitorModConfig& config,
+                                                                  std::span<const std::uint8_t> signals);
+
+// sitor_b_signals then sitor_b_render_signals.
+[[nodiscard]] Expected<std::vector<float>> sitor_b_render(const SitorModConfig& config,
+                                                          std::span<const std::uint8_t> combinations);
+
+// M.540-2 Annex II Figure 1 as text: "ZCZC", a space, B1 B2 B3 B4, carriage
+// return and line feed, the message, "NNNN", carriage return and two line
+// feeds.
+[[nodiscard]] std::u32string navtex_text(char area, char subject, int serial,
+                                         std::u32string_view message);
 
 }  // namespace revenant::siggen

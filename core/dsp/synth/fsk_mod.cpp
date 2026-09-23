@@ -365,6 +365,82 @@ Expected<std::vector<float>> pocsag_render_audio(const PocsagModConfig& config,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// SITOR-B and NAVTEX
+// ---------------------------------------------------------------------------
+
+std::vector<std::uint8_t> sitor_b_signals(const SitorModConfig& config,
+                                          std::span<const std::uint8_t> combinations) {
+    // M.625-4 clause 4.4.2: phasing signal 2 in the DX position.
+    std::vector<std::uint8_t> dx(config.phasing_pairs, decode::kSitorPhasing2);
+    const std::size_t first_traffic = dx.size();
+    if (config.line_end_first) {
+        // Clause 4.6.1: carriage return (No. 27) and line feed (No. 28).
+        dx.push_back(decode::sitor_encode(0b01000));
+        dx.push_back(decode::sitor_encode(0b00010));
+    }
+    for (const std::uint8_t c : combinations) {
+        dx.push_back(decode::sitor_encode(c));
+    }
+    // Clause 4.6.7.1: idle signal alpha to finish, plus two more so the RX
+    // copies of the last two traffic signals are on the air before the end.
+    for (std::size_t i = 0; i < config.closing_alphas + 2; ++i) {
+        dx.push_back(decode::kSitorPhasing1);
+    }
+
+    std::vector<std::uint8_t> slots;
+    slots.reserve(2 * dx.size());
+    for (std::size_t k = 0; k < dx.size(); ++k) {
+        slots.push_back(dx[k]);
+        // Clause 4.2: the RX slot after DX slot k repeats DX slot k - 2, five
+        // slots back. During phasing, and before the first repeat is due, it
+        // carries phasing signal 1 (clause 4.4.2).
+        const bool repeat = k >= 2 && k - 2 >= first_traffic;
+        slots.push_back(repeat ? dx[k - 2] : decode::kSitorPhasing1);
+    }
+    return slots;
+}
+
+Expected<std::vector<float>> sitor_b_render_signals(const SitorModConfig& config,
+                                                    std::span<const std::uint8_t> signals) {
+    if (config.rate <= 0 || config.shift_hz <= 0 || config.centre_hz * 2 >= config.rate) {
+        return fail("SITOR needs a positive rate and shift and a centre below half the rate");
+    }
+    // Table 1 note 2: Y is the lower emitted frequency.
+    const double half = static_cast<double>(config.shift_hz) / 2.0;
+    const double centre = static_cast<double>(config.centre_hz) + config.tone_offset_hz;
+    const double y_hz = config.upper_sideband ? centre - half : centre + half;
+    const double b_hz = config.upper_sideband ? centre + half : centre - half;
+
+    std::vector<Segment> segments;
+    segments.reserve(signals.size() * decode::kSitorSignalUnits);
+    for (const std::uint8_t s : signals) {
+        // Table 1 note 3: bit position 1 first, Y = 1.
+        for (std::size_t u = 0; u < decode::kSitorSignalUnits; ++u) {
+            segments.push_back({((s >> u) & 1U) != 0U, 1.0});
+        }
+    }
+    return render_segments(segments, config.rate, decode::kSitorBaud, y_hz, b_hz, config.amplitude);
+}
+
+Expected<std::vector<float>> sitor_b_render(const SitorModConfig& config,
+                                            std::span<const std::uint8_t> combinations) {
+    const std::vector<std::uint8_t> signals = sitor_b_signals(config, combinations);
+    return sitor_b_render_signals(config, signals);
+}
+
+std::u32string navtex_text(char area, char subject, int serial, std::u32string_view message) {
+    std::u32string text = U"ZCZC ";
+    text.push_back(static_cast<char32_t>(area));
+    text.push_back(static_cast<char32_t>(subject));
+    text.push_back(static_cast<char32_t>(U'0' + (serial / 10) % 10));
+    text.push_back(static_cast<char32_t>(U'0' + serial % 10));
+    text += U"\r\n";
+    text += message;
+    text += U"NNNN\r\n\n";
+    return text;
+}
+
 Expected<std::vector<dsp::Complex32>> pocsag_render_baseband(const PocsagModConfig& config,
                                                              std::span<const std::uint8_t> bits) {
     if (auto ok = check_pocsag(config); !ok) {
