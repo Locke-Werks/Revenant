@@ -564,3 +564,51 @@ instead: The release job publishes Revenant-<version>-corresponding-source.zip
     each port's vcpkg recipe with rtlsdr's three patches, every byte checked
     against the hashes the engine's build recorded. The Qt and FFmpeg sources
     are not in it and are still owed; docs/packaging.md says so.
+
+phrase: Reed-Solomon code over GF(2^6) that this work did not build
+phrase: an interleave that this lane did not reach
+phrase: a GF(2^6) encoder this lane did not build
+retired: 2026-09-22
+commit: "Build the P25 voice codes: Reed-Solomon over GF(2^6), Hamming and LSD"
+instead: core/decode/dv_codes.cpp has the (36,20,17), (24,12,13) and (24,16,9)
+    codes of TIA-102.BAAA-A clause 5.9, encode and errors-and-erasures decode.
+    The LDU fields sit at fixed positions, with no interleave beyond Table 5-1
+    inside each voice frame.
+
+phrase: but not the talkgroup until the next header
+phrase: the NAC but not the talkgroup until the next
+retired: 2026-09-22
+commit: "Decode P25 Link Control, encryption sync and voice from the LDUs"
+instead: Link Control is decoded from every LDU1, so a receiver joining
+    mid-call has the talkgroup and source at the end of its first whole LDU1.
+
+phrase: which is how the IMBE decoder will be fed
+phrase: All three stop at the bits. P25's voice is IMBE and goes to
+phrase: All three stop at the bits. Voice is a separate seam
+retired: 2026-09-22
+commit: "Decode P25 Link Control, encryption sync and voice from the LDUs"
+instead: P25Frame::voice carries each LDU's nine 144-bit IMBE frames, and
+    P25Voice in core/decode/p25p1.h hands them to the IMBE decoder and
+    collects 8 kHz PCM. D-STAR and TETRA still stop at the bits.
+
+phrase: The P25 transmitter leaves the Reed-Solomon parity hexbits zero
+phrase: decodable by this project and not by a radio
+phrase: The Reed-Solomon (36,20,17) parity is not computed
+retired: 2026-09-22
+commit: "Send P25 voice LDUs and the header's Reed-Solomon parity"
+instead: core/dsp/synth/dv_mod.cpp computes every parity TIA-102.BAAA-A
+    specifies: the header's (36,20,17), the LDUs' (24,12,13) and (24,16,9),
+    the Golay and Hamming inner codes and the (16,8,5) low speed data code.
+
+phrase: Four things these three do not reach
+retired: 2026-09-22
+commit: "Send P25 voice LDUs and the header's Reed-Solomon parity"
+instead: docs/modes.md now lists three: the P25 terminator's Link Control and
+    formats beyond $00 and $03, TETRA's traffic channels, and D-STAR's
+    unstated bandwidth-time product.
+
+phrase: nothing in this project transmits P25
+retired: 2026-09-22
+commit: "Send P25 voice LDUs and the header's Reed-Solomon parity"
+instead: core/dsp/synth/dv_mod.cpp transmits P25 headers and voice LDUs. What
+    the project lacks is the IMBE encoder, TIA-102.BABA sections 5 and 10.

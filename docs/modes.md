@@ -732,32 +732,71 @@ all.
 
 | Mode | File | Document | What comes out |
 | --- | --- | --- | --- |
-| P25 Phase 1 | `core/decode/p25p1.cpp` | TIA-102.BAAA-A clauses 8 and 9 and the clause 10.2 annex, with reserved values from TIA-102.BAAC | Frame sync, the Network Access Code and Data Unit ID through the (63,16,23) BCH code, and from a header data unit the talkgroup, the manufacturer, the key and algorithm identifiers and the message indicator |
+| P25 Phase 1 | `core/decode/p25p1.cpp` | TIA-102.BAAA-A clauses 5, 8 and 9 and the clause 10.2 to 10.4 annexes, with reserved values from TIA-102.BAAC | Frame sync, the Network Access Code and Data Unit ID through the (63,16,23) BCH code; from a header data unit the talkgroup, the manufacturer, the key and algorithm identifiers and the message indicator; from LDU1 the Link Control word, and from LDU2 the encryption sync; the low speed data; and the nine IMBE voice frames of every LDU, which `P25Voice` turns into 8 kHz PCM. See the P25 voice paragraph below |
 | D-STAR DV | `core/decode/dstar.cpp` | JARL Ver 7.0 clauses 4.1.1, 4.1.2, Ap1 and Ap2 | Bit and frame sync, the radio header through the rate 1/2 convolutional code and the 24 bit interleave, with all five callsigns and the flag byte, and the voice and data frames with the resynchronisation signals marked |
 | TETRA V+D | `core/decode/tetra.cpp` | EN 300 392-2 V3.8.1 clauses 5, 8.2, 8.3.1.2, 9.4.4 and 21.4.4.2 | Burst sync from the synchronisation training sequence, and the SYNC PDU off the broadcast synchronisation channel: colour code, system code, timeslot, frame and multiframe number, and the country and network codes |
 
-All three stop at the bits. P25's voice is IMBE and goes to
-`core/decode/imbe.cpp`; D-STAR's is AMBE and has nowhere to go; TETRA's is
-ACELP and is not implemented. Where a P25 header says a call is encrypted, the
-decoder reports that, reports the talkgroup and the network, and stops.
+D-STAR and TETRA stop at the bits: D-STAR's voice is AMBE and has nowhere to
+go, and TETRA's is ACELP and is not implemented. P25 goes through to audio,
+and the paragraph below says how.
 
 `core/dsp/synth/dv_mod.cpp` is the transmitter for all three, written from the
-same clauses, and `tests/decode/test_p25p1.cpp`, `test_dstar.cpp` and
-`test_tetra.cpp` are the round trips. Each measures a bit or symbol error rate
-at a high and a low signal to noise and reports the figure rather than
-asserting it tight.
+same clauses, and `tests/decode/test_p25p1.cpp`, `test_p25p1_voice.cpp`,
+`test_dstar.cpp` and `test_tetra.cpp` are the round trips. Each measures a bit
+or symbol error rate at a high and a low signal to noise and reports the
+figure rather than asserting it tight.
 
-Four things these three do not reach, recorded so nobody assumes otherwise.
-P25's Link Control in LDU1 and encryption sync in LDU2 both sit under a
-Reed-Solomon code over GF(2^6) that this work did not build, so a receiver
-joining a call mid-transmission gets the DUID sequence and the network but not
-the talkgroup until the next header. The P25 transmitter leaves the
-Reed-Solomon parity hexbits zero for the same reason, so its output is
-decodable by this project and not by a radio. TETRA stops at the broadcast
-synchronisation channel and does not follow the traffic or signalling channels
-that the recovered colour code would unscramble. And the JARL standard states
-no bandwidth-time product for D-STAR's GMSK, so the value at both ends of that
-round trip is this project's choice and the round trip cannot see it.
+**P25 Phase 1 voice.** The header word, the Link Control word and the
+encryption sync word each sit under a shortened Reed-Solomon code over
+GF(2^6), clause 5.9: (36,20,17) under the (18,6,8) Golay code in the header,
+(24,12,13) and (24,16,9) under the (10,6,3) shortened Hamming code in LDU1 and
+LDU2. `core/decode/dv_codes.cpp` has all three, encode and errors-and-erasures
+decode; an inner word the Golay or Hamming code detects but cannot correct
+reaches the Reed-Solomon code as an erasure. The field arithmetic, the three
+generator polynomials and all 48 rows of the three printed generator matrices
+are checked against clause 5.9's own tables. From LDU1 comes the Link Control
+format, the MFID, and for formats $00 and $03 with the standard MFID the
+emergency bit, the talkgroup, the source and the destination; formats $80 and
+$83 are reported as encrypted Link Control with nothing parsed. From LDU2 come
+the message indicator, the algorithm and the key. So a receiver joining a call
+mid-transmission has the talkgroup and the source at the end of its first
+whole LDU1, at most 540 ms after it tunes in, where before it had them only
+from a header that a late joiner never sees.
+
+Each LDU's nine 144-bit voice frames are cut out at the positions the clause
+10.3 and 10.4 annexes give and handed, in the Table 5-1 order, to
+`core/decode/imbe.cpp`, which owns the Golay and Hamming codes inside the
+frame. `P25Voice` collects the PCM. It passes a frame to the vocoder only
+once a header or an encryption sync word has said ALGID $80; a receiver that
+joins at an LDU1 holds that unit's nine frames until the LDU2 behind it
+settles the question. An encrypted call, by header, by encryption sync, or by
+Link Control format $80 or $83, is reported with its talkgroup and network and
+none of its frames reaches the vocoder.
+
+Measured in `tests/decode/test_p25p1_voice.cpp` on a two-superframe call
+through the same channel model as the other round trips: at 30 dB every frame
+arrives intact and the PCM is the vocoder's output for the transmitted frames
+sample for sample; at 8 and 5 dB every LDU frames and every Link Control and
+encryption sync word decodes, with a raw voice channel bit error rate of
+0.00019 and 0.0116 and no frame repeated or muted; at 3 dB one LDU of four
+frames, and the frame sync search is the limit there rather than any code.
+
+The transmitter computes every parity the clauses specify, so its header and
+LDUs are what a radio expects to receive. What it lacks is an IMBE encoder:
+it carries frames a caller has built, the tests build theirs from chosen
+quantizer values through TIA-102.BABA section 7.1 and `imbe_pack_frame`, and
+it asks for whole LDUs because clause 8.2.3's silence padding would need an
+encoder to produce.
+
+Three things these modes do not reach, recorded so nobody assumes otherwise.
+P25's terminator with Link Control carries its word under the (24,12,8)
+extended Golay code and is framed but not decoded, and Link Control formats
+beyond $00 and $03 are reported as octets, because TSB102.AABF, which defines
+them, is not in hand. TETRA stops at the broadcast synchronisation channel and
+does not follow the traffic or signalling channels that the recovered colour
+code would unscramble. And the JARL standard states no bandwidth-time product
+for D-STAR's GMSK, so the value at both ends of that round trip is this
+project's choice and the round trip cannot see it.
 
 RDS and RBDS, shipped. `core/decode/rds_bits.cpp` is the physical layer, from a
 recovered 57 kHz subcarrier to a differentially decoded bitstream, implementing
