@@ -589,22 +589,24 @@ the same command buffer, and `gpustress` has no `pfb_fft` shape at all.
 Either could raise the rate further and neither is measured. Both are one
 afternoon of work in the same tool.
 
-### The control experiment, run, and inconclusive
+### 2026-09-18: the first reading of the spectrum kernel, withdrawn
 
-The channelizer's own transform is that control: a hand-written shared-memory
-kernel, M = 64, on the same device. It has been run 197 times there since the
-output buffers started being zeroed. It failed once, very early, and has not
-failed in the 192 runs since. The failure was not captured, so there is no
-divergence magnitude to report.
+WHAT THIS SECTION USED TO SAY, kept word for word below this paragraph. It is
+the first account of the spectrum kernel failing on the integrated device,
+written the day the kernel was, and "2026-09-18: the spectrum kernel, and what
+it turned out to be" higher up replaces it. Its conclusion is now false. It
+read the sizes as pointing at an ordinary defect in the kernel, and every
+measurement since points away from that: the discrete card is exact over 3.7
+million dispatches of the same kernel, and on the integrated device the fault
+needs several dispatches in one submission. It also ended on one unexplained
+event, where the sections above count 106 in 200,000 single dispatches and far
+more once dispatches share a command buffer.
 
-That is too weak to conclude anything and it is recorded rather than
-interpreted. One unreproduced event is equally consistent with a rare driver
-fault, with residue from the buffer-initialisation bug that was being fixed in
-the same minute, and with something not yet imagined. It is written down for
-two reasons: the VkFFT observation predicts exactly this, so the next person
-who sees an intermittent on that device should know it would not be the first;
-and an anomaly nobody records is an anomaly the project gets to be surprised by
-twice.
+Until 2026-09-22 this section sat at the end of the file, after the sections
+that withdraw it and below a second copy of "The control experiment, run, and
+inconclusive", with nothing in front of it. A reader who read to the bottom
+finished on the conclusion the rest of the file had disproved. The duplicate
+is removed; the original of it is further up, where it was first written.
 
 ### 2026-09-18: a second shared-memory kernel, and it is not the same shape
 
@@ -619,6 +621,9 @@ The tempting reading is that the driver fault the VkFFT finding predicted has
 finally shown up, and that would matter a great deal: it would mean
 bit-exactness is unreachable on that device by any route and the argument for
 writing our own transform loses its point.
+
+The rest of this section is now false in its conclusion and is kept as it was
+written.
 
 **The sizes say otherwise, and they say it clearly.** VkFFT was unstable at
 1024 points and below and stable at 2048 and above. The channelizer's own

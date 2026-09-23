@@ -422,3 +422,14 @@ commit: 0e645f4
 instead: installer.toml is the Forge configuration at the repository root,
     scripts/stage-payload.ps1 assembles its payload, and the package and
     release jobs in ci.yml build it. docs/packaging.md says what it carries.
+
+phrase: the likely reading is an ordinary defect in a day-old kernel
+phrase: the integrated part has one unexplained event against it
+retired: 2026-09-19
+commit: 2ac9087
+instead: The spectrum kernel's arithmetic is not the fault: the RTX 4090 is exact
+    over 3.7 million dispatches of it. On the integrated device the fault needs
+    several dispatches in one submission, and tools/gpustress counts 106 in
+    200,000 single dispatches and far more once dispatches share a command
+    buffer. docs/fft.md from "2026-09-19: measured with an instrument" on has
+    the tables.
