@@ -15,8 +15,8 @@
 //               [--receiver FREQ:MODE ...] [--decode NAME] [--rds]
 //               [--grab-receivers FILE] [--palette QUERY] [--keymap]
 //               [--grab-main FILE] [--frame-stats FILE] [--maximise]
-//               [--memories FILE] [--panel NAME] [--preview-import FILE]
-//               [--open-recording PATH[:CENTER] ...]
+//               [--on-top] [--memories FILE] [--panel NAME]
+//               [--preview-import FILE] [--open-recording PATH[:CENTER] ...]
 //
 // --smoke-seconds is for CI, which has no screen and no one to close the
 // window: it runs on the offscreen platform unless QT_QPA_PLATFORM names
@@ -73,6 +73,16 @@
 // can photograph the picker with --panel radio; a native file dialog cannot be
 // driven offscreen, and these are how the recording path is exercised without
 // one.
+//
+// --on-top keeps both windows above every other window, for a measurement.
+// A window started from a background process opens behind whatever is in
+// front, and a window covered by others is timed as something else: DWM does
+// not compose it, so its swap chain never waits for the display, and Windows
+// 11 serves an occluded process's timers at the 15.6 ms tick. Measured on
+// 2026-09-23 with a one-rectangle Qt Quick window at 120 Hz: 64.0 frames a
+// second behind two maximised windows, 119.3 kept on top. It takes the screen
+// from whoever is at it, so scripts/frame-budget.ps1 passes it only when
+// asked to with -OnTop.
 //
 // Loopback and a default port when nothing is given, because the ordinary
 // case is an engine on the same machine and a remote engine is a decision
@@ -411,6 +421,7 @@ int main(int argc, char* argv[])
     bool keymap_wanted = false;
     QString frame_stats;
     bool maximise = false;
+    bool on_top = false;
     QString memories_file;
     QString open_panel;
     QString preview_import;
@@ -482,6 +493,10 @@ int main(int argc, char* argv[])
         }
         if (args[i] == QStringLiteral("--maximise")) {
             maximise = true;
+            continue;
+        }
+        if (args[i] == QStringLiteral("--on-top")) {
+            on_top = true;
             continue;
         }
         if (args[i] == QStringLiteral("--smoke-seconds")) {
@@ -674,10 +689,21 @@ int main(int argc, char* argv[])
         root_window != nullptr ? root_window->findChild<QObject*>(QStringLiteral("commands"))
                                : nullptr;
 
+    QQuickWindow* receiver_window_item =
+        root_window != nullptr ? root_window->findChild<QQuickWindow*>(QStringLiteral("vrxWindow"))
+                               : nullptr;
+
     if (frame_probe != nullptr && root_window != nullptr) {
         frame_probe->watch(root_window, QStringLiteral("main"));
-        frame_probe->watch(root_window->findChild<QQuickWindow*>(QStringLiteral("vrxWindow")),
-                           QStringLiteral("receivers"));
+        frame_probe->watch(receiver_window_item, QStringLiteral("receivers"));
+    }
+    if (on_top) {
+        for (QWindow* window : {static_cast<QWindow*>(root_window),
+                                static_cast<QWindow*>(receiver_window_item)}) {
+            if (window != nullptr) {
+                window->setFlag(Qt::WindowStaysOnTopHint, true);
+            }
+        }
     }
     if (maximise && root_window != nullptr) {
         root_window->showMaximized();

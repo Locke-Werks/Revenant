@@ -38,7 +38,13 @@
     with Qt's software rasteriser and has no vsync: its numbers say what the
     GUI thread and the scene graph cost, not whether a frame met a refresh.
     -Visible opens real windows on the default platform, and that is the run
-    the M2 criterion is measured by.
+    the M2 criterion is measured by, with one condition: the windows have to
+    be in front. A window this script starts opens behind whatever is in
+    front, and a covered window is neither composed nor paced by the display,
+    so it measures the occlusion instead (ui/main.cpp, --on-top, has the
+    numbers). -OnTop keeps both windows above every other window for the run.
+    It covers the screen for the length of the run, so it is for a machine
+    nobody is using or a time agreed with whoever is.
 
     A CI run in progress is refused, because the engine takes the GPU CI's
     runner uses on this machine.
@@ -49,6 +55,10 @@
 
 .PARAMETER Visible
     Real windows at the screen's refresh rather than the offscreen platform.
+
+.PARAMETER OnTop
+    With -Visible, keep both windows above every other window. See above for
+    why a measurement needs it and whose screen it takes.
 
 .PARAMETER NoReceiverWindow
     Leave the receiver window closed. Not the target load: it is the control
@@ -62,6 +72,7 @@
 param(
     [int]$Seconds = 60,
     [switch]$Visible,
+    [switch]$OnTop,
     [switch]$NoReceiverWindow,
     [string]$Work = (Join-Path $env:TEMP 'revenant-frame-budget'),
     [string]$Engine = (Join-Path $PSScriptRoot '..\build\ci\tools\engined\revenant-engine.exe'),
@@ -147,6 +158,9 @@ try {
     if ($Visible) {
         $clientArgs += '--maximise'
     }
+    if ($OnTop) {
+        $clientArgs += '--on-top'
+    }
     foreach ($receiver in $receivers) {
         $clientArgs += @('--receiver', $receiver)
     }
@@ -168,6 +182,22 @@ try {
     }
     Get-Content -LiteralPath $clientOut -ErrorAction SilentlyContinue
     "client exited $clientExit; stats in $stats"
+
+    # A window DWM is not composing is not paced by the display at all, and
+    # Windows 11 then serves the client's timers at the 15.6 ms tick, so it
+    # runs at about 64 frames a second whatever the client does. Seen on
+    # 2026-09-23 with a one-rectangle Qt Quick window behind two maximised
+    # windows, before --on-top: 64.0 frames a second. A run like that
+    # measures the occlusion, or a display that is asleep.
+    if ($Visible -and $clientExit -eq 0 -and (Test-Path -LiteralPath $stats)) {
+        $report = Get-Content -LiteralPath $stats -Raw | ConvertFrom-Json
+        $main = $report.windows | Where-Object { $_.name -eq 'main' } | Select-Object -First 1
+        if ($main -and $main.interval_ms.p50 -gt 1.5 * $report.budget_ms) {
+            Write-Warning ("the main window's median frame interval was $($main.interval_ms.p50) ms " +
+                "against a $($report.budget_ms) ms refresh: the display is not pacing frames " +
+                "(covered by another window, or asleep), so this run does not measure the budget; see -OnTop")
+        }
+    }
     if ($clientExit -ne 0) {
         exit $clientExit
     }
