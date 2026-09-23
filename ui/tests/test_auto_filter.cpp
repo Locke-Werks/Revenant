@@ -122,6 +122,30 @@ TEST_CASE("AM is fitted out to its outer sideband lines", "[autofilter]")
     CHECK(fit.high_hz < 2'800);
 }
 
+// Rejects a bridge sized for a 1 kHz tone. A station modulated by one tone
+// has nothing between its carrier and its only pair of lines, and the first
+// live run fitted a 2.5 kHz tone's station to its carrier alone, 0.73 kHz
+// wide. And rejects a bridge long enough to take the neighbours at the 9 kHz
+// spacing either side for sidebands when voice reaches 4.5 kHz.
+TEST_CASE("AM reaches a single tone's lines and not the neighbours beyond", "[autofilter]")
+{
+    Pane tone;
+    tone.line(0.0, 30.0F).line(-2'500.0, 15.0F).line(2'500.0, 15.0F);
+    const AutoFilterFit one = fit_auto_filter(tone.input(AutoFilterRule::Carrier, -5'000, 5'000));
+    REQUIRE(one.outcome == AutoFilterOutcome::Fitted);
+    CHECK(one.high_hz > 2'500);
+    CHECK(one.high_hz < 2'800);
+
+    Pane voice;
+    voice.line(0.0, 30.0F).band(-4'500.0, -300.0, 12.0F).band(300.0, 4'500.0, 12.0F);
+    voice.line(-9'000.0, 30.0F).line(9'000.0, 30.0F);
+    const AutoFilterFit spaced =
+        fit_auto_filter(voice.input(AutoFilterRule::Carrier, -5'000, 5'000));
+    REQUIRE(spaced.outcome == AutoFilterOutcome::Fitted);
+    CHECK(spaced.high_hz > 4'500);
+    CHECK(spaced.high_hz < 5'000);
+}
+
 // Rejects fitting an AM filter to a carrier the receiver is not on: the
 // carrier has to be at the centre, which is where a click on it puts it.
 TEST_CASE("AM with no carrier at the centre is no signal", "[autofilter]")

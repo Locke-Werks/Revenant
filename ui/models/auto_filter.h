@@ -125,9 +125,17 @@ struct AutoFilterSettings {
     double sideband_bridge_hz = 300.0;
 
     // The furthest an AM carrier's lines may sit from the last pair found
-    // and still be the same station: far enough to reach a 1 kHz test tone's
-    // lines from the carrier, short of the 9 and 10 kHz channel spacings.
-    double am_bridge_hz = 1'500.0;
+    // and still be the same station. A single tone puts its only pair a whole
+    // audio frequency from the carrier with nothing between, so this has to
+    // reach that far. 4 kHz does, and stops short of a pair of neighbours at
+    // the 9 kHz spacing even behind voice sidebands reaching 4.5 kHz, which
+    // leave a 4.4 kHz gap.
+    //
+    // WHAT THIS USED TO SAY: 1.5 kHz, "far enough to reach a 1 kHz test
+    // tone's lines from the carrier". On a synthetic station modulated by a
+    // 2.5 kHz tone it fitted the carrier alone, 0.73 kHz wide, which the
+    // screenshots of the first live run show.
+    double am_bridge_hz = 4'000.0;
 
     // A sideband signal narrower than this is data, and gets a tone window.
     double narrow_data_hz = 500.0;

@@ -1078,3 +1078,9 @@ instead: AFT reads levels against the noise mean, each frame's raw 5th
     percentile plus 12.90 dB averaged over half a second, gates on
     10 log10(ln(N / 0.05)) dB for N bins searched, and confirms across four
     analysis windows. models/aft.h has the derivation.
+
+phrase: far enough to reach a 1 kHz test tone's lines from the carrier
+retired: 2026-09-23
+commit: "Reach a single tone's lines when fitting an AM filter"
+instead: The auto filter bridges 4 kHz between an AM carrier's line pairs,
+    enough for a single audio tone and short of 9 kHz neighbours.
