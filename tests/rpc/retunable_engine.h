@@ -97,9 +97,16 @@ public:
 
             const bool reachable = repinned.center >= -half_span && repinned.center <= half_span;
             if (!reachable || !inner_->set_vrx_params(id, repinned)) {
+                // A refused set_vrx_params is the graph's shape refusal here,
+                // the only refusal the inner engine gives a receiver it holds
+                // at an offset inside the span. No sentence, so the server
+                // composes its own, which names both frequencies and is what
+                // the cases built on this assert on.
+                const engine::RetuneCause cause = reachable ? engine::RetuneCause::ShapeChanged
+                                                            : engine::RetuneCause::OutsideSpan;
                 if (inner_->remove_vrx(id)) {
                     out.removed.push_back(engine::RetuneRemoval{
-                        .id = id, .frequency = was + status->params.center});
+                        .id = id, .cause = cause, .frequency = was + status->params.center});
                 }
             }
         }

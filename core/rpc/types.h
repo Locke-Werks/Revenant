@@ -159,11 +159,20 @@ struct SourceTuning {
     std::int64_t high_hz = 0;
 };
 
+// Why a retune removed a receiver: the schema's RetuneCause, ordinal for
+// ordinal, which client.cpp static_asserts. Unknown is what a server built
+// before the field sends, and an ordinal this client has no name for reads as
+// Unknown too rather than being cast into one of the others.
+enum class RetuneCause : std::uint8_t { Unknown, OutsideSpan, Unplaceable, ShapeChanged };
+
 // One receiver a front-end retune removed, with the absolute frequency its
-// centre was on before the tune.
+// centre was on before the tune, why, and the engine's sentence saying why.
+// reason is empty from a server built before the field.
 struct RetuneRemoval {
     std::uint64_t id = 0;
     std::int64_t frequency_hz = 0;
+    RetuneCause cause = RetuneCause::Unknown;
+    std::string reason;
 };
 
 // What Session.setSourceCenter answers: the centre the device took, and every

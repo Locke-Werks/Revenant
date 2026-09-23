@@ -764,6 +764,7 @@ public:
 
                 const dsp::Hertz frequency = was + status->params.center;
                 std::string reason;
+                RetuneCause cause = RetuneCause::OutsideSpan;
                 if (!reachable) {
                     reason = std::format(
                         "the front end was retuned to {} Hz, which leaves this receiver's centre "
@@ -771,6 +772,7 @@ public:
                         *landed, frequency);
                 } else if (auto placement = place(info_.grid, info_.source_rate, repinned);
                            !placement) {
+                    cause = RetuneCause::Unplaceable;
                     reason = std::format(
                         "the front end was retuned to {} Hz and the receiver at {} Hz could not "
                         "be placed on the grid from there, so the engine removed it: {}",
@@ -811,9 +813,10 @@ public:
                     // The reason carries the graph's own sentence, which ends
                     // "a remove and an add", the phrase ui/models/
                     // receiver_link.cpp matches on a refused set_vrx_params.
-                    // The wire's RetuneRemoval carries no reason yet, so what
-                    // reaches a client today is the server handing this to
-                    // the receiver's subscribers as the reason they ended.
+                    // The wire carries the cause and this sentence in each
+                    // RetuneRemoval, so a client can offer that add without
+                    // matching on the phrase.
+                    cause = RetuneCause::ShapeChanged;
                     reason = std::format(
                         "the front end was retuned to {} Hz, which puts the receiver at {} Hz in "
                         "a different place in its channel and so needs a different filter: {}. "
@@ -831,8 +834,10 @@ public:
                 // graph no longer held the receiver, so whoever removed it has
                 // already accounted for it.
                 if (graph_->remove_vrx(id)) {
-                    out.removed.push_back(RetuneRemoval{
-                        .id = id, .frequency = frequency, .reason = std::move(reason)});
+                    out.removed.push_back(RetuneRemoval{.id = id,
+                                                        .cause = cause,
+                                                        .frequency = frequency,
+                                                        .reason = std::move(reason)});
                 }
             }
         }

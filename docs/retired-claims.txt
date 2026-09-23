@@ -1295,6 +1295,15 @@ commit: "Read CW's sensitivity at 0.01 now that its floor is gone"
 instead: CW is read at 0.01 like every other decoder mode: -6.2 dB in 2500 Hz
     at 20 WPM, in tests/baselines/ber-vs-snr-cw.json.
 
+phrase: The wire's RetuneRemoval carries no reason yet
+phrase: the engine's sentence saying which; this struct does not carry it
+retired: 2026-09-23
+commit: "Carry why a retune removed a receiver on the wire"
+instead: Session.setSourceCenter's RetuneRemoval carries cause, an enum a
+    client branches on, and reason, the engine's sentence. unknown is what a
+    server built before the fields sends. tests/rpc/test_rpc_session.cpp
+    reads both off a real engine's shape refusal.
+
 phrase: Why is not established; the clean round trips read within 2 per cent
 phrase: 33.3 for 35 at -8 dB, and the reason has not been found
 retired: 2026-09-23

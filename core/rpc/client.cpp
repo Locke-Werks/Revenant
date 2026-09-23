@@ -140,6 +140,17 @@ static_assert(static_cast<std::uint16_t>(schema::TrackState::HELD) ==
 static_assert(static_cast<std::uint16_t>(schema::TrackState::MERGED) ==
               static_cast<std::uint16_t>(TrackState::Merged));
 
+// And for why a retune removed a receiver, which retune_source reads by
+// ordinal.
+static_assert(static_cast<std::uint16_t>(schema::RetuneCause::UNKNOWN) ==
+              static_cast<std::uint16_t>(RetuneCause::Unknown));
+static_assert(static_cast<std::uint16_t>(schema::RetuneCause::OUTSIDE_SPAN) ==
+              static_cast<std::uint16_t>(RetuneCause::OutsideSpan));
+static_assert(static_cast<std::uint16_t>(schema::RetuneCause::UNPLACEABLE) ==
+              static_cast<std::uint16_t>(RetuneCause::Unplaceable));
+static_assert(static_cast<std::uint16_t>(schema::RetuneCause::SHAPE_CHANGED) ==
+              static_cast<std::uint16_t>(RetuneCause::ShapeChanged));
+
 // And for the front end's verdict, used by read_source_stats.
 static_assert(static_cast<std::uint16_t>(schema::FrontEndState::UNMEASURED) ==
               static_cast<std::uint16_t>(FrontEndState::Unmeasured));
@@ -1578,9 +1589,21 @@ Expected<SourceRetune> ClientImpl::retune_source(std::int64_t center_hz) {
             // A server built before this field never sends it, and it reads
             // as an empty list. That server's removals are visible only as
             // vrx_ids changing, which is all it ever offered.
+            //
+            // The same server leaves cause and reason unset, which read as
+            // unknown and empty. An ordinal past the last this client names
+            // is a newer server's cause, and reads as unknown rather than
+            // being cast into one of these.
             for (const auto removal : response.getRemoved()) {
+                const auto ordinal = static_cast<std::uint16_t>(removal.getCause());
+                const RetuneCause cause =
+                    ordinal <= static_cast<std::uint16_t>(RetuneCause::ShapeChanged)
+                        ? static_cast<RetuneCause>(ordinal)
+                        : RetuneCause::Unknown;
                 out.removed.push_back(RetuneRemoval{.id = removal.getVrx(),
-                                                    .frequency_hz = removal.getFrequencyHz()});
+                                                    .frequency_hz = removal.getFrequencyHz(),
+                                                    .cause = cause,
+                                                    .reason = read_text(removal.getReason())});
             }
             return out;
         });

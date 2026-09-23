@@ -2083,6 +2083,8 @@ public:
 
             removed[i].setVrx(gone.id.value);
             removed[i].setFrequencyHz(gone.frequency);
+            removed[i].setCause(to_schema(gone.cause));
+            removed[i].setReason(kj::StringPtr(reason.c_str()));
         }
 
         // After the tune and only if it took, exactly as setVrxParams

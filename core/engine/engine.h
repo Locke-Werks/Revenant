@@ -544,8 +544,28 @@ struct SourceTuning {
 // filter from its new place in a channel, which the graph refuses to apply in
 // place, and until 2026-09-23 that refusal was discarded and the receiver left
 // on its old offset. It is removed now and reported here like the other.
+//
+// Which of the three causes it was, as a value a caller can branch on. The
+// sentence below says the same thing to a person; this says it to code, which
+// otherwise has to search the sentence for a phrase, and a reworded sentence
+// then changes what the code does with nothing failing to say so. The cause
+// decides what a caller can offer: a receiver refused only for its filter
+// shape comes back from an add at the same frequency, and one outside the span
+// or refused by place() does not.
+enum class RetuneCause : std::uint8_t {
+    // Its centre fell strictly outside the new span.
+    OutsideSpan,
+    // Inside the span, and place() refused it on the new grid.
+    Unplaceable,
+    // Placed, and the graph refused the new place because it needs a
+    // different filter shape, which it will not swap into a running receiver.
+    ShapeChanged,
+};
+
 struct RetuneRemoval {
     VrxId id;
+
+    RetuneCause cause = RetuneCause::OutsideSpan;
 
     // The absolute frequency its centre was on: the old source centre plus
     // its baseband offset, read before the tune. This is the number an

@@ -376,10 +376,34 @@ struct TuneRange {
     stepHz @2 :Int64;
 }
 
+# Why Session::setSourceCenter removed a receiver. engine::RetuneCause, ordinal
+# for ordinal after unknown.
+#
+# unknown is ordinal zero ON PURPOSE: it is what a server built before this
+# field existed sends, because an unset enum reads as zero, and "the server did
+# not say" must not read as any one of the causes. A client offers to put a
+# receiver back only on shapeChanged, so an old server's removals never get an
+# offer that would be refused.
+enum RetuneCause {
+    unknown @0;
+
+    # Its centre fell strictly outside the new span. Adding it again at the same
+    # frequency is refused for the same reason.
+    outsideSpan @1;
+
+    # Inside the span, and the channel planner refused it on the new grid.
+    unplaceable @2;
+
+    # Placed, and the graph refused the new place because it needs a different
+    # filter shape, which it builds only for a new receiver. An add at the same
+    # frequency is exactly that new receiver.
+    shapeChanged @3;
+}
+
 # One receiver Session::setSourceCenter removed: its centre fell outside the new
 # span, or its new place in a channel needed a filter the engine will not swap
-# into a running receiver. The server ends the receiver's subscriptions with the
-# engine's sentence saying which; this struct does not carry it.
+# into a running receiver. The server also ends the receiver's subscriptions
+# with the same sentence as `reason`.
 struct RetuneRemoval {
     vrx @0 :UInt64;
 
@@ -387,6 +411,14 @@ struct RetuneRemoval {
     # nothing to an operator; this is the number a client names when it says a
     # receiver went.
     frequencyHz @1 :Int64;
+
+    # Which cause, for a client to act on, and the engine's sentence saying so,
+    # for it to show. Both, because they answer different readers: code
+    # branching on the sentence's wording breaks silently when the wording is
+    # improved, and a cause with no sentence leaves the client composing one
+    # that cannot quote the planner's or the graph's own refusal.
+    cause @2 :RetuneCause;
+    reason @3 :Text;
 }
 
 # One gain control on the device, named the way the device names it.

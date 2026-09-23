@@ -125,6 +125,7 @@ static_assert(static_cast<std::uint16_t>(schema::RdsSync::SYNCED) ==
 [[nodiscard]] schema::RdsRegion to_schema(decode::Region region);
 [[nodiscard]] schema::RdsLock to_schema(decode::RdsLock lock);
 [[nodiscard]] schema::RdsSync to_schema(decode::SyncState sync);
+[[nodiscard]] schema::RetuneCause to_schema(engine::RetuneCause cause);
 
 // Rejects an out-of-range ordinal rather than casting it.
 //

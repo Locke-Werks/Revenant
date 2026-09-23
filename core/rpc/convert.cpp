@@ -159,6 +159,19 @@ schema::RdsSync to_schema(decode::SyncState sync) {
     return schema::RdsSync::HUNTING;
 }
 
+schema::RetuneCause to_schema(engine::RetuneCause cause) {
+    // A switch and not an ordinal cast, because the schema has unknown at
+    // zero and the engine has no such value, so the two are one apart.
+    switch (cause) {
+        case engine::RetuneCause::OutsideSpan:  return schema::RetuneCause::OUTSIDE_SPAN;
+        case engine::RetuneCause::Unplaceable:  return schema::RetuneCause::UNPLACEABLE;
+        case engine::RetuneCause::ShapeChanged: return schema::RetuneCause::SHAPE_CHANGED;
+    }
+    // Unreachable, and unknown rather than any cause: a value nobody
+    // enumerated is not a cause a client should act on.
+    return schema::RetuneCause::UNKNOWN;
+}
+
 Expected<decode::Region> from_schema(schema::RdsRegion region) {
     const auto ordinal = static_cast<std::uint16_t>(region);
     if (ordinal > static_cast<std::uint16_t>(decode::Region::kRbds)) {
