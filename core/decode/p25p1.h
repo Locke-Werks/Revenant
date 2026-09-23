@@ -3,12 +3,13 @@
 //
 // SPECIFICATION
 //
-// Implements ANSI/TIA-102.BAAA-A, "Project 25 FDMA Common Air Interface", the
-// parts of it that are physical layer and framing: clause 8 (channel access,
-// frame synchronisation, status symbols and the Network Identifier) and
-// clause 9 (modulation), plus the clause 10.2 transmit-order annex for the
-// Header Data Unit. Reserved field values are ANSI/TIA-102.BAAC, "Common Air
-// Interface Reserved Values".
+// Implements ANSI/TIA-102.BAAA-A, "Project 25 FDMA Common Air Interface":
+// clause 5 (the voice code words: header, Link Control, encryption sync, low
+// speed data and the placement of the IMBE frames), clause 8 (channel access,
+// frame synchronisation, status symbols and the Network Identifier), clause 9
+// (modulation), and the clause 10.2, 10.3 and 10.4 transmit-order annexes for
+// the Header Data Unit and the two Logical Link Data Units. Reserved field
+// values are ANSI/TIA-102.BAAC, "Common Air Interface Reserved Values".
 //
 // Both documents were read from the public archive at
 // archive.org/details/TIA-102_Series_Documents, items
@@ -19,20 +20,29 @@
 //
 // WHERE THIS STOPS
 //
-// At the bits, and deliberately. The voice payload is IMBE and is
-// core/decode/imbe.cpp's job; this file recovers the channel bits and the
-// header, and hands over. It does not decrypt: where the header says a call
-// is encrypted this reports that and stops, per docs/modes.md.
+// At the IMBE frame, and deliberately. P25Phase1 recovers every data unit's
+// channel bits, decodes the header, the Link Control word and the encryption
+// sync through their Reed-Solomon codes, and cuts the nine 144-bit voice
+// frames out of each LDU. P25Voice hands those frames to core/decode/imbe.cpp,
+// which owns the vocoder and its own error control, and collects the PCM.
 //
-// It also stops short of the Link Control word in LDU1 and the encryption
-// sync in LDU2. Both are reachable and neither is here; see the note on
-// P25Frame::header for what that costs and why.
+// It does not decrypt. Where a header, an encryption sync word or a Link
+// Control format says a call is encrypted, P25Voice reports that with the
+// talkgroup and the network and hands no frame of that call to the vocoder,
+// per docs/modes.md.
 //
 // CLEAN ROOM
 //
 // No P25 implementation was read. Every constant names the clause, table or
 // annex it came from. Where a number is an engineering choice rather than a
 // specified value, the comment says so.
+//
+// The clause 10.3 and 10.4 annexes are 1728 rows of symbol-by-symbol tables.
+// They were read out of the same PDF's text layer by script, not retyped, and
+// checked there against Table 5-1 (all eighteen voice frames follow it
+// exactly) before p25_ldu_layout below was written from Figures 8-3 and 8-4.
+// tests/decode/test_p25p1.cpp checks the layout against the annexes' own
+// symbol numbers, so the check survives without the PDF in hand.
 //
 // NOTHING HERE IS BIT EXACT AGAINST A GPU TWIN
 //
@@ -47,10 +57,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
 #include "core/decode/dv_phy.h"
+#include "core/decode/imbe.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
@@ -152,6 +164,137 @@ inline constexpr std::size_t kP25SimpleTerminatorNullSymbols =
 inline constexpr std::uint8_t kP25AlgidUnencrypted = 0x80;
 
 // ---------------------------------------------------------------------------
+// The Logical Link Data Units
+// ---------------------------------------------------------------------------
+
+// Clause 8.2.2 and Figures 8-3 and 8-4: nine voice code words per LDU, frames
+// 1 to 9 in LDU1 and 10 to 18 in LDU2. Clause 5.3.1: a voice code word is 144
+// bits, 72 dibits, transmitted in the Table 5-1 order.
+inline constexpr std::size_t kP25VoiceFramesPerLdu = 9;
+inline constexpr std::size_t kP25VoiceFrameSymbols = 72;
+inline constexpr std::size_t kP25VoiceFrameBits = 144;
+
+// Clauses 5.4 and 5.5: the Link Control word in LDU1 and the encryption sync
+// word in LDU2 are each 24 hexbits, each hexbit a (10,6,3) shortened Hamming
+// word of five dibits. Clause 5.6: two low speed data octets per LDU, each a
+// 16-bit code word of eight dibits.
+inline constexpr std::size_t kP25LduHammingWords = 24;
+inline constexpr std::size_t kP25HammingWordSymbols = 5;
+inline constexpr std::size_t kP25LduLsdOctets = 2;
+inline constexpr std::size_t kP25LsdWordSymbols = 8;
+
+// Clause 8.2.2: "24 Status Symbols" in each LDU, which the clause 10.3 and
+// 10.4 annexes put at the same positions as every other data unit's.
+inline constexpr std::size_t kP25LduStatusSymbols = 24;
+inline constexpr std::size_t kP25LduInformationSymbols = kP25LduSymbols - kP25LduStatusSymbols;
+
+// Where each field of an LDU starts, as an index into its information dibits,
+// that is after the status symbols are removed. Index 0 is the first frame
+// sync dibit.
+struct P25LduLayout {
+    std::array<std::size_t, kP25VoiceFramesPerLdu> voice{};
+    std::array<std::size_t, kP25LduHammingWords> hamming{};
+    std::size_t low_speed_data = 0;
+};
+
+// Figures 8-3 and 8-4, read against the clause 10.3 and 10.4 annexes: the
+// frame sync and NID, voice frames 1 and 2, then one block of four Hamming
+// words after each of voice frames 2 through 7, the low speed data after
+// voice frame 8, and voice frame 9 last. Both LDUs share it; what the Hamming
+// words carry is the difference. The test checks every offset against the
+// annex's own absolute symbol numbers.
+[[nodiscard]] constexpr P25LduLayout p25_ldu_layout() {
+    P25LduLayout layout;
+    std::size_t at = kP25FrameSyncSymbols + kP25NidSymbols;
+    std::size_t word = 0;
+    for (std::size_t frame = 0; frame < kP25VoiceFramesPerLdu; ++frame) {
+        layout.voice[frame] = at;
+        at += kP25VoiceFrameSymbols;
+        if (frame >= 1 && frame <= 6) {
+            for (std::size_t i = 0; i < 4; ++i) {
+                layout.hamming[word++] = at;
+                at += kP25HammingWordSymbols;
+            }
+        } else if (frame == 7) {
+            layout.low_speed_data = at;
+            at += kP25LduLsdOctets * kP25LsdWordSymbols;
+        }
+    }
+    return layout;
+}
+
+// ---------------------------------------------------------------------------
+// Link Control
+// ---------------------------------------------------------------------------
+
+// TIA-102.BAAC clause 2.2, the four Link Control Formats the Common Air
+// Interface uses. Clause 5.5 and Figure 5-6 of TIA-102.BAAA-A give the layout
+// of $00 and $03; $80 and $83 carry the same contents encrypted.
+inline constexpr std::uint8_t kP25LcfGroupVoice = 0x00;
+inline constexpr std::uint8_t kP25LcfUnitToUnitVoice = 0x03;
+inline constexpr std::uint8_t kP25LcfEncryptedBit = 0x80;
+
+// TIA-102.BAAC clause 2.3: the standard MFID. Definitions made before April
+// 2001, which both formats above are, use $00.
+inline constexpr std::uint8_t kP25MfidStandard = 0x00;
+
+// The decoding report every Reed-Solomon protected word carries.
+struct P25CodeReport {
+    // Hexbits the Reed-Solomon code changed, and hexbits the inner code
+    // (Golay in the header, Hamming in LC and ES) flagged as detected errors
+    // and handed over as erasures.
+    std::uint32_t rs_corrected = 0;
+    std::uint32_t erasures = 0;
+
+    // Inner code words that needed any correction, and the most bits any one
+    // of them took.
+    std::uint32_t inner_words_corrected = 0;
+    std::uint32_t worst_inner_correction = 0;
+};
+
+// Clause 5.5, the 72 bits of Link Control from LDU1.
+struct P25LinkControl {
+    // All 72 bits, most significant first, as recovered. Formats this file
+    // does not parse are still here in full.
+    std::array<std::uint8_t, 9> octets{};
+
+    std::uint8_t format = 0;
+    std::uint8_t manufacturer_id = 0;
+
+    // TIA-102.BAAC clause 2.2: formats $80 and $83 are encrypted Link Control,
+    // so nothing past the MFID means anything in clear.
+    bool encrypted = false;
+
+    // Figure 5-6, parsed only for formats $00 and $03 with the standard MFID.
+    // Clause 5.2 has a standard receiver ignore what a non-standard MFID
+    // carries, which is why a manufacturer's own format is left as octets.
+    bool emergency = false;
+    std::optional<std::uint16_t> talkgroup_id;
+    std::optional<std::uint32_t> source_id;
+    std::optional<std::uint32_t> destination_id;
+
+    P25CodeReport code;
+};
+
+// Clause 5.4, the 96 bits of encryption sync from LDU2.
+struct P25EncryptionSync {
+    std::array<std::uint8_t, 9> message_indicator{};
+    std::uint8_t algorithm_id = 0;
+    std::uint16_t key_id = 0;
+
+    // TIA-102.BAAC clause 2.8, as for the header.
+    bool encrypted = false;
+
+    P25CodeReport code;
+};
+
+// Figure 5-6 applied to 72 recovered bits. The transmitter takes Link Control
+// as raw octets and the tests build those octets from the figure themselves,
+// so this parse is checked against a second reading of the figure rather than
+// against its own inverse.
+[[nodiscard]] P25LinkControl p25_parse_link_control(const std::array<std::uint8_t, 9>& octets);
+
+// ---------------------------------------------------------------------------
 // What comes out
 // ---------------------------------------------------------------------------
 
@@ -188,22 +331,45 @@ struct P25Header {
 
     // The worst Golay correction across the 36 code words, and the number of
     // words that needed any. A header whose worst word took three corrections
-    // is at the edge of what a distance-8 code can do.
+    // is at the edge of what a distance-8 code can do. A word four or more
+    // bits from every code word is handed to the Reed-Solomon code as an
+    // erasure and counted in `code`.
     std::uint32_t worst_golay_correction = 0;
     std::uint32_t golay_words_corrected = 0;
+
+    // The (36,20,17) Reed-Solomon decode under the Golay code.
+    P25CodeReport code;
 };
 
 struct P25Frame {
     P25Nid nid;
 
-    // Present only for a Header Data Unit. Link Control in LDU1 and encryption
-    // sync in LDU2 carry the source and destination identifiers and a second
-    // copy of the talkgroup, and neither is decoded here: both sit under a
-    // Reed-Solomon code over GF(2^6) and an interleave that this lane did not
-    // reach. The consequence is that a receiver joining a call mid-transmission
-    // sees the DUID sequence and the NAC but not the talkgroup until the next
-    // header, which for voice is up to the length of the transmission.
+    // Present for a Header Data Unit whose Reed-Solomon word decoded.
     std::optional<P25Header> header;
+
+    // Present for an LDU1 and an LDU2 respectively, when the Reed-Solomon word
+    // decoded. Link Control carries the talkgroup and source again every
+    // 360 ms, so a receiver that joins mid-call has them at its first LDU1
+    // rather than at the next header, which for voice might never come.
+    std::optional<P25LinkControl> link_control;
+    std::optional<P25EncryptionSync> encryption_sync;
+
+    // True when this data unit carries a header, LC or ES word and the
+    // Reed-Solomon code could not correct it. The optional above is then
+    // empty, because a field that failed its code is not data.
+    bool code_word_failed = false;
+
+    // The nine voice frames of an LDU, 144 bits each, one bit per byte in
+    // the Table 5-1 transmission order, which is the order
+    // ImbeDecoder::decode takes. Empty for every other data unit.
+    //
+    // Handed out whether or not the call is encrypted: they are channel bits,
+    // and deciding what may be done with them is P25Voice's job.
+    std::vector<std::array<std::uint8_t, kP25VoiceFrameBits>> voice;
+
+    // Clause 5.6, the two low speed data octets of an LDU, each present when
+    // its (16,8,5) code word was within the two errors the code corrects.
+    std::array<std::optional<std::uint8_t>, kP25LduLsdOctets> low_speed_data{};
 
     // Index into the symbol run at which this frame's sync word starts.
     std::size_t first_symbol = 0;
@@ -218,9 +384,16 @@ struct P25Frame {
     // Every information dibit of the data unit after the status symbols are
     // removed, including the sync word and the NID, one dibit per byte in the
     // low two bits. Handed out so a caller can take the payload somewhere this
-    // file does not go, which is how the IMBE decoder will be fed.
+    // file does not go.
     std::vector<std::uint8_t> dibits;
 };
+
+// Decodes the fields of an LDU1 or LDU2 from its information dibits, status
+// symbols already removed, into `out`: the voice frames, the low speed data,
+// and the Link Control or encryption sync word. Exposed so the tests can
+// drive it from the transmitter's dibits with no modem in between.
+[[nodiscard]] Status p25_decode_ldu(std::span<const std::uint8_t> information_dibits,
+                                    std::uint8_t duid, P25Frame& out);
 
 struct P25Config {
     SampleRate rate = 48000;
@@ -258,7 +431,9 @@ class P25Phase1 {
     // calls, so a caller may feed the stream in any blocking.
     //
     // A frame straddling a block boundary is held until the rest of it
-    // arrives, so no frame is lost and none is reported twice.
+    // arrives, so no frame is lost and none is reported twice. That includes
+    // the payload: a data unit is reported once all of its symbols are in,
+    // so the last one in a capture that stops mid-unit is not reported.
     [[nodiscard]] Status process(ConstComplexSpan samples, std::vector<P25Frame>& out);
 
     // The soft symbol values the last call recovered, in units where a
@@ -271,8 +446,12 @@ class P25Phase1 {
    private:
     P25Phase1() = default;
 
-    [[nodiscard]] Status decode_at(std::size_t offset, bool inverted, double score,
-                                   P25Frame& out) const;
+    // What decode_at found at a sync hit. NeedMore means the NID decoded and
+    // named a data unit longer than the symbols held so far.
+    enum class Outcome : std::uint8_t { Complete, NeedMore };
+
+    [[nodiscard]] Expected<Outcome> decode_at(std::size_t offset, bool inverted, double score,
+                                              P25Frame& out) const;
 
     P25Config config_{};
     std::vector<float> filter_taps_;
@@ -297,5 +476,88 @@ class P25Phase1 {
 // Removes the status symbols from a run of symbols that starts at a data
 // unit's first sync symbol, per clause 8.4.
 [[nodiscard]] std::vector<float> p25_strip_status_symbols(std::span<const float> symbols);
+
+// ---------------------------------------------------------------------------
+// Voice
+// ---------------------------------------------------------------------------
+
+// What is known about whether the call on the channel is encrypted.
+enum class P25CallEncryption : std::uint8_t {
+    // Nothing has said. A receiver that joined at an LDU1 is here until the
+    // LDU2 that follows it, at most 180 ms later.
+    Unknown,
+    // A header or an encryption sync word carried ALGID $80.
+    Clear,
+    // A header or an encryption sync word carried any other ALGID, or the
+    // Link Control arrived in format $80 or $83.
+    Encrypted,
+};
+
+// The status surface docs/modes.md asks for: the call as the channel has
+// described it so far, whether or not any audio came out of it.
+struct P25CallState {
+    // True from the first data unit of a call to its terminator.
+    bool active = false;
+
+    std::uint16_t network_access_code = 0;
+    std::optional<std::uint16_t> talkgroup_id;
+    std::optional<std::uint32_t> source_id;
+
+    P25CallEncryption encryption = P25CallEncryption::Unknown;
+    std::optional<std::uint8_t> algorithm_id;
+    std::optional<std::uint16_t> key_id;
+
+    // Voice frames handed to the vocoder, withheld because the call is
+    // encrypted, and dropped because the call ended or its encryption state
+    // could not be established before a second LDU1 arrived.
+    std::uint64_t frames_decoded = 0;
+    std::uint64_t frames_withheld = 0;
+    std::uint64_t frames_dropped = 0;
+
+    // Of the frames decoded, how many the vocoder repeated or muted under
+    // TIA-102.BABA section 7.7 and 7.8 rather than synthesizing.
+    std::uint64_t frames_repeated = 0;
+    std::uint64_t frames_muted = 0;
+};
+
+// P25 voice, from frames to 8 kHz PCM.
+//
+// Feed it every P25Frame a P25Phase1 produced, in order. For each voice frame
+// of a call known to be in clear it appends ImbeDecoder::kPcmFrames samples of
+// float PCM at ImbeDecoder::kSampleRateHz, full scale +-1, to `pcm`.
+//
+// THE ENCRYPTION GATE
+//
+// Voice goes to the vocoder only when a header or an encryption sync word has
+// said ALGID $80. A receiver joining at an LDU1 has neither yet, so that LDU's
+// nine frames are held until the LDU2 behind it: its encryption sync word
+// releases them if the call is in clear and discards them if it is not. So a
+// clear call joined mid-transmission loses no audio, and an encrypted one
+// never reaches the vocoder, which is the line docs/modes.md draws: identify
+// what cannot be decoded, and never attempt it.
+class P25Voice {
+   public:
+    [[nodiscard]] Status push(const P25Frame& frame, std::vector<float>& pcm);
+
+    [[nodiscard]] const P25CallState& call() const noexcept { return call_; }
+
+    // The vocoder's report on the last frame it was handed.
+    [[nodiscard]] const ImbeFrameReport& last_voice_frame() const noexcept {
+        return imbe_.last_frame();
+    }
+
+    void reset();
+
+   private:
+    [[nodiscard]] Status decode_frames(
+        std::span<const std::array<std::uint8_t, kP25VoiceFrameBits>> frames,
+        std::vector<float>& pcm);
+    void begin_call(std::uint16_t nac);
+    void end_call();
+
+    ImbeDecoder imbe_;
+    P25CallState call_;
+    std::vector<std::array<std::uint8_t, kP25VoiceFrameBits>> pending_;
+};
 
 }  // namespace revenant::decode
