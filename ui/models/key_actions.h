@@ -28,9 +28,14 @@
 //
 // WHAT IS NOT HERE, AND WHY.
 //
-// A list of detections. The "detections" panel is the detector's two
-// thresholds, and nothing in the client lists the detections themselves; they
-// are drawn on the span. The key opens the panel that exists.
+// A list of detections. Nothing in the client lists the detections
+// themselves; they are drawn on the span. The detector's settings are the
+// control row under the top bar, and the detections key puts the arrow keys on
+// its threshold.
+//
+// WHAT THAT PARAGRAPH USED TO SAY, before 2026-09-23: "The "detections" panel
+// is the detector's two thresholds" and "The key opens the panel that exists."
+// The panel went when its sliders moved into the control row.
 //
 // WHAT THIS BLOCK USED TO SAY FIRST: "Next and previous receiver, and solo.
 // The engine holds any number of receivers and this client holds one per
@@ -243,11 +248,15 @@ inline constexpr std::array kKeyActions{
     KeyAction{"scale.ceiling", "pin or unpin the spectrum ceiling", "display", "colour map scale lock top",
               {"Ctrl+]", ""}, KeyContext::Window, kNeedsSpectrum, "scale.pin", "ceiling"},
 
+    // The detector's threshold in the control row, which used to be a panel
+    // this key opened.
+    KeyAction{"detector.keys", "put the arrow keys on the detection threshold", "display",
+              "thresholds detector detections snr margin held",
+              {"Ctrl+Shift+D", ""}, KeyContext::Window, kNeedsSpectrum, "detector.keys", ""},
+
     // Panels and windows.
     KeyAction{"panel.radio", "open the radio picker", "panels", "device source open choose",
               {"Ctrl+O", ""}, KeyContext::Window, kNeedsEngine, "panel.open", "radio"},
-    KeyAction{"panel.detections", "open the detections panel", "panels", "thresholds detector",
-              {"Ctrl+Shift+D", ""}, KeyContext::Window, kNeedsSpectrum, "panel.open", "detections"},
     KeyAction{"panel.memories", "open the frequency manager", "panels",
               "bookmarks marks memories channels saved scan import export chirp sdr",
               {"Ctrl+B", ""}, KeyContext::Window, kNeedsNothing, "panel.open", "memories"},

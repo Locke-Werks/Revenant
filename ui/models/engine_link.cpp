@@ -114,11 +114,27 @@ EngineLink::EngineLink(QObject* parent) : QObject(parent)
     // for clamping on the way out: a settings file is editable, and a bar
     // of 2 read straight into the atomic would refuse every poll for the
     // whole session with nothing on screen to explain it.
+    //
+    // The margin bar and the threshold are read here too since 2026-09-23;
+    // models/detector_settings.h has what each restore refuses and why.
     const QSettings store;
-    confidence_bar_.store(
-        std::clamp(store.value(settings::kConfidenceBar, 0.0).toDouble(), 0.0,
-                   kMaxConfidenceBar),
-        std::memory_order_release);
+    const auto stored = [&store](QLatin1StringView key) -> std::optional<double> {
+        if (!store.contains(key)) {
+            return std::nullopt;
+        }
+        bool ok = false;
+        const double value = store.value(key).toDouble(&ok);
+        return ok ? std::optional<double>(value) : std::nullopt;
+    };
+    detector_memory_ =
+        restore_detector_memory(stored(settings::kConfidenceBar), stored(settings::kMarginBar),
+                                stored(settings::kDetectionThresholdDb), kMaxConfidenceBar);
+    confidence_bar_.store(detector_memory_.confidence_bar, std::memory_order_release);
+    margin_bar_.store(detector_memory_.margin_bar, std::memory_order_release);
+    if (const auto threshold = threshold_for_connection(detector_memory_)) {
+        remembered_threshold_db_.store(*threshold, std::memory_order_release);
+        threshold_remembered_.store(true, std::memory_order_release);
+    }
 
     // The listen switch, which is a switch and not a state: it survives a
     // retune, a mode change and a reconnect within a session, and this is
@@ -643,6 +659,18 @@ bool EngineLink::attempt_connect()
     // had a source, which note_source_epoch already reads as nothing seen.
     seen_source_epoch_ = info->source_epoch;
 
+    // THE OPERATOR'S THRESHOLD, AGAIN. A connection is also what a restarted
+    // engine looks like, and that engine decides at 6 dB until told otherwise.
+    // Queued for the first detection pass, which writes before it polls, so
+    // the first list this connection draws is already at the operator's value.
+    // Nothing is queued when this window has never set one. See
+    // threshold_for_connection in models/detector_settings.h.
+    if (threshold_remembered_.load(std::memory_order_acquire)) {
+        requested_threshold_db_.store(remembered_threshold_db_.load(std::memory_order_acquire),
+                                      std::memory_order_release);
+        threshold_pending_.store(true, std::memory_order_release);
+    }
+
     // An engine built with no spectrum stage is the default and is what a
     // headless recording runs. Connecting to one is not a failure, so the
     // window comes up, says the spectrum is off, and skips the subscription
@@ -1103,13 +1131,16 @@ void EngineLink::setConfidenceBar(double bar)
         return;
     }
     confidence_bar_.store(clamped, std::memory_order_release);
+    detector_memory_.confidence_bar = clamped;
 
     // THE CLAMPED VALUE AND NOT THE ARGUMENT. This property is remembered
     // across launches, and what is stored has to be what the link is
     // actually using: storing the request would let a bar the engine
     // refuses survive a restart and refuse every poll of the next
     // session, with the slider apparently in a legal place.
-    QSettings().setValue(settings::kConfidenceBar, clamped);
+    if (remember_detector_) {
+        QSettings().setValue(settings::kConfidenceBar, clamped);
+    }
 
     // No signal here. The bar changes what the next poll asks for, and the
     // poll emits detectionsChanged when the answer differs. Emitting now
@@ -1125,16 +1156,23 @@ void EngineLink::setMarginBar(double bar)
     // there is no slider position it could have meant, and nothing is emitted
     // because the bar changes what the NEXT poll asks for.
     //
-    // NOT REMEMBERED ACROSS LAUNCHES, which is the one difference and is
-    // deliberate. A confidence bar left high hides tracks that have not been
-    // up long, which an operator notices within seconds. A margin bar left
-    // high hides weak signals, which looks exactly like a quiet band, and a
-    // window that came up filtering them out would be making a claim about
-    // the band it had not looked at. That is the same argument
-    // models/settings.h makes for not restoring the receiver.
+    // Remembered across launches like the confidence bar, since 2026-09-23:
+    // the owner asked for the detector's settings to hold, and the bar now
+    // sits in the control row under the top bar with its value on screen at
+    // all times, so a window that comes up filtering weak signals says so.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "NOT REMEMBERED ACROSS LAUNCHES, which
+    // is the one difference and is deliberate. A confidence bar left high
+    // hides tracks that have not been up long, which an operator notices
+    // within seconds. A margin bar left high hides weak signals, which looks
+    // exactly like a quiet band". That was true of a bar behind a panel.
     const double wanted = std::isnan(bar) ? 0.0 : bar;
     const double clamped = std::clamp(wanted, 0.0, kMaxConfidenceBar);
     margin_bar_.store(clamped, std::memory_order_release);
+    detector_memory_.margin_bar = clamped;
+    if (remember_detector_) {
+        QSettings().setValue(settings::kMarginBar, clamped);
+    }
 }
 
 void EngineLink::setDetectionThresholdDb(double threshold_db)
@@ -1142,10 +1180,38 @@ void EngineLink::setDetectionThresholdDb(double threshold_db)
     requested_threshold_db_.store(threshold_db, std::memory_order_release);
     threshold_pending_.store(true, std::memory_order_release);
 
-    // Also no signal. detectionThresholdDb reads the value in force, which
-    // is not this one until the supervisor has sent it and the engine has
-    // answered, and reporting it early is the lie this property exists to
-    // avoid.
+    // Remembered as asked, and only a value the engine could take: one it
+    // would refuse is still sent, so the refusal reaches detectionFault, but
+    // it is not kept to be refused again at every connection.
+    if (const auto keep = restore_detection_threshold(threshold_db)) {
+        detector_memory_.threshold_db = keep;
+        remembered_threshold_db_.store(*keep, std::memory_order_release);
+        threshold_remembered_.store(true, std::memory_order_release);
+        if (remember_detector_) {
+            QSettings().setValue(settings::kDetectionThresholdDb, *keep);
+        }
+    }
+
+    // detectionThresholdDb reads the value in force, which is not this one
+    // until the supervisor has sent it and the engine has answered, and
+    // reporting it early is the lie that property exists to avoid. What
+    // changed now is the request, which detectionThresholdWanted reads.
+    emit detectionsChanged();
+}
+
+void EngineLink::setRememberDetector(bool remember)
+{
+    remember_detector_ = remember;
+    if (remember) {
+        return;
+    }
+
+    // Back to what a first run has, so a smoke run draws the same on every
+    // machine and sends nothing the operator chose.
+    detector_memory_ = DetectorMemory{};
+    confidence_bar_.store(0.0, std::memory_order_release);
+    margin_bar_.store(0.0, std::memory_order_release);
+    threshold_remembered_.store(false, std::memory_order_release);
 }
 
 void EngineLink::adopt_running()

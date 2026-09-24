@@ -31,6 +31,7 @@ Item {
     // filter display. See ReceiverPanel.qml.
     required property var receiverPanel
     required property var topBar
+    required property var controlRow
     required property var spanView
     required property var mainPalette
     required property var mainKeyMap
@@ -126,6 +127,10 @@ Item {
         "panel.open": (name) => {
             commands.bringForward(commands.mainWindow)
             commands.topBar.togglePanel(name)
+        },
+        "detector.keys": () => {
+            commands.bringForward(commands.mainWindow)
+            commands.controlRow.focusThreshold()
         },
         "memory.save": () => frequencyManager.addFromReceiver(""),
         "window.receivers": () => commands.mainWindow.toggleReceivers(),

@@ -30,9 +30,11 @@ ColumnLayout {
     // IN THE RADIO PANEL, WHICH OPENS OVER THE SPAN FROM THE TOP BAR. It was
     // three rows at the top of the window's column, always drawn, and it
     // pushed the spectrum down for a control an operator uses once a
-    // session. The rows and their reasoning are unchanged; the refusal row
-    // is also in the banner under the top bar, so it is seen with this
-    // panel closed.
+    // session. The rows and their reasoning are unchanged; a refusal is also
+    // a notice in the top bar, so it is seen with this panel closed.
+    //
+    // WHAT THE END OF THAT SENTENCE USED TO SAY: "the refusal row is also in
+    // the banner under the top bar". The banner went on 2026-09-23.
     Layout.preferredWidth: 780
 
     RowLayout {
@@ -135,96 +137,11 @@ ColumnLayout {
             }
         }
 
-        // THE FRONT END'S GAIN, drawn only where the device says it has a
-        // stage to drive. Every file and every synthetic scene reports
-        // none, and a slider over those would be a control that always
-        // refuses.
-        //
-        // Labelled with the stage's OWN name rather than "gain", because
-        // that is what it drives: on an R820T the one stage moves the LNA,
-        // the mixer and the VGA together, and a device with three separate
-        // stages would want three controls rather than one lying label.
-        // engineLink.sourceGainStages says how many the device reported so
-        // the row can admit when it is showing fewer than there are.
-        RowLayout {
-            spacing: 6
-            visible: engineLink.sourceGainStage !== ""
-
-            Label {
-                text: engineLink.sourceGainStage + " gain"
-                color: Theme.inkTune
-                font.pixelSize: Theme.sizeBody
-                font.bold: true
-            }
-
-            RSlider {
-                id: gainSlider
-                Layout.preferredWidth: 140
-                from: 0.0
-                to: 1.0
-
-                // Zero on a continuous stage, which Slider reads as no
-                // stepping. See gain_fraction_step for why the size comes
-                // off the count of steps and not off the distance between
-                // two of them.
-                stepSize: engineLink.sourceGainStep
-                snapMode: Slider.SnapAlways
-                enabled: !engineLink.sourceGainAuto
-
-                // THE HANDLE FOLLOWS THE DEVICE, NOT THE POINTER. The
-                // binding is restored whenever the link answers, so a step
-                // the tuner rounded to shows up as the handle settling onto
-                // it rather than staying where it was let go.
-                value: engineLink.sourceGainFraction
-
-                onMoved: engineLink.setSourceGainFraction(value)
-            }
-
-            // What the device took, and nothing at all before it has said.
-            // A number here that was only ever a request is the lie
-            // sourceGainKnown exists to prevent.
-            Label {
-                text: engineLink.sourceGainAuto
-                      ? "device choosing"
-                      : (engineLink.sourceGainKnown
-                         ? engineLink.sourceGainDb.toFixed(1) + " dB"
-                         : "not set from here")
-                color: engineLink.sourceGainKnown || engineLink.sourceGainAuto
-                       ? Theme.ink
-                       : Theme.inkDim
-                font.pixelSize: Theme.sizeBody
-            }
-
-            // Offered only where the device will do it. Whether it should
-            // is the operator's call: README.md has the measurement of what
-            // this dongle's own AGC did to the detector's track list.
-            RButton {
-                visible: engineLink.sourceGainHasAuto
-                flat: true
-                text: engineLink.sourceGainAuto ? "manual" : "auto"
-                ink: Theme.inkDim
-                onClicked: engineLink.setSourceGainAuto(!engineLink.sourceGainAuto)
-            }
-
-            Label {
-                visible: engineLink.sourceGainStages > 1
-                text: "+" + (engineLink.sourceGainStages - 1) + " more"
-                color: Theme.inkDim
-                font.pixelSize: Theme.sizeSmall
-            }
-        }
-
+        // THE FRONT END'S GAIN IS NOT HERE. It moved to the control row under
+        // the top bar on 2026-09-23, ui/qml/GainControl.qml, so it is on
+        // screen while the band it is judged against is, and there is one
+        // slider for it rather than two.
         Item { Layout.fillWidth: true }
-
-        Label {
-            Layout.minimumWidth: 0
-            visible: engineLink.sourceGainFault !== ""
-            text: engineLink.sourceGainFault
-            color: Theme.inkWarn
-            font.pixelSize: Theme.sizeBody
-            elide: Text.ElideRight
-            Layout.maximumWidth: 420
-        }
 
         Label {
             Layout.minimumWidth: 0
@@ -235,12 +152,17 @@ ColumnLayout {
         }
     }
 
-    // What the front end is doing, under the control that changes it.
+    // What the front end is doing.
     //
     // The wording is in models/front_end_note.h with its own cases in
     // ui/tests, and the measurement is core/detect/front_end.h. This file
     // chooses the colour and nothing else. The status drawer carries the same
-    // line, and the banner brings it forward while it is a fault.
+    // line, and the top bar names it while it is a fault.
+    //
+    // WHAT THE FIRST AND LAST LINES USED TO SAY: "under the control that
+    // changes it" and "the banner brings it forward while it is a fault". The
+    // gain slider moved to the control row and the banner went, both on
+    // 2026-09-23; the row stays here with the radio it describes.
     //
     // WHAT THIS PARAGRAPH USED TO SAY. It sat under the tune box and began
     // "HERE AND NOT BESIDE A GAIN CONTROL, because this window has no gain

@@ -25,16 +25,52 @@ backlog as the displays, and a click on it tunes there.
 
 The top bar carries the front end's frequency dial, a few band shortcuts and
 a grouped band menu, and buttons that open panels over the span for what
-direct manipulation cannot express: the radio, the detection thresholds, the
-frequency manager, and the status drawer behind a pill that names the
-engine's state in a word or two. Faults come forward in a strip under the bar
-that exists only while one does, as chips naming the problem with the full
-sentence on hover. `ui/models/status_summary.h` decides which conditions are
-faults and which are notes that wait in the drawer.
+direct manipulation cannot express: the radio, the frequency manager, and the
+status drawer behind a pill that names the engine's state in a word or two.
+Each fault is on screen once, in the top bar: the pill names the first, with
+its full sentence on hover, and any others are chips beside the pill, each
+with its sentence on hover. `ui/models/status_summary.h` decides which
+conditions are faults, which one the pill names and which are chips, and
+which are notes that wait in the drawer.
+
+**The control row.** Under the top bar, always there and on one line: the
+front end's gain and the detector's three settings. The gain slider is
+labelled with the stage's own name, sits on the tuner's steps with a tick at
+each, and reads the step the tuner took, "unset" until one is set from here,
+or "auto" while the device's AGC has it; for a source with no stage it is
+disabled and says why, "recording", "synthetic" or "no radio", with the
+sentence on hover (`gain_absence` in `ui/models/gain_control.h`). Then the
+detector: "detect" is the engine's detection threshold in dB of SNR in
+2500 Hz, with the value in force beside it, in the warning colour when
+another client has set something other than what this window asked for;
+"held" is the confidence bar and "stronger" the margin bar, both this
+window's own filters on what the engine sends back; and the count of tracks
+the two bars let through. There is one of each control: the gain left the
+radio panel and the detector's sliders left the detections panel, which is
+gone.
+
+The detector's settings hold across a tune, a new source and a restart. The
+engine keeps the threshold when a retune, a calibration change or a source
+close throws its detector away, and builds the next detector at it rather
+than at 6 dB. This window remembers all three in `detections/confidenceBar`,
+`detections/marginBar` and `detections/thresholdDb`, and sends the threshold
+again on every connection, since a restarted engine starts at 6 dB.
+`ui/models/detector_settings.h` has the rules, with cases in
+`ui/tests/test_detector_settings.cpp`, and the engine's half is a case in
+`tests/rpc/test_rpc_detect.cpp`. A smoke run draws the detector at its
+defaults, sends no remembered threshold and writes none of the three.
 
 WHAT THIS PARAGRAPH USED TO SAY: "the radio, the detection thresholds, the
 bookmarks, and the status drawer". The bookmark row became the frequency
 manager on 2026-09-23; see "Frequency manager" below.
+
+AND WHAT IT SAID AFTER THAT, until later the same day: "the radio, the
+detection thresholds, the frequency manager, and the status drawer" and
+"Faults come forward in a strip under the bar that exists only while one
+does, as chips naming the problem with the full sentence on hover." The pill
+named the first of those faults as well, so the owner saw "receiver let go"
+beside the receivers button and again in the strip under it. The strip's row
+became the control row, and the detection thresholds left their panel for it.
 
 The receivers are one panel, `ui/qml/ReceiverPanel.qml`: the receiver rack,
 one strip per receiver in the receiver's colour with a live meter, and the
@@ -132,9 +168,13 @@ handler the table names. `revenant-ui --smoke-seconds N --palette QUERY
 
 The receiver keys act on the focused receiver in the rack; see "The receiver
 rack" below. Next and previous need a second receiver to move to, and the
-palette says so when there is none. The detections key opens the detection
-thresholds, which is the panel there is; nothing in the client lists the
+palette says so when there is none. The detections key puts the arrow keys on
+the detection threshold in the control row; nothing in the client lists the
 detections themselves.
+
+WHAT THE SENTENCE ABOUT THE DETECTIONS KEY USED TO SAY: "The detections key
+opens the detection thresholds, which is the panel there is". The panel went
+on 2026-09-23 when its sliders moved into the control row.
 
 WHAT THIS PARAGRAPH USED TO SAY: "Not bound, because the client cannot do
 them: next and previous receiver, and solo. The engine holds any number of
@@ -185,8 +225,8 @@ are bound.
 | audio | turn the volume down | `Alt+-` |
 | display | pin or unpin the spectrum floor | `Ctrl+[` |
 | display | pin or unpin the spectrum ceiling | `Ctrl+]` |
+| display | put the arrow keys on the detection threshold | `Ctrl+Shift+D` |
 | panels | open the radio picker | `Ctrl+O` |
-| panels | open the detections panel | `Ctrl+Shift+D` |
 | panels | open the frequency manager | `Ctrl+B` |
 | panels | save the receiver as a memory | `Ctrl+D` |
 | panels | show or hide the receivers | `Ctrl+R` |

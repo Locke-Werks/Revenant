@@ -4,9 +4,12 @@
 // These were rows of the window's column, on screen all the time. They are
 // true and they are ordinary, and together they pushed the spectrum down and
 // made a healthy engine look like a list of complaints. Each keeps its words
-// and its reasoning here; the ones that can become a fault are also brought
-// forward by NoticeBanner.qml while they are one, and
+// and its reasoning here; the ones that can become a fault are also named in
+// the top bar while they are one, by the pill or a chip beside it, and
 // models/status_summary.h decides which is which.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "brought forward by NoticeBanner.qml while
+// they are one". The banner went on 2026-09-23 and its row holds controls.
 
 import QtQuick
 import QtQuick.Controls
@@ -37,7 +40,8 @@ ColumnLayout {
     // measurement of how fast the engine is producing, and the two
     // read together: rows/s is what is reaching the display and this
     // is whether the radio is supplying it. While the source is behind,
-    // the same sentence is in the banner as well, because then it is news.
+    // the same sentence is on the top bar's notice as well, because then it
+    // is news. (It said "in the banner" until the banner went, 2026-09-23.)
     //
     // The wording and the threshold are in models/source_pacing.h with
     // their own cases in ui/tests. This file chooses the colour and
@@ -52,8 +56,9 @@ ColumnLayout {
         bodyBold: engineLink.sourceBehind
     }
 
-    // What the front end is doing. The radio panel carries the same line
-    // under the gain control it names; see SourcePicker.qml.
+    // What the front end is doing. The radio panel carries the same line;
+    // see SourcePicker.qml. It sat under the gain control it names until the
+    // gain moved to the control row, 2026-09-23.
     NoticeRow {
         visible: engineLink.connected && engineLink.frontEndText.length > 0
         heading: "front end:"

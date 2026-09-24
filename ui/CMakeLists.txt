@@ -171,6 +171,7 @@ qt_add_executable(revenant_ui
     models/decoded_log.h
     models/decoded_model.cpp
     models/decoded_model.h
+    models/detector_settings.h
     models/engine_link.cpp
     models/engine_link.h
     models/frequency_manager.cpp
@@ -267,7 +268,8 @@ qt_add_qml_module(revenant_ui
         qml/ClickReadout.qml
         qml/TopBar.qml
         qml/TuneBar.qml
-        qml/NoticeBanner.qml
+        qml/ControlRow.qml
+        qml/GainControl.qml
         qml/StatusDrawer.qml
         qml/ReceiverDetail.qml
         qml/ReceiverPanel.qml
@@ -615,6 +617,7 @@ if(REVENANT_UI_TESTS)
             tests/test_colour_map.cpp
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
+            tests/test_detector_settings.cpp
             tests/test_frame_stats.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp

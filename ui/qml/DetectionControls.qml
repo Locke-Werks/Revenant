@@ -1,51 +1,117 @@
-// The detector's two thresholds, which are two different knobs
+// The detector's three settings, in the control row under the top bar
 // ------------------------------------------------------------------
-// docs/detection.md puts both of these on the operator and says why:
+// docs/detection.md puts all of these on the operator and says why:
 // where a person wants them depends on the band, the antenna and
 // what they are doing, and a default that suits a quiet VHF band
 // buries an HF evening.
 //
-// They are not the same knob and the row has to make that legible.
-// The confidence bar is this window's: it is the min_confidence
-// argument to Client::detections and it only filters what comes
-// back, so moving it changes this display and nothing else. The dB
-// threshold is the engine's: it changes what the detector decides at
-// all, every client sees the result, and the last writer wins. So
-// the number beside the second slider is the value IN FORCE, read
-// back from DetectionList::detection_threshold_db, rather than the
-// one this window last asked for.
+// IN THE CONTROL ROW AND NOT A PANEL, since 2026-09-23. The owner
+// asked for the row the fault strip used to take to hold these and
+// the gain instead, so they are on screen while the band they judge
+// is. There is one of each: the detections panel they lived in is
+// gone, and its key puts the arrow keys on the threshold instead.
 //
-// One more difference is visible in how the two behave, and the row
-// reads the two numbers from different places because of it. The
-// confidence bar is local, so the handle is the value and the label
-// is taken from the handle, through the one expression that also
-// writes the link. The dB threshold is a round trip and a poll, so
-// the handle is a request, the label is taken from the link, and a
-// third label appears if those two part company.
+// WHAT THIS PARAGRAPH USED TO SAY, AS THE FILE'S TITLE: "The
+// detector's two thresholds, which are two different knobs".
+//
+// They are not the same knob and the row has to make that legible.
+// The confidence bar ("held") is this window's: it is the
+// min_confidence argument to Client::detections and it only filters
+// what comes back, so moving it changes this display and nothing
+// else. The margin bar ("stronger") is this window's the same way.
+// The dB threshold ("detect") is the engine's: it changes what the
+// detector decides at all, every client sees the result, and the last
+// writer wins. So the number beside that slider is the value IN
+// FORCE, read back from DetectionList::detection_threshold_db, rather
+// than the one this window last asked for, and it turns the warning
+// colour when another client has set something else.
+//
+// All three are remembered across a restart, and the threshold is
+// sent again on each connection; models/detector_settings.h has the
+// rules, and why a tune no longer puts the threshold back to 6 dB.
+//
+// One more difference is visible in how the two kinds behave, and the
+// row reads the numbers from different places because of it. A bar is
+// local, so the handle is the value and the label is taken from the
+// handle, through the one expression that also writes the link. The dB
+// threshold is a round trip and a poll, so the handle is a request and
+// the label is taken from the link.
 
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Revenant
 
-GridLayout {
-    // A grid in the detections panel: one row per bar, the label, the
-    // handle and the number in force lined up down three columns. It was one
-    // row across the whole window.
-    columns: 3
-    rowSpacing: 6
-    columnSpacing: 10
-    visible: engineLink.connected && engineLink.spectrumEnabled
+RowLayout {
+    id: detector
+
+    spacing: 6
+    enabled: engineLink.connected && engineLink.spectrumEnabled
+
+    // The arrow keys onto the threshold, which is what the detections key
+    // does now that there is no panel for it to open.
+    function focusThreshold() {
+        thresholdSlider.forceActiveFocus(Qt.ShortcutFocusReason)
+    }
 
     Label {
-        Layout.row: 0
-        Layout.column: 0
-        Layout.minimumWidth: 0
-        text: "detections"
-        color: Theme.inkTune
-        font.pixelSize: Theme.sizeBody
-        font.bold: true
-        elide: Text.ElideRight
+        text: "detect"
+        color: detector.enabled ? Theme.inkDim : Theme.inkOff
+        font.pixelSize: Theme.sizeSmall
+    }
+
+    // THE HANDLE IS THIS WINDOW'S REQUEST, AND IT STARTS WHERE THE
+    // OPERATOR LEFT IT. detectionThresholdWanted is the value this window
+    // last asked for, remembered across a restart, or the value in force
+    // when it never has. A plain binding, which a drag breaks, as Qt Quick
+    // sliders do; from then on the handle is where the operator put it,
+    // which is also what the property says, so nothing is lost.
+    //
+    // NOT BOUND TO THE VALUE IN FORCE, WHICH IS DELIBERATE. A handle bound
+    // to the property it writes fights the drag: Slider sets value itself
+    // while the handle moves, and a Binding with `when: !pressed` pulls the
+    // handle back on release to whatever the link last reported, which for
+    // an engine-side knob is a poll behind. That flicker was on screen once.
+    RSlider {
+        id: thresholdSlider
+
+        Layout.preferredWidth: 96
+        from: -3.0
+        to: 40.0
+        stepSize: 0.5
+        value: engineLink.detectionThresholdWanted
+        onMoved: engineLink.detectionThresholdDb = value
+
+        Tip {
+            visible: parent.hovered || parent.visualFocus
+            delay: 400
+            text: "The engine's detection threshold, in dB of SNR in 2500 Hz. Shared by "
+                  + "every client, and the last writer wins. Changes what the detector finds at all."
+                  + (engineLink.detectionThresholdOverridden
+                     ? "\nAnother client set " + engineLink.detectionThresholdDb.toFixed(1)
+                       + " dB; this window asked for " + thresholdSlider.value.toFixed(1) + "."
+                     : "")
+        }
+    }
+
+    // The value in force, engine-wide. The warning colour is another client
+    // having set something else since this window's write, which the
+    // detector answers on the next poll, so a gap that outlives a decision is
+    // not this window in flight.
+    Readout {
+        widest: "-00.0 dB"
+        // Nothing in force to show without a detector to hold it.
+        text: detector.enabled ? engineLink.detectionThresholdDb.toFixed(1) + " dB" : "-- dB"
+        color: !detector.enabled ? Theme.inkOff
+               : engineLink.detectionThresholdOverridden ? Theme.inkWarn : Theme.ink
+    }
+
+    Rectangle {
+        Layout.preferredWidth: 1
+        Layout.preferredHeight: 14
+        Layout.leftMargin: 4
+        Layout.rightMargin: 4
+        color: Theme.border
     }
 
     // NOT LABELLED "confidence", WHICH IS WHAT IT FILTERS ON AND NOT
@@ -57,95 +123,62 @@ GridLayout {
     // An operator read the old word as "how sure are we this is real",
     // moved the bar to filter out interference, and filtered by how
     // long each signal had been there instead. The bar is useful and
-    // the word was wrong, so the word changed.
-    //
-    // The margin beside a tuned track is the number that answers the
-    // question the old label implied. See detectionMargin.
+    // the word was wrong, so the word changed; "held" is "held for"
+    // shortened to fit the row.
     Label {
-        Layout.row: 1
-        Layout.column: 0
-        Layout.minimumWidth: 0
-        text: "held for"
-        color: Theme.inkDim
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+        text: "held"
+        color: detector.enabled ? Theme.inkDim : Theme.inkOff
+        font.pixelSize: Theme.sizeSmall
     }
 
     RSlider {
-        Layout.row: 1
-        Layout.column: 1
         id: confidenceSlider
 
-        Layout.preferredWidth: 120
+        Layout.preferredWidth: 80
         from: 0.0
         // The engine's own bound, not a copy of it. core/rpc/client.h
         // refuses a bar of exactly 1 rather than answering emptily,
         // because a track's confidence approaches 1 without reaching
         // it, so a bar of 1 lists nothing however strong the signal
         // is and an empty list is what a dead band looks like too.
-        // maxConfidenceBar is the largest double below 1. This read
-        // 0.95 until 2026-09-20: a round number that was not the
-        // engine's rule and could only drift from it.
-        //
-        // The range is this wide because the engine's bound is where
-        // it is, not because the top of it is a setting anybody
-        // should leave a display on.
-        //
-        // WHAT THIS PARAGRAPH USED TO SAY
-        //
-        // Until 2026-09-20 it finished "which is the same constant
-        // setConfidenceBar clamps to, so the handle cannot reach a
-        // value the link would quietly pull back". The handle reaches
-        // exactly 1 and the link does quietly pull it back.
+        // maxConfidenceBar is the largest double below 1.
         //
         // Slider will not hold this number. QQuickSlider::setTo drops
         // an assignment that is qFuzzyCompare-equal to the value the
         // property already holds, the property starts at 1, and
         // maxConfidenceBar is 1.1e-16 short of 1. Measured on Qt
         // 6.8.3: a `to` of 1 - 1e-11 is taken and reads back, a `to`
-        // of 1 - 1e-12 is dropped and `to` stays exactly 1, three
-        // ways of writing it (this binding, a literal, an imperative
-        // assignment) all reading back 1. So the top of the travel is
-        // 1, which is the one value the engine refuses, and what
-        // makes the stop legal is setConfidenceBar's clamp and
-        // nothing here.
-        //
-        // The binding stays anyway. It is inert only for a bound
-        // within 1e-12 of 1; move the engine's bound anywhere a
-        // person would actually move it and this follows it, which a
-        // hardcoded number would not.
+        // of 1 - 1e-12 is dropped and `to` stays exactly 1. So the top
+        // of the travel is 1, which is the one value the engine
+        // refuses, and what makes the stop legal is the `bar`
+        // expression below and setConfidenceBar's clamp, nothing here.
+        // The binding stays anyway: it follows the engine's bound if
+        // that ever moves anywhere a person would move it.
         to: engineLink.maxConfidenceBar
         stepSize: 0.01
 
-        // SEEDED FROM THE LINK AND NOT BOUND TO IT, on the same
-        // pattern the volume slider uses and for the same reason:
-        // a binding is broken by the first drag anyway, and a
-        // half-live binding is worse than none. This control is
-        // the only writer.
-        //
-        // WHAT THIS USED TO BE. A literal 0.0, with a comment
-        // saying EngineLink starts the bar at zero. It no longer
-        // does: the bar is remembered across launches, so a
-        // literal here would put the handle at the bottom while
-        // the link filtered at last night's setting, and the
-        // number beside the handle is read off the handle.
+        // SEEDED FROM THE LINK AND NOT BOUND TO IT, on the same pattern
+        // the volume slider uses and for the same reason: a binding is
+        // broken by the first drag anyway, and a half-live binding is
+        // worse than none. This control is the only writer, and the bar
+        // is remembered across launches, so a literal here would put the
+        // handle at the bottom while the link filtered at last night's
+        // setting.
         Component.onCompleted: value = engineLink.confidenceBar
 
-        // The bar this handle is asking for. The label prints this
-        // and the link is written this, from one expression, so the
-        // number on screen is the number the next poll carries
-        // instead of a rounded picture of it.
+        // The bar this handle is asking for. The label prints this and
+        // the link is written this, from one expression, so the number
+        // on screen is the number the next poll carries.
         //
-        // Two things it has to survive, neither of which the handle
-        // position guarantees on its own. A value at or past the stop
-        // becomes the stop exactly, because that is what
-        // setConfidenceBar clamps it to and the label would otherwise
-        // be naming a bar the link never used. Everything below is
-        // quantised to the control's own step, and capped one step
+        // A value at or past the stop becomes the stop exactly, because
+        // that is what setConfidenceBar clamps it to. Everything below
+        // is quantised to the control's own step and capped one step
         // short of 1, so no position can produce a bar that prints as
-        // the refused value. Today stepSize already makes every
-        // reachable position a hundredth, measured; this holds if
-        // that stops being true.
+        // the refused value. Measured on Qt 6.8.3 offscreen across every
+        // pixel of a 1000 px slider: Slider rounds the value to stepSize
+        // whichever snapMode is in force, 101 distinct values, top of
+        // travel exactly 1. Adding snapMode would read as a fix and
+        // change nothing; what the label rests on is this expression.
         readonly property double bar: {
             if (confidenceSlider.value >= engineLink.maxConfidenceBar) {
                 return engineLink.maxConfidenceBar
@@ -161,8 +194,9 @@ GridLayout {
         Tip {
             visible: parent.hovered
             delay: 400
-            text: "This window only. Filters what the engine sends back; "
-                  + "the detector still tracks everything below it.\n"
+            text: "Held for: this window only. Filters what the engine sends back by how long "
+                  + "each track has been detected without a break; the detector still tracks "
+                  + "everything below it.\n"
                   + "At the right-hand stop only a saturated track clears it: "
                   + "85 consecutive detections, about 8.4 s of unbroken carrier "
                   + "at the shipped settings, and one missed decision costs most "
@@ -170,110 +204,70 @@ GridLayout {
         }
     }
 
-    // From the handle and not from the link, which is the opposite
-    // of the rule the row beside it follows, and for a reason
-    // EngineLink states: setConfidenceBar emits nothing, because
-    // the bar changes what the NEXT poll asks for and signalling
-    // now would tell the overlay to redraw a list fetched at the
-    // old bar. So confidenceBar notifies only when a poll comes
-    // back different, and a window reading it would show a stale
-    // number over a band where nothing was changing. This window is
-    // the only writer of that property, so the handle is the value.
+    // From the handle and not from the link, for a reason EngineLink
+    // states: setConfidenceBar emits nothing, because the bar changes
+    // what the NEXT poll asks for, so confidenceBar notifies only when a
+    // poll comes back different and would show a stale number here.
     //
-    // The stop gets its own text rather than a number. toFixed(2) at
-    // the top of the travel prints 1.00, which is the one value the
-    // engine refuses, so the readout was naming a bar that would have
-    // failed every poll.
-    //
-    // WHAT THIS PARAGRAPH USED TO SAY
-    //
-    // Until 2026-09-20 it carried the reasoning: "stepSize is 0.01
-    // from zero, so every other reachable position is a hundredth and
-    // rounds to itself; the stop is the only value that can round
-    // up". The conclusion holds on this Qt. The reason given for it
-    // is not the reason it holds, which makes it a rule a reader
-    // cannot check and a reader who tried would have concluded the
-    // opposite: stepSize is documented against snapMode, this slider
-    // never set snapMode, and the default is Slider.NoSnap, first in
-    // the enum at C:/Qt/6.8.3/msvc2022_64/qml/QtQuick/Templates/
-    // plugins.qmltypes, which is the mode where a drag is supposed to
-    // be continuous.
-    //
-    // Measured rather than argued, Qt 6.8.3 offscreen, a QtTest drag
-    // and a groove click across every pixel of a 1000 px slider: the
-    // VALUE lands on a hundredth under NoSnap and under SnapAlways
-    // alike, 101 distinct values either way, top of travel exactly 1.
-    // Slider rounds the value to stepSize whichever snapMode is in
-    // force; snapMode moves the handle, not the value. The same sweep
-    // with stepSize removed gives 991 values, five of them printing
-    // 1.00 from below the stop, which is the failure this label is
-    // here to prevent.
-    //
-    // Which is why the obvious repair was not taken. Adding
-    // snapMode: Slider.SnapAlways would read as the fix and change
-    // nothing measurable. What the label rests on now is
-    // confidenceSlider.bar, the same expression the link is written,
-    // so the printed number is the bar the next poll carries whatever
-    // stepSize and snapMode do later.
-    //
-    // The word says what the stop does, which the number never did.
-    // ui/models/engine_link.h has the arithmetic: a track reaches
-    // this bar after 85 consecutive detections and no sooner, so
-    // what is listed here is a carrier that has not stopped, and a
-    // band of bursty traffic reads as empty. That is worth a label
+    // The stop gets its own word rather than a number. toFixed(2) at the
+    // top of the travel prints 1.00, the one value the engine refuses,
+    // and a track reaches this bar after 85 consecutive detections and
+    // no sooner, so what is listed is a carrier that has not stopped and
+    // a band of bursty traffic reads as empty. That is worth a word
     // because an empty list is also what a dead band looks like.
-    Label {
-        Layout.row: 1
-        Layout.column: 2
-        Layout.minimumWidth: 0
-        text: (confidenceSlider.bar >= engineLink.maxConfidenceBar
-               ? "saturated only"
-               : confidenceSlider.bar.toFixed(2)) + "  this window"
-        color: Theme.ink
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+    Readout {
+        widest: "saturated"
+        horizontalAlignment: Text.AlignLeft
+        text: confidenceSlider.bar >= engineLink.maxConfidenceBar
+              ? "saturated" : confidenceSlider.bar.toFixed(2)
+        color: detector.enabled ? Theme.ink : Theme.inkOff
     }
 
-    // THE OTHER BAR, AND THE ONE THE OLD LABEL WAS PROMISING. It
-    // filters on Detection::marginConfidence, which is how far a
-    // detection stood above the detection threshold, so it hides what
-    // is weak rather than what is new. The two are independent and a
-    // track has to clear both, which is how "strong AND settled"
-    // becomes expressible with two handles and no third call.
+    Rectangle {
+        Layout.preferredWidth: 1
+        Layout.preferredHeight: 14
+        Layout.leftMargin: 4
+        Layout.rightMargin: 4
+        color: Theme.border
+    }
+
+    // THE OTHER BAR, AND THE ONE THE OLD "confidence" LABEL WAS PROMISING.
+    // It filters on Detection::marginConfidence, which is how far a
+    // detection stood above the detection threshold, so it hides what is
+    // weak rather than what is new. The two are independent and a track
+    // has to clear both, which is how "strong AND settled" becomes
+    // expressible with two handles and no third call.
     //
     // IT STILL DOES NOT FILTER OUT INTERFERENCE and the label does not
-    // pretend to. A strong intermodulation product stands well above
-    // the noise and clears any margin bar, correctly; the front-end
-    // line above is what speaks to that.
+    // pretend to. A strong intermodulation product stands well above the
+    // noise and clears any margin bar, correctly; the front end's note in
+    // the status drawer is what speaks to that.
     //
-    // Starts at zero and is not remembered across launches, unlike the
-    // bar beside it. A margin bar left high hides weak signals, which
-    // looks exactly like a quiet band, so a window coming up with one
-    // set would be making a claim about a band it had not looked at.
+    // Remembered across launches like the bar beside it, since 2026-09-23.
+    // WHAT THIS PARAGRAPH USED TO SAY: "Starts at zero and is not
+    // remembered across launches, unlike the bar beside it. A margin bar
+    // left high hides weak signals, which looks exactly like a quiet band".
+    // The row now shows its value at all times, so a window that comes up
+    // filtering weak signals says so where the operator is looking.
     Label {
-        Layout.row: 2
-        Layout.column: 0
-        Layout.minimumWidth: 0
-        text: "stronger than"
-        color: Theme.inkDim
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+        text: "stronger"
+        color: detector.enabled ? Theme.inkDim : Theme.inkOff
+        font.pixelSize: Theme.sizeSmall
     }
 
     RSlider {
-        Layout.row: 2
-        Layout.column: 1
         id: marginSlider
 
-        Layout.preferredWidth: 120
+        Layout.preferredWidth: 80
         from: 0.0
         to: engineLink.maxConfidenceBar
         stepSize: 0.01
 
-        // The same pin the confidence handle uses, and for the same
-        // reason: the engine refuses a bar of exactly one, so a handle
-        // at full travel has to arrive as the largest value below it
-        // rather than as one.
+        Component.onCompleted: value = engineLink.marginBar
+
+        // The same pin the confidence handle uses, and for the same reason:
+        // the engine refuses a bar of exactly one, so a handle at full
+        // travel has to arrive as the largest value below it.
         readonly property double bar: {
             if (marginSlider.value >= engineLink.maxConfidenceBar) {
                 return engineLink.maxConfidenceBar
@@ -284,118 +278,50 @@ GridLayout {
         }
 
         onMoved: engineLink.marginBar = marginSlider.bar
-    }
-
-    // Below a half passes the whole list, because every published
-    // detection cleared the detection threshold and the margin map is
-    // exactly a half at it. Saying so stops the first half of the
-    // travel reading as a filter that does nothing for no reason.
-    Label {
-        Layout.row: 2
-        Layout.column: 2
-        Layout.minimumWidth: 0
-        text: marginSlider.bar < 0.5
-              ? "everything"
-              : marginSlider.bar.toFixed(2) + "  this window"
-        color: Theme.ink
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
-    }
-
-    Label {
-        Layout.row: 3
-        Layout.column: 0
-        Layout.minimumWidth: 0
-        text: "detect"
-        color: Theme.inkDim
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
-    }
-
-    // NEITHER HANDLE IS BOUND TO THE LINK, WHICH IS DELIBERATE
-    //
-    // A handle bound to the property it writes fights the drag. Qt
-    // Quick's Slider sets value itself while the handle is moving,
-    // which breaks a `value:` binding on the first drag, and a
-    // Binding element with `when: !pressed` reactivates on release
-    // and pulls the handle back to whatever the link last reported,
-    // which for the engine-side knob is a poll behind. That flicker
-    // was on screen this session, and the first arrangement of it
-    // also put the confidence handle at zero on its own.
-    //
-    // So a plain binding, which does exactly the right thing twice
-    // and is then out of the way. Until the first drag it follows
-    // the value in force, so the handle starts where the engine
-    // already is however that engine was configured. The first drag
-    // breaks it, as Qt Quick sliders do, and from then on the
-    // handle is this window's request while the label beside it
-    // stays the value in force. When those two part company the row
-    // says so rather than moving the handle out from under whoever
-    // is holding it.
-    RSlider {
-        Layout.row: 3
-        Layout.column: 1
-        id: thresholdSlider
-
-        Layout.preferredWidth: 120
-        from: -3.0
-        to: 40.0
-        stepSize: 0.5
-        value: engineLink.detectionThresholdDb
-        onMoved: engineLink.detectionThresholdDb = value
 
         Tip {
             visible: parent.hovered
             delay: 400
-            text: "The engine's, shared by every client. Changes what the "
-                  + "detector finds at all. Last writer wins."
+            text: "Stronger than: this window only. Hides detections that stood only a little "
+                  + "above the detection threshold. Below a half passes everything, because "
+                  + "every published detection cleared the threshold and the margin is a half at it."
         }
     }
 
-    Label {
-        Layout.row: 3
-        Layout.column: 2
-        Layout.minimumWidth: 0
-        text: engineLink.detectionThresholdDb.toFixed(1)
-              + " dB SNR in 2500 Hz in force, engine-wide"
-        color: Theme.ink
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+    // Below a half passes the whole list, because every published
+    // detection cleared the detection threshold and the margin map is
+    // exactly a half at it. Saying so stops the first half of the travel
+    // reading as a filter that does nothing for no reason.
+    Readout {
+        widest: "saturated"
+        horizontalAlignment: Text.AlignLeft
+        text: marginSlider.bar < 0.5 ? "all" : marginSlider.bar.toFixed(2)
+        color: detector.enabled ? Theme.ink : Theme.inkOff
     }
 
-    // Only when somebody else has moved it. The detector answers a
-    // write on the next poll, so a gap wider than one step that is
-    // still there is another client and not this one in flight.
-    Label {
-        Layout.row: 4
-        Layout.column: 1
-        Layout.columnSpan: 2
-        Layout.minimumWidth: 0
-        visible: engineLink.detectionDecisions > 0
-                 && Math.abs(engineLink.detectionThresholdDb
-                             - thresholdSlider.value) > 0.6
-        text: "(this window asked for " + thresholdSlider.value.toFixed(1) + ")"
-        color: Theme.inkWarn
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
-    }
+    // How many of the detector's tracks the two bars let through. Zero
+    // decisions is the detector having been built by this client's first
+    // poll and not having decided yet, which core/rpc/client.h is explicit
+    // is not an empty band.
+    Readout {
+        widest: "starting"
+        horizontalAlignment: Text.AlignLeft
+        text: !detector.enabled ? ""
+              : engineLink.detectionDecisions === 0
+              ? "starting"
+              : engineLink.detectionCount + "/" + engineLink.detectionTotal
+        color: !detector.enabled ? Theme.inkOff
+               : engineLink.detectionDecisions === 0 ? Theme.inkWarn : Theme.inkDim
 
-    // Zero decisions is the detector having been built by this
-    // client's first poll and not having decided yet, which
-    // core/rpc/client.h is explicit is not an empty band.
-    Label {
-        Layout.row: 0
-        Layout.column: 1
-        Layout.columnSpan: 2
-        Layout.minimumWidth: 0
-        Layout.preferredWidth: 220
-        horizontalAlignment: Text.AlignRight
-        text: engineLink.detectionDecisions === 0
-              ? "detector starting"
-              : engineLink.detectionCount + " of " + engineLink.detectionTotal
-                + " tracks shown"
-        color: engineLink.detectionDecisions === 0 ? Theme.inkWarn : Theme.inkDim
-        font.pixelSize: Theme.sizeBody
-        elide: Text.ElideRight
+        HoverHandler { id: countHover }
+
+        Tip {
+            visible: countHover.hovered
+            delay: 400
+            text: engineLink.detectionDecisions === 0
+                  ? "The detector is built and has not decided yet. That is not an empty band."
+                  : engineLink.detectionCount + " of the detector's " + engineLink.detectionTotal
+                    + " tracks clear both bars and are drawn."
+        }
     }
 }

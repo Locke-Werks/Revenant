@@ -1872,3 +1872,37 @@ retired: 2026-09-23
 commit: "Stop counting the open points in clean-room.md"
 instead: The list above it holds three, the third now an accepted risk, and
     the sentence names no count so it cannot drift again.
+
+phrase: Faults come forward in a strip under the bar that exists only while one does
+phrase: the radio, the detection thresholds, the frequency manager, and the status drawer
+phrase: the radio, the detection thresholds and the frequency manager in panels
+phrase: faults in a banner that exists only while they do
+phrase: A banner appears under the bar only while something is wrong
+phrase: the refusal row is also in the banner under the top bar
+phrase: the banner brings it forward while it is a fault
+phrase: brought forward by NoticeBanner.qml while they are one
+phrase: in the shape of the fault strip below it
+retired: 2026-09-23
+commit: "Put the gain and the detector's settings in a row under the top bar"
+instead: The notice strip is gone. Each fault is named once in the top bar, by
+    the status pill or as a chip beside it, models/status_summary.h; the row
+    under the bar is ControlRow.qml, the gain and the detector's three
+    settings, and the detections panel went with it.
+
+phrase: Starts at zero and is not remembered across launches, unlike the bar beside it
+phrase: NOT REMEMBERED ACROSS LAUNCHES, which is the one difference and is deliberate
+retired: 2026-09-23
+commit: "Put the gain and the detector's settings in a row under the top bar"
+instead: The margin bar is remembered across launches like the confidence bar,
+    and the threshold this window set is remembered and re-sent on each
+    connection; ui/models/detector_settings.h.
+
+phrase: The detections key opens the detection thresholds, which is the panel there is
+phrase: The detector's two thresholds, which are two different knobs
+phrase: panel is the detector's two thresholds
+phrase: The radio panel carries the same line under the gain control it names
+retired: 2026-09-23
+commit: "Put the gain and the detector's settings in a row under the top bar"
+instead: The detections panel is gone; the detector's three settings are in the
+    control row, and Ctrl+Shift+D puts the arrow keys on its threshold. The
+    gain slider left the radio panel for the same row, ui/qml/GainControl.qml.

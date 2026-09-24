@@ -23,6 +23,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string_view>
+#include <vector>
 
 #include "core/rpc/types.h"
 #include "models/source_choice.h"
@@ -98,6 +100,56 @@ namespace revenant::ui {
                                                       double fraction)
 {
     return settle_gain(stage, gain_for_fraction(stage, fraction));
+}
+
+// Where each of the stage's own steps sits along the slider, for the control
+// row to draw a tick at each. The steps are unevenly spaced, so the ticks are
+// too, and that is the point of drawing them: they show where the tuner can
+// actually land, which the handle's even key step does not. Empty for a
+// continuous stage or one with no travel.
+[[nodiscard]] inline std::vector<double> gain_step_fractions(const rpc::GainStage& stage)
+{
+    std::vector<double> out;
+    if (!gain_stage_usable(stage)) {
+        return out;
+    }
+    out.reserve(stage.steps_db.size());
+    for (const double step : stage.steps_db) {
+        if (std::isfinite(step)) {
+            out.push_back(fraction_for_gain(stage, step));
+        }
+    }
+    return out;
+}
+
+// Why there is no gain to set, for the control row's disabled slider. A short
+// word for the row and the sentence for its hover. Empty when the source has
+// a stage, which is when the slider is live.
+struct GainAbsence {
+    std::string_view word;
+    std::string_view sentence;
+};
+
+[[nodiscard]] inline GainAbsence gain_absence(bool source_open, bool has_stage,
+                                              std::string_view backend)
+{
+    if (!source_open) {
+        return {"no radio", "No source is open, so there is no front end to set a gain on."};
+    }
+    if (has_stage) {
+        return {};
+    }
+    if (backend == "file") {
+        return {"recording",
+                "A recording's levels were fixed by the radio that made it. There is no "
+                "amplifier between the file and the engine to turn up or down."};
+    }
+    if (backend == "synthetic") {
+        return {"synthetic",
+                "A synthetic scene generates its emitters at the levels its URI asks for, "
+                "against the noise it asks for. There is no amplifier to set."};
+    }
+    return {"no gain", "This source reports no gain stage the engine can drive."};
 }
 
 }  // namespace revenant::ui

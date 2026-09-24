@@ -61,7 +61,8 @@
 // --memories reads the frequency manager's list from FILE instead of the
 // user's own, and never writes it; a smoke run without it starts with an empty
 // list and no file at all. --panel opens one of the top bar's panels by the
-// name the key table uses, "memories", "radio" or "detections", and
+// name the key table uses, "memories" or "radio" ("detections" went with its
+// panel on 2026-09-23; the detector is the control row now), and
 // --preview-import reads FILE into the frequency manager's import preview.
 // With --grab-main they photograph the frequency manager on sample memories.
 // --open-recording PATH[:CENTER] opens a recording at startup through the
@@ -585,6 +586,13 @@ int main(int argc, char* argv[])
     // joins the Cap'n Proto loop thread, and all three want a live process
     // around them.
     revenant::ui::EngineLink link;
+
+    // A smoke run draws the detector at its defaults and remembers nothing it
+    // is set to, so it neither writes the operator's settings nor sends their
+    // threshold to CI's engine.
+    if (smoke) {
+        link.setRememberDetector(false);
+    }
 
     // A refused connection is not a startup failure and never was. The
     // engine is often not running yet, and this returns either way: the

@@ -69,6 +69,12 @@ inline constexpr QLatin1StringView kAudioListen{"audio/listen"};
 // changes nothing about the engine.
 inline constexpr QLatin1StringView kConfidenceBar{"detections/confidenceBar"};
 
+// The margin bar, the confidence bar's partner and also this window's own; and
+// the detection threshold this window last set on the engine, which a new
+// connection sends again. See models/detector_settings.h.
+inline constexpr QLatin1StringView kMarginBar{"detections/marginBar"};
+inline constexpr QLatin1StringView kDetectionThresholdDb{"detections/thresholdDb"};
+
 // Where the window was. Saved as a rectangle plus the visibility, so a
 // window that was maximised comes back maximised rather than at whatever
 // size it happened to be restored to last.

@@ -125,6 +125,77 @@ TEST_CASE("a fault hides a note in the pill but not its level", "[status]")
     CHECK(summarise_status(in).headline == "tune refused");
 }
 
+// Rejects the duplication the owner found on 2026-09-23: "receiver let go"
+// beside the receivers button in the pill and again as a chip in a strip
+// under the bar. The pill names one condition and the chips are the rest, so
+// no label is ever on screen twice.
+TEST_CASE("the pill's headline is never also a chip", "[status]")
+{
+    auto in = healthy();
+    in.receiver_gone = true;
+    auto summary = summarise_status(in);
+    CHECK(summary.headline == "receiver let go");
+    CHECK(summary.chips.empty());
+
+    in.tune_fault = true;
+    in.source_fault = true;
+    summary = summarise_status(in);
+    CHECK(summary.headline == "radio refused");
+    REQUIRE(summary.chips.size() == 2);
+    CHECK(summary.chips[0] == "tune refused");
+    CHECK(summary.chips[1] == "receiver let go");
+}
+
+// Rejects dropping a notice because a worse one holds the pill. Every
+// condition that was a chip in the old strip is still on screen once: the
+// strip showed the three refusals and the let-go receiver with no engine too.
+TEST_CASE("every true chip condition is on screen exactly once", "[status]")
+{
+    StatusInputs in;
+    in.connected = false;
+    in.tune_fault = true;
+    in.receiver_gone = true;
+    auto summary = summarise_status(in);
+    CHECK(summary.headline == "no engine");
+    CHECK(summary.level == StatusLevel::Bad);
+    REQUIRE(summary.chips.size() == 2);
+    CHECK(summary.chips[0] == "tune refused");
+    CHECK(summary.chips[1] == "receiver let go");
+
+    in = healthy();
+    in.front_end_fault = true;
+    in.source_behind = true;
+    in.detection_fault = true;
+    summary = summarise_status(in);
+    CHECK(summary.headline == "front end overloaded");
+    REQUIRE(summary.chips.size() == 2);
+    CHECK(summary.chips[0] == "source behind");
+    CHECK(summary.chips[1] == "detector refused");
+}
+
+// Rejects inventing chips for the two states the pill names and the drawer
+// explains. The old strip had no chip for either, and a chip reading "engine
+// stopped" beside a pill reading "detector refused" would be a new notice
+// nobody asked for.
+TEST_CASE("a stopped engine and a closed source are the pill's alone", "[status]")
+{
+    auto in = healthy();
+    in.detection_fault = true;
+    in.engine_running = false;
+    in.source_open = false;
+    auto summary = summarise_status(in);
+    CHECK(summary.headline == "detector refused");
+    CHECK(summary.chips.empty());
+
+    in = healthy();
+    in.engine_running = false;
+    in.receiver_gone = true;
+    summary = summarise_status(in);
+    CHECK(summary.headline == "engine stopped");
+    REQUIRE(summary.chips.size() == 1);
+    CHECK(summary.chips[0] == "receiver let go");
+}
+
 // Rejects drawing the engine's placeholder as a level. -200 dBFS is "not
 // measured yet", and an empty bar for it reads as a receiver hearing nothing.
 TEST_CASE("the meter has no reading at the engine's placeholder", "[meter]")

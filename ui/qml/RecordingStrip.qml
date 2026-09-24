@@ -2,10 +2,12 @@
 // far through it the engine is, the pace in force with a control to change
 // it, and that it plays once.
 //
-// A STRIP UNDER THE TOP BAR, THERE ONLY WHILE A RECORDING IS OPEN, in the
-// shape of the fault strip below it: a radio session pays nothing for it, and
-// the bar above keeps its width for the dial and the band buttons it already
-// fills at 1280 pixels.
+// A STRIP UNDER THE TOP BAR, THERE ONLY WHILE A RECORDING IS OPEN, above the
+// control row: a radio session pays nothing for it, and the bar above keeps
+// its width for the dial and the band buttons it already fills at 1280 pixels.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "in the shape of the fault strip below
+// it". The fault strip went on 2026-09-23 and its row is ControlRow.qml.
 //
 // A READOUT WITH ONE CONTROL. The pace is the one thing the wire lets a client
 // change while a recording plays, Session.setSourcePace, so it gets 1x, 2x, 4x

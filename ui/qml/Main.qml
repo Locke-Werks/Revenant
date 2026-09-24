@@ -16,8 +16,9 @@
 //
 // The span, which is the interface: spectrum, ruler and waterfall filling
 // everything under one strip of chrome. The top bar tunes the radio and opens
-// panels over the span for what direct manipulation cannot express. A banner
-// appears under the bar only while something is wrong. The last click is a
+// panels over the span for what direct manipulation cannot express, and names
+// what is wrong, when something is, beside its status pill. Under it a row
+// holds the gain and the detector's settings. The last click is a
 // card over the waterfall. The receivers, the rack, the focused receiver's
 // controls and fine-tuning display, RDS, decoding and audio, are one panel
 // docked under the span, behind a divider the operator can drag, or popped out
@@ -30,6 +31,10 @@
 // WHAT THE PARAGRAPH ABOVE USED TO SAY, from its fifth sentence: "The
 // receiver's controls, its fine-tuning display, RDS and audio are the receiver
 // window, which is a second top-level window made here".
+//
+// AND WHAT ITS THIRD SENTENCE USED TO SAY, before 2026-09-23: "A banner
+// appears under the bar only while something is wrong." Its notices are in
+// the top bar now and its row is ControlRow.qml.
 //
 // Until 2026-09-22 this was a column of twenty-odd rows over a spectrum that
 // got the height left over, and before that one file of 2792 lines. Each
@@ -154,6 +159,7 @@ ApplicationWindow {
         receiverWindow: receiverWindow
         receiverPanel: receiverPanel
         topBar: topBar
+        controlRow: controlRow
         spanView: spanView
         mainPalette: commandPalette
         mainKeyMap: keyMapView
@@ -183,7 +189,10 @@ ApplicationWindow {
             Layout.fillWidth: true
         }
 
-        NoticeBanner {
+        // The gain and the detector's three settings, always there. Faults
+        // are in the top bar, beside the status pill.
+        ControlRow {
+            id: controlRow
             Layout.fillWidth: true
         }
 

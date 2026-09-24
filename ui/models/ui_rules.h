@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "models/composite_probe.h"
 #include "models/frame_stats.h"
 #include "models/frequency_dial.h"
+#include "models/gain_control.h"
 #include "models/level_meter.h"
 #include "models/mode_choice.h"
 #include "models/receiver_palette.h"
@@ -203,9 +205,26 @@ public:
             conditions.value(QStringLiteral("framesDroppedByEngine")).toULongLong();
         in.frame_rate = conditions.value(QStringLiteral("frameRate")).toDouble();
         const StatusSummary summary = summarise_status(in);
+        QStringList chips;
+        for (const std::string& chip : summary.chips) {
+            chips.append(QString::fromStdString(chip));
+        }
         return QVariantMap{{QStringLiteral("level"), static_cast<int>(summary.level)},
                            {QStringLiteral("headline"),
-                            QString::fromStdString(summary.headline)}};
+                            QString::fromStdString(summary.headline)},
+                           {QStringLiteral("chips"), chips}};
+    }
+
+    // Why the control row's gain slider is off, as {word, sentence}, both
+    // empty when there is a stage to drive. See gain_absence in
+    // models/gain_control.h.
+    [[nodiscard]] Q_INVOKABLE QVariantMap gainAbsence(bool source_open, bool has_stage,
+                                                      const QString& backend) const
+    {
+        const std::string name = backend.toStdString();
+        const GainAbsence absent = gain_absence(source_open, has_stage, name);
+        return QVariantMap{{QStringLiteral("word"), to_qstring(absent.word)},
+                           {QStringLiteral("sentence"), to_qstring(absent.sentence)}};
     }
 
     [[nodiscard]] Q_INVOKABLE double meterFraction(double dbfs) const

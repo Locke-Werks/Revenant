@@ -161,6 +161,7 @@
 #include "models/bookmarks.h"
 #include "models/composite_probe.h"
 #include "models/decoded_model.h"
+#include "models/detector_settings.h"
 #include "models/label_tune.h"
 #include "models/mode_choice.h"
 #include "models/receiver_gone.h"
@@ -643,6 +644,10 @@ class EngineLink : public QObject {
     Q_PROPERTY(double sourceGainFraction READ sourceGainFraction NOTIFY sourceGainChanged)
     Q_PROPERTY(double sourceGainStep READ sourceGainStep NOTIFY sourceGainChanged)
 
+    // Each of the stage's own steps as a fraction along the slider, for the
+    // control row's ticks. See gain_step_fractions.
+    Q_PROPERTY(QVariantList sourceGainTicks READ sourceGainTicks NOTIFY sourceGainChanged)
+
     // The gain the DEVICE TOOK, in decibels, and whether that number means
     // anything yet.
     //
@@ -833,6 +838,17 @@ class EngineLink : public QObject {
                    NOTIFY detectionsChanged)
     Q_PROPERTY(double detectionThresholdDb READ detectionThresholdDb
                    WRITE setDetectionThresholdDb NOTIFY detectionsChanged)
+
+    // What this window last asked the threshold to be, remembered across a
+    // restart and re-sent on every connection, or the value in force when it
+    // has never asked; and whether the value in force has since parted from
+    // it, which is another client having set it. models/detector_settings.h
+    // has the rules and why the engine, not this window, keeps the threshold
+    // across a tune.
+    Q_PROPERTY(double detectionThresholdWanted READ detectionThresholdWanted
+                   NOTIFY detectionsChanged)
+    Q_PROPERTY(bool detectionThresholdOverridden READ detectionThresholdOverridden
+                   NOTIFY detectionsChanged)
 
     // The top of confidenceBar's range, which ui/qml/DetectionControls.qml's confidence
     // slider takes as its `to` rather than carrying a copy of. CONSTANT
@@ -1772,6 +1788,13 @@ public:
         return fraction_for_gain(gain_stage_, gain_db_);
     }
     [[nodiscard]] double sourceGainStep() const { return gain_fraction_step(gain_stage_); }
+    [[nodiscard]] QVariantList sourceGainTicks() const {
+        QVariantList out;
+        for (const double fraction : gain_step_fractions(gain_stage_)) {
+            out.append(fraction);
+        }
+        return out;
+    }
     [[nodiscard]] double sourceGainDb() const { return gain_db_; }
     [[nodiscard]] bool sourceGainKnown() const { return gain_known_; }
     [[nodiscard]] bool sourceGainAuto() const { return gain_auto_; }
@@ -1910,6 +1933,23 @@ public:
     void setMarginBar(double bar);
     [[nodiscard]] double detectionThresholdDb() const { return shown_.detection_threshold_db; }
     void setDetectionThresholdDb(double threshold_db);
+    [[nodiscard]] double detectionThresholdWanted() const {
+        return threshold_wanted(detector_memory_, shown_.detection_threshold_db);
+    }
+    // Not while this window's own write is still waiting for the supervisor,
+    // which would colour the readout as another client's for the length of
+    // every drag.
+    [[nodiscard]] bool detectionThresholdOverridden() const {
+        return threshold_overridden(
+            detector_memory_, shown_.detection_threshold_db,
+            shown_.decisions > 0 && !threshold_pending_.load(std::memory_order_acquire));
+    }
+
+    // Whether the detector's three settings are read from and written to
+    // QSettings. main() turns it off for a smoke run, which writes no
+    // settings and should not draw with the operator's either: the bars and
+    // the threshold go back to their defaults and nothing is re-sent.
+    void setRememberDetector(bool remember);
 
     [[nodiscard]] uint detectionCount() const {
         return static_cast<uint>(shown_.detections.size());
@@ -2959,6 +2999,17 @@ private:
     // itself is an RPC call and cannot happen on the Qt thread.
     std::atomic<bool> threshold_pending_{false};
     std::atomic<double> requested_threshold_db_{0.0};
+
+    // The operator's last threshold the engine could take, for
+    // attempt_connect to send again on a new connection. Written by the Qt
+    // thread, read by the supervisor; the flag says whether there is one.
+    std::atomic<bool> threshold_remembered_{false};
+    std::atomic<double> remembered_threshold_db_{0.0};
+
+    // The Qt thread's record of all three, what is read at startup and
+    // written as each moves. models/detector_settings.h.
+    DetectorMemory detector_memory_;
+    bool remember_detector_ = true;
 
     // The clock behind report_rate. Lives on the Qt thread and is started by
     // start(), which main() calls from that thread before the event loop

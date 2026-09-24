@@ -159,3 +159,38 @@ TEST_CASE("a key press moves one step on average and nothing on a continuous sta
     only_one.steps_db = {20.0};
     CHECK(gain_fraction_step(only_one) == Approx(0.0));
 }
+
+// Rejects ticks drawn at an even spacing, which is what the handle's key step
+// is and what the tuner is not. The R820T's steps bunch at the bottom and the
+// top of its range, and a tick belongs where a step is.
+TEST_CASE("the control row's ticks sit on the tuner's own steps", "[gain]")
+{
+    const revenant::rpc::GainStage stage = r820t();
+    const std::vector<double> ticks = revenant::ui::gain_step_fractions(stage);
+    REQUIRE(ticks.size() == stage.steps_db.size());
+    CHECK(ticks.front() == Approx(0.0));
+    CHECK(ticks.back() == Approx(1.0));
+    CHECK(ticks[1] == Approx(0.9 / 49.6));
+    CHECK(ticks[5] == Approx(7.7 / 49.6));
+
+    // Every tick is a position the slider settles onto the same step from.
+    for (std::size_t i = 0; i < ticks.size(); ++i) {
+        CHECK(gain_request_for_fraction(stage, ticks[i]) == Approx(stage.steps_db[i]));
+    }
+
+    CHECK(revenant::ui::gain_step_fractions(continuous()).empty());
+}
+
+// Rejects a disabled slider with nothing to say why, which reads as a control
+// that is broken. A recording, a synthetic scene and no source at all are
+// three different reasons, and the owner opens recordings as often as radios.
+TEST_CASE("a source with no gain says why", "[gain]")
+{
+    using revenant::ui::gain_absence;
+    CHECK(gain_absence(true, true, "rtlsdr").word.empty());
+    CHECK(gain_absence(true, false, "file").word == "recording");
+    CHECK(gain_absence(true, false, "synthetic").word == "synthetic");
+    CHECK(gain_absence(true, false, "somethingelse").word == "no gain");
+    CHECK(gain_absence(false, false, "").word == "no radio");
+    CHECK_FALSE(gain_absence(true, false, "file").sentence.empty());
+}
