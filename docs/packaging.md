@@ -427,7 +427,7 @@ pushed or published.
 | Icon in the installer | The same seven images, stamped by `lwforge` from `product.icon` |
 | Icon in the README | The header block points at `assets/revenant.ico`. No release badge, which is right until there is a release |
 | Uninstall | Install directory, Add/Remove Programs key and Start Menu shortcut gone. `PendingFileRenameOperations` 60 entries before and after. One file left, `%TEMP%\lwu847B.tmp.exe`, 489,872 bytes: the stub's copy that finishes the removal, which cannot schedule its own deletion without administrator rights. Forge documents it. An elevated machine-scope uninstall queues it for deletion at the next restart instead. Deleted by hand |
-| `FORGE_VERSION` | v0.4.0 in both jobs. `installer.toml` uses `[[options]]` and `when`, which need v0.3.0, and no hooks, so no key it carries is one the pin would drop |
+| `FORGE_VERSION` | v0.4.1 in both jobs, moved from v0.4.0 after the second run below. `installer.toml` uses `[[options]]` and `when`, which need v0.3.0, and no hooks, so no key it carries is one either pin would drop |
 | Hooks as the user | None declared, so there is nothing to mark `as = "user"`. Nothing in the install writes into a user profile: the RPC token is made by the engine on first run |
 | Release job | Now checks `installer.toml`'s version against `cmake/RevenantVersion.cmake`, which only the `package` job did and the `release` job does not wait for, and runs `--check-only` on the signed installer it publishes |
 
@@ -474,9 +474,6 @@ pushed or published.
   stamped without breaking its signature, so the fix is in Forge, for example
   a way to point `DisplayIcon` at `revenant-ui.exe` once that carries the
   icon.
-- **Forge v0.4.1**, released 2026-09-16, reports files an uninstall could not
-  remove where v0.4.0 dropped them silently. It adds no config keys. The pin
-  stays at v0.4.0 until somebody chooses the move.
 - **`restart_manager` offers nothing.** Corrected above and in
   `installer.toml`. Forge's `docs/config-schema.md` still describes the key as
   giving the user an option; that file is Forge's to correct.
@@ -487,4 +484,36 @@ pushed or published.
 - **The `release` job has never run.** The first tag is its first run. Every
   step before signing has a counterpart in the `package` job that runs on
   each push; the signing steps and `gh release create` do not.
+
+### The Forge pin, moved to v0.4.1
+
+Forge v0.4.1, released 2026-09-16, reports files an uninstall could not remove
+where v0.4.0 dropped them silently, and adds no config keys. A second dry run
+the same day, from another worktree at `b43d763`, checked it against this
+config before the pin moved:
+
+- The same staged payload forged with the `v0.4.0` and `v0.4.1` release
+  assets, all four binaries `Valid`: 28,634,304 and 28,635,560 bytes, and
+  `lwforge inspect` listing the same 43 config keys and 200 members from each.
+- The per-user variant forged with `v0.4.1` and installed with
+  `/S /D=<scratch directory> /O:desktop_shortcut=off`: exit 0 in 2.5 s, all
+  199 payload files SHA-256 identical to the stage.
+- The engine and the client from that install, as in the first run: the
+  engine served 25 s of the synthetic source on a free loopback port with its
+  own token file and exited 0, and the client's offscreen smoke against it
+  exited 0 while the engine counted 306 spectrum frames sent and 0 dropped.
+  The client's settings key held 7 subkeys and 0 values before and after.
+- `/uninstall /S` from the `v0.4.1` stub: exit 0, with no file reported as
+  left behind. The install directory, the HKCU key and the shortcut were gone.
+  The one remaining file was the stub's `%TEMP%` copy, 490,896 bytes, queued in
+  `PendingFileRenameOperations` for the next restart because that run was
+  elevated.
+
+Both jobs in `.github/workflows/ci.yml` pin `v0.4.1` from the commit that
+moved it, and have to move together.
+
+WHAT THIS SECTION'S BULLET USED TO SAY, under "Owed, not blocking": "The pin
+stays at v0.4.0 until somebody chooses the move." And the `FORGE_VERSION` row
+of "Done and verified" read "v0.4.0 in both jobs". Both were true on the first
+run and stopped being true when the pin moved.
 
