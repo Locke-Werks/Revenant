@@ -3937,10 +3937,24 @@ void ServerImpl::publish_detections_locked() {
     auto next = std::make_shared<Published>();
     if (detector_.has_value()) {
         const std::span<const detect::Track> tracks = detector_->tracks();
-        next->all.tracks.assign(tracks.begin(), tracks.end());
+
+        // ONE DETECTION PER EMITTER where tier two runs. A talker on AM or FM
+        // is several spectral lines to the detector, five on AM and up to
+        // eleven on NFM at 30 dB in docs/detection.md's voice survey, and tier
+        // two already probes them as one emitter and records one answer on
+        // every line. Publishing the lines drew one bracket for each of them,
+        // all with the same label. detect::fold_emitters says what the one detection
+        // carries. The emitters are this decision's: step() ran on these
+        // tracks just before, under the same lock.
+        if (tier_two_.has_value()) {
+            const std::vector<detect::TierTwoEmitter> emitters = tier_two_->emitters();
+            next->all.tracks = detect::fold_emitters(tracks, emitters);
+        } else {
+            next->all.tracks.assign(tracks.begin(), tracks.end());
+        }
         next->all.decisions = detector_->stats().decisions;
         next->all.last_decision = detector_->last_decision();
-        next->all.total = static_cast<std::uint32_t>(tracks.size());
+        next->all.total = static_cast<std::uint32_t>(next->all.tracks.size());
         next->all.threshold_db = detector_->config().detection_threshold_db;
         next->all.hold_seconds = detector_->config().bootstrap_hold_seconds;
         next->front_end = front_end_.observation();

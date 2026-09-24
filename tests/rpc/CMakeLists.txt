@@ -52,6 +52,13 @@ if(TARGET revenant_rpc_server)
     )
     target_include_directories(revenant_rpc_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 
+    # One detection per talker on tools/siggen/voice.h's scene, which needs
+    # the scene library, built only where the tools are.
+    if(TARGET revenant_siggen_scenes)
+        target_sources(revenant_rpc_tests PRIVATE test_rpc_detect_voice.cpp)
+        target_link_libraries(revenant_rpc_tests PRIVATE revenant_siggen_scenes)
+    endif()
+
     revenant_apply_warnings(revenant_rpc_tests)
     revenant_apply_reference_fp(revenant_rpc_tests)
 

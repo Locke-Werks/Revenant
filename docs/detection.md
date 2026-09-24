@@ -2589,8 +2589,11 @@ NFM on every track, from 3.5 to 11.3 s. CW and BPSK read right from 3.4 to
 7.2 s where they took 5.8 to 18.8. USB and LSB carry no label at all, which is
 the stated answer until the side reaches a track; see "What is not done" below.
 The tracks column is the same in both tables: nothing here changed the
-detector, which is why the lines are still several tracks on the wire.
+detector, which still reports a talker as several lines.
 "emitters at once" is how many tier two probed as units, a group counting once.
+WHAT THE SENTENCE BEFORE THAT USED TO SAY at its end: "which is why the lines are
+still several tracks on the wire." The server publishes one detection per
+emitter now; "One detection per emitter on the wire" below.
 
 What changed, each recorded where it lives:
 
@@ -2648,14 +2651,75 @@ separates one talker from two neighbours by the spectrum alone. 400 Hz splits
 a talker rather than merging two stations. It is the default and it is a
 choice; a wider gap buys fewer units on this scene and costs that.
 
+### One detection per emitter on the wire
+
+`core/rpc/server.cpp` publishes, wherever tier two runs, the track list
+through `detect::fold_emitters` (`core/detect/tier_two.h`): each emitter tier
+two follows, a group of at least two lines covering at least
+`emitter_min_fill` of its extent, becomes one detection, and every other track
+is published as it was. The schema did not change and neither did the client,
+which draws whatever detections arrive.
+
+What the one detection carries, and why:
+
+- **Band.** `centerHz` and `bandwidthHz` are the emitter's extent, the lowest
+  line's lower edge to the highest line's upper edge. That is the band a click
+  tunes and the bracket draws.
+- **Id.** The id of the line born first, not the anchor's.
+  `LineGroup::anchor` is the strongest line and can move between decisions on
+  measurement noise; a display keys its row, its selection and its waterfall
+  history on the id.
+- **Level and label.** `snr2500Db`, `marginConfidence`, the band shape, the
+  channel and the label are the strongest line's. Tier two records the
+  emitter's answer on every line, so that line's label is the emitter's. The
+  SNR and the margin are that line's own measurement and are not recomputed
+  over the extent: each line was measured against its own band, and adding
+  lines measured over different widths is arithmetic with no measurement
+  behind it. On AM the strongest line is the carrier, so the SNR is the
+  carrier's; the other lines' SNRs and margins are not published.
+- **Presence.** `state` is live when any line is live, `confidence` is the
+  highest of the lines', `firstSeen` the earliest and `lastSeen` and
+  `lastDetected` the latest. A talker's sideband stretches come and go with
+  the syllables while the talker does not, and these fields say how long the
+  emitter has been there.
+- **Merged rows.** A merged track whose parent was folded names the emitter's
+  id, so no row names an id that is not on the list.
+
+WHAT "WHAT IS NOT DONE" BELOW USED TO SAY FIRST: "One detection per emitter
+on the wire. The detector still publishes lines, so the span still draws a
+bracket per line, each now carrying the emitter's label."
+
+Measured over the wire by "a talker on AM or NFM is one detection on the wire"
+in `tests/rpc/test_rpc_detect_voice.cpp`: the voice scene at 30 dB, seed
+20260924, 16 s at four times realtime on the survey's engine, a client polling
+every 100 ms and counting the detections whose centre is inside each
+emitter's nominal band widened by a kilohertz, live or held. "Lines" is the
+same run with no probe receivers, so no tier two and nothing folded, which is
+what the wire carried per talker before; "emitters" is with four. Each cell
+is the most at once over the run / the count at the last decision, and the
+last column is what the one detection at the end carried:
+
+| emitter | lines | emitters | at the end, with four probes |
+| --- | --- | --- | --- |
+| am | 5 / 3 | 1 / 1 | AM, 2699 Hz wide |
+| nfm2.5 | 9 / 6 | 3 / 1 | NFM, 5608 Hz |
+| nfm5 | 11 / 9 | 3 / 1 | NFM, 10411 Hz |
+| usb | 4 / 2 | 2 / 1 | no label, 2007 Hz |
+| lsb | 5 / 2 | 2 / 1 | no label, 3277 Hz |
+| cw | 1 / 1 | 1 / 1 | CW, 183 Hz |
+| bpsk | 1 / 1 | 1 / 1 | BPSK, 1464 Hz |
+
+Two runs with four probes gave the same table. The case asserts one
+detection, carrying its own label, per AM and NFM talker at the last
+decision, and prints the rest. **NFM still reached three detections at
+once** during the run: tier two groups at the 400 Hz edge gap, and "The
+emitter gap, swept" above measured holes up to 887 Hz inside an NFM talker
+at 2.5 kHz deviation and 1747 Hz at 5 kHz, so at some decisions one talker
+is two or three emitters and publishes as that many. The fold follows the
+grouping; it does not change it.
+
 ### What is not done
 
-- **One detection per emitter on the wire.** The detector still publishes
-  lines, so the span still draws a bracket per line, each now carrying the
-  emitter's label. `detect::TierTwo::emitters()` lists each emitter's group,
-  anchor, extent and lines; publishing the anchor with the group's extent and
-  suppressing the other lines is a change to `core/rpc/server.cpp`'s
-  `detections()`, which is another lane's.
 - **USB and LSB labels.** `characterise::Characterisation::voice` and
   `voice_sideband` read the talker and the side at every level measured, and
   stop at `engine::ProbeOutcome`, which has no field for them. Carrying them

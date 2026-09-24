@@ -1261,6 +1261,18 @@ enum TrackState {
 # What a click-to-tune surface should do with this today is what AFT does with
 # an unidentified signal in docs/ui-spectrum.md: take the measured centre,
 # and hold still rather than guess.
+#
+# ONE DETECTION PER EMITTER, WHERE TIER TWO RUNS
+#
+# The detector reports a talker on AM or FM as several spectral lines, a
+# carrier and stretches of sideband. On an engine with probe receivers the
+# server publishes the lines tier two follows as one emitter as one
+# detection: centerHz and bandwidthHz are the emitter's extent, id is the
+# id of its line born first, the label, snr2500Db, marginConfidence and
+# concentration are its strongest line's, and state, confidence and the
+# three sample indices are taken across its lines. detect::fold_emitters in
+# core/detect/tier_two.h has each choice and why. No field changed for it, so
+# a client draws one bracket per talker without knowing a fold happened.
 struct Detection {
     # Issued in order from one and never reused, so an id names one signal for
     # the life of the engine process. This is what a click resolves against

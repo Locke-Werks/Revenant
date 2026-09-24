@@ -20,11 +20,14 @@
 //
 // WHAT IT DOES NOT DO
 //
-// It classifies nothing and names no family, and a group goes on the wire as
-// nothing: what reaches a client is each track's own label, core/detect/
-// label.h. WHAT THIS SENTENCE USED TO SAY after "names no family": "and
+// It classifies nothing and names no family. A group tier two treats as one
+// emitter goes on the wire as one detection over its extent,
+// detect::fold_emitters in core/detect/tier_two.h, carrying its strongest
+// line's label, core/detect/label.h; any other group's lines go as their own
+// tracks. WHAT THIS SENTENCE USED TO SAY after "names no family": first "and
 // docs/detection.md decided that nothing goes on the wire as a family",
-// which the owner reversed on 2026-09-23 for tracks.
+// which the owner reversed on 2026-09-23 for tracks; then "and a group goes
+// on the wire as nothing: what reaches a client is each track's own label".
 //
 // The gap is the caller's, for the
 // same reason both detector thresholds are the operator's: no measurement has

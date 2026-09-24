@@ -345,6 +345,18 @@ detection is asking to be put near a signal rather than on a channel centre.
 `Detection::centerHz` is absolute and `VrxParams::center` is a baseband
 offset, so tuning is `centerHz - EngineInfo::sourceCenter`.
 
+**A talker is one detection, where tier two runs.** The detector reports a
+talker on AM or FM as several spectral lines. On an engine with probe
+receivers the server publishes each emitter tier two follows as one
+detection over the emitter's extent, `detect::fold_emitters` in
+`core/detect/tier_two.h`, and every other track as it was; `total` counts
+what was published. No field was added and none changed meaning for a line
+on its own, so the client needed no change. On the voice scene at 30 dB the
+wire carried 5 detections at once for an AM talker and 11 for NFM at 5 kHz
+deviation with no probe receivers, and 1 and 3 with four; at the last
+decision each talker was one. docs/detection.md, "One detection per emitter
+on the wire", has the table and what each field of the one detection is.
+
 **A recording is detected and labelled over the wire as a radio is.** The
 owner reported after the playtest of 2026-09-23 that signal identification did
 nothing on a recording. The engine and this server were checked on his path,

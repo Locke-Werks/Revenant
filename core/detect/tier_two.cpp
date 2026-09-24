@@ -20,6 +20,102 @@ namespace {
 
 }  // namespace
 
+std::vector<Track> fold_emitters(std::span<const Track> tracks,
+                                 std::span<const TierTwoEmitter> emitters) {
+    std::unordered_map<std::uint64_t, std::size_t> by_id;
+    by_id.reserve(tracks.size());
+    for (std::size_t i = 0; i < tracks.size(); ++i) {
+        by_id.emplace(tracks[i].id, i);
+    }
+
+    // Track index to the folded detection it went into, and that detection's
+    // id, for the lines of every emitter that folded.
+    std::unordered_map<std::size_t, std::size_t> folded_into;
+    std::vector<Track> folded;
+    folded.reserve(emitters.size());
+
+    for (const TierTwoEmitter& emitter : emitters) {
+        std::vector<std::size_t> present;
+        for (const std::uint64_t id : emitter.tracks) {
+            const auto found = by_id.find(id);
+            if (found == by_id.end()) {
+                continue;
+            }
+            const TrackState state = tracks[found->second].state;
+            if (state == TrackState::Live || state == TrackState::Held) {
+                present.push_back(found->second);
+            }
+        }
+        if (present.size() < 2 || emitter.high_edge <= emitter.low_edge) {
+            continue;
+        }
+
+        // The anchor when it is among them, which it is whenever the emitter
+        // list is the same decision's as the tracks; otherwise the strongest.
+        std::size_t base = present.front();
+        bool anchor_found = false;
+        for (const std::size_t at : present) {
+            if (tracks[at].id == emitter.anchor) {
+                base = at;
+                anchor_found = true;
+                break;
+            }
+        }
+        if (!anchor_found) {
+            for (const std::size_t at : present) {
+                if (tracks[at].snr_2500_db > tracks[base].snr_2500_db) {
+                    base = at;
+                }
+            }
+        }
+
+        Track out = tracks[base];
+        out.center = emitter.low_edge + (emitter.high_edge - emitter.low_edge) / 2;
+        out.bandwidth = emitter.high_edge - emitter.low_edge;
+        out.merged_into = 0;
+        bool any_live = false;
+        for (const std::size_t at : present) {
+            const Track& line = tracks[at];
+            out.id = std::min(out.id, line.id);
+            out.confidence = std::max(out.confidence, line.confidence);
+            out.first_seen = std::min(out.first_seen, line.first_seen);
+            out.last_seen = std::max(out.last_seen, line.last_seen);
+            out.last_detected = std::max(out.last_detected, line.last_detected);
+            any_live = any_live || line.state == TrackState::Live;
+        }
+        out.state = any_live ? TrackState::Live : TrackState::Held;
+
+        for (const std::size_t at : present) {
+            folded_into[at] = folded.size();
+        }
+        folded.push_back(std::move(out));
+    }
+
+    std::vector<Track> result;
+    result.reserve(tracks.size());
+    for (std::size_t i = 0; i < tracks.size(); ++i) {
+        if (folded_into.contains(i)) {
+            continue;
+        }
+        Track track = tracks[i];
+        if (track.merged_into != 0) {
+            if (const auto parent = by_id.find(track.merged_into); parent != by_id.end()) {
+                if (const auto into = folded_into.find(parent->second);
+                    into != folded_into.end()) {
+                    track.merged_into = folded[into->second].id;
+                }
+            }
+        }
+        result.push_back(std::move(track));
+    }
+    for (Track& track : folded) {
+        result.push_back(std::move(track));
+    }
+    std::stable_sort(result.begin(), result.end(),
+                     [](const Track& a, const Track& b) { return a.center < b.center; });
+    return result;
+}
+
 Expected<TierTwo> TierTwo::create(const TierTwoConfig& config) {
     if (config.source_rate <= 0) {
         return fail("TierTwo needs the source rate to turn sample indices into seconds");

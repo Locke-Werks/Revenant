@@ -40,9 +40,11 @@
 // the emitter's answer without a probe of its own. A line that is in a group
 // is never probed on its own.
 //
-// What reaches the wire is still one detection per track, each carrying the
-// emitter's label; publishing one detection per emitter is core/rpc's, and
-// emitters() below is what it would read.
+// What reaches the wire is one detection per emitter: core/rpc's server
+// passes the track list and emitters() below through fold_emitters() before
+// it publishes, so a talker is one bracket. WHAT THIS PARAGRAPH USED TO SAY:
+// "What reaches the wire is still one detection per track, each carrying the
+// emitter's label; publishing one detection per emitter is core/rpc's".
 //
 // THREADING
 //
@@ -125,6 +127,40 @@ struct TierTwoEmitter {
     bool answered = false;
     ProbeFinding finding;
 };
+
+// ONE DETECTION PER EMITTER, for a caller publishing tracks to a display.
+//
+// Every emitter with at least two of its lines in `tracks` becomes one Track
+// and its lines are dropped; every other track passes through unchanged. The
+// result is ascending in centre, as Detector::tracks() is.
+//
+// What the one Track carries, field by field, and why:
+//
+// - id: the lowest id among its lines, the line born first. Not the anchor's,
+//   because LineGroup::anchor can move between decisions on measurement noise
+//   and a display keys its row, its selection and its waterfall history on the
+//   id. The line born first changes only when that line goes.
+// - center and bandwidth: the emitter's extent, low_edge to high_edge. That is
+//   the band a click should tune and the bracket should draw.
+// - snr_2500_db, margin_confidence, shape, channel and everything the label
+//   reads (classification, protocol, last_probe, probes): the anchor's, the
+//   strongest line. Tier two records the emitter's answer on every line, so the
+//   anchor's label is the emitter's. The SNR and the margin are the strongest
+//   line's own measurement and are not recomputed over the extent: the
+//   detector measured each line against its own band, and summing lines
+//   measured over different widths would be arithmetic with no measurement
+//   behind it.
+// - state, confidence, first_seen, last_seen, last_detected: across the lines.
+//   Live when any line is Live, the highest confidence, the earliest birth and
+//   the latest sightings. These say how long the emitter has been there, and
+//   a talker's sideband stretches come and go with the syllables while the
+//   emitter does not.
+//
+// A Merged track whose merged_into names a line that was folded is pointed at
+// the emitter's id instead, so no row on the wire names an id that is not on
+// it.
+[[nodiscard]] std::vector<Track> fold_emitters(std::span<const Track> tracks,
+                                               std::span<const TierTwoEmitter> emitters);
 
 struct TierTwoStats {
     std::uint64_t submitted = 0;
