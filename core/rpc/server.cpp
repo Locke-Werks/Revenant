@@ -1510,6 +1510,17 @@ private:
     // is kept here and reported to the next caller instead.
     std::string detector_fault_;  // detect_lock_
 
+    // The detection threshold an operator set over the wire, empty until one
+    // has. It outlives the detector on purpose: a retune, a new calibration and
+    // a source close all throw the detector away because its tracks describe a
+    // band it is no longer looking at, and the threshold describes nothing
+    // about the band. It is the operator's statement of how far above the noise
+    // a signal has to stand. Until 2026-09-23 ensure_detector built every
+    // detector at DetectorConfig's default, so each tune put the threshold
+    // back to 6 dB for every client, with the slider still showing the value
+    // the operator had chosen.
+    std::optional<double> detection_threshold_db_;  // detect_lock_
+
     // THE SIGID LANE, which is where the detector and tier two run.
     //
     // Until 2026-09-23 on_frame fed the detector itself, on the engine's
@@ -2945,6 +2956,13 @@ Status ServerImpl::ensure_detector() {
     // would make one client's preference the server's.
     config.confidence_threshold = detect::DetectorConfig{}.confidence_threshold;
 
+    // The detection threshold is different: it is engine-wide by design, and
+    // one a client set before this detector existed still stands. See
+    // detection_threshold_db_.
+    if (detection_threshold_db_.has_value()) {
+        config.detection_threshold_db = *detection_threshold_db_;
+    }
+
     auto made = detect::Detector::create(config, info.spectrum);
     if (!made) {
         return std::unexpected(with_context(made.error(), "building the wideband detector"));
@@ -3116,8 +3134,11 @@ Status ServerImpl::set_detection_threshold(double threshold_db) {
         detector_->set_thresholds(threshold_db, detector_->config().confidence_threshold);
 
     // Republished at once rather than at the next decision, so a poll that
-    // follows this call reports the threshold it set.
+    // follows this call reports the threshold it set. Kept only once the
+    // detector has taken it, so a value it refused is never handed to the
+    // next one.
     if (applied) {
+        detection_threshold_db_ = threshold_db;
         publish_detections_locked();
     }
     return applied;

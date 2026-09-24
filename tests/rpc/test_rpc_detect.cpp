@@ -970,6 +970,72 @@ TEST_CASE("the detection threshold is the operator's and changes what the detect
     REQUIRE(stopped.has_value());
 }
 
+TEST_CASE("the detection threshold outlives the detector a retune throws away",
+          "[gpu][rpc][detect][m2]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // THE DEFECT THIS HOLDS SHUT. A retune forgets the detector, because its
+    // tracks describe a band it is no longer looking at, and until 2026-09-23
+    // the next one was built at DetectorConfig's default. So every tune put
+    // the threshold back to 6 dB for every client while the operator's slider
+    // still showed what they had chosen. The owner found it live.
+    //
+    // Through tests/rpc/retunable_engine.h, because no source that opens
+    // without a radio will retune; the server's half is the real one.
+    HarnessOptions options = detecting_options();
+    options.retunable = true;
+
+    Harness harness;
+    bring_up(harness, options);
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    const rpc::DetectionList before = wait_for_detections(harness.client(), 2, 20000);
+    REQUIRE(before.decisions >= 2);
+    REQUIRE(before.detection_threshold_db == 6.0);
+
+    constexpr double kOperatorsThresholdDb = 11.5;
+    const auto set = harness.client().set_detection_threshold(kOperatorsThresholdDb);
+    INFO(test::message_of(set));
+    REQUIRE(set.has_value());
+
+    const auto moved = harness.client().set_source_center(kSceneCenter + 200'000);
+    INFO(test::message_of(moved));
+    REQUIRE(moved.has_value());
+
+    // The first poll after the retune builds the new detector, so this is
+    // the answer from a detector that did not exist when the threshold was
+    // set.
+    auto rebuilt = harness.client().detections(0.0, 0.0);
+    INFO(test::message_of(rebuilt));
+    REQUIRE(rebuilt.has_value());
+    CHECK(rebuilt->decisions < before.decisions);
+    CHECK(rebuilt->detection_threshold_db == kOperatorsThresholdDb);
+
+    // And once it has decided, which is the threshold it is deciding with
+    // rather than one written into the answer.
+    const rpc::DetectionList deciding = wait_for_detections(harness.client(), 2, 20000);
+    INFO(std::format("{} decisions after the retune", deciding.decisions));
+    CHECK(deciding.decisions >= 2);
+    CHECK(deciding.detection_threshold_db == kOperatorsThresholdDb);
+
+    // A refused write keeps what stood, across the next retune as well.
+    CHECK_FALSE(harness.client().set_detection_threshold(500.0).has_value());
+    const auto back = harness.client().set_source_center(kSceneCenter);
+    INFO(test::message_of(back));
+    REQUIRE(back.has_value());
+    auto after_refusal = harness.client().detections(0.0, 0.0);
+    REQUIRE(after_refusal.has_value());
+    CHECK(after_refusal->detection_threshold_db == kOperatorsThresholdDb);
+
+    const auto stopped = harness.stop_engine();
+    INFO(test::message_of(stopped));
+    REQUIRE(stopped.has_value());
+}
+
 TEST_CASE("the detector's hold crosses the wire and bounds what the detector does",
           "[gpu][rpc][detect][m2]") {
     REVENANT_NEEDS_GPU();
