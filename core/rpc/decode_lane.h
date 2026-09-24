@@ -123,7 +123,19 @@ public:
         return lane;
     }
 
-    ~DecodeLane() { stop(); }
+    // Work still queued is released here and not in stop(). The engine takes
+    // a sink off asynchronously, so a completion thread can still be inside
+    // post(), assigning a job's `work`, after stop() has returned; resetting
+    // the same shared_ptr there raced that assignment. Nothing can be inside
+    // post() once the lane is being destroyed, because every sink that calls
+    // it holds a shared_ptr to the lane.
+    ~DecodeLane()
+    {
+        stop();
+        for (auto& job : jobs_) {
+            job->work.reset();
+        }
+    }
 
     DecodeLane(const DecodeLane&) = delete;
     DecodeLane& operator=(const DecodeLane&) = delete;
@@ -178,9 +190,10 @@ public:
         return true;
     }
 
-    // Stops the thread and joins it. Idempotent. Work still queued is
-    // released without running, which is right for the one caller, a server
-    // that has already taken every sink off and cleared every route's owner.
+    // Stops the thread and joins it. Idempotent. Work still queued never
+    // runs, which is right for the one caller, a server that has already
+    // taken every sink off and cleared every route's owner; it is released
+    // when the lane is destroyed, for the reason ~DecodeLane gives.
     void stop()
     {
         if (stopping_.exchange(true, std::memory_order_acq_rel)) {
@@ -195,9 +208,6 @@ public:
         returned_.notify_all();
         if (thread_.joinable()) {
             thread_.join();
-        }
-        for (auto& job : jobs_) {
-            job->work.reset();
         }
     }
 
