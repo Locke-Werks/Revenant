@@ -1,0 +1,138 @@
+{
+  "commit": "213bc77",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 56,
+    "snr_start_db": 14.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 28.000000,
+    "trial_batch": 64,
+    "trials_per_point": 256
+  },
+  "mode": "ais",
+  "points": [
+    {
+      "ber": 1.000000000000e+00,
+      "bit_errors": 1024,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 14.000000,
+      "trials": 256
+    },
+    {
+      "ber": 9.921875000000e-01,
+      "bit_errors": 1016,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 15.000000,
+      "trials": 256
+    },
+    {
+      "ber": 9.667968750000e-01,
+      "bit_errors": 990,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 16.000000,
+      "trials": 256
+    },
+    {
+      "ber": 8.408203125000e-01,
+      "bit_errors": 861,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 17.000000,
+      "trials": 256
+    },
+    {
+      "ber": 6.103515625000e-01,
+      "bit_errors": 625,
+      "bits_total": 1024,
+      "decoded_count": 8,
+      "snr_db": 18.000000,
+      "trials": 256
+    },
+    {
+      "ber": 3.750000000000e-01,
+      "bit_errors": 384,
+      "bits_total": 1024,
+      "decoded_count": 43,
+      "snr_db": 19.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.816406250000e-01,
+      "bit_errors": 186,
+      "bits_total": 1024,
+      "decoded_count": 110,
+      "snr_db": 20.000000,
+      "trials": 256
+    },
+    {
+      "ber": 6.445312500000e-02,
+      "bit_errors": 66,
+      "bits_total": 1024,
+      "decoded_count": 196,
+      "snr_db": 21.000000,
+      "trials": 256
+    },
+    {
+      "ber": 2.246093750000e-02,
+      "bit_errors": 23,
+      "bits_total": 1024,
+      "decoded_count": 234,
+      "snr_db": 22.000000,
+      "trials": 256
+    },
+    {
+      "ber": 4.882812500000e-03,
+      "bit_errors": 5,
+      "bits_total": 1024,
+      "decoded_count": 251,
+      "snr_db": 23.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 24.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 25.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 26.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 27.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 28.000000,
+      "trials": 256
+    }
+  ],
+  "schema": 1,
+  "subject": "ais Message 1 bursts, 9600 bit/s GMSK BT 0.4 as complex baseband at 48000 S/s with the carrier off between them, through an 8 kHz nfm channel filter and FM discriminator; packet error rate against SNR in 2500 Hz of the burst"
+}

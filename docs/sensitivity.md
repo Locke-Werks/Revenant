@@ -49,7 +49,8 @@ PSK31, PSK63, QPSK31 and D-STAR were swept again the same day at commit "Limit
 FM discriminator clicks before POCSAG's level discriminator", after the fixes
 the section below records, and their baselines replaced; of those, SITOR-B's,
 POCSAG's and D-STAR's crossings moved. DMR was added and swept the same day
-at commit "Serve DMR bursts over the wire as decoded messages".
+at commit "Serve DMR bursts over the wire as decoded messages", and AIS and
+VHF DSC at commit "Serve AIS and DSC as decoded messages over the wire".
 
 WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
 512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400, SITOR-B -1.1 dB and D-STAR
@@ -73,6 +74,8 @@ WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
 | D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.2 dB | `bench sweep --mode dstar --seed 20260918` |
 | TETRA, pi/4-DQPSK | bit | 0.01 | 2500 Hz | 20.2 dB | `bench sweep --mode tetra --seed 20260918` |
 | DMR, CSBKs on both timeslots | frame | 0.01 | 2500 Hz | 18.8 dB | `bench sweep --mode dmr --seed 20260918` |
+| AIS, Message 1 bursts, through an nfm receiver | frame | 0.01 | 2500 Hz | 22.5 dB | `bench sweep --mode ais --seed 20260918` |
+| DSC on VHF, individual calls, through an nfm receiver | message | 0.01 | 2500 Hz | 15.7 dB | `bench sweep --mode dsc --seed 20260918` |
 | RDS | bit | 0.01 | Eb/N0 | 7.2 dB | `bench sweep --mode rds --snr-start 2 --snr-stop 12 --trials 1024 --min-bit-errors 0 --seed 20260918` |
 
 Every figure is the crossing in that mode's committed baseline,
@@ -92,12 +95,18 @@ What each unit is:
   60 information octets, 83 octets before the FCS; M17 frames are the 16-byte
   stream payloads after one Link Setup Frame; DMR frames are CSBKs, ten
   octets each through the BPTC (196,96) and the CRC-CCITT, one a slot on
-  both timeslots of a base station channel with its CACH.
+  both timeslots of a base station channel with its CACH. AIS frames are
+  Message 1 position reports, 168 bits of data each in a one-slot burst
+  with the carrier off between bursts; AIS's SNR is the burst's own, its
+  power taken over the samples where the carrier is on.
 - **page**: a POCSAG page whose identity and 40-character alphanumeric text
   did not both come back.
 - **message**: a NAVTEX message of 120 characters not received exactly with a
   clean preamble, which is what M.540-2 Annex II clause 3 lets a receiver
-  print. Each is its own transmission with ten seconds of phasing.
+  print. Each is its own transmission with ten seconds of phasing. For DSC, a
+  routine individual call on a VHF working channel, 19 information
+  characters, not received with every one of them and its error-check
+  character right.
 - **bit**: a demodulated bit wrong after aligning the recovered stream to the
   one sent. A trial that cannot be aligned, or a TETRA burst not found, is
   scored as every bit half wrong. P25 and D-STAR are a raw stream through the
@@ -125,6 +134,8 @@ framing.
 | D-STAR | 4800 bit/s | -2.83 dB |
 | TETRA | 36000 bit/s | -11.58 dB |
 | DMR | 9600 bit/s gross | -5.84 dB |
+| AIS | 9600 bit/s | -5.84 dB |
+| DSC on VHF | 1200 bit/s | +3.19 dB |
 
 Some tests in `tests/decode` state their figures in other bandwidths. To
 compare: M17's 9 kHz channel figure is the 2500 Hz one less 5.56 dB; P25's and
@@ -238,6 +249,19 @@ WHAT THE PARAGRAPH ABOVE USED TO SAY: "POCSAG at 1200 bit/s keeps losing a
 page in a thousand at 10 and 11 dB ... Not examined." And the one below
 compared "POCSAG 0.49 at 8 dB against 0.475 over 40 pages".
 
+**AIS and DSC sit at the FM discriminator's threshold.** Both are read the
+way the engine hands them over, through an nfm receiver's 16 kHz channel and
+its discriminator, and both curves fall from all lost to none in about five
+dB. The carrier to noise ratio in that channel is the 2500 Hz figure less
+8.06 dB: 11.9 dB for AIS at 20 dB and 5.9 dB for DSC at 14 dB. AIS's curve
+reads 0.61 at 18 dB, 0.18 at 20 and 0.0049 at 23; DSC's, whose tones are
+phase modulated at index 2.0, 0.87 at 13 dB, 0.39 at 14 and 0.0049 at 16,
+with 1023 of 1024 calls lost at 12 dB. Their tests agree where they send the
+same thing: DSC's 27 of 70 calls lost at 14 dB against the curve's 0.39.
+AIS's test lost 0.311 at 20 dB over a mix of message types up to two slots
+long, against the curve's 0.18 over one-slot Message 1s; nothing longer
+than one slot has been swept.
+
 The rest agree with their tests within counting error: RTTY 0.0077 at -5 dB
 against the test's 0.0033 over 300 characters, AX.25 0.036 at 10 dB against
 0.05 over 60 frames, POCSAG 0.10 at 8 dB against 0.10 over 40 pages, NAVTEX
@@ -252,7 +276,8 @@ at 12 dB in 9 kHz.
 with the same command and seed, after the BPSK reference and RDS. Making the
 baselines took 664 s for all fifteen on the RTX 4090 workstation's CPU, with
 other builds running on it; with RDS's 226 s the job's sweeps come to about 15
-minutes, so every mode runs every night. The workflow states the rule for
+minutes, so every mode runs every night. AIS and DSC, added later, take 0.7 s
+and 4.2 s. The workflow states the rule for
 splitting them if that passes 30 minutes. A regression is a point whose error rate rose by more than half again plus
 three errors' worth of counting noise, or a crossing that moved more than
 0.2 dB to the right: `tools/bench/curve.h`.

@@ -10,6 +10,7 @@ add_library(revenant_bench STATIC
     fsk_subjects.cpp
     tone_subjects.cpp
     dv_subjects.cpp
+    maritime_subjects.cpp
 )
 target_link_libraries(revenant_bench PUBLIC revenant_core)
 target_include_directories(revenant_bench PUBLIC ${CMAKE_SOURCE_DIR})

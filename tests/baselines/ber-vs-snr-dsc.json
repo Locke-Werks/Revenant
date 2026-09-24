@@ -1,0 +1,106 @@
+{
+  "commit": "213bc77",
+  "config": {
+    "base_seed": 20260918,
+    "min_bit_errors": 0,
+    "payload_bytes": 36,
+    "snr_start_db": 10.000000,
+    "snr_step_db": 1.000000,
+    "snr_stop_db": 20.000000,
+    "trial_batch": 64,
+    "trials_per_point": 256
+  },
+  "mode": "dsc",
+  "points": [
+    {
+      "ber": 1.000000000000e+00,
+      "bit_errors": 1024,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 10.000000,
+      "trials": 256
+    },
+    {
+      "ber": 1.000000000000e+00,
+      "bit_errors": 1024,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 11.000000,
+      "trials": 256
+    },
+    {
+      "ber": 9.990234375000e-01,
+      "bit_errors": 1023,
+      "bits_total": 1024,
+      "decoded_count": 0,
+      "snr_db": 12.000000,
+      "trials": 256
+    },
+    {
+      "ber": 8.720703125000e-01,
+      "bit_errors": 893,
+      "bits_total": 1024,
+      "decoded_count": 1,
+      "snr_db": 13.000000,
+      "trials": 256
+    },
+    {
+      "ber": 3.886718750000e-01,
+      "bit_errors": 398,
+      "bits_total": 1024,
+      "decoded_count": 38,
+      "snr_db": 14.000000,
+      "trials": 256
+    },
+    {
+      "ber": 6.347656250000e-02,
+      "bit_errors": 65,
+      "bits_total": 1024,
+      "decoded_count": 197,
+      "snr_db": 15.000000,
+      "trials": 256
+    },
+    {
+      "ber": 4.882812500000e-03,
+      "bit_errors": 5,
+      "bits_total": 1024,
+      "decoded_count": 251,
+      "snr_db": 16.000000,
+      "trials": 256
+    },
+    {
+      "ber": 2.929687500000e-03,
+      "bit_errors": 3,
+      "bits_total": 1024,
+      "decoded_count": 253,
+      "snr_db": 17.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 18.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 19.000000,
+      "trials": 256
+    },
+    {
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
+      "bits_total": 1024,
+      "decoded_count": 256,
+      "snr_db": 20.000000,
+      "trials": 256
+    }
+  ],
+  "schema": 1,
+  "subject": "dsc VHF individual calls, 1200 baud on 1300 and 2100 Hz tones phase modulated at index 2.0 as complex baseband at 48000 S/s, through an 8 kHz nfm channel filter and FM discriminator; call error rate against SNR in 2500 Hz"
+}

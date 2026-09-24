@@ -18,15 +18,18 @@ namespace {
 
 // The order the nightly sweeps them, which is also the order of the table in
 // docs/sensitivity.md.
-constexpr std::array<std::string_view, 16> kModes = {
+constexpr std::array<std::string_view, 18> kModes = {
     "rtty",   "ax25",   "pocsag-512", "pocsag-1200", "pocsag-2400", "sitor-b", "navtex", "psk31",
     "psk63",  "qpsk31", "cw",         "m17",         "p25p1",       "dstar",   "tetra",
-    "dmr",
+    "dmr",    "ais",    "dsc",
 };
 
-enum class Family { Fsk, Tone, Dv };
+enum class Family { Fsk, Tone, Dv, Maritime };
 
 Family family_of(std::string_view mode) {
+    if (mode == "ais" || mode == "dsc") {
+        return Family::Maritime;
+    }
     if (mode == "psk31" || mode == "psk63" || mode == "qpsk31" || mode == "cw") {
         return Family::Tone;
     }
@@ -58,6 +61,8 @@ Expected<ModeSubject> make_mode_subject(std::string_view mode) {
         return detail::make_tone_subject(mode);
     case Family::Dv:
         return detail::make_dv_subject(mode);
+    case Family::Maritime:
+        return detail::make_maritime_subject(mode);
     }
     return fail(std::format("mode '{}' has no family", mode));
 }

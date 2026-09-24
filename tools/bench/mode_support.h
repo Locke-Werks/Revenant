@@ -58,4 +58,7 @@ namespace revenant::bench::detail {
 [[nodiscard]] Expected<ModeSubject> make_tone_subject(std::string_view mode);
 [[nodiscard]] Expected<ModeSubject> make_dv_subject(std::string_view mode);
 
+// AIS and DSC, tools/bench/maritime_subjects.cpp.
+[[nodiscard]] Expected<ModeSubject> make_maritime_subject(std::string_view mode);
+
 }  // namespace revenant::bench::detail
