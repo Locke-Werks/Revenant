@@ -649,6 +649,7 @@ if(REVENANT_UI_TESTS)
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
             tests/test_spectrum_scale.cpp
+            tests/test_squelch_control.cpp
             tests/test_status_summary.cpp
             tests/test_window_raise.cpp
         )

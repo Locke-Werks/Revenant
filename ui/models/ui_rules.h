@@ -39,6 +39,7 @@
 #include "models/receiver_rack.h"
 #include "models/ruler.h"
 #include "models/scroll_tune.h"
+#include "models/squelch_control.h"
 #include "models/status_summary.h"
 #include "models/window_raise.h"
 
@@ -215,6 +216,38 @@ public:
     [[nodiscard]] Q_INVOKABLE bool meterHasReading(double dbfs) const
     {
         return meter_has_reading(dbfs);
+    }
+
+    // ---------------------------------------------------------------------
+    // The receiver's squelch slider. See models/squelch_control.h.
+    // ---------------------------------------------------------------------
+
+    [[nodiscard]] Q_INVOKABLE double squelchSliderLow() const { return kSquelchSliderLowDbfs; }
+
+    [[nodiscard]] Q_INVOKABLE double squelchSliderHigh() const
+    {
+        return kSquelchSliderHighDbfs;
+    }
+
+    [[nodiscard]] Q_INVOKABLE double squelchFromSlider(double position) const
+    {
+        return squelch_from_slider(position);
+    }
+
+    [[nodiscard]] Q_INVOKABLE double sliderFromSquelch(double dbfs) const
+    {
+        return slider_from_squelch(dbfs);
+    }
+
+    [[nodiscard]] Q_INVOKABLE QString squelchText(double dbfs) const
+    {
+        return QString::fromStdString(squelch_text(dbfs));
+    }
+
+    [[nodiscard]] Q_INVOKABLE QString squelchGateText(double threshold_dbfs, bool reported,
+                                                      bool gate_open) const
+    {
+        return QString::fromStdString(squelch_gate_text(threshold_dbfs, reported, gate_open));
     }
 
     // ---------------------------------------------------------------------

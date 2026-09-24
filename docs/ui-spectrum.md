@@ -49,6 +49,18 @@ until ticked; `ui/models/aft.h` carries the loop and the rules below, and it
 drives the same `moveReceiverCentre` path as the wheel. The auto filter
 sits beside it, also off until ticked; see "Auto filter" below.
 
+**The filter expansion.** "filter ▸" opens what the engine reports about the
+filter, the AGC switch, the squelch and the noise controls. The squelch is a
+slider in whole dBFS from -119 to -10 with "open" at its bottom stop, which
+sends the engine's own -200 dBFS default and so never shuts. Beside it are the
+threshold in figures, the receiver's level, so the handle can be set just above
+the noise, and, while a threshold is set, a "gate shut" or "gate open" chip
+from the receiver's status. A shut gate mutes everything fed from the
+receiver's audio, decoders included; the meter and the display carry on. A
+move of the slider is a retune in place, as the AGC switch is, never a remove
+and an add. `ui/models/squelch_control.h` has the rules, with cases in
+`ui/tests/test_squelch_control.cpp`.
+
 **Docked, or popped out.** The owner's call of 2026-09-23, after a live
 playtest: the panel starts docked in the main window, under the span, behind a
 divider that drags; the rack's "pop out" button or Ctrl+Shift+W moves it into

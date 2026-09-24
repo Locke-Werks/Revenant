@@ -1115,6 +1115,14 @@ class EngineLink : public QObject {
     Q_PROPERTY(bool agcEnabled READ agcEnabled WRITE setAgcEnabled NOTIFY receiverChanged)
     Q_PROPERTY(bool agcOffered READ agcOffered NOTIFY receiverChanged)
 
+    // The squelch on the pane's receiver: VrxParams::squelch_dbfs, sent as a
+    // retune in place on the same terms as the AGC. -200 is the engine's
+    // default and never shuts; models/squelch_control.h has the slider's
+    // rules. squelchGateOpen is the engine's report of the gate, from the
+    // receiver's status, and reads false until the first status arrives.
+    Q_PROPERTY(double squelchDbfs READ squelchDbfs WRITE setSquelchDbfs NOTIFY receiverChanged)
+    Q_PROPERTY(bool squelchGateOpen READ squelchGateOpen NOTIFY receiverStatusChanged)
+
     // The audio frequency the notch sits on, which is what the operator
     // hears it as: the same as notchHz on USB and its magnitude elsewhere.
     Q_PROPERTY(double notchAudioHz READ notchAudioHz NOTIFY receiverChanged)
@@ -2164,6 +2172,12 @@ public:
     [[nodiscard]] bool agcEnabled() const { return wanted_.agc_enabled; }
     void setAgcEnabled(bool on);
     [[nodiscard]] bool agcOffered() const;
+
+    // The squelch threshold. Sent as a retune in place and kept in the
+    // request across mode changes, like the AGC switch.
+    [[nodiscard]] double squelchDbfs() const { return wanted_.squelch_dbfs; }
+    void setSquelchDbfs(double dbfs);
+    [[nodiscard]] bool squelchGateOpen() const { return receiver_status_.squelch_open; }
 
     // A key's toggle: "nb", "notch", "auto_notch" or "nr". Does nothing on a
     // mode that does not offer the stage, which the key table greys out.

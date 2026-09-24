@@ -1811,4 +1811,12 @@ phrase: not parameters the engine offers on a receiver yet
 retired: 2026-09-23
 commit: "Apply the receiver AGC to what a person hears"
 instead: VrxParams carries squelch_dbfs and the three agc fields. The receiver
-    panel's expansion has the AGC switch; squelch has no control there yet.
+    panel's expansion has the AGC switch and the squelch slider.
+
+phrase: Squelch has no control here yet, and the expansion says so
+phrase: squelch has no control there yet
+retired: 2026-09-23
+commit: "Give the receiver panel a squelch control"
+instead: The receiver panel's filter expansion has a squelch slider in dBFS,
+    open at its bottom stop, with the receiver's level and the gate beside it.
+    ui/models/squelch_control.h, docs/ui-spectrum.md.

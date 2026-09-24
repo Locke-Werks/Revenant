@@ -23,8 +23,12 @@
 // anything.
 //
 // The brief for this panel asks for squelch by default and AGC behind the
-// expansion. The AGC switch is behind the expansion, bound to agcEnabled.
-// Squelch has no control here yet, and the expansion says so.
+// expansion. Both are behind the expansion for now: the AGC switch bound to
+// agcEnabled, and the squelch slider bound to squelchDbfs, with the
+// receiver's level beside it and a chip for the gate while a threshold is set.
+//
+// WHAT THE LAST SENTENCE ABOVE USED TO SAY: "Squelch has no control here yet,
+// and the expansion says so."
 //
 // WHAT THIS PARAGRAPH USED TO SAY: "Neither is a parameter the engine offers
 // on a receiver today, rpc::VrxParams has no field for either". It had both,
@@ -358,15 +362,56 @@ ColumnLayout {
             }
         }
 
+        // The squelch: a threshold in dBFS against the receiver's own level,
+        // which is shown beside it so the handle can be set just above the
+        // noise. The bottom stop is "open", the engine's -200 default, which
+        // never shuts. Sent as a retune in place like the AGC switch. The
+        // chip is the engine's report of the gate, there only while a
+        // threshold is set; models/squelch_control.h has the rules.
         Label {
             text: "squelch"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
-        Label {
-            text: "no control here yet"
-            color: Theme.inkDim
-            font.pixelSize: Theme.sizeSmall
+        RowLayout {
+            spacing: 8
+            RSlider {
+                Layout.preferredWidth: 160
+                tint: detail.tint
+                from: UiRules.squelchSliderLow()
+                to: UiRules.squelchSliderHigh()
+                stepSize: 1
+                value: UiRules.sliderFromSquelch(engineLink.squelchDbfs)
+                onMoved: engineLink.squelchDbfs = UiRules.squelchFromSlider(value)
+            }
+            Readout {
+                widest: "-000 dBFS"
+                text: UiRules.squelchText(engineLink.squelchDbfs)
+                color: Theme.ink
+                font.pixelSize: Theme.sizeSmall
+            }
+            Label {
+                text: UiRules.meterHasReading(engineLink.receiverLevelDbfs)
+                      ? "level " + engineLink.receiverLevelDbfs.toFixed(1) + " dBFS"
+                      : "no level yet"
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+            }
+            StatusChip {
+                readonly property string gate:
+                    UiRules.squelchGateText(engineLink.squelchDbfs,
+                                            engineLink.receiverDemodRate > 0,
+                                            engineLink.squelchGateOpen)
+                visible: gate.length > 0
+                ink: gate === "shut" ? Theme.inkWarn : Theme.inkDim
+                label: "gate " + gate
+                detail: gate === "shut"
+                        ? "The receiver's level is under the squelch, so its audio is muted. "
+                          + "Everything fed from that audio, decoders included, gets the same "
+                          + "silence; the meter and the display carry on."
+                        : "The receiver's level is over the squelch, so its audio passes."
+            }
         }
 
         // Noise mitigation: four stages, each off until ticked, each greyed

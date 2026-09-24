@@ -1,11 +1,13 @@
-// EngineLink's side of the noise controls and the AGC switch: each setter
-// builds the next request and sends it as a retune in place. The noise rules
-// are all in models/noise_controls.h and the AGC's in the engine; this file
-// is plumbing.
+// EngineLink's side of the noise controls, the AGC switch and the squelch:
+// each setter builds the next request and sends it as a retune in place. The
+// noise rules are all in models/noise_controls.h, the squelch slider's in
+// models/squelch_control.h and the AGC's in the engine; this file is
+// plumbing.
 
 #include "models/engine_link.h"
 
 #include "models/noise_controls.h"
+#include "models/squelch_control.h"
 
 namespace revenant::ui {
 
@@ -172,6 +174,23 @@ void EngineLink::setAgcEnabled(bool on)
 bool EngineLink::agcOffered() const
 {
     return mode_takes_agc(demod_name(wanted_.demod).toStdString());
+}
+
+void EngineLink::setSquelchDbfs(double dbfs)
+{
+    const double next = normalise_squelch(dbfs);
+    if (wanted_.squelch_dbfs == next) {
+        return;
+    }
+    wanted_.squelch_dbfs = next;
+
+    // On the AGC switch's terms: a retune in place, never a remove and an
+    // add, so the audio carries on through a drag of the slider.
+    if (receiverId() == 0) {
+        emit receiverChanged();
+        return;
+    }
+    post_receiver_request(false);
 }
 
 void EngineLink::toggleNoiseStage(const QString& stage)
