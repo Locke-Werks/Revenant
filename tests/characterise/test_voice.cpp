@@ -222,19 +222,23 @@ struct Emitter {
                                                         double level, std::uint64_t draw) {
     const auto count = static_cast<std::size_t>(kDwellSeconds * static_cast<double>(rate));
     const std::uint64_t seed = kSeed + 1000 * draw;
-    for (const Emitter& emitter : emitters()) {
-        if (std::string(emitter.name) != name) {
-            continue;
+    // Found first and asserted, rather than a FAIL after the loop, because
+    // MSVC cannot see that FAIL throws and flags the return after it as
+    // unreachable, which the vs preset's warnings-as-errors refuses.
+    const std::vector<Emitter> all = emitters();
+    const Emitter* found = nullptr;
+    for (const Emitter& emitter : all) {
+        if (std::string(emitter.name) == name) {
+            found = &emitter;
+            break;
         }
-        const bool silent = std::string(emitter.name) == "noise";
-        auto extract =
-            silent ? probe_like(characterise_test::gaussian_noise(count, 1.0, seed + 7), rate,
-                                std::nan(""), seed)
-                   : probe_like(emitter.make(rate, count, seed), rate, level, seed + 7);
-        return characterise_at(extract, rate, emitter.detection_hz);
     }
-    FAIL("no emitter named " << name);
-    return {};
+    REQUIRE(found != nullptr);
+    const bool silent = std::string(found->name) == "noise";
+    auto extract = silent ? probe_like(characterise_test::gaussian_noise(count, 1.0, seed + 7),
+                                       rate, std::nan(""), seed)
+                          : probe_like(found->make(rate, count, seed), rate, level, seed + 7);
+    return characterise_at(extract, rate, found->detection_hz);
 }
 
 }  // namespace
