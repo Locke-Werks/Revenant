@@ -658,13 +658,22 @@ jobs:
     timeout-minutes: 20
     env:
       # Pinned, so a Forge release cannot change what this job produces without
-      # somebody choosing it. v0.4.0 is the first release that rejects an
-      # unknown hook phase and the first with build-time checks on a hook, and
-      # installer.toml's [[options]] and `when` need v0.3.0 or later. A pin
-      # older than that does not fail: it inverts the feature, and a `when`
-      # fires unconditionally. See "Which version has what" in
+      # somebody choosing it. v0.4.1 is the first release whose uninstaller
+      # says which file it could not remove; v0.4.0 and earlier queued a
+      # locked file for deletion at reboot and reported success either way.
+      # v0.4.0 is the first release that rejects an unknown hook phase and
+      # the first with build-time checks on a hook, and installer.toml's
+      # [[options]] and `when` need v0.3.0 or later. A pin older than that
+      # does not fail: it inverts the feature, and a `when` fires
+      # unconditionally. See "Which version has what" in
       # Forge/docs/using-forge-in-ci.md.
-      FORGE_VERSION: v0.4.0
+      #
+      # Moved from v0.4.0 on 2026-09-23 after forging installer.toml with
+      # both releases: the same 43 config keys and 200 members in each, and a
+      # per-user install and silent uninstall of the v0.4.1 build in a scratch
+      # directory left no file, key or shortcut behind. docs/packaging.md has
+      # the run.
+      FORGE_VERSION: v0.4.1
     steps:
       - uses: actions/checkout@v4
 
@@ -822,7 +831,10 @@ jobs:
       contents: write
     timeout-minutes: 30
     env:
-      FORGE_VERSION: v0.4.0
+      # The same pin as the package job, for the reasons given there. The two
+      # have to move together or the tag builds a different installer from
+      # the one every commit tested.
+      FORGE_VERSION: v0.4.1
     steps:
       - uses: actions/checkout@v4
 
