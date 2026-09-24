@@ -741,6 +741,77 @@ ends are pinned nothing gives at all. The CLI got this wrong first and drew
 a pinned ceiling up to 21.4 dB above where it was asked for, which defeats
 the one job pinning has.
 
+## The level scale, the noise floor and the peak
+
+Asked for by the owner on 2026-09-23: a vertical scale on both spectrum
+traces, and on the span spectrum alone a marker for the noise floor and one
+for the strongest signal.
+
+**The scale.** Both traces carry dBFS ticks up their right edge, with a
+faint gridline across the pane at each labelled one and a short mark at the
+edge for each minor one. The ticks are planned from the ends the trace is
+actually drawn against, the item's `drawFloorDb` and `drawCeilingDb` on the
+span, so they move with the auto-scale and sit still under a pin. The step is
+the smallest of 1, 2 or 5 times a power of ten decibels that leaves a label's
+height and a 14 px gap between neighbours: 10 dB on a 300 px span showing 70
+dB, 20 dB on the passband pane at its 96 px minimum, single decibels between
+two pins set 6 dB apart. A label that would reach into the detection labels
+along the top of the span, or off either edge, is dropped and its tick kept.
+`ui/models/level_scale.h` has the rule and `ui/tests/test_level_scale.cpp`
+holds every height from 20 to 1200 px against every span from one decibel to
+two hundred with no two labels touching. The gridlines are drawn under the
+trace's fill, so a line never crosses a carrier; the numbers are outlined in
+the background colour rather than set on plates, so they read over the trace
+without hiding a strip of it. The passband pane's scale follows that pane's
+own ends, which the span's pins do not reach.
+
+**The noise floor is this window's estimate, because the engine publishes
+none.** The detector keeps a floor per fine bin and uses it on every
+decision, and none of it crosses the wire: `rpc::Detection` carries no
+floor, `DetectionList` carries the threshold and not what it is measured
+against, and `SourceStats` has only the front end's floor lift, which is
+relative to a session low. So the span measures the floor off its own trace:
+the level a quarter of the drawn columns sit below, eased over a second of
+source time. A quarter rather than the median because a broadcast band can be
+more than half stations. It is not the auto-scale floor, which is where the
+colour map starts rather than where the noise is, and which parts from the
+noise whenever it is pinned or still following noise that rose. Its plate
+reads "noise ... dBFS est.", with the reasoning on hover. The line is dashed,
+over the fill and under the trace; the plate goes under the bottom of the
+noise, where there is only fill.
+
+On a flat band with the auto-scale free the estimate sits a few decibels
+under the bottom edge, because the floor's reduction correction is built to
+put an empty band's columns on that edge. Measured: the synthetic wideband
+scene, seed 7 at 2.4 MS/s, drew its floor at -92.5 dBFS and the estimate
+read -94.8; the labelled SigMF scene at 2.16 MS/s drew -92.5 and read -95.2.
+The line is then not drawn and the plate, on the bottom edge, leads with a
+down arrow. With the engine's floor held at -125 dBFS the same synthetic
+scene drew its floor at -108.2 and the estimate, -95.1, sat in the middle of
+the pane with its line.
+
+**The peak is the whole source's.** The strongest bin across the whole frame,
+which is every hertz the source delivers, whether or not a receiver is open;
+the owner's correction of 2026-09-23 took it off the focused receiver's
+passband. The largest bin of each frame cannot be read: two carriers a
+decibel apart trade it on noise, and the loudest bin inside one broadcast
+station wanders across it. So the marker is held on one signal until another
+is 3 dB louder than both that signal's reading and the level on the plate,
+and while it stays its level and position ease over a quarter second of
+source time. The cost is that the signal named can be up to 3 dB quieter than
+the loudest bin in the frame. A tick points down at the peak and the plate,
+"peak ... dBFS ... MHz", sits over the tick, where the pane is empty because
+nothing else is as tall. A peak above the top of the scale cannot be pointed
+at, and its plate goes beside it, under the detection labels, leading with an
+up arrow. Neither plate enters the detection labels' strip or covers the
+ceiling's pin plate. `ui/models/span_markers.h` has both markers and both
+placements, with cases in `ui/tests/test_span_markers.cpp`.
+
+What the offscreen grabs show: the scale's numbers and both plates. The
+trace, the gridlines, the edge marks and the noise line are scene graph
+geometry and have not rendered in an offscreen grab, so they are held by the
+tests above rather than by a picture.
+
 ## The fine-tuning display
 
 A second spectrum and waterfall showing the receiver's passband and what is
