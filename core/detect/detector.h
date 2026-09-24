@@ -106,6 +106,7 @@
 #include <vector>
 
 #include "core/characterise/catalogue.h"
+#include "core/characterise/characterise.h"
 #include "core/detect/shape.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
@@ -229,8 +230,14 @@ struct ProbeFinding {
     bool psk_without_symbol_rate = false;
 
     // characterise::Characterisation::double_sideband, meaningful on an
-    // Unmodulated family only: the carrier has mirrored sidebands.
+    // Unmodulated family only: the carrier's voice-channel sidebands sit in
+    // phase with it. WHAT THIS USED TO SAY after the colon: "the carrier has
+    // mirrored sidebands".
     bool double_sideband = false;
+
+    // engine::ProbeOutcome::voice_sideband: the side of its suppressed carrier
+    // a talker sits on, Unknown when the probe read no such talker.
+    characterise::VoiceSideband voice_sideband = characterise::VoiceSideband::Unknown;
 
     // core/identify's answer, which stands on verified framing and not on the
     // family, so it is kept whether or not the family may drive anything.
@@ -370,6 +377,14 @@ struct Track {
     std::uint32_t classification_order = 0;
     std::uint32_t classification_tones = 0;
     bool classification_double_sideband = false;
+
+    // The side of its suppressed carrier a talker sits on, from the most
+    // recent probe that read one, and Unknown until one has. Taken whatever
+    // may_drive_detection said, because the family on such a probe is always
+    // Unknown: no family the characteriser names is single sideband. Sticky
+    // for the reason the classification is; a later probe that read no talker,
+    // a pause between phrases, leaves it.
+    characterise::VoiceSideband voice_sideband = characterise::VoiceSideband::Unknown;
 
     // The protocol the most recent probe VERIFIED, with its confidence, and
     // None until one has. core/identify/identify.h claims one only on a sync

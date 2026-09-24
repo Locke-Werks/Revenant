@@ -1592,9 +1592,10 @@ TEST_CASE("a probed detection crosses the wire with its label", "[gpu][rpc][dete
     INFO(std::format("{} detections at decision {}", last.detections.size(), last.last_decision));
     REQUIRE(labelled != nullptr);
 
-    INFO(std::format("detection {} labelled {} '{}' at {:.2f} after {} probes", labelled->id,
-                     static_cast<int>(labelled->label.kind), labelled->label.name,
-                     labelled->label.confidence, labelled->label.probes));
+    INFO(std::format("detection {} labelled {} '{}' at {:.2f} after {} probes, {} Hz wide",
+                     labelled->id, static_cast<int>(labelled->label.kind), labelled->label.name,
+                     labelled->label.confidence, labelled->label.probes,
+                     labelled->bandwidth_hz));
     CHECK(labelled->label.kind == rpc::LabelKind::AnalogModulation);
     CHECK((labelled->label.name == "CW" || labelled->label.name == "AM"));
     CHECK(labelled->label.may_drive);
@@ -1796,5 +1797,19 @@ TEST_CASE("every labelled protocol's decoder reads the mode the label sets", "[r
     for (const auto& row : ui::label_tune_detail::kAnalogue) {
         INFO(std::string(row.name));
         CHECK(engine::demod_from_name(row.mode).has_value());
+    }
+
+    // A talker's side, which core/detect/label.cpp names USB or LSB, sets the
+    // matching sideband receiver and attaches nothing.
+    for (const auto& [name, mode] : {std::pair{"USB", "usb"}, std::pair{"LSB", "lsb"}}) {
+        rpc::DetectionLabel label;
+        label.kind = rpc::LabelKind::AnalogModulation;
+        label.name = name;
+        label.may_drive = true;
+        const ui::LabelTune tune = ui::label_tune(label, 2'400.0);
+        INFO(name);
+        CHECK(tune.drives);
+        CHECK(tune.mode == mode);
+        CHECK(tune.decoder.empty());
     }
 }

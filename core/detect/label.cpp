@@ -52,7 +52,17 @@ TrackLabel label_track(const Track& track) {
     out.confidence = track.classification_confidence;
     out.symbol_rate_hz = track.symbol_rate_hz;
     switch (track.classification) {
-        case Classification::Unknown: return TrackLabel{};
+        case Classification::Unknown:
+            // Rule 3: a talker on a suppressed carrier, by its side.
+            switch (track.voice_sideband) {
+                case characterise::VoiceSideband::Unknown: return TrackLabel{};
+                case characterise::VoiceSideband::Upper: out.name = "USB"; break;
+                case characterise::VoiceSideband::Lower: out.name = "LSB"; break;
+            }
+            out.kind = LabelKind::AnalogModulation;
+            out.confidence = kVoiceSidebandConfidence;
+            out.symbol_rate_hz = 0.0;
+            break;
         case Classification::Unmodulated:
             out.kind = LabelKind::AnalogModulation;
             out.name = track.classification_double_sideband ? "AM" : "CW";

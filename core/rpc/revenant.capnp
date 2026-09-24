@@ -1498,7 +1498,8 @@ struct DetectionLabel {
     name @1 :Text;
 
     # The verified protocol's confidence for a protocol, the accepted family's
-    # for the rest, zero for unknown. core/identify/identify.h and
+    # for the rest, detect::kVoiceSidebandConfidence, a half, for USB and LSB,
+    # and zero for unknown. core/identify/identify.h and
     # core/characterise/characterise.h say what each is and is not.
     confidence @2 :Float64;
 

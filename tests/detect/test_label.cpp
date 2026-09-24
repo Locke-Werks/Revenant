@@ -104,3 +104,33 @@ TEST_CASE("digital families name the family with its order or tone count", "[det
 
     CHECK(detect::label_track(track_with(Classification::Ofdm)).name == "OFDM");
 }
+
+// REJECTS: a talker on single sideband left unlabelled once the probe read its
+// side, a side read that overrules an accepted family or a verified protocol,
+// and a sideband label that claims more than the half the characteriser's own
+// analogue FM calls are held to.
+TEST_CASE("a talker's side names USB or LSB when no family was accepted", "[detect][label]") {
+    detect::Track upper = track_with(Classification::Unknown, 0.0);
+    upper.probes = 2;
+    upper.voice_sideband = characterise::VoiceSideband::Upper;
+    const detect::TrackLabel usb = detect::label_track(upper);
+    CHECK(usb.kind == LabelKind::AnalogModulation);
+    CHECK(usb.name == "USB");
+    CHECK(usb.may_drive);
+    CHECK(usb.confidence == detect::kVoiceSidebandConfidence);
+    CHECK(usb.symbol_rate_hz == 0.0);
+
+    detect::Track lower = upper;
+    lower.voice_sideband = characterise::VoiceSideband::Lower;
+    CHECK(detect::label_track(lower).name == "LSB");
+
+    detect::Track carrier = track_with(Classification::Unmodulated);
+    carrier.classification_double_sideband = true;
+    carrier.voice_sideband = characterise::VoiceSideband::Upper;
+    CHECK(detect::label_track(carrier).name == "AM");
+
+    detect::Track framed = upper;
+    framed.protocol = identify::Protocol::Rtty;
+    framed.protocol_confidence = 0.9;
+    CHECK(detect::label_track(framed).kind == LabelKind::Protocol);
+}

@@ -420,6 +420,12 @@ Status Detector::record_probe(std::uint64_t track_id, const ProbeFinding& findin
             track.protocol_confidence = stamped.protocol_confidence;
         }
 
+        // Before the gate too: a talker on single sideband is refused a
+        // family by construction. See Track::voice_sideband.
+        if (stamped.voice_sideband != characterise::VoiceSideband::Unknown) {
+            track.voice_sideband = stamped.voice_sideband;
+        }
+
         if (!stamped.may_drive_detection) {
             return;
         }

@@ -13,9 +13,11 @@ namespace revenant::detect {
 namespace {
 
 // Whether a finding is one an emitter's lines should all carry: a verified
-// protocol, or a family characterise::may_drive_detection accepted.
+// protocol, a family characterise::may_drive_detection accepted, or the side
+// of a talker on a suppressed carrier, which never has a family to accept.
 [[nodiscard]] bool settles(const ProbeFinding& finding) {
-    return finding.protocol != identify::Protocol::None || finding.may_drive_detection;
+    return finding.protocol != identify::Protocol::None || finding.may_drive_detection ||
+           finding.voice_sideband != characterise::VoiceSideband::Unknown;
 }
 
 }  // namespace
@@ -265,6 +267,7 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
             finding.may_drive_detection = outcome.may_drive_detection;
             finding.psk_without_symbol_rate = outcome.psk_without_symbol_rate;
             finding.double_sideband = outcome.double_sideband;
+            finding.voice_sideband = outcome.voice_sideband;
             finding.protocol = outcome.protocol;
             finding.protocol_confidence = outcome.protocol_confidence;
 

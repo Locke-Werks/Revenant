@@ -2436,19 +2436,28 @@ whole rule, in this order:
    voice-channel sidebands sit in phase with it; analogue FM is NFM below
    50 kHz and WFM above;
    FSK and PSK carry their tone count and order, 2FSK or BPSK; OFDM is OFDM.
-3. **Nothing.** A track probed and named nothing gets no label.
+3. **A talker's side.** With no family accepted, a track on which a probe read
+   a talker on a suppressed carrier is USB or LSB by the side the
+   characteriser read, at a confidence of a half
+   (`detect::kVoiceSidebandConfidence`).
+4. **Nothing.** A track probed and named nothing gets no label.
 
 WHAT RULE 2 USED TO SAY about AM: "or AM when its sidebands mirror about
 it". "Voice" below has why that changed.
 
-**It cannot say USB or LSB yet.** No family the characteriser names is single
-sideband. Since 2026-09-24 the characteriser reads a talker on a suppressed
+**USB and LSB come from the side, not from a family.** No family the
+characteriser names is single sideband. It reads a talker on a suppressed
 carrier and which side of it the talker sits, from the probe's extract, and
-refuses the family; the reading stops at `engine::ProbeOutcome`, which has no
-field for it, so a sideband signal is unlabelled. "Voice" below has the
-measurement and what carrying it to the label would take.
+refuses the family; `engine::ProbeOutcome::voice_sideband` carries the side to
+`ProbeFinding` and `Track::voice_sideband`, which keeps the last side read
+through a pause, and rule 3 names it. `ui/models/label_tune.h` sets a usb or
+lsb receiver from it.
 
-WHAT THIS PARAGRAPH USED TO SAY after its first sentence: "relative to a
+WHAT THE PARAGRAPH ABOVE USED TO SAY: "It cannot say USB or LSB yet. ... the
+reading stops at `engine::ProbeOutcome`, which has no field for it, so a
+sideband signal is unlabelled."
+
+WHAT THAT PARAGRAPH USED TO SAY BEFORE, after its first sentence: "relative to a
 carrier that is not transmitted the two differ only in which side their power
 sits, which "The lines as a set" above measured no per-band field can read."
 Per band, from the detector's spectrum, that still holds; from the probe's
@@ -2716,8 +2725,9 @@ pool of four was spent on the voice fragments.
 **No wrong label on any of the 56 emitter runs.** AM reads AM on every track
 it puts up, from 3.5 to 5.2 s, at every level. NFM at both deviations reads
 NFM on every track, from 3.5 to 11.3 s. CW and BPSK read right from 3.4 to
-7.2 s where they took 5.8 to 18.8. USB and LSB carry no label at all, which is
-the stated answer until the side reaches a track; see "What is not done" below.
+7.2 s where they took 5.8 to 18.8. In this run USB and LSB carried no label
+at all, which was the stated answer until the side reached a track; "USB and
+LSB on the wire" below is the measurement since it does.
 The tracks column is the same in both tables: nothing here changed the
 detector, which still reports a talker as several lines.
 "emitters at once" is how many tier two probed as units, a group counting once.
@@ -2900,9 +2910,11 @@ ENVELOPE"), which is the right family and opens the RTTY row on every probe.
 `tests/detect/test_labelled_scene.cpp` holds it, in ctest: `siggen labelled`
 at seeds 1, 2 and 3, 30 s each, run at twice realtime on sixteen channels
 and on the default grid, and every emitter's tracks at the last decision carry
-its own label and no other, USB none. All twelve held on all six runs, RTTY by
-its protocol on sixteen channels and by its family on the default grid, for
-the reason below.
+its own label and no other. All twelve held on all six runs, RTTY by its
+protocol on sixteen channels and by its family on the default grid, for the
+reason below, and USB, since "USB and LSB on the wire" below, by its side.
+WHAT THE FIRST SENTENCE USED TO SAY at its end: "carry its own label and no
+other, USB none", which was the rule for USB until the side reached the label.
 
 **RTTY's protocol on the default grid** is out of reach, and was before. Its
 detection is 1318 Hz wide, and the RTTY and CW rows in
@@ -2923,15 +2935,45 @@ The voice survey above, run again with this change on the same scenes, levels
 and seeds: no wrong label on any of the 56 emitter runs, and every AM, NFM,
 CW and BPSK cell's labels at the end as "After" has them.
 
+### USB and LSB on the wire
+
+`engine::ProbeOutcome::voice_sideband` carries the side the characteriser read
+on a talker to `ProbeFinding` and to `Track::voice_sideband`, which keeps the
+last side read through a pause; `detect::label_track` names a track with no
+accepted family and a side USB or LSB at a confidence of a half; and a tier-two
+emitter whose probe read a side settles on it, so its later lines carry it.
+`ui/models/label_tune.h` sets a usb or lsb receiver from the name and attaches
+no decoder.
+
+It waited on one case. A keyed CW carrier the detector measured 1465 Hz wide,
+in `tests/rpc/test_rpc_detect.cpp`'s "a probed detection crosses the wire with
+its label", read as a talker on the lower sideband and went on the wire as
+LSB. `CharacteriseConfig::voice_max_line_share`, from "The labelled scene,
+held" above, is the gate: a keyed carrier keeps 0.993 or more of its power
+within 50 Hz of its strongest bin and speech on either sideband 0.660 at most,
+so that detection is a carrier again and is labelled CW.
+
+The voice survey above, run again with this change on the same scenes, levels
+and seeds, read per track: **USB and LSB right on all 16 of their runs and no
+wrong label on any of the 56 emitter runs.** USB's first right label came at
+3.5 to 18.3 s and LSB's at 3.7 to 8.9 s, every label at the end at 0.50; AM,
+NFM, CW and BPSK ended as in "After". On the labelled scene,
+`tests/detect/test_labelled_scene.cpp` now holds USB to its label too, and it
+held on all six runs, on both grids.
+
+WHAT "WHAT IS NOT DONE" BELOW ALSO USED TO SAY, next: "USB and LSB labels.
+`characterise::Characterisation::voice` and `voice_sideband` read the talker
+and the side at every level measured, and stop at `engine::ProbeOutcome`,
+which has no field for them." And last: "`core/engine/probe.h` and
+`core/detect/detector.h` still describe `double_sideband` as mirrored
+sidebands in their comments." Both are done.
+
 ### What is not done
 
-- **USB and LSB labels.** `characterise::Characterisation::voice` and
-  `voice_sideband` read the talker and the side at every level measured, and
-  stop at `engine::ProbeOutcome`, which has no field for them. Carrying them
-  is two fields there, filled in `core/engine/probe.cpp` beside
-  `double_sideband`; then a `ProbeFinding` and `Track` field, a label rule for
-  an Unknown family with a side, and `USB` and `LSB` rows in
-  `ui/models/label_tune.h`'s analogue table.
+- **One detection per emitter was measured at one level and one seed.** The
+  voice survey reads the detector's tracks, not the wire, so its tables are
+  the lines tier two saw; the over-the-wire counts above are 30 dB, seed
+  20260924.
 - **WFM.** A probe asks for a bucket at least four times the detection's width
   and never above the grid's channel rate or 192000 S/s
   (`engine::kProbeRateOverOccupied`, `kProbeRates`). A broadcast station is
@@ -2944,8 +2986,6 @@ CW and BPSK cell's labels at the end as "After" has them.
   voice; "The labelled scene, held" above is the scene on speech.
   WHAT THIS USED TO SAY: "The HF corpus and the labelled scene were not
   re-run."
-- `core/engine/probe.h` and `core/detect/detector.h` still describe
-  `double_sideband` as mirrored sidebands in their comments.
 
 
 ## Click to tune

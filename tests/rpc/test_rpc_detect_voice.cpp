@@ -15,7 +15,8 @@
 // centre is inside its nominal band widened by a kilohertz, Live or Held, at
 // every poll. The case prints the most at once for each emitter and the count
 // at the last decision. It asserts that at the last decision each AM and NFM
-// talker is exactly one detection and carries its own label, AM or NFM; the
+// talker is exactly one detection, and that every talker and control has at
+// least one detection there carrying its own label, USB and LSB included; the
 // most at once over the run is printed and not asserted, because tier two
 // groups at a 400 Hz edge gap and docs/detection.md measured that splitting
 // NFM into two or three emitters at some decisions at 30 dB.
@@ -229,12 +230,16 @@ TEST_CASE("a talker on AM or NFM is one detection on the wire", "[gpu][rpc][dete
         return;
     }
     for (const Talker& talker : talkers) {
-        if (talker.label != "AM" && talker.label != "NFM") {
-            continue;
-        }
         INFO(std::format("{}: {} at the end, most {} at once", talker.name, talker.at_end,
                          talker.most));
-        CHECK(talker.at_end == 1);
+        if (talker.label == "AM" || talker.label == "NFM") {
+            CHECK(talker.at_end == 1);
+        }
+
+        // Every detection a talker has at the end carries its own label: AM
+        // and NFM by the family, USB and LSB by the side the characteriser
+        // read, and CW and BPSK as the controls they are.
+        CHECK(talker.at_end >= 1);
         for (const std::string& one : talker.end_labels) {
             CHECK(one.starts_with(talker.label + " "));
         }

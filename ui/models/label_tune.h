@@ -17,9 +17,10 @@
 // SITOR-B and PSK31 to usb, CW to cw, DMR to dmr and the dmr decoder. RDS
 // goes to wfm, whose RDS pane is where RDS is decoded, not the decoder seam.
 //
-// An analogue label is the mode by name: AM, NFM, WFM and CW. A CW label is a
-// carrier, not a Morse decode, so it attaches nothing; a CW PROTOCOL is Morse
-// the engine read, and attaches the cw decoder.
+// An analogue label is the mode by name: AM, NFM, WFM, CW, USB and LSB. A CW
+// label is a carrier, not a Morse decode, so it attaches nothing; a CW
+// PROTOCOL is Morse the engine read, and attaches the cw decoder. USB and LSB
+// are a talker on a suppressed carrier and attach nothing either.
 //
 // A digital family with no protocol sets usb when it is no wider than
 // kFamilySidebandMaxHz, so the tones of a narrow data signal land in the audio
@@ -87,11 +88,13 @@ inline constexpr std::array<Row, 12> kProtocols = {{
 }};
 
 // Analogue modulations, by the names core/detect/label.cpp gives.
-inline constexpr std::array<Row, 4> kAnalogue = {{
+inline constexpr std::array<Row, 6> kAnalogue = {{
     {"AM", "am", ""},
     {"NFM", "nfm", ""},
     {"WFM", "wfm", ""},
     {"CW", "cw", ""},
+    {"USB", "usb", ""},
+    {"LSB", "lsb", ""},
 }};
 
 template <std::size_t N>

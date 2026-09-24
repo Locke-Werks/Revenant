@@ -105,7 +105,7 @@ constexpr SceneEmitter kEmitters[] = {
     {"AX.25", 550'000, "AX.25"},
     {"RTTY", 700'000, "RTTY", "2FSK"},
     {"DMR", -950'000, "DMR"},
-    {"USB", 850'000, ""},
+    {"USB", 850'000, "USB"},
 };
 
 [[nodiscard]] std::string_view wanted(const SceneEmitter& emitter, bool default_grid) {

@@ -27,23 +27,22 @@
 //
 //      WHAT THE AM CLAUSE USED TO SAY: "or AM when its sidebands mirror about
 //      it". A keyed carrier's own noise mirrors too, and read as AM at 10 dB.
-//   3. Nothing. Unknown is a real answer, docs/detection.md says why, and a
+//   3. A talker on a suppressed carrier, with no family: USB or LSB by the
+//      side the characteriser read it on (Track::voice_sideband, from
+//      characterise::Characterisation::voice_sideband through
+//      engine::ProbeOutcome). The characteriser has no single-sideband
+//      family and refuses one on such a talker, so this cannot come from
+//      rule 2, and it comes after rule 2 so an accepted family wins.
+//   4. Nothing. Unknown is a real answer, docs/detection.md says why, and a
 //      track that was probed and named nothing gets no label rather than the
 //      nearest one.
 //
-// WHAT IT CANNOT SAY
-//
-// USB and LSB, yet. The characteriser has no single-sideband family, and
-// since 2026-09-24 it reads a talker on a suppressed carrier and which side
-// of it the talker sits (characterise::Characterisation::voice_sideband), and
-// refuses the family; but engine::ProbeOutcome does not carry that reading to
-// a track, so a sideband signal is still labelled nothing. That is the rule
-// above rather than a gap in it, and docs/detection.md says what carrying it
-// would take.
-//
-// WHAT THIS PARAGRAPH USED TO SAY after the first sentence: "relative to a
-// carrier that is not transmitted the two differ only in which side their
-// power sits, which docs/detection.md measured no field here can read."
+// WHAT "WHAT IT CANNOT SAY" USED TO SAY: "USB and LSB, yet. ... but
+// engine::ProbeOutcome does not carry that reading to a track, so a sideband
+// signal is still labelled nothing." It carries it now, and rule 3 is it.
+// Before that it said, after its first sentence: "relative to a carrier that
+// is not transmitted the two differ only in which side their power sits,
+// which docs/detection.md measured no field here can read."
 //
 // PURITY
 //
@@ -75,6 +74,13 @@ enum class LabelKind : std::uint8_t {
 // the 16 kHz a 5 kHz-deviation NFM channel occupies by Carson's rule.
 inline constexpr dsp::Hertz kWfmMinimumBandwidthHz = 50'000;
 
+// The confidence a USB or LSB label carries. Held to a half, as the
+// characteriser holds its analogue FM calls: the side is read from where a
+// talker's power sits against the extract's centre, which is an elimination
+// of the digital families rather than a positive finding of a sideband
+// modulator, and nothing calibrated puts a number on it.
+inline constexpr double kVoiceSidebandConfidence = 0.5;
+
 struct TrackLabel {
     LabelKind kind = LabelKind::Unknown;
 
@@ -82,14 +88,16 @@ struct TrackLabel {
     std::string_view name;
 
     // The protocol's own confidence for a protocol, the accepted family's for
-    // the rest, zero for Unknown.
+    // the rest, kVoiceSidebandConfidence for USB and LSB, zero for Unknown.
     double confidence = 0.0;
 
     // Whether a client may set a receiver from this label. True for a
-    // verified protocol and for a family characterise::may_drive_detection
-    // accepted, which are the only two ways a track gets a label at all, and
-    // false for Unknown. Carried as its own field rather than read off the
-    // kind so the rule can tighten without a client changing.
+    // verified protocol, for a family characterise::may_drive_detection
+    // accepted and for a talker's side, which are the only three ways a track
+    // gets a label at all, and false for Unknown. WHAT THIS USED TO SAY: "which
+    // are the only two ways a track gets a label at all". Carried as its own
+    // field rather than read off the kind so the rule can tighten without a
+    // client changing.
     bool may_drive = false;
 
     // The symbol rate the family's probe measured, zero where none was, for

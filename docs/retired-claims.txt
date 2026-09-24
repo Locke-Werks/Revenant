@@ -2015,3 +2015,28 @@ commit: "Tell a keyed carrier from a talker, and read RTTY's two tones as FSK"
 instead: The labelled scene is held end to end by
     tests/detect/test_labelled_scene.cpp; docs/detection.md, "The labelled
     scene, held". The HF corpus has not been re-run.
+
+phrase: It cannot say USB or LSB yet
+phrase: so a sideband signal is still labelled nothing
+phrase: which are the only two ways a track gets a label at all
+phrase: stop at `engine::ProbeOutcome`, which has no field for them
+retired: 2026-09-24
+commit: "Label a talker on single sideband USB or LSB by its side"
+instead: engine::ProbeOutcome::voice_sideband carries the side to
+    Track::voice_sideband, and detect::label_track names a track with no
+    accepted family and a side USB or LSB. docs/detection.md, "Voice".
+
+phrase: an Unmodulated call whose carrier has mirrored sidebands
+phrase: Unmodulated family only: the carrier has mirrored sidebands
+retired: 2026-09-24
+commit: "Label a talker on single sideband USB or LSB by its side"
+instead: double_sideband is characterise's in-phase reading: the carrier's
+    voice-channel sidebands sit in phase with it,
+    CharacteriseConfig::carrier_in_phase_balance.
+
+phrase: carry its own label and no other, USB none
+retired: 2026-09-24
+commit: "Label a talker on single sideband USB or LSB by its side"
+instead: tests/detect/test_labelled_scene.cpp holds USB to the label USB,
+    which detect::label_track names from the talker's side.
+

@@ -623,6 +623,8 @@ struct ProbePool::Impl {
                 outcome.psk_tone_pair = found.psk_tone_pair;
                 outcome.symbol_rate_exceeds_detection = found.symbol_rate_exceeds_detection;
                 outcome.double_sideband = found.double_sideband;
+                outcome.voice_sideband = found.voice ? found.voice_sideband
+                                                     : characterise::VoiceSideband::Unknown;
 
                 // Then the protocols the family and the width make plausible,
                 // over everything collected. A failure here is not the probe's:

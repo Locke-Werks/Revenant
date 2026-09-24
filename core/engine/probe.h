@@ -259,8 +259,17 @@ struct ProbeOutcome {
     bool symbol_rate_exceeds_detection;
 
     // characterise::Characterisation::double_sideband: an Unmodulated call
-    // whose carrier has mirrored sidebands, which a label reads as AM.
+    // whose carrier's voice-channel sidebands sit in phase with it
+    // (CharacteriseConfig::carrier_in_phase_balance), which a label reads as
+    // AM. WHAT THIS USED TO SAY: "an Unmodulated call whose carrier has
+    // mirrored sidebands".
     bool double_sideband;
+
+    // characterise::Characterisation::voice_sideband when the characteriser
+    // read a talker on a suppressed carrier, Unknown otherwise: which side of
+    // it the talker sits, which a label reads as USB or LSB. The family on
+    // such a call is Unknown, because no family here is single sideband.
+    characterise::VoiceSideband voice_sideband;
 
     // core/identify's answer over the whole dwell: a protocol claimed on
     // verified framing, or None. Independent of may_drive_detection, because a
