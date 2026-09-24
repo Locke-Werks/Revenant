@@ -120,8 +120,23 @@ fail  = "Revenant needs about 256 MB free on the install volume."
 #
 # The hook route needs a payload member that stops the product, depends on
 # nothing but the operating system and itself, and is signed before staging.
-# No such binary exists. The preflight route costs nothing to ship and,
-# with restart_manager, hands the user the option rather than a dead end.
+# No such binary exists. The preflight route costs nothing to ship.
+#
+# A RUNNING COPY IS A REFUSAL, NOT AN OFFER. restart_manager = true sets a
+# `recoverable` flag on the outcome and nothing in the stub reads it: there is
+# no RmShutdown anywhere in Forge v0.4.0 or in its tree at 544533e, and
+# has_blocking_failure counts the check as a plain failure. So the person
+# installing gets the fail message below, exit 1603, and has to close the
+# program themselves. The match is on the image name across every process on
+# the machine, in any session and from any path: on 2026-09-23 --check-only
+# failed here on an engine running out of another checkout's build tree. The
+# key stays because it costs nothing and is what a Forge that grows the close
+# will read.
+#
+# WHAT THIS PARAGRAPH USED TO SAY: "The preflight route costs nothing to ship
+# and, with restart_manager, hands the user the option rather than a dead
+# end." It never did. Forge's docs/config-schema.md describes the key that way
+# and the stub does not implement it.
 [[preflight]]
 type            = "process_not_running"
 name            = "revenant-engine.exe"
