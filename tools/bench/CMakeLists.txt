@@ -5,6 +5,7 @@ add_library(revenant_bench STATIC
     sweep.cpp
     curve.cpp
     throughput.cpp
+    cw_engine.cpp
     rds_subject.cpp
     mode_subjects.cpp
     fsk_subjects.cpp

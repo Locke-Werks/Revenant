@@ -41,6 +41,7 @@
 #include "core/engine/vrx.h"
 #include "core/error.h"
 #include "tools/bench/curve.h"
+#include "tools/bench/cw_engine.h"
 #include "tools/bench/mode_subjects.h"
 #include "tools/bench/rds_subject.h"
 #include "tools/bench/sweep.h"
@@ -887,6 +888,158 @@ int command_throughput(const ArgMap& args) {
     return kExitOk;
 }
 
+// ---------------------------------------------------------------------------
+// cw-engine
+// ---------------------------------------------------------------------------
+
+constexpr std::string_view kCwEngineOptions[] = {
+    "wpm", "snr", "pitch", "receivers", "trials", "characters", "seed", "jitter",
+    "gpu", "threads", "out", "quiet",
+};
+
+template <typename T>
+Expected<std::vector<T>> parse_list(std::string_view text, std::string_view key) {
+    std::vector<T> out;
+    while (!text.empty()) {
+        const std::size_t comma = text.find(',');
+        const std::string_view item = text.substr(0, comma);
+        T value{};
+        const auto result = std::from_chars(item.data(), item.data() + item.size(), value);
+        if (item.empty() || result.ec != std::errc{} || result.ptr != item.data() + item.size()) {
+            return fail(std::format("option '--{}' needs a comma-separated list of numbers, "
+                                    "found '{}'",
+                                    key, item));
+        }
+        out.push_back(value);
+        text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+    }
+    return out;
+}
+
+int command_cw_engine(const ArgMap& args) {
+    if (const Status ok = args.require_known(kCwEngineOptions); !ok) {
+        std::print(stderr, "bench cw-engine: {}\n", ok.error().message);
+        return kExitUsage;
+    }
+    bench::CwEngineConfig config;
+    if (args.has("wpm")) {
+        auto list = parse_list<double>(args.text("wpm", ""), "wpm");
+        if (!list) {
+            std::print(stderr, "bench cw-engine: {}\n", list.error().message);
+            return kExitUsage;
+        }
+        config.wpm = *list;
+    }
+    if (args.has("snr")) {
+        auto list = parse_list<double>(args.text("snr", ""), "snr");
+        if (!list) {
+            std::print(stderr, "bench cw-engine: {}\n", list.error().message);
+            return kExitUsage;
+        }
+        config.snr_db = *list;
+    }
+    if (args.has("pitch")) {
+        auto list = parse_list<std::int64_t>(args.text("pitch", ""), "pitch");
+        if (!list) {
+            std::print(stderr, "bench cw-engine: {}\n", list.error().message);
+            return kExitUsage;
+        }
+        config.pitch_hz = *list;
+    }
+    if (args.has("receivers")) {
+        config.receivers.clear();
+        std::string_view text = args.text("receivers", "");
+        while (!text.empty()) {
+            const std::size_t comma = text.find(',');
+            config.receivers.emplace_back(text.substr(0, comma));
+            text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+        }
+    }
+    auto trials = args.integer("trials", config.trials);
+    auto characters = args.integer("characters", config.characters);
+    auto seed = args.integer("seed", config.seed);
+    auto threads = args.integer("threads", config.threads);
+    auto jitter = args.number("jitter", config.jitter);
+    auto gpu = args.number("gpu", config.gpu_index);
+    for (const revenant::Error* error :
+         {trials ? nullptr : &trials.error(), characters ? nullptr : &characters.error(),
+          seed ? nullptr : &seed.error(), threads ? nullptr : &threads.error(),
+          jitter ? nullptr : &jitter.error(), gpu ? nullptr : &gpu.error()}) {
+        if (error != nullptr) {
+            std::print(stderr, "bench cw-engine: {}\n", error->message);
+            return kExitUsage;
+        }
+    }
+    config.trials = *trials;
+    config.characters = *characters;
+    config.seed = *seed;
+    config.threads = static_cast<unsigned>(*threads);
+    config.jitter = *jitter;
+    config.gpu_index = static_cast<int>(*gpu);
+
+    auto report = bench::run_cw_engine(config);
+    if (!report) {
+        std::print(stderr, "bench cw-engine: {}\n", report.error().message);
+        return kExitError;
+    }
+    if (!args.has("quiet")) {
+        std::print("{}\n{} receivers x {} files on {}, {:.1f} s\n",
+                   bench::cw_engine_tables(config, *report),
+                   config.receivers.size() * config.pitch_hz.size(),
+                   config.wpm.size() * config.snr_db.size() * config.trials, report->device,
+                   report->wall_seconds);
+    }
+    const std::string out_path(args.text("out", ""));
+    if (!out_path.empty()) {
+        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+        const std::string text = bench::cw_engine_json(*report);
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!out) {
+            std::print(stderr, "bench cw-engine: failed while writing '{}'\n", out_path);
+            return kExitError;
+        }
+    }
+    return kExitOk;
+}
+
+constexpr std::string_view kCwFileOptions[] = {"seconds", "channels", "gpu"};
+
+int command_cw_file(const ArgMap& args) {
+    if (const Status ok = args.require_known(kCwFileOptions); !ok) {
+        std::print(stderr, "bench cw-file: {}\n", ok.error().message);
+        return kExitUsage;
+    }
+    const auto& positional = args.positional();
+    if (positional.size() < 2) {
+        std::print(stderr, "bench cw-file: needs a source URI and at least one receiver\n");
+        return kExitUsage;
+    }
+    bench::CwFileConfig config;
+    config.uri = std::string(positional[0]);
+    for (std::size_t i = 1; i < positional.size(); ++i) {
+        config.receivers.emplace_back(positional[i]);
+    }
+    auto seconds = args.number("seconds", config.seconds);
+    auto channels = args.integer("channels", config.channels);
+    auto gpu = args.number("gpu", config.gpu_index);
+    for (const revenant::Error* error : {seconds ? nullptr : &seconds.error(),
+                                         channels ? nullptr : &channels.error(),
+                                         gpu ? nullptr : &gpu.error()}) {
+        if (error != nullptr) {
+            std::print(stderr, "bench cw-file: {}\n", error->message);
+            return kExitUsage;
+        }
+    }
+    config.seconds = *seconds;
+    config.channels = static_cast<std::uint32_t>(*channels);
+    config.gpu_index = static_cast<int>(*gpu);
+    if (auto ran = bench::run_cw_file(config); !ran) {
+        std::print(stderr, "bench cw-file: {}\n", ran.error().message);
+        return kExitError;
+    }
+    return kExitOk;
+}
+
 constexpr std::string_view kUsage = R"(revenant bench: BER/SNR sweep harness and throughput measurement
 
 usage:
@@ -894,6 +1047,8 @@ usage:
   bench compare    REFERENCE.json CANDIDATE.json [options]
   bench validate   [options]
   bench throughput [options]
+  bench cw-engine  [options]
+  bench cw-file    URI RECEIVER... [options]
   bench help
 
 sweep options (validate takes the same set):
@@ -975,6 +1130,28 @@ throughput options:
   throughput reports and never judges: it has no threshold and always exits 0
   on a completed run.
 
+cw-engine options (a keyed carrier through cw, usb and lsb receivers on the
+engine, and the "cw" decoder a client is fed by on each; tools/bench/cw_engine.h):
+  --wpm LIST              speeds                        (default 12,20,30,40)
+  --snr LIST              SNR in 2500 Hz at RF          (default 0,5,10,15,20)
+  --pitch LIST            audio pitches the tone lands at (default 300,500,700,900,1200)
+  --receivers LIST        cw cw-wide usb lsb            (default all four)
+  --trials N              transmissions per cell        (default 4)
+  --characters N          characters per transmission   (default 40)
+  --seed N                                              (default 20260923)
+  --jitter X              keyer stretch, 0 a machine    (default 0)
+  --gpu N                 device index                  (default -1)
+  --threads N             decoder threads               (default: hardware)
+  --out FILE              every cell as JSON
+  --quiet                 no tables
+
+cw-file: the "cw" decoder on a recording, every line it prints with its
+stream, pitch and speed. Each RECEIVER is offset:mode or offset:mode:low:high,
+the offset in hertz from the source's centre, mode cw, usb or lsb.
+  --seconds X             source seconds to run         (default: all)
+  --channels N            channelizer channels          (default 16)
+  --gpu N                 device index                  (default -1)
+
 exit codes:
   0  ok
   1  regression, or validation outside the band
@@ -1016,6 +1193,12 @@ int main(int argc, char** argv) {
     }
     if (command == "throughput") {
         return command_throughput(*parsed);
+    }
+    if (command == "cw-file") {
+        return command_cw_file(*parsed);
+    }
+    if (command == "cw-engine") {
+        return command_cw_engine(*parsed);
     }
 
     std::print(stderr, "bench: unknown command '{}'\n", command);
