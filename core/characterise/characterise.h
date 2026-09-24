@@ -263,6 +263,25 @@ struct CharacteriseConfig {
     // 0.997 at 30 dB, with the third line under 0.005 of the weaker tone;
     // tests/characterise/test_consistency.cpp measures both sides at the
     // probe pool's 12000 S/s floor bucket.
+    //
+    // THE SAME TWO BARS ON A CONSTANT ENVELOPE name the family 2-FSK, ahead of
+    // every other branch. Two tones keyed between are two lines with nothing
+    // else of note, and unlike two steady tones their envelope is constant, net
+    // of the noise inside the passband (constant_envelope_variance). The
+    // branches that used to take the pair each read a talker or a carrier into
+    // it: tools/siggen's labelled scene's RTTY, 170 Hz shift at 45.45 baud,
+    // holds one tone's worth of power in three bins, 0.49 at 30 dB here, and
+    // through the probe pool it read 0.51 and 0.52, over
+    // carrier_concentration, and was called a carrier, labelled CW, a family
+    // that admits no RTTY row in core/identify; otherwise its keying read as
+    // a talker's deviation (fm_voice_frequency_syllabic) and it was labelled
+    // NFM. MEASURED in tests/characterise/test_voice.cpp's survey at 12000,
+    // 24000 and 48000 S/s from 30 to 5 dB in 2500 Hz: that RTTY's third line
+    // reads 0.062 to 0.084 of its weaker tone and its pair 0.20 to 0.81 of
+    // the excess, and it clears both bars on a constant envelope in 13 of 24
+    // extracts, all six at 30 dB; every other emitter there, AM, NFM, keyed
+    // CW, a bare carrier, BPSK, 2FSK at 1200 baud, PSK31, speech on either
+    // sideband and noise, reads a third line of 0.351 or more.
     double tone_pair_fraction = 0.5;
     double tone_pair_third_fraction = 0.25;
     double tone_pair_rate_tolerance = 0.02;
@@ -394,18 +413,52 @@ struct CharacteriseConfig {
     // syllabic_fast of 3.5 to 7.5, and a side_centroid of 0.57 to 0.68 on its
     // own side; noise 0.20 to 0.32 at 0.42 to 0.48, PSK31 0.20 to 0.22 at 0.62
     // to 0.65, BPSK and 2FSK under 0.09, AM on speech under 0.10; a keyed
-    // carrier 0.66 to 0.81 at 2.7 to 3.3, which the width and the carrier
-    // branch keep out. FM on speech at 5 kHz deviation reads a
+    // carrier 0.66 to 0.81 at 2.7 to 3.3, which voice_max_line_share below
+    // keeps out at any width. FM on speech at 5 kHz deviation reads a
     // frequency_syllabic_depth of 0.215 to 0.81 from 30 to 10 dB, so its
     // weakest draws fall under the bar and are named by the quadrature reading
     // or not at all; BPSK, 2FSK, noise, a bare carrier and AM read 0.11 at
     // most. docs/detection.md, "Voice", has the table.
+    //
+    // WHAT THE KEYED CARRIER CLAUSE USED TO SAY: "which the width and the
+    // carrier branch keep out". On a coarse grid neither did; see
+    // voice_max_line_share.
     double voice_syllabic_depth = 0.4;
     double voice_syllabic_ratio = 2.0;
     double voice_min_width_hz = 250.0;
     double voice_carrier_width_hz = 1'000.0;
     double voice_side_centroid = 0.1;
     double fm_voice_frequency_syllabic = 0.25;
+
+    // A KEYED CARRIER IS NOT A TALKER, whatever width the detector gave it.
+    // The single sideband rule above takes a keyed carrier's envelope for a
+    // talker's, and keeps it out by its width; but a line on a coarse grid is
+    // as wide as five of the detector's bins, which measured 1311 Hz for keyed
+    // CW on the 263.7 Hz bins revenant-cli opens tools/siggen's labelled scene
+    // on, and 1465 Hz in tests/rpc/test_rpc_detect.cpp. Both were then taken
+    // for a talker: the first refused and left unlabelled, the second read as
+    // lower sideband.
+    //
+    // What a keyed carrier has and a talker does not is one frequency. So the
+    // share of the passband's power within voice_line_half_width_hz of its
+    // strongest bin is measured (Characterisation::line_share), and at or over
+    // voice_max_line_share the extract is a line and not a talker.
+    //
+    // MEASURED in tests/characterise/test_voice.cpp's survey at 12000, 24000
+    // and 48000 S/s from 30 to 5 dB in 2500 Hz, two draws each, within 50 Hz:
+    // keyed CW at 20 WPM 0.993 to 1.005, a bare carrier and PSK31 0.998 to
+    // 1.011; speech on USB 0.326 to 0.660 and on LSB 0.227 to 0.605, the top
+    // of both at 5 dB. 0.8 is a fifth inside each. Two readings were tried
+    // first and dropped. Within 150 Hz speech on USB read up to 0.817, too
+    // near a carrier. And with each bin's excess clipped at zero over the
+    // 20th percentile, as the other voice readings take it, noise added the
+    // positive half of its fluctuation across the whole passband to the
+    // total: keyed CW fell to 0.69 at 5 dB and 48000 S/s while speech on USB
+    // reached 0.77 at 30 dB. 50 Hz because every keyed carrier measured held
+    // 99 percent of its excess within it; am_sideband_min_offset_hz above
+    // puts keying at 25 WPM with 5 ms edges inside about 100 Hz.
+    double voice_line_half_width_hz = 50.0;
+    double voice_max_line_share = 0.8;
 
     // Transform length for the averaged spectrum, or zero to let
     // analysis_segment pick one from the sample count.
@@ -488,6 +541,13 @@ struct Characterisation {
     double tone_pair_spacing_hz = 0.0;
     bool psk_tone_pair = false;
 
+    // Set when the same measurement named the family 2-FSK: the pair clears
+    // both bars on an envelope constant net of the noise inside the passband.
+    // CharacteriseConfig::tone_pair_fraction, "THE SAME TWO BARS ON A CONSTANT
+    // ENVELOPE". tones is then whatever the histogram found, usually nothing,
+    // and the tone count the family carries is two.
+    bool fsk_tone_pair = false;
+
     // Set when CharacteriseConfig::detection_bandwidth_hz was given and the
     // family's own symbol rate was wider than it. The family is then refused,
     // Unknown with the reason in the refusal, and symbol_rate keeps the rate
@@ -552,6 +612,14 @@ struct Characterisation {
     // detection's width of the extract's centre, as a fraction of that half
     // width: negative below the centre, positive above.
     double side_centroid = 0.0;
+
+    // Within a quarter of the rate of the centre, which is the half of the
+    // bucket a probe passes: the power over the median bin there that sits
+    // within CharacteriseConfig::voice_line_half_width_hz of the strongest
+    // bin, as a share of all of it. Each bin's excess is signed, so noise sums
+    // to about nothing and a share can come out a little over one. Negative
+    // when the passband held no power over its median.
+    double line_share = -1.0;
 
     // The carrier's sidebands in the voice channel, 300 to 3000 Hz from it,
     // split into the part in phase with the carrier and the part in

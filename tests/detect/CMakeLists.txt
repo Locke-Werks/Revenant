@@ -59,3 +59,32 @@ catch_discover_tests(revenant_detect_tests
         LABELS "detect"
         TIMEOUT 300
 )
+
+# The labelled scene end to end, which ctest does run and which does need the
+# GPU, so it is its own binary with the shared device fixture rather than a
+# case in the one above, whose cases need none. It renders
+# tools/siggen/labelled.h's scene, so it is built only where the tools are.
+if(TARGET revenant_siggen_scenes)
+    add_executable(revenant_labelled_tests
+        ../support/no_modal_dialogs.cpp
+        ../reference/gpu_fixture.cpp
+        test_labelled_scene.cpp
+    )
+    target_link_libraries(revenant_labelled_tests PRIVATE
+        revenant_core
+        revenant_siggen_scenes
+        Catch2::Catch2WithMain
+    )
+    target_include_directories(revenant_labelled_tests PRIVATE "${CMAKE_SOURCE_DIR}")
+    revenant_apply_warnings(revenant_labelled_tests)
+    revenant_apply_reference_fp(revenant_labelled_tests)
+
+    # Three seeds of thirty seconds, each rendered and run on two grids at
+    # twice realtime: 239 s on the machine it was written on, about half of it
+    # the render, so the timeout is twice the helper's.
+    catch_discover_tests(revenant_labelled_tests
+        PROPERTIES
+            LABELS "detect"
+            TIMEOUT 600
+    )
+endif()

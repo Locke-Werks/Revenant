@@ -31,6 +31,7 @@
 
 #include "core/characterise/characterise.h"
 #include "core/dsp/synth/channel.h"
+#include "core/dsp/synth/fsk_mod.h"
 #include "core/dsp/synth/modulators.h"
 #include "core/dsp/synth/psk31_mod.h"
 #include "tests/characterise/signal_lab.h"
@@ -155,6 +156,20 @@ struct Emitter {
                        cw.words_per_minute = 20.0;
                        return must(siggen::generate_cw(common, cw, count));
                    }});
+    // The same keyed carrier handed over at the widths a coarse grid gives a
+    // line: 1311 Hz on the 263.7 Hz bins revenant-cli opens the labelled
+    // scene on, and 1465 Hz in tests/rpc/test_rpc_detect.cpp. See
+    // CharacteriseConfig::voice_max_line_share.
+    for (const auto& [name, width] : {std::pair{"cw1311", 1'311.0}, std::pair{"cw1465", 1'465.0}}) {
+        out.push_back({name, width, [](dsp::SampleRate rate, std::size_t count, std::uint64_t seed) {
+                           siggen::ModulatorConfig common;
+                           common.rate = rate;
+                           common.seed = seed;
+                           siggen::CwParams cw;
+                           cw.words_per_minute = 20.0;
+                           return must(siggen::generate_cw(common, cw, count));
+                       }});
+    }
     out.push_back({"carrier", 180.0, [](dsp::SampleRate, std::size_t count, std::uint64_t) {
                        return std::vector<dsp::Complex32>(count, dsp::Complex32(1.0F, 0.0F));
                    }});
@@ -200,6 +215,54 @@ struct Emitter {
                        }
                        return out;
                    }});
+    // RTTY at 45.45 baud and 170 Hz shift, rendered as audio and moved to DC
+    // the way tools/siggen/labelled.cpp puts it in the labelled scene, at the
+    // two widths the detector measured it there: 791 Hz on 16 channels and
+    // 1318 Hz on the eight revenant-cli opens it on.
+    for (const auto& [name, width] : {std::pair{"rtty", 791.0}, std::pair{"rtty1318", 1'318.0}}) {
+        out.push_back({name, width, [](dsp::SampleRate rate, std::size_t count, std::uint64_t) {
+                           siggen::RttyModConfig mod;
+                           mod.rate = rate;
+                           auto combinations = siggen::ita2_encode_text(
+                               U"RYRYRY CQ CQ DE N0CALL THE QUICK BROWN FOX 73 ");
+                           REQUIRE(combinations.has_value());
+                           auto audio = siggen::rtty_render(mod, *combinations);
+                           REQUIRE(audio.has_value());
+                           constexpr int kHalf = 128;
+                           const double cutoff = 600.0 / static_cast<double>(rate);
+                           std::vector<double> taps(2 * kHalf + 1);
+                           double sum = 0.0;
+                           for (int k = -kHalf; k <= kHalf; ++k) {
+                               const double x = 2.0 * cutoff * static_cast<double>(k);
+                               const double sinc =
+                                   k == 0 ? 1.0 : std::sin(std::numbers::pi * x) / (std::numbers::pi * x);
+                               const double window = 0.54 + 0.46 * std::cos(std::numbers::pi * k / kHalf);
+                               taps[static_cast<std::size_t>(k + kHalf)] = sinc * window;
+                               sum += sinc * window;
+                           }
+                           std::vector<std::complex<double>> mixed(count);
+                           const double step = -2.0 * std::numbers::pi * 2'210.0 / static_cast<double>(rate);
+                           for (std::size_t n = 0; n < count; ++n) {
+                               const double phase = std::fmod(step * static_cast<double>(n), 2.0 * std::numbers::pi);
+                               mixed[n] = 2.0 * static_cast<double>((*audio)[n % audio->size()]) *
+                                          std::polar(1.0, phase);
+                           }
+                           std::vector<dsp::Complex32> out(count);
+                           for (std::size_t n = 0; n < count; ++n) {
+                               std::complex<double> acc(0.0, 0.0);
+                               for (int k = -kHalf; k <= kHalf; ++k) {
+                                   const auto j = static_cast<std::ptrdiff_t>(n) + k;
+                                   if (j >= 0 && j < static_cast<std::ptrdiff_t>(count)) {
+                                       acc += taps[static_cast<std::size_t>(k + kHalf)] / sum *
+                                              mixed[static_cast<std::size_t>(j)];
+                                   }
+                               }
+                               out[n] = dsp::Complex32(static_cast<float>(acc.real()),
+                                                       static_cast<float>(acc.imag()));
+                           }
+                           return out;
+                       }});
+    }
     out.push_back({"noise", 3'000.0, [](dsp::SampleRate, std::size_t count, std::uint64_t) {
                        return std::vector<dsp::Complex32>(count, dsp::Complex32(0.0F, 0.0F));
                    }});
@@ -290,6 +353,49 @@ TEST_CASE("speech on AM reads in phase and on FM in quadrature, and a carrier re
     }
 }
 
+// REJECTS: a keyed carrier taken for a talker because a coarse grid measured
+// it over a kilohertz wide, which left it unlabelled on the labelled scene's
+// default grid and read it as lower sideband in tests/rpc/test_rpc_detect.cpp.
+// See CharacteriseConfig::voice_max_line_share.
+TEST_CASE("a keyed carrier is a carrier at any width the detector gives it",
+          "[characterise][voice]") {
+    for (const dsp::SampleRate rate : {12'000, 24'000}) {
+        for (const double level : {30.0, 20.0, 10.0}) {
+            for (const char* name : {"cw", "cw1311", "cw1465"}) {
+                const auto result = extract_of(name, rate, level, 0);
+                INFO(name << " at " << rate << " S/s and " << level << " dB: " << result.summary);
+                CHECK(result.line_share >= characterise::CharacteriseConfig{}.voice_max_line_share);
+                CHECK_FALSE(result.voice);
+                CHECK(result.family == ModulationFamily::Unmodulated);
+                CHECK_FALSE(result.double_sideband);
+            }
+        }
+    }
+}
+
+// REJECTS: RTTY's two tones called a carrier, which labelled it CW and kept
+// core/identify's RTTY row from ever trying it, or a talker on FM, which
+// labelled it NFM. See CharacteriseConfig::tone_pair_fraction, "THE SAME TWO
+// BARS ON A CONSTANT ENVELOPE". At 10 dB the pair's share falls under the bar
+// on most extracts and the family is refused or a flagged PSK call, neither of
+// which is labelled; the survey below prints it.
+TEST_CASE("RTTY's two tones are 2-FSK, not a carrier and not a talker",
+          "[characterise][voice]") {
+    for (const dsp::SampleRate rate : {12'000, 24'000, 48'000}) {
+        for (const double level : {30.0, 20.0}) {
+            for (const char* name : {"rtty", "rtty1318"}) {
+                const auto result = extract_of(name, rate, level, 0);
+                INFO(name << " at " << rate << " S/s and " << level << " dB: " << result.summary
+                          << result.refusal);
+                CHECK(result.fsk_tone_pair);
+                CHECK(result.family == ModulationFamily::Fsk);
+                CHECK_FALSE(result.voice);
+                CHECK(characterise::may_drive_detection(result));
+            }
+        }
+    }
+}
+
 // REJECTS: 5 kHz deviation FM on speech called unknown or PSK, which is what
 // it was before: its carrier holds under half its power, its deviation comes
 // and goes with the talker, and the old analogue FM branch wanted the
@@ -312,7 +418,8 @@ TEST_CASE("speech on wide deviation FM is analogue FM", "[characterise][voice]")
 TEST_CASE("the voice rules claim no data mode and no noise", "[characterise][voice]") {
     for (const dsp::SampleRate rate : {12'000, 24'000}) {
         for (const double level : {30.0, 20.0, 10.0, 5.0}) {
-            for (const char* name : {"cw", "carrier", "bpsk", "fsk2", "psk31", "noise"}) {
+            for (const char* name :
+                 {"cw", "cw1311", "cw1465", "carrier", "bpsk", "fsk2", "psk31", "noise"}) {
                 const auto result = extract_of(name, rate, level, 0);
                 INFO(name << " at " << rate << " S/s and " << level << " dB: " << result.summary);
                 CHECK_FALSE(result.voice);
@@ -347,7 +454,7 @@ TEST_CASE("voice survey: what the characteriser says about speech", "[.voice-cha
                     std::println(
                         "  {:<7} {:>4.0f} dB #{}  {:<12} {:.2f} d{:d} r{:>6.1f} conc {:.3f} "
                         "env {:.3f} net {:+.3f} dsb {:d} lfm {:d} iq {:+.3f}/{:+.4f} syl {:.3f} "
-                        "fast {:.3f} fsyl {:.3f} side {:+.3f} voice {:d}{}",
+                        "fast {:.3f} fsyl {:.3f} side {:+.3f} line {:.3f} pair {:.3f}/{:.3f} voice {:d}{}",
                         emitter.name, level, draw,
                         characterise::modulation_family_name(result.family),
                         result.family_confidence, characterise::may_drive_detection(result),
@@ -356,7 +463,9 @@ TEST_CASE("voice survey: what the characteriser says about speech", "[.voice-cha
                         net, result.double_sideband, result.low_index_fm,
                         result.carrier_iq_balance, result.carrier_in_phase_excess,
                         result.syllabic_depth, result.syllabic_fast,
-                        result.frequency_syllabic_depth, result.side_centroid, result.voice,
+                        result.frequency_syllabic_depth, result.side_centroid, result.line_share,
+                        result.tone_pair_share, result.tone_pair_third,
+                        result.voice,
                         result.voice_sideband == characterise::VoiceSideband::Upper   ? " usb"
                         : result.voice_sideband == characterise::VoiceSideband::Lower ? " lsb"
                                                                                       : "");

@@ -610,8 +610,13 @@ struct ProbePool::Impl {
                     found.symbol_rate.found ? found.symbol_rate.symbol_rate_hz : 0.0;
                 outcome.order =
                     found.order.found ? static_cast<std::uint32_t>(found.order.order) : 0U;
+                // Two when the family came from the spectrum's tone pair
+                // rather than the histogram. See
+                // characterise::Characterisation::fsk_tone_pair.
                 outcome.tone_count =
-                    found.tones.found ? static_cast<std::uint32_t>(found.tones.tone_count) : 0U;
+                    found.tones.found     ? static_cast<std::uint32_t>(found.tones.tone_count)
+                    : found.fsk_tone_pair ? 2U
+                                          : 0U;
                 outcome.concentration = found.spectral_concentration;
                 outcome.may_drive_detection = characterise::may_drive_detection(found);
                 outcome.psk_without_symbol_rate = found.psk_without_symbol_rate;

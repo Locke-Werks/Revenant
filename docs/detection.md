@@ -2848,6 +2848,81 @@ at 2.5 kHz deviation and 1747 Hz at 5 kHz, so at some decisions one talker
 is two or three emitters and publishes as that many. The fold follows the
 grouping; it does not change it.
 
+### The labelled scene, held
+
+Nothing above re-ran the labelled scene, and on the grid revenant-cli opens
+it on, two of its emitters had come off their labels. `revenant-cli
+<labelled-2160k.sigmf-data> --detect --duration 30 --pace 1`, the capture
+`siggen labelled --seconds 45 --seed 1` writes, which with no `--channels` is
+eight channels and 263.7 Hz a bin (`EngineConfig::channels_yield_to_source`).
+Each cell is the label the emitter's tracks ended with, the same in every run
+unless it says otherwise; e0f6268 is the commit before "Label a talker on AM
+or FM by its emitter, and stop calling SSB voice digital", b43d763 the one
+this change is on:
+
+| emitter | e0f6268, 3 runs | b43d763, 3 runs | this change, 3 runs |
+| --- | --- | --- | --- |
+| AM | AM | AM | AM |
+| NFM | NFM | NFM | NFM |
+| CW, 1311 Hz | CW | **none**, after 3 probes | CW |
+| BPSK | BPSK | BPSK | BPSK |
+| P25, D-STAR, TETRA, M17, AX.25, DMR | each its protocol | each its protocol | each its protocol |
+| RTTY, 1318 Hz | **NFM** | **NFM** | 2FSK |
+| USB | none | none | none |
+
+And with `--channels 16`, 131.8 Hz a bin, two runs each: e0f6268 labelled CW
+and RTTY by their protocols and put CW on two of the NFM emitter's six lines
+and CW or AM on a third; b43d763 and this change label every line of every
+emitter right, RTTY by its protocol, and USB with nothing.
+
+**Keyed CW** is one line, and a line on a coarse grid is five of the
+detector's bins wide: 1311 Hz here. The single sideband rule reads a keyed
+carrier's envelope as a talker's, and its width bar and the carrier branch were
+what kept one out; at over a kilohertz `voice_carrier_width_hz` let the talker
+reading overrule the carrier, the family was refused, and the CW row and the
+long identification dwell both stop at a kilohertz, so nothing named it. The
+same rule read a keyed carrier 1465 Hz wide in `tests/rpc/test_rpc_detect.cpp`
+as lower sideband once the side reached the label. It now asks first whether
+the extract is one frequency (`CharacteriseConfig::voice_max_line_share`).
+
+**RTTY** was not a regression of that change on this grid: it read NFM before
+it too. Its two tones hold 0.49 of its power in three bins, so a probe whose
+two seconds leaned to one tone crossed `carrier_concentration` and was called
+a carrier, labelled CW, and a carrier's family admits no RTTY row in
+`core/identify`; otherwise its keying read as a talker's deviation on FM and
+it was labelled NFM. Through `--pace 4` for 20 s, e0f6268 labelled it CW in
+both runs on the default grid and RTTY in both on sixteen channels; b43d763
+RTTY in one of two there and NFM in the other. Two lines and nothing else of
+note on a constant envelope are now 2-FSK ahead of every other branch
+(`CharacteriseConfig::tone_pair_fraction`, "THE SAME TWO BARS ON A CONSTANT
+ENVELOPE"), which is the right family and opens the RTTY row on every probe.
+
+`tests/detect/test_labelled_scene.cpp` holds it, in ctest: `siggen labelled`
+at seeds 1, 2 and 3, 30 s each, run at twice realtime on sixteen channels
+and on the default grid, and every emitter's tracks at the last decision carry
+its own label and no other, USB none. All twelve held on all six runs, RTTY by
+its protocol on sixteen channels and by its family on the default grid, for
+the reason below.
+
+**RTTY's protocol on the default grid** is out of reach, and was before. Its
+detection is 1318 Hz wide, and the RTTY and CW rows in
+`core/identify/identify.cpp` and the long dwell (`engine::kProbeIdentifyNarrowHz`)
+all stop at a kilohertz, a bar measured on the 131.8 Hz grid where a line
+reads 659 Hz. Reaching it is the narrow bars following the grid: a line reads
+five bins wide on every grid measured here, keyed CW at 183 Hz on 36.6 Hz bins
+in the voice scene at 30 dB, and at 659 on 131.8 and 1311 on 263.7 in this
+one at 25 dB, so each bar would take the detector's bin width,
+carried to the probe on `engine::ProbeRequest` from
+`EngineInfo::spectrum`, and admit a detection up to its own width plus five
+bins beyond the 131.8 Hz grid's. The cost to measure first is what the
+widened bars let in: on this grid AM measures 1436 Hz, NFM 1583 and USB 1439,
+so a bar near 1659 Hz would give NFM and USB the five-second dwell and put
+USB's speech through the CW row. That measurement was not made.
+
+The voice survey above, run again with this change on the same scenes, levels
+and seeds: no wrong label on any of the 56 emitter runs, and every AM, NFM,
+CW and BPSK cell's labels at the end as "After" has them.
+
 ### What is not done
 
 - **USB and LSB labels.** `characterise::Characterisation::voice` and
@@ -2864,8 +2939,11 @@ grouping; it does not change it.
   and on the owner's 75 kS/s channels nothing over 12 kHz does. Reaching it is
   a probe that may ask about the centre of a detection wider than its bucket,
   in `core/engine/probe.cpp`.
-- **The HF corpus and the labelled scene were not re-run.** The labelled
-  scene's voice rows above were measured on its old noise-shaped voice.
+- **The HF corpus was not re-run.** The labelled scene's voice rows under
+  "The labelled scene, end to end" were measured on its old noise-shaped
+  voice; "The labelled scene, held" above is the scene on speech.
+  WHAT THIS USED TO SAY: "The HF corpus and the labelled scene were not
+  re-run."
 - `core/engine/probe.h` and `core/detect/detector.h` still describe
   `double_sideband` as mirrored sidebands in their comments.
 

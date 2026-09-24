@@ -2000,3 +2000,18 @@ commit: "Refresh the CW curve and record what the search reads"
 instead: bench sweep --mode cw scores through CwBand's search now and crosses
     0.01 at -6.6 dB, 0.040 at -8 dB; docs/sensitivity.md, "CW's curve since
     the search".
+
+phrase: the talker and not a keyed carrier, which is never a kilohertz wide
+phrase: a keyed carrier 0.66 to 0.81 at 2.7 to 3.3, which the width and the carrier branch keep out
+retired: 2026-09-24
+commit: "Tell a keyed carrier from a talker, and read RTTY's two tones as FSK"
+instead: A coarse grid measures a keyed carrier 1311 Hz wide; what keeps it out
+    of the single sideband rule is its line share,
+    CharacteriseConfig::voice_max_line_share.
+
+phrase: The HF corpus and the labelled scene were not re-run
+retired: 2026-09-24
+commit: "Tell a keyed carrier from a talker, and read RTTY's two tones as FSK"
+instead: The labelled scene is held end to end by
+    tests/detect/test_labelled_scene.cpp; docs/detection.md, "The labelled
+    scene, held". The HF corpus has not been re-run.

@@ -419,6 +419,51 @@ struct Syllabic {
     return moment / (weight * half_width);
 }
 
+// The share of the passband's power over its median bin that sits within
+// `half_width_hz` of its strongest bin. See Characterisation::line_share.
+[[nodiscard]] double line_share(const PowerSpectrum& spectrum, double half_width_hz)
+{
+    const double passband = static_cast<double>(spectrum.rate) / 4.0;
+    std::vector<double> central;
+    std::size_t loudest = spectrum.bins.size();
+    for (std::size_t k = 0; k < spectrum.bins.size(); ++k) {
+        if (std::abs(spectrum.frequency_at(static_cast<double>(k))) > passband) {
+            continue;
+        }
+        central.push_back(spectrum.bins[k]);
+        if (loudest == spectrum.bins.size() || spectrum.bins[k] > spectrum.bins[loudest]) {
+            loudest = k;
+        }
+    }
+    if (central.empty()) {
+        return -1.0;
+    }
+    // The median rather than inband_noise's 20th percentile, and each bin's
+    // excess signed rather than clipped at zero: noise then sums to nothing
+    // across the passband instead of adding the positive half of its own
+    // fluctuation to the total, which on a wide bucket is most of the total
+    // at a low SNR.
+    const std::size_t middle = central.size() / 2;
+    std::nth_element(central.begin(), central.begin() + static_cast<std::ptrdiff_t>(middle),
+                     central.end());
+    const double floor = central[middle];
+    const double line_hz = spectrum.frequency_at(static_cast<double>(loudest));
+    double total = 0.0;
+    double near = 0.0;
+    for (std::size_t k = 0; k < spectrum.bins.size(); ++k) {
+        const double f = spectrum.frequency_at(static_cast<double>(k));
+        if (std::abs(f) > passband) {
+            continue;
+        }
+        const double excess = spectrum.bins[k] - floor;
+        total += excess;
+        if (std::abs(f - line_hz) <= half_width_hz) {
+            near += excess;
+        }
+    }
+    return total > 0.0 ? near / total : -1.0;
+}
+
 // The carrier's sidebands split into the part in phase with it and the part
 // in quadrature. See Characterisation::carrier_iq_balance.
 struct CarrierQuadrature {
@@ -636,6 +681,7 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
                                       ? 0.5 * config.detection_bandwidth_hz
                                       : (out.band.found ? 0.5 * out.band.bandwidth_hz : 0.0);
         out.side_centroid = side_centroid(*spectrum, noise.per_bin, half_width);
+        out.line_share = line_share(*spectrum, config.voice_line_half_width_hz);
         const CarrierQuadrature quadrature = carrier_quadrature(widened, *spectrum, segment);
         if (quadrature.measured) {
             out.carrier_iq_balance = quadrature.balance;
@@ -687,8 +733,11 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
     const double voice_width = config.detection_bandwidth_hz > 0.0
                                    ? config.detection_bandwidth_hz
                                    : (out.band.found ? out.band.bandwidth_hz : 0.0);
+    // A keyed carrier is one frequency and a talker is not. See
+    // CharacteriseConfig::voice_max_line_share.
+    const bool one_line = out.line_share >= config.voice_max_line_share;
     const bool ssb_voice = !constant_inband && voice_width >= config.voice_min_width_hz &&
-                           out.syllabic_depth >= config.voice_syllabic_depth &&
+                           !one_line && out.syllabic_depth >= config.voice_syllabic_depth &&
                            out.syllabic_depth >= config.voice_syllabic_ratio * out.syllabic_fast;
     const bool fm_voice =
         constant_inband && out.frequency_syllabic_depth >= config.fm_voice_frequency_syllabic;
@@ -711,15 +760,50 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
         (in_phase_sidebands || quadrature_sidebands);
 
     // A talker on single sideband whose extract a voiced sound's harmonics
-    // pulled over the carrier bar; over a wide detection that is the talker
-    // and not a keyed carrier, which is never a kilohertz wide. Whatever the
-    // quadrature reading says about the harmonic it locked to: an AM
-    // carrier holds its power through the talker's pauses, so its envelope
-    // never moves like this. See CharacteriseConfig::voice_carrier_width_hz.
+    // pulled over the carrier bar; over a wide detection that is the talker,
+    // and ssb_voice has already ruled out a keyed carrier by its line share.
+    // Whatever the quadrature reading says about the harmonic it locked to:
+    // an AM carrier holds its power through the talker's pauses, so its
+    // envelope never moves like this. See CharacteriseConfig::
+    // voice_carrier_width_hz.
+    //
+    // WHAT THE FIRST SENTENCE USED TO SAY after the semicolon: "over a wide
+    // detection that is the talker and not a keyed carrier, which is never a
+    // kilohertz wide." A coarse grid measures one 1311 Hz wide; see
+    // CharacteriseConfig::voice_max_line_share.
     const bool voice_over_carrier = ssb_voice && voice_width >= config.voice_carrier_width_hz;
 
-    if ((out.spectral_concentration >= config.carrier_concentration || carrier_with_sidebands) &&
-        !voice_over_carrier) {
+    // Two lines and nothing else of note, on a constant envelope: a pair of
+    // tones keyed between, which is two-tone FSK. See "THE SAME TWO BARS ON A
+    // CONSTANT ENVELOPE" under CharacteriseConfig::tone_pair_fraction.
+    out.fsk_tone_pair = constant_inband && out.tone_pair_share >= config.tone_pair_fraction &&
+                        out.tone_pair_third >= 0.0 &&
+                        out.tone_pair_third < config.tone_pair_third_fraction;
+
+    if (out.fsk_tone_pair) {
+        out.family = ModulationFamily::Fsk;
+        out.family_confidence = std::clamp(out.tone_pair_share, 0.0, 1.0);
+        // The transition detector only. The squared envelope cannot read a
+        // constant envelope at all, and on RTTY it named 2994 Hz, which the
+        // symbol-rate rule then refused as wider than the 791 Hz detection.
+        if (out.frequency_transition.found) {
+            out.symbol_rate = out.frequency_transition;
+        }
+        query.family = ModulationFamily::Fsk;
+        query.tone_count = 2;
+        query.symbol_rate_hz = out.symbol_rate.found ? out.symbol_rate.symbol_rate_hz : 0.0;
+        out.candidates = match_protocols(query);
+        out.summary = std::format(
+            "2-FSK at {}, read off the spectrum: its two strongest lines, {} apart, hold {:.1f} "
+            "percent of the band's excess power, the next holds {:.3f} of the weaker, and the "
+            "envelope is constant, which two steady tones' is not{}",
+            out.symbol_rate.found ? hertz(out.symbol_rate.symbol_rate_hz)
+                                  : std::string("an unmeasured symbol rate"),
+            hertz(out.tone_pair_spacing_hz), 100.0 * out.tone_pair_share, out.tone_pair_third,
+            candidate_clause(out.candidates));
+    } else if ((out.spectral_concentration >= config.carrier_concentration ||
+                carrier_with_sidebands) &&
+               !voice_over_carrier) {
         // Nothing else can be read off a signal whose energy is one line,
         // or a carrier whose sidebands sit against it the way AM's or FM's
         // do. See CharacteriseConfig::carrier_sideband_concentration.
