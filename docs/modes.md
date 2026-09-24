@@ -331,11 +331,11 @@ clean-room breach and is wrong within a year.
 
 | Mode | Numbers | Specification | Effort |
 | --- | --- | --- | --- |
-| AIS Class A, Class B, AtoN, base station, SAR aircraft | GMSK BT 0.4 over FM, 9600 bit/s, 25 kHz at 161.975 and 162.025 MHz; NRZI, HDLC with 0x7E flags and bit stuffing, CRC-16-CCITT; 26.67 ms slots, 2250 per minute per channel | ITU-R M.1371-6 (02/2026, verified in force, supersedes -5 of 02/2014), free | Medium |
+| AIS Class A, Class B, AtoN, base station, SAR aircraft | GMSK BT 0.4 over FM, 9600 bit/s, 25 kHz at 161.975 and 162.025 MHz; NRZI, HDLC with 0x7E flags and bit stuffing, CRC-16-CCITT; 26.67 ms slots, 2250 per minute per channel | ITU-R M.1371-6 (02/2026, verified in force, supersedes -5 of 02/2014), free. Done from -5, checked against -6, see "AIS and VHF DSC" below | Medium |
 | AIS-SART, AIS-MOB, AIS-EPIRB | Identical physical layer; a burst of eight position reports once per minute, navigation status 14, message 14 text | Annex 8 of ITU-R M.1371-6, free; IMO Resolution MSC.246(83), free | Small |
 | Satellite AIS and message 27 | Same GMSK; AIS3 at 156.775 and AIS4 at 156.825 MHz; message 27 is the reduced long-range report | ITU-R M.1371-6, free | Medium |
 | VDES and AIS ASM channels | ASM at 161.950 and 162.000 MHz reuses the AIS physical layer; VDE-TER is pi/4-QPSK, 8PSK and 16QAM across 25, 50 and 100 kHz to about 307 kbit/s | ITU-R M.2092-2 (02/2026, verified in force), free; IALA G1117 Edition 3.0, free | Medium |
-| DSC on VHF (channel 70) | FFSK 1200 baud on 156.525 MHz, mark 1300 Hz, space 2100 Hz, 10-bit symbols, time diversity | ITU-R M.493-16 (12/2023, verified in force), free; M.541-11 for procedures | Small |
+| DSC on VHF (channel 70) | FFSK 1200 baud on 156.525 MHz, mark 1300 Hz, space 2100 Hz, 10-bit symbols, time diversity | ITU-R M.493-16 (12/2023, verified in force), free; M.541-11 for procedures. Done from -15, checked against -16, see "AIS and VHF DSC" below | Small |
 | DSC on MF and HF | 2-FSK 100 baud, 170 Hz shift, centre 1700 Hz in J2B; same symbol alphabet and diversity | ITU-R M.493-16, free | Small |
 | NAVTEX | F1B FSK, 170 Hz shift, 100 baud, CCIR 476 7-unit 4/3 code, 280 ms time-diversity FEC, about 300 Hz; 518, 490 and 4209.5 kHz | ITU-R M.540-2 (06/1990, verified still in force), free, plus the IMO NAVTEX Manual for the B1 to B4 header semantics. Framing done without the IMO semantics, see below | Small |
 | NBDP SITOR-A and SITOR-B | FSK 100 baud, 170 Hz shift; SITOR-A is a 450 ms ARQ cycle, SITOR-B is the NAVTEX FEC mode | ITU-R M.625-4 (03/2012, verified in force) and M.476-5, free. SITOR-B done, see below | Small |
@@ -1344,6 +1344,83 @@ in the specification's embedded GPL listing, figures G.3 to G.5, before the
 licence note was noticed, so it is left to somebody who has not read it, per
 docs/clean-room.md. The randomiser the M17 row above used to call PRBS9 is a
 fixed 368-bit table, Appendix B.
+
+**AIS and VHF DSC, from an nfm receiver's audio, 2026-09-23.** Two libraries
+over the audio an nfm receiver's discriminator hands to `attach_audio_sink`,
+at 48000 S/s, and two adapters on the decoded-message seam, `ais` and `dsc`,
+so the Demod enum does not grow. AIS needs no complex tap: an nfm receiver's
+kernel is the plain discriminator with no de-emphasis, and its default 8 kHz
+either side holds 9600 bit/s GMSK at index 0.5, whose deviation is 2400 Hz. A
+decoder handed complex baseband would discriminate it first and do the same
+thereafter. VHF DSC is audio by its own definition: two tones on an FM
+voice channel. `docs/clean-room.md` has the entry recording what both were
+written from, with the clause behind every constant.
+
+| Mode | File | Document | What comes out |
+| --- | --- | --- | --- |
+| AIS | `core/decode/ais.cpp` | ITU-R M.1371-5 Annex 2 clauses 2.1.1 to 2.6, 3.2.2 to 3.2.2.11 and 3.3.7 with Tables 3, 6, 12 and 17; Annex 8 Tables 47 to 52, 70, 71, 73, 78, 79 and 79A and Figure 41. -6 read beside it | Every message whose FCS checks, with its octets and the sample indices of its first data bit and end flag; Messages 1 to 3, 4 and 11, 5, 18, 19, 21 and 24 parsed: MMSI, position, SOG, COG, heading, status, rate of turn, time stamp, UTC, name with Message 21's extension, call sign, destination, ETA, draught, dimensions, ship and AtoN type, the Class B flags and Table 79A's vendor ID |
+| DSC on VHF | `core/decode/dsc.cpp` | ITU-R M.493-15 Annex 1 clauses 1.1 to 1.5.1, 3 to 10, Tables A1-1 to A1-3, A1-4.1 to A1-4.9 and A1-5, and Figure 1. -16 read beside it | Each call whose error-check character agrees: format specifier, address or area, category, self-ID, telecommands, the distress ID, nature, position, time and subsequent communications where the format carries them, channel or frequency elements, the end of sequence, and how many characters came from their RX copy |
+
+AIS is received as bursts. The audio is summed over a bit and read at eight
+phases of the bit at once, with no clock loop: clause 2.4's 50 ppm moves the
+instant 0.064 of a bit over the longest frame. Each phase fits its last 32
+readings to the levels the training sequence and start flag put on the air,
+and where they correlate above 0.7 a burst starts, sliced against the offset
+the fit gave, which is the carrier's error; each burst is NRZI decoded and
+deframed on its own and reported from whichever phase finished it first.
+`core/decode/ais.h` records the two receivers measured and set aside: a
+running mean in place of the fit, which lost 8 of 90 packets at 30 dB where
+the fit loses none, and a Gaussian receive filter of BT 0.5, which lost
+0.378 at 20 dB where the boxcar lost 0.144, both with the SNR then stated
+over bursts and gaps together. The FCS is HDLC's; a
+frame whose CRC would check only uncomplemented is counted rather than
+reported, so a real capture can say whether that reading of ISO/IEC 13239,
+not held, is right. Two sentences real stations sent, from the gpsd
+project's AIVDM/AIVDO write-up, read through Tables 48 and 52 as a ship
+moored in Seattle and a vessel named MT.MITCHELL bound for SEATTLE; that
+checks the field layout against a real transmitter and not the bit order on
+the air, which an AIVDM sentence does not carry.
+
+DSC is read on `core/decode/fsk.h`'s tone discriminator and Gardner bit
+clock. Phasing is clause 3.3's: two DX and one RX, two RX and one DX, or
+three RX, each in its own place among the sixteen phasing slots, tried at
+every bit. Each character is taken from its DX copy when that passes the
+ten-bit check and from its RX copy when it does not; where both pass and
+disagree, the error-check character decides. A call is reported only whole
+and with its ECC agreeing, and a distress alert or all ships call only with
+both its format specifiers alike, clause 4.2. Figure 1 draws DX and RX as
+two rows without saying which of a pair is sent first; DX first is the order
+that puts clause 1.2.1's four characters between the copies.
+
+Measured in `tests/decode/test_ais.cpp` and `test_dsc.cpp` at 48000 S/s,
+through an 8 kHz channel filter and discriminator with the noise on the RF.
+AIS, nine message types ten times over: none of 90 lost at 30 dB in 2500 Hz
+with the carrier on the channel centre or 500 Hz either side and the clock
+50 ppm either way, and 0.311 lost at 20 dB. DSC, seven calls ten times over:
+none of 70 lost at 20 dB, and 27 at 14 dB with 117 characters taken from
+their RX copies. Noise alone decoded neither in two minutes; AIS started 174
+bursts on it, 6 of which ran to whole octets and none past the FCS, and DSC
+never found a phasing. Both give the same output however the audio is cut,
+down to a sample a call. Swept by `bench sweep --mode ais` over one-slot
+Message 1 bursts, 256 trials of four a point: a frame error rate of 0.01 at
+22.5 dB in 2500 Hz, 0.18 at 20 dB and none from 24 dB up. By `bench sweep
+--mode dsc` over individual calls: 0.01 at 15.7 dB, 0.39 at 14 dB, none from
+18 dB up ([sensitivity.md](sensitivity.md)). Through the engine and the wire
+in `tests/rpc/test_rpc_decode_audio.cpp`, on an nfm receiver: three of three
+AIS messages at 30 and at 22 dB and three of three DSC calls at 30 and at
+16 dB.
+
+What they do not reach. AIS: the binary messages' application data, Message
+27 and the long-range channels, the satellite channels AIS 3 and AIS 4, the
+transmit power bit M.1371-6 gives Messages 1 to 3 and 18, and one receiver
+listening to both channels, which takes two receivers. No message longer
+than two slots has been sent through the decoder. DSC: MF and HF, the same
+code and alphabet at 100 baud on a sideband receiver, not written or
+measured; the M.821 expansion sequence after a distress alert, M.821 not
+held; the semi-automatic service's network numbers beyond keeping their
+symbols; M.493-16's ACS second telecommands, reported by number; and any
+acknowledgement, relay or alarm, which a receiver has no business sending.
+A decoded distress alert is a report and not a GMDSS watch.
 
 ## What would change the list
 

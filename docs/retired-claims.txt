@@ -1951,3 +1951,9 @@ retired: 2026-09-23
 commit: "Serve AIS and DSC as decoded messages over the wire"
 instead: Sixteen decoders report through Session.subscribeDecoded, ais and
     dsc the fifteenth and sixteenth. docs/rpc.md's table lists them.
+
+phrase: Seven entries, all self-reported by the person who did it
+retired: 2026-09-23
+commit: "Record AIS and DSC in modes.md and the clean-room log"
+instead: The disclosure log in docs/clean-room.md has eight entries; the
+    eighth records what AIS and DSC were written from.

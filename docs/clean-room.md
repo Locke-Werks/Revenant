@@ -780,8 +780,10 @@ on the relink question:
 Every exposure gets recorded here, with what was seen, when, and what was done
 about it. The log stays useful after the licence change, for the same reason it
 was useful before: it is the record of what the people writing this project
-actually read. Seven entries, all self-reported by the person who did it,
-which is the behaviour the practice needs to keep producing.
+actually read. Eight entries, all self-reported by the person who did it,
+which is the behaviour the practice needs to keep producing. WHAT THAT
+SENTENCE USED TO SAY: "Seven entries, all self-reported by the person who did
+it"; the AIS and DSC entry below is the eighth.
 
 **2026-09-18, polyphase channelizer design.** While verifying the licences of
 candidate reference implementations, the first 1200 bytes of GNU Radio's
@@ -908,6 +910,76 @@ and distributed under librtlsdr's licence, which is the patch exception the
 policy now names. `tools/rtlsdr-cancel-trial` calls `rtl-sdr.h` and nothing
 else. Nothing under `core/`, `tools/` or `ui/` implements what was read, and
 the reader wrote no clean-room component touching USB transfers.
+
+**2026-09-23, AIS and VHF DSC.** No exposure: this entry records what the
+two decoders were written from, because the brief that asked for them asked
+for the record here, with the clause behind every constant.
+
+What was read. ITU-R M.1371-5 (02/2014) and M.1371-6 (02/2026), and ITU-R
+M.493-15 (01/2019) and M.493-16 (12/2023), each fetched as PDF and as Word
+from the ITU's publication service; their tables were read out of the Word
+files by script, and the text of both editions compared by script for the
+clauses used. The gpsd project's AIVDM/AIVDO protocol write-up,
+`gpsd.gitlab.io/gpsd/AIVDM.html`, which is documentation and not source, for
+two sentences real stations sent and the paragraph on IEC 61162's six-bit
+payload armouring; `tests/decode/test_ais.cpp` decodes the two sentences and
+cites the page, and nothing under `core/` uses it. No gpsd source was opened,
+and no AIS or DSC implementation was read: not AIS-catcher, rtl-ais, gnuais,
+multimon-ng or any other. ITU-R keeps its copyright on both Recommendations,
+so the tests check Table 47 and Table A1-1 by FNV-1a fingerprint of their
+printed text, as `tests/decode/test_dmr.cpp` does for ETSI's tables, and
+neither table is in the tree.
+
+The constants, and where each comes from. M.1371-5, Annex 2 unless named:
+
+| Constant | Value | Clause |
+| --- | --- | --- |
+| `kAisChannel1Hz`, `kAisChannel2Hz` | 161.975, 162.025 MHz | Table 3, PH.AIS1 and PH.AIS2 |
+| `kAisBitRate` | 9600 bit/s | 2.4 and Table 3, PH.BR |
+| `kAisModulationIndex`, `kAisDeviationHz` | 0.5, 2400 Hz | 2.3.2 and Table 3, PH.MI |
+| `kAisTransmitBt`, `kAisReceiveBt` | 0.4, 0.5 | 2.3.1.2, 2.3.1.3 and Table 3 |
+| `kAisTrainingBits` | 24, alternating from a zero | 2.5 and 3.2.2.3 |
+| `kAisFlag` | 0x7E | 3.2.2.4 and 3.2.2.7 |
+| `kAisStuffAfterOnes` | 5 | 3.2.2.1 |
+| `kAisMaximumFrameBits` | 5 slots of 256 bits | 3.2.2.11, Table 6 and 3.2.2.2 |
+| `kAisMinimumMessageOctets` | 5 | Annex 8 Tables 60 and 80, the shortest messages |
+| `kAisMessageIdBits` | 6 | 3.3.7.1 |
+| `kAisLongitudeNotAvailable`, `kAisLatitudeNotAvailable` | 0x6791AC0, 0x3412140 | Annex 8 Table 48 |
+| `kAisPositionUnitsPerDegree` | 600000 | Annex 8 Table 48, 1/10000 minute |
+| `kAisSogNotAvailable`, `kAisCogNotAvailable`, `kAisHeadingNotAvailable` | 1023, 3600, 511 | Annex 8 Table 48 |
+| Field positions and widths | per message | Annex 8 Tables 48, 51, 52, 70, 71, 73, 78, 79 and 79A, Figure 41 |
+| Six-bit characters | 0 to 31 are ASCII 64 to 95 | Annex 8 Table 47 |
+| NRZI, bit order | a zero changes the level; fields MSB first, octets LSB first | 2.6 and 3.3.7 with Table 17 |
+| FCS | the 16-bit CRC of ISO/IEC 13239, preset to ones | 3.2.2.6; the complement and the octet order are HDLC's, from `core/decode/ax25.h`, and ISO/IEC 13239 was not held |
+
+M.493-15, Annex 1:
+
+| Constant | Value | Clause |
+| --- | --- | --- |
+| `kDscVhfYHz`, `kDscVhfBHz` | 1300, 2100 Hz | 1.3.2 and 1.4 |
+| `kDscVhfBitRate` | 1200 bit/s | 1.3.2 |
+| `kDscVhfModulationIndex` | 2.0 | 1.3.2 |
+| `kDscCharacterBits`, `kDscInformationBits` | 10, 7 | 1.1 and 1.1.1 |
+| The ten-bit code | check bits count the B elements | 1.1.1 and Table A1-1 |
+| `kDscVhfDotBits` | 20 | 3.4.2 |
+| `kDscPhasingDx`, `kDscPhasingDxCount`, `kDscPhasingRx` | 125 six times, 111 to 104 | 3.2 to 3.2.2 |
+| Phasing criteria | two DX and one RX, two RX and one DX, or three RX | 3.3 |
+| DX and RX order | DX first, RX five slots later | 1.2.1 and Figure 1 b) |
+| Format specifiers | 102, 112, 114, 116, 120, 123 | 4.1 and Table A1-3 |
+| Categories | 100, 108, 110, 112 | 6 and Table A1-3 |
+| Telecommands 110 and 112 | distress acknowledgement, relay | Table A1-3 |
+| End of sequence | 117, 122, 127 | 9 |
+| `kDscNoInformation` | 126 | Table A1-3 note "*" |
+| Error-check character | even vertical parity, one format specifier and one EOS | 10.2 |
+| Identities, positions, times | two digits a symbol; ten nines and 8888 for none | 5.2, 8.1.2, 8.1.3 and Table A1-2 |
+| Channel and frequency elements | HM digit 0 to 2, 3 or 9 | 8.3.2 and Table A1-5 |
+| Call layouts | per format and category | Tables A1-4.1 to A1-4.9 |
+
+What was chosen rather than cited is labelled so where it is set: the eight
+slicing phases and the sync correlation of 0.7 in `core/decode/ais.h`, the
+one-bit boxcar that replaced a reading of clause 2.3.1.3 as a filter to
+build, and the three characters lost in a row after which
+`core/decode/dsc.cpp` gives a call up.
 
 **What the log is for now.** Under the old rule an exposure was a contamination
 to be contained. Under the current one it still gets written down, because the
