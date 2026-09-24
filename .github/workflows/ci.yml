@@ -850,6 +850,13 @@ jobs:
           if ("${{ github.ref_name }}" -ne "v$version") {
             throw "the tag is ${{ github.ref_name }} and cmake/RevenantVersion.cmake says v$version"
           }
+          # installer.toml's copy is what Add/Remove Programs shows. The package
+          # job checks it too, but this job does not wait for that one, so a
+          # tag whose toml disagrees would otherwise be signed and published.
+          $toml = [regex]::Match((Get-Content installer.toml -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          if ($toml -ne $version) {
+            throw "installer.toml says $toml and cmake/RevenantVersion.cmake says $version"
+          }
           $missing = @('LICENSE.txt', 'THIRD-PARTY-NOTICES-engine.txt', 'THIRD-PARTY-NOTICES-client.txt',
                        'licenses/LGPL-2.1.txt', 'licenses/LGPL-3.0.txt' |
                        Where-Object { -not (Test-Path "dist/stage/$_") })
@@ -977,6 +984,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "the signed installer cannot read its own container"
           }
+
+          # The option surface of the installer being published, not of the
+          # unsigned one the package job forged from the same payload before
+          # it was signed. Writes nothing; see the package job for why the
+          # report is printed.
+          $report = & ./dist/Revenant-Setup.exe --check-only /O:desktop_shortcut=off 2>&1 | Out-String
+          $report
+          if ($LASTEXITCODE -ne 0) { throw "check-only exited $LASTEXITCODE`n$report" }
 
       - uses: actions/download-artifact@v4
         with:
