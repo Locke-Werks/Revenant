@@ -2040,3 +2040,10 @@ commit: "Label a talker on single sideband USB or LSB by its side"
 instead: tests/detect/test_labelled_scene.cpp holds USB to the label USB,
     which detect::label_track names from the talker's side.
 
+phrase: Reaching it is a probe that may ask about the centre of a detection wider than its bucket
+retired: 2026-09-24
+commit: "Measure a broadcast station through a probe narrower than it"
+instead: Measured in tests/characterise/test_wfm_window.cpp: a probe at a
+    station's centre narrower than it reads PSK at 0.98 to 1.00 on 14 of 18
+    windows. docs/detection.md, "WFM through a window narrower than the
+    station", says what reaching WFM would take.

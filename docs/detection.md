@@ -2968,6 +2968,51 @@ which has no field for them." And last: "`core/engine/probe.h` and
 `core/detect/detector.h` still describe `double_sideband` as mirrored
 sidebands in their comments." Both are done.
 
+### WFM through a window narrower than the station
+
+A probe cannot hold a broadcast station on any grid, so the question was
+whether one at the station's centre, at the widest bucket a grid allows,
+could still name it. `wfm window survey` in
+`tests/characterise/test_wfm_window.cpp`, hidden, renders
+`core/dsp/synth/wfm_mod.h`'s stations, stereo on 1000 and 2500 Hz tones at
+52.5, 30 and 10 kHz of audio deviation and mono with no pilot at 52.5 kHz, at
+40 and 25 dB in 2500 Hz, narrows each to the half of a 48000, 96000 or 192000
+S/s bucket a probe passes, and asks two things of two seconds of it:
+
+- **What the characteriser says: PSK, at 0.98 to 1.00, on 14 of the 18
+  stereo windows**, and analogue FM on the other 4, all at 40 dB with 30 or
+  10 kHz of audio. The window clips the carrier's swing, so the envelope moves
+  (normalised power variance 0.098 to 1.74 where it said PSK) and the
+  M-th power law finds a line. So a probe allowed to ask about the centre of
+  a detection wider than its bucket would, on its own, put BPSK or QPSK on a
+  broadcast station.
+- **Whether the stereo pilot stands out of the discriminator's output**, the
+  power at 19 kHz over the mean of 20 neighbours 10 to 200 Hz either side:
+  +27.1 to +66.1 dB on every stereo window, and on the mono station, which has
+  no pilot, -7.9 to +44.8 dB, over +30 dB on four of its six windows. The
+  programme is tones, and 19 kHz is the nineteenth harmonic of 1000 Hz, which
+  the clipped swing makes. On this station the reading cannot tell a pilot
+  from the programme's products, and nothing here has a programme that is not
+  tones. Narrowband FM on a 1000 Hz tone, the control, read -6.8 and -9.7 dB.
+
+So it was not implemented. What reaching WFM would take, in the order it
+would have to be measured:
+
+1. **A window that holds the station.** A bucket of 384000 S/s holds 140 kHz
+   at the probe's passband of half the bucket. It fits a grid whose channel
+   rate is at least that, which the 2.16 MS/s labelled scene's eight
+   channels, 540 kS/s, are and the owner's 2.4 MS/s grid over 64 channels,
+   75 kS/s, is not: there it needs a receiver spanning several coarse
+   channels, which `core/engine`'s graph does not have. `kProbeRates` and the
+   pool's capture buffer would take the new bucket; two seconds of it is
+   768000 samples to characterise.
+2. **The characteriser on a whole station.** Unclipped, broadcast FM is a
+   constant envelope, which the analogue FM branches read; that is the
+   measurement to make first, at 384000 S/s, over programme that is not tones.
+3. **The pilot, on the whole station**, as the positive finding: a 19 kHz
+   line in the discriminator's output within the standard's tolerance, with a
+   bar measured against stations with no pilot carrying real programme, since
+   on tones the harmonic above defeats it.
 ### What is not done
 
 - **One detection per emitter was measured at one level and one seed.** The
@@ -2978,9 +3023,12 @@ sidebands in their comments." Both are done.
   and never above the grid's channel rate or 192000 S/s
   (`engine::kProbeRateOverOccupied`, `kProbeRates`). A broadcast station is
   about 140 kHz wide as the detector measures it, so no probe fits on any grid,
-  and on the owner's 75 kS/s channels nothing over 12 kHz does. Reaching it is
-  a probe that may ask about the centre of a detection wider than its bucket,
-  in `core/engine/probe.cpp`.
+  and on the owner's 75 kS/s channels nothing over 12 kHz does. "WFM through a
+  window narrower than the station" above measured the two ways round it and
+  says what reaching it would take; neither is built. WHAT THE LAST SENTENCE
+  USED TO SAY: "Reaching it is a probe that may ask about the centre of a
+  detection wider than its bucket, in `core/engine/probe.cpp`." On its own that
+  probe would label a station BPSK.
 - **The HF corpus was not re-run.** The labelled scene's voice rows under
   "The labelled scene, end to end" were measured on its old noise-shaped
   voice; "The labelled scene, held" above is the scene on speech.

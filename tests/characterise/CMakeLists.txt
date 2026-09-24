@@ -25,6 +25,7 @@ add_executable(revenant_characterise_tests
     test_periodicity.cpp
     test_tones.cpp
     test_transform.cpp
+    test_wfm_window.cpp
 )
 
 target_link_libraries(revenant_characterise_tests PRIVATE
