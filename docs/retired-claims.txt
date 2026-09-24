@@ -1820,3 +1820,17 @@ commit: "Give the receiver panel a squelch control"
 instead: The receiver panel's filter expansion has a squelch slider in dBFS,
     open at its bottom stop, with the receiver's level and the gate beside it.
     ui/models/squelch_control.h, docs/ui-spectrum.md.
+
+phrase: its sidebands mirror about it
+phrase: which is what lets a label say AM rather than CW
+retired: 2026-09-24
+commit: "Label a talker on AM or FM by its emitter, and stop calling SSB voice digital"
+instead: AM is a carrier whose voice-channel sidebands sit in phase with it,
+    CharacteriseConfig::carrier_in_phase_balance; the mirrored spectral
+    reading is still reported and decides nothing. docs/detection.md, "Voice".
+
+phrase: is Gaussian noise band-limited to 300 to 3000 Hz
+retired: 2026-09-24
+commit: "Label a talker on AM or FM by its emitter, and stop calling SSB voice digital"
+instead: The labelled and voice scenes carry tools/siggen/speech.h's speech:
+    syllables, pauses between phrases, a pitch and formants.

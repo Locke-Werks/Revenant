@@ -47,6 +47,7 @@
 #include "tools/bench/mode_subjects.h"
 #include "tools/bench/sweep.h"
 #include "tools/siggen/labelled.h"
+#include "tools/siggen/voice.h"
 
 namespace {
 
@@ -58,6 +59,7 @@ using revenant::with_context;
 namespace dsp = revenant::dsp;
 namespace siggen = revenant::siggen;
 namespace siggen_labelled = revenant::siggen_labelled;
+namespace siggen_voice = revenant::siggen_voice;
 
 using dsp::Complex32;
 using dsp::ConstComplexSpan;
@@ -1722,6 +1724,13 @@ void print_usage()
         "                    TETRA, M17, DMR, AX.25, RTTY and USB, each at --snr in\n"
         "                    2500 Hz. tools/siggen/labelled.h has the offsets.\n"
         "\n"
+        "  voice             --out PATH --seconds S (20) --seed N --snr X (20)\n"
+        "                    --noise-dbfs X (-60) --truth PATH\n"
+        "                    cf32 at 1200000 S/s: speech on AM, NFM at 2.5 and 5 kHz\n"
+        "                    deviation, USB and LSB, beside CW, BPSK and an empty\n"
+        "                    slot, each at --snr in 2500 Hz. tools/siggen/voice.h has\n"
+        "                    the offsets and tools/siggen/speech.h the speech.\n"
+        "\n"
         "  wideband          --emitters N --bursts N --span-low N --span-high N\n"
         "                    --noise-dbfs X --no-noise --snr-min X --snr-max X\n"
         "                    --min-burst S --max-burst S --modes a,b,c\n"
@@ -1762,6 +1771,33 @@ void print_usage()
     return siggen_labelled::render_labelled_scene(spec);
 }
 
+// The scene in tools/siggen/voice.h: speech on every analogue modulation,
+// beside the controls, for measuring the labels on voice.
+[[nodiscard]] Status run_voice(Options& options)
+{
+    auto out_path = options.text("out", "");
+    auto truth_path = options.text("truth", "");
+    auto seconds = options.real("seconds", 20.0);
+    auto seed = options.integer("seed", 20260924);
+    auto snr = options.real("snr", 20.0);
+    auto noise = options.real("noise-dbfs", -60.0);
+    if (!out_path) { return std::unexpected(out_path.error()); }
+    if (!truth_path) { return std::unexpected(truth_path.error()); }
+    if (!seconds) { return std::unexpected(seconds.error()); }
+    if (!seed) { return std::unexpected(seed.error()); }
+    if (!snr) { return std::unexpected(snr.error()); }
+    if (!noise) { return std::unexpected(noise.error()); }
+    if (auto clean = options.reject_unused(); !clean) {
+        return clean;
+    }
+    siggen_voice::VoiceSceneSpec spec;
+    spec.seconds = *seconds;
+    spec.seed = static_cast<std::uint64_t>(*seed);
+    spec.snr_2500_db = *snr;
+    spec.noise_dbfs = *noise;
+    return siggen_voice::write_voice_scene(spec, *out_path, *truth_path);
+}
+
 [[nodiscard]] Status run(int argc, char** argv)
 {
     auto options = Options::parse(argc, argv);
@@ -1790,6 +1826,9 @@ void print_usage()
     }
     if (command == "labelled") {
         return run_labelled(*options);
+    }
+    if (command == "voice") {
+        return run_voice(*options);
     }
     if (command == "trial") {
         return run_trial(*options, std::string{});

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <numbers>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,8 @@
 #include "core/dsp/synth/fsk_mod.h"
 #include "core/dsp/synth/m17_mod.h"
 #include "core/dsp/synth/modulators.h"
+#include "tools/siggen/lift.h"
+#include "tools/siggen/speech.h"
 
 namespace revenant::siggen_labelled {
 namespace {
@@ -36,33 +39,8 @@ using dsp::SampleRate;
 constexpr SampleRate kVoiceRate = 48'000;
 constexpr SampleRate kTetraRate = 72'000;
 
-// Taps per polyphase branch of the interpolator that lifts each emitter onto
-// the wideband rate, and its Kaiser beta. The same figures
-// tests/engine/test_engine_probe.cpp's interpolator uses for its OFDM burst.
-constexpr std::size_t kTapsPerPhase = 24;
-constexpr double kKaiserBeta = 8.0;
-
-struct Emitter {
-    std::string name;
-    dsp::Hertz offset_hz = 0;
-    SampleRate rate = 0;
-    std::vector<Complex32> samples;  // one loop of it, unit mean power
-};
-
-// Abramowitz and Stegun 9.6.12.
-[[nodiscard]] double bessel_i0(double x) {
-    const double quarter_square = 0.25 * x * x;
-    double term = 1.0;
-    double sum = 1.0;
-    for (int k = 1; k < 256; ++k) {
-        term *= quarter_square / (static_cast<double>(k) * static_cast<double>(k));
-        sum += term;
-        if (term < 1e-18 * sum) {
-            break;
-        }
-    }
-    return sum;
-}
+// One loop of each emitter at its own rate; tools/siggen/lift.h lifts them.
+using Emitter = siggen_lift::LiftedEmitter;
 
 // A windowed-sinc low pass, `half` taps either side of centre, cutoff as a
 // fraction of the rate, unity gain at DC.
@@ -80,47 +58,6 @@ struct Emitter {
         tap /= sum;
     }
     return taps;
-}
-
-// Gaussian noise band-limited to 300 to 3000 Hz at kVoiceRate, scaled to an
-// RMS of 0.3 and clipped at one, which a modulator reads as full scale.
-[[nodiscard]] std::vector<float> voice_shaped(std::size_t count, std::uint64_t seed) {
-    std::mt19937_64 engine(seed);
-    std::vector<double> white(count);
-    for (std::size_t n = 0; n < count; n += 2) {
-        const double u1 = (static_cast<double>(engine() >> 11) + 1.0) / 9007199254740993.0;
-        const double u2 = static_cast<double>(engine() >> 11) / 9007199254740992.0;
-        const double radius = std::sqrt(-2.0 * std::log(u1));
-        white[n] = radius * std::cos(2.0 * std::numbers::pi * u2);
-        if (n + 1 < count) {
-            white[n + 1] = radius * std::sin(2.0 * std::numbers::pi * u2);
-        }
-    }
-    const auto high = low_pass(96, 3000.0 / kVoiceRate);
-    const auto low = low_pass(96, 300.0 / kVoiceRate);
-    std::vector<double> band(count, 0.0);
-    for (std::size_t n = 0; n < count; ++n) {
-        double acc = 0.0;
-        for (int k = -96; k <= 96; ++k) {
-            const auto j = static_cast<std::ptrdiff_t>(n) + k;
-            if (j < 0 || j >= static_cast<std::ptrdiff_t>(count)) {
-                continue;
-            }
-            const auto t = static_cast<std::size_t>(k + 96);
-            acc += (high[t] - low[t]) * white[static_cast<std::size_t>(j)];
-        }
-        band[n] = acc;
-    }
-    double power = 0.0;
-    for (const double v : band) {
-        power += v * v;
-    }
-    const double scale = 0.3 / std::sqrt(power / static_cast<double>(count));
-    std::vector<float> out(count);
-    for (std::size_t n = 0; n < count; ++n) {
-        out[n] = static_cast<float>(std::clamp(band[n] * scale, -1.0, 1.0));
-    }
-    return out;
 }
 
 // Real audio around `centre_hz` moved to DC as complex baseband, with the
@@ -163,19 +100,14 @@ struct Emitter {
     return out;
 }
 
-void normalise(std::vector<Complex32>& samples) {
-    double power = 0.0;
-    for (const Complex32 sample : samples) {
-        power += static_cast<double>(std::norm(sample));
-    }
-    power /= static_cast<double>(std::max<std::size_t>(samples.size(), 1));
-    if (!(power > 0.0)) {
-        return;
-    }
-    const auto scale = static_cast<float>(1.0 / std::sqrt(power));
-    for (Complex32& sample : samples) {
-        sample *= scale;
-    }
+// Speech-shaped audio at kVoiceRate: syllables, pauses and a pitch, from
+// tools/siggen/speech.h.
+[[nodiscard]] std::vector<float> voice_shaped(std::size_t count, std::uint64_t seed) {
+    siggen_speech::SpeechSpec speech;
+    speech.rate = kVoiceRate;
+    speech.samples = count;
+    speech.seed = seed;
+    return siggen_speech::synthesise_speech(speech).audio;
 }
 
 template <typename T>
@@ -397,48 +329,7 @@ template <typename T>
         out.push_back({"USB", 850'000, kVoiceRate, std::move(made->samples)});
     }
 
-    for (Emitter& emitter : out) {
-        normalise(emitter.samples);
-    }
     return out;
-}
-
-// One emitter's interpolator, lifting its loop by `factor` with a Kaiser
-// windowed sinc cut at 0.45 of its own rate, and its mixer to the offset.
-struct Lift {
-    const Emitter* emitter = nullptr;
-    std::size_t factor = 1;
-    std::vector<float> taps;  // kTapsPerPhase * factor, scaled so power is kept
-    double gain = 1.0;
-};
-
-[[nodiscard]] Lift make_lift(const Emitter& emitter, double gain) {
-    Lift lift;
-    lift.emitter = &emitter;
-    lift.factor = static_cast<std::size_t>(kLabelledRate / emitter.rate);
-    lift.gain = gain;
-    const std::size_t length = kTapsPerPhase * lift.factor;
-    const double centre = (static_cast<double>(length) - 1.0) / 2.0;
-    const double cutoff = 0.45 * static_cast<double>(emitter.rate) / kLabelledRate;
-    const double i0 = bessel_i0(kKaiserBeta);
-    std::vector<double> taps(length);
-    double sum = 0.0;
-    for (std::size_t i = 0; i < length; ++i) {
-        const double position = static_cast<double>(i) - centre;
-        const double ratio = 2.0 * static_cast<double>(i) / static_cast<double>(length - 1) - 1.0;
-        const double window =
-            bessel_i0(kKaiserBeta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio))) / i0;
-        const double x = 2.0 * cutoff * position;
-        const double sinc = x == 0.0 ? 1.0 : std::sin(std::numbers::pi * x) / (std::numbers::pi * x);
-        taps[i] = 2.0 * cutoff * sinc * window;
-        sum += taps[i];
-    }
-    const double scale = static_cast<double>(lift.factor) / sum;
-    lift.taps.resize(length);
-    for (std::size_t i = 0; i < length; ++i) {
-        lift.taps[i] = static_cast<float>(taps[i] * scale);
-    }
-    return lift;
 }
 
 }  // namespace
@@ -457,12 +348,8 @@ Status render_labelled_scene(const LabelledSceneSpec& spec) {
     }
 
     // Every emitter at the same SNR in 2500 Hz against the noise's density.
-    const double noise_power = std::pow(10.0, spec.noise_dbfs / 10.0);
-    const double noise_in_reference = noise_power * 2500.0 / static_cast<double>(kLabelledRate);
-    const double signal_power = noise_in_reference * std::pow(10.0, spec.snr_2500_db / 10.0);
-    std::vector<Lift> lifts;
-    for (const Emitter& emitter : *emitters) {
-        lifts.push_back(make_lift(emitter, std::sqrt(signal_power)));
+    for (Emitter& emitter : *emitters) {
+        emitter.snr_2500_db = spec.snr_2500_db;
     }
 
     std::ofstream stream(spec.out_path, std::ios::binary);
@@ -470,66 +357,22 @@ Status render_labelled_scene(const LabelledSceneSpec& spec) {
         return fail(std::format("could not open '{}' for writing", spec.out_path));
     }
 
-    const auto total = static_cast<std::uint64_t>(spec.seconds * kLabelledRate);
-    constexpr std::size_t kBlock = 1U << 16;
-    std::vector<std::complex<float>> block(kBlock);
-    std::mt19937_64 noise_engine(siggen::derive_seed(spec.seed, 0x4E015E));
-    const double sigma = std::sqrt(noise_power / 2.0);
-
-    for (std::uint64_t first = 0; first < total; first += kBlock) {
-        const std::size_t count = static_cast<std::size_t>(std::min<std::uint64_t>(kBlock, total - first));
-        for (std::size_t n = 0; n < count; n += 2) {
-            const double u1 = (static_cast<double>(noise_engine() >> 11) + 1.0) / 9007199254740993.0;
-            const double u2 = static_cast<double>(noise_engine() >> 11) / 9007199254740992.0;
-            const double radius = sigma * std::sqrt(-2.0 * std::log(u1));
-            block[n] = {static_cast<float>(radius * std::cos(2.0 * std::numbers::pi * u2)),
-                        static_cast<float>(radius * std::sin(2.0 * std::numbers::pi * u2))};
-            if (n + 1 < count) {
-                const double u3 = (static_cast<double>(noise_engine() >> 11) + 1.0) / 9007199254740993.0;
-                const double u4 = static_cast<double>(noise_engine() >> 11) / 9007199254740992.0;
-                const double r2 = sigma * std::sqrt(-2.0 * std::log(u3));
-                block[n + 1] = {static_cast<float>(r2 * std::cos(2.0 * std::numbers::pi * u4)),
-                                static_cast<float>(r2 * std::sin(2.0 * std::numbers::pi * u4))};
+    siggen_lift::LiftSpec lift;
+    lift.rate = kLabelledRate;
+    lift.total_samples = static_cast<std::uint64_t>(spec.seconds * kLabelledRate);
+    lift.seed = spec.seed;
+    lift.noise_dbfs = spec.noise_dbfs;
+    auto rendered = siggen_lift::render_lifted(
+        *emitters, lift, [&](std::span<const std::complex<float>> block) -> Status {
+            stream.write(reinterpret_cast<const char*>(block.data()),
+                         static_cast<std::streamsize>(block.size() * sizeof(std::complex<float>)));
+            if (!stream) {
+                return fail(std::format("writing '{}' failed", spec.out_path));
             }
-        }
-
-        for (const Lift& lift : lifts) {
-            const Emitter& emitter = *lift.emitter;
-            const std::size_t loop = emitter.samples.size();
-            const std::size_t length = lift.taps.size();
-            for (std::size_t n = 0; n < count; ++n) {
-                const std::uint64_t m = first + n;
-                // y[m] = sum over input k of x[k] h[m - k L], h of `length`
-                // taps, so k runs from ceil((m - length + 1) / L) to m / L.
-                const std::uint64_t k_high = m / lift.factor;
-                std::complex<float> acc(0.0F, 0.0F);
-                for (std::uint64_t k = k_high + 1; k-- > 0;) {
-                    const std::uint64_t offset = m - k * lift.factor;
-                    if (offset >= length) {
-                        break;
-                    }
-                    acc += lift.taps[offset] * emitter.samples[static_cast<std::size_t>(k % loop)];
-                }
-                // Integer reduction of the mixer's phase, so it does not
-                // drift over a long capture.
-                std::int64_t turns = (emitter.offset_hz * static_cast<std::int64_t>(m)) %
-                                     static_cast<std::int64_t>(kLabelledRate);
-                if (turns < 0) {
-                    turns += kLabelledRate;
-                }
-                const double angle = 2.0 * std::numbers::pi * static_cast<double>(turns) /
-                                     static_cast<double>(kLabelledRate);
-                const std::complex<float> mixer(static_cast<float>(std::cos(angle)),
-                                                static_cast<float>(std::sin(angle)));
-                block[n] += static_cast<float>(lift.gain) * acc * mixer;
-            }
-        }
-
-        stream.write(reinterpret_cast<const char*>(block.data()),
-                     static_cast<std::streamsize>(count * sizeof(std::complex<float>)));
-        if (!stream) {
-            return fail(std::format("writing '{}' failed", spec.out_path));
-        }
+            return {};
+        });
+    if (!rendered) {
+        return rendered;
     }
 
     if (!spec.truth_path.empty()) {

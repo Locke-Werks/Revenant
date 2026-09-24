@@ -80,6 +80,17 @@ struct LineGroupConfig {
     // against real air has chosen a value; docs/detection.md has what three
     // gaps did across the HF corpus.
     dsp::Hertz gap_hz = 0;
+
+    // Two tracks whose occupied bands come within this of each other are in
+    // one group: the lower edge of the next, centre less half its width,
+    // against the highest upper edge in the chain so far. Zero for none. At
+    // least one of the two gaps has to be positive, and either chains.
+    //
+    // This is the rule for the pieces of ONE emitter, where the centre gap is
+    // the rule for lines at a family's spacing. detect::TierTwo uses it to
+    // probe an emitter whole; TierTwoConfig::emitter_gap_hz has the number
+    // and the measurement.
+    dsp::Hertz edge_gap_hz = 0;
 };
 
 // One track, as a member of a group.
@@ -124,6 +135,12 @@ struct LineGroup {
 
     // Highest member centre minus lowest.
     dsp::Hertz span = 0;
+
+    // The lowest member's lower edge and the highest member's upper edge,
+    // centre less and plus half the width, absolute: the extent the group's
+    // lines occupy between them.
+    dsp::Hertz low_edge = 0;
+    dsp::Hertz high_edge = 0;
 
     // The decision this id was first issued at.
     dsp::SampleIndex formed = 0;

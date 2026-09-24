@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <format>
+#include <numbers>
 
 namespace revenant::characterise {
 namespace {
@@ -210,6 +212,338 @@ struct Sidebands {
     return out;
 }
 
+// The voice channel: 300 to 3000 Hz. ITU-T G.712 states 300 to 3400 Hz for
+// telephony; 3000 is the top land mobile and amateur voice transmitters pass
+// and the figure tools/siggen's voice scenes use.
+constexpr double kVoiceLowHz = 300.0;
+constexpr double kVoiceHighHz = 3000.0;
+
+// The noise level inside the extract's passband. See
+// Characterisation::inband_noise.
+struct InbandNoise {
+    double per_bin = 0.0;
+    double total = 0.0;
+};
+
+[[nodiscard]] InbandNoise inband_noise(const PowerSpectrum& spectrum)
+{
+    InbandNoise out;
+    const double half = static_cast<double>(spectrum.rate) / 4.0;
+    std::vector<double> central;
+    for (std::size_t k = 0; k < spectrum.bins.size(); ++k) {
+        if (std::abs(spectrum.frequency_at(static_cast<double>(k))) <= half) {
+            central.push_back(spectrum.bins[k]);
+        }
+    }
+    if (central.empty()) {
+        return out;
+    }
+    const auto at = static_cast<std::size_t>(0.2 * static_cast<double>(central.size()));
+    std::nth_element(central.begin(), central.begin() + static_cast<std::ptrdiff_t>(at),
+                     central.end());
+    out.per_bin = central[at];
+    double sum = 0.0;
+    for (const double bin : spectrum.bins) {
+        sum += std::min(bin, out.per_bin);
+    }
+    out.total = sum / static_cast<double>(spectrum.bins.size());
+    return out;
+}
+
+// The variance a series of frame values carries between 2 and 10 Hz and
+// between 10 and 40 Hz, and its mean, from a direct transform: a few hundred
+// frames against a few dozen bins.
+struct ModulationBands {
+    double mean = 0.0;
+    double syllabic = 0.0;
+    double fast = 0.0;
+};
+
+[[nodiscard]] ModulationBands modulation_bands(const std::vector<double>& series, double frame_rate)
+{
+    ModulationBands out;
+    const std::size_t frames = series.size();
+    if (frames == 0) {
+        return out;
+    }
+    for (const double value : series) {
+        out.mean += value;
+    }
+    out.mean /= static_cast<double>(frames);
+    const double resolution = frame_rate / static_cast<double>(frames);
+    for (std::size_t j = 1; static_cast<double>(j) * resolution <= 40.0 && j < frames / 2; ++j) {
+        const double hz = static_cast<double>(j) * resolution;
+        std::complex<double> sum(0.0, 0.0);
+        const double step =
+            -2.0 * std::numbers::pi * static_cast<double>(j) / static_cast<double>(frames);
+        for (std::size_t k = 0; k < frames; ++k) {
+            sum += (series[k] - out.mean) * std::polar(1.0, step * static_cast<double>(k));
+        }
+        // Both halves of the two-sided transform, so each sum is the variance
+        // the series carries in its band.
+        const double variance =
+            2.0 * std::norm(sum) / (static_cast<double>(frames) * static_cast<double>(frames));
+        if (hz >= 2.0 && hz <= 10.0) {
+            out.syllabic += variance;
+        } else if (hz > 10.0) {
+            out.fast += variance;
+        }
+    }
+    return out;
+}
+
+// Ten milliseconds, the frame every syllabic measurement here is taken over:
+// short against a syllable and long against the 300 Hz bottom of the voice
+// channel.
+constexpr double kSyllabicFrameSeconds = 0.01;
+
+// Frames the syllabic measurements need, 0.64 s, so the 2 Hz end of the band
+// holds at least one whole cycle.
+constexpr std::size_t kMinSyllabicFrames = 64;
+
+struct Syllabic {
+    double depth = -1.0;
+    double fast = -1.0;
+};
+
+// The power envelope's movement at a syllable's rate and above it. See
+// Characterisation::syllabic_depth.
+[[nodiscard]] Syllabic syllabic_envelope(const std::vector<Complex64>& samples,
+                                         dsp::SampleRate rate, double noise_power)
+{
+    Syllabic out;
+    const auto frame = std::max<std::size_t>(
+        1, static_cast<std::size_t>(kSyllabicFrameSeconds * static_cast<double>(rate)));
+    const std::size_t frames = samples.size() / frame;
+    if (frames < kMinSyllabicFrames) {
+        return out;
+    }
+    std::vector<double> power(frames, 0.0);
+    for (std::size_t k = 0; k < frames; ++k) {
+        double sum = 0.0;
+        for (std::size_t n = k * frame; n < (k + 1) * frame; ++n) {
+            sum += std::norm(samples[n]);
+        }
+        power[k] = sum / static_cast<double>(frame);
+    }
+    const ModulationBands bands =
+        modulation_bands(power, static_cast<double>(rate) / static_cast<double>(frame));
+    const double signal = bands.mean - noise_power;
+    if (!(signal > 0.0)) {
+        return out;
+    }
+    out.depth = std::sqrt(bands.syllabic) / signal;
+    out.fast = std::sqrt(bands.fast) / signal;
+    return out;
+}
+
+// The instantaneous frequency's deviation, frame by frame, moving at a
+// syllable's rate. See Characterisation::frequency_syllabic_depth.
+[[nodiscard]] double frequency_syllabic(const std::vector<Complex64>& samples,
+                                        dsp::SampleRate rate, double mean_power)
+{
+    const auto frame = std::max<std::size_t>(
+        1, static_cast<std::size_t>(kSyllabicFrameSeconds * static_cast<double>(rate)));
+    const std::size_t frames = samples.size() / frame;
+    if (frames < kMinSyllabicFrames || !(mean_power > 0.0)) {
+        return -1.0;
+    }
+    // The same amplitude gate the tone histogram uses by default, a tenth of
+    // the mean power, so a sample of phase noise across an envelope null
+    // does not read as a deviation of the whole rate.
+    const double gate = 0.1 * mean_power;
+    const double to_hertz = static_cast<double>(rate) / (2.0 * std::numbers::pi);
+    std::vector<double> frequency;
+    frequency.reserve(samples.size());
+    for (std::size_t n = 1; n < samples.size(); ++n) {
+        if (std::norm(samples[n]) < gate || std::norm(samples[n - 1]) < gate) {
+            frequency.push_back(std::nan(""));
+            continue;
+        }
+        frequency.push_back(std::arg(samples[n] * std::conj(samples[n - 1])) * to_hertz);
+    }
+    std::vector<double> kept;
+    for (const double f : frequency) {
+        if (!std::isnan(f)) {
+            kept.push_back(f);
+        }
+    }
+    if (kept.size() < frequency.size() / 4) {
+        return -1.0;
+    }
+    const std::size_t middle = kept.size() / 2;
+    std::nth_element(kept.begin(), kept.begin() + static_cast<std::ptrdiff_t>(middle), kept.end());
+    const double centre = kept[middle];
+
+    std::vector<double> deviation(frames, 0.0);
+    for (std::size_t k = 0; k < frames; ++k) {
+        double sum = 0.0;
+        std::size_t count = 0;
+        for (std::size_t n = k * frame; n < (k + 1) * frame && n < frequency.size(); ++n) {
+            if (!std::isnan(frequency[n])) {
+                sum += (frequency[n] - centre) * (frequency[n] - centre);
+                ++count;
+            }
+        }
+        deviation[k] = count == 0 ? 0.0 : std::sqrt(sum / static_cast<double>(count));
+    }
+    const ModulationBands bands =
+        modulation_bands(deviation, static_cast<double>(rate) / static_cast<double>(frame));
+    if (!(bands.mean > 0.0)) {
+        return -1.0;
+    }
+    return std::sqrt(bands.syllabic) / bands.mean;
+}
+
+// Which side of the extract's centre its excess power sits, over the centre
+// plus and minus `half_width`. See Characterisation::side_centroid.
+[[nodiscard]] double side_centroid(const PowerSpectrum& spectrum, double floor, double half_width)
+{
+    if (!(half_width > 0.0)) {
+        return 0.0;
+    }
+    double weight = 0.0;
+    double moment = 0.0;
+    for (std::size_t k = 0; k < spectrum.bins.size(); ++k) {
+        const double f = spectrum.frequency_at(static_cast<double>(k));
+        if (std::abs(f) > half_width) {
+            continue;
+        }
+        const double excess = std::max(spectrum.bins[k] - floor, 0.0);
+        weight += excess;
+        moment += excess * f;
+    }
+    if (!(weight > 0.0)) {
+        return 0.0;
+    }
+    return moment / (weight * half_width);
+}
+
+// The carrier's sidebands split into the part in phase with it and the part
+// in quadrature. See Characterisation::carrier_iq_balance.
+struct CarrierQuadrature {
+    double balance = 0.0;
+    double in_phase_excess = 0.0;
+    bool measured = false;
+};
+
+[[nodiscard]] CarrierQuadrature carrier_quadrature(const std::vector<Complex64>& samples,
+                                                   const PowerSpectrum& spectrum,
+                                                   std::size_t segment)
+{
+    CarrierQuadrature out;
+    const std::size_t size = spectrum.bins.size();
+    const dsp::SampleRate rate = spectrum.rate;
+    const double upper_hz = std::min(kVoiceHighHz, static_cast<double>(rate) / 4.0);
+    if (size < 16 || rate <= 0 || !(upper_hz > kVoiceLowHz)) {
+        return out;
+    }
+
+    // The carrier: the strongest three-bin window, refined to the power
+    // centroid of those three bins.
+    std::size_t carrier = 0;
+    double loudest = -1.0;
+    for (std::size_t k = 0; k < size; ++k) {
+        const double here = spectrum.bins[(k + size - 1) % size] + spectrum.bins[k] +
+                            spectrum.bins[(k + 1) % size];
+        if (here > loudest) {
+            loudest = here;
+            carrier = k;
+        }
+    }
+    double weight = 0.0;
+    double moment = 0.0;
+    for (int d = -1; d <= 1; ++d) {
+        const std::size_t k = (carrier + size + static_cast<std::size_t>(d + 1) - 1) % size;
+        const double p = spectrum.bins[k];
+        weight += p;
+        moment += p * (spectrum.frequency_at(static_cast<double>(carrier)) +
+                       static_cast<double>(d) * spectrum.bin_width_hz);
+    }
+    const double carrier_hz = weight > 0.0 ? moment / weight
+                                           : spectrum.frequency_at(static_cast<double>(carrier));
+
+    // Mixed to the carrier, then its residual phase followed in 20 ms blocks,
+    // which averages the voice channel's lowest tone over six cycles and
+    // follows anything the bin left of the carrier's frequency up to 25 Hz.
+    const std::size_t count = samples.size();
+    const auto block = std::max<std::size_t>(1, static_cast<std::size_t>(rate / 50));
+    const std::size_t blocks = count / block;
+    if (blocks < 8) {
+        return out;
+    }
+    std::vector<Complex64> mixed(count);
+    const double step = -2.0 * std::numbers::pi * carrier_hz / static_cast<double>(rate);
+    for (std::size_t n = 0; n < count; ++n) {
+        mixed[n] = samples[n] * std::polar(1.0, std::fmod(step * static_cast<double>(n),
+                                                          2.0 * std::numbers::pi));
+    }
+    std::vector<double> phase(blocks, 0.0);
+    for (std::size_t b = 0; b < blocks; ++b) {
+        Complex64 sum(0.0, 0.0);
+        for (std::size_t n = b * block; n < (b + 1) * block; ++n) {
+            sum += mixed[n];
+        }
+        phase[b] = std::arg(sum);
+        if (b > 0) {
+            while (phase[b] - phase[b - 1] > std::numbers::pi) {
+                phase[b] -= 2.0 * std::numbers::pi;
+            }
+            while (phase[b] - phase[b - 1] < -std::numbers::pi) {
+                phase[b] += 2.0 * std::numbers::pi;
+            }
+        }
+    }
+    std::vector<double> in_phase(count);
+    std::vector<double> quadrature(count);
+    double carrier_sum = 0.0;
+    for (std::size_t n = 0; n < count; ++n) {
+        const double position = (static_cast<double>(n) + 0.5) / static_cast<double>(block) - 0.5;
+        double theta = 0.0;
+        if (position <= 0.0) {
+            theta = phase.front();
+        } else if (position >= static_cast<double>(blocks - 1)) {
+            theta = phase.back();
+        } else {
+            const auto low = static_cast<std::size_t>(position);
+            const double t = position - static_cast<double>(low);
+            theta = phase[low] + t * (phase[low + 1] - phase[low]);
+        }
+        const Complex64 y = mixed[n] * std::polar(1.0, -theta);
+        in_phase[n] = y.real();
+        quadrature[n] = y.imag();
+        carrier_sum += y.real();
+    }
+    const double carrier_amplitude = carrier_sum / static_cast<double>(count);
+    const double carrier_power = carrier_amplitude * carrier_amplitude;
+
+    auto i_spectrum = welch_spectrum_real(in_phase, rate, segment);
+    auto q_spectrum = welch_spectrum_real(quadrature, rate, segment);
+    if (!i_spectrum.has_value() || !q_spectrum.has_value() || !(carrier_power > 0.0)) {
+        return out;
+    }
+    // Band power on the noise-equivalent normalisation: a bin reads the
+    // variance of white noise, so a band's share of it is its width over the
+    // one-sided extent.
+    double p_i = 0.0;
+    double p_q = 0.0;
+    const double scale = i_spectrum->bin_width_hz / (static_cast<double>(rate) / 2.0);
+    for (std::size_t k = 0; k < i_spectrum->bins.size(); ++k) {
+        const double f = i_spectrum->frequency_at(static_cast<double>(k));
+        if (f >= kVoiceLowHz && f <= upper_hz) {
+            p_i += i_spectrum->bins[k] * scale;
+            p_q += q_spectrum->bins[k] * scale;
+        }
+    }
+    if (!(p_i + p_q > 0.0)) {
+        return out;
+    }
+    out.balance = (p_i - p_q) / (p_i + p_q);
+    out.in_phase_excess = (p_i - p_q) / carrier_power;
+    out.measured = true;
+    return out;
+}
+
 }  // namespace
 
 Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
@@ -287,6 +621,28 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
     out.ofdm = find_cyclic_prefix(*profile, config.ofdm);
     out.frame = find_frame_period(*profile, config.frame);
 
+    // The voice measurements, each against the noise inside the passband
+    // rather than the 20th percentile of the whole extract. See
+    // Characterisation::inband_noise.
+    {
+        const InbandNoise noise = inband_noise(*spectrum);
+        out.inband_noise = noise.total;
+        const Syllabic syllabic = syllabic_envelope(widened, config.rate, noise.total);
+        out.syllabic_depth = syllabic.depth;
+        out.syllabic_fast = syllabic.fast;
+        out.frequency_syllabic_depth =
+            frequency_syllabic(widened, config.rate, out.envelope.mean_power);
+        const double half_width = config.detection_bandwidth_hz > 0.0
+                                      ? 0.5 * config.detection_bandwidth_hz
+                                      : (out.band.found ? 0.5 * out.band.bandwidth_hz : 0.0);
+        out.side_centroid = side_centroid(*spectrum, noise.per_bin, half_width);
+        const CarrierQuadrature quadrature = carrier_quadrature(widened, *spectrum, segment);
+        if (quadrature.measured) {
+            out.carrier_iq_balance = quadrature.balance;
+            out.carrier_in_phase_excess = quadrature.in_phase_excess;
+        }
+    }
+
     const bool constant_envelope =
         out.envelope.normalised_power_variance < config.constant_envelope_variance;
 
@@ -317,46 +673,78 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
         }
     }
 
+    // The envelope against the noise inside the passband, for the voice
+    // branches. See Characterisation::envelope_variance_inband.
+    {
+        const double noise = out.inband_noise;
+        const double signal = std::max(out.envelope.mean_power - noise, 0.0);
+        const double total = signal + noise;
+        out.envelope_variance_inband =
+            out.envelope.normalised_power_variance -
+            (total > 0.0 ? (2.0 * signal * noise + noise * noise) / (total * total) : 0.0);
+    }
+    const bool constant_inband = out.envelope_variance_inband < config.constant_envelope_variance;
+    const double voice_width = config.detection_bandwidth_hz > 0.0
+                                   ? config.detection_bandwidth_hz
+                                   : (out.band.found ? out.band.bandwidth_hz : 0.0);
+    const bool ssb_voice = !constant_inband && voice_width >= config.voice_min_width_hz &&
+                           out.syllabic_depth >= config.voice_syllabic_depth &&
+                           out.syllabic_depth >= config.voice_syllabic_ratio * out.syllabic_fast;
+    const bool fm_voice =
+        constant_inband && out.frequency_syllabic_depth >= config.fm_voice_frequency_syllabic;
+
     ProtocolQuery query;
     query.bandwidth_hz = out.band.found ? out.band.bandwidth_hz : 0.0;
 
     // The order of these branches is the whole classifier and each one is
     // ahead of the next for a reason rather than by convenience.
-    if (out.spectral_concentration >= config.carrier_concentration) {
-        // Nothing else can be read off a signal whose energy is one line.
+    // The carrier's sidebands against its own phase. See
+    // CharacteriseConfig::carrier_in_phase_balance.
+    const bool in_phase_sidebands =
+        out.carrier_iq_balance >= config.carrier_in_phase_balance &&
+        out.carrier_in_phase_excess >= config.carrier_sideband_excess;
+    const bool quadrature_sidebands =
+        out.carrier_iq_balance <= -config.carrier_in_phase_balance &&
+        -out.carrier_in_phase_excess >= config.carrier_sideband_excess;
+    const bool carrier_with_sidebands =
+        out.spectral_concentration >= config.carrier_sideband_concentration && !ssb_voice &&
+        (in_phase_sidebands || quadrature_sidebands);
+
+    // A talker on single sideband whose extract a voiced sound's harmonics
+    // pulled over the carrier bar; over a wide detection that is the talker
+    // and not a keyed carrier, which is never a kilohertz wide. Whatever the
+    // quadrature reading says about the harmonic it locked to: an AM
+    // carrier holds its power through the talker's pauses, so its envelope
+    // never moves like this. See CharacteriseConfig::voice_carrier_width_hz.
+    const bool voice_over_carrier = ssb_voice && voice_width >= config.voice_carrier_width_hz;
+
+    if ((out.spectral_concentration >= config.carrier_concentration || carrier_with_sidebands) &&
+        !voice_over_carrier) {
+        // Nothing else can be read off a signal whose energy is one line,
+        // or a carrier whose sidebands sit against it the way AM's or FM's
+        // do. See CharacteriseConfig::carrier_sideband_concentration.
         out.family = ModulationFamily::Unmodulated;
         out.family_confidence = std::clamp(out.spectral_concentration, 0.0, 1.0);
 
-        // Whether the carrier has mirrored sidebands, which is what a label
-        // reads as AM. See CharacteriseConfig::am_sideband_share.
+        // The spectral sideband reading, reported and no longer deciding
+        // anything. See CharacteriseConfig::am_sideband_share.
         const Sidebands sides = sidebands(*spectrum, out.band, config.am_sideband_min_offset_hz);
         out.sideband_share = sides.share;
         out.sideband_symmetry = sides.symmetry;
-        const bool mirrored = sides.share >= config.am_sideband_share &&
-                              sides.symmetry >= config.am_sideband_symmetry;
+        // Where the sidebands sit against the carrier's own phase is what
+        // separates AM from FM at a low index and both from a keyed or bare
+        // carrier. See CharacteriseConfig::carrier_in_phase_balance.
+        out.double_sideband = in_phase_sidebands;
+        out.low_index_fm = quadrature_sidebands;
 
-        // Mirrored sidebands on a constant envelope are frequency modulation
-        // at a low index, not AM: AM's sidebands are its envelope. Voice on
-        // narrowband FM keeps most of its power in the carrier, so it
-        // reaches the concentration bar above and would otherwise be called a
-        // carrier. See CharacteriseConfig::am_sideband_share.
-        //
-        // The envelope is judged net of what the extract's own noise puts on
-        // it, which the plain constant_envelope test is not: a constant
-        // envelope of power S in complex Gaussian noise of power N reads a
-        // normalised power variance of (2SN + N^2) / (S + N)^2, and the
-        // spectrum's floor is N, because a Welch bin reads the per-sample
-        // variance of white noise. Without the correction low-index FM at
-        // 20 dB in 2500 Hz read 0.089, over the 0.05 bar, and was called AM.
+        // The envelope net of the noise, which the double-sideband reading
+        // used to rest on and is still reported. See envelope_variance_net.
         const double noise = out.band.found ? out.band.noise_floor : 0.0;
         const double signal = std::max(out.envelope.mean_power - noise, 0.0);
         const double total = signal + noise;
         const double from_noise =
             total > 0.0 ? (2.0 * signal * noise + noise * noise) / (total * total) : 0.0;
         out.envelope_variance_net = out.envelope.normalised_power_variance - from_noise;
-        const bool flat = out.envelope_variance_net < config.constant_envelope_variance;
-        out.double_sideband = mirrored && !flat;
-        out.low_index_fm = mirrored && flat;
         out.summary = std::format(
             "an unmodulated carrier: {:.1f} percent of the extract's power is in three adjacent "
             "bins at {}, and its instantaneous frequency spans {}",
@@ -364,9 +752,10 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             hertz(out.tones.frequency_spread_hz));
         if (out.double_sideband) {
             out.summary += std::format(
-                ", with {:.1f} percent of the band's excess power in sidebands that mirror each "
-                "other to {:.2f} about it, which is double sideband",
-                100.0 * out.sideband_share, out.sideband_symmetry);
+                ", with sidebands in the voice channel {:.2f} in phase with it against their "
+                "quadrature and holding {:.1f} percent of its power beyond what the quadrature "
+                "holds, which is double sideband amplitude modulation",
+                out.carrier_iq_balance, 100.0 * out.carrier_in_phase_excess);
         }
         if (out.low_index_fm) {
             // Held to a half for the reason the AnalogueFm branch below is:
@@ -378,11 +767,11 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             out.candidates = match_protocols(query);
             out.summary = std::format(
                 "frequency modulation at a low index: {:.1f} percent of the extract's power is "
-                "in the carrier at {}, the envelope is constant, and {:.1f} percent sits in "
-                "sidebands mirroring to {:.2f} about it, which an unmodulated carrier does not "
-                "have and AM would carry on its envelope{}",
+                "in the carrier at {}, and its sidebands in the voice channel sit in quadrature "
+                "with it, {:.2f} against their in-phase part and {:.1f} percent of its power "
+                "beyond it, which is phase modulation and not AM{}",
                 100.0 * out.spectral_concentration, hertz(out.band.centre_hz),
-                100.0 * out.sideband_share, out.sideband_symmetry,
+                -out.carrier_iq_balance, -100.0 * out.carrier_in_phase_excess,
                 candidate_clause(out.candidates));
         }
     } else if (out.ofdm.found) {
@@ -400,6 +789,36 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             "samples read off a correlation of {:.3f}; occupying {}{}",
             seconds(out.ofdm.symbol_seconds), hertz(out.ofdm.subcarrier_spacing_hz),
             out.ofdm.prefix_samples, out.ofdm.correlation, hertz(out.band.bandwidth_hz),
+            candidate_clause(out.candidates));
+    } else if (ssb_voice) {
+        // Speech on a suppressed carrier. No family here names single
+        // sideband, so this is a refusal, and it is taken before the tone
+        // test and the PSK branch because a talker's pitch lights both: a
+        // cyclic line at the fundamental, which the PSK branch would report
+        // as a symbol rate. See CharacteriseConfig::voice_syllabic_depth.
+        out.voice = true;
+        if (out.side_centroid <= -config.voice_side_centroid) {
+            out.voice_sideband = VoiceSideband::Upper;
+        } else if (out.side_centroid >= config.voice_side_centroid) {
+            out.voice_sideband = VoiceSideband::Lower;
+        }
+    } else if (fm_voice) {
+        // A constant envelope whose deviation comes and goes at a syllable's
+        // rate: a talker on FM. Held to a half like the other analogue FM
+        // calls, because the syllabic measurement says voice and not which
+        // index, and a slow data burst on FM could move the deviation the
+        // same way. See CharacteriseConfig::fm_voice_frequency_syllabic.
+        out.voice = true;
+        out.family = ModulationFamily::AnalogueFm;
+        out.family_confidence = 0.5;
+        query.family = ModulationFamily::AnalogueFm;
+        out.candidates = match_protocols(query);
+        out.summary = std::format(
+            "frequency modulation carrying speech: the envelope's normalised power variance is "
+            "{:.3f} net of the noise inside the passband, and the instantaneous frequency's "
+            "deviation moves by {:.2f} of its mean between 2 and 10 Hz, which is a talker's "
+            "syllables{}",
+            out.envelope_variance_inband, out.frequency_syllabic_depth,
             candidate_clause(out.candidates));
     } else if (out.tones.found) {
         out.family = ModulationFamily::Fsk;
@@ -529,6 +948,19 @@ Expected<Characterisation> characterise(dsp::ConstComplexSpan samples,
             out.frequency_transition.refusal.empty() ? "it found a symbol rate."
                                                      : out.frequency_transition.refusal,
             out.ofdm.refusal.empty() ? "it found a cyclic prefix." : out.ofdm.refusal);
+
+        if (out.voice) {
+            out.refusal += std::format(
+                " The power envelope moves by {:.2f} of the signal's mean power between 2 and 10 "
+                "Hz against {:.2f} from 10 to 40 Hz, across {}, and the envelope is not constant: "
+                "that is a talker's syllables on a suppressed carrier, {}. No family here names "
+                "single sideband, so it is refused rather than given the digital family its "
+                "pitch would pass for.",
+                out.syllabic_depth, out.syllabic_fast, hertz(voice_width),
+                out.voice_sideband == VoiceSideband::Upper   ? "the upper sideband"
+                : out.voice_sideband == VoiceSideband::Lower ? "the lower sideband"
+                                                             : "on a side this could not read");
+        }
 
         if (out.psk_carrier_outside_band) {
             out.refusal += std::format(

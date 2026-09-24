@@ -23,11 +23,13 @@ namespace {
 
 Expected<LineGrouper> LineGrouper::create(const LineGroupConfig& config)
 {
-    if (config.gap_hz <= 0) {
+    if (config.gap_hz < 0 || config.edge_gap_hz < 0 ||
+        (config.gap_hz == 0 && config.edge_gap_hz == 0)) {
         return fail(std::format(
-            "LineGrouper: gap_hz must be positive, was {}. Zero would group nothing and a "
-            "negative gap has no meaning; a caller that wants no groups should not make one.",
-            config.gap_hz));
+            "LineGrouper: gap_hz was {} and edge_gap_hz {}. At least one must be positive and "
+            "neither negative: both at zero would group nothing, and a negative gap has no "
+            "meaning; a caller that wants no groups should not make one.",
+            config.gap_hz, config.edge_gap_hz));
     }
     LineGrouper grouper;
     grouper.config_ = config;
@@ -87,12 +89,32 @@ Status LineGrouper::observe(std::span<const Track> tracks, dsp::SampleIndex now)
 
     // Chains of neighbours within the gap. A chain of one is a line on its
     // own and is not a group.
+    //
+    // Two rules, either of which chains. The centre gap is the original one.
+    // The edge gap chains a track whose lower edge sits within it of the
+    // highest upper edge in the chain so far, which is how the pieces of one
+    // filled emitter meet: a carrier and the sidebands either side of it, or
+    // the stretches of a talker's spectrum the detector cut apart. Running
+    // over the chain's highest edge rather than the neighbour's, because a
+    // narrow line can sit inside a wide band's extent with its centre past it.
+    const auto low_edge = [](const Track& track) { return track.center - track.bandwidth / 2; };
+    const auto high_edge = [](const Track& track) {
+        return track.center + (track.bandwidth - track.bandwidth / 2);
+    };
     std::size_t first = 0;
     while (first < eligible_.size()) {
         std::size_t last = first;
-        while (last + 1 < eligible_.size() &&
-               eligible_[last + 1]->center - eligible_[last]->center <= config_.gap_hz) {
+        dsp::Hertz reach = high_edge(*eligible_[first]);
+        while (last + 1 < eligible_.size()) {
+            const Track& next = *eligible_[last + 1];
+            const bool by_centre =
+                config_.gap_hz > 0 && next.center - eligible_[last]->center <= config_.gap_hz;
+            const bool by_edge = config_.edge_gap_hz > 0 && low_edge(next) - reach <= config_.edge_gap_hz;
+            if (!by_centre && !by_edge) {
+                break;
+            }
             ++last;
+            reach = std::max(reach, high_edge(next));
         }
 
         if (last > first) {
@@ -118,6 +140,12 @@ Status LineGrouper::observe(std::span<const Track> tracks, dsp::SampleIndex now)
             group.anchor_center = eligible_[strongest]->center;
             group.span = eligible_[last]->center - eligible_[first]->center;
             group.birth_spread = latest - earliest;
+            group.low_edge = low_edge(*eligible_[first]);
+            group.high_edge = high_edge(*eligible_[first]);
+            for (std::size_t i = first; i <= last; ++i) {
+                group.low_edge = std::min(group.low_edge, low_edge(*eligible_[i]));
+                group.high_edge = std::max(group.high_edge, high_edge(*eligible_[i]));
+            }
 
             for (std::size_t i = first; i <= last; ++i) {
                 const Track& track = *eligible_[i];

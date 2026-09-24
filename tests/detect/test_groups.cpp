@@ -482,6 +482,53 @@ TEST_CASE("grouping is a function of the track list and not of its order",
     }
 }
 
+// REJECTS: an edge rule that compares neighbours' centres, which would leave a
+// carrier's line outside the wide sideband band it sits beside; one that
+// compares only the previous line's edge, which a narrow line inside a wide
+// band's extent would cut; and an extent that forgets a member's width.
+//
+// The layout is an AM talker as the detector reported one at 30 dB in the
+// voice survey: a wide lower sideband stretch, a narrow line inside its
+// reach, the carrier 315 Hz clear of the inner stretch, and the upper side.
+TEST_CASE("an edge gap chains the pieces of one filled emitter and not a neighbour",
+          "[detect][groups]")
+{
+    const auto piece = [](std::uint64_t id, dsp::Hertz center, dsp::Hertz width, double snr) {
+        detect::Track track = line(id, center, snr, 0.0);
+        track.bandwidth = width;
+        return track;
+    };
+    const std::vector<detect::Track> tracks = {
+        piece(1, 146'000'000 - 2'243, 2'450, 10.0),
+        piece(2, 146'000'000 - 1'500, 60, 3.0),
+        piece(3, 146'000'000 - 640, 467, 8.0),
+        piece(4, 146'000'000, 183, 30.0),
+        piece(5, 146'000'000 + 643, 471, 8.0),
+        piece(6, 146'000'000 + 2'322, 2'554, 10.0),
+        piece(7, 146'000'000 + 5'000, 183, 20.0),
+    };
+    auto made = detect::LineGrouper::create(detect::LineGroupConfig{.edge_gap_hz = 400});
+    REQUIRE(made.has_value());
+    detect::LineGrouper grouper = std::move(*made);
+    REQUIRE(grouper.observe(tracks, at_seconds(5.0)).has_value());
+
+    REQUIRE(grouper.groups().size() == 1);
+    const detect::LineGroup& group = grouper.groups().front();
+    CHECK(member_ids(grouper, group) == std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6});
+    CHECK(group.anchor == 4);
+    CHECK(group.low_edge == 146'000'000 - 2'243 - 1'225);
+    CHECK(group.high_edge == 146'000'000 + 2'322 + 1'277);
+
+    // The same lines at a 200 Hz edge gap: the carrier stands 315 Hz clear of
+    // both inner stretches and is on its own, and each side is its own group.
+    auto narrow = detect::LineGrouper::create(detect::LineGroupConfig{.edge_gap_hz = 200});
+    REQUIRE(narrow.has_value());
+    REQUIRE(narrow->observe(tracks, at_seconds(5.0)).has_value());
+    REQUIRE(narrow->groups().size() == 2);
+    CHECK(member_ids(*narrow, narrow->groups()[0]) == std::vector<std::uint64_t>{1, 2, 3});
+    CHECK(member_ids(*narrow, narrow->groups()[1]) == std::vector<std::uint64_t>{5, 6});
+}
+
 // REJECTS: a grouper that accepts a gap it cannot use, and one that takes a
 // decision from before the last one as though the capture had continued.
 TEST_CASE("a grouper refuses a gap of nothing and time running backward", "[detect][groups]")

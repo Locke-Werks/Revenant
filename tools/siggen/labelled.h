@@ -20,10 +20,17 @@
 //   AX.25 on NFM             +550 kHz    RTTY at 45.45 baud     +700 kHz
 //   USB, voice-shaped        +850 kHz    DMR base station idle  -950 kHz
 //
-// "Voice-shaped" is Gaussian noise band-limited to 300 to 3000 Hz, so the
-// analogue emitters fill their bands the way speech does rather than
-// breaking into the line spectra a test tone makes, which docs/detection.md
-// measured the detector reports line by line.
+// "Voice-shaped" is tools/siggen/speech.h: syllables at about four a second,
+// pauses between phrases, a pitch, formants, and the 300 to 3000 Hz voice
+// channel, so the analogue emitters fill their bands the way speech does
+// rather than breaking into the line spectra a test tone makes, which
+// docs/detection.md measured the detector reports line by line, and they go
+// quiet and come back the way a talker does.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "'Voice-shaped' is Gaussian noise
+// band-limited to 300 to 3000 Hz". Steady noise never pauses and has no
+// syllabic envelope, which are two of the things that tell voice from data,
+// so the labelled scene's voice rows are not comparable across the change.
 //
 // 2160000 S/s, because it is 45 times 48000 and 30 times 72000, so every
 // transmitter lifts by a whole factor, and on 16 coarse channels it runs

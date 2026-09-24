@@ -39,6 +39,16 @@ target_link_libraries(revenant_detect_tests PRIVATE
 )
 target_include_directories(revenant_detect_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 
+# The voice survey renders tools/siggen/voice.h's scene and runs it through the
+# engine, so it needs the GPU and the scene library from tools/siggen. It is
+# hidden, so ctest never runs it, and it is built only where the tools are.
+# Guarding it drops no case ctest counts: catch_discover_tests lists no hidden
+# case either way.
+if(TARGET revenant_siggen_scenes)
+    target_sources(revenant_detect_tests PRIVATE test_voice_survey.cpp)
+    target_link_libraries(revenant_detect_tests PRIVATE revenant_siggen_scenes)
+endif()
+
 revenant_apply_warnings(revenant_detect_tests)
 revenant_apply_reference_fp(revenant_detect_tests)
 

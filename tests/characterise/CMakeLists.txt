@@ -33,6 +33,15 @@ target_link_libraries(revenant_characterise_tests PRIVATE
 )
 target_include_directories(revenant_characterise_tests PRIVATE "${CMAKE_SOURCE_DIR}")
 
+# Voice cases need tools/siggen/speech.h, which is in the scene library the
+# tools build. Where the tools are not built the file is not either, and the
+# case count says so rather than a guard hiding it: this is the one place a
+# case here depends on something outside core.
+if(TARGET revenant_siggen_scenes)
+    target_sources(revenant_characterise_tests PRIVATE test_voice.cpp)
+    target_link_libraries(revenant_characterise_tests PRIVATE revenant_siggen_scenes)
+endif()
+
 revenant_apply_warnings(revenant_characterise_tests)
 revenant_apply_reference_fp(revenant_characterise_tests)
 

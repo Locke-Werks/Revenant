@@ -2303,15 +2303,26 @@ whole rule, in this order:
    protocol plausible, and claims one only on what the decoder verifies. Its
    header states what counts for each protocol and how many it needs.
 2. **An accepted family.** An unmodulated carrier is CW, or AM when its
-   sidebands mirror about it; analogue FM is NFM below 50 kHz and WFM above;
+   voice-channel sidebands sit in phase with it; analogue FM is NFM below
+   50 kHz and WFM above;
    FSK and PSK carry their tone count and order, 2FSK or BPSK; OFDM is OFDM.
 3. **Nothing.** A track probed and named nothing gets no label.
 
-**It cannot say USB or LSB.** No family the characteriser names is single
-sideband, and relative to a carrier that is not transmitted the two differ only
-in which side their power sits, which "The lines as a set" above measured no
-per-band field can read. A sideband signal is unlabelled, which is rule 3
-rather than a gap in it.
+WHAT RULE 2 USED TO SAY about AM: "or AM when its sidebands mirror about
+it". "Voice" below has why that changed.
+
+**It cannot say USB or LSB yet.** No family the characteriser names is single
+sideband. Since 2026-09-24 the characteriser reads a talker on a suppressed
+carrier and which side of it the talker sits, from the probe's extract, and
+refuses the family; the reading stops at `engine::ProbeOutcome`, which has no
+field for it, so a sideband signal is unlabelled. "Voice" below has the
+measurement and what carrying it to the label would take.
+
+WHAT THIS PARAGRAPH USED TO SAY after its first sentence: "relative to a
+carrier that is not transmitted the two differ only in which side their power
+sits, which "The lines as a set" above measured no per-band field can read."
+Per band, from the detector's spectrum, that still holds; from the probe's
+complex baseband the side is read at every level measured.
 
 **WFM is reachable only where a probe fits.** A broadcast station is 200 kHz
 wide and a probe runs at four times its detection's width, so on the shipped
@@ -2427,6 +2438,11 @@ label each emitter's tracks ended with:
 | RTTY | 1 | RTTY | yes |
 | USB, speech-shaped | 1 | BPSK, from PSK at 2246 to 2293 baud and 0.68 | **no** |
 
+The voice rows were measured when the scene's "speech-shaped" audio was steady
+band-limited noise. Since 2026-09-24 it is `tools/siggen/speech.h`'s speech,
+and these rows have not been measured again; "Voice" below is the measurement
+of the same three modulations on speech.
+
 **Three wrong labels and what they are.** The AM emitter's sidebands are
 separate tracks, and so is the NFM emitter's weakest line, and a probe centred on one sees the carrier 1.5 kHz off with
 one sideband beside it, which is a carrier, and the NFM line reads the same way: the problem "And the lines as a set
@@ -2445,6 +2461,220 @@ until the carrier branch learned to read low-index FM off a constant envelope
 5 percent of its power and fell under the double-sideband share bar until it
 came down to 0.02; and TETRA's continuous bursts came back OFDM on one run,
 which used to rule the TETRA row out.
+
+## Voice
+
+The owner, after the live playtest of 2026-09-23: "I also want to reasonably
+ident AM/FM phone." What follows is what the span's labels said about a talker
+before and after the work that answer asked for, measured end to end.
+
+### The scene and the survey
+
+`tools/siggen/speech.h` makes speech-shaped audio rather than a tone or steady
+noise: phrases of 1.2 to 3.0 s with pauses of 0.25 to 0.9 s between them,
+syllables of 150 to 300 ms at about four a second, four in five voiced on a
+100 to 140 Hz pitch falling a fifth across each phrase, the first three
+formants of ten Peterson and Barney vowels through Klatt's resonators, the
+unvoiced fifth 10 dB under the vowels, and the 300 to 3000 Hz voice channel.
+The header cites each number or marks it as its own choice.
+
+`siggen voice` (`tools/siggen/voice.h`) puts that speech on AM at index 0.8,
+NFM at 2.5 and at 5 kHz peak deviation, USB and LSB, beside CW at 20 WPM,
+BPSK at 1200 baud and an empty slot, 100 to 200 kHz apart at 1.2 MS/s. On 32 channels
+with a 2048-point second stage that is the 36.6 Hz bins and 75 kS/s channels
+of the owner's 2.4 MS/s RTL-SDR grid over 64 channels. Every emitter sits at
+one SNR in 2500 Hz over its mean power across the loop.
+
+`voice survey` in `tests/detect/test_voice_survey.cpp`, hidden, runs that
+scene through the engine's file source, the detector on the engine's own
+frames, tier two through the probe pool, four probes, and
+`detect::label_track` on every track at every decision, which is what the wire
+carries. Twenty seconds a run at four times realtime, two seeds, 20260924 and
+20260925, at 30, 20, 15 and 10 dB. A track belongs to an emitter when its
+centre is inside the emitter's nominal band widened by a kilohertz. Each cell
+reads seed one / seed two. "none" is a track with no label.
+
+    revenant_detect_tests.exe "[.voice-survey]"
+
+The before run is the same scene and the same survey against the detection
+code at d94c33d. The after run is this change on d5e7a06, whose probe pool
+runs under a CPU budget the before run's did not have; the first-label times
+moved by up to 1.7 s between two runs of this change either side of that
+rebase, and no label did.
+
+### Before
+
+| emitter | SNR | labels at the end | tracks: ids, most at once | first right label | first wrong label |
+| --- | --- | --- | --- | --- | --- |
+| am | 30 dB | CW 0.95, AM 0.96 x2 / AM 0.96 x3 | 5, 5 / 5, 5 | 3.5 s / 3.4 s | CW 3.5 s / never |
+| nfm2.5 | 30 dB | NFM 0.50 x2, none x2, CW 0.67 / CW 0.81, CW 0.82, NFM 0.50 x4 | 17, 10 / 12, 9 | 8.2 s / 3.7 s | CW 15.6 s / CW 8.7 s |
+| nfm5 | 30 dB | none x3, AM 0.67, AM 0.65, AM 0.71, CW 0.59 / NFM 0.50 x2, none x5, AM 0.68, CW 0.61 | 20, 11 / 20, 10 | never / 6.1 s | AM 6.1 s / AM 6.2 s |
+| usb | 30 dB | none x2 / QPSK 0.95, none | 9, 4 / 10, 6 | never / never | never / QPSK 10.8 s |
+| lsb | 30 dB | none x3 / none x2 | 11, 6 / 11, 5 | never / never | never / never |
+| cw | 30 dB | CW 0.94 / CW 0.93 | 1, 1 / 1, 1 | 10.6 s / 13.1 s | never / never |
+| bpsk | 30 dB | BPSK 0.98 / BPSK 0.98 | 1, 1 / 1, 1 | 12.8 s / 13.1 s | never / never |
+| am | 20 dB | AM 0.94 / AM 0.92 | 1, 1 / 1, 1 | 3.4 s / 3.4 s | never / never |
+| nfm2.5 | 20 dB | NFM 0.50 x2, CW 0.62 / NFM 0.50 x2, AM 0.58 | 3, 3 / 3, 3 | 3.5 s / 13.8 s | CW 18.7 s / AM 18.0 s |
+| nfm5 | 20 dB | CW 0.66, CW 0.90, CW 0.65 / AM 0.62, AM 0.65, AM 0.66, none | 4, 4 / 5, 4 | never / never | CW 5.8 s / AM 5.8 s |
+| usb | 20 dB | none x2 / none x2 | 5, 3 / 6, 4 | never / never | PSK31 15.6 s / never |
+| lsb | 20 dB | none x2 / none x2 | 4, 4 / 8, 4 | never / never | never / never |
+| cw | 20 dB | CW 0.93 / CW 0.93 | 1, 1 / 1, 1 | 8.1 s / 8.1 s | never / never |
+| bpsk | 20 dB | BPSK 0.98 / BPSK 0.98 | 1, 1 / 1, 1 | 8.2 s / 8.2 s | never / never |
+| am | 15 dB | AM 0.90 / AM 0.91 | 1, 1 / 1, 1 | 3.5 s / 3.5 s | never / never |
+| nfm2.5 | 15 dB | AM 0.76, AM 0.51, AM 0.68 / AM 0.64, AM 0.77, none | 4, 3 / 6, 3 | never / never | AM 3.5 s / BPSK 3.5 s |
+| nfm5 | 15 dB | CW 0.62, AM 0.51, CW 0.74 / none, AM 0.62 | 4, 3 / 4, 3 | never / never | BPSK 3.8 s / AM 6.0 s |
+| usb | 15 dB | none / none | 2, 2 / 4, 3 | never / never | never / never |
+| lsb | 15 dB | none / BPSK 0.95 | 2, 2 / 1, 1 | never / never | never / BPSK 6.1 s |
+| cw | 15 dB | CW 0.95 / CW 0.95 | 1, 1 / 1, 1 | 18.6 s / 18.8 s | AM 6.0 s / AM 8.2 s |
+| bpsk | 15 dB | BPSK 0.98 / BPSK 0.98 | 1, 1 / 1, 1 | 6.0 s / 8.2 s | never / never |
+| am | 10 dB | AM 0.79 / AM 0.79 | 1, 1 / 1, 1 | 4.0 s / 3.5 s | never / never |
+| nfm2.5 | 10 dB | AM 0.58 / AM 0.57 | 1, 1 / 1, 1 | never / never | AM 4.3 s / AM 11.0 s |
+| nfm5 | 10 dB | AM 0.61 / AM 0.53 | 1, 1 / 1, 1 | never / never | AM 19.5 s / AM 3.7 s |
+| usb | 10 dB | BPSK 0.88 / none | 1, 1 / 1, 1 | never / never | BPSK 17.7 s / never |
+| lsb | 10 dB | none / BPSK 0.88 | 1, 1 / 1, 1 | never / never | never / BPSK 5.7 s |
+| cw | 10 dB | CW 0.97 / CW 0.90 | 1, 1 / 1, 1 | 15.6 s / 16.3 s | AM 6.3 s / AM 5.8 s |
+| bpsk | 10 dB | BPSK 0.97 / BPSK 0.97 | 1, 1 / 1, 1 | 6.9 s / 5.8 s | never / never |
+
+**A wrong label on 26 of 56 emitter runs, and the talker is several tracks.**
+A talker on AM at 30 dB is five tracks, a carrier and four stretches of
+sideband; on NFM at 5 kHz deviation, up to eleven at once. Each track was
+probed on its own: a probe sized to one stretch sees the carrier off centre
+with one sideband beside it, which is the carrier alone to the characteriser,
+so the lines read CW. NFM on speech read AM, CW or BPSK, and at 5 kHz
+deviation read NFM on one run of eight. Speech on USB and LSB read BPSK, QPSK or PSK31 at 10 to 30 dB: a
+talker's pitch is a cyclic line at 90 to 125 Hz that the PSK branch reports as
+a symbol rate, and a detection kilohertz wide lets the rate through. A keyed
+CW carrier read AM from 5.8 to 8.2 s at 10 and 15 dB until the long
+identification dwell verified Morse at 15.6 to 18.8 s: its own noise, measured
+over the 20th percentile of the whole extract, filled both sides of it as
+mirrored sidebands. The first right label on CW and BPSK took 5.8 to 18.8 s because the
+pool of four was spent on the voice fragments.
+
+### After
+
+| emitter | SNR | labels at the end | tracks: ids, most at once | emitters at once | first right label | first wrong label |
+| --- | --- | --- | --- | --- | --- | --- |
+| am | 30 dB | AM 0.96 x3 / AM 0.96 x3 | 5, 5 / 5, 5 | 1 / 3 | 3.7 s / 5.2 s | never / never |
+| nfm2.5 | 30 dB | NFM 0.50 x5 / NFM 0.50 x6 | 17, 10 / 12, 9 | 3 / 2 | 3.7 s / 5.6 s | never / never |
+| nfm5 | 30 dB | NFM 0.50 x7 / NFM 0.50 x9 | 20, 11 / 20, 10 | 3 / 4 | 6.4 s / 8.0 s | never / never |
+| usb | 30 dB | none x2 / none x2 | 9, 4 / 10, 6 | 2 / 1 | never / never | never / never |
+| lsb | 30 dB | none x3 / none x2 | 11, 6 / 11, 5 | 2 / 2 | never / never | never / never |
+| cw | 30 dB | CW 0.95 / CW 0.95 | 1, 1 / 1, 1 | 1 / 1 | 3.4 s / 3.8 s | never / never |
+| bpsk | 30 dB | BPSK 0.98 / BPSK 0.98 | 1, 1 / 1, 1 | 1 / 1 | 3.5 s / 5.1 s | never / never |
+| am | 20 dB | AM 0.94 / AM 0.94 | 1, 1 / 1, 1 | 1 / 1 | 3.5 s / 3.5 s | never / never |
+| nfm2.5 | 20 dB | NFM 0.50 x3 / NFM 0.50 x3 | 3, 3 / 3, 3 | 2 / 1 | 5.8 s / 6.3 s | never / never |
+| nfm5 | 20 dB | NFM 0.50 x3 / NFM 0.50 x4 | 4, 4 / 5, 4 | 2 / 2 | 6.2 s / 6.9 s | never / never |
+| usb | 20 dB | none x2 / none x2 | 5, 3 / 6, 4 | 2 / 1 | never / never | never / never |
+| lsb | 20 dB | none x2 / none x2 | 4, 4 / 8, 4 | 2 / 2 | never / never | never / never |
+| cw | 20 dB | CW 0.95 / CW 0.95 | 1, 1 / 1, 1 | 1 / 1 | 3.7 s / 4.1 s | never / never |
+| bpsk | 20 dB | BPSK 0.98 / BPSK 0.98 | 1, 1 / 1, 1 | 1 / 1 | 3.7 s / 4.1 s | never / never |
+| am | 15 dB | AM 0.90 / AM 0.90 | 1, 1 / 1, 1 | 1 / 1 | 3.5 s / 3.5 s | never / never |
+| nfm2.5 | 15 dB | NFM 0.50 x3 / NFM 0.50 x3 | 4, 3 / 6, 3 | 1 / 1 | 3.5 s / 7.3 s | never / never |
+| nfm5 | 15 dB | NFM 0.50 x3 / NFM 0.50 x2 | 4, 3 / 4, 3 | 1 / 1 | 6.1 s / 7.0 s | never / never |
+| usb | 15 dB | none / none | 2, 2 / 4, 3 | 1 / 1 | never / never | never / never |
+| lsb | 15 dB | none / none | 2, 2 / 1, 1 | 1 / 1 | never / never | never / never |
+| cw | 15 dB | CW 0.95 / CW 0.91 | 1, 1 / 1, 1 | 1 / 1 | 6.3 s / 4.2 s | never / never |
+| bpsk | 15 dB | BPSK 0.98 / BPSK 0.98 | 1, 1 / 1, 1 | 1 / 1 | 6.4 s / 7.2 s | never / never |
+| am | 10 dB | AM 0.79 / AM 0.80 | 1, 1 / 1, 1 | 1 / 1 | 3.5 s / 3.5 s | never / never |
+| nfm2.5 | 10 dB | NFM 0.50 / NFM 0.50 | 1, 1 / 1, 1 | 1 / 1 | 3.7 s / 3.5 s | never / never |
+| nfm5 | 10 dB | NFM 0.50 / NFM 0.50 | 1, 1 / 1, 1 | 1 / 1 | 11.3 s / 3.7 s | never / never |
+| usb | 10 dB | none / none | 1, 1 / 1, 1 | 1 / 1 | never / never | never / never |
+| lsb | 10 dB | none / none | 1, 1 / 1, 1 | 1 / 1 | never / never | never / never |
+| cw | 10 dB | CW 0.90 / CW 0.95 | 1, 1 / 1, 1 | 1 / 1 | 6.0 s / 6.0 s | never / never |
+| bpsk | 10 dB | BPSK 0.96 / BPSK 0.97 | 1, 1 / 1, 1 | 1 / 1 | 6.1 s / 6.1 s | never / never |
+
+**No wrong label on any of the 56 emitter runs.** AM reads AM on every track
+it puts up, from 3.5 to 5.2 s, at every level. NFM at both deviations reads
+NFM on every track, from 3.5 to 11.3 s. CW and BPSK read right from 3.4 to
+7.2 s where they took 5.8 to 18.8. USB and LSB carry no label at all, which is
+the stated answer until the side reaches a track; see "What is not done" below.
+The tracks column is the same in both tables: nothing here changed the
+detector, which is why the lines are still several tracks on the wire.
+"emitters at once" is how many tier two probed as units, a group counting once.
+
+What changed, each recorded where it lives:
+
+- **An emitter is probed whole** (`core/detect/tier_two.h`). Tier two follows
+  the tracks with a `detect::LineGrouper` at an edge gap,
+  `LineGroupConfig::edge_gap_hz`, new: lines whose occupied bands come within
+  `TierTwoConfig::emitter_gap_hz`, 400 Hz, of each other and cover at least
+  `emitter_min_fill`, 0.6, of their extent between them are one emitter. One
+  probe goes to the centre of the extent at its width, its answer is recorded
+  on every line, a line that joins later is given it without a probe, and no
+  line in a group is probed on its own or given the long identification dwell.
+- **AM against FM against a carrier reads the sidebands against the carrier's
+  own phase** (`CharacteriseConfig::carrier_in_phase_balance`). AM's
+  voice-channel sidebands sit in phase with its carrier and narrowband FM's in
+  quadrature; circular noise fills both alike, so the split holds at any SNR.
+  It replaced the mirrored-spectrum reading, which is still reported.
+- **A talker on a suppressed carrier is refused and its side read**
+  (`CharacteriseConfig::voice_syllabic_depth`). The power envelope's movement
+  between 2 and 10 Hz against 10 to 40 Hz separates speech from data and noise;
+  where the excess power sits against the extract's centre says which side.
+- **A talker on FM is FM** (`fm_voice_frequency_syllabic`): a constant
+  envelope, judged against the noise inside the probe's passband
+  (`Characterisation::inband_noise`), whose deviation comes and goes with the
+  syllables.
+
+The characteriser's side of it, one probe-shaped extract at a time, is
+`voice survey: what the characteriser says about speech` in
+`tests/characterise/test_voice.cpp`, and four cases there pin it: speech on
+USB and LSB is a talker on its own side and no family at 12000 and 24000 S/s
+from 30 to 10 dB; AM on speech reads in phase and NFM in quadrature from 30 to
+10 dB, and a keyed or bare carrier reads neither; 5 kHz deviation NFM on
+speech is analogue FM; and none of CW, a bare carrier, BPSK, 2FSK, PSK31 or
+noise is called a talker at any level from 30 to 5 dB. The margins either side
+of each bar are in `core/characterise/characterise.h` beside the bar.
+
+### The emitter gap, swept
+
+`REVENANT_VOICE_SURVEY_GAP` sets `emitter_gap_hz`. Emitters at once, seed one
+/ seed two, before the last two changes to the characteriser, which move
+labels and not groups:
+
+| emitter | 30 dB at 400 Hz | 800 Hz | 1500 Hz | 20 dB at 400 Hz | 800 Hz | 1500 Hz |
+| --- | --- | --- | --- | --- | --- | --- |
+| am | 1 / 3 | 1 / 3 | 1 / 3 | 1 / 1 | 1 / 1 | 1 / 1 |
+| nfm2.5 | 3 / 2 | 2 / 1 | 1 / 1 | 2 / 1 | 1 / 1 | 1 / 1 |
+| nfm5 | 3 / 4 | 2 / 3 | 1 / 2 | 2 / 2 | 1 / 2 | 1 / 1 |
+| usb | 2 / 1 | 2 / 1 | 1 / 1 | 2 / 1 | 1 / 1 | 1 / 1 |
+| lsb | 2 / 2 | 1 / 1 | 1 / 1 | 2 / 2 | 1 / 1 | 1 / 1 |
+
+The widest hole inside one emitter, over every decision of the after run, was
+313 to 327 Hz on AM, up to 887 Hz on NFM at 2.5 kHz deviation and 1747 Hz at
+5 kHz, and up to 826 Hz on USB. Two HF sideband stations 3 kHz apart leave a
+hole of about 300 to 600 Hz between them, inside that range, so no gap
+separates one talker from two neighbours by the spectrum alone. 400 Hz splits
+a talker rather than merging two stations. It is the default and it is a
+choice; a wider gap buys fewer units on this scene and costs that.
+
+### What is not done
+
+- **One detection per emitter on the wire.** The detector still publishes
+  lines, so the span still draws a bracket per line, each now carrying the
+  emitter's label. `detect::TierTwo::emitters()` lists each emitter's group,
+  anchor, extent and lines; publishing the anchor with the group's extent and
+  suppressing the other lines is a change to `core/rpc/server.cpp`'s
+  `detections()`, which is another lane's.
+- **USB and LSB labels.** `characterise::Characterisation::voice` and
+  `voice_sideband` read the talker and the side at every level measured, and
+  stop at `engine::ProbeOutcome`, which has no field for them. Carrying them
+  is two fields there, filled in `core/engine/probe.cpp` beside
+  `double_sideband`; then a `ProbeFinding` and `Track` field, a label rule for
+  an Unknown family with a side, and `USB` and `LSB` rows in
+  `ui/models/label_tune.h`'s analogue table.
+- **WFM.** A probe asks for a bucket at least four times the detection's width
+  and never above the grid's channel rate or 192000 S/s
+  (`engine::kProbeRateOverOccupied`, `kProbeRates`). A broadcast station is
+  about 140 kHz wide as the detector measures it, so no probe fits on any grid,
+  and on the owner's 75 kS/s channels nothing over 12 kHz does. Reaching it is
+  a probe that may ask about the centre of a detection wider than its bucket,
+  in `core/engine/probe.cpp`.
+- **The HF corpus and the labelled scene were not re-run.** The labelled
+  scene's voice rows above were measured on its old noise-shaped voice.
+- `core/engine/probe.h` and `core/detect/detector.h` still describe
+  `double_sideband` as mirrored sidebands in their comments.
+
 
 ## Click to tune
 

@@ -6,7 +6,19 @@
 #include <format>
 #include <tuple>
 
+#include "core/engine/probe.h"
+
 namespace revenant::detect {
+
+namespace {
+
+// Whether a finding is one an emitter's lines should all carry: a verified
+// protocol, or a family characterise::may_drive_detection accepted.
+[[nodiscard]] bool settles(const ProbeFinding& finding) {
+    return finding.protocol != identify::Protocol::None || finding.may_drive_detection;
+}
+
+}  // namespace
 
 Expected<TierTwo> TierTwo::create(const TierTwoConfig& config) {
     if (config.source_rate <= 0) {
@@ -16,8 +28,24 @@ Expected<TierTwo> TierTwo::create(const TierTwoConfig& config) {
         return fail(std::format("reprobe_seconds must be zero or more, got {}",
                                 config.reprobe_seconds));
     }
+    if (config.emitter_gap_hz < 0) {
+        return fail(std::format("emitter_gap_hz must be zero or more, got {}",
+                                config.emitter_gap_hz));
+    }
+    if (!std::isfinite(config.emitter_min_fill) || config.emitter_min_fill < 0.0 ||
+        config.emitter_min_fill > 1.0) {
+        return fail(std::format("emitter_min_fill must be between zero and one, got {}",
+                                config.emitter_min_fill));
+    }
     TierTwo out;
     out.config_ = config;
+    if (config.emitter_gap_hz > 0) {
+        auto grouper = LineGrouper::create(LineGroupConfig{.edge_gap_hz = config.emitter_gap_hz});
+        if (!grouper) {
+            return std::unexpected(with_context(grouper.error(), "tier two"));
+        }
+        out.grouper_.emplace(std::move(*grouper));
+    }
     return out;
 }
 
@@ -116,6 +144,13 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
             }
             statuses_[outcome.tag] = outcome.status;
 
+            // Whether this answered a whole emitter, and which lines it had.
+            std::optional<GroupProbe> emitter;
+            if (const auto found = group_probes_.find(outcome.tag); found != group_probes_.end()) {
+                emitter = std::move(found->second);
+                group_probes_.erase(found);
+            }
+
             switch (outcome.status) {
                 case engine::ProbeStatus::Characterised: break;
                 case engine::ProbeStatus::TooWide: ++stats_.too_wide; continue;
@@ -150,7 +185,28 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
                 }
             }
 
-            if (!detector.record_probe(outcome.tag, finding)) {
+            // An emitter's answer goes on every line it had, and on the
+            // group, so a line that joins it later is given it too.
+            bool landed = static_cast<bool>(detector.record_probe(outcome.tag, finding));
+            if (emitter.has_value()) {
+                for (const std::uint64_t line : emitter->tracks) {
+                    if (line == outcome.tag) {
+                        continue;
+                    }
+                    if (detector.record_probe(line, finding)) {
+                        landed = true;
+                        ++stats_.inherited;
+                    }
+                }
+                if (settles(finding)) {
+                    group_findings_[emitter->group] = finding;
+                    for (const std::uint64_t line : emitter->tracks) {
+                        inherited_[line] = finding;
+                    }
+                }
+            }
+
+            if (!landed) {
                 ++stats_.orphaned;
                 continue;
             }
@@ -185,6 +241,66 @@ void TierTwo::take(Detector& detector, engine::Engine& engine) {
     }
 }
 
+bool TierTwo::is_emitter(const LineGroup& group) const {
+    const dsp::Hertz extent = group.high_edge - group.low_edge;
+    if (extent <= 0) {
+        return false;
+    }
+    dsp::Hertz covered = 0;
+    for (const GroupMember& member : grouper_->members(group)) {
+        covered += member.bandwidth;
+    }
+    return static_cast<double>(covered) >=
+           config_.emitter_min_fill * static_cast<double>(extent);
+}
+
+void TierTwo::propagate(Detector& detector) {
+    if (!grouper_.has_value()) {
+        return;
+    }
+    for (const LineGroup& group : grouper_->groups()) {
+        if (!is_emitter(group)) {
+            continue;
+        }
+        const std::span<const GroupMember> members = grouper_->members(group);
+
+        // The group's own answer, or failing that one a line carried in from
+        // an earlier incarnation of the same emitter: the anchor's first.
+        const ProbeFinding* answer = nullptr;
+        if (const auto found = group_findings_.find(group.id); found != group_findings_.end()) {
+            answer = &found->second;
+        } else {
+            if (const auto found_anchor = inherited_.find(group.anchor);
+                found_anchor != inherited_.end()) {
+                answer = &found_anchor->second;
+            } else {
+                for (const GroupMember& member : members) {
+                    if (const auto carried = inherited_.find(member.track);
+                        carried != inherited_.end()) {
+                        answer = &carried->second;
+                        break;
+                    }
+                }
+            }
+            if (answer != nullptr) {
+                answer = &(group_findings_[group.id] = *answer);
+            }
+        }
+        if (answer == nullptr) {
+            continue;
+        }
+        for (const GroupMember& member : members) {
+            if (inherited_.contains(member.track)) {
+                continue;
+            }
+            if (detector.record_probe(member.track, *answer)) {
+                ++stats_.inherited;
+            }
+            inherited_[member.track] = *answer;
+        }
+    }
+}
+
 std::optional<engine::ProbeStatus> TierTwo::last_status(std::uint64_t track_id) const {
     const auto found = statuses_.find(track_id);
     if (found == statuses_.end()) {
@@ -193,29 +309,154 @@ std::optional<engine::ProbeStatus> TierTwo::last_status(std::uint64_t track_id) 
     return found->second;
 }
 
+std::vector<TierTwoEmitter> TierTwo::emitters() const {
+    std::vector<TierTwoEmitter> out;
+    if (!grouper_.has_value()) {
+        return out;
+    }
+    for (const LineGroup& group : grouper_->groups()) {
+        if (!is_emitter(group)) {
+            continue;
+        }
+        TierTwoEmitter emitter;
+        emitter.group = group.id;
+        emitter.anchor = group.anchor;
+        emitter.low_edge = group.low_edge;
+        emitter.high_edge = group.high_edge;
+        for (const GroupMember& member : grouper_->members(group)) {
+            emitter.tracks.push_back(member.track);
+        }
+        if (const auto found = group_findings_.find(group.id); found != group_findings_.end()) {
+            emitter.answered = true;
+            emitter.finding = found->second;
+        }
+        out.push_back(std::move(emitter));
+    }
+    return out;
+}
+
 Status TierTwo::step(Detector& detector, engine::Engine& engine) {
     take(detector, engine);
 
     const std::span<const Track> tracks = detector.tracks();
+    const dsp::SampleIndex now = detector.last_decision();
+
+    if (grouper_.has_value()) {
+        if (auto observed = grouper_->observe(tracks, now); !observed) {
+            return std::unexpected(with_context(observed.error(), "tier two"));
+        }
+        propagate(detector);
+    }
 
     // Forget attempts on tracks that have gone, so the maps are bounded by the
-    // track list rather than by the length of the run.
+    // track list rather than by the length of the run, and on groups that
+    // have gone likewise.
     const auto gone = [&](const auto& entry) {
         return std::none_of(tracks.begin(), tracks.end(),
                             [&](const Track& track) { return track.id == entry.first; });
     };
     std::erase_if(attempts_, gone);
     std::erase_if(statuses_, gone);
+    std::erase_if(inherited_, gone);
+    std::vector<std::uint64_t> live_groups;
+    std::vector<std::uint64_t> grouped;
+    if (grouper_.has_value()) {
+        for (const LineGroup& group : grouper_->groups()) {
+            if (!is_emitter(group)) {
+                continue;
+            }
+            live_groups.push_back(group.id);
+            for (const GroupMember& member : grouper_->members(group)) {
+                grouped.push_back(member.track);
+            }
+        }
+    }
+    const auto group_gone = [&](const auto& entry) {
+        return std::find(live_groups.begin(), live_groups.end(), entry.first) == live_groups.end();
+    };
+    std::erase_if(group_attempts_, group_gone);
+    std::erase_if(group_findings_, group_gone);
+    std::erase_if(group_identify_tried_, [&](std::uint64_t id) {
+        return std::find(live_groups.begin(), live_groups.end(), id) == live_groups.end();
+    });
 
     const engine::ProbeStats pool = engine.probe_stats();
     if (pool.size == 0 || in_flight_.size() >= pool.size) {
         return {};
     }
     const std::size_t free = pool.size - in_flight_.size();
+    const auto listed = [](std::span<const std::uint64_t> ids, std::uint64_t id) {
+        return std::find(ids.begin(), ids.end(), id) != ids.end();
+    };
 
-    const dsp::SampleIndex now = detector.last_decision();
-    std::vector<std::uint64_t> chosen = pick(tracks, attempts_, in_flight_, free, now,
-                                             config_.source_rate, config_.reprobe_seconds);
+    // The lines on their own: every track that is not in a group.
+    std::vector<Track> alone;
+    alone.reserve(tracks.size());
+    for (const Track& track : tracks) {
+        if (!listed(grouped, track.id)) {
+            alone.push_back(track);
+        }
+    }
+
+    // One unit per line on its own and one per emitter, ordered together by
+    // the rule pick() states: never probed first, oldest first, then by the
+    // last submission. An emitter's age is the decision its group formed.
+    struct Unit {
+        int probed = 0;
+        dsp::SampleIndex key = 0;
+        std::uint64_t tag = 0;
+        const LineGroup* group = nullptr;
+    };
+    std::vector<Unit> units;
+    {
+        const std::vector<std::uint64_t> singles = pick(alone, attempts_, in_flight_, alone.size(),
+                                                        now, config_.source_rate,
+                                                        config_.reprobe_seconds);
+        for (const std::uint64_t id : singles) {
+            const auto found = std::find_if(alone.begin(), alone.end(),
+                                            [id](const Track& track) { return track.id == id; });
+            const auto tried = attempts_.find(id);
+            units.push_back(Unit{.probed = tried == attempts_.end() ? 0 : 1,
+                                 .key = tried == attempts_.end() ? found->first_seen : tried->second,
+                                 .tag = id});
+        }
+    }
+    const auto reprobe_samples = static_cast<dsp::SampleIndex>(
+        config_.reprobe_seconds * static_cast<double>(config_.source_rate));
+    if (grouper_.has_value()) {
+        for (const LineGroup& group : grouper_->groups()) {
+            if (!is_emitter(group) || group_findings_.contains(group.id)) {
+                continue;
+            }
+            const auto anchor = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) {
+                return t.id == group.anchor;
+            });
+            if (anchor == tracks.end() || anchor->state != TrackState::Live) {
+                continue;
+            }
+            const std::span<const GroupMember> members = grouper_->members(group);
+            if (std::any_of(members.begin(), members.end(), [&](const GroupMember& member) {
+                    return listed(in_flight_, member.track);
+                })) {
+                continue;
+            }
+            const auto tried = group_attempts_.find(group.id);
+            if (tried != group_attempts_.end() && now < tried->second + reprobe_samples) {
+                continue;
+            }
+            units.push_back(Unit{.probed = tried == group_attempts_.end() ? 0 : 1,
+                                 .key = tried == group_attempts_.end() ? group.formed
+                                                                       : tried->second,
+                                 .tag = group.anchor,
+                                 .group = &group});
+        }
+    }
+    std::sort(units.begin(), units.end(), [](const Unit& a, const Unit& b) {
+        return std::tie(a.probed, a.key, a.tag) < std::tie(b.probed, b.key, b.tag);
+    });
+    if (units.size() > free) {
+        units.resize(free);
+    }
 
     // What the pool has left after the classification schedule goes to the
     // identification one: a narrow track's one long dwell. See pick_identify.
@@ -224,43 +465,145 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                             [id](const Track& track) { return track.id == id; });
     });
     std::vector<std::uint64_t> identifying;
-    if (chosen.size() < free) {
-        identifying = pick_identify(tracks, identify_tried_, in_flight_, chosen,
-                                    free - chosen.size());
-        chosen.insert(chosen.end(), identifying.begin(), identifying.end());
+    std::vector<const LineGroup*> identifying_groups;
+    if (units.size() < free) {
+        std::vector<std::uint64_t> chosen;
+        for (const Unit& unit : units) {
+            chosen.push_back(unit.tag);
+        }
+        // Not a line an emitter's answer reached, and not one called AM: the
+        // long dwell is for the narrow data modes, and a talker's syllables
+        // key a carrier the way Morse does. In the voice survey a sideband
+        // stretch of an AM talker, 907 Hz wide and so narrow by the bar, was
+        // given the long dwell at 30 dB while its group had come apart and
+        // verified CW.
+        std::vector<Track> narrow;
+        for (const Track& track : alone) {
+            if (!inherited_.contains(track.id) && !track.classification_double_sideband) {
+                narrow.push_back(track);
+            }
+        }
+        identifying =
+            pick_identify(narrow, identify_tried_, in_flight_, chosen, free - units.size());
+
+        // A narrow emitter gets the same long dwell once its first emitter
+        // probe has answered and named no protocol: RTTY's two tones read as
+        // two lines are one such emitter.
+        if (grouper_.has_value()) {
+            for (const LineGroup& group : grouper_->groups()) {
+                if (units.size() + identifying.size() + identifying_groups.size() >= free) {
+                    break;
+                }
+                if (!is_emitter(group) ||
+                    (!group_findings_.contains(group.id) && !group_attempts_.contains(group.id))) {
+                    continue;
+                }
+                if (group.high_edge - group.low_edge > engine::kProbeIdentifyNarrowHz ||
+                    group_identify_tried_.contains(group.id) || listed(chosen, group.anchor)) {
+                    continue;
+                }
+                const auto anchor = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) {
+                    return t.id == group.anchor;
+                });
+                if (anchor == tracks.end() || anchor->state != TrackState::Live ||
+                    anchor->protocol != identify::Protocol::None) {
+                    continue;
+                }
+                const std::span<const GroupMember> members = grouper_->members(group);
+                if (std::any_of(members.begin(), members.end(), [&](const GroupMember& member) {
+                        return listed(in_flight_, member.track);
+                    })) {
+                    continue;
+                }
+                identifying_groups.push_back(&group);
+            }
+        }
     }
-    if (chosen.empty()) {
+    if (units.empty() && identifying.empty() && identifying_groups.empty()) {
         return {};
     }
 
+    // The widest occupied bandwidth this grid's probes can be asked for: the
+    // largest bucket its channels carry, over the most a signal may occupy of
+    // one. An emitter wider than that is asked about at its centre, and the
+    // probe still passes half its bucket, twice this.
+    dsp::Hertz widest = 0;
+    for (const dsp::SampleRate rate : engine::kProbeRates) {
+        if (rate <= engine.info().channel_rate) {
+            widest = rate / engine::kProbeRateOverOccupied;
+        }
+    }
+
     const dsp::Hertz source_center = engine.info().source_center;
-    for (const std::uint64_t id : chosen) {
+    const auto submit = [&](std::uint64_t tag, dsp::Hertz center, dsp::Hertz occupied,
+                            bool long_dwell) -> Status {
+        engine::ProbeRequest request{};
+        request.tag = tag;
+        request.center = center - source_center;
+        request.occupied_hz = occupied;
+        request.dwell_seconds = long_dwell ? engine::kProbeIdentifyDwellSeconds : 0.0;
+        if (auto submitted = engine.submit_probe(request); !submitted) {
+            ++stats_.refused;
+            return std::unexpected(with_context(submitted.error(), "tier two"));
+        }
+        in_flight_.push_back(tag);
+        ++stats_.submitted;
+        return {};
+    };
+    const auto submit_group = [&](const LineGroup& group, bool long_dwell) -> Status {
+        const dsp::Hertz extent = std::max<dsp::Hertz>(1, group.high_edge - group.low_edge);
+        const dsp::Hertz occupied = widest > 0 ? std::min(extent, widest) : extent;
+        const dsp::Hertz center = group.low_edge + extent / 2;
+        if (auto sent = submit(group.anchor, center, occupied, long_dwell); !sent) {
+            return sent;
+        }
+        GroupProbe probe;
+        probe.group = group.id;
+        for (const GroupMember& member : grouper_->members(group)) {
+            probe.tracks.push_back(member.track);
+        }
+        group_probes_[group.anchor] = std::move(probe);
+        ++stats_.emitter_submitted;
+        return {};
+    };
+
+    for (const Unit& unit : units) {
+        if (unit.group != nullptr) {
+            if (auto sent = submit_group(*unit.group, false); !sent) {
+                return sent;
+            }
+            group_attempts_[unit.group->id] = now;
+            continue;
+        }
+        const auto found = std::find_if(tracks.begin(), tracks.end(),
+                                        [&](const Track& track) { return track.id == unit.tag; });
+        if (found == tracks.end()) {
+            continue;
+        }
+        if (auto sent = submit(unit.tag, found->center, found->bandwidth, false); !sent) {
+            return sent;
+        }
+        attempts_[unit.tag] = now;
+    }
+    for (const std::uint64_t id : identifying) {
         const auto found = std::find_if(tracks.begin(), tracks.end(),
                                         [id](const Track& track) { return track.id == id; });
         if (found == tracks.end()) {
             continue;
         }
-
-        const bool long_dwell =
-            std::find(identifying.begin(), identifying.end(), id) != identifying.end();
-
-        engine::ProbeRequest request{};
-        request.tag = id;
-        request.center = found->center - source_center;
-        request.occupied_hz = found->bandwidth;
-        request.dwell_seconds = long_dwell ? engine::kProbeIdentifyDwellSeconds : 0.0;
-
-        if (auto submitted = engine.submit_probe(request); !submitted) {
-            ++stats_.refused;
-            return std::unexpected(with_context(submitted.error(), "tier two"));
+        if (auto sent = submit(id, found->center, found->bandwidth, true); !sent) {
+            return sent;
         }
-        in_flight_.push_back(id);
         attempts_[id] = now;
-        ++stats_.submitted;
-        if (long_dwell) {
-            identify_tried_.insert(id);
-            ++stats_.identify_submitted;
+        identify_tried_.insert(id);
+        ++stats_.identify_submitted;
+    }
+    for (const LineGroup* group : identifying_groups) {
+        if (auto sent = submit_group(*group, true); !sent) {
+            return sent;
         }
+        group_identify_tried_.insert(group->id);
+        ++stats_.identify_submitted;
     }
     return {};
 }

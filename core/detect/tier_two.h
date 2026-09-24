@@ -24,6 +24,26 @@
 // one is inside another track's band, where a probe would characterise the
 // other track.
 //
+// AN EMITTER IS PROBED WHOLE, NOT LINE BY LINE
+//
+// The detector reports a talker on AM or FM as several tracks, a carrier and
+// the stretches of sideband the averaged spectrum shows beside it, and one on
+// single sideband as the stretches of its voice channel. docs/detection.md
+// measured what probing those one at a time does: a probe sized to one
+// sideband sees the carrier off centre with one sideband beside it and calls
+// it a carrier, so an AM talker's brackets read CW and an FM talker's read AM,
+// CW or BPSK. So tier two follows the tracks with a detect::LineGrouper at
+// TierTwoConfig::emitter_gap_hz and treats a group as one emitter: one probe
+// at the centre of the group's extent and as wide as it, and the answer
+// recorded on every line in it. A line that joins the group later, which is
+// what a sideband does when the talker starts again after a pause, is given
+// the emitter's answer without a probe of its own. A line that is in a group
+// is never probed on its own.
+//
+// What reaches the wire is still one detection per track, each carrying the
+// emitter's label; publishing one detection per emitter is core/rpc's, and
+// emitters() below is what it would read.
+//
 // THREADING
 //
 // step() is the one producer and the one consumer core/engine/probe.h asks
@@ -44,6 +64,7 @@
 #include <vector>
 
 #include "core/detect/detector.h"
+#include "core/detect/groups.h"
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
@@ -59,14 +80,65 @@ struct TierTwoConfig {
     // pool of four gets through twenty other tracks before it comes back to
     // one it has already asked about.
     double reprobe_seconds = 10.0;
+
+    // Tracks whose occupied bands come within this of each other are one
+    // emitter, through LineGroupConfig::edge_gap_hz. Zero probes every track
+    // on its own, which is what tier two did before it.
+    //
+    // WHY 400 Hz. The voice channel starts 300 Hz from the carrier, so an AM
+    // or FM talker leaves a hole at most 300 Hz wide either side of its
+    // carrier's line, plus whatever the edges of the two bands the detector
+    // measured leave; the sideband stretches of one voice channel otherwise
+    // touch. Measured on tools/siggen/voice.h's scene through
+    // tests/detect/test_voice_survey.cpp: the widest hole inside one emitter
+    // and the narrowest between two are in docs/detection.md.
+    dsp::Hertz emitter_gap_hz = 400;
+
+    // A group is probed as one emitter only when its lines between them
+    // cover at least this share of its extent: one filled band the detector
+    // cut into pieces, not lines that happen to sit near each other.
+    // Otherwise its lines are probed one at a time, as before.
+    //
+    // WHY. A talker's pieces touch or nearly touch: the holes between them are
+    // the 300 Hz under the voice channel and the stretches the averaged
+    // spectrum left under the growth level. Carriers a few hundred hertz apart
+    // are lines with floor between them, and one probe over the pair reads
+    // them as two tones. THIS FILE'S CHOICE, not a measured bar: in the voice
+    // survey an AM talker's five lines at 30 dB covered 0.75 of their extent,
+    // and nothing yet has measured a cluster of independent carriers. The HF
+    // corpus is where that measurement belongs; docs/detection.md, "Voice".
+    double emitter_min_fill = 0.6;
+};
+
+// One emitter tier two is following: a LineGrouper group, by its id, its
+// strongest line, its extent and its lines. For a caller that publishes one
+// detection per emitter rather than one per line.
+struct TierTwoEmitter {
+    std::uint64_t group = 0;
+    std::uint64_t anchor = 0;
+    dsp::Hertz low_edge = 0;
+    dsp::Hertz high_edge = 0;
+    std::vector<std::uint64_t> tracks;
+
+    // Whether an emitter-wide probe has answered for it yet, and the answer
+    // every line carries when one has.
+    bool answered = false;
+    ProbeFinding finding;
 };
 
 struct TierTwoStats {
     std::uint64_t submitted = 0;
     std::uint64_t refused = 0;
 
-    // Of submitted, the identification schedule's long dwells.
+    // Of submitted, the identification schedule's long dwells, and the
+    // probes of a whole emitter.
     std::uint64_t identify_submitted = 0;
+    std::uint64_t emitter_submitted = 0;
+
+    // An emitter's answer recorded on one of its lines other than the one the
+    // probe was tagged with, either when it came back or when the line joined
+    // later.
+    std::uint64_t inherited = 0;
 
     // Outcomes taken off the pool, by what became of them. recorded is
     // characterised and handed to the detector; orphaned is characterised for
@@ -158,10 +230,23 @@ public:
     // wide" instead of implying nobody tried.
     [[nodiscard]] std::optional<engine::ProbeStatus> last_status(std::uint64_t track_id) const;
 
+    // The emitters at the last step, ascending in frequency, and the grouper
+    // that found them. Empty, and null, with emitter_gap_hz at zero.
+    [[nodiscard]] std::vector<TierTwoEmitter> emitters() const;
+    [[nodiscard]] const LineGrouper* grouper() const {
+        return grouper_.has_value() ? &*grouper_ : nullptr;
+    }
+
 private:
     TierTwo() = default;
 
     void take(Detector& detector, engine::Engine& engine);
+
+    // Gives each group's lines its emitter's answer. See the header.
+    void propagate(Detector& detector);
+
+    // Whether a group is an emitter: TierTwoConfig::emitter_min_fill.
+    [[nodiscard]] bool is_emitter(const LineGroup& group) const;
 
     TierTwoConfig config_{};
     TierTwoStats stats_{};
@@ -171,6 +256,22 @@ private:
     std::unordered_map<std::uint64_t, engine::ProbeStatus> statuses_;
     std::unordered_set<std::uint64_t> identify_tried_;
     std::vector<engine::ProbeOutcome> outcomes_;
+
+    // The emitters. A probe of a group is tagged with its anchor's id and
+    // remembers the group and the lines it had when it was submitted.
+    std::optional<LineGrouper> grouper_;
+    struct GroupProbe {
+        std::uint64_t group = 0;
+        std::vector<std::uint64_t> tracks;
+    };
+    std::unordered_map<std::uint64_t, GroupProbe> group_probes_;
+    std::unordered_map<std::uint64_t, dsp::SampleIndex> group_attempts_;
+    std::unordered_map<std::uint64_t, ProbeFinding> group_findings_;
+    std::unordered_set<std::uint64_t> group_identify_tried_;
+
+    // The emitter answer each line carries, so one that leaves and rejoins,
+    // or turns up in a group with a new id after a pause, keeps it.
+    std::unordered_map<std::uint64_t, ProbeFinding> inherited_;
 };
 
 }  // namespace revenant::detect

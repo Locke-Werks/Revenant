@@ -79,6 +79,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -266,9 +267,14 @@ struct CharacteriseConfig {
     double tone_pair_third_fraction = 0.25;
     double tone_pair_rate_tolerance = 0.02;
 
-    // THE DOUBLE-SIDEBAND READING on an Unmodulated call, which is what lets a
-    // label say AM rather than CW. It changes no family: the characteriser has
-    // no AM family and an AM carrier is a carrier.
+    // THE SPECTRAL SIDEBAND READING on an Unmodulated call, measured and
+    // reported in Characterisation::sideband_share and sideband_symmetry, and
+    // no longer what decides AM: carrier_in_phase_balance below does, and
+    // says why this one could not.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY at its head: "THE DOUBLE-SIDEBAND
+    // READING on an Unmodulated call, which is what lets a label say AM rather
+    // than CW", and what follows is how the reading was taken while it did.
     //
     // A carrier with sidebands mirrored about it is double sideband. So the
     // band's excess power more than am_sideband_min_offset_hz from the carrier
@@ -295,6 +301,111 @@ struct CharacteriseConfig {
     double am_sideband_min_offset_hz = 150.0;
     double am_sideband_share = 0.02;
     double am_sideband_symmetry = 0.5;
+
+    // THE CARRIER'S SIDEBANDS AGAINST ITS OWN PHASE, which is what decides AM,
+    // FM at a low index and a bare or keyed carrier on an Unmodulated call.
+    //
+    // AM's sidebands are in phase with its carrier and narrowband FM's are in
+    // quadrature with it: an AM wave is C(1 + m a(t)) and a small phase
+    // deviation is C(1 + j b(t)), the phasor argument every communications
+    // text makes for narrowband FM against AM (A. B. Carlson, Communication
+    // Systems, the narrowband FM section). So the extract is mixed to the
+    // carrier, its residual phase followed in 20 ms blocks, and the power in
+    // the voice channel, 300 to 3000 Hz from the carrier, split between the
+    // in-phase and the quadrature parts. Noise that is circularly symmetric
+    // puts the same power in both, so the difference is the modulation's
+    // whatever the SNR, which the spectral reading this replaced was not.
+    //
+    // A carrier is AM when (in - quad) / (in + quad) reaches
+    // carrier_in_phase_balance and (in - quad) is at least
+    // carrier_sideband_excess of the carrier's own power; FM at a low index
+    // when the same two hold the other way round. MEASURED in
+    // tests/characterise/test_voice.cpp at 12000 and 24000 S/s, 30 to 10 dB
+    // in 2500 Hz, two draws each: AM on speech reads a balance of +0.12 to
+    // +0.95 and an excess of +0.031 to +0.046; FM on speech at 2.5 and 5 kHz
+    // deviation -0.09 to -0.40 and -0.18 to -0.36; a keyed carrier -0.029 to
+    // +0.017 and -0.012 to +0.006, a bare one -0.022 to -0.005 and under
+    // 0.004, PSK31 -0.015 to -0.003. Both bars sit at least two and a half
+    // times inside every population. docs/detection.md, "Voice".
+    //
+    // WHAT DECIDED THIS BEFORE: the band's excess power beyond
+    // am_sideband_min_offset_hz, mirrored to am_sideband_symmetry, with the
+    // envelope's variance net of the noise choosing between AM and FM. The
+    // excess was taken over the 20th percentile of the whole extract, which
+    // on a probe's extract lands in the filter's skirt, so at 10 dB in 2500 Hz
+    // a keyed carrier's own noise read 0.17 of the band as mirrored sidebands
+    // and was called AM. The spectral numbers are still measured and
+    // reported, in sideband_share and sideband_symmetry.
+    double carrier_in_phase_balance = 0.05;
+    double carrier_sideband_excess = 0.01;
+
+    // The least spectral_concentration at which a carrier whose sidebands
+    // read in phase or in quadrature is taken as that carrier, under the
+    // carrier_concentration a bare one needs. A wide extract of AM at a
+    // modest SNR puts enough noise beside the carrier to pull it under the
+    // half: measured at 48000 S/s and 10 dB in 2500 Hz, AM on speech read
+    // 0.49 and went to the PSK branch at 440 to 480 baud, with its sidebands
+    // reading 0.12 to 0.16 in phase. BPSK, 2FSK and noise read under 0.05 in
+    // tests/characterise/test_voice.cpp. Speech on single sideband reads up
+    // to 0.38, over this bar, and is kept out by the voice rule below rather
+    // than by it: a talker is never taken as a carrier with sidebands. The
+    // quadrature reading is the discriminator here, not this bar.
+    double carrier_sideband_concentration = 0.3;
+
+    // THE VOICE BRANCHES, which read a talker off an extract the other
+    // branches would give a family it does not have.
+    //
+    // Speech moves its level at a syllable's rate: the envelope modulation
+    // spectrum of running speech peaks near 4 Hz (T. Houtgast and H. J. M.
+    // Steeneken, JASA 77(3), 1985). On a suppressed carrier that movement is
+    // the signal's own power, and it pauses between phrases. On FM the power
+    // stays put and it is the deviation that comes and goes.
+    //
+    // Single sideband: an envelope that is not constant, a detection at least
+    // voice_min_width_hz wide, and syllabic_depth at least voice_syllabic_depth
+    // and at least voice_syllabic_ratio times syllabic_fast. The ratio keeps
+    // out noise and data, whose envelope moves as much or more above 10 Hz as
+    // below it; the width keeps out the narrow modes whose envelope moves as a
+    // talker's does, a keyed carrier and PSK31's phase reversals, which the
+    // detector measures at 183 Hz and under on the 36.6 Hz grid. A talker's
+    // detection is the voice channel or a stretch of it: 324 Hz was the
+    // narrowest stretch of single sideband speech the voice survey saw
+    // probed, and a probe centred on a stretch still collects the whole
+    // channel. A detection at least voice_carrier_width_hz wide is taken as a
+    // talker even when a voiced sound's harmonics lift its extract over
+    // carrier_concentration, and a talker is never taken as a carrier with
+    // sidebands under it: AM's carrier holds its power through the pauses,
+    // and its syllabic_depth read 0.09 at most in the same file against the
+    // 0.4 bar, while speech on single sideband once read 0.32 concentrated and
+    // in phase with a harmonic, and was called AM. It refuses the family, since none here is
+    // single sideband, and says which side from side_centroid: speech holds
+    // most of its power low in the voice channel (the long-term average
+    // speech spectrum of D. Byrne et al., JASA 96(4), 1994, falls above 500
+    // Hz), which on an upper sideband is the band's low edge, next to the
+    // suppressed carrier.
+    //
+    // FM: an envelope constant against the noise inside the passband and a
+    // deviation that moves by fm_voice_frequency_syllabic of its mean between
+    // 2 and 10 Hz. That is AnalogueFm with the voice flag.
+    //
+    // MEASURED in tests/characterise/test_voice.cpp either side of every bar,
+    // at 12000 and 24000 S/s from 30 to 5 dB in 2500 Hz: speech on single
+    // sideband reads a syllabic_depth of 0.86 to 1.66 at a ratio to
+    // syllabic_fast of 3.5 to 7.5, and a side_centroid of 0.57 to 0.68 on its
+    // own side; noise 0.20 to 0.32 at 0.42 to 0.48, PSK31 0.20 to 0.22 at 0.62
+    // to 0.65, BPSK and 2FSK under 0.09, AM on speech under 0.10; a keyed
+    // carrier 0.66 to 0.81 at 2.7 to 3.3, which the width and the carrier
+    // branch keep out. FM on speech at 5 kHz deviation reads a
+    // frequency_syllabic_depth of 0.215 to 0.81 from 30 to 10 dB, so its
+    // weakest draws fall under the bar and are named by the quadrature reading
+    // or not at all; BPSK, 2FSK, noise, a bare carrier and AM read 0.11 at
+    // most. docs/detection.md, "Voice", has the table.
+    double voice_syllabic_depth = 0.4;
+    double voice_syllabic_ratio = 2.0;
+    double voice_min_width_hz = 250.0;
+    double voice_carrier_width_hz = 1'000.0;
+    double voice_side_centroid = 0.1;
+    double fm_voice_frequency_syllabic = 0.25;
 
     // Transform length for the averaged spectrum, or zero to let
     // analysis_segment pick one from the sample count.
@@ -330,6 +441,13 @@ struct CharacteriseConfig {
     // the number to set is the one whose three bins span what the signal is
     // allowed to drift.
     std::size_t segment = 0;
+};
+
+// Which side of its suppressed carrier a talker on single sideband sits.
+enum class VoiceSideband : std::uint8_t {
+    Unknown = 0,
+    Upper,
+    Lower,
 };
 
 // Everything measured, the family decided from it, and what that is
@@ -378,27 +496,82 @@ struct Characterisation {
 
     // CharacteriseConfig::am_sideband_share's reading, on an Unmodulated call
     // only: the band's excess power away from the carrier as a share of all
-    // of it, how well the two sides mirror each other, and whether both
-    // cleared their bars. Negative shares mean it was not measured.
+    // of it and how well the two sides mirror each other. Negative shares mean
+    // it was not measured. Reported; nothing decides on it.
     double sideband_share = -1.0;
     double sideband_symmetry = -1.0;
+
+    // On an Unmodulated call, the carrier's voice-channel sidebands sit in
+    // phase with it: AM. CharacteriseConfig::carrier_in_phase_balance.
+    //
+    // WHAT THIS USED TO MEAN: the spectral sidebands above cleared their two
+    // bars and the envelope was not flat net of noise.
     bool double_sideband = false;
 
-    // The same mirrored sidebands on a constant envelope, which is FM at a
-    // low index rather than AM, since AM's sidebands are its envelope. The
-    // family is then AnalogueFm at a half, not Unmodulated: voice on
-    // narrowband FM keeps most of its power in its carrier and reaches the
-    // carrier bar. Measured in tests/characterise/test_consistency.cpp, three
-    // tones at 30, 20 and 15 dB in 2500 Hz: FM at an index under a half reads
-    // its envelope variance net of noise at 0.001 to 0.031, the same audio as
-    // AM at 0.26 to 0.30, either side of the 0.05 constant_envelope_variance
-    // bar that decides between them.
+    // On an Unmodulated call, the same sidebands sit in quadrature with it:
+    // FM at a low index, since AM's sidebands are its envelope. The family is
+    // then AnalogueFm at a half, not Unmodulated: voice on narrowband FM keeps
+    // most of its power in its carrier and reaches the carrier bar.
+    //
+    // WHAT THIS USED TO MEAN: the spectral sidebands cleared their bars on an
+    // envelope whose variance net of noise was under
+    // constant_envelope_variance. tests/characterise/test_consistency.cpp
+    // measured that at 0.001 to 0.031 for three tones on FM at an index under
+    // a half and 0.26 to 0.30 for the same audio on AM, and still holds both
+    // cases under the reading that replaced it.
     bool low_index_fm = false;
 
     // The envelope's normalised power variance less what the extract's own
     // noise accounts for, on an Unmodulated call only; see characterise.cpp.
     // Zero elsewhere.
     double envelope_variance_net = 0.0;
+
+    // The noise power inside the extract's passband, as a total. The 20th
+    // percentile of the bins within a quarter of the rate of the centre,
+    // which is the half of the bucket a probe passes, taken as the per-bin
+    // level, and each bin's own level where it is lower, which is the filter
+    // skirt. OccupiedBand::noise_floor is the 20th percentile of the whole
+    // extract, and on a probe's extract that lands in the skirt, under the
+    // noise the signal actually sits in.
+    double inband_noise = 0.0;
+
+    // How much the extract's power moves at a syllable's rate: the RMS of the
+    // 10 ms frame powers band-passed to 2 to 10 Hz, over the signal's mean
+    // power net of inband_noise. syllabic_fast is the same from 10 to 40 Hz.
+    // Negative when the extract is under 64 frames or holds no signal power.
+    double syllabic_depth = -1.0;
+    double syllabic_fast = -1.0;
+
+    // The same band-pass over the instantaneous frequency's RMS deviation in
+    // each 10 ms frame, over its mean: how much the deviation comes and goes
+    // at a syllable's rate. Negative when too few samples cleared the
+    // amplitude gate.
+    double frequency_syllabic_depth = -1.0;
+
+    // The centroid of the excess power over inband_noise, within half the
+    // detection's width of the extract's centre, as a fraction of that half
+    // width: negative below the centre, positive above.
+    double side_centroid = 0.0;
+
+    // The carrier's sidebands in the voice channel, 300 to 3000 Hz from it,
+    // split into the part in phase with the carrier and the part in
+    // quadrature: (in - quad) / (in + quad), and (in - quad) over the
+    // carrier's own power. Zero when not measured.
+    double carrier_iq_balance = 0.0;
+    double carrier_in_phase_excess = 0.0;
+
+    // The envelope's normalised power variance less what inband_noise
+    // accounts for, which is what the voice branches judge a constant
+    // envelope by.
+    double envelope_variance_inband = 0.0;
+
+    // A talker, from CharacteriseConfig::voice_syllabic_depth's rules: true
+    // on the FM voice branch, whose family is AnalogueFm, and on the single
+    // sideband one, whose family is Unknown because none here is single
+    // sideband. voice_sideband is the side on the second and Unknown on the
+    // first.
+    bool voice = false;
+    VoiceSideband voice_sideband = VoiceSideband::Unknown;
 
     // True when nothing at all was established: no family and no frame
     // period either. A frame period without a family is still a finding,

@@ -20,20 +20,30 @@
 //      the family said, including nothing.
 //   2. A family the characteriser named and the detector accepted. Analogue
 //      families give a modulation: an unmodulated carrier is CW, or AM when
-//      its sidebands mirror about it, and analogue FM is NFM or WFM by the
-//      track's width. Digital ones give the family with its order or tone
-//      count where the probe measured one.
+//      its sidebands in the voice channel sit in phase with it
+//      (characterise::CharacteriseConfig::carrier_in_phase_balance), and
+//      analogue FM is NFM or WFM by the track's width. Digital ones give the
+//      family with its order or tone count where the probe measured one.
+//
+//      WHAT THE AM CLAUSE USED TO SAY: "or AM when its sidebands mirror about
+//      it". A keyed carrier's own noise mirrors too, and read as AM at 10 dB.
 //   3. Nothing. Unknown is a real answer, docs/detection.md says why, and a
 //      track that was probed and named nothing gets no label rather than the
 //      nearest one.
 //
 // WHAT IT CANNOT SAY
 //
-// USB and LSB. The characteriser has no single-sideband family, and relative
-// to a carrier that is not transmitted the two differ only in which side
-// their power sits, which docs/detection.md measured no field here can read.
-// A sideband signal is labelled nothing, which is the rule above rather than
-// a gap in it.
+// USB and LSB, yet. The characteriser has no single-sideband family, and
+// since 2026-09-24 it reads a talker on a suppressed carrier and which side
+// of it the talker sits (characterise::Characterisation::voice_sideband), and
+// refuses the family; but engine::ProbeOutcome does not carry that reading to
+// a track, so a sideband signal is still labelled nothing. That is the rule
+// above rather than a gap in it, and docs/detection.md says what carrying it
+// would take.
+//
+// WHAT THIS PARAGRAPH USED TO SAY after the first sentence: "relative to a
+// carrier that is not transmitted the two differ only in which side their
+// power sits, which docs/detection.md measured no field here can read."
 //
 // PURITY
 //
