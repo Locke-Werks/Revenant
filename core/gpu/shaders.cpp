@@ -16,6 +16,7 @@
 #include "shaders/convert_cs24_cf32_comp.h"
 #include "shaders/vrx_fine_comp.h"
 #include "shaders/vrx_demod_comp.h"
+#include "shaders/vrx_carrier_comp.h"
 #include "shaders/iq_moments_comp.h"
 #include "shaders/iq_correct_comp.h"
 #include "shaders/noise_blank_comp.h"
@@ -75,6 +76,10 @@ std::span<const std::uint32_t> vrx_fine() {
 
 std::span<const std::uint32_t> vrx_demod() {
     return std::span<const std::uint32_t>(vrx_demod_comp_spv, std::size(vrx_demod_comp_spv));
+}
+
+std::span<const std::uint32_t> vrx_carrier() {
+    return std::span<const std::uint32_t>(vrx_carrier_comp_spv, std::size(vrx_carrier_comp_spv));
 }
 
 std::span<const std::uint32_t> iq_moments() {

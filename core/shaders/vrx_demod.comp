@@ -29,7 +29,9 @@
 // passband, CW is a translation that puts the carrier on the operator's pitch,
 // DSB is the symmetric case. core/shaders/vrx_fine.comp carries the table.
 // Writing them as one line here rather than four is the honest description of
-// what the arithmetic is.
+// what the arithmetic is. DSB's carrier is recovered upstream too, by
+// core/shaders/vrx_carrier.comp, and so is SAM's; SAM then takes AM's DC
+// removal on the real part rather than on the magnitude.
 //
 // DETERMINISTIC TRANSCENDENTALS, WHICH ARE NOT OPTIONAL HERE.
 //
@@ -92,21 +94,26 @@
 //   LSB   +/-1, which is the same peak-envelope reference AM uses, so a
 //   CW    voice peak at full scale sounds the same loudness in every one of
 //         these modes and in AM. Measured: 0.99995 and 1.00000.
-//   DSB   Re(z), gain 1, WITH A CAVEAT that is physics rather than an
-//         implementation gap. USB, LSB and CW carry their audio as a rotating
-//         phasor, so a constant phase offset moves the audio's phase and not
-//         its amplitude. A double-sideband suppressed-carrier signal does
-//         not: its complex envelope is real and in phase with a carrier that
-//         is not being transmitted, so a product detector with no carrier
-//         recovery scales the audio by cos(theta), where theta is the
-//         residual phase between the receiver's oscillator and the
-//         suppressed carrier. Here theta is fixed by the fine filter's group
-//         delay times the mix frequency and by the NCO's phase, so it is
-//         deterministic and tuning-dependent rather than noise, and the
-//         measured 0.743 at theta = -0.733 rad is exactly cos(theta). Closing
-//         that needs a carrier recovery loop, which is carried state and so
-//         is not a demodulator kernel's business; it belongs above this
-//         layer, and M1 does not have one.
+//   DSB   Re(z), gain 1, of a ring core/shaders/vrx_carrier.comp has already
+//         rotated onto the recovered carrier. USB, LSB and CW carry their
+//         audio as a rotating phasor, so a constant phase offset moves the
+//         audio's phase and not its amplitude. A double-sideband
+//         suppressed-carrier signal does not: its complex envelope is real
+//         and in phase with a carrier that is not being transmitted, so a
+//         product detector scales the audio by cos(theta), where theta is the
+//         residual phase against that carrier. The Costas loop in the carrier
+//         kernel drives theta to zero or a half turn, which is a sign, and a
+//         unit tone comes back at unit level.
+//   SAM   Re(z) with AM's DC removal, gain 1, of a ring the carrier kernel's
+//         phase-locked loop has rotated onto AM's own carrier. The same audio
+//         convention as AM: a carrier of 1 at full modulation gives +/-1.
+//
+//         WHAT THE DSB ENTRY USED TO SAY: "the measured 0.743 at theta =
+//         -0.733 rad is exactly cos(theta). Closing that needs a carrier
+//         recovery loop, which is carried state and so is not a demodulator
+//         kernel's business; it belongs above this layer, and M1 does not
+//         have one." The loop is a kernel of its own, beside this one, and
+//         carries its state in a buffer; this kernel still carries none.
 //
 // WFM STEREO, WHICH IS WHY THIS KERNEL CAN WRITE TWO CHANNELS.
 //
@@ -147,7 +154,9 @@
 layout(local_size_x_id = 0) in;
 
 // revenant::engine::Demod's value. Not a private numbering: the twin static
-// asserts that these eleven constants equal the enumerators.
+// asserts that each of the constants below equals its enumerator. WHAT THIS
+// SENTENCE USED TO SAY: "these eleven constants", which was one short once
+// dmr arrived and two short with sam.
 layout(constant_id = 1) const uint kMode = 2;  // Demod::Nfm
 
 // Fd / Fa. One for every mode whose demodulation rate already is the audio
@@ -161,7 +170,7 @@ layout(constant_id = 2) const uint kDecimation = 1;
 // with unit weight when kDecimation is 1, which folds the loop away.
 layout(constant_id = 3) const uint kAudioTaps = 1;
 
-// Length of the AM DC-removal window. Only the AM branch reads it.
+// Length of the AM DC-removal window. Only the AM and SAM branches read it.
 layout(constant_id = 4) const uint kDcTaps = 256;
 
 // Floats per output frame: 1 for a mono detector, 2 for an interleaved pair.
@@ -186,6 +195,7 @@ const uint kModeP25p1 = 8u;
 const uint kModeDstar = 9u;
 const uint kModeTetra = 10u;
 const uint kModeDmr = 11u;
+const uint kModeSam = 12u;
 
 // The modes that hand out complex baseband rather than detected audio, which
 // is engine::is_complex_tap and dsp::is_complex_output on the host. Until
@@ -445,6 +455,20 @@ float detect(uint index) {
             dc = dc + term;
         }
         precise float detected = magnitude_at(index) - dc;
+        return detected;
+    }
+
+    if (kMode == kModeSam) {
+        // The same window on the real part. core/shaders/vrx_carrier.comp
+        // has rotated the ring so the carrier lies on the real axis, which
+        // makes the real part carrier plus audio, and the window takes the
+        // carrier off exactly as it takes the envelope's mean off above.
+        precise float dc = 0.0;
+        for (uint w = 0u; w < kDcTaps; ++w) {
+            precise float term = sample_at(index - w).x * weights.values[kAudioTaps + w];
+            dc = dc + term;
+        }
+        precise float detected = sample_at(index).x - dc;
         return detected;
     }
 

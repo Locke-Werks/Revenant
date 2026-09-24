@@ -623,6 +623,7 @@ bool blanker_offered(engine::Demod mode) { return engine::produces_audio(mode); 
 bool notch_offered(engine::Demod mode) {
     switch (mode) {
         case engine::Demod::Am:
+        case engine::Demod::Sam:
         case engine::Demod::Usb:
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
@@ -657,6 +658,7 @@ std::optional<double> notch_audio_hz(engine::Demod mode, Hertz passband_hz, Hert
         case engine::Demod::Usb: return f;
         case engine::Demod::Lsb: return -f;
         case engine::Demod::Am:
+        case engine::Demod::Sam:
         case engine::Demod::Dsb: return std::abs(f);
         case engine::Demod::Cw: return std::abs(f + static_cast<double>(cw_pitch));
         case engine::Demod::Raw:

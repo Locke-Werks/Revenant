@@ -1,0 +1,296 @@
+// Carrier recovery for the two coherent detectors: a phase-locked loop on
+// the AM carrier for sam, and a Costas loop on the suppressed carrier for dsb.
+// It rotates one receiver's fine ring in place, between
+// core/shaders/vrx_fine.comp writing it and core/shaders/vrx_demod.comp
+// reading it, so what the detector sees is baseband whose carrier sits on
+// the real axis.
+//
+// Written from published mathematics only, per docs/clean-room.md. The loop
+// is the second-order type-2 loop of Gardner, "Phaselock Techniques", 3rd
+// ed., chapters 2 and 3, and the Costas loop of the same book's chapter on
+// suppressed-carrier recovery; the discrete gains are the standard mapping of
+// that loop's natural frequency and damping onto a proportional-plus-
+// integral filter, as tabulated in Rice, "Digital Communications: A
+// Discrete-Time Approach", appendix C. Neither book was opened for this work:
+// the formulas are the well-known ones, and every constant they feed is a
+// measurement in tests/reference/test_vrx_carrier.cpp rather than a figure
+// taken from either. core/dsp/vrx_reference.h, "Carrier recovery", has the
+// design and the numbers. No GPL implementation was read, fetched or
+// consulted while writing this file.
+//
+// A RECURSION, SO ONE INVOCATION WALKS THE BLOCK. Every sample's rotation
+// depends on the loop's state after the sample before it, so there is no
+// parallel formulation that is the same arithmetic. One workgroup of one
+// invocation reads the state, walks the dispatch's new fine samples in
+// order, and writes the state back; the host specializes the workgroup at
+// one. An invocation beyond the first, if a caller specialized a larger size,
+// returns at once and touches nothing.
+//
+// STATE is carried between dispatches in a buffer of eight words, laid out in
+// core/dsp/vrx_reference.h beside the twin, reference_vrx_carrier, which is
+// bit-identical: the same NCO table, the same Newton reciprocal and square
+// root as core/shaders/vrx_demod.comp, and the same operation order.
+//
+// THIS KERNEL IS WHY THOSE TWO MODES ARE NOT A PURE FUNCTION OF THE INDEX.
+// Every other receiver's audio can be recomputed from the ring alone, which
+// is what retroactive decode leans on. A loop's output depends on everything
+// it has seen since it last restarted, so a sam or dsb receiver re-entering a
+// stream at an arbitrary index produces the same audio only once it has
+// locked again. That is the cost of the mode and not a defect in it.
+
+#version 450
+
+layout(local_size_x_id = 0) in;
+
+// 1 for the carrier loop, which locks to a transmitted carrier; 2 for the
+// Costas loop, which squares the signal so the modulation's sign drops out
+// and locks to a carrier that is not there.
+layout(constant_id = 1) const uint kPower = 1u;
+
+// The shared NCO circle's length, as core/shaders/vrx_fine.comp reads it.
+layout(constant_id = 2) const uint kNcoLog2 = 16u;
+
+// Where each word of the state lives. The float words are stored as their
+// bits so the whole state is one uint buffer.
+const uint kStatePhase = 0u;
+const uint kStateIntegrator = 1u;
+const uint kStateLevel = 2u;
+const uint kStateLockReal = 3u;
+const uint kStateLockImag = 4u;
+const uint kStateLocked = 5u;
+const uint kStateCount = 6u;
+const uint kStatePrimed = 7u;
+
+const uint kFlagReset = 1u;
+
+// 2^32 / (2*pi): radians per sample into the 0.32 fixed-point turns the
+// phase accumulates in. Rounded to float once, here and in the twin, from
+// the same decimal.
+const float kTurnsPerRadian = 683565275.576431632;
+
+// The level below which the detector's normalisation stops rising, so the
+// reciprocal always has a positive argument inside det_recip's range. A
+// hundred decibels under the quietest input this engine has been measured
+// on.
+const float kLevelFloor = 1.0e-24;
+
+// A lock is a filtered phasor whose real part stands this many times above
+// its imaginary part: 26.6 degrees of carrier phase for the carrier loop, and
+// 13.3 for the Costas loop, whose phasor turns at twice the carrier's rate.
+const float kLockRatio = 2.0;
+
+layout(std430, binding = 0) readonly buffer Nco {
+    vec2 w[];
+} nco;
+
+layout(std430, binding = 1) buffer FineRing {
+    vec2 values[];
+} fine;
+
+layout(std430, binding = 2) buffer State {
+    uint values[];
+} state;
+
+layout(push_constant) uniform Params {
+    // Fine ring capacity minus one, and the ring offset of the first sample
+    // this dispatch rotates. The host hands it exactly the samples the fine
+    // stage wrote this dispatch, so every sample is rotated once.
+    uint in_mask;
+    uint in_offset;
+    uint count;
+
+    // kFlagReset: forget everything and start acquiring, which a retune
+    // further than the passband asks for.
+    uint flags;
+
+    // Added to the integrator before the first sample, in radians per
+    // sample. A retune inside the passband moves the carrier in the fine
+    // stream by exactly the distance the receiver moved, and this carries
+    // the loop's frequency with it.
+    float shift;
+
+    // The loop filter's proportional and integral gains while acquiring and
+    // while locked.
+    float k1_acquire;
+    float k2_acquire;
+    float k1_track;
+    float k2_track;
+
+    // One-pole coefficients of the level the detector is normalised by and
+    // of the phasor the lock test reads.
+    float level_alpha;
+    float lock_alpha;
+
+    // The integrator's bound in radians per sample, which is the tracking
+    // range: the passband's furthest edge from the receiver's centre.
+    float clamp_radians;
+
+    // Samples the lock test must hold before the loop narrows, and fail for
+    // before it widens again.
+    uint hold_in;
+    uint hold_out;
+} params;
+
+// The same seed and the same four Newton steps as core/shaders/vrx_demod.comp
+// and det_recip and det_rsqrt in core/dsp/vrx_reference.cpp, copied rather
+// than shared because GLSL has no include here; the twin calls those
+// functions, so a copy that drifted would fail the diff.
+float det_rsqrt(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x5F375A86u - (bits >> 1u));
+
+    precise float half_value = 0.5 * value;
+    precise float r1 = seed * (1.5 - half_value * (seed * seed));
+    precise float r2 = r1 * (1.5 - half_value * (r1 * r1));
+    precise float r3 = r2 * (1.5 - half_value * (r2 * r2));
+    precise float r4 = r3 * (1.5 - half_value * (r3 * r3));
+    return r4;
+}
+
+float det_sqrt(float value) {
+    if (!(value > 0.0)) {
+        return 0.0;
+    }
+    precise float result = value * det_rsqrt(value);
+    return result;
+}
+
+float det_recip(float value) {
+    const uint bits = floatBitsToUint(value);
+    const float seed = uintBitsToFloat(0x7EF311C3u - bits);
+
+    precise float r1 = seed * (2.0 - value * seed);
+    precise float r2 = r1 * (2.0 - value * r1);
+    precise float r3 = r2 * (2.0 - value * r2);
+    precise float r4 = r3 * (2.0 - value * r3);
+    return r4;
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x != 0u) {
+        return;
+    }
+
+    const bool reset = (params.flags & kFlagReset) != 0u;
+
+    // precise on the carried floats as well as on every intermediate, so no
+    // update of one can be fused with the multiply that feeds it. The twin
+    // is built with contraction off, and a fused step here would be a
+    // different rounding on the device only.
+    uint phase = reset ? 0u : state.values[kStatePhase];
+    precise float integrator = reset ? 0.0 : uintBitsToFloat(state.values[kStateIntegrator]);
+    precise float level = reset ? 0.0 : uintBitsToFloat(state.values[kStateLevel]);
+    precise float lock_real = reset ? 0.0 : uintBitsToFloat(state.values[kStateLockReal]);
+    precise float lock_imag = reset ? 0.0 : uintBitsToFloat(state.values[kStateLockImag]);
+    uint locked = reset ? 0u : state.values[kStateLocked];
+    uint held = reset ? 0u : state.values[kStateCount];
+    uint primed = reset ? 0u : state.values[kStatePrimed];
+
+    {
+        precise float moved = integrator + params.shift;
+        integrator = clamp(moved, -params.clamp_radians, params.clamp_radians);
+    }
+
+    for (uint i = 0u; i < params.count; ++i) {
+        const uint slot = (params.in_offset + i) & params.in_mask;
+        const vec2 z = fine.values[slot];
+
+        // The table holds exp(-j*2*pi*k/N), so this is z * exp(-j*phase):
+        // the loop's estimate of the carrier taken off the sample.
+        const vec2 r = nco.w[phase >> (32u - kNcoLog2)];
+        precise float y_real = z.x * r.x - z.y * r.y;
+        precise float y_imag = z.x * r.y + z.y * r.x;
+        fine.values[slot] = vec2(y_real, y_imag);
+
+        precise float real_square = y_real * y_real;
+        precise float imag_square = y_imag * y_imag;
+        precise float power = real_square + imag_square;
+        precise float cross = y_real * y_imag;
+
+        // What the loop locks to, and how big it is. The carrier loop reads
+        // the sample itself and its magnitude. The Costas loop reads its
+        // square, whose argument is twice the carrier phase whatever sign
+        // the modulation has, and its power.
+        precise float w_real;
+        precise float w_imag;
+        precise float magnitude;
+        if (kPower == 1u) {
+            w_real = y_real;
+            w_imag = y_imag;
+            magnitude = det_sqrt(power);
+        } else {
+            precise float difference = real_square - imag_square;
+            precise float doubled = cross + cross;
+            w_real = difference;
+            w_imag = doubled;
+            magnitude = power;
+        }
+
+        if (primed == 0u) {
+            level = magnitude;
+            primed = 1u;
+        } else {
+            precise float step = params.level_alpha * (magnitude - level);
+            level = level + step;
+        }
+        {
+            precise float step_real = params.lock_alpha * (w_real - lock_real);
+            precise float step_imag = params.lock_alpha * (w_imag - lock_imag);
+            lock_real = lock_real + step_real;
+            lock_imag = lock_imag + step_imag;
+        }
+
+        // The lock test, with a hold either way so one noisy sample neither
+        // narrows the loop nor widens it. Acquiring, it wants hold_in samples
+        // inside in a row. Locked, it counts up outside and down inside and
+        // lets go at hold_out: a loop slipping cycles turns the phasor
+        // through the inside sector once a cycle, and a count that restarted
+        // there would never reach the hold and never widen the loop again.
+        precise float bound = kLockRatio * abs(lock_imag);
+        const bool inside = lock_real > bound;
+        if (locked != 0u) {
+            held = inside ? ((held > 0u) ? held - 1u : 0u) : held + 1u;
+            if (held >= params.hold_out) {
+                locked = 0u;
+                held = 0u;
+            }
+        } else {
+            held = inside ? held + 1u : 0u;
+            if (held >= params.hold_in) {
+                locked = 1u;
+                held = 0u;
+            }
+        }
+
+        // The phase detector, normalised by the level so the loop's gain does
+        // not follow the signal's: sin(theta) near lock for the carrier
+        // loop, and sin(2*theta)/2 for the Costas loop, both about theta.
+        // Limited to one either way, which only an impulse or the first
+        // samples after a restart ever reach.
+        precise float inverse = det_recip(max(level, kLevelFloor));
+        precise float detected = ((kPower == 1u) ? y_imag : cross) * inverse;
+        precise float error = clamp(detected, -1.0, 1.0);
+
+        const float k1 = (locked != 0u) ? params.k1_track : params.k1_acquire;
+        const float k2 = (locked != 0u) ? params.k2_track : params.k2_acquire;
+
+        precise float integrated = integrator + k2 * error;
+        integrator = clamp(integrated, -params.clamp_radians, params.clamp_radians);
+        precise float advance = k1 * error + integrator;
+
+        // The host bounds clamp_radians at a quarter turn and k1 far below
+        // one, so the product stays inside int's range and the conversion,
+        // which truncates, is defined. The uint add wraps modulo one turn.
+        precise float turns = advance * kTurnsPerRadian;
+        phase = phase + uint(int(turns));
+    }
+
+    state.values[kStatePhase] = phase;
+    state.values[kStateIntegrator] = floatBitsToUint(integrator);
+    state.values[kStateLevel] = floatBitsToUint(level);
+    state.values[kStateLockReal] = floatBitsToUint(lock_real);
+    state.values[kStateLockImag] = floatBitsToUint(lock_imag);
+    state.values[kStateLocked] = locked;
+    state.values[kStateCount] = held;
+    state.values[kStatePrimed] = primed;
+}

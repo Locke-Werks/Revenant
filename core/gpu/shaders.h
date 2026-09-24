@@ -62,6 +62,11 @@ namespace revenant::gpu::shaders {
 // revenant::dsp::reference_vrx_demod.
 [[nodiscard]] std::span<const std::uint32_t> vrx_demod();
 
+// Carrier recovery for sam and dsb: a phase-locked or Costas loop walking one
+// receiver's new fine samples in order and rotating them in place, with its
+// state carried in a buffer. Twin of revenant::dsp::reference_vrx_carrier.
+[[nodiscard]] std::span<const std::uint32_t> vrx_carrier();
+
 // A zero-IF front end's DC offset and I/Q imbalance: the five moments of a
 // block summed in fixed chunks, and the correction applied in place on the
 // ring. Twins in core/dsp/front_end_correction.h.

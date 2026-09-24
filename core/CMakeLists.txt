@@ -210,6 +210,7 @@ revenant_add_shaders(revenant_core
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/convert_cs24_cf32.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_fine.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_demod.comp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vrx_carrier.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_moments.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/iq_correct.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/shaders/noise_blank.comp"

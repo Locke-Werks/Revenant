@@ -16,9 +16,11 @@
 //
 // WHAT IT DOES PER MODE, which levelling_for below decides:
 //
-//   am, usb, lsb, dsb, cw   the AGC. An envelope detector and a product
-//                           detector hand out audio in the input's own units,
-//                           dsp::vrx_demod_gain is unity for all five, so
+//   am, sam, usb, lsb,      the AGC. An envelope detector and a product
+//   dsb, cw                 detector hand out audio in the input's own units,
+//                           and sam's coherent detector does too, since it is
+//                           a product detector against a recovered carrier.
+//                           dsp::vrx_demod_gain is unity for all six, so
 //                           without this a -60 dBFS station is -60 dBFS of
 //                           audio. Measured through tests/rpc's harness on
 //                           2026-09-23, before this existed: those five
@@ -102,6 +104,7 @@ enum class Levelling : std::uint8_t {
 [[nodiscard]] constexpr Levelling levelling_for(Demod mode) {
     switch (mode) {
         case Demod::Am:
+        case Demod::Sam:
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:

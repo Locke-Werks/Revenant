@@ -11,6 +11,14 @@
 // proved bit-exact against their twins in tests/reference/test_vrx.cpp; this
 // file is the plumbing that gets them the right push constants.
 //
+// A sam or dsb receiver has a third, between those two:
+// core/shaders/vrx_carrier.comp walks the fine samples just written in order
+// and rotates them in place onto the carrier its loop recovers, carrying the
+// loop's state in a buffer from one block to the next. A retune further than
+// the passband restarts the loop and a smaller one carries it along, on the
+// AGC's rule; dsp::carrier_retune decides. Its twin is proved bit-exact in
+// tests/reference/test_vrx_carrier.cpp.
+//
 // A third dispatch on the blocks where the graph asks for the display, and
 // only on those: vrx_fine.comp again, specialized with the display tap's one
 // 256-tap branch, reading the same channel and writing the ring the passband
@@ -50,6 +58,13 @@
 // would produce the same bits. That property is what makes retroactive decode
 // and faster-than-realtime replay possible, and it is asserted directly in
 // tests/reference/test_vrx.cpp.
+//
+// Except on sam and dsb, whose carrier loop is an accumulator by nature: it
+// carries eight words of state between blocks, and a receiver re-entering
+// the stream gives the same audio once the loop has locked again rather than
+// from the first sample. The positions above are still positions.
+// What a loop can promise is that its output does not depend on where the
+// blocks fell, and tests/reference/test_vrx_carrier.cpp asserts that.
 //
 // WHAT THIS COSTS, MEASURED ON 2026-09-18 AND NOT WHAT WAS PREDICTED.
 //
@@ -430,6 +445,24 @@ private:
     // produces audio; null for the complex taps. core/engine/noise_stage.h
     // has the three points it is called from.
     std::unique_ptr<NoiseChain> noise_;
+
+    // The carrier loop, for sam and dsb only: core/shaders/vrx_carrier.comp,
+    // its eight words of state, and one descriptor set, since nothing it
+    // binds varies per frame. The loop walks the fine samples in order, so
+    // its dispatches are ordered on the queue by the barriers either side of
+    // them, and a later frame's dispatch reads the state an earlier frame's
+    // wrote.
+    bool carrier_built_ = false;
+    gpu::ComputePipeline carrier_pipeline_;
+    gpu::Buffer carrier_state_;
+    VkDescriptorSet carrier_set_ = VK_NULL_HANDLE;
+
+    // What the retunes since the last carrier dispatch asked of the loop,
+    // from dsp::carrier_retune. Held until a dispatch carries them, because a
+    // block that produced no fine samples dispatches nothing.
+    dsp::Hertz centre_ = 0;
+    bool carrier_reset_pending_ = false;
+    double carrier_shift_pending_ = 0.0;
 };
 
 Expected<std::unique_ptr<VrxStage>> DemodStage::create(const VrxStageRequest& request) {
@@ -457,6 +490,7 @@ Status DemodStage::build(const VrxStageRequest& request) {
     local_size_x_ =
         request.local_size_x != 0 ? request.local_size_x : gpu::kDefaultLocalSizeX;
     chan_base_ = request.placement.channel * channel_ring_blocks_;
+    centre_ = request.params.center;
 
     // The graph resolved the audio rate against its own default already, and
     // the planner would otherwise resolve it against a different one.
@@ -555,6 +589,13 @@ Status DemodStage::build(const VrxStageRequest& request) {
         probe.gain = plan_.demod_gain;
         if (auto valid = dsp::validate(plan_.demod, probe); !valid) {
             return std::unexpected(with_context(valid.error(), "receiver demodulator"));
+        }
+    }
+    carrier_built_ = plan_.carrier.power != dsp::kCarrierNone;
+    if (carrier_built_) {
+        auto probe = dsp::carrier_block(plan_, fine_mask_, 0U, max_outputs_, false, 0.0F);
+        if (!probe) {
+            return std::unexpected(with_context(probe.error(), "receiver carrier loop"));
         }
     }
 
@@ -740,6 +781,24 @@ Status DemodStage::build_pipelines() {
         }
         demod_pipeline_ = std::move(*pipeline);
     }
+    if (carrier_built_) {
+        // One invocation, specialized rather than launched inside a larger
+        // group: the loop is a recursion and there is nothing for a second
+        // invocation to do. core/shaders/vrx_carrier.comp.
+        const std::uint32_t constants[] = {plan_.carrier.power, plan_.carrier.nco_log2};
+        gpu::ComputePipeline::Options options;
+        options.spirv = gpu::shaders::vrx_carrier();
+        options.storage_buffer_count = 3;
+        options.local_size_x = 1;
+        options.push_constant_bytes = sizeof(dsp::VrxCarrierParams);
+        options.grid_constants = constants;
+
+        auto pipeline = gpu::ComputePipeline::create(*context_, options);
+        if (!pipeline) {
+            return std::unexpected(with_context(pipeline.error(), "receiver carrier pipeline"));
+        }
+        carrier_pipeline_ = std::move(*pipeline);
+    }
     if (display_built_) {
         // The fine kernel again. One branch and no fractional phase, because
         // the display rate divides the channel rate; the tap count is fixed
@@ -817,6 +876,15 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
         return std::unexpected(fine.error());
     }
     fine_ring_ = std::move(*fine);
+
+    if (carrier_built_) {
+        auto loop = make_device(dsp::kCarrierStateWords * sizeof(std::uint32_t),
+                                "receiver carrier state");
+        if (!loop) {
+            return std::unexpected(loop.error());
+        }
+        carrier_state_ = std::move(*loop);
+    }
 
     if (display_built_) {
         auto display_taps = make_device(display_taps_bytes_, "receiver display taps");
@@ -901,10 +969,15 @@ Status DemodStage::build_buffers(VkBuffer channel_ring) {
     // whatever the allocator last had in that memory would otherwise be
     // demodulated.
     std::vector<gpu::CommandRunner::BufferClear> clears;
-    clears.reserve(2 + audio_.size());
+    clears.reserve(3 + audio_.size());
     clears.push_back({fine_ring_.handle(), fine_ring_.size()});
     if (display_built_) {
         clears.push_back({display_ring_.handle(), display_ring_.size()});
+    }
+    if (carrier_built_) {
+        // All zero is a loop that has seen nothing, which is where the first
+        // block starts. dsp::kCarrierStateWords has the layout.
+        clears.push_back({carrier_state_.handle(), carrier_state_.size()});
     }
     for (auto& buffer : audio_) {
         clears.push_back({buffer.handle(), buffer.size()});
@@ -932,8 +1005,10 @@ Status DemodStage::build_descriptors(VkBuffer channel_ring) {
     // it, and the display set is the same shape. The detector writes into a
     // per-frame scratch buffer, so there is one of those per frame in flight.
     const std::uint32_t display_sets = display_built_ ? 1U : 0U;
-    const std::uint32_t sets = 1U + display_sets + frames_in_flight_;
-    const std::uint32_t buffers = 4U + 4U * display_sets + 3U * frames_in_flight_;
+    const std::uint32_t carrier_sets = carrier_built_ ? 1U : 0U;
+    const std::uint32_t sets = 1U + display_sets + carrier_sets + frames_in_flight_;
+    const std::uint32_t buffers =
+        4U + 4U * display_sets + 3U * carrier_sets + 3U * frames_in_flight_;
 
     VkDescriptorPoolSize pool_size{};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -989,6 +1064,26 @@ Status DemodStage::build_descriptors(VkBuffer channel_ring) {
                                   display_ring_.handle()};
         if (auto wrote = write_storage_set(device_, display_set_, bound); !wrote) {
             return std::unexpected(with_context(wrote.error(), "receiver display set"));
+        }
+    }
+
+    if (carrier_built_) {
+        VkDescriptorSetLayout layout = carrier_pipeline_.descriptor_layout();
+        VkDescriptorSetAllocateInfo alloc{};
+        alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc.descriptorPool = descriptors_;
+        alloc.descriptorSetCount = 1;
+        alloc.pSetLayouts = &layout;
+        result = vkAllocateDescriptorSets(device_, &alloc, &carrier_set_);
+        if (result != VK_SUCCESS) {
+            return fail(std::format("vkAllocateDescriptorSets failed for a receiver carrier loop "
+                                    "({})",
+                                    gpu::result_name(result)),
+                        result);
+        }
+        const VkBuffer bound[] = {nco_->handle(), fine_ring_.handle(), carrier_state_.handle()};
+        if (auto wrote = write_storage_set(device_, carrier_set_, bound); !wrote) {
+            return std::unexpected(with_context(wrote.error(), "receiver carrier set"));
         }
     }
 
@@ -1132,6 +1227,10 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
             std::min<dsp::SampleIndex>(available, max_outputs_));
     }
 
+    // The first fine sample this dispatch writes, which is where the carrier
+    // loop picks up.
+    const dsp::SampleIndex written_from = next_output_;
+
     if (count > 0) {
         auto block = dsp::fine_block(plan_, fine_base, fine_chan_mask, fine_mask_,
                                      next_output_, count);
@@ -1216,9 +1315,38 @@ Expected<StageOutput> DemodStage::record(const StageRecord& record) {
     }
 
     if (count > 0) {
+        // With a carrier loop the next writer of these samples is the loop,
+        // rotating them in place, so the barrier orders a write after a write
+        // as well as the read.
+        const VkAccessFlags next_access =
+            carrier_built_ ? (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT)
+                           : VK_ACCESS_SHADER_READ_BIT;
         record_barrier(record.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                        VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                       VK_ACCESS_SHADER_READ_BIT);
+                       next_access);
+    }
+
+    // --- the carrier loop ---------------------------------------------------
+    //
+    // Over exactly the samples the fine stage just wrote, so each is rotated
+    // once and in order. The barrier above also covers the previous frame's
+    // loop dispatch, which is earlier on the queue, so the state this one
+    // reads is the state that one wrote.
+    if (count > 0 && carrier_built_) {
+        auto loop = dsp::carrier_block(plan_, fine_mask_, written_from, count,
+                                       carrier_reset_pending_,
+                                       static_cast<float>(carrier_shift_pending_));
+        if (!loop) {
+            return std::unexpected(with_context(loop.error(), "receiver carrier block"));
+        }
+        record_dispatch(record.commands, carrier_pipeline_, carrier_set_,
+                        std::as_bytes(std::span<const dsp::VrxCarrierParams>(&*loop, 1)), 1U);
+        record_barrier(record.commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        carrier_reset_pending_ = false;
+        carrier_shift_pending_ = 0.0;
+        out.dispatches += 1;
     }
 
     const auto dc = fine_dc_of(plan_);
@@ -1429,6 +1557,22 @@ Status DemodStage::retune(const VrxParams& params, const VrxPlacement& placement
         }
         display_ = std::move(*display);
     }
+
+    // The carrier loop restarts on the same retunes the receiver AGC does,
+    // and follows the others. Accumulated rather than replaced, because two
+    // retunes can land before a block produces a sample to carry them.
+    if (carrier_built_) {
+        const dsp::Hertz moved = params.center - centre_;
+        const dsp::CarrierRetune loop = dsp::carrier_retune(
+            moved, placement.granted_high - placement.granted_low, next.demod_rate);
+        if (loop.reset) {
+            carrier_reset_pending_ = true;
+            carrier_shift_pending_ = 0.0;
+        } else if (!carrier_reset_pending_) {
+            carrier_shift_pending_ += loop.shift;
+        }
+    }
+    centre_ = params.center;
 
     // Everything that survives is the tuning: the tap table's modulation, the
     // mixer's increment, the channel the receiver reads and the detector's

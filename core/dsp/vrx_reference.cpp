@@ -780,6 +780,21 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
             return magnitude_at(index) - dc;
         }
 
+        if (config.mode == kDemodSam) {
+            // AM's DC removal on the real part rather than the magnitude:
+            // the carrier loop has put the carrier on the real axis, so the
+            // real part is carrier plus audio and the window takes the
+            // carrier off exactly as it does the envelope's mean.
+            float dc = 0.0F;
+            for (std::uint32_t w = 0; w < config.dc_taps; ++w) {
+                const float term =
+                    sample_at(index - w).real() *
+                    weights[static_cast<std::size_t>(config.audio_taps) + w];
+                dc = dc + term;
+            }
+            return sample_at(index).real() - dc;
+        }
+
         if (config.mode == kDemodNfm || config.mode == kDemodWfm) {
             // The argument of z[m]*conj(z[m-1]) rather than a difference of
             // two arguments: the difference of two principal values needs an
@@ -883,6 +898,308 @@ Status reference_vrx_demod(const VrxDemodConfig& config, const VrxDemodParams& p
 }
 
 // ---------------------------------------------------------------------------
+// Carrier recovery
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The kernel's three constants, rounded to float from the same decimals by
+// the same route, decimal to double to float, that glslang takes.
+constexpr float kTurnsPerRadianF = static_cast<float>(683565275.576431632);
+constexpr float kCarrierLevelFloorF = static_cast<float>(1.0e-24);
+constexpr float kCarrierLockRatioF = static_cast<float>(2.0);
+
+// A quarter turn per sample, the most the integrator is ever allowed. With
+// k1 below one it keeps the kernel's advance under half a turn, and so its
+// float-to-int conversion inside int's range.
+constexpr double kCarrierClampCeiling = 0.5 * std::numbers::pi;
+
+}  // namespace
+
+std::uint32_t carrier_power(std::uint32_t mode) {
+    if (!is_known_mode(mode)) {
+        return kCarrierNone;
+    }
+    switch (static_cast<engine::Demod>(mode)) {
+        case engine::Demod::Sam: return kCarrierPll;
+        case engine::Demod::Dsb: return kCarrierCostas;
+
+        // AM keeps its envelope detector: that is the difference between am
+        // and sam, and an operator picks between them. USB, LSB and CW carry
+        // their audio as a rotating phasor, so a constant phase offset moves
+        // the audio's phase and not its level, and there is nothing for a
+        // loop to fix. The FM modes and the taps detect no carrier at all.
+        case engine::Demod::Raw:
+        case engine::Demod::Am:
+        case engine::Demod::Nfm:
+        case engine::Demod::Wfm:
+        case engine::Demod::Usb:
+        case engine::Demod::Lsb:
+        case engine::Demod::Cw:
+        case engine::Demod::P25p1:
+        case engine::Demod::Dstar:
+        case engine::Demod::Tetra:
+        case engine::Demod::Dmr: return kCarrierNone;
+    }
+    return kCarrierNone;
+}
+
+CarrierGains carrier_loop_gains(double noise_bandwidth_hz, double damping, SampleRate rate) {
+    if (!(noise_bandwidth_hz > 0.0) || !(damping > 0.0) || rate <= 0) {
+        return {};
+    }
+    const double period = 1.0 / static_cast<double>(rate);
+    const double theta = noise_bandwidth_hz * period / (damping + 1.0 / (4.0 * damping));
+    const double denominator = 1.0 + 2.0 * damping * theta + theta * theta;
+    return CarrierGains{4.0 * damping * theta / denominator, 4.0 * theta * theta / denominator};
+}
+
+Expected<VrxCarrierParams> design_carrier_loop(SampleRate demod_rate, Hertz reach_hz) {
+    if (demod_rate <= 0) {
+        return fail(std::format("design_carrier_loop: demodulation rate must be positive, got {}",
+                                demod_rate));
+    }
+    if (reach_hz <= 0) {
+        return fail(std::format(
+            "design_carrier_loop: a passband reaching {} Hz from its centre holds no carrier",
+            reach_hz));
+    }
+
+    const auto fs = static_cast<double>(demod_rate);
+    const CarrierGains acquire = carrier_loop_gains(kCarrierAcquireHz, kCarrierDamping, demod_rate);
+    const CarrierGains track = carrier_loop_gains(kCarrierTrackHz, kCarrierDamping, demod_rate);
+
+    // One-pole coefficients from time constants, the form
+    // core/engine/listener_level.h uses for the AGC's attack and decay.
+    const auto one_pole = [fs](double seconds) {
+        return static_cast<float>(1.0 - std::exp(-1.0 / (seconds * fs)));
+    };
+    const auto samples = [fs](double seconds) {
+        return static_cast<std::uint32_t>(std::max(1.0, std::round(seconds * fs)));
+    };
+
+    VrxCarrierParams params;
+    params.k1_acquire = static_cast<float>(acquire.k1);
+    params.k2_acquire = static_cast<float>(acquire.k2);
+    params.k1_track = static_cast<float>(track.k1);
+    params.k2_track = static_cast<float>(track.k2);
+    params.level_alpha = one_pole(kCarrierLevelSeconds);
+    params.lock_alpha = one_pole(kCarrierLockSeconds);
+    params.clamp_radians = static_cast<float>(
+        std::min(kTwoPi * static_cast<double>(reach_hz) / fs, kCarrierClampCeiling));
+    params.hold_in = samples(kCarrierHoldInSeconds);
+    params.hold_out = samples(kCarrierHoldOutSeconds);
+    return params;
+}
+
+Status validate(const VrxCarrierConfig& config, const VrxCarrierParams& params) {
+    if (config.power != kCarrierPll && config.power != kCarrierCostas) {
+        return fail(std::format("vrx carrier: power {} is neither the carrier loop (1) nor the "
+                                "Costas loop (2)",
+                                config.power));
+    }
+    if (config.nco_log2 == 0 || config.nco_log2 > kMaxNcoLog2) {
+        return fail(std::format("vrx carrier: NCO table log2 {} is outside [1, {}]",
+                                config.nco_log2, kMaxNcoLog2));
+    }
+    const std::uint64_t capacity = static_cast<std::uint64_t>(params.in_mask) + 1U;
+    if ((capacity & static_cast<std::uint64_t>(params.in_mask)) != 0U) {
+        return fail(std::format("vrx carrier: ring mask {} is not a power of two minus one",
+                                params.in_mask));
+    }
+    if (params.count > capacity) {
+        return fail(std::format(
+            "vrx carrier: {} samples in a ring of {} would rotate some of them twice",
+            params.count, capacity));
+    }
+    if ((params.flags & ~kCarrierFlagReset) != 0U) {
+        return fail(std::format("vrx carrier: flags {:#x} carry bits nothing reads", params.flags));
+    }
+    const auto finite = [](float v) { return std::isfinite(v); };
+    if (!finite(params.shift)) {
+        return fail("vrx carrier: the retune shift is not a finite number");
+    }
+    if (!(params.clamp_radians > 0.0F) ||
+        !(static_cast<double>(params.clamp_radians) <= kCarrierClampCeiling)) {
+        return fail(std::format(
+            "vrx carrier: an integrator bound of {} radians per sample is outside (0, pi/2]",
+            params.clamp_radians));
+    }
+    for (const float k : {params.k1_acquire, params.k1_track}) {
+        if (!(k > 0.0F) || !(k < 1.0F)) {
+            return fail(std::format("vrx carrier: a proportional gain of {} is outside (0, 1), "
+                                    "which the phase conversion's range rests on",
+                                    k));
+        }
+    }
+    for (const float k : {params.k2_acquire, params.k2_track}) {
+        if (!(k > 0.0F) || !(k < 1.0F)) {
+            return fail(std::format("vrx carrier: an integral gain of {} is outside (0, 1)", k));
+        }
+    }
+    for (const float a : {params.level_alpha, params.lock_alpha}) {
+        if (!(a > 0.0F) || !(a <= 1.0F)) {
+            return fail(std::format("vrx carrier: a one-pole coefficient of {} is outside (0, 1]",
+                                    a));
+        }
+    }
+    if (params.hold_in == 0 || params.hold_out == 0) {
+        return fail("vrx carrier: a lock hold of zero samples switches on noise");
+    }
+    return {};
+}
+
+Status reference_vrx_carrier(const VrxCarrierConfig& config, const VrxCarrierParams& params,
+                             ConstComplexSpan nco, ComplexSpan fine_ring,
+                             std::span<std::uint32_t> state) {
+    if (const Status valid = validate(config, params); !valid) {
+        return std::unexpected(with_context(valid.error(), "reference_vrx_carrier"));
+    }
+    const std::size_t table = std::size_t{1} << config.nco_log2;
+    if (nco.size() != table) {
+        return fail(std::format("reference_vrx_carrier: the NCO table holds {} entries and log2 "
+                                "{} implies {}",
+                                nco.size(), config.nco_log2, table));
+    }
+    const std::size_t capacity = static_cast<std::size_t>(params.in_mask) + 1U;
+    if (fine_ring.size() < capacity) {
+        return fail(std::format("reference_vrx_carrier: fine ring holds {} samples, mask {} "
+                                "implies a capacity of {}",
+                                fine_ring.size(), params.in_mask, capacity));
+    }
+    if (state.size() != kCarrierStateWords) {
+        return fail(std::format("reference_vrx_carrier: the state is {} words and the loop "
+                                "carries {}",
+                                state.size(), kCarrierStateWords));
+    }
+
+    const ScopedDenormalFlush flush_denormals;
+
+    // Transcribes core/shaders/vrx_carrier.comp operation for operation. The
+    // order of every sum and product below is the kernel's, and a change to
+    // either side that is not made to the other fails
+    // tests/reference/test_vrx_carrier.cpp.
+    const bool reset = (params.flags & kCarrierFlagReset) != 0U;
+    const auto as_float = [](std::uint32_t bits) { return std::bit_cast<float>(bits); };
+
+    std::uint32_t phase = reset ? 0U : state[kCarrierStatePhase];
+    float integrator = reset ? 0.0F : as_float(state[kCarrierStateIntegrator]);
+    float level = reset ? 0.0F : as_float(state[kCarrierStateLevel]);
+    float lock_real = reset ? 0.0F : as_float(state[kCarrierStateLockReal]);
+    float lock_imag = reset ? 0.0F : as_float(state[kCarrierStateLockImag]);
+    std::uint32_t locked = reset ? 0U : state[kCarrierStateLocked];
+    std::uint32_t held = reset ? 0U : state[kCarrierStateCount];
+    std::uint32_t primed = reset ? 0U : state[kCarrierStatePrimed];
+
+    // GLSL's clamp is min(max(x, lo), hi), which is what these spell.
+    const auto clamp_to = [](float value, float low, float high) {
+        return std::min(std::max(value, low), high);
+    };
+
+    {
+        const float moved = integrator + params.shift;
+        integrator = clamp_to(moved, -params.clamp_radians, params.clamp_radians);
+    }
+
+    const std::uint32_t shift_down = 32U - config.nco_log2;
+    for (std::uint32_t i = 0; i < params.count; ++i) {
+        const auto slot = static_cast<std::size_t>((params.in_offset + i) & params.in_mask);
+        const Complex32 z = fine_ring[slot];
+
+        const Complex32 r = nco[static_cast<std::size_t>(phase >> shift_down)];
+        const float y_real = z.real() * r.real() - z.imag() * r.imag();
+        const float y_imag = z.real() * r.imag() + z.imag() * r.real();
+        fine_ring[slot] = Complex32{y_real, y_imag};
+
+        const float real_square = y_real * y_real;
+        const float imag_square = y_imag * y_imag;
+        const float power = real_square + imag_square;
+        const float cross = y_real * y_imag;
+
+        float w_real = 0.0F;
+        float w_imag = 0.0F;
+        float magnitude = 0.0F;
+        if (config.power == kCarrierPll) {
+            w_real = y_real;
+            w_imag = y_imag;
+            magnitude = det_sqrt(power);
+        } else {
+            w_real = real_square - imag_square;
+            w_imag = cross + cross;
+            magnitude = power;
+        }
+
+        if (primed == 0U) {
+            level = magnitude;
+            primed = 1U;
+        } else {
+            const float step = params.level_alpha * (magnitude - level);
+            level = level + step;
+        }
+        {
+            const float step_real = params.lock_alpha * (w_real - lock_real);
+            const float step_imag = params.lock_alpha * (w_imag - lock_imag);
+            lock_real = lock_real + step_real;
+            lock_imag = lock_imag + step_imag;
+        }
+
+        const float bound = kCarrierLockRatioF * std::abs(lock_imag);
+        const bool inside = lock_real > bound;
+        if (locked != 0U) {
+            held = inside ? ((held > 0U) ? held - 1U : 0U) : held + 1U;
+            if (held >= params.hold_out) {
+                locked = 0U;
+                held = 0U;
+            }
+        } else {
+            held = inside ? held + 1U : 0U;
+            if (held >= params.hold_in) {
+                locked = 1U;
+                held = 0U;
+            }
+        }
+
+        const float inverse = det_recip(std::max(level, kCarrierLevelFloorF));
+        const float detected = ((config.power == kCarrierPll) ? y_imag : cross) * inverse;
+        const float error = clamp_to(detected, -1.0F, 1.0F);
+
+        const float k1 = (locked != 0U) ? params.k1_track : params.k1_acquire;
+        const float k2 = (locked != 0U) ? params.k2_track : params.k2_acquire;
+
+        const float integrated = integrator + k2 * error;
+        integrator = clamp_to(integrated, -params.clamp_radians, params.clamp_radians);
+        const float advance = k1 * error + integrator;
+
+        const float turns = advance * kTurnsPerRadianF;
+        phase = phase + static_cast<std::uint32_t>(static_cast<std::int32_t>(turns));
+    }
+
+    state[kCarrierStatePhase] = phase;
+    state[kCarrierStateIntegrator] = std::bit_cast<std::uint32_t>(integrator);
+    state[kCarrierStateLevel] = std::bit_cast<std::uint32_t>(level);
+    state[kCarrierStateLockReal] = std::bit_cast<std::uint32_t>(lock_real);
+    state[kCarrierStateLockImag] = std::bit_cast<std::uint32_t>(lock_imag);
+    state[kCarrierStateLocked] = locked;
+    state[kCarrierStateCount] = held;
+    state[kCarrierStatePrimed] = primed;
+    return {};
+}
+
+CarrierRetune carrier_retune(Hertz moved, Hertz granted_width, SampleRate demod_rate) {
+    CarrierRetune out;
+    // The same comparison core/engine/graph.cpp makes for the AGC, written
+    // the same way so the two restart on exactly the same retunes.
+    if (moved > granted_width || -moved > granted_width) {
+        out.reset = true;
+        return out;
+    }
+    if (demod_rate > 0) {
+        out.shift = -kTwoPi * static_cast<double>(moved) / static_cast<double>(demod_rate);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Design
 // ---------------------------------------------------------------------------
 
@@ -896,8 +1213,10 @@ Passband default_passband(engine::Demod mode) {
         // that a caller who names no mode and no width gets what it used to.
         case engine::Demod::Raw: return Passband{-6'000, 6'000};
 
-        // Broadcast AM's transmitted channel is 10 kHz wide.
-        case engine::Demod::Am: return Passband{-5'000, 5'000};
+        // Broadcast AM's transmitted channel is 10 kHz wide, and synchronous
+        // AM receives the same transmission.
+        case engine::Demod::Am:
+        case engine::Demod::Sam: return Passband{-5'000, 5'000};
 
         // Land mobile in a 25 kHz channel: 5 kHz deviation plus 3 kHz of
         // audio, twice, is 16 kHz of occupied bandwidth by Carson.
@@ -1010,6 +1329,7 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
         case engine::Demod::Wfm:
         case engine::Demod::Dsb:
         case engine::Demod::Cw:
+        case engine::Demod::Sam:
 
         // The digital modes are symmetric about their carrier, like the four
         // above, because a linear modulation's spectrum is and an FM one's
@@ -1022,7 +1342,8 @@ Expected<Passband> resolve_passband(const engine::VrxParams& params) {
         case engine::Demod::Lsb: return Passband{-params.bandwidth, 0};
     }
 
-    return fail(std::format("resolve_passband: demodulator {} is not one of the twelve",
+    return fail(std::format("resolve_passband: demodulator {} is not an enumerator of "
+                            "engine::Demod",
                             static_cast<std::uint32_t>(params.demod)));
 }
 
@@ -1162,6 +1483,7 @@ Hertz fm_deviation(std::uint32_t mode, Hertz bandwidth) {
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
         case engine::Demod::Cw:
+        case engine::Demod::Sam:
 
         // Zero for the digital modes even though two of the three are
         // frequency modulations, and the reason is where the discriminator
@@ -1253,12 +1575,16 @@ Hertz minimum_demod_rate(std::uint32_t mode, Passband band_in_mix_frame) {
         case engine::Demod::Nfm:
         case engine::Demod::Wfm:
         case engine::Demod::Dsb:
+        case engine::Demod::Sam:
             // A discriminator produces the modulating audio, which is
             // narrower than the channel, and DSB's real part folds a
-            // symmetric band onto half its width. Raw is not detected at all.
-            // Spelled out rather than left to a default, because sitting at
-            // the shared floor is a claim about these four detectors and not
-            // a fallback.
+            // symmetric band onto half its width. SAM's is the same real
+            // part, of the same symmetric band, against a recovered carrier:
+            // it makes none of the envelope's difference products, which is
+            // why it does not take AM's 2*width above. Raw is not detected at
+            // all. Spelled out rather than left to a default, because sitting
+            // at the shared floor is a claim about these five detectors and
+            // not a fallback.
             return floor_rate;
 
         // The four digital modes are complex taps, so nothing detects them
@@ -1398,7 +1724,8 @@ SampleRate complex_tap_rate_step(std::uint32_t mode) {
         case engine::Demod::Usb:
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
-        case engine::Demod::Cw: return 0;
+        case engine::Demod::Cw:
+        case engine::Demod::Sam: return 0;
     }
     return 0;
 }
@@ -1419,6 +1746,7 @@ float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation)
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
         case engine::Demod::Cw:
+        case engine::Demod::Sam:
 
         // Unity for the digital modes, on the same reasoning as Raw: they
         // are taps and the samples they hand out are the fine stage's, at
@@ -1437,18 +1765,22 @@ float vrx_demod_gain(std::uint32_t mode, SampleRate demod_rate, Hertz deviation)
             // Unity keeps every mode on the one convention: a unit-amplitude
             // signal fully modulating its own mode swings the audio to +/-1.
             //
-            // DSB is the one mode where that is not the whole story, and the
-            // reason is physics rather than a missing constant. Its complex
-            // envelope is real and in phase with a carrier that is not being
-            // transmitted, so a product detector with no carrier recovery
-            // scales the audio by the cosine of the residual phase between
-            // the receiver's oscillator and that suppressed carrier. The
-            // measured figure at one tuning is 0.743 against a residual phase
-            // of -0.733 radian, which is exactly its cosine. USB, LSB and CW
-            // are not affected: their audio is a rotating phasor, so a
-            // constant phase offset moves its phase and not its amplitude.
-            // Closing it needs a loop with carried state, which belongs above
-            // a kernel.
+            // DSB and SAM hold to it because core/shaders/vrx_carrier.comp
+            // has put their carrier on the real axis before the detector
+            // sees it, so the real part is the whole signal. A product
+            // detector on DSB with no carrier recovery scales the audio by
+            // the cosine of the residual phase against a carrier that is not
+            // transmitted; tests/reference/test_vrx_carrier.cpp measures a
+            // unit tone come back at unit level across the full turn of
+            // phase now.
+            //
+            // WHAT THIS PARAGRAPH USED TO SAY: "The measured figure at one
+            // tuning is 0.743 against a residual phase of -0.733 radian,
+            // which is exactly its cosine", and "Closing it needs a loop
+            // with carried state, which belongs above a kernel". The figure
+            // was right for a detector with no loop. The loop is a kernel of
+            // its own now, carrying its state in a buffer the way
+            // core/shaders/noise_line.comp does.
             return 1.0F;
     }
     if (deviation <= 0 || demod_rate <= 0) {
@@ -2195,7 +2527,7 @@ namespace {
         plan.demod.pilot_taps = 0U;
     }
 
-    if (plan.mode == kDemodAm) {
+    if (plan.mode == kDemodAm || plan.mode == kDemodSam) {
         const auto window = static_cast<std::uint32_t>(
             std::clamp<std::int64_t>(plan.demod_rate / kAmDcCornerHz, 16, kMaxDcTaps));
         plan.demod.dc_taps = window;
@@ -2205,6 +2537,19 @@ namespace {
 
     plan.deviation = fm_deviation(plan.mode, plan.bandwidth);
     plan.demod_gain = vrx_demod_gain(plan.mode, plan.demod_rate, plan.deviation);
+
+    // The carrier loop. The fine stage mixes the receiver's centre to DC for
+    // both modes that run one, so the passband's reach from that centre is
+    // how far off it a carrier can sit and still be inside the filter.
+    plan.carrier.power = carrier_power(plan.mode);
+    plan.carrier.nco_log2 = plan.fine.nco_log2;
+    if (plan.carrier.power != kCarrierNone) {
+        auto loop = design_carrier_loop(plan.demod_rate, plan.passband.reach_from(0));
+        if (!loop) {
+            return std::unexpected(with_context(loop.error(), "plan_vrx carrier loop"));
+        }
+        plan.carrier_loop = *loop;
+    }
 
     return plan;
 }
@@ -2311,6 +2656,7 @@ VrxShape shape_of(const VrxPlan& plan) {
     VrxShape shape;
     shape.fine = plan.fine;
     shape.demod = plan.demod;
+    shape.carrier = plan.carrier;
     shape.channel_rate = plan.channel_rate;
     shape.demod_rate = plan.demod_rate;
     shape.output_rate = plan.output_rate;
@@ -2355,6 +2701,14 @@ std::string describe_audio_chain(const VrxPlan& plan) {
     std::string text =
         std::format("{} at {} S/s", engine::demod_name(static_cast<engine::Demod>(plan.mode)),
                     plan.output_rate);
+
+    if (plan.carrier.power == kCarrierPll) {
+        text += ", detected against the carrier a phase-locked loop recovers, which acquires "
+                "wide and tracks narrow and follows the carrier anywhere inside the passband";
+    } else if (plan.carrier.power == kCarrierCostas) {
+        text += ", its suppressed carrier recovered by a Costas loop, so the level does not "
+                "depend on where the receiver's oscillator sits against it";
+    }
 
     if (plan.audio_decimation_taps > 1) {
         text += std::format(", audio filtered flat to {:.0f} Hz and {:.0f} dB down by "
@@ -2543,6 +2897,29 @@ Expected<VrxDemodBlock> demod_block(const VrxPlan& plan, std::uint32_t fine_mask
     block.oldest_fine = first_fine - static_cast<SampleIndex>(demod_fine_history(plan.demod));
 
     return block;
+}
+
+Expected<VrxCarrierParams> carrier_block(const VrxPlan& plan, std::uint32_t fine_mask,
+                                         SampleIndex first_fine, std::uint32_t count, bool reset,
+                                         float shift) {
+    if (plan.carrier.power == kCarrierNone) {
+        return fail(std::format("carrier_block: a {} receiver runs no carrier loop",
+                                engine::demod_name(static_cast<engine::Demod>(plan.mode))));
+    }
+    VrxCarrierParams out = plan.carrier_loop;
+    out.in_mask = fine_mask;
+    out.in_offset = static_cast<std::uint32_t>(first_fine & static_cast<SampleIndex>(fine_mask));
+    out.count = count;
+    out.flags = reset ? kCarrierFlagReset : 0U;
+
+    // A reset starts the integrator at zero, so a shift beside one would
+    // move a loop that has not begun.
+    out.shift = reset ? 0.0F : shift;
+
+    if (const Status valid = validate(plan.carrier, out); !valid) {
+        return std::unexpected(with_context(valid.error(), "carrier_block"));
+    }
+    return out;
 }
 
 // ---------------------------------------------------------------------------

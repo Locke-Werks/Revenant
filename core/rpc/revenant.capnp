@@ -93,9 +93,10 @@ struct Rational {
 }
 
 enum Demod {
-    # Ordinal for ordinal with revenant::engine::Demod, all twelve of them:
-    # the eight demodulators Raw to Cw and the four digital voice taps
-    # appended below. Matching it makes the conversion a cast, and
+    # Ordinal for ordinal with revenant::engine::Demod, every one of them:
+    # the eight demodulators Raw to Cw, the four digital voice taps appended
+    # below them, and sam after those. Matching it makes the conversion a
+    # cast, and
     # core/rpc/convert.h static_asserts every pair rather than trusting
     # that: a mode reordered on one side and not the other would silently
     # retune every receiver in a saved session, and nothing about the
@@ -104,7 +105,8 @@ enum Demod {
     # WHAT THE FIRST SENTENCE USED TO SAY: "which is Raw, Am, Nfm, Wfm, Usb,
     # Lsb, Dsb, Cw. Matching it makes the conversion a cast", which listed
     # eight and stopped before p25p1, dstar and tetra. It then said "all
-    # eleven of them" until dmr made twelve.
+    # eleven of them" until dmr made twelve, and "all twelve of them" until
+    # sam made thirteen, which is why it no longer counts.
     raw @0;
     am @1;
     nfm @2;
@@ -130,6 +132,13 @@ enum Demod {
     dstar @9;
     tetra @10;
     dmr @11;
+
+    # Synchronous AM, appended after dmr. AM's channel and audio, detected
+    # against a carrier a phase-locked loop recovers instead of by the
+    # envelope, so a carrier fading under its own sidebands costs level and
+    # not distortion. Mono audio like am, and levelled by the receiver AGC
+    # like am. core/dsp/vrx_reference.h, "Carrier recovery".
+    sam @12;
 }
 
 struct DeviceInfo {

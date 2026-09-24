@@ -59,7 +59,17 @@ namespace revenant::engine {
 // the wire and reach a specialization constant, and core/rpc/convert.h
 // asserts every pair; a reorder would retune every receiver in a saved
 // session and nothing about the failure would point at this line. Dmr came
-// last, on 2026-09-23, after the other three.
+// after the other three on 2026-09-23.
+//
+// Sam is synchronous AM, appended after Dmr the same day: AM's channel and
+// AM's audio, detected coherently against a carrier a phase-locked loop
+// recovers rather than by the envelope. A mode and not an option on Am,
+// because it is a different pipeline: core/shaders/vrx_carrier.comp and the
+// state it carries exist on a sam receiver and not on an am one, and in this
+// engine a different pipeline is a different mode, the one change
+// set_vrx_params already refuses in place. It also costs a client nothing to
+// offer, since the mode selector is where an operator already looks.
+// core/dsp/vrx_reference.h, "Carrier recovery", has the loop.
 //
 // WHAT THIS PARAGRAPH USED TO SAY: "DMR is deliberately absent from a list
 // that names its three neighbours. ETSI TS 102 361 carries a live Motorola
@@ -80,6 +90,7 @@ enum class Demod : std::uint8_t {
     Dstar,
     Tetra,
     Dmr,
+    Sam,
 };
 
 [[nodiscard]] constexpr const char* demod_name(Demod mode) {
@@ -96,6 +107,7 @@ enum class Demod : std::uint8_t {
         case Demod::Dstar: return "dstar";
         case Demod::Tetra: return "tetra";
         case Demod::Dmr: return "dmr";
+        case Demod::Sam: return "sam";
     }
     return "unknown";
 }
@@ -155,7 +167,8 @@ enum class Demod : std::uint8_t {
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:
-        case Demod::Cw: return false;
+        case Demod::Cw:
+        case Demod::Sam: return false;
     }
     return false;
 }
@@ -326,6 +339,9 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         case Demod::Dsb:
         case Demod::Cw:
 
+        // AM's audio, so AM's answer.
+        case Demod::Sam:
+
         // The digital modes carry no analogue audio at all, so there is no
         // curve to apply and no transmitter that applied one.
         case Demod::P25p1:
@@ -378,6 +394,7 @@ inline constexpr dsp::SampleRate kCompositeAudioRateHz = 114'000;
         case Demod::Lsb:
         case Demod::Dsb:
         case Demod::Cw:
+        case Demod::Sam:
         case Demod::P25p1:
         case Demod::Dstar:
         case Demod::Tetra:
@@ -608,8 +625,8 @@ struct VrxParams {
     double squelch_dbfs = -200.0;
 
     // The receiver AGC, which levels what a PERSON HEARS and nothing else.
-    // It runs on am, usb, lsb, dsb and cw, whose detectors hand out audio at
-    // the input's level; nfm and wfm take a fixed gain instead, and raw and
+    // It runs on am, sam, usb, lsb, dsb and cw, whose detectors hand out
+    // audio at the input's level; nfm and wfm take a fixed gain instead, and raw and
     // the digital voice taps nothing. AudioChunk::heard carries its output
     // and AudioChunk::samples stays the demodulator's, so a decoder, the RDS
     // route and a recording read the same bits with it on or off.
@@ -778,7 +795,12 @@ struct VrxPlacement {
         case Demod::Usb:
         case Demod::Lsb:
         case Demod::Dsb:
-        case Demod::Cw: return false;
+        case Demod::Cw:
+
+        // Coherent, so linear in its passband like AM. A narrower band is
+        // less audio, and the carrier the loop locks to is at the centre,
+        // which a clamp never takes.
+        case Demod::Sam: return false;
     }
     return false;
 }

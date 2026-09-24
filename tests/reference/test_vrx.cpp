@@ -695,6 +695,11 @@ TEST_CASE("the cheap demodulation rate query answers what the planner builds",
         {engine::Demod::Dstar, -3'000, 3'000, 16'000},
         {engine::Demod::Tetra, -12'500, 12'500, 48'000},
         {engine::Demod::Dmr, -6'250, 6'250, 16'000},
+
+        // SAM, at an audio rate low enough that its own minimum decides.
+        // tests/reference/test_vrx_carrier.cpp checks that minimum is the
+        // shared floor and not AM's twice the width.
+        {engine::Demod::Sam, -5'000, 5'000, 8'000},
     };
 
     for (const auto& want : cases) {
@@ -901,6 +906,7 @@ TEST_CASE("a plan's fine tap table is exactly the length its config implies", "[
         {engine::Demod::Dstar, 6'000, &kGrid},     {engine::Demod::Dstar, 4'000, &kGrid},
         {engine::Demod::Tetra, 25'000, &kGrid},    {engine::Demod::Tetra, 20'000, &kGrid},
         {engine::Demod::Dmr, 12'500, &kGrid},      {engine::Demod::Dmr, 9'000, &kGrid},
+        {engine::Demod::Sam, 10'000, &kGrid},      {engine::Demod::Sam, 6'000, &kGrid},
     };
 
     for (const Case& want : cases) {
@@ -926,11 +932,11 @@ TEST_CASE("every enumerator is a known mode and nothing past the last one is",
     // before the three digital voice modes were appended and never moved
     // after. Every enumerator is asked here so that the next one appended
     // is either covered by the switch or fails this case.
-    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodDmr; ++mode) {
+    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodSam; ++mode) {
         INFO("mode " << mode);
         CHECK(dsp::is_known_mode(mode));
     }
-    CHECK_FALSE(dsp::is_known_mode(dsp::kDemodDmr + 1U));
+    CHECK_FALSE(dsp::is_known_mode(dsp::kDemodSam + 1U));
 
     // 257 truncates to 1 in the enum's 8-bit underlying type, which is Am.
     // The guard reads the word, not the truncation.
@@ -938,7 +944,7 @@ TEST_CASE("every enumerator is a known mode and nothing past the last one is",
     CHECK_FALSE(dsp::is_complex_output(257U));
 
     // The five complex taps, and only those five.
-    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodDmr; ++mode) {
+    for (std::uint32_t mode = dsp::kDemodRaw; mode <= dsp::kDemodSam; ++mode) {
         INFO("mode " << mode);
         const bool expected = mode == dsp::kDemodRaw || mode == dsp::kDemodP25p1 ||
                               mode == dsp::kDemodDstar || mode == dsp::kDemodTetra ||
@@ -1618,6 +1624,11 @@ TEST_CASE("every demodulator matches its CPU twin bit-exactly", "[gpu][vrx][m1]"
 
         // DMR, specialization constant 11, appended 2026-09-23.
         {engine::Demod::Dmr, 12'500, &kGrid},
+
+        // SAM, specialization constant 12, the same day: AM's DC window on
+        // the real part. The carrier kernel before it has its own diff in
+        // tests/reference/test_vrx_carrier.cpp.
+        {engine::Demod::Sam, 10'000, &kGrid},
     };
 
     test::SeededInput input(kSeed);

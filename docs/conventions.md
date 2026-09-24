@@ -172,11 +172,18 @@ One kernel per file, under `core/shaders/`, named for what it does.
 
 Workgroup size is a specialization constant. Never hardcoded, never a `#define`
 patched at build time. One line, and it is the same line in every kernel under
-`core/shaders/`, seventeen of them by the end of 2026-09-23:
+`core/shaders/`, eighteen of them by the end of 2026-09-23:
 
 ```glsl
 layout(local_size_x_id = 0) in;
 ```
+
+WHAT THAT SENTENCE USED TO SAY, LAST: "seventeen of them by the end of
+2026-09-23".
+`vrx_carrier.comp` arrived with "Recover the DSB carrier and add synchronous
+AM" and carries the same line. The host specializes it at one invocation,
+because it is a recursion walked by a single thread, and
+`core/engine/vrx_stage.cpp` says why.
 
 WHAT THAT SENTENCE USED TO SAY, EARLIER THE SAME DAY: "the same line in every
 kernel under `core/shaders/`, twelve of them on 2026-09-23". The front-end

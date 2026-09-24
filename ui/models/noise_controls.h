@@ -55,6 +55,7 @@ struct NoiseOffer {
 {
     switch (mode) {
         case rpc::Demod::Am:
+        case rpc::Demod::Sam:
         case rpc::Demod::Usb:
         case rpc::Demod::Lsb:
         case rpc::Demod::Dsb: return {true, true, true, true};
@@ -110,6 +111,7 @@ inline constexpr double kNrStrengthMax = 1.0;
         case rpc::Demod::Usb: return f > 0.0 ? f : 0.0;
         case rpc::Demod::Lsb: return f < 0.0 ? -f : 0.0;
         case rpc::Demod::Am:
+        case rpc::Demod::Sam:
         case rpc::Demod::Dsb: return std::abs(f);
         case rpc::Demod::Cw: return std::abs(f + static_cast<double>(cw_pitch));
         case rpc::Demod::Raw:

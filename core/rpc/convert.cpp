@@ -88,6 +88,7 @@ schema::Demod to_schema(engine::Demod mode) {
         case engine::Demod::Dstar: return schema::Demod::DSTAR;
         case engine::Demod::Tetra: return schema::Demod::TETRA;
         case engine::Demod::Dmr: return schema::Demod::DMR;
+        case engine::Demod::Sam: return schema::Demod::SAM;
     }
     return schema::Demod::RAW;
 }
@@ -186,7 +187,7 @@ Expected<decode::Region> from_schema(schema::RdsRegion region) {
 
 Expected<engine::Demod> from_schema(schema::Demod mode) {
     const auto ordinal = static_cast<std::uint16_t>(mode);
-    if (ordinal > static_cast<std::uint16_t>(engine::Demod::Dmr)) {
+    if (ordinal > static_cast<std::uint16_t>(engine::Demod::Sam)) {
         return fail(std::format(
             "demodulator ordinal {} is not one this engine knows; the caller was built "
             "against a newer schema",
@@ -231,6 +232,7 @@ namespace {
         case engine::Demod::Lsb:
         case engine::Demod::Dsb:
         case engine::Demod::Cw:
+        case engine::Demod::Sam:
             return {};
     }
     return {};
@@ -874,7 +876,7 @@ void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
     if (modes.empty()) {
         const bool complex = input == DecoderInput::ComplexBaseband;
         for (auto ordinal = static_cast<std::uint16_t>(engine::Demod::Raw);
-             ordinal <= static_cast<std::uint16_t>(engine::Demod::Dmr); ++ordinal) {
+             ordinal <= static_cast<std::uint16_t>(engine::Demod::Sam); ++ordinal) {
             const auto mode = static_cast<engine::Demod>(ordinal);
             if (engine::is_complex_tap(mode) == complex) {
                 named.emplace_back(engine::demod_name(mode));

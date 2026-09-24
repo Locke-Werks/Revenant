@@ -1,29 +1,21 @@
-// What a client hears: the receiver AGC's level on subscribeAudio, over a real
-// socket, from signals 30 dB apart.
+// sam and dsb over a real socket at the listening level, from the layout
+// tests/rpc/test_rpc_agc.cpp streams, rendered at -30 and -60 dBFS.
 //
-// tests/engine/test_engine_agc.cpp holds the stage itself: every mode, the
-// timing, the decoders' input bit for bit, and the switch and a retune on a
-// running receiver. This is the one thing that file cannot say, which is that
-// the stream a client subscribes to is the levelled one. Before the engine
-// had an AGC these five modes arrived here at 3e-7 to 2e-6, and a client that
-// did not level them itself played nothing anyone could hear.
+// That case was rendered at -20 and -50 because DSB could not reach the
+// target from -60: its product detector read the real part of a carrier
+// nothing recovered, the weak DSB emitter came out below -82 dBFS, and the
+// AGC's 70 dB ceiling stopped short of it. The Costas loop in
+// core/shaders/vrx_carrier.comp recovers that carrier now, so this renders
+// the same ten emitters 10 dB lower and asks for every stream at the target,
+// and adds two sam receivers on the two AM emitters.
 //
-// THE CAPTURE is complex baseband rendered here and served through the file
-// source, ten emitters at 1.152 MS/s: AM at 80% modulation, a 1 kHz tone on
-// USB, LSB and DSB, and a bare carrier CW pitches to 700 Hz, each once at
-// -20 dBFS and once at -50 dBFS. Paced at realtime, as every other streaming
-// case in this directory is, so the subscriptions keep up without dropping.
-//
-// WHY -20 AND -50 AND NOT -30 AND -60, which is what the engine case uses.
-// It was chosen when DSB had no carrier recovery, and it is kept because the
-// case is about the AGC, not about DSB. WHAT THIS PARAGRAPH USED TO SAY:
-// "DSB's product detector takes the real part of a carrier nothing recovers,
-// so its output is the tone times the cosine of wherever the receiver's
-// oscillator happens to sit against the emitter's carrier", and that the
-// weak DSB emitter rendered at -60 dBFS came out below -82 dBFS and arrived
-// 0.5 dB under the target. A Costas loop recovers that carrier now, and
-// tests/rpc/test_rpc_carrier.cpp streams the same layout at -30 and -60 dBFS
-// with every stream at the target.
+// Two retunes ride along, because the loop restarts on the AGC's rule and
+// only the engine applies that rule to a running receiver. A dsb receiver starts
+// on the strong DSB emitter and is moved 90 kHz to the weak one, which is
+// further than its passband and restarts the loop; a sam receiver starts
+// 200 Hz below the weak AM emitter and is moved onto it, which is inside its
+// passband and carries the loop. Both are measured where every other stream
+// is, 1.0 to 1.5 s of audio, which is after both retunes.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -40,6 +32,7 @@
 #include <numbers>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/dsp/types.h"
@@ -69,7 +62,8 @@ struct Emitter {
     double dbfs;
 };
 
-// Carrier at DC, level `a`, for one mode's test signal.
+// Carrier at DC, level `a`, for one mode's test signal. The same signals as
+// tests/rpc/test_rpc_agc.cpp.
 [[nodiscard]] std::complex<double> baseband(rpc::Demod demod, double t, double a) {
     const double phase = 2.0 * std::numbers::pi * kToneHz * t;
     switch (demod) {
@@ -81,11 +75,10 @@ struct Emitter {
     }
 }
 
-// Writes the capture and removes it again when the case is done.
 class Capture {
 public:
     explicit Capture(const std::vector<Emitter>& emitters)
-        : path_(test::unique_temp_path("revenant_test_rpc_agc", ".cf32")) {
+        : path_(test::unique_temp_path("revenant_test_rpc_carrier", ".cf32")) {
         const auto count = static_cast<std::size_t>(kSeconds * static_cast<double>(kRate));
         std::vector<dsp::Complex32> out(count);
         for (std::size_t n = 0; n < count; ++n) {
@@ -130,9 +123,8 @@ private:
     bool written_ = false;
 };
 
-// The peak each subscription saw, by the stream time its chunks started at.
-// Shared with the client's loop thread through a shared_ptr, for the reason
-// tests/rpc/test_rpc_audio.cpp's AudioLog gives.
+// The peak each subscription saw over 1.0 to 1.5 s of audio, and whether its
+// sample index ever skipped.
 class PeakLog {
 public:
     void record(const rpc::AudioChunk& chunk) {
@@ -186,26 +178,54 @@ private:
 
 [[nodiscard]] double db(double ratio) { return 20.0 * std::log10(ratio); }
 
+struct Receiver {
+    std::string name;
+    rpc::Demod demod;
+    dsp::Hertz center;
+    std::uint64_t id = 0;
+    std::shared_ptr<PeakLog> log;
+};
+
 }  // namespace
 
-TEST_CASE("am, usb, lsb, dsb and cw stream at the listening level from inputs 30 dB apart",
-          "[gpu][rpc][audio][agc]") {
+TEST_CASE("sam and dsb stream at the listening level from -30 and -60 dBFS",
+          "[gpu][rpc][audio][agc][carrier]") {
     REVENANT_NEEDS_GPU();
     INFO("running on " << test::shared_context_description());
 
+    // test_rpc_agc.cpp's ten emitters, 90 kHz apart from -450 kHz, strong
+    // then weak for each mode, at -30 and -60 dBFS.
     const std::vector<rpc::Demod> modes = {rpc::Demod::Am, rpc::Demod::Usb, rpc::Demod::Lsb,
                                            rpc::Demod::Dsb, rpc::Demod::Cw};
     const std::vector<std::string> names = {"am", "usb", "lsb", "dsb", "cw"};
     std::vector<Emitter> emitters;
     dsp::Hertz center = -450'000;
     for (const rpc::Demod mode : modes) {
-        for (const double dbfs : {-20.0, -50.0}) {
+        for (const double dbfs : {-30.0, -60.0}) {
             emitters.push_back(Emitter{mode, center, dbfs});
             center += 90'000;
         }
     }
     const Capture capture(emitters);
     REQUIRE(capture.written());
+
+    std::vector<Receiver> receivers;
+    for (std::size_t i = 0; i < emitters.size(); ++i) {
+        receivers.push_back(Receiver{std::format("{} {}", names[i / 2], i % 2 == 0 ? "-30" : "-60"),
+                                     emitters[i].demod, emitters[i].center});
+    }
+    // sam on both AM emitters.
+    receivers.push_back(Receiver{"sam -30", rpc::Demod::Sam, emitters[0].center});
+    receivers.push_back(Receiver{"sam -60", rpc::Demod::Sam, emitters[1].center});
+
+    // The two retuned receivers, and where each is moved to.
+    const dsp::Hertz dsb_strong = emitters[6].center;
+    const dsp::Hertz dsb_weak = emitters[7].center;
+    const dsp::Hertz am_weak = emitters[1].center;
+    receivers.push_back(Receiver{"dsb moved -30 to -60", rpc::Demod::Dsb, dsb_strong});
+    receivers.push_back(Receiver{"sam moved 200 Hz onto -60", rpc::Demod::Sam, am_weak - 200});
+    const std::size_t moved_dsb = receivers.size() - 2;
+    const std::size_t moved_sam = receivers.size() - 1;
 
     HarnessOptions options;
     options.source_uri = capture.uri();
@@ -217,54 +237,51 @@ TEST_CASE("am, usb, lsb, dsb and cw stream at the listening level from inputs 30
     INFO(test::message_of(ready));
     REQUIRE(ready.has_value());
 
-    std::vector<std::uint64_t> ids;
-    std::vector<std::shared_ptr<PeakLog>> logs;
-    for (const Emitter& emitter : emitters) {
+    for (Receiver& receiver : receivers) {
         rpc::VrxParams params;
-        params.center = emitter.center;
-        params.demod = emitter.demod;
+        params.center = receiver.center;
+        params.demod = receiver.demod;
         params.bandwidth = 0;
         auto vrx = harness.client().add_vrx(params);
-        INFO(test::message_of(vrx));
+        INFO(receiver.name << ": " << test::message_of(vrx));
         REQUIRE(vrx.has_value());
-        ids.push_back(*vrx);
+        receiver.id = *vrx;
 
         auto log = std::make_shared<PeakLog>();
         auto granted = harness.client().subscribe_audio(
             *vrx, 0, [log](const rpc::AudioChunk& chunk) { log->record(chunk); },
             [log](const std::string& reason) { log->end(reason); });
-        INFO(test::message_of(granted));
+        INFO(receiver.name << ": " << test::message_of(granted));
         REQUIRE(granted.has_value());
-        logs.push_back(std::move(log));
+        receiver.log = std::move(log);
     }
 
     const auto started = harness.start_engine();
     INFO(test::message_of(started));
     REQUIRE(started.has_value());
 
-    // Half way through, the AGC on the last weak receiver is switched off
-    // over the wire. Off holds the gain it had, so its level does not move,
-    // and the subscription carries on through it: a push to the running
-    // receiver, not a remove and an add.
+    // The two retunes, a little over half a second in.
     const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (logs.back()->reached() < static_cast<std::uint64_t>(0.7 * kAudioRate) &&
+    while (receivers[moved_sam].log->reached() < static_cast<std::uint64_t>(0.6 * kAudioRate) &&
            std::chrono::steady_clock::now() < give_up) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    REQUIRE(logs.back()->reached() >= static_cast<std::uint64_t>(0.7 * kAudioRate));
-    rpc::VrxParams switched;
-    switched.center = emitters.back().center;
-    switched.demod = emitters.back().demod;
-    switched.bandwidth = 0;
-    switched.agc_enabled = false;
-    const auto off = harness.client().set_vrx_params(ids.back(), switched);
-    INFO(test::message_of(off));
-    CHECK(off.has_value());
+    REQUIRE(receivers[moved_sam].log->reached() >= static_cast<std::uint64_t>(0.6 * kAudioRate));
+    for (const auto& [index, to] : {std::pair{moved_dsb, dsb_weak}, std::pair{moved_sam, am_weak}}) {
+        rpc::VrxParams params;
+        params.center = to;
+        params.demod = receivers[index].demod;
+        params.bandwidth = 0;
+        const auto moved = harness.client().set_vrx_params(receivers[index].id, params);
+        INFO(receivers[index].name << ": " << test::message_of(moved));
+        CHECK(moved.has_value());
+    }
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     const auto wanted = static_cast<std::uint64_t>(1.6 * kAudioRate);
     auto all_there = [&] {
-        return std::ranges::all_of(logs, [&](const auto& log) { return log->reached() >= wanted; });
+        return std::ranges::all_of(receivers,
+                                   [&](const Receiver& r) { return r.log->reached() >= wanted; });
     };
     while (!all_there() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -272,28 +289,24 @@ TEST_CASE("am, usb, lsb, dsb and cw stream at the listening level from inputs 30
     REQUIRE(all_there());
 
     const double target = db(engine::kHeardTarget);
-    for (std::size_t m = 0; m < modes.size(); ++m) {
-        const double strong = db(logs[2 * m]->settled_peak());
-        const double weak = db(logs[2 * m + 1]->settled_peak());
-        WARN(std::format("{:>3} on the wire: {:.2f} dBFS from a -20 dBFS signal and {:.2f} dBFS "
-                         "from a -50 dBFS one",
-                         names[m], strong, weak));
-        INFO(names[m]);
-        CHECK(std::abs(strong - target) < 1.0);
-        CHECK(std::abs(weak - target) < 1.0);
-        CHECK(std::abs(strong - weak) < 0.1);
+    std::string table = std::format("on the wire, peak over 1.0 to 1.5 s, target {:.2f} dBFS:\n",
+                                    target);
+    for (const Receiver& receiver : receivers) {
+        const double heard = db(receiver.log->settled_peak());
+        table += std::format("  {:<28} {:7.2f} dBFS\n", receiver.name, heard);
+        INFO(receiver.name);
+        // At or above the target, not merely near it. The AGC settles 0.43
+        // dB over it on a tone (docs/rpc.md), and the defect this case is
+        // about arrived 0.5 dB under it, with the 70 dB ceiling spent: a
+        // window of a decibel either side would have passed that.
+        CHECK(heard >= target);
+        CHECK(heard - target < 1.0);
+        CHECK_FALSE(receiver.log->gap());
+        CHECK_FALSE(receiver.log->ended());
     }
-    for (const auto& log : logs) {
-        CHECK_FALSE(log->gap());
-        CHECK_FALSE(log->ended());
-    }
+    WARN(table);
 
-    const auto status = harness.client().vrx_status(ids.back());
-    INFO(test::message_of(status));
-    REQUIRE(status.has_value());
-    CHECK_FALSE(status->params.agc_enabled);
-
-    for (const std::uint64_t vrx : ids) {
-        harness.client().unsubscribe_audio(vrx);
+    for (const Receiver& receiver : receivers) {
+        harness.client().unsubscribe_audio(receiver.id);
     }
 }

@@ -189,7 +189,11 @@ nothing in it divides a rational or calls a `_hz()` helper.
 
 `schema::Demod` is declared ordinal for ordinal with `engine::Demod`, so the
 conversion is a cast. `core/rpc/convert.h` carries a `static_assert` per mode,
-all eight, so reordering one side without the other stops the build there.
+every one of them, so reordering one side without the other stops the build
+there. Appended modes take the next ordinal and never renumber: p25p1, dstar,
+tetra, dmr, and `sam @12`, synchronous AM. WHAT THIS SENTENCE USED TO SAY: "a
+`static_assert` per mode, all eight", which was five short by the time sam
+arrived.
 Without that, a reordered enum would retune every receiver in a saved session
 to a different mode, and nothing about the symptom would point at the schema.
 
@@ -561,7 +565,7 @@ filter), peak over 1.0 to 1.5 s of audio.
 | am | -11.62, -11.62 dBFS | -31.94, -61.94 dBFS |
 | usb | -11.61, -11.61 | -30.64, -60.64 |
 | lsb | -11.61, -11.61 | -31.36, -61.36 |
-| dsb | -11.62, -11.62 | -34.33, -64.33 |
+| dsb | -11.62, -11.62 | -30.51, -60.51 |
 | cw | -11.61, -11.61 | -30.00, -60.00 |
 | nfm | -12.08, -12.08 | -0.04, -0.04 |
 | wfm | -12.92, -12.92 | -0.87, -0.87 |
@@ -574,11 +578,30 @@ de-emphasis at 1 kHz. Over the wire, `tests/rpc/test_rpc_agc.cpp` streams
 am, usb, lsb, dsb and cw from -20 and -50 dBFS at -11.61 to -11.62 dBFS on
 every stream.
 
-DSB is the mode that can fall short. Its product detector takes the real part
-of a carrier nothing recovers, so its output is the tone times the cosine of
-where the receiver's oscillator sits against the carrier, and in the wire
-case's first layout the weak DSB emitter came out under -82 dBFS, which is
-where the 70 dB ceiling stops, and arrived at -12.14 dBFS.
+DSB reads its level off a recovered carrier since "Recover the DSB carrier and
+add synchronous AM". A Costas loop, `core/shaders/vrx_carrier.comp`, rotates
+the receiver's baseband onto the suppressed carrier before the product
+detector sees it, so a unit tone comes back at unit level whatever the carrier
+phase: 0.99988 to 1.00010 over sixteen phases round the turn in
+`tests/reference/test_vrx_carrier.cpp`, against 0.00006 at the worst phase
+with the loop taken out. The receiver's own output in the table above was
+-34.33 and -64.33 dBFS before it, which was the cosine of that tuning's phase.
+
+WHAT THIS PARAGRAPH USED TO SAY: "DSB is the mode that can fall short. Its
+product detector takes the real part of a carrier nothing recovers, so its
+output is the tone times the cosine of where the receiver's oscillator sits
+against the carrier, and in the wire case's first layout the weak DSB emitter
+came out under -82 dBFS, which is where the 70 dB ceiling stops, and arrived at
+-12.14 dBFS." `tests/rpc/test_rpc_carrier.cpp` renders that layout at -30 and
+-60 dBFS and every stream arrives at -11.61 or -11.62 dBFS, the weak DSB
+emitter included; with the loop disabled the same case measured -12.14 dBFS
+for it again and failed.
+
+**sam**, synchronous AM, is levelled as am is. Over the wire in the same case,
+on the two AM emitters: -11.62 dBFS from both -30 and -60 dBFS, and -11.62
+dBFS for a sam receiver moved 200 Hz onto the weak one, which carries its loop
+across the retune, and for a dsb receiver moved 90 kHz from the strong DSB
+emitter to the weak one, which restarts it.
 
 Timing, one USB tone stepped up 20 dB and down again, heard level per
 millisecond:
@@ -2238,7 +2261,9 @@ and an engine restarted while its old connections sit in `TIME_WAIT` still
 binds, measured on 2026-09-22. `tests/rpc` binds an ephemeral loopback port per case,
 connects a real `Client` and drives a real engine through it. A channel centre
 that is not a whole hertz is compared against what the engine holds rather than
-against the other end of the wire, all eight demodulator modes round-trip, an
+against the other end of the wire, every demodulator mode round-trips (the
+list in `tests/rpc/test_rpc_session.cpp` is thirteen long with sam; this said
+"all eight" until then), an
 unknown ordinal is refused, `everyNth` decimates, a second subscription
 replaces the first, and a client disappearing mid-stream takes its subscription
 and nothing else. Backpressure has its own case: it delays the callback by the

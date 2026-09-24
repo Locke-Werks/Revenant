@@ -64,6 +64,7 @@ add_executable(revenant_reference_tests
     reference/test_spectrum.cpp
     reference/test_spectrum_levels.cpp
     reference/test_vrx.cpp
+    reference/test_vrx_carrier.cpp
 )
 
 target_link_libraries(revenant_reference_tests PRIVATE

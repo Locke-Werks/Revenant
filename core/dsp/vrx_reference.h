@@ -41,6 +41,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -324,6 +325,11 @@ inline constexpr std::uint32_t kDemodTetra = 10;
 // DMR, appended on 2026-09-23 and routed to the same passthrough.
 inline constexpr std::uint32_t kDemodDmr = 11;
 
+// Synchronous AM, appended after DMR the same day. It reaches this kernel
+// after core/shaders/vrx_carrier.comp has rotated the fine ring onto the
+// recovered carrier, and detects the real part with AM's DC removal.
+inline constexpr std::uint32_t kDemodSam = 12;
+
 static_assert(static_cast<std::uint32_t>(engine::Demod::Raw) == kDemodRaw);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Am) == kDemodAm);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Nfm) == kDemodNfm);
@@ -336,6 +342,7 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::P25p1) == kDemodP25p1);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Dstar) == kDemodDstar);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Tetra) == kDemodTetra);
 static_assert(static_cast<std::uint32_t>(engine::Demod::Dmr) == kDemodDmr);
+static_assert(static_cast<std::uint32_t>(engine::Demod::Sam) == kDemodSam);
 
 // What those eight catch and what they do not, because the difference has
 // already been got wrong once in this tree.
@@ -385,7 +392,8 @@ static_assert(static_cast<std::uint32_t>(engine::Demod::Dmr) == kDemodDmr);
         case engine::Demod::P25p1:
         case engine::Demod::Dstar:
         case engine::Demod::Tetra:
-        case engine::Demod::Dmr: return true;
+        case engine::Demod::Dmr:
+        case engine::Demod::Sam: return true;
     }
     return false;
 }
@@ -506,8 +514,8 @@ struct VrxDemodConfig {
     // One, with a unit weight, when decimation is one.
     std::uint32_t audio_taps = 1;
 
-    // Length of the AM DC-removal window. Only the AM branch reads it, but it
-    // is always at least one so the weights buffer is never empty.
+    // Length of the AM DC-removal window. Only the AM and SAM branches read
+    // it, but it is always at least one so the weights buffer is never empty.
     std::uint32_t dc_taps = 1;
 
     // Floats per output FRAME, which is one for a mono detector and two for
@@ -545,7 +553,8 @@ struct VrxDemodConfig {
 // Those two answering differently is a kernel reading a slot a later
 // dispatch has already written, which is silent and sounds like a click.
 [[nodiscard]] constexpr std::uint32_t demod_fine_history(const VrxDemodConfig& config) {
-    const std::uint32_t detector = (config.mode == kDemodAm) ? config.dc_taps - 1U
+    const std::uint32_t detector = (config.mode == kDemodAm || config.mode == kDemodSam)
+                                       ? config.dc_taps - 1U
                                    : (config.mode == kDemodNfm || config.mode == kDemodWfm)
                                        ? 1U
                                        : 0U;
@@ -593,6 +602,263 @@ static_assert(sizeof(VrxDemodParams) == 4 * sizeof(std::uint32_t),
                                          RealSpan audio);
 
 [[nodiscard]] Status validate(const VrxDemodConfig& config, const VrxDemodParams& params);
+
+// ---------------------------------------------------------------------------
+// Carrier recovery
+// ---------------------------------------------------------------------------
+//
+// core/shaders/vrx_carrier.comp and its twin below. Two modes run it, and
+// they run it between the fine stage and the detector, rotating the fine ring
+// in place so the detector sees a carrier on the real axis.
+//
+//   sam   A phase-locked loop on AM's transmitted carrier. The detector then
+//         takes the real part and AM's DC removal, which is a product
+//         detector against the recovered carrier. Unlike the envelope it is
+//         linear, so a carrier that fades below its own sidebands costs level
+//         and not distortion.
+//
+//   dsb   A Costas loop on a carrier that is not transmitted. It locks to the
+//         square of the signal, whose argument is twice the carrier phase
+//         whatever the modulation's sign, so the product detector's real part
+//         no longer carries the cosine of an arbitrary phase. The half-turn
+//         ambiguity that leaves is a sign on the audio, which nobody hears.
+//
+// THE LOOP. Second order and type 2, a proportional-plus-integral filter
+// driving a phase accumulator (Gardner, "Phaselock Techniques", 3rd ed.,
+// chapters 2 and 3; the Costas form is the same book's suppressed-carrier
+// chapter). The gains are the usual discrete mapping of a noise bandwidth
+// B_n and damping zeta onto that filter, with theta = B_n*T / (zeta +
+// 1/(4*zeta)):
+//
+//     K1 = 4*zeta*theta / (1 + 2*zeta*theta + theta^2)
+//     K2 = 4*theta^2    / (1 + 2*zeta*theta + theta^2)
+//
+// as tabulated in Rice, "Digital Communications: A Discrete-Time Approach",
+// appendix C, for a detector and an oscillator of unit gain. Neither book was
+// opened for this work; these are the well-known forms, and the phase
+// detector below is normalised to unit gain so they apply as written.
+//
+// The detector is the quadrature part over a running level: y_imag / |y| for
+// the carrier loop, which is sin(theta) near lock, and y_real*y_imag / |y|^2
+// for the Costas loop, which is sin(2*theta)/2. Normalising makes the loop's
+// bandwidth independent of the signal's level, which is what lets one set of
+// constants serve a -20 and a -60 dBFS station.
+//
+// TWO BANDWIDTHS AND A LOCK TEST, which is gear shifting in Gardner's terms.
+// A loop narrow enough to hold a clean reference through a fade pulls in
+// slowly, since a type-2 loop's pull-in time grows as the offset squared over
+// the bandwidth cubed. So it acquires wide and tracks narrow, and switches on
+// a filtered copy of what it locks to: the sample itself for the carrier
+// loop, its square for the Costas loop. Locked is that phasor's real part
+// standing twice its imaginary part for hold_in samples in a row; unlocked is
+// the test failing hold_out more samples than it passes, counted up and down,
+// because a loop slipping cycles swings the phasor through the passing sector
+// once a cycle and a count that restarted there would hold a lost loop narrow
+// for ever. Every figure below is a measurement in
+// tests/reference/test_vrx_carrier.cpp and the case that measured it is named
+// beside it.
+//
+// THE TRACKING RANGE IS THE RECEIVER'S FILTER. The integrator is bounded at
+// the passband's furthest edge from the centre, so the loop can follow a
+// carrier anywhere the filter passes one and never chases a frequency the
+// filter has already removed.
+//
+// WHAT IT COSTS. A loop is carried state, so these two modes are the ones
+// whose audio is not a pure function of the absolute index: a receiver
+// re-entering a stream produces the same audio only once it has locked
+// again. core/shaders/vrx_carrier.comp says so where it matters.
+
+// Which loop a mode runs, as the power the loop raises the signal to before
+// locking: none, the carrier loop, or the Costas loop. The value is the
+// kernel's kPower specialization constant.
+inline constexpr std::uint32_t kCarrierNone = 0;
+inline constexpr std::uint32_t kCarrierPll = 1;
+inline constexpr std::uint32_t kCarrierCostas = 2;
+
+// kCarrierPll for sam, kCarrierCostas for dsb, kCarrierNone for every other
+// mode and for a word that is no mode at all. A switch over engine::Demod with
+// no default, so a fourteenth mode has to say whether it recovers a carrier.
+[[nodiscard]] std::uint32_t carrier_power(std::uint32_t mode);
+
+// The two specialization constants of core/shaders/vrx_carrier.comp, at ids
+// 1 and 2. power is kCarrierNone on a receiver that runs no loop, which then
+// has no carrier pipeline at all.
+struct VrxCarrierConfig {
+    std::uint32_t power = kCarrierNone;
+    std::uint32_t nco_log2 = 16;
+
+    friend constexpr bool operator==(const VrxCarrierConfig&,
+                                     const VrxCarrierConfig&) = default;
+};
+
+inline constexpr std::uint32_t kCarrierFlagReset = 1;
+
+// The kernel's push constants, in the order it declares them. Every field
+// from shift on is a design figure the planner fills once; the first four and
+// shift are per dispatch, from carrier_block.
+struct VrxCarrierParams {
+    std::uint32_t in_mask = 0;
+    std::uint32_t in_offset = 0;
+    std::uint32_t count = 0;
+    std::uint32_t flags = 0;
+    float shift = 0.0F;
+    float k1_acquire = 0.0F;
+    float k2_acquire = 0.0F;
+    float k1_track = 0.0F;
+    float k2_track = 0.0F;
+    float level_alpha = 0.0F;
+    float lock_alpha = 0.0F;
+    float clamp_radians = 0.0F;
+    std::uint32_t hold_in = 0;
+    std::uint32_t hold_out = 0;
+};
+
+static_assert(sizeof(VrxCarrierParams) == 14 * sizeof(std::uint32_t),
+              "VrxCarrierParams must be fourteen packed 32-bit words to alias the kernel's push "
+              "constant block");
+
+// The state the loop carries between dispatches, eight 32-bit words. The
+// float words hold their bits. All zero is a loop that has seen nothing, so a
+// cleared buffer and a reset start the same way.
+inline constexpr std::size_t kCarrierStateWords = 8;
+inline constexpr std::size_t kCarrierStatePhase = 0;       // 0.32 fixed-point turns
+inline constexpr std::size_t kCarrierStateIntegrator = 1;  // radians per sample
+inline constexpr std::size_t kCarrierStateLevel = 2;       // |y|, or |y|^2 for Costas
+inline constexpr std::size_t kCarrierStateLockReal = 3;
+inline constexpr std::size_t kCarrierStateLockImag = 4;
+inline constexpr std::size_t kCarrierStateLocked = 5;      // 0 acquiring, 1 tracking
+inline constexpr std::size_t kCarrierStateCount = 6;       // the lock test's hold count
+inline constexpr std::size_t kCarrierStatePrimed = 7;      // the level has a first value
+
+// The loop's design, each figure with the measurement that chose it. The
+// cases are in tests/reference/test_vrx_carrier.cpp and print these tables;
+// all of them run the twins at a 48 kHz demodulation rate, sam in a 10 kHz
+// passband and dsb in a 6 kHz one.
+//
+// kCarrierAcquireHz and kCarrierTrackHz, the two noise bandwidths. The
+// discrete gains deliver 403.0 and 30.0 Hz, measured from the linearised
+// loop's impulse response ("the loop gains are the second-order loop's").
+//
+// LOCK TIME, "the loops lock within the times stated": the worst of five
+// seeds, at 30 and at 10 dB SNR across the 48 kHz rate, to the lock test
+// holding and the loop within 1 Hz of the carrier.
+//
+//   carrier off by        0      50     200     500     800    1500    3000
+//   sam, 1 kHz tone    13 ms   15 ms   24 ms   49 ms  104 ms   sideband
+//   sam, programme     12 ms   13 ms   18 ms   38 ms   66 ms  201 ms  748 ms
+//   dsb, 1 kHz tone    16 ms   21 ms   41 ms  115 ms  438 ms   sideband
+//   dsb, programme     13 ms   15 ms   45 ms  471 ms  967 ms*  2 of 5
+//
+// Programme is twenty tones over 300 to 3000 Hz. "sideband" is the loop
+// locking to a sideband of the steady tone instead, 0 of 5 on the carrier: a
+// line as strong as a sideband, nearer the centre than the carrier is, is a
+// carrier as far as a phase-locked loop can tell. The starred figure is 4 of
+// 5 on the carrier. sam 4500 Hz off with programme, and dsb 2500 Hz off with
+// either, did not lock on the carrier inside a second. So sam acquires from 800 Hz off
+// whatever the modulation and from 3000 Hz off on programme, dsb from 500 Hz
+// off, and a receiver clicked onto a station is inside both.
+//
+// TRACKING, "the loop follows a drifting carrier across the passband and no
+// further": locked on the centre, a carrier drifting at 100 Hz a second is
+// followed to 5009 Hz for sam's 5000 Hz reach and 3009 Hz for dsb's 3000,
+// the integrator pinned at the bound for the last few hertz, and the loop's
+// frequency never passes the bound once the carrier leaves the passband.
+//
+// DISTORTION, "sam is linear where the envelope is not": AM at 80% of a 1 kHz
+// tone, 37 Hz off, harmonics two to five over the fundamental.
+//
+//   channel                                   envelope      sam
+//   carrier notched 20 dB after 0.3 s           8.6 dB   -154.4 dB
+//   carrier notched 30 dB after 0.3 s          18.7 dB   -159.3 dB
+//   carrier notched 40 dB after 0.3 s          28.7 dB   -158.6 dB
+//   carrier notched 20 dB from the start        8.6 dB   -134.6 dB
+//   two paths 0.3 ms apart, static             12.4 dB    -47.4 dB
+//   two paths 0.3 ms apart, 0.5 Hz Doppler    -22.9 dB    -55.1 dB
+//   two paths 0.5 ms apart, static             14.2 dB    -43.4 dB
+//   two paths 0.5 ms apart, 0.5 Hz Doppler     -0.1 dB    -32.6 dB
+//   two paths 0.7 ms apart, static             12.4 dB    -29.5 dB
+//   two paths 0.7 ms apart, 0.5 Hz Doppler    -22.9 dB    -55.1 dB
+//
+// The second path is 0.9 as strong and a half turn round, which puts the
+// carrier in a 20 dB notch. A carrier notched alone leaves sam at the float
+// arithmetic's floor, because its detector is linear and the tracking loop
+// holds the reference through the notch; two paths leave some, from the
+// reference following the sidebands the second path turned out of phase.
+inline constexpr double kCarrierAcquireHz = 400.0;
+inline constexpr double kCarrierTrackHz = 30.0;
+
+// The damping. 1/sqrt(2), the value Gardner and Rice both use as the
+// ordinary compromise between overshoot and settling, and the one their
+// B_n formula above is usually quoted at.
+inline constexpr double kCarrierDamping = 0.70710678118654752440;
+
+// The level the detector is normalised by, a one-pole over 5 ms: short
+// against a fade and long against the audio.
+inline constexpr double kCarrierLevelSeconds = 0.005;
+
+// The lock test's phasor, a one-pole over 20 ms, whose 8 Hz bandwidth takes a
+// 1 kHz sideband down 42 dB so the test reads the carrier and not the
+// programme.
+inline constexpr double kCarrierLockSeconds = 0.020;
+
+// 10 ms of the test holding before the loop narrows, and 200 ms more failing
+// than passing before it widens again: long enough that a selective fade
+// passing through the carrier does not throw the loop back into acquisition.
+// A dsb unit tone at sixteen phases round the turn is at 0.99988 to 1.00010
+// of full level with the loop, the slowest locked in 24 ms, and 0.00006 at
+// the worst phase without it ("dsb comes back at unit level whatever the
+// carrier phase"). Sam retuned 300 Hz inside its passband holds lock with
+// the retune's shift and drops it for 384 ms without ("a retune inside the
+// passband keeps the loop on the carrier").
+//
+// HANGUP. A Costas loop has an unstable null a quarter turn from lock and a
+// carrier loop one a half turn away. A noise-free signal started exactly
+// there reads 1e-17 in the detector, which moves the phase by less than the
+// accumulator's 2^-32 of a turn, and the loop stays. Any noise at all moves
+// it; the dsb case above runs at 40 dB SNR, and includes that quarter turn.
+inline constexpr double kCarrierHoldInSeconds = 0.010;
+inline constexpr double kCarrierHoldOutSeconds = 0.200;
+
+// K1 and K2 for a noise bandwidth and damping at a sample rate, in double.
+// The planner rounds them to float once.
+struct CarrierGains {
+    double k1 = 0.0;
+    double k2 = 0.0;
+};
+[[nodiscard]] CarrierGains carrier_loop_gains(double noise_bandwidth_hz, double damping,
+                                              SampleRate rate);
+
+// Every design field of VrxCarrierParams for a receiver demodulating at
+// demod_rate whose passband reaches reach_hz from its centre. The integrator
+// bound is that reach, never more than a quarter turn per sample, which keeps
+// the kernel's float-to-int conversion inside its range.
+[[nodiscard]] Expected<VrxCarrierParams> design_carrier_loop(SampleRate demod_rate,
+                                                             Hertz reach_hz);
+
+[[nodiscard]] Status validate(const VrxCarrierConfig& config, const VrxCarrierParams& params);
+
+// Twin of core/shaders/vrx_carrier.comp. Rotates params.count samples of
+// fine_ring in place from params.in_offset, and carries state, which is
+// kCarrierStateWords long, from one call to the next. nco is the table
+// build_nco_table(config.nco_log2) returns.
+[[nodiscard]] Status reference_vrx_carrier(const VrxCarrierConfig& config,
+                                           const VrxCarrierParams& params,
+                                           ConstComplexSpan nco, ComplexSpan fine_ring,
+                                           std::span<std::uint32_t> state);
+
+// What a retune does to the loop, decided the way the receiver AGC decides
+// it in core/engine/graph.cpp. A move further than the passband's width is a
+// different signal and the loop starts again. A move inside it is the same
+// carrier seen from somewhere else: the fine stage puts the receiver's centre
+// at DC, so the carrier moves in the fine stream by exactly minus the move,
+// and shift carries the loop's frequency the same distance, in radians per
+// sample at the demodulation rate.
+struct CarrierRetune {
+    bool reset = false;
+    double shift = 0.0;
+};
+[[nodiscard]] CarrierRetune carrier_retune(Hertz moved, Hertz granted_width,
+                                           SampleRate demod_rate);
 
 // ---------------------------------------------------------------------------
 // Design
@@ -1124,6 +1390,12 @@ struct VrxPlan {
     std::vector<float> demod_weights;
     float demod_gain = 1.0F;
 
+    // The carrier loop, for sam and dsb, and power kCarrierNone for every
+    // other mode. carrier_loop holds the design fields of the kernel's push
+    // constants; carrier_block fills the per-dispatch ones from it.
+    VrxCarrierConfig carrier{};
+    VrxCarrierParams carrier_loop{};
+
     // Peak deviation the FM gain was derived from. Zero outside FM.
     Hertz deviation = 0;
 
@@ -1244,6 +1516,13 @@ struct VrxShape {
     VrxFineConfig fine{};
     VrxDemodConfig demod{};
 
+    // Whether there is a carrier pipeline, and its table length. A function
+    // of demod.mode and fine.nco_log2 today, and a member anyway: whether a
+    // stage builds a pipeline and a state buffer is exactly the question this
+    // struct answers, and a second rule deriving it from two other fields is
+    // the parallel list the paragraph above retires.
+    VrxCarrierConfig carrier{};
+
     SampleRate channel_rate = 0;
     SampleRate demod_rate = 0;
     SampleRate output_rate = 0;
@@ -1345,6 +1624,16 @@ struct VrxDemodBlock {
                                                   std::uint32_t fine_mask,
                                                   SampleIndex first_audio,
                                                   std::uint32_t count);
+
+// The carrier kernel's push constants for the count fine samples from
+// first_fine, which are the ones the fine stage wrote this dispatch: every
+// fine sample is rotated exactly once, in order. reset and shift come from
+// carrier_retune. Refused on a plan that runs no loop.
+[[nodiscard]] Expected<VrxCarrierParams> carrier_block(const VrxPlan& plan,
+                                                       std::uint32_t fine_mask,
+                                                       SampleIndex first_fine,
+                                                       std::uint32_t count, bool reset,
+                                                       float shift);
 
 // ---------------------------------------------------------------------------
 // The display tap

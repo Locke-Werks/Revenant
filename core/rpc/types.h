@@ -58,6 +58,7 @@ enum class Demod : std::uint8_t {
     Dstar,
     Tetra,
     Dmr,
+    Sam,
 };
 
 struct DeviceInfo {
