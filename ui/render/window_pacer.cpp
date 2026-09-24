@@ -53,7 +53,7 @@ WindowPacer::WindowPacer(QQuickWindow* lead, QQuickWindow* follower, QObject* pa
         }
     });
     connect(&follower_fallback_, &QTimer::timeout, this, [this] {
-        if (follower_held_) {
+        if (follower_held_ && follower_ != nullptr) {
             drawFollower();
         }
     });
