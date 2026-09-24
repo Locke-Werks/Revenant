@@ -6,16 +6,26 @@
 // names into rpc::Demod through kDemodNames, and UiRules hands the selector
 // its rows and labels.
 //
-// TWELVE MODES, TWO ROWS OF THEM. The selector shows the eight an operator
-// reaches for on every band as one row of segments, and puts P25, D-STAR,
-// TETRA and DMR behind a ninth segment that opens a short list. All twelve
-// are demodulators the engine plans, and the four digital ones reach the
-// decoders through the fine stage at the rate each was written for, so a raw
-// receiver is no longer the only way to them. Grouped rather than added to
-// the row, which it shares with the width controls and the level readout:
-// eight segments is what it held before, and one more for the group keeps it
-// close to that. DMR joined the group on 2026-09-23, and until then this
-// paragraph counted eleven modes and three digital ones.
+// THIRTEEN MODES, TWO ROWS OF THEM. The selector shows the analogue nine as
+// one row of segments, and puts P25, D-STAR, TETRA and DMR behind a tenth
+// segment that opens a short list. All thirteen are demodulators the engine
+// plans, and the four digital ones reach the decoders through the fine stage
+// at the rate each was written for, so a raw receiver is no longer the only
+// way to them. Grouped rather than added to the row, which it shares with
+// the width controls and the level readout. DMR joined the group on
+// 2026-09-23, and until then this paragraph counted eleven modes and three
+// digital ones.
+//
+// sam joined the row the same day, at its end. It is synchronous AM, AM's
+// channel detected against a recovered carrier, and an operator reaches for
+// it on the same stations am is for, so it is on the row rather than in a
+// group. At the end and not beside am because the row's order is also the
+// Alt+1 to Alt+9 order models/key_actions.h gives it, and an insertion would
+// have moved six keys an operator already has.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "TWELVE MODES, TWO ROWS OF THEM. The
+// selector shows the eight an operator reaches for on every band as one row
+// of segments", and that eight segments was what the row held before.
 //
 // WHAT THIS WINDOW USED TO OFFER: the row alone, "am, nfm, wfm, usb, lsb,
 // dsb, cw, raw", and a name table in models/engine_link.h that held those
@@ -43,10 +53,10 @@ namespace revenant::ui {
 // so the ORDINALS here are pinned by the engine's own build even though the
 // spellings are not. ui/tests/test_mode_choice.cpp pins each spelling to its
 // enumerator.
-inline constexpr std::array<std::string_view, 12> kDemodNames = {
-    "raw", "am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1", "dstar", "tetra", "dmr"};
+inline constexpr std::array<std::string_view, 13> kDemodNames = {
+    "raw", "am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1", "dstar", "tetra", "dmr", "sam"};
 
-static_assert(kDemodNames.size() == static_cast<std::size_t>(rpc::Demod::Dmr) + 1,
+static_assert(kDemodNames.size() == static_cast<std::size_t>(rpc::Demod::Sam) + 1,
               "a demodulator was added to rpc::Demod without a name here");
 
 struct ModeChoice {
@@ -58,7 +68,7 @@ struct ModeChoice {
 // In the order the selector draws them. The row keeps the engine's lower-case
 // names, which is how it has always read; the digital four are known on the
 // air by these spellings and not by the engine's.
-inline constexpr std::array<ModeChoice, 12> kModeChoices = {{
+inline constexpr std::array<ModeChoice, 13> kModeChoices = {{
     {"am", "am", false},
     {"nfm", "nfm", false},
     {"wfm", "wfm", false},
@@ -67,6 +77,7 @@ inline constexpr std::array<ModeChoice, 12> kModeChoices = {{
     {"dsb", "dsb", false},
     {"cw", "cw", false},
     {"raw", "raw", false},
+    {"sam", "sam", false},
     {"p25p1", "P25", true},
     {"dstar", "D-STAR", true},
     {"tetra", "TETRA", true},
@@ -122,7 +133,7 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 // Whether a receiver in this mode makes audio, which is whether the audio
 // section applies to it at all.
 //
-// engine::produces_audio's seven analogue modes, and p25p1. raw, dstar, tetra
+// engine::produces_audio's eight analogue modes, and p25p1. raw, dstar, tetra
 // and dmr hand out complex baseband, two floats a sample, for a decoder to
 // read, and the engine refuses an audio subscription on one. So the window
 // neither asks nor shows a section that could only say it was refused. A
@@ -139,16 +150,17 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 // stream nobody described.
 [[nodiscard]] constexpr bool mode_makes_audio(std::string_view name)
 {
-    return name == "am" || name == "nfm" || name == "wfm" || name == "usb" || name == "lsb" ||
-           name == "dsb" || name == "cw" || name == "p25p1";
+    return name == "am" || name == "sam" || name == "nfm" || name == "wfm" || name == "usb" ||
+           name == "lsb" || name == "dsb" || name == "cw" || name == "p25p1";
 }
 
 // Whether a receiver in this mode runs the engine's receiver AGC, which is
 // what its AGC switch in ReceiverDetail.qml acts on.
 //
-// An envelope detector and the four product detectors hand out audio at the
-// level the signal came in at, so the engine levels what it sends of those
-// five; core/engine/listener_level.h. nfm and wfm take a fixed gain there
+// An envelope detector and the product detectors hand out audio at the level
+// the signal came in at, so the engine levels what it sends of those six, sam
+// among them since it is a product detector against a recovered carrier;
+// core/engine/listener_level.h. nfm and wfm take a fixed gain there
 // instead, because a discriminator's level is set by the deviation, and the
 // complex taps take nothing, so the switch does nothing on any of them.
 //
@@ -157,7 +169,8 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 // no AGC". The engine applies it now and the mix does not.
 [[nodiscard]] constexpr bool mode_takes_agc(std::string_view name)
 {
-    return name == "am" || name == "usb" || name == "lsb" || name == "dsb" || name == "cw";
+    return name == "am" || name == "sam" || name == "usb" || name == "lsb" || name == "dsb" ||
+           name == "cw";
 }
 
 // "raw, am, nfm, ..., tetra", for a refusal that has to say what would have

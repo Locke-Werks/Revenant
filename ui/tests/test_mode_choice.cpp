@@ -55,6 +55,7 @@ TEST_CASE("every demodulator name sits at its rpc::Demod ordinal", "[modes]")
     CHECK(name_of(Demod::Dstar) == "dstar");
     CHECK(name_of(Demod::Tetra) == "tetra");
     CHECK(name_of(Demod::Dmr) == "dmr");
+    CHECK(name_of(Demod::Sam) == "sam");
 }
 
 // Rejects a selector that leaves a demodulator unreachable, which is what the
@@ -72,12 +73,19 @@ TEST_CASE("the selector offers every demodulator exactly once", "[modes]")
     CHECK(offered.size() == kDemodNames.size());
 }
 
-// Rejects widening the row by the digital modes, and rejects a group that
-// holds anything the row already has.
-TEST_CASE("the row is the eight it was and the digital group is the other four", "[modes]")
+// Rejects widening the row by the digital modes, rejects a group that holds
+// anything the row already has, and rejects sam anywhere but the row's end,
+// where it takes Alt+9 and moves no key an operator already has.
+//
+// WHAT THIS CASE'S NAME USED TO SAY: "the row is the eight it was and the
+// digital group is the other four". sam made the row nine.
+TEST_CASE("the row is the analogue nine and the digital group is the other four", "[modes]")
 {
-    CHECK(mode_names(false) == Names{"am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw"});
+    CHECK(mode_names(false) ==
+          Names{"am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "raw", "sam"});
     CHECK(mode_names(true) == Names{"p25p1", "dstar", "tetra", "dmr"});
+    CHECK(mode_label("sam") == "sam");
+    CHECK_FALSE(mode_is_digital("sam"));
 }
 
 // Rejects showing the engine's spellings for the digital modes, and rejects
@@ -123,7 +131,8 @@ TEST_CASE("the digital segment names the digital mode in force", "[modes]")
 // half of this change.
 TEST_CASE("the analogue demodulators and P25 make audio", "[modes]")
 {
-    for (const std::string_view name : {"am", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1"}) {
+    for (const std::string_view name :
+         {"am", "sam", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1"}) {
         INFO(name);
         CHECK(mode_makes_audio(name));
     }
@@ -135,10 +144,10 @@ TEST_CASE("the analogue demodulators and P25 make audio", "[modes]")
 
 // Rejects an AGC switch that is live on a mode the engine runs no AGC on,
 // where toggling it would change nothing an operator hears, and one that is
-// dead on the five modes whose audio the AGC levels.
+// dead on the six modes whose audio the AGC levels, sam treated as am is.
 TEST_CASE("the AGC switch is offered on the amplitude-detected modes", "[modes]")
 {
-    for (const std::string_view name : {"am", "usb", "lsb", "dsb", "cw"}) {
+    for (const std::string_view name : {"am", "sam", "usb", "lsb", "dsb", "cw"}) {
         INFO(name);
         CHECK(mode_takes_agc(name));
     }
@@ -161,7 +170,8 @@ TEST_CASE("AFT holds and the auto filter does nothing on the digital modes", "[m
 }
 
 // Rejects a refusal that lists the eight the window used to know.
-TEST_CASE("a refused mode is answered with all twelve names", "[modes]")
+TEST_CASE("a refused mode is answered with all thirteen names", "[modes]")
 {
-    CHECK(demod_names_text() == "raw, am, nfm, wfm, usb, lsb, dsb, cw, p25p1, dstar, tetra, dmr");
+    CHECK(demod_names_text() ==
+          "raw, am, nfm, wfm, usb, lsb, dsb, cw, p25p1, dstar, tetra, dmr, sam");
 }

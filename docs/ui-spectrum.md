@@ -216,6 +216,7 @@ are bound.
 | mode | switch the receiver to dsb | `Alt+6` |
 | mode | switch the receiver to cw | `Alt+7` |
 | mode | switch the receiver to raw | `Alt+8` |
+| mode | switch the receiver to sam | `Alt+9` |
 | filter | widen the filter | `Ctrl+=` |
 | filter | narrow the filter | `Ctrl+-` |
 | filter | put the mode's default filter back | `Ctrl+0` |

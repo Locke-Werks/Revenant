@@ -195,8 +195,9 @@ inline constexpr std::array kKeyActions{
     KeyAction{"noise.reduction", "turn noise reduction on or off", "noise", "nr hiss dsp",
               {"Ctrl+Shift+R", ""}, KeyContext::Window, kNeedsNoise, "receiver.noise", "nr"},
 
-    // The receiver's mode. The eight on the selector's row take Alt and their
-    // place on it; the digital three are the palette's. Their order is
+    // The receiver's mode. The nine on the selector's row take Alt and their
+    // place on it, sam last on Alt+9 so no key an operator already has
+    // moved; the digital four are the palette's. Their order is
     // kModeChoices', which ui/tests holds this table to.
     KeyAction{"mode.am", "switch the receiver to am", "mode", "mode demodulator",
               {"Alt+1", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "am"},
@@ -214,6 +215,9 @@ inline constexpr std::array kKeyActions{
               {"Alt+7", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "cw"},
     KeyAction{"mode.raw", "switch the receiver to raw", "mode", "mode demodulator iq baseband",
               {"Alt+8", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "raw"},
+    KeyAction{"mode.sam", "switch the receiver to sam", "mode",
+              "mode demodulator synchronous am carrier fading",
+              {"Alt+9", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "sam"},
     KeyAction{"mode.p25p1", "switch the receiver to P25", "mode", "mode digital p25p1",
               {"", ""}, KeyContext::Window, kNeedsReceiver, "receiver.mode", "p25p1"},
     KeyAction{"mode.dstar", "switch the receiver to D-STAR", "mode", "mode digital dstar",
