@@ -163,6 +163,12 @@ never written over; the engine opens the device uncalibrated and says why.
 A source with no serial, every file and every synthetic scene, is calibrated
 for the session and not kept.
 
+revenant-cli is the exception to the paragraph above: it starts its engine
+with no calibration file and never sets one, so a dongle opened there runs
+uncorrected whatever the file says. Measured on 2026-09-23: its detector
+listed the DC offset as a track at exactly the centre, 14.175000 MHz, 183 Hz
+wide, 12.9 dB.
+
 ### Two stock dongles share a serial
 
 RTL-SDRs ship with the serial `00000001` and most are never reprogrammed, so
@@ -177,25 +183,200 @@ librtlsdr. The engine then holds the stored correction and does not apply it,
 because two corrections of one crystal correct it twice, and the calibration's
 note says so.
 
-## What needs the real dongle to confirm
+## On the owner's dongle
 
-Everything above was measured on synthetic sources. These are the parts only
-the hardware can settle:
+Everything in the sections above was measured on synthetic sources. This one
+is the hardware, measured on 2026-09-23: the RTL-SDR on the owner's machine,
+which librtlsdr names "Generic RTL2832U OEM" and whose tuner answers as an
+R820T/R820T2. The instruments are the three `[.probe]` cases in
+`tests/engine/test_rtlsdr_front_end.cpp`, which take the machine-wide dongle
+lock and write raw captures and engine traces to `REVENANT_PROBE_DIR`; the
+file says how each is driven. Unless a paragraph says otherwise the dongle
+was at 98.5 MHz, 2.4 MS/s and gain 20.
 
-- That the R820T's synthesiser and the RTL2832U's sample clock share the
-  crystal on the owner's dongle, so one correction serves both. An RTL-SDR v3
-  is built that way; a clone need not be.
-- The owner's dongle's actual error, measured against a known carrier, and how
-  far it moves as the dongle warms up.
-- That `rtlsdr_get_usb_strings` returns the serial on an open handle on this
-  platform, and what it returns for the owner's dongle.
-- How large the DC spike and the I/Q imbalance are on an R820T. The R820T
-  delivers a real IF that the RTL2832U converts to I/Q digitally, so its
-  imbalance is expected to be small and its centre spike to come from the
-  digital path; the I/Q estimate reading near zero there is itself a result
-  worth recording. An E4000, which is zero-IF, is where both should show.
-- That the DC estimate follows the step in LO leakage a retune or a gain change
-  brings, at the 0.1 s time constant, without a visible transient on the
-  waterfall.
-- That the correction survives an engine restart against the real file in
-  `%LOCALAPPDATA%\Revenant`.
+### The serial
+
+`rtlsdr_get_usb_strings` on the open handle returns the serial on Windows,
+on every open and every describe in the session: `20202020`. The key is
+`rtlsdr:20202020`, not the stock `00000001`. The owner's own
+`%LOCALAPPDATA%\Revenant\calibration.txt` already carried a line under that
+key, written by revenant-engine.
+
+### The DC offset is a constant from the digital path
+
+-58.87 dBFS: I and Q each -8.05e-4 of full scale, which is -0.103 of one
+8-bit step, the same on both arms. Over 61 three-second raw captures in 30
+minutes it read -59.24 to -58.26 dBFS.
+
+It does not move with gain. The engine's running estimate at gain 0 read
+-58.87 dBFS with a standard deviation of 0.06 dB across 23 readings, I and Q
+each -8.05e-4 with a deviation of 9e-6. It does not move with frequency, and
+it is there with the tuner out of circuit: direct sampling at 2.5, 5, 7.15
+and 10 MHz read -58.55 to -58.96 dBFS. So the spike comes from the
+RTL2832U's digital path, as the R820T's real IF predicted, and there is no
+LO leakage for a retune or a gain change to step.
+
+On the spectrum, at 36.6 Hz bins (64 channels), it stands 6.2 and 7.2 dB over
+the local floor on two three-second averages, across bins -1 to +1, which is
+the spectrum window's spread of one line. At 293 Hz bins, which is
+revenant-engine's own choice at 2.4 MS/s with 8 channels, it stands 1.7 and
+2.4 dB over, because the floor in a bin eight times wider is 9 dB higher. At
+gain 0 the floor falls 22 dB and the offset does not, which is where it is
+most visible.
+
+### What DC removal leaves: nothing
+
+On raw captures, a 65536-point Hann FFT at 36.6 Hz bins over three seconds:
+the centre bin 7.8 dB over the floor before, 0.4 dB after subtracting the
+capture's mean, and no bin within 64 of the centre more than 3 dB over the
+floor. Through the engine on the device, with the 0.1 s running mean: 0.1 to
+1.2 dB over the floor on three-second averages in four separate segments at
+36.6 Hz bins, and no bin over 3 dB. In direct sampling at 2.5, 5 and 7.15
+MHz the same subtraction leaves 0.5 to 1.0 dB.
+
+There is no low-frequency hump beside the 0 Hz term on this dongle, so there
+is nothing for software offset tuning to move aside, and it was not built.
+
+### Following a retune or a gain change
+
+Three retunes onto an empty centre (99.3 to 98.5, 98.5 to 98.7 and 98.7 to
+98.5 MHz) and four gain increases (20 to 40 and 0 to 20, twice each) left no
+frame after them above what the centre reads on noise alone: a frame's centre
+is the strongest of three bins against a median, so noise alone takes single
+frames to 8 to 12 dB over the floor, and the three-second averages after
+each event were -0.1 to 1.2 dB. A fourth retune, onto 99.3 MHz, landed on a
+station's carrier and says nothing either way.
+
+A gain DECREASE does leave a visible transient. From 40 to 0: at 36.6 Hz bins
+nine frames covering the first 250 ms of samples after the pause stood 8 to
+24 dB over the floor; at 293 Hz bins seven frames stood 11 to 19 dB over.
+
+It is not a step in the offset, which stays at -58.87 dBFS. It is the
+estimate's own noise. A tenth of a second of a strong band does not average
+to its offset: at gain 40 the estimate read -59.93 dBFS with a standard
+deviation of 3.71 dB and I scattered by 5.4e-4 against a true -8.05e-4; at
+gain 20 the deviation was 0.79 dB and at gain 0 0.06 dB. Whatever error the
+estimate held when the gain dropped stands against a floor 22 dB lower until
+the average replaces it. Because the offset is a constant of the device, a
+longer time constant or a stored per-device value would remove both the
+noise and the transient; neither is done.
+
+### I/Q imbalance: nothing to correct
+
+The blind estimate over the 61 raw captures: gain error +0.0008 dB with a
+deviation of 0.0063 dB, phase error -0.012 degrees with a deviation of 0.044
+degrees, both indistinguishable from zero, and an image rejection per capture
+of 58 to 105 dB. The engine's own one-second estimate read 0.0024 dB and
+-0.018 degrees, 73.6 dB of image rejection. Direct sampling at five centres:
+gain within 0.01 dB of zero, phase within 0.11 degrees. The estimate stays
+plausible, so `iq=on` applies a correction within a hair of the identity and
+costs nothing but the two dispatches.
+
+### The crystal: 0.72 ppm slow
+
+The reference is WWV, whose carriers NIST holds to its frequency standard,
+received through direct sampling on the Q branch, which runs the whole path
+off the 28.8 MHz crystal with the tuner out of it. Eight seconds each, the
+carrier's frequency from the slope of its phase:
+
+| Carrier | Centre | Read | Error | ppm | SNR |
+| --- | --- | --- | --- | --- | --- |
+| 2.5 MHz | 2,503,125 Hz | +1.84 Hz | high | -0.735 | 26 dB |
+| 5 MHz | 5,006,250 Hz | +3.62 Hz | high | -0.723 | 37 dB |
+| 10 MHz | 10,012,500 Hz | +7.00 Hz | high | -0.700 | 16 dB |
+
+The 10 MHz reading is the weakest and its phase wandered by 4.4 radians
+against 0.31 at 5 MHz. Labels read high, so the crystal is slow: the stored
+correction for this dongle is -725 ppb. At 162.55 MHz that is 118 Hz of label.
+
+Through the tuner, the carrier of the broadcast station on 98.1 MHz, from the
+mean of its FM discriminator over 61 captures, read -0.751 ppm with a
+standard error of 0.043, which agrees with WWV to 0.03 ppm. That is what one
+crystal shared by the R820T's synthesiser and the RTL2832U predicts. A
+broadcast carrier is not a reference on its own: the station on 98.9 MHz read
+-1.14 ppm, standard error 0.21, and the tuner's own step is part of each
+reading. Nor is a stereo pilot: the two stations' 19 kHz pilots, read through
+the same clock, differ from each other by 97 ppm.
+
+### Warming up
+
+The same 30 minutes, streaming continuously from the session's first open.
+How long the dongle had been idle before that is not known, so this is not a
+cold start. The 98.1 MHz pilot is steady enough to read the dongle's sample
+clock against: over the 43 captures it came through cleanly (the others are
+in the next section), the mean of
+the first five minutes and of the last five were -6.49 and -6.50 ppm off
+19 kHz, and every capture fell between -6.59 and -5.93. The carrier through the
+tuner read -0.78 ppm over the first ten captures and -0.76 over the last ten,
+with a deviation of 0.33 per capture. No drift was resolved: under 0.1 ppm
+on the sample clock, and under the carrier's scatter on the synthesiser.
+
+### Samples lost without being counted
+
+11 of those 61 captures carry a step in the phase of both stations' pilots at
+the same instant, to within the 10 ms the analysis resolves, with 0.3 to 2.5
+radians of residual against 0.02 on a clean capture; 7 more are disturbed
+without a step it could place in both. A step common to two transmitters is a slip
+in the receiver's timeline, which is what samples lost inside the dongle or
+the USB stack would produce, and SourceStats reported no loss for any of
+them. The machine was running several builds at the time. It was not
+investigated further; a pilot's phase is how to look.
+
+### The calibration across a restart
+
+One engine opened the dongle with a calibration file, set -725 ppb with DC
+removal and I/Q correction on, and was destroyed. The file then held
+
+```
+rtlsdr:20202020	ppb=-725	dc=on	iq=on
+```
+
+and a second engine opening the same URI on the same file came up with all
+three in force, persisted and applied: `source_center` 98,499,929 Hz against
+the device's 98,500,000, the 71 Hz that 725 ppb is of 98.5 MHz. Two engines
+in one process on a scratch file, which is the same load and save the
+revenant-engine process runs; the owner's own file was left as it was.
+
+### HF through direct sampling
+
+`direct=q` on an rtlsdr URI puts the v3's HF input on the Q branch. The
+reachable range is then 0 to 14.4 MHz, half the crystal, and a centre above
+it is refused: 15,018,750 Hz was. The URIs that worked:
+
+```
+rtlsdr://0?freq=7150000&rate=2400000&direct=q     40 m
+rtlsdr://0?freq=14175000&rate=2400000&direct=q    20 m
+```
+
+The top of a span centred on 14.175 MHz passes 14.4 MHz, and what lies above
+that is folded rather than received.
+
+The antenna hears HF: WWV at 2.5, 5 and 10 MHz above. What the detector found,
+`revenant-cli <uri> --detect --duration 30`, at 22:08 local time:
+
+- A comb of lines about 15.79 kHz apart across the whole span on both bands,
+  0.2 to 2.0 kHz wide, 6 to 14 dB, which tier two calls a carrier or 120 Bd
+  PSK. Something local is radiating it. It is most of what either run
+  lists: 134 to 139 tracks on 20 m, 119 to 120 on 40 m.
+- The DC offset at exactly the centre, 183 Hz wide: 12.9 dB at 14.175000 MHz
+  and 9.0 dB at 7.150000 MHz, because revenant-cli applies no calibration.
+- On 20 m, off the comb: 14.279931 MHz, 10.7 kHz wide, 7.8 dB; 14.288911
+  MHz, 4.0 kHz, 6.0 dB; 14.226252 MHz, 2.0 kHz, 6.6 dB. None classified.
+- On 40 m, nothing inside 7.000 to 7.300 MHz but the comb and the centre.
+  Above it, 7.381593 MHz, 15.5 kHz wide, 14.4 dB, a broadcast by its width.
+
+No amateur CW or SSB was identified on either band at that hour. Live HF CW
+on 40 m would sit at -150 to -25 kHz on the 7.15 MHz URI, clear of the
+centre, with comb lines through it at 7.010492, 7.042096, 7.073663, 7.089544,
+7.105231 and 7.121089 MHz.
+
+### Still open
+
+- A cold start. The warm-up above began from an idle time nobody recorded.
+- The transient after a gain decrease, and the estimator noise behind it.
+- The comb's source, which is the first thing between this antenna and HF
+  work.
+- The uncounted slips.
+- An E4000, which is zero-IF, is where LO leakage and a real imbalance would
+  show. There is none here to measure.
+

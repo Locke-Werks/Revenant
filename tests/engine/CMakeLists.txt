@@ -108,6 +108,10 @@
 # Every name it takes is a stand-in of its own under Global\, never the
 # RTL-SDR's.
 #
+# test_rtlsdr_front_end.cpp is the instruments behind docs/calibration.md's
+# figures for the real dongle. Every case in it is hidden, [.probe], and
+# writes files to REVENANT_PROBE_DIR or skips, so no ordinary run touches it.
+#
 # THE DONGLE CASES. Every case that opens the RTL-SDR is tagged [dongle] and
 # begins with tests/support/dongle_lock.h's hold_the_dongle(), and
 # revenant_discover_tests in tests/CMakeLists.txt registers them under the
@@ -160,6 +164,7 @@ add_executable(revenant_engine_tests
     test_front_end_correction.cpp
     test_listener_level.cpp
     test_ring.cpp
+    test_rtlsdr_front_end.cpp
     test_rtlsdr_source.cpp
     test_signal_meter.cpp
     test_sources.cpp
