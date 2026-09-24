@@ -54,6 +54,7 @@ ColumnLayout {
             anchors.fill: parent
             link: engineLink
             mapPins: ScaleSettings
+            scaleLabelHeight: scaleMetrics.height
             selectedDetection: span.selection.selectedDetection
             onTuneRequested: (id, centerHz, bandwidthHz, candidates, rank, exhausted, pointerHz) =>
                              span.selection.takeTune(id, centerHz, bandwidthHz, candidates,
@@ -82,6 +83,7 @@ ColumnLayout {
         // that end at the level drawn when it went in, on both displays,
         // until it is taken out; see PinPlate.qml.
         PinPlate {
+            id: ceilingPin
             anchors.left: parent.left
             anchors.top: parent.top
             anchors.leftMargin: 4
@@ -116,6 +118,150 @@ ColumnLayout {
                       + "those sits that far above the fifth percentile of one, so the "
                       + "floor is raised to match."
                     : ""
+        }
+
+        // THE LEVEL SCALE, up the right edge, since 2026-09-23. The ticks and
+        // their spacing are models/level_scale.h, planned by the item from
+        // the ends it draws against, so the scale follows the auto-scale and
+        // the pins alike; the gridlines and edge marks are drawn by the item
+        // under the trace, and only the numbers are here. Outlined in the
+        // background colour rather than set on plates, so they read over the
+        // trace without hiding a strip of it.
+        FontMetrics {
+            id: scaleMetrics
+            font.family: Theme.monoFont
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        // How far in from the right edge the scale's numbers reach, which the
+        // peak's plate keeps out of: four characters, "-120", and the ticks.
+        readonly property double scaleGutter: scaleMetrics.averageCharacterWidth * 4 + 12
+
+        Repeater {
+            model: span.drawing ? spectrum.scaleLabelCount : 0
+
+            Text {
+                required property int index
+                readonly property var entry: spectrum.scaleLabels[index] || ({})
+
+                // A number under the noise floor's plate would be read as
+                // part of it.
+                visible: !noisePlate.covers(y, height)
+                x: parent.width - 9 - implicitWidth
+                y: (entry.y || 0) - height / 2
+                height: scaleMetrics.height
+                verticalAlignment: Text.AlignVCenter
+                text: entry.text || ""
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+                style: Text.Outline
+                styleColor: Theme.background
+            }
+        }
+
+        // THE NOISE FLOOR, as this window measures it. The engine publishes
+        // no floor of its own; the detector keeps one and it does not cross
+        // the wire. models/span_markers.h has why the estimate is a low
+        // percentile of the trace and not the auto-scale floor on the plate
+        // at the left. The line is the item's, dashed under the trace; the
+        // plate goes under the noise so it covers the fill and not the trace.
+        Plate {
+            id: noisePlate
+
+            readonly property var at: spectrum.noisePlate(spectrum.noiseY, spectrum.noiseLowY,
+                                                          implicitWidth, implicitHeight,
+                                                          parent.width, parent.height)
+
+            function covers(top, tall) {
+                return visible && top < y + height && y < top + tall
+            }
+
+            // Under the bottom of the scale, which is where the auto-scale
+            // puts the noise on a flat band: its floor is lifted to where a
+            // noise-only column lands, so half the noise is drawn at the
+            // bottom edge. The line is not drawn there, and the arrow says
+            // which way the floor is.
+            readonly property bool below: spectrum.noiseY >= parent.height
+
+            visible: span.drawing && spectrum.noiseValid
+            x: at.x
+            y: at.y
+            text: (below ? "▼ " : "") + "noise " + spectrum.noiseDb.toFixed(1) + " dBFS est."
+
+            HoverHandler { id: noiseHover }
+
+            Tip {
+                visible: noiseHover.hovered
+                text: "The noise floor as this window estimates it from the trace: a quarter "
+                      + "of the trace's columns sit below the dashed line. The engine publishes "
+                      + "no noise floor; its detector keeps one and it stays inside the engine. "
+                      + "This is not the floor plate at the left, which is where the colour "
+                      + "map starts rather than where the noise is."
+            }
+        }
+
+        // THE STRONGEST SIGNAL across the whole span the source delivers,
+        // held on one signal until another is 3 dB louder and eased over a
+        // quarter second, so it can be read; models/span_markers.h. A tick
+        // points down at it and the plate sits over the tick, where the pane
+        // is empty because nothing else is as tall. Above the top of the
+        // scale it cannot be pointed at, and the plate goes beside it,
+        // under the detection labels, with an arrow saying which way it is.
+        Item {
+            id: peakMarker
+
+            readonly property bool above: spectrum.peakY < 0
+            readonly property var at: spectrum.peakPlate(spectrum.peakX, spectrum.peakY,
+                                                         peakPlate.width, peakPlate.height,
+                                                         parent.scaleGutter, width, height,
+                                                         Qt.rect(ceilingPin.x, ceilingPin.y,
+                                                                 ceilingPin.width,
+                                                                 ceilingPin.height))
+
+            anchors.fill: parent
+            visible: span.drawing && spectrum.peakValid
+
+            Rectangle {
+                visible: peakMarker.at.tick
+                x: Math.round(peakMarker.at.tickX)
+                y: peakMarker.at.tickTop
+                width: 1
+                height: peakMarker.at.tickBottom - peakMarker.at.tickTop
+                color: Theme.ink
+            }
+
+            Rectangle {
+                id: peakPlate
+
+                x: peakMarker.at.x
+                y: peakMarker.at.y
+                width: peakText.implicitWidth + 8
+                height: peakText.implicitHeight + 4
+                radius: 2
+                color: Theme.plate
+
+                Text {
+                    id: peakText
+                    anchors.centerIn: parent
+                    color: Theme.ink
+                    font.family: Theme.monoFont
+                    font.pixelSize: Theme.sizeSmall
+                    text: (peakMarker.above ? "▲ " : "") + "peak "
+                          + spectrum.peakDb.toFixed(1) + " dBFS  "
+                          + (spectrum.peakHz / 1.0e6).toFixed(4) + " MHz"
+                }
+
+                HoverHandler { id: peakHover }
+
+                Tip {
+                    visible: peakHover.hovered
+                    text: "The strongest signal across the whole span the source delivers, "
+                          + "at its loudest bin. The marker stays on one signal until another "
+                          + "is 3 dB louder, and its figures are eased over a quarter second."
+                          + (peakMarker.above ? " It is above the top of the scale." : "")
+                }
+            }
         }
 
         // THE TRACK UNDER THE POINTER, in full, on either display.

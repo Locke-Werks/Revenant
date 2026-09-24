@@ -590,6 +590,38 @@ ColumnLayout {
             id: passband
             anchors.fill: parent
             link: engineLink
+            scaleLabelHeight: passbandScaleMetrics.height
+        }
+
+        // The level scale up the right edge, the span spectrum's arrangement
+        // in qml/SpanView.qml: the item plans the ticks from this pane's own
+        // ends and draws the gridlines under the trace, and the numbers are
+        // here. The pane is let shrink to 96 px docked, which is where the
+        // spacing rule in models/level_scale.h earns its keep.
+        FontMetrics {
+            id: passbandScaleMetrics
+            font.family: Theme.monoFont
+            font.pixelSize: Theme.sizeSmall
+        }
+
+        Repeater {
+            model: engineLink.passbandActive ? passband.scaleLabelCount : 0
+
+            Text {
+                required property int index
+                readonly property var entry: passband.scaleLabels[index] || ({})
+
+                x: parent.width - 9 - implicitWidth
+                y: (entry.y || 0) - height / 2
+                height: passbandScaleMetrics.height
+                verticalAlignment: Text.AlignVCenter
+                text: entry.text || ""
+                color: Theme.inkDim
+                font.family: Theme.monoFont
+                font.pixelSize: Theme.sizeSmall
+                style: Text.Outline
+                styleColor: Theme.background
+            }
         }
 
         // The keys are on the edges while the display has focus, and an

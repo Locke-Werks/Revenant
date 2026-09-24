@@ -143,6 +143,7 @@ private:
 class PassbandNode : public QSGNode {
 public:
     QSGRectangleNode* background = nullptr;
+    OverlayNode* grid = nullptr;
     OverlayNode* band = nullptr;
     PassbandTraceNode* trace = nullptr;
     OverlayNode* rules = nullptr;
@@ -193,6 +194,7 @@ void PassbandItem::setLink(EngineLink* link)
     columns_.clear();
     levels_.clear();
     rebuildQuads();
+    rebuildScale();
     rebuildReadout();
     emit linkChanged();
     update();
@@ -476,6 +478,7 @@ void PassbandItem::takeFrame()
     // fill the frozen pane.
     frame_axis_ = liveAxis();
     have_frame_ = true;
+    rebuildScale();
 
     // A frame is the only thing that can move the pane's span, because the
     // axis comes off the frame's own geometry. So this is where a release
@@ -507,6 +510,37 @@ void PassbandItem::dropFrame()
     rescale_armed_ = false;
     rescaling_ = false;
     rescale_tick_.stop();
+
+    // The scale goes with the trace: its ends were the dropped frame's.
+    rebuildScale();
+}
+
+void PassbandItem::rebuildScale()
+{
+    // Nothing before a frame, for the reason SpectrumItem::rebuildScale
+    // gives: the ends until then are defaults nobody measured.
+    const bool drawing = have_frame_ && width() > 0.0 && height() > 0.0;
+    const bool changed =
+        drawing ? scale_.update(ends_.floor_db, ends_.ceiling_db, height(), scale_label_height_, 0.0)
+                : scale_.update(0.0, 0.0, 0.0, 0.0, 0.0);
+    grid_quads_.clear();
+    if (drawing) {
+        build_level_scale_quads(scale_.plan(), width(), height(), grid_quads_);
+    }
+    if (changed) {
+        emit scaleChanged();
+    }
+}
+
+void PassbandItem::setScaleLabelHeight(double height_px)
+{
+    if (scale_label_height_ == height_px) {
+        return;
+    }
+    scale_label_height_ = height_px;
+    rebuildScale();
+    emit scaleChanged();
+    update();
 }
 
 void PassbandItem::onConnectionChanged()
@@ -1033,6 +1067,7 @@ void PassbandItem::geometryChange(const QRectF& new_geometry, const QRectF& old_
     QQuickItem::geometryChange(new_geometry, old_geometry);
     if (new_geometry.size() != old_geometry.size()) {
         rebuildQuads();
+        rebuildScale();
         update();
     }
 }
@@ -1052,6 +1087,7 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         node = new PassbandNode;
         node->background = window()->createRectangleNode();
         node->background->setColor(QColor(8, 10, 14));
+        node->grid = new OverlayNode;
         node->band = new OverlayNode;
         node->trace = new PassbandTraceNode;
         node->rules = new OverlayNode;
@@ -1060,7 +1096,9 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         // is lining an edge up against the edge of a signal, so the rule has
         // to be the thing on top and the fill has to be the thing that does
         // not hide the signal.
+        // The scale's gridlines under all of it, as on the span.
         node->appendChildNode(node->background);
+        node->appendChildNode(node->grid);
         node->appendChildNode(node->band);
         node->appendChildNode(node->trace);
         node->appendChildNode(node->rules);
@@ -1087,6 +1125,7 @@ QSGNode* PassbandItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
     const double right = frame_axis_.valid() ? pixelAtOffset(frame_axis_.high_hz) : w;
     node->trace->setTrace(levels_, left, right, h);
 
+    node->grid->setQuads(grid_quads_);
     node->band->setQuads(fill_quads_);
     node->rules->setQuads(rule_quads_);
     return node;

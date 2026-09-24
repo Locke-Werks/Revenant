@@ -88,12 +88,16 @@
 
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QVariantList>
+#include <QVariantMap>
 
 #include "core/rpc/types.h"
 #include "models/engine_link.h"
+#include "models/level_scale.h"
 #include "models/scale_settings.h"
 #include "models/receiver_marker.h"
 #include "models/scroll_tune.h"
+#include "models/span_markers.h"
 #include "render/spectrum_scale.h"
 
 class QMouseEvent;
@@ -373,6 +377,49 @@ private:
     QSGVertexColorMaterial material_;
 };
 
+// ---------------------------------------------------------------------------
+// The level scale up the right edge, shared by both spectrum traces
+// ---------------------------------------------------------------------------
+//
+// models/level_scale.h chooses the ticks. What is here is the part both
+// items do identically with them: the gridlines and edge ticks, drawn into the
+// item's own scene graph node UNDER the trace so a line never crosses a
+// carrier, and the labels handed to QML, which draws them in the Theme's
+// monospace beside the ticks.
+//
+// THE LABELS ARE HANDED OVER BY INDEX, NOT AS A MODEL. The ends move a little
+// on almost every frame while the auto-scale settles, and a Repeater whose
+// model is replaced destroys and rebuilds every delegate. So QML repeats over
+// scaleLabelCount and each delegate reads its own entry of scaleLabels: while
+// the count holds, a frame moves the labels and builds nothing.
+
+// How far in from the right edge the tick marks reach, and so where the
+// labels' right edges sit.
+inline constexpr double kScaleMajorTickPx = 6.0;
+inline constexpr double kScaleMinorTickPx = 3.0;
+
+// The ticks as quads: a faint gridline across the item at each major tick, a
+// short mark in from the right edge at every tick. Appended to out.
+void build_level_scale_quads(const LevelScalePlan& plan, double width_px, double height_px,
+                             std::vector<OverlayQuad>& out);
+
+// One item's scale, planned from the ends it draws against, and the labels as
+// QML reads them.
+class LevelScaleState {
+public:
+    // Replans, and says whether the labels QML is showing need to change.
+    // A label that moved less than a quarter of a pixel has not changed.
+    bool update(double floor_db, double ceiling_db, double height_px, double label_height_px,
+                double reserve_top_px);
+
+    [[nodiscard]] const LevelScalePlan& plan() const { return plan_; }
+    [[nodiscard]] const QVariantList& labels() const { return labels_; }
+
+private:
+    LevelScalePlan plan_;
+    QVariantList labels_;
+};
+
 // WHICH BOX A CLICK MEANS, WHEN SEVERAL OF THEM CONTAIN IT
 //
 // The narrowest containing box used to win, on the reasoning that a narrow
@@ -538,6 +585,34 @@ class SpectrumItem : public QQuickItem {
     Q_PROPERTY(qulonglong hoveredDetection READ hoveredDetection
                    NOTIFY hoveredDetectionChanged)
 
+    // The level scale up the right edge. QML writes the height of one label
+    // as its FontMetrics measures the Theme's monospace, and reads back the
+    // labelled ticks; see LevelScaleState for why by index.
+    Q_PROPERTY(double scaleLabelHeight READ scaleLabelHeight WRITE setScaleLabelHeight
+                   NOTIFY scaleChanged)
+    Q_PROPERTY(QVariantList scaleLabels READ scaleLabels NOTIFY scaleChanged)
+    Q_PROPERTY(int scaleLabelCount READ scaleLabelCount NOTIFY scaleChanged)
+
+    // Where the detection labels' strip ends. Nothing else is drawn above it.
+    Q_PROPERTY(double labelStripBottom READ labelStripBottom CONSTANT)
+
+    // The noise floor this window measures off the trace, since the engine
+    // publishes none, as a level and as the y it is drawn at; noiseLowY is
+    // the bottom of the noise, which the plate goes under. See
+    // models/span_markers.h for why it is not the auto-scale floor.
+    Q_PROPERTY(bool noiseValid READ noiseValid NOTIFY markersChanged)
+    Q_PROPERTY(double noiseDb READ noiseDb NOTIFY markersChanged)
+    Q_PROPERTY(double noiseY READ noiseY NOTIFY markersChanged)
+    Q_PROPERTY(double noiseLowY READ noiseLowY NOTIFY markersChanged)
+
+    // The strongest signal across the whole frame, held and eased. peakY is
+    // not clamped: above zero is on the trace, below it is above the ceiling.
+    Q_PROPERTY(bool peakValid READ peakValid NOTIFY markersChanged)
+    Q_PROPERTY(double peakDb READ peakDb NOTIFY markersChanged)
+    Q_PROPERTY(double peakHz READ peakHz NOTIFY markersChanged)
+    Q_PROPERTY(double peakX READ peakX NOTIFY markersChanged)
+    Q_PROPERTY(double peakY READ peakY NOTIFY markersChanged)
+
 public:
     explicit SpectrumItem(QQuickItem* parent = nullptr);
 
@@ -556,12 +631,47 @@ public:
 
     [[nodiscard]] qulonglong hoveredDetection() const { return hovered_detection_; }
 
+    [[nodiscard]] double scaleLabelHeight() const { return scale_label_height_; }
+    void setScaleLabelHeight(double height_px);
+    [[nodiscard]] QVariantList scaleLabels() const { return scale_.labels(); }
+    [[nodiscard]] int scaleLabelCount() const
+    {
+        return static_cast<int>(scale_.labels().size());
+    }
+    [[nodiscard]] double labelStripBottom() const;
+
+    [[nodiscard]] bool noiseValid() const { return have_frame_ && noise_.valid; }
+    [[nodiscard]] double noiseDb() const { return noise_.level_db; }
+    [[nodiscard]] double noiseY() const;
+    [[nodiscard]] double noiseLowY() const;
+
+    [[nodiscard]] bool peakValid() const { return have_frame_ && peak_.valid; }
+    [[nodiscard]] double peakDb() const { return peak_.level_db; }
+    [[nodiscard]] double peakHz() const { return peak_hz_; }
+    [[nodiscard]] double peakX() const { return peak_fraction_ * width(); }
+    [[nodiscard]] double peakY() const;
+
+    // Where the two plates go, from models/span_markers.h. Every input is an
+    // argument, including the ones this item could read itself, so a QML
+    // binding calling these re-evaluates when any of them changes: a binding
+    // cannot see what a C++ call reads. keep_clear is the ceiling's pin plate.
+    [[nodiscard]] Q_INVOKABLE QVariantMap peakPlate(double peak_x, double peak_y,
+                                                    double plate_width, double plate_height,
+                                                    double right_px, double pane_width,
+                                                    double pane_height,
+                                                    const QRectF& keep_clear) const;
+    [[nodiscard]] Q_INVOKABLE QVariantMap noisePlate(double noise_y, double low_y,
+                                                     double plate_width, double plate_height,
+                                                     double pane_width, double pane_height) const;
+
 signals:
     void linkChanged();
     void endsChanged();
     void mapPinsChanged();
     void selectedDetectionChanged();
     void hoveredDetectionChanged();
+    void scaleChanged();
+    void markersChanged();
 
     // A click landed on a detection, or on nothing, in which case id is zero
     // and the other two are the click's own frequency rather than a track's.
@@ -683,6 +793,32 @@ private:
     // Created in the constructor and positioned in updatePaintNode, so the
     // labels are a child item and not part of this item's own node.
     OverlayLabelItem* labels_ = nullptr;
+
+    // The level scale and what sits under the trace: the gridlines and edge
+    // ticks under the fill, the noise line between the fill and the trace.
+    // Rebuilt together whenever the ends, the size or the floor move.
+    void rebuildScale();
+
+    // The two markers after a frame, and after anything that invalidates
+    // their history: a reconnect or a retune.
+    void takeMarkers(const rpc::SpectrumFrame& frame);
+    void forgetMarkers();
+
+    LevelScaleState scale_;
+    double scale_label_height_ = 0.0;
+    std::vector<OverlayQuad> grid_quads_;
+    std::vector<OverlayQuad> noise_quads_;
+
+    NoiseFloor noise_;
+    SpanPeak peak_;
+    double peak_hz_ = 0.0;
+    double peak_fraction_ = 0.0;
+
+    // The frame clock the markers ease on, and the span it was measured
+    // across, so a retune reads as a new start rather than a step to ease.
+    std::uint64_t last_frame_start_ = 0;
+    double last_span_low_hz_ = 0.0;
+    bool have_last_frame_ = false;
 };
 
 }  // namespace revenant::ui

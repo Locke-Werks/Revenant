@@ -186,12 +186,14 @@ qt_add_executable(revenant_ui
     models/key_map.h
     models/key_steps.h
     models/level_meter.h
+    models/level_scale.h
     models/mode_choice.h
     models/palette_match.h
     models/receiver_scroll.h
     models/status_summary.h
     models/ruler.h
     models/scale_settings.h
+    models/span_markers.h
     models/ui_rules.h
     models/aft.h
     models/aft_link.cpp
@@ -628,6 +630,7 @@ if(REVENANT_UI_TESTS)
             tests/test_memories.cpp
             tests/test_memory_import.cpp
             tests/test_label_tune.cpp
+            tests/test_level_scale.cpp
             tests/test_mode_choice.cpp
             tests/test_noise_controls.cpp
             tests/test_palette_match.cpp
@@ -651,6 +654,7 @@ if(REVENANT_UI_TESTS)
             tests/test_scroll_tune.cpp
             tests/test_source_choice.cpp
             tests/test_source_pacing.cpp
+            tests/test_span_markers.cpp
             tests/test_spectrum_scale.cpp
             tests/test_squelch_control.cpp
             tests/test_status_summary.cpp

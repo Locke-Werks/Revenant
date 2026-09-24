@@ -159,6 +159,16 @@ class PassbandItem : public QQuickItem {
     // colour and the readout can say which edge and at what.
     Q_PROPERTY(bool atLimit READ atLimit NOTIFY readoutChanged)
 
+    // The level scale up the right edge, the span spectrum's arrangement:
+    // QML writes one label's height and reads back the labelled ticks. See
+    // LevelScaleState in render/spectrum_item.h. The ends it follows are this
+    // pane's own, the passband frame's, which the operator's pins on the span
+    // do not reach.
+    Q_PROPERTY(double scaleLabelHeight READ scaleLabelHeight WRITE setScaleLabelHeight
+                   NOTIFY scaleChanged)
+    Q_PROPERTY(QVariantList scaleLabels READ scaleLabels NOTIFY scaleChanged)
+    Q_PROPERTY(int scaleLabelCount READ scaleLabelCount NOTIFY scaleChanged)
+
 public:
     explicit PassbandItem(QQuickItem* parent = nullptr);
 
@@ -171,6 +181,14 @@ public:
 
     [[nodiscard]] QString selectedEdge() const;
     void setSelectedEdge(const QString& edge);
+
+    [[nodiscard]] double scaleLabelHeight() const { return scale_label_height_; }
+    void setScaleLabelHeight(double height_px);
+    [[nodiscard]] QVariantList scaleLabels() const { return scale_.labels(); }
+    [[nodiscard]] int scaleLabelCount() const
+    {
+        return static_cast<int>(scale_.labels().size());
+    }
 
     // The keyboard equivalent, also reachable from QML so a toolbar button
     // can do the same thing. step_hz is signed and is applied to whichever
@@ -211,6 +229,7 @@ signals:
     void dragChanged();
     void readoutChanged();
     void selectedEdgeChanged();
+    void scaleChanged();
 
 private slots:
     void takeFrame();
@@ -278,6 +297,13 @@ private:
     // first shape of this and got a very narrow band drawn as a rule.
     std::vector<OverlayQuad> fill_quads_;
     std::vector<OverlayQuad> rule_quads_;
+
+    // The level scale, and its gridlines under everything else in the pane.
+    void rebuildScale();
+    LevelScaleState scale_;
+    double scale_label_height_ = 0.0;
+    std::vector<OverlayQuad> grid_quads_;
+
     QString readout_;
     bool at_limit_ = false;
 

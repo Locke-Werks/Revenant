@@ -405,15 +405,96 @@ private:
 
 // The item's own node, so the parts are named rather than fetched back out
 // of the child list by index.
+//
+// The order is the depth. The scale's gridlines are under the fill, so a
+// line never crosses a carrier; the noise line is over the fill and under the
+// trace, so it reads through the gradient and the trace's own stroke still
+// draws over it.
 class SpectrumNode : public QSGNode {
 public:
     QSGRectangleNode* background = nullptr;
+    OverlayNode* grid = nullptr;
     SpectrumFillNode* fill = nullptr;
+    OverlayNode* noise = nullptr;
     TraceNode* trace = nullptr;
     OverlayNode* overlay = nullptr;
 };
 
+// THE SCALE'S COLOURS ARE THE THEME'S, named here because a scene graph node
+// cannot read the QML singleton: Theme.border for the gridlines, Theme.inkDim
+// for a major tick and Theme.inkOff for a minor one. A change to those three
+// in qml/Theme.qml wants the same change here.
+//
+// The gridlines are the faintest thing on the display. They are there to
+// carry a level across from the labels to a carrier in the middle of the
+// pane, and at any strength that competes with the trace they become a
+// second picture.
+const QColor kGridLine{38, 48, 64, 150};
+const QColor kMajorTick{111, 123, 140, 230};
+const QColor kMinorTick{58, 66, 80, 230};
+
+// The noise floor's line: Theme.inkDim, dashed, so it cannot be taken for a
+// gridline, which is solid and fainter, or for the trace, which is neither.
+const QColor kNoiseLine{111, 123, 140, 200};
+constexpr double kNoiseDashPx = 6.0;
+constexpr double kNoiseGapPx = 4.0;
+
 }  // namespace
+
+void build_level_scale_quads(const LevelScalePlan& plan, double width_px, double height_px,
+                             std::vector<OverlayQuad>& out)
+{
+    if (width_px <= 0.0 || height_px <= 0.0) {
+        return;
+    }
+    for (const LevelTick& tick : plan.ticks) {
+        // A line on the very edge is half outside the item and reads as a
+        // border, so a tick exactly on the floor or the ceiling is drawn one
+        // pixel in.
+        const double y = std::clamp(std::floor(tick.y_px), 0.0, height_px - 1.0);
+        if (tick.major) {
+            push_quad(out, QRectF(0.0, y, width_px - kScaleMajorTickPx, 1.0), kGridLine);
+            push_quad(out, QRectF(width_px - kScaleMajorTickPx, y, kScaleMajorTickPx, 1.0),
+                      kMajorTick);
+        } else {
+            push_quad(out, QRectF(width_px - kScaleMinorTickPx, y, kScaleMinorTickPx, 1.0),
+                      kMinorTick);
+        }
+    }
+}
+
+bool LevelScaleState::update(double floor_db, double ceiling_db, double height_px,
+                             double label_height_px, double reserve_top_px)
+{
+    plan_ = plan_level_scale(floor_db, ceiling_db, height_px, label_height_px, reserve_top_px);
+
+    QVariantList labels;
+    for (const LevelTick& tick : plan_.ticks) {
+        if (tick.label.empty()) {
+            continue;
+        }
+        QVariantMap entry;
+        entry.insert(QStringLiteral("y"), tick.y_px);
+        entry.insert(QStringLiteral("text"), QString::fromStdString(tick.label));
+        labels.push_back(entry);
+    }
+
+    const bool same =
+        labels.size() == labels_.size() &&
+        std::equal(labels.begin(), labels.end(), labels_.begin(),
+                   [](const QVariant& lhs, const QVariant& rhs) {
+                       const QVariantMap a = lhs.toMap();
+                       const QVariantMap b = rhs.toMap();
+                       return a.value(QStringLiteral("text")) == b.value(QStringLiteral("text")) &&
+                              std::abs(a.value(QStringLiteral("y")).toDouble() -
+                                       b.value(QStringLiteral("y")).toDouble()) < 0.25;
+                   });
+    if (same) {
+        return false;
+    }
+    labels_ = std::move(labels);
+    return true;
+}
 
 void build_detection_boxes(const EngineLink& link, double width_px,
                            std::vector<DetectionBox>& out)
@@ -1055,7 +1136,9 @@ void SpectrumItem::setLink(EngineLink* link)
     }
     have_frame_ = false;
     boxes_.clear();
+    forgetMarkers();
     rebuildOverlay();
+    rebuildScale();
     emit linkChanged();
     update();
 }
@@ -1121,7 +1204,11 @@ void SpectrumItem::onConnectionChanged()
     click_cycle_ = {};
     hovered_detection_ = 0;
 
+    // The markers' history is the previous engine's too.
+    forgetMarkers();
+
     rebuildOverlay();
+    rebuildScale();
     update();
 }
 
@@ -1155,6 +1242,8 @@ void SpectrumItem::geometryChange(const QRectF& newGeometry, const QRectF& oldGe
     }
     if (newGeometry.size() != oldGeometry.size()) {
         rebuildOverlay();
+        rebuildScale();
+        emit markersChanged();
         update();
     }
 }
@@ -1256,8 +1345,166 @@ void SpectrumItem::takeFrame()
     // makes the fade move at the frame rate instead of the poll rate.
     rebuildOverlay();
 
+    takeMarkers(frame);
+    rebuildScale();
+
     emit endsChanged();
     update();
+}
+
+void SpectrumItem::forgetMarkers()
+{
+    noise_ = {};
+    peak_ = {};
+    peak_hz_ = 0.0;
+    peak_fraction_ = 0.0;
+    have_last_frame_ = false;
+    emit markersChanged();
+}
+
+void SpectrumItem::takeMarkers(const rpc::SpectrumFrame& frame)
+{
+    // A pin moving calls takeFrame again with the frame already in hand, and
+    // feeding that frame twice would read as no time passing, which restarts
+    // the easing. The trace is redrawn for a pin; the markers are not news.
+    if (have_last_frame_ && frame.start == last_frame_start_) {
+        return;
+    }
+
+    // Seconds of SOURCE time since the last frame, from the frames' own
+    // indices, so a replay eases at the rate it was recorded. Zero, which the
+    // two trackers take as a new start, when there is no last frame, when the
+    // stream went backwards, which a recording that loops does, and when the
+    // span moved under the bins: after a retune bin 4000 is another frequency,
+    // and easing the marker from the old signal's level would be easing
+    // between two different things.
+    const double span_low_hz = link_->spanLowHz();
+    const auto rate = static_cast<double>(link_->sourceRate());
+    double dt_seconds = 0.0;
+    if (have_last_frame_ && frame.start > last_frame_start_ && rate > 0.0 &&
+        span_low_hz == last_span_low_hz_) {
+        dt_seconds = static_cast<double>(frame.start - last_frame_start_) / rate;
+    }
+    last_frame_start_ = frame.start;
+    last_span_low_hz_ = span_low_hz;
+    have_last_frame_ = true;
+
+    // The floor from the trace as drawn, the peak from the frame's own bins:
+    // the whole source, at the frame's resolution rather than the window's,
+    // so the frequency on the plate is a bin's and not a pixel's.
+    noise_ = track_noise_floor(noise_, columns_, dt_seconds);
+    peak_ = track_span_peak(peak_, frame.power_db, dt_seconds);
+    if (peak_.valid && peak_.bins > 0) {
+        // Through the one hertz mapping the axis is drawn from, at the bin's
+        // centre. See build_detection_boxes.
+        peak_fraction_ = (peak_.bin + 0.5) / static_cast<double>(peak_.bins);
+        peak_hz_ = link_->frequencyAtFraction(peak_fraction_);
+    }
+    emit markersChanged();
+}
+
+void SpectrumItem::rebuildScale()
+{
+    // Nothing before the first frame. Until then the ends are the defaults
+    // the members were built with, and a scale drawn against them is a set of
+    // numbers no measurement stands behind; qml/SpanView.qml says the same
+    // about the floor and ceiling plates.
+    const bool drawing = have_frame_ && width() > 0.0 && height() > 0.0;
+    const bool changed =
+        drawing ? scale_.update(ends_.floor_db, ends_.ceiling_db, height(), scale_label_height_,
+                                labelStripBottom())
+                : scale_.update(0.0, 0.0, 0.0, 0.0, 0.0);
+
+    grid_quads_.clear();
+    noise_quads_.clear();
+    if (drawing) {
+        build_level_scale_quads(scale_.plan(), width(), height(), grid_quads_);
+
+        const double y = std::floor(noiseY());
+        if (noiseValid() && y >= 0.0 && y < height()) {
+            for (double x = 0.0; x < width() - kScaleMajorTickPx;
+                 x += kNoiseDashPx + kNoiseGapPx) {
+                push_quad(noise_quads_,
+                          QRectF(x, y, std::min(kNoiseDashPx, width() - kScaleMajorTickPx - x),
+                                 1.0),
+                          kNoiseLine);
+            }
+        }
+    }
+    if (changed) {
+        emit scaleChanged();
+    }
+}
+
+void SpectrumItem::setScaleLabelHeight(double height_px)
+{
+    if (scale_label_height_ == height_px) {
+        return;
+    }
+    scale_label_height_ = height_px;
+    rebuildScale();
+    emit scaleChanged();
+    update();
+}
+
+double SpectrumItem::labelStripBottom() const
+{
+    return kLabelTopPx + overlay_label_height();
+}
+
+double SpectrumItem::noiseY() const
+{
+    return level_y(noise_.level_db, ends_.floor_db, ends_.ceiling_db, height());
+}
+
+double SpectrumItem::noiseLowY() const
+{
+    return level_y(noise_.low_db, ends_.floor_db, ends_.ceiling_db, height());
+}
+
+double SpectrumItem::peakY() const
+{
+    return level_y(peak_.level_db, ends_.floor_db, ends_.ceiling_db, height());
+}
+
+QVariantMap SpectrumItem::peakPlate(double peak_x, double peak_y, double plate_width,
+                                    double plate_height, double right_px, double pane_width,
+                                    double pane_height, const QRectF& keep_clear) const
+{
+    PaneRoom room;
+    room.width = pane_width;
+    room.height = pane_height;
+    room.top_px = labelStripBottom();
+    room.right_px = right_px;
+    room.keep_clear =
+        PlateBox{keep_clear.x(), keep_clear.y(), keep_clear.width(), keep_clear.height()};
+
+    const PeakPlacement placed = place_peak_plate(peak_x, peak_y, plate_width, plate_height, room);
+    QVariantMap out;
+    out.insert(QStringLiteral("x"), placed.plate.x);
+    out.insert(QStringLiteral("y"), placed.plate.y);
+    out.insert(QStringLiteral("tick"), placed.tick);
+    out.insert(QStringLiteral("tickX"), placed.tick_x);
+    out.insert(QStringLiteral("tickTop"), placed.tick_top);
+    out.insert(QStringLiteral("tickBottom"), placed.tick_bottom);
+    out.insert(QStringLiteral("aboveScale"), placed.above_scale);
+    return out;
+}
+
+QVariantMap SpectrumItem::noisePlate(double noise_y, double low_y, double plate_width,
+                                     double plate_height, double pane_width,
+                                     double pane_height) const
+{
+    PaneRoom room;
+    room.width = pane_width;
+    room.height = pane_height;
+    room.top_px = labelStripBottom();
+
+    const PlateBox plate = place_noise_plate(noise_y, low_y, plate_width, plate_height, room);
+    QVariantMap out;
+    out.insert(QStringLiteral("x"), plate.x);
+    out.insert(QStringLiteral("y"), plate.y);
+    return out;
 }
 
 void SpectrumItem::setHovered(std::uint64_t id)
@@ -1390,12 +1637,16 @@ QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         // Opaque and covering the item, so the scene graph composites this
         // without reading what is behind it.
         node->background->setColor(QColor(8, 10, 14));
+        node->grid = new OverlayNode;
         node->fill = new SpectrumFillNode;
+        node->noise = new OverlayNode;
         node->trace = new TraceNode;
         node->overlay = new OverlayNode;
 
         node->appendChildNode(node->background);
+        node->appendChildNode(node->grid);
         node->appendChildNode(node->fill);
+        node->appendChildNode(node->noise);
         node->appendChildNode(node->trace);
         node->appendChildNode(node->overlay);
     }
@@ -1416,7 +1667,9 @@ QSGNode* SpectrumItem::updatePaintNode(QSGNode* old_node, UpdatePaintNodeData* /
         levels_.clear();
     }
 
+    node->grid->setQuads(grid_quads_);
     node->fill->setTrace(levels_, w, h);
+    node->noise->setQuads(noise_quads_);
     node->trace->setTrace(levels_, w, h);
     node->overlay->setQuads(quads_);
     return node;
