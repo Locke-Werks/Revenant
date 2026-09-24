@@ -66,16 +66,36 @@ struct SceneGeometry {
     std::uint32_t channels = 64;
     std::uint32_t transform = 2048;
 
+    // Coarse-channel blocks from one frame's window to the next, which is the
+    // engine's block over D. Zero is the transform, so windows are contiguous
+    // and nothing overlaps, which is every case written before this existed.
+    //
+    // Less than the transform is what EngineConfig::spectrum_rows_per_second
+    // does to a slow source: the window keeps its length and consecutive
+    // windows overlap. More than the transform is a block longer than the
+    // window, which is what a slow source in 65536-sample blocks got before
+    // that, and the samples between windows are never transformed.
+    std::uint32_t hop_blocks = 0;
+
     [[nodiscard]] dsp::GridParams grid() const;
 
     // Bins across the whole span, and hertz per bin.
     [[nodiscard]] std::size_t bins() const;
     [[nodiscard]] double bin_width_hz() const;
 
-    // Source samples between one frame and the next. The spectrum stage
-    // transforms N non-overlapping coarse-channel samples, and a coarse
-    // channel sample is D source samples.
+    // Source samples between one frame's start and the next, hop_blocks
+    // coarse-channel samples of D source samples each.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "The spectrum stage transforms N
+    // non-overlapping coarse-channel samples, and a coarse channel sample is
+    // D source samples." The engine's spectrum stage takes the last N channel
+    // samples at every dispatch, and since "Keep the display's row rate when
+    // the source is slow" a slow source dispatches more often than every N.
     [[nodiscard]] std::uint64_t frame_step() const;
+
+    // Source samples one frame's window covers: N coarse-channel samples.
+    // The same as frame_step() only when hop_blocks is zero or the transform.
+    [[nodiscard]] std::uint64_t window_samples() const;
 
     [[nodiscard]] engine::SpectrumGeometry spectrum() const;
 };
@@ -189,17 +209,20 @@ private:
     std::vector<dsp::Complex32> fine_twiddles_;
     std::vector<float> window_;
 
-    // One batch of frames' worth of input, and the two intermediate buffers.
+    // One batch of input, and the two intermediate buffers. The channel ring
+    // holds two batches, so a window that starts in one batch and ends in the
+    // next, which an overlapped hop produces, is still whole in it.
     std::vector<dsp::Complex32> iq_;
     std::vector<dsp::Complex32> branches_;
     std::vector<dsp::Complex32> channel_ring_;
+    std::uint32_t channel_ring_blocks_ = 0;
     std::vector<float> power_db_;
 
-    std::uint32_t frames_per_batch_ = 0;
-    std::uint32_t frame_in_batch_ = 0;
+    // Coarse-channel blocks rendered per batch, and rendered so far.
+    std::uint32_t batch_blocks_ = 0;
+    std::uint64_t blocks_rendered_ = 0;
 
     dsp::SampleIndex next_sample_ = 0;
-    dsp::SampleIndex frame_start_ = 0;
     std::uint64_t sequence_ = 0;
 };
 

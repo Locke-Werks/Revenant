@@ -143,12 +143,19 @@ inline constexpr std::size_t kFrontEndSegments = 16;
 // when the session started.
 inline constexpr double kFrontEndWindowSeconds = 10.0;
 
-// Effective observations the window must hold before any verdict is given.
+// Source seconds of decisions the window must hold, decayed the way the sums
+// are, before any verdict is given. Below that the sums are dominated by
+// whatever the first few decisions happened to see.
 //
-// At a 0.1 s decision interval and a 10 s window the weight settles near 100,
-// so thirty is about three seconds of decisions. Below that the sums are
-// dominated by whatever the first few decisions happened to see.
-inline constexpr double kFrontEndMinWeight = 30.0;
+// WHAT THIS USED TO BE: kFrontEndMinWeight, thirty effective observations,
+// under "At a 0.1 s decision interval and a 10 s window the weight settles
+// near 100, so thirty is about three seconds of decisions." That arithmetic
+// holds at 0.1 s. A decision count stops being a time when the interval
+// moves, and Detector::decision_seconds() now runs to one spectrum window,
+// 0.68 s at 96 kS/s on 64 channels, where a 10 s window holds at most 15
+// decisions' weight and thirty would never have been reached. Three seconds
+// is the same bar at 0.1 s: both are first met at the 36th decision.
+inline constexpr double kFrontEndMinSeconds = 3.0;
 
 // How far the strongest signal on the span must have moved, as a standard
 // deviation in decibels over the window, before a slope against it means
@@ -296,6 +303,7 @@ private:
     };
 
     double weight_ = 0.0;
+    double seconds_ = 0.0;
     double sum_p_ = 0.0;
     double sum_pp_ = 0.0;
     std::array<Segment, kFrontEndSegments> segments_{};

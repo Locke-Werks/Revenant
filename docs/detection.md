@@ -777,6 +777,136 @@ a neighbour merged into it; `docs/recordings.md` lists them. So
 `split_gap_bins` stays open: the RTTY case that would test it has been measured
 on a synthetic signal and does not exist in the corpus.
 
+### Overlapping frames
+
+"Keep the display's row rate when the source is slow" gave every source under
+1.97 MS/s a block shorter than its spectrum window, so consecutive frames
+overlap. The transform is unchanged: a frame is still the last N channel
+samples at each dispatch, one window of `1 / bin width` seconds. At 30 rows a
+second:
+
+| grid | window | hop | frames on each sample |
+| --- | --- | --- | --- |
+| 2.4 MS/s, 64 channels | 27 ms | 27 ms | 1.00 |
+| 250 kS/s, 32 channels | 131 ms | 33 ms | 3.94 |
+| 96 kS/s, 16 channels | 171 ms | 33 ms | 5.12 |
+| 96 kS/s, 64 channels | 683 ms | 33 ms | 20.48 |
+| 48 kS/s, 8 channels | 171 ms | 33 ms | 5.12 |
+
+The detector's thresholds were calibrated on the first row, so this was
+re-measured. `tests/detect/test_detector_overlap.cpp` has the cases:
+`"[overlap]"` runs the synthetic scenes through the channelizer and spectrum
+twins at three cadences per slow grid, and `"[overlap-recordings]"` runs the
+six KF4FIC excerpts through the engine. The cadences are contiguous (hop equal
+to the window: the same grid with no overlap, the control), 30 rows a second
+(what `revenant-engine` does now), and one frame per 65536-sample block (what a
+slow source got before the row-rate change, a window shorter than the block, so
+most samples never transformed). 96 kS/s on 64 channels is
+`EngineConfig::channels`' own default and the grid `docs/recordings.md`
+measured the recordings on; `revenant-engine` passes 0 and gets 16 there.
+
+**The average was already right.** It weights each frame by the source time
+between frame starts, not by the frame, so correlated frames cannot be counted
+as independent ones. Read off the averaged spectrum on noise alone, the
+spread of averaged power over floor across bins gives the number of
+independent frames the one-second average is worth, K:
+
+| grid | contiguous | 30 rows/s | 30 rows/s if frames were independent | 65536 block |
+| --- | --- | --- | --- | --- |
+| 2.4 MS/s, 64 | 73.6 | the same cadence | 73.2 | the same cadence |
+| 250 kS/s, 32 | 15.6 | 43.9 | 60.1 | 8.0 |
+| 96 kS/s, 16 | 12.1 | 34.3 | 60.0 | 3.3 |
+| 96 kS/s, 64 | 3.3 | 9.4 | 60.0 | 3.3 |
+| 48 kS/s, 8 | 12.1 | 34.3 | 60.0 | 1.8 |
+
+Contiguous and gapped frames measure what independence predicts, within 4
+percent from 7.7 up and 6 and 10 percent at 1.7 and 3.0. Overlap buys 2.8 to 2.9 times the averaging, not the 3.9 to 20.5 the
+frame count claims, which is what a rule counting frames would have got wrong.
+None does, and no noise-alone run at any cadence was born at the default 6 dB,
+or at 3 or 0 dB, in two minutes a cell.
+
+**The tracker was not.** Its rules are counted in decisions: `birth_hits`
+consecutive ones, `residual_decisions`, a confidence rise and a centre
+smoothing per decision. Each assumes a decision brings evidence the last one
+did not. Decisions come every 0.1 s of source, which on the calibration grid
+is four fresh windows. Before the row-rate change a slow source could not
+decide faster than it got frames, one a block. After it, a 64-channel grid at
+96 kS/s decided ten times a second on windows 0.68 s long, so about seven
+decisions in a row read the same window. The live tracks per decision held,
+and births, merges and splits were counted up to seven times over, which on
+the recordings is churn: new ids and merge flicker on the same signals.
+
+**The correction**: a decision is taken no more often than one window,
+`Detector::decision_seconds()`, `max(decision_interval_seconds, 1 / bin
+width)`. The average still takes every frame, so the overlap's extra
+averaging is kept. It changes nothing where a window is under 0.1 s, which is
+2.4 MS/s on every grid and 250 kS/s in effect (its decisions already fell
+every 133 ms, four hops). `detect::FrontEndMonitor`'s minimum, which was
+thirty decisions, is three seconds of them now, the same bar at 0.1 s; a count
+would never have been reached at 0.68 s a decision.
+
+The recordings through the engine, 60 s each, default thresholds. Before is
+the code at "Find the voice test's emitter before characterising it"; after
+is this change; the 65536 block column is the old cadence, measured before, and
+after it differs by one decision in 86 and, on 20 m 1501 on 64 channels, one
+birth:
+
+| excerpt, grid | 65536 block: born, merges, splits, live | 30 rows/s before | 30 rows/s after |
+| --- | --- | --- | --- |
+| 40 m 1359, 16 | 10, 0, 0, 2.84 | 12, 0, 0, 2.42 | 11, 1, 0, 2.58 |
+| 40 m 1501, 16 | 5, 0, 0, 1.26 | 3, 0, 0, 0.65 | 3, 0, 0, 0.64 |
+| 40 m 1603, 16 | 1, 0, 0, 0.03 | 0, 0, 0, 0.00 | 0, 0, 0, 0.00 |
+| 20 m 1359, 16 | 11, 8, 2, 2.38 | 12, 2, 1, 2.35 | 11, 2, 1, 2.44 |
+| 20 m 1501, 16 | 26, 11, 3, 4.65 | 30, 11, 3, 4.64 | 29, 9, 1, 4.70 |
+| 20 m 1603, 16 | 47, 26, 6, 6.52 | 57, 26, 12, 7.20 | 51, 20, 12, 7.44 |
+| 40 m 1359, 64 | 31, 15, 1, 3.91 | 59, 55, 19, 3.91 | 27, 11, 2, 3.71 |
+| 40 m 1501, 64 | 3, 0, 0, 0.65 | 3, 0, 0, 0.66 | 3, 0, 0, 0.62 |
+| 40 m 1603, 64 | 0, 0, 0, 0.00 | 1, 0, 0, 0.00 | 0, 0, 0, 0.00 |
+| 20 m 1359, 64 | 10, 4, 1, 2.52 | 14, 6, 2, 2.47 | 7, 3, 2, 2.59 |
+| 20 m 1501, 64 | 25, 10, 1, 4.91 | 37, 15, 4, 5.34 | 30, 13, 3, 5.34 |
+| 20 m 1603, 64 | 55, 39, 12, 7.72 | 90, 76, 18, 7.60 | 53, 26, 7, 7.71 |
+
+The synthetic scenes, one emitter per scene of four kinds (a carrier, AM with
+a tone, 2400 baud QPSK, NFM at 2.5 kHz deviation), two seeds, on from 3 s to
+12 s. Pd is the fraction of decisions from 2 s after the start with a live
+track describing the emitter, averaged over the four kinds, at the SNR in
+2500 Hz named; first is the mean time to the first live track at 12 dB; ids is
+distinct ids per emitter summed over the four kinds and averaged over seeds,
+at 12 dB. At 30 rows a second:
+
+| grid | Pd 6.0 before, after | Pd 6.5 | Pd 7.0 | first at 12 dB, s | ids at 12 dB |
+| --- | --- | --- | --- | --- | --- |
+| 2.4 MS/s, 64 | 0.19, 0.19 | 0.90, 0.90 | 0.99, 0.99 | 0.52, 0.52 | 6.0, 6.0 |
+| 250 kS/s, 32 | 0.38, 0.38 | 0.91, 0.91 | 0.98, 0.98 | 0.69, 0.69 | 4.5, 4.5 |
+| 96 kS/s, 16 | 0.28, 0.25 | 0.90, 0.86 | 0.99, 0.96 | 0.60, 0.80 | 4.0, 4.0 |
+| 96 kS/s, 64 | 0.54, 0.39 | 0.88, 0.69 | 0.99, 0.80 | 0.86, 2.22 | 7.5, 5.0 |
+| 48 kS/s, 8 | 0.09, 0.08 | 0.89, 0.85 | 0.98, 0.94 | 0.60, 0.80 | 4.0, 4.0 |
+
+And the two controls, which the change does not touch, for the same columns:
+contiguous 0.54, 0.95, 0.99, 0.65 s, 6.5 at 250 kS/s; 0.47, 0.90, 0.98, 0.75 s,
+5.5 at 96 kS/s on 16; 0.72, 0.85, 0.93, 1.78 s, 7.0 on 64; 0.18, 0.88, 0.96,
+0.75 s, 5.0 at 48 kS/s. The 65536 block: 0.86, 0.91, 0.90, 1.95 s, 7.0 at
+96 kS/s on 16, and 0.62, 0.72, 0.80, 4.00 s, 7.0 at 48 kS/s.
+
+Below the default threshold, where noise alone is born at all, 96 kS/s on 64
+channels at 30 rows a second went from 1.5 and 6.0 births a minute at -3 and
+-6 dB to none at either; contiguous there is 0.5 and 11.5.
+
+**What it costs**, stated rather than hidden: time to a first detection on a
+long window. On 64 channels at 96 kS/s a 12 dB emitter is live 2.22 s after it
+starts, against 0.86 s before and 1.78 s for the old one-frame-a-block cadence,
+and Pd from 2 s after the start reads lower for the same reason: the first
+decisions after the start are missed while the birth rule runs at 0.68 s a
+decision. On the 16-channel grid `revenant-engine` uses the cost is 0.20 s.
+Pd at 6.0 dB, on the threshold itself, is lower at 30 rows a second than
+contiguous on every slow grid, before and after alike, so it is the overlap and
+not this change. Why is not measured here. It is what a steadier statistic
+around a mean slightly under the truth would do, and the steadiest, the
+2.4 MS/s reference at K 73.6, reads 0.19.
+
+**The empty-channel gate** is `tests/characterise/test_empty_channel.cpp` and
+still passes; no noise-alone scene here gave tier two a track to label.
+
 ## Identification
 
 Two tiers, split on cost.

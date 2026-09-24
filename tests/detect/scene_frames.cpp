@@ -90,6 +90,11 @@ double SceneGeometry::bin_width_hz() const {
 }
 
 std::uint64_t SceneGeometry::frame_step() const {
+    const std::uint32_t hop = hop_blocks != 0 ? hop_blocks : transform;
+    return static_cast<std::uint64_t>(hop) * grid().decimation;
+}
+
+std::uint64_t SceneGeometry::window_samples() const {
     return static_cast<std::uint64_t>(transform) * grid().decimation;
 }
 
@@ -154,11 +159,11 @@ Expected<SceneFrames> SceneFrames::create(const SceneGeometry& geometry,
     frames.coarse_twiddles_ = std::move(*coarse);
     frames.fine_twiddles_ = std::move(*fine);
     frames.window_ = std::move(*window);
-    frames.frames_per_batch_ = kFramesPerBatch;
 
     const std::uint32_t blocks = geometry.transform * kFramesPerBatch;
     const std::uint64_t batch_samples =
         static_cast<std::uint64_t>(blocks) * grid.decimation;
+    frames.batch_blocks_ = blocks;
 
     // Twice the batch so the previous batch's tail is still in the ring when
     // the branch filter walks back over its own history. The filter needs
@@ -167,28 +172,34 @@ Expected<SceneFrames> SceneFrames::create(const SceneGeometry& geometry,
     // arithmetic trivial rather than about capacity.
     const std::uint32_t capacity = round_up_pow2(batch_samples * 2);
 
+    // Twice the batch here too, for the window rather than the filter: next()
+    // renders only until the window it wants is whole, so that window can
+    // begin up to a transform before the batch just rendered, and a ring of
+    // one batch would already have overwritten its start.
+    frames.channel_ring_blocks_ = blocks * 2;
+
     frames.iq_.assign(capacity, dsp::Complex32{});
     frames.branches_.assign(static_cast<std::size_t>(blocks) * grid.channels, dsp::Complex32{});
-    frames.channel_ring_.assign(static_cast<std::size_t>(grid.channels) * blocks,
-                                dsp::Complex32{});
+    frames.channel_ring_.assign(
+        static_cast<std::size_t>(grid.channels) * frames.channel_ring_blocks_, dsp::Complex32{});
     frames.power_db_.assign(geometry.bins(), 0.0F);
-
-    // Forces the first next() to render rather than serve a stale batch.
-    frames.frame_in_batch_ = kFramesPerBatch;
     return frames;
 }
 
 std::uint64_t SceneFrames::frames_available() const {
     const dsp::SampleIndex duration = scene_->duration_samples();
-    if (duration == 0) {
+    const std::uint64_t window = geometry_.window_samples();
+    if (duration == 0 || duration < window) {
         return 0;
     }
-    return duration / geometry_.frame_step();
+    // Every frame whose whole window fits. With contiguous windows this is
+    // duration / window, which is what it said before a hop existed.
+    return (duration - window) / geometry_.frame_step() + 1;
 }
 
 Status SceneFrames::fill_batch() {
     const dsp::GridParams grid = geometry_.grid();
-    const std::uint32_t blocks = geometry_.transform * frames_per_batch_;
+    const std::uint32_t blocks = batch_blocks_;
     const std::uint64_t batch_samples =
         static_cast<std::uint64_t>(blocks) * grid.decimation;
     const std::uint32_t mask = static_cast<std::uint32_t>(iq_.size() - 1);
@@ -234,36 +245,41 @@ Status SceneFrames::fill_batch() {
     fft_params.stages = dsp::fft_stages(grid.channels);
     fft_params.block_base = static_cast<std::uint32_t>(next_sample_ / grid.decimation);
     fft_params.block_count = blocks;
-    fft_params.out_ring_blocks = blocks;
-    fft_params.out_ring_mask = blocks - 1U;
+    fft_params.out_ring_blocks = channel_ring_blocks_;
+    fft_params.out_ring_mask = channel_ring_blocks_ - 1U;
     if (auto ok = dsp::reference_pfb_fft(fft_params, branches_, coarse_twiddles_, channel_ring_);
         !ok) {
         return ok;
     }
 
-    frame_start_ = next_sample_;
     next_sample_ += batch_samples;
-    frame_in_batch_ = 0;
+    blocks_rendered_ += blocks;
     return {};
 }
 
 Expected<engine::SpectrumFrame> SceneFrames::next() {
-    if (frame_in_batch_ >= frames_per_batch_) {
+    // The frame's window, in coarse-channel blocks from the start of the
+    // scene, which is where the engine's own spectrum stage takes it from: the
+    // last N channel samples at the end of each dispatch, one dispatch every
+    // hop.
+    const std::uint32_t hop = geometry_.hop_blocks != 0 ? geometry_.hop_blocks
+                                                        : geometry_.transform;
+    const std::uint64_t first_block = sequence_ * hop;
+    while (blocks_rendered_ < first_block + geometry_.transform) {
         if (auto ok = fill_batch(); !ok) {
             return std::unexpected(ok.error());
         }
     }
 
     const dsp::GridParams grid = geometry_.grid();
-    const std::uint32_t blocks = geometry_.transform * frames_per_batch_;
 
     dsp::SpectrumParams params;
     params.channels = grid.channels;
     params.transform = geometry_.transform;
     params.stages = dsp::fft_stages(geometry_.transform);
-    params.chan_blocks = blocks;
-    params.chan_mask = blocks - 1U;
-    params.in_offset = frame_in_batch_ * geometry_.transform;
+    params.chan_blocks = channel_ring_blocks_;
+    params.chan_mask = channel_ring_blocks_ - 1U;
+    params.in_offset = static_cast<std::uint32_t>(first_block & (channel_ring_blocks_ - 1U));
 
     if (auto ok = dsp::reference_spectrum(params, channel_ring_, fine_twiddles_, window_,
                                           power_db_);
@@ -274,11 +290,9 @@ Expected<engine::SpectrumFrame> SceneFrames::next() {
     engine::SpectrumFrame frame;
     frame.power_db = power_db_;
     frame.geometry = spectrum_;
-    frame.start = frame_start_ +
-                  static_cast<dsp::SampleIndex>(frame_in_batch_) * geometry_.frame_step();
-    frame.count = geometry_.frame_step();
+    frame.start = static_cast<dsp::SampleIndex>(first_block) * grid.decimation;
+    frame.count = geometry_.window_samples();
     frame.sequence = sequence_++;
-    ++frame_in_batch_;
     return frame;
 }
 

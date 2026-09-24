@@ -319,7 +319,13 @@ Expected<Detector> Detector::create(const DetectorConfig& config,
     detector.quantile_span_ = high_quantile - low_quantile;
     detector.high_quantile_ = high_quantile;
 
-    const double interval = config.decision_interval_seconds * static_cast<double>(config.source_rate);
+    // No more often than one window, which is a transform's own duration and
+    // the reciprocal of its bin width. See decision_interval_seconds in
+    // detector.h for why and for what it measured.
+    detector.window_seconds_ = 1.0 / detector.bin_width_hz_;
+    detector.decision_seconds_ =
+        std::max(config.decision_interval_seconds, detector.window_seconds_);
+    const double interval = detector.decision_seconds_ * static_cast<double>(config.source_rate);
     detector.decision_interval_samples_ =
         interval < 1.0 ? 1ULL : static_cast<std::uint64_t>(std::llround(interval));
 
@@ -463,11 +469,24 @@ Status Detector::consume(const engine::SpectrumFrame& frame) {
             geometry_.channels, geometry_.transform));
     }
 
-    // The frame's own window length is the bootstrap step, because at the
-    // engine's defaults a block and a spectrum window are the same number of
-    // source samples. After the first frame the real gap is used, so a frame
-    // the engine skipped advances the average by the right amount rather than
-    // by one step.
+    // The frame's own window length is the bootstrap step: the first frame is
+    // the first evidence, and it covers its window. After the first frame the
+    // real gap between frame starts is used, the engine's block, so each
+    // frame is weighted by the source time it adds whatever that is against
+    // the window. A frame the engine skipped advances the average by the right
+    // amount rather than by one step, and a frame that OVERLAPS the one before
+    // it, which is what a source under 1.97 MS/s gets at 30 rows a second,
+    // counts for its hop and not for its window. No rule in this file counts
+    // frames, so correlated frames cannot be mistaken for independent ones;
+    // docs/detection.md, "Overlapping frames", has the measurement.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "The frame's own window length is the
+    // bootstrap step, because at the engine's defaults a block and a spectrum
+    // window are the same number of source samples." Since "Keep the
+    // display's row rate when the source is slow" a slow source's block is a
+    // fifth of its window at 96 kS/s, and in 65536-sample blocks the two were
+    // equal only on a 64-channel grid, which revenant-engine's default of 8
+    // channels at 2.4 MS/s is not. The step was right and the reason was not.
     std::uint64_t delta = frame.count;
     if (have_previous_ && frame.start > previous_start_) {
         delta = frame.start - previous_start_;
@@ -525,7 +544,7 @@ Status Detector::consume(const engine::SpectrumFrame& frame) {
     const double since = have_decided_
                              ? static_cast<double>(samples_since_decision_) /
                                    static_cast<double>(config_.source_rate)
-                             : config_.decision_interval_seconds;
+                             : decision_seconds_;
     samples_since_decision_ = 0;
     decide(now, since);
     return {};

@@ -89,6 +89,7 @@ Status FrontEndMonitor::observe(std::span<const double> averaged_power,
     const double decay = std::exp(-elapsed_seconds / kFrontEndWindowSeconds);
 
     weight_ = weight_ * decay + 1.0;
+    seconds_ = seconds_ * decay + elapsed_seconds;
     sum_p_ = sum_p_ * decay + drive_db;
     sum_pp_ = sum_pp_ * decay + drive_db * drive_db;
 
@@ -119,7 +120,7 @@ Status FrontEndMonitor::observe(std::span<const double> averaged_power,
     const double var_p = std::max(0.0, sum_pp_ / weight_ - mean_p * mean_p);
     out.drive_spread_db = std::sqrt(var_p);
 
-    if (weight_ < kFrontEndMinWeight || out.drive_spread_db < kFrontEndMinDriveSpreadDb) {
+    if (seconds_ < kFrontEndMinSeconds || out.drive_spread_db < kFrontEndMinDriveSpreadDb) {
         verdict_ = FrontEndVerdict::Unmeasured;
         out.verdict = verdict_;
         last_ = out;

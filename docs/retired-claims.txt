@@ -1957,3 +1957,20 @@ retired: 2026-09-23
 commit: "Record AIS and DSC in modes.md and the clean-room log"
 instead: The disclosure log in docs/clean-room.md has eight entries; the
     eighth records what AIS and DSC were written from.
+
+phrase: a block and a spectrum window are the same number of source samples
+phrase: transforms N non-overlapping coarse-channel samples
+retired: 2026-09-23
+commit: "Keep the display's row rate when the source is slow"
+instead: A spectrum frame is the last N channel samples at each dispatch, so
+    a block shorter than the window overlaps frames, which a source under
+    1.97 MS/s gets at 30 rows a second. The detector weights a frame by its
+    hop. docs/detection.md, "Overlapping frames".
+
+phrase: decides only when decision_interval_seconds of source time has passed
+retired: 2026-09-23
+commit: "Decide no more often than one spectrum window"
+instead: Detector::decision_seconds() is decision_interval_seconds or one
+    spectrum window, 1 / bin width, whichever is longer, so consecutive
+    decisions do not read the same window. docs/detection.md,
+    "Overlapping frames".

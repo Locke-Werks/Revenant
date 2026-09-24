@@ -557,6 +557,31 @@ struct DetectorConfig {
     // top of this file: the average already integrates a second, so deciding
     // per frame decides repeatedly on the same evidence at thirty times the
     // price.
+    //
+    // AND NEVER MORE OFTEN THAN ONE SPECTRUM WINDOW, which create() enforces
+    // and decision_seconds() reports. A window is one transform's duration,
+    // the reciprocal of the bin width: 27 ms on the shipped 2.4 MS/s grid,
+    // 0.17 s at 96 kS/s on 16 channels, 0.68 s on 64. The tracker's rules are
+    // counted in decisions, birth_hits consecutive ones, residual_decisions,
+    // a confidence rise and a centre smoothing per decision, and each assumes
+    // a decision brings evidence the last one did not have. Where a window is
+    // shorter than this interval, which is every grid these were calibrated
+    // on, one does. Where it is longer, several decisions in a row read the
+    // same window.
+    //
+    // That became reachable with EngineConfig::spectrum_rows_per_second.
+    // Before it a slow source's frame came once per 65536-sample block, never
+    // faster than one window, and a decision could not outrun its frames.
+    // Since, a 96 kS/s source gets a frame every 3200 samples however long its
+    // window, so on 64 channels ten decisions a second read windows 0.68 s
+    // long. Measured 2026-09-23 on the KF4FIC 40 m 1359 UT excerpt through
+    // the engine: the live tracks per decision held at 3.91, and births went
+    // from 31 to 59, merges from 15 to 55 and splits from 1 to 19. With the
+    // interval held to one window the same run gives 27, 11 and 2 at 3.71
+    // live. docs/detection.md, "Overlapping frames", has every rate.
+    //
+    // The average is not slowed with it. It still takes every frame, weighted
+    // by the source time each adds, so the overlap's extra averaging is kept.
     double decision_interval_seconds = 0.1;
 
     // ---- the noise floor, across frequency -------------------------------
@@ -1155,8 +1180,13 @@ public:
     Detector& operator=(const Detector&) = delete;
     ~Detector() = default;
 
-    // Takes one frame. Always accumulates; decides only when
-    // decision_interval_seconds of source time has passed since the last one.
+    // Takes one frame. Always accumulates; decides only when decision_seconds()
+    // of source time has passed since the last one.
+    //
+    // WHAT THIS COMMENT USED TO SAY: "decides only when
+    // decision_interval_seconds of source time has passed since the last one."
+    // Where one spectrum window is longer than that, the window is what has
+    // to pass; see decision_interval_seconds.
     //
     // frame.power_db is read during the call and never retained.
     [[nodiscard]] Status consume(const engine::SpectrumFrame& frame);
@@ -1182,6 +1212,10 @@ public:
     // The sample index the most recent decision was taken at, which is one
     // past the last sample it had seen.
     [[nodiscard]] dsp::SampleIndex last_decision() const { return last_decision_; }
+
+    // Source seconds between decisions as run: decision_interval_seconds, or
+    // one spectrum window where that is longer. See decision_interval_seconds.
+    [[nodiscard]] double decision_seconds() const { return decision_seconds_; }
 
     // The operator's two knobs, both changeable while running. Validated,
     // because a NaN threshold detects everything or nothing depending on
@@ -1264,6 +1298,11 @@ private:
     double quantile_span_ = 1.0;
     double high_quantile_ = 0.0;
     std::uint64_t decision_interval_samples_ = 1;
+
+    // One transform's duration, 1 / bin width, and the decision interval in
+    // force, which is the configured one or the window, whichever is longer.
+    double window_seconds_ = 0.0;
+    double decision_seconds_ = 0.0;
     std::uint64_t warmup_samples_ = 1;
     std::size_t noise_window_bins_ = 0;
 
