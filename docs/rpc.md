@@ -1712,6 +1712,16 @@ hears is the voice stream running dry, four to six times in 30 s for 82 to
   probes start later. On an unthrottled Demand source neither sheds; the
   completion thread waits instead, which is the graph's own rule for a source
   with no clock.
+- `revenant-engine` sets all three: `--detector-cpu` and `--probe-cpu` take a
+  share of one core above 0 and at most 1, because each budget holds one
+  thread, and `--decode-lanes` takes 1 to 16 lanes, 16 being the 7950X's
+  physical cores and every lane running above normal priority. Zero is refused
+  for a budget rather than read as off, since a bucket that never refills
+  starts nothing; `--probes 0` is how to run without probes. A budget for a
+  thread the run will not build, `--detector-cpu` with `--no-spectrum` or
+  `--probe-cpu` with `--probes 0`, is refused too. The startup block prints a
+  `budgets` line with what was settled, defaults included, and
+  `tests/rpc/CMakeLists.txt` runs each refusal.
 
 **After**, the same runs:
 

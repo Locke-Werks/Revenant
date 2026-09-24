@@ -235,6 +235,96 @@ if(TARGET revenant-engine)
         TIMEOUT 60
         PASS_REGULAR_EXPRESSION "--port <n> +Port, default 17690,"
     )
+
+    # --detector-cpu, --probe-cpu and --decode-lanes, docs/rpc.md under
+    # "Threading". Each refusal is matched on its own message, which is what
+    # says the right check fired rather than some other usage error, and none
+    # of them may reach "listening on": every one is refused before a token is
+    # read or a device opened, so these need no GPU and touch no profile.
+    function(revenant_engined_refuses name expected)
+        add_test(NAME engined_refuses_${name} COMMAND revenant-engine ${ARGN})
+        set_tests_properties(engined_refuses_${name} PROPERTIES
+            LABELS "rpc"
+            TIMEOUT 60
+            PASS_REGULAR_EXPRESSION "${expected}"
+            FAIL_REGULAR_EXPRESSION "listening on"
+        )
+    endfunction()
+
+    set(engined_uri "synthetic:wideband?rate=2400032&emitters=4&seed=4242&samples=4800064")
+    revenant_engined_refuses(a_detector_budget_over_one
+        "--detector-cpu 1\\.5 is not above 0 and at most 1\\. It is a share of one core"
+        "${engined_uri}" --detector-cpu 1.5)
+    revenant_engined_refuses(a_zero_detector_budget
+        "--detector-cpu 0 is not above 0 and at most 1"
+        "${engined_uri}" --detector-cpu 0)
+    revenant_engined_refuses(a_negative_probe_budget
+        "--probe-cpu -0\\.5 is not above 0 and at most 1.*--probes 0 is how to run without probes"
+        "${engined_uri}" --probe-cpu=-0.5)
+    revenant_engined_refuses(a_nan_probe_budget
+        "--probe-cpu nan is not above 0 and at most 1"
+        "${engined_uri}" --probe-cpu nan)
+    revenant_engined_refuses(an_infinite_detector_budget
+        "--detector-cpu inf is not above 0 and at most 1"
+        "${engined_uri}" --detector-cpu inf)
+    revenant_engined_refuses(a_budget_in_words
+        "--probe-cpu 'half' is not a number"
+        "${engined_uri}" --probe-cpu half)
+    revenant_engined_refuses(zero_decode_lanes
+        "--decode-lanes 0 is outside 1 to 16"
+        "${engined_uri}" --decode-lanes 0)
+    revenant_engined_refuses(seventeen_decode_lanes
+        "--decode-lanes 17 is outside 1 to 16"
+        "${engined_uri}" --decode-lanes 17)
+    revenant_engined_refuses(fractional_decode_lanes
+        "--decode-lanes '2\\.5' is not a whole number"
+        "${engined_uri}" --decode-lanes 2.5)
+    revenant_engined_refuses(a_probe_budget_with_no_probes
+        "--probe-cpu budgets the probe worker, and --probes 0 builds no probes"
+        "${engined_uri}" --probes 0 --probe-cpu 0.3)
+    revenant_engined_refuses(a_probe_budget_with_no_spectrum
+        "--probe-cpu budgets the probe worker, and --no-spectrum builds no probes"
+        "${engined_uri}" --no-spectrum --probe-cpu 0.3)
+    revenant_engined_refuses(a_detector_budget_with_no_spectrum
+        "--detector-cpu budgets the detector, which reads the spectrum stage that --no-spectrum"
+        "${engined_uri}" --no-spectrum --detector-cpu 0.3)
+
+    add_test(
+        NAME engined_lists_the_budget_defaults
+        COMMAND revenant-engine --help
+    )
+    set_tests_properties(engined_lists_the_budget_defaults PROPERTIES
+        LABELS "rpc"
+        TIMEOUT 60
+        PASS_REGULAR_EXPRESSION "and RDS, default 2, 1 to 16\\."
+    )
+
+    # And taken: the values named reach the server and the engine and the
+    # startup block says so. Everything else is engined_serves_and_reports_its_port's
+    # run, for that entry's reasons, including both regexes, except the token
+    # file: a file of its own, so the two entries cannot race to mint one
+    # when ctest runs them in parallel.
+    add_test(
+        NAME engined_takes_the_budgets_it_is_given
+        COMMAND revenant-engine
+                "${engined_uri}"
+                --gpu -1
+                --port 0
+                --spectrum 256
+                --block-samples 16384
+                --duration 0.5
+                --quiet
+                --detector-cpu 0.1
+                --probe-cpu 0.2
+                --decode-lanes 3
+                --token-file "${CMAKE_CURRENT_BINARY_DIR}/engined-budgets-test-token"
+    )
+    set_tests_properties(engined_takes_the_budgets_it_is_given PROPERTIES
+        LABELS "rpc"
+        TIMEOUT 300
+        PASS_REGULAR_EXPRESSION "budgets +detector 0\\.10 of a core, probes 0\\.20 of a core, 3 decode lanes"
+        FAIL_REGULAR_EXPRESSION "revenant-engine: |listening on 127\\.0\\.0\\.1:17690"
+    )
 else()
     message(STATUS "revenant-engine is not present yet, skipping its service test")
 endif()

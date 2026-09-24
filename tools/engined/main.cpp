@@ -167,6 +167,38 @@ using source::parse_frequency;
     return *value;
 }
 
+// A share of one core, for the two signal identification budgets.
+//
+// Above zero and at most one, the range core/engine/cpu_budget.h's bucket
+// means anything in: each budget holds one thread, and one thread cannot take
+// more than one core, so 1.5 would read as a promise the bucket cannot keep.
+// Zero is refused rather than taken as "off", because a bucket that never
+// refills starts nothing and the thing it holds would sit there looking idle.
+// Each flag's own message says what off is spelled as. from_chars reads "nan"
+// and "inf" as numbers, and the comparison below is written so both fail it.
+[[nodiscard]] Expected<double> parse_core_share(std::string_view text, std::string_view what,
+                                                std::string_view off_hint)
+{
+    auto value = parse_real(text, what);
+    if (!value) {
+        return value;
+    }
+    if (!(*value > 0.0 && *value <= 1.0)) {
+        return fail(std::format("{} {} is not above 0 and at most 1. It is a share of one core, "
+                                "such as 0.25 for a quarter, and the budget holds one thread, "
+                                "which cannot use more than one core. {}",
+                                what, text, off_hint));
+    }
+    return *value;
+}
+
+// Decode lanes the server may be asked for. Every lane is a thread above normal
+// priority, core/thread_role.h's listening class, so lanes past the processors
+// a machine has take time from the display and signal identification rather
+// than giving decoding more. Sixteen is the physical core count of the Ryzen 9
+// 7950X docs/rpc.md measured on, and eight times the two it measured with.
+constexpr std::int64_t kMaxDecodeLanes = 16;
+
 // Display only. Every decision is made on the integer.
 [[nodiscard]] std::string format_hz(double hertz)
 {
@@ -255,6 +287,20 @@ struct Options {
     // dongle at 2.4 MS/s, which already makes 36.6 a second in 65536-sample
     // blocks, and turns a 96 kS/s recording's 1.46 into 30.
     double rows_per_second = 30.0;
+
+    // The CPU budgets docs/rpc.md sized under "Threading": the most of one
+    // core the detector's lane averages, ServerOptions::detector_cpu_budget,
+    // and the most the probe worker averages, EngineConfig::probe_cpu_budget.
+    // Past its budget the lane sheds frames and the worker starts its next
+    // probe later. Empty keeps the library's default, which is read from the
+    // library rather than restated so the two cannot drift; set means the
+    // operator named one, which the cross-checks in main() need to know.
+    std::optional<double> detector_cpu;
+    std::optional<double> probe_cpu;
+
+    // ServerOptions::decode_lanes: the threads that run every decoder, every
+    // P25 voice stream and RDS, each receiver's route pinned to one.
+    std::uint32_t decode_lanes = rpc::ServerOptions{}.decode_lanes;
 
     std::optional<float> spectrum_floor_db;
     std::optional<float> spectrum_ceiling_db;
@@ -356,6 +402,22 @@ void print_usage()
         "                      track the signal otherwise, which is right almost\n"
         "                      always; pin them when two captures have to be compared.\n"
         "\n"
+        "Signal identification and decoding:\n"
+        "  --detector-cpu <x>  The most of one core the wideband detector and tier two\n"
+        "                      average, default {}. A share above 0 and at most 1. Past\n"
+        "                      it the detector's lane sheds spectrum frames rather than\n"
+        "                      fall behind. Needs the spectrum stage.\n"
+        "  --probe-cpu <x>     The most of one core the probe worker averages\n"
+        "                      characterising and identifying what the probes collect,\n"
+        "                      default {}. A share above 0 and at most 1. Past it the\n"
+        "                      next probe starts later. Needs probes; --probes 0 is how\n"
+        "                      to run without them.\n"
+        "  --decode-lanes <n>  Threads that run every decoder, every P25 voice stream\n"
+        "                      and RDS, default {}, 1 to {}. Each receiver's decoding is\n"
+        "                      pinned to one lane, so one that falls behind holds up\n"
+        "                      only the receivers sharing its lane. Lanes run above\n"
+        "                      normal priority.\n"
+        "\n"
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
         "                      fraction. Omitted serves until the source ends or\n"
@@ -373,7 +435,9 @@ void print_usage()
         "  revenant-engine \"synthetic:wideband?rate=2400000&emitters=8&seed=4242\" \\\n"
         "      --pace 1\n"
         "  revenant-engine \"rtlsdr://0?freq=162.550M&rate=2400000\" --port 47000\n",
-        kDefaultPort);
+        kDefaultPort, rpc::ServerOptions{}.detector_cpu_budget,
+        engine::EngineConfig{}.probe_cpu_budget, rpc::ServerOptions{}.decode_lanes,
+        kMaxDecodeLanes);
 }
 
 [[nodiscard]] Expected<Options> parse_options(int argc, char** argv)
@@ -599,6 +663,46 @@ void print_usage()
                 return std::unexpected(number.error());
             }
             options.probes = static_cast<std::uint32_t>(*number);
+            continue;
+        }
+
+        if (arg == "--detector-cpu") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto share = parse_core_share(
+                *text, arg, "The detector costs nothing until a client asks for detections.");
+            if (!share) {
+                return std::unexpected(share.error());
+            }
+            options.detector_cpu = *share;
+            continue;
+        }
+
+        if (arg == "--probe-cpu") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto share = parse_core_share(*text, arg, "--probes 0 is how to run without probes.");
+            if (!share) {
+                return std::unexpected(share.error());
+            }
+            options.probe_cpu = *share;
+            continue;
+        }
+
+        if (arg == "--decode-lanes") {
+            auto text = value_of(i, arg, inline_value, has_inline);
+            if (!text) {
+                return std::unexpected(text.error());
+            }
+            auto number = parse_bounded(*text, arg, 1, kMaxDecodeLanes);
+            if (!number) {
+                return std::unexpected(number.error());
+            }
+            options.decode_lanes = static_cast<std::uint32_t>(*number);
             continue;
         }
 
@@ -943,6 +1047,7 @@ void print_engine_block(const engine::Engine& eng)
     // The pool is built with the graph, so before the engine exists. It labels
     // only what the spectrum stage detects, so it is not asked for without one.
     config.probe_receivers = options.spectrum_points != 0 ? options.probes : 0;
+    config.probe_cpu_budget = options.probe_cpu.value_or(config.probe_cpu_budget);
 
     auto created = engine::Engine::create(config);
     if (!created) {
@@ -1002,6 +1107,9 @@ void print_engine_block(const engine::Engine& eng)
     server_options.bind_address = options.bind;
     server_options.port = options.port;
     server_options.token.assign(token->second.begin(), token->second.end());
+    server_options.detector_cpu_budget =
+        options.detector_cpu.value_or(server_options.detector_cpu_budget);
+    server_options.decode_lanes = options.decode_lanes;
 
     auto server = rpc::Server::create(eng, server_options);
     if (!server) {
@@ -1022,6 +1130,19 @@ void print_engine_block(const engine::Engine& eng)
     std::println("");
     std::println("token file      {}", token->first);
     std::println("calibration     {}", config.calibration_path);
+
+    // What the three knobs settled on, defaults included, so a log says what
+    // a run was held to without anyone reconstructing it from the command
+    // line and the library's defaults.
+    if (config.probe_receivers > 0) {
+        std::println("budgets         detector {:.2f} of a core, probes {:.2f} of a core, {} "
+                     "decode lanes",
+                     server_options.detector_cpu_budget, config.probe_cpu_budget,
+                     server_options.decode_lanes);
+    } else {
+        std::println("budgets         detector {:.2f} of a core, no probes, {} decode lanes",
+                     server_options.detector_cpu_budget, server_options.decode_lanes);
+    }
 
     // One line on stderr and no second flag. Two flags that have to agree are
     // two flags that get out of sync, and the token does not make this wire
@@ -1331,6 +1452,24 @@ int main(int argc, char** argv)
         std::println(stderr,
                      "revenant-engine: --spectrum-floor and --spectrum-ceiling set the colour "
                      "map of a spectrum stage that --no-spectrum turned off.");
+        return 2;
+    }
+
+    // A budget for a thread that will not exist is refused rather than kept,
+    // on the argument the colour map check above makes: an operator who set
+    // it expects it to hold something, and a run that ignores it quietly is
+    // the run they will read the wrong conclusion off.
+    if (options->spectrum_points == 0 && options->detector_cpu.has_value()) {
+        std::println(stderr,
+                     "revenant-engine: --detector-cpu budgets the detector, which reads the "
+                     "spectrum stage that --no-spectrum turned off.");
+        return 2;
+    }
+    if ((options->probes == 0 || options->spectrum_points == 0) && options->probe_cpu.has_value()) {
+        std::println(stderr,
+                     "revenant-engine: --probe-cpu budgets the probe worker, and {} builds no "
+                     "probes.",
+                     options->probes == 0 ? "--probes 0" : "--no-spectrum");
         return 2;
     }
 
