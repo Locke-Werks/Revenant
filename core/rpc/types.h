@@ -682,6 +682,11 @@ struct DetectionList {
     // default-constructed one starts here. Not a track dropped the instant
     // it goes quiet.
     double detector_hold_seconds = 0.0;
+
+    // The detector's floor across the span in dBFS, the median over bins of
+    // what its latest decision estimated. Zero means not stated: not decided
+    // yet, or an engine older than the field. revenant.capnp has the rest.
+    double noise_floor_dbfs = 0.0;
 };
 
 // Unlike engine::SpectrumFrame, this one owns its bins.

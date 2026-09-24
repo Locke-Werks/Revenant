@@ -766,14 +766,19 @@ the background colour rather than set on plates, so they read over the trace
 without hiding a strip of it. The passband pane's scale follows that pane's
 own ends, which the span's pins do not reach.
 
-**The noise floor is this window's estimate, because the engine publishes
-none.** The detector keeps a floor per fine bin and uses it on every
-decision, and none of it crosses the wire: `rpc::Detection` carries no
-floor, `DetectionList` carries the threshold and not what it is measured
-against, and `SourceStats` has only the front end's floor lift, which is
-relative to a session low. So the span measures the floor off its own trace:
-the level a quarter of the drawn columns sit below, eased over a second of
-source time. A quarter rather than the median because a broadcast band can be
+**The noise floor is the detector's.** The detector keeps a floor per fine
+bin and uses it on every decision, and `DetectionList.noiseFloorDbfs`
+carries its median across the span on every detections poll; the marker
+draws that, and its plate reads "noise ... dBFS". It sits under the band of
+noise the trace shows, by about what the auto-scale's reduction correction
+adds, because the trace draws the largest bin under each column and the
+detector's floor is per bin. That gap is the display's; the detector's
+figure is the one every detection's SNR is measured against.
+
+Until the detector has decided, and from an engine older than the field, the
+span falls back to measuring the floor off its own trace: the level a
+quarter of the drawn columns sit below, eased over a second of source
+time. A quarter rather than the median because a broadcast band can be
 more than half stations. It is not the auto-scale floor, which is where the
 colour map starts rather than where the noise is, and which parts from the
 noise whenever it is pinned or still following noise that rose. Its plate

@@ -596,10 +596,16 @@ class SpectrumItem : public QQuickItem {
     // Where the detection labels' strip ends. Nothing else is drawn above it.
     Q_PROPERTY(double labelStripBottom READ labelStripBottom CONSTANT)
 
-    // The noise floor this window measures off the trace, since the engine
-    // publishes none, as a level and as the y it is drawn at; noiseLowY is
-    // the bottom of the noise, which the plate goes under. See
-    // models/span_markers.h for why it is not the auto-scale floor.
+    // The noise floor, as a level and as the y it is drawn at; noiseLowY is
+    // the bottom of the noise, which the plate goes under. The detector's own
+    // floor when the engine states one (DetectionList.noiseFloorDbfs, bound to
+    // engineNoiseDbfs), and this window's estimate off the trace otherwise,
+    // which is an engine older than the field or one that has not decided
+    // yet; noiseFromEngine says which. See models/span_markers.h for why the
+    // estimate is not the auto-scale floor.
+    Q_PROPERTY(double engineNoiseDbfs READ engineNoiseDbfs WRITE setEngineNoiseDbfs
+                   NOTIFY markersChanged)
+    Q_PROPERTY(bool noiseFromEngine READ noiseFromEngine NOTIFY markersChanged)
     Q_PROPERTY(bool noiseValid READ noiseValid NOTIFY markersChanged)
     Q_PROPERTY(double noiseDb READ noiseDb NOTIFY markersChanged)
     Q_PROPERTY(double noiseY READ noiseY NOTIFY markersChanged)
@@ -640,8 +646,24 @@ public:
     }
     [[nodiscard]] double labelStripBottom() const;
 
-    [[nodiscard]] bool noiseValid() const { return have_frame_ && noise_.valid; }
-    [[nodiscard]] double noiseDb() const { return noise_.level_db; }
+    // Zero is the wire's "not stated", and no real floor is at 0 dBFS.
+    [[nodiscard]] double engineNoiseDbfs() const { return engine_noise_dbfs_; }
+    void setEngineNoiseDbfs(double dbfs)
+    {
+        if (dbfs != engine_noise_dbfs_) {
+            engine_noise_dbfs_ = dbfs;
+            emit markersChanged();
+        }
+    }
+    [[nodiscard]] bool noiseFromEngine() const { return engine_noise_dbfs_ != 0.0; }
+    [[nodiscard]] bool noiseValid() const
+    {
+        return have_frame_ && (noiseFromEngine() || noise_.valid);
+    }
+    [[nodiscard]] double noiseDb() const
+    {
+        return noiseFromEngine() ? engine_noise_dbfs_ : noise_.level_db;
+    }
     [[nodiscard]] double noiseY() const;
     [[nodiscard]] double noiseLowY() const;
 
@@ -810,6 +832,7 @@ private:
     std::vector<OverlayQuad> noise_quads_;
 
     NoiseFloor noise_;
+    double engine_noise_dbfs_ = 0.0;
     SpanPeak peak_;
     double peak_hz_ = 0.0;
     double peak_fraction_ = 0.0;

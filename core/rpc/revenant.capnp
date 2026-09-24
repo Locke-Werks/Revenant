@@ -1579,6 +1579,19 @@ struct DetectionList {
     # this field existed. A reader must not take zero as a track that is
     # dropped the instant it goes quiet.
     detectorHoldSeconds @5 :Float64;
+
+    # The detector's noise floor across the span, in dBFS on the same scale
+    # as SpectrumFrame's bins: the median over bins of the floor the detector
+    # estimated under its latest decision. Every detection's SNR is measured
+    # against that floor, so a display drawing it shows the level the
+    # detector is actually deciding against rather than an estimate of its
+    # own. The median, so one strong station's skirts do not move the figure
+    # for a span of empty bins.
+    #
+    # Zero means not stated: a detector that has not decided yet, or an
+    # engine built before this field existed. A real floor is well below
+    # zero dBFS, so zero cannot be mistaken for one.
+    noiseFloorDbfs @6 :Float64;
 }
 
 # What a subscriber implements. The engine calls this; the client does not

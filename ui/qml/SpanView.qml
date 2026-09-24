@@ -53,6 +53,7 @@ ColumnLayout {
             id: spectrum
             anchors.fill: parent
             link: engineLink
+            engineNoiseDbfs: engineLink.detectorNoiseFloorDbfs
             mapPins: ScaleSettings
             scaleLabelHeight: scaleMetrics.height
             selectedDetection: span.selection.selectedDetection
@@ -160,12 +161,14 @@ ColumnLayout {
             }
         }
 
-        // THE NOISE FLOOR, as this window measures it. The engine publishes
-        // no floor of its own; the detector keeps one and it does not cross
-        // the wire. models/span_markers.h has why the estimate is a low
-        // percentile of the trace and not the auto-scale floor on the plate
-        // at the left. The line is the item's, dashed under the trace; the
-        // plate goes under the noise so it covers the fill and not the trace.
+        // THE NOISE FLOOR: the detector's own, when the engine states it on
+        // the detections poll, and this window's estimate off the trace when
+        // it does not. The detector's is what every detection's SNR is
+        // measured against. models/span_markers.h has why the fallback is a
+        // low percentile of the trace and not the auto-scale floor on the
+        // plate at the left. The line is the item's, dashed under the trace;
+        // the plate goes under the noise so it covers the fill and not the
+        // trace.
         Plate {
             id: noisePlate
 
@@ -187,17 +190,24 @@ ColumnLayout {
             visible: span.drawing && spectrum.noiseValid
             x: at.x
             y: at.y
-            text: (below ? "▼ " : "") + "noise " + spectrum.noiseDb.toFixed(1) + " dBFS est."
+            text: (below ? "▼ " : "") + "noise " + spectrum.noiseDb.toFixed(1)
+                  + (spectrum.noiseFromEngine ? " dBFS" : " dBFS est.")
 
             HoverHandler { id: noiseHover }
 
             Tip {
                 visible: noiseHover.hovered
-                text: "The noise floor as this window estimates it from the trace: a quarter "
-                      + "of the trace's columns sit below the dashed line. The engine publishes "
-                      + "no noise floor; its detector keeps one and it stays inside the engine. "
-                      + "This is not the floor plate at the left, which is where the colour "
-                      + "map starts rather than where the noise is."
+                text: spectrum.noiseFromEngine
+                      ? "The detector's noise floor across the span: the median over bins of "
+                        + "the floor it estimated under its latest decision, which is what "
+                        + "every detection's SNR is measured against. This is not the floor "
+                        + "plate at the left, which is where the colour map starts."
+                      : "The noise floor as this window estimates it from the trace: a "
+                        + "quarter of the trace's columns sit below the dashed line. The "
+                        + "engine has not stated its detector's floor yet, which an engine "
+                        + "that has not decided or one older than the field does not. This "
+                        + "is not the floor plate at the left, which is where the colour map "
+                        + "starts rather than where the noise is."
             }
         }
 

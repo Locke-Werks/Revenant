@@ -6,17 +6,27 @@
 // returns.
 //
 // ---------------------------------------------------------------------------
-// THE NOISE FLOOR IS MEASURED HERE, BECAUSE THE ENGINE DOES NOT PUBLISH ONE
+// THE NOISE FLOOR IS THE DETECTOR'S, AND THIS ESTIMATE IS THE FALLBACK
 // ---------------------------------------------------------------------------
 //
 // The detector keeps a noise floor, per fine bin, and uses it on every
-// decision: Detector::noise_floor() in core/detect/detector.h, and each
-// candidate's noise_floor_dbfs beside it. None of it crosses the wire.
-// rpc::Detection has no floor, rpc::DetectionList has the threshold and not
-// the floor it is measured from, and SourceStats carries only the front
-// end's floor lift, which is relative to a session low-water mark. So the
-// floor drawn here is this window's own estimate, and it says so on its
-// plate.
+// decision: Detector::noise_floor() in core/detect/detector.h. Since
+// 2026-09-23 DetectionList.noiseFloorDbfs carries the median of it across
+// the span, and the marker draws that. What is below is the estimate the
+// marker falls back to while the engine states none, which is before its
+// detector has decided and from an engine older than the field; the plate
+// says "est." when it is showing this one.
+//
+// THE TWO DIFFER BY THE DISPLAY'S REDUCTION. The detector's floor is per
+// bin. The trace draws the largest bin under each column, and the largest of
+// several noise bins stands above their typical level, so the detector's
+// floor sits under the band of noise the trace shows by roughly what the
+// auto-scale's reduction correction adds. That gap is the display's, and the
+// detector's figure is the one every detection's SNR is measured against.
+//
+// WHAT THIS HEADER USED TO SAY: "THE NOISE FLOOR IS MEASURED HERE, BECAUSE
+// THE ENGINE DOES NOT PUBLISH ONE", and that none of the detector's floor
+// crossed the wire. True until the field was added.
 //
 // IT IS NOT THE AUTO-SCALE FLOOR, which was the first thing to reach for.
 // SpectrumFrame::floor_db is the colour map's bottom end: the frame's fifth

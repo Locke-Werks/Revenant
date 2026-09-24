@@ -898,6 +898,13 @@ class EngineLink : public QObject {
     Q_PROPERTY(double detectorHoldSeconds READ detectorHoldSeconds
                    NOTIFY detectionsChanged)
 
+    // The detector's noise floor across the span in dBFS, as the latest
+    // detections poll stated it. Zero until the detector has decided, and
+    // zero from an engine older than the field; the spectrum's floor marker
+    // falls back to its own estimate while it is.
+    Q_PROPERTY(double detectorNoiseFloorDbfs READ detectorNoiseFloorDbfs
+                   NOTIFY detectionsChanged)
+
     // Why the engine refused something this link asked of the detector,
     // when the engine is there and refusing rather than gone. Empty when
     // nothing it has been asked for is outstanding, and empty while the
@@ -1964,6 +1971,7 @@ public:
     [[nodiscard]] double detectorHoldSeconds() const {
         return shown_.detector_hold_seconds;
     }
+    [[nodiscard]] double detectorNoiseFloorDbfs() const { return shown_.noise_floor_dbfs; }
     [[nodiscard]] QString detectionFault() const { return detection_fault_; }
 
     // What the items draw. Qt thread only, and valid until the next

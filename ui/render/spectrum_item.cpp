@@ -1454,12 +1454,15 @@ double SpectrumItem::labelStripBottom() const
 
 double SpectrumItem::noiseY() const
 {
-    return level_y(noise_.level_db, ends_.floor_db, ends_.ceiling_db, height());
+    return level_y(noiseDb(), ends_.floor_db, ends_.ceiling_db, height());
 }
 
 double SpectrumItem::noiseLowY() const
 {
-    return level_y(noise_.low_db, ends_.floor_db, ends_.ceiling_db, height());
+    // The bottom of the noise is only ever measured off the trace. With the
+    // engine's floor drawn and no estimate yet, the plate goes under the line.
+    const double low = noise_.valid ? std::min(noise_.low_db, noiseDb()) : noiseDb();
+    return level_y(low, ends_.floor_db, ends_.ceiling_db, height());
 }
 
 double SpectrumItem::peakY() const

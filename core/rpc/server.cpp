@@ -537,7 +537,27 @@ struct DetectionSnapshot {
     // display has to have and cannot derive: it is the detector's
     // configuration and the wire is the only place a client can read it.
     double hold_seconds = 0.0;
+
+    // The detector's noise floor across the span, the median over bins of
+    // the floor it estimated under this decision, in dBFS. Zero until it has
+    // decided. See DetectionList.noiseFloorDbfs.
+    double noise_floor_dbfs = 0.0;
 };
+
+// The median over bins of a per-bin linear floor, in dB. The median rather
+// than the mean because the floor under a strong station is pulled up by its
+// skirts over a few knots, and one such station should not move the figure
+// for a whole span of empty bins.
+[[nodiscard]] double span_noise_floor_db(std::span<const double> floor) {
+    if (floor.empty()) {
+        return 0.0;
+    }
+    std::vector<double> sorted(floor.begin(), floor.end());
+    const auto middle = sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2);
+    std::nth_element(sorted.begin(), middle, sorted.end());
+    const double linear = *middle;
+    return linear > 0.0 ? 10.0 * std::log10(linear) : 0.0;
+}
 
 // One subscriber. Touched only on the event loop thread, so none of it is
 // atomic and none of it is locked.
@@ -2188,6 +2208,7 @@ public:
         out.setTotal(taken->total);
         out.setDetectionThresholdDb(taken->threshold_db);
         out.setDetectorHoldSeconds(taken->hold_seconds);
+        out.setNoiseFloorDbfs(taken->noise_floor_dbfs);
         return kj::READY_NOW;
     }
 
@@ -3088,6 +3109,7 @@ Expected<DetectionSnapshot> ServerImpl::detections(double min_confidence, double
     out.total = seen->all.total;
     out.threshold_db = seen->all.threshold_db;
     out.hold_seconds = seen->all.hold_seconds;
+    out.noise_floor_dbfs = seen->all.noise_floor_dbfs;
 
     // Filtered here rather than on the client so that a busy band does not
     // put five hundred rows on the wire for a display that asked for the
@@ -3978,6 +4000,9 @@ void ServerImpl::publish_detections_locked() {
         next->all.total = static_cast<std::uint32_t>(next->all.tracks.size());
         next->all.threshold_db = detector_->config().detection_threshold_db;
         next->all.hold_seconds = detector_->config().bootstrap_hold_seconds;
+        if (next->all.decisions > 0) {
+            next->all.noise_floor_dbfs = span_noise_floor_db(detector_->noise_floor());
+        }
         next->front_end = front_end_.observation();
     }
     next->fault = detector_fault_;

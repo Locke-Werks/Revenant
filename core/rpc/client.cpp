@@ -665,6 +665,7 @@ void write_vrx_params(schema::VrxParams::Builder out, const VrxParams& in) {
     out.total = in.getTotal();
     out.detection_threshold_db = in.getDetectionThresholdDb();
     out.detector_hold_seconds = in.getDetectorHoldSeconds();
+    out.noise_floor_dbfs = in.getNoiseFloorDbfs();
     return out;
 }
 

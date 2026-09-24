@@ -1144,6 +1144,46 @@ TEST_CASE("the detector's hold crosses the wire and bounds what the detector doe
     REQUIRE(stopped.has_value());
 }
 
+TEST_CASE("the detector's noise floor crosses the wire once it has decided",
+          "[gpu][rpc][detect]") {
+    REVENANT_NEEDS_GPU();
+    INFO("running on " << test::shared_context_description());
+
+    // DetectionList::noiseFloorDbfs is what the client's floor marker draws,
+    // so a display shows the level every detection's SNR is measured
+    // against rather than an estimate of its own. Zero is "not stated", and
+    // the call that builds the detector has nothing to state.
+    Harness harness;
+    bring_up(harness, detecting_options());
+
+    auto first = harness.client().detections(0.0, 0.0);
+    INFO(test::message_of(first));
+    REQUIRE(first.has_value());
+    CHECK(first->decisions == 0);
+    CHECK(first->noise_floor_dbfs == 0.0);
+
+    const auto started = harness.start_engine();
+    INFO(test::message_of(started));
+    REQUIRE(started.has_value());
+
+    const rpc::DetectionList live = wait_for_detections(harness.client(), 8, 20000);
+    const rpc::DetectionList later = wait_for_detections(harness.client(), 16, 20000);
+    INFO(std::format("floor {:.2f} dBFS at {} decisions, {:.2f} dBFS at {}",
+                     live.noise_floor_dbfs, live.decisions, later.noise_floor_dbfs,
+                     later.decisions));
+    REQUIRE(!live.detections.empty());
+
+    // A stated floor, well under full scale and over the spectrum's own
+    // floor constant, and steady from one decision to the next on a scene
+    // whose noise does not move: a server that wrote a constant, or one that
+    // took the mean over a span with strong emitters in it, fails one of
+    // these.
+    CHECK(std::isfinite(live.noise_floor_dbfs));
+    CHECK(live.noise_floor_dbfs < -20.0);
+    CHECK(live.noise_floor_dbfs > -200.0);
+    CHECK(std::abs(later.noise_floor_dbfs - live.noise_floor_dbfs) < 3.0);
+}
+
 TEST_CASE("the detector refuses the arguments that would fail silently",
           "[gpu][rpc][detect][m2]") {
     REVENANT_NEEDS_GPU();
