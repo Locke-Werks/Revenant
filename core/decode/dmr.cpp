@@ -504,8 +504,22 @@ Expected<DmrSyncScore> dmr_sync_score(ConstComplexSpan baseband, SampleRate rate
     }
     DmrSyncScore out = decoder->seen_;
     const double slot = static_cast<double>(kDmrSlotSymbols) * decoder->samples_per_symbol_;
-    out.hits = decoder->hits_.size();
-    for (const double hit : decoder->hits_) {
+
+    // One sync, one hit. The search records the sync it starts the slot grid
+    // on, and the grid's first read_slot lands on the same instant and records
+    // it again, so without this the grid count came out one high whenever the
+    // best sync was not the first, and identify's three-sync rule passed on
+    // two. Duplicates are hits within a symbol of each other.
+    std::vector<double> hits = decoder->hits_;
+    std::sort(hits.begin(), hits.end());
+    hits.erase(std::unique(hits.begin(), hits.end(),
+                           [&](double a, double b) {
+                               return b - a <= decoder->samples_per_symbol_;
+                           }),
+               hits.end());
+
+    out.hits = hits.size();
+    for (const double hit : hits) {
         const double distance = std::abs(hit - decoder->best_time_);
         const double phase = std::fmod(distance, slot);
         if (distance > decoder->samples_per_symbol_ &&

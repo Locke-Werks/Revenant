@@ -18,8 +18,10 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <format>
+#include <numbers>
 #include <print>
 #include <random>
 #include <string>
@@ -776,6 +778,57 @@ TEST_CASE("dmr_sync_score finds DMR and does not find noise", "[decode][dmr]") {
     INFO("noise: score " << none->score << ", hits " << none->hits << ", on the grid "
                          << none->hits_on_slot_grid);
     CHECK(none->hits_on_slot_grid == 0);
+}
+
+TEST_CASE("dmr_sync_score counts the sync that starts the slot grid once", "[decode][dmr]") {
+    // Three BS data syncs two slots apart in random 4FSK, the first one symbol
+    // off so it is not the best. The search starts the slot grid on the best
+    // sync and the grid's first read lands on it again; counted twice, the
+    // grid showed three syncs where two others are on it, which is identify's
+    // three-sync rule passing one short.
+    std::mt19937_64 rng(20260923);
+    std::uniform_int_distribution<int> dibit(0, 3);
+    constexpr int kSps = 10;
+    constexpr std::size_t kLead = 300;
+    constexpr std::size_t kSyncs = 3;
+
+    const std::size_t total = kLead + 8 * decode::kDmrSlotSymbols + 300;
+    std::vector<int> symbols(total);
+    for (auto& s : symbols) {
+        s = decode::kDmrDibitToSymbol[static_cast<std::size_t>(dibit(rng))];
+    }
+    const auto pattern = decode::dmr_sync_pattern(DmrSyncType::BsData);
+    for (std::size_t k = 0; k < kSyncs; ++k) {
+        const std::size_t centre =
+            kLead + 2 * k * decode::kDmrSlotSymbols + decode::kDmrCentreFirstSymbol;
+        for (std::size_t i = 0; i < decode::kDmrSyncSymbols; ++i) {
+            symbols[centre + i] = static_cast<int>(pattern[i]);
+        }
+    }
+    const std::size_t first = kLead + decode::kDmrCentreFirstSymbol;
+    for (std::size_t i = 0; i < decode::kDmrSyncSymbols; ++i) {
+        if (symbols[first + i] == 3) {
+            symbols[first + i] = 1;
+            break;
+        }
+    }
+
+    std::vector<dsp::Complex32> iq;
+    iq.reserve(total * kSps);
+    double phase = 0.0;
+    for (const int s : symbols) {
+        const double hz = s * decode::kDmrDeviationPerSymbolUnitHz;
+        for (int n = 0; n < kSps; ++n) {
+            phase += 2.0 * std::numbers::pi * hz / static_cast<double>(kRate);
+            iq.emplace_back(static_cast<float>(std::cos(phase)),
+                            static_cast<float>(std::sin(phase)));
+        }
+    }
+
+    auto score = decode::dmr_sync_score(dsp::ConstComplexSpan(iq), kRate);
+    REQUIRE(score.has_value());
+    INFO("hits " << score->hits << ", on the slot grid " << score->hits_on_slot_grid);
+    CHECK(score->hits_on_slot_grid == kSyncs - 1);
 }
 
 TEST_CASE("a minute of noise gives no DMR bursts", "[decode][dmr]") {
