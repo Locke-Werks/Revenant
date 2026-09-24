@@ -501,7 +501,7 @@ TEST_CASE("every mode has a default passband and SSB's is anchored on the carrie
         {engine::Demod::Raw, {-6'000, 6'000}},     {engine::Demod::Am, {-5'000, 5'000}},
         {engine::Demod::Nfm, {-8'000, 8'000}},     {engine::Demod::Wfm, {-100'000, 100'000}},
         {engine::Demod::Usb, {300, 2'700}},        {engine::Demod::Lsb, {-2'700, -300}},
-        {engine::Demod::Dsb, {-3'000, 3'000}},     {engine::Demod::Cw, {-250, 250}},
+        {engine::Demod::Dsb, {-3'000, 3'000}},     {engine::Demod::Cw, {-600, 600}},
     };
 
     for (const auto& want : expected) {

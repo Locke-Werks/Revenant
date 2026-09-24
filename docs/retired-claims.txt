@@ -2047,3 +2047,10 @@ instead: Measured in tests/characterise/test_wfm_window.cpp: a probe at a
     station's centre narrower than it reads PSK at 0.98 to 1.00 on 14 of 18
     windows. docs/detection.md, "WFM through a window narrower than the
     station", says what reaching WFM would take.
+
+phrase: 500 Hz about the carrier, which is the narrowest filter a general
+retired: 2026-09-23
+commit: "Widen the cw receiver's default filter to 600 Hz each side"
+instead: The cw default is -600 to +600 Hz, 100 to 1300 Hz of audio at the
+    700 Hz sidetone, so the CW decoder hears stations off zero beat.
+    core/dsp/vrx_reference.cpp, default_passband.

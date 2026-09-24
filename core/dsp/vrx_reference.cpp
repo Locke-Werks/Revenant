@@ -1237,11 +1237,20 @@ Passband default_passband(engine::Demod mode) {
         // Both sidebands of the same audio band.
         case engine::Demod::Dsb: return Passband{-3'000, 3'000};
 
-        // 500 Hz about the carrier, which is the narrowest filter a general
-        // coverage receiver ships and comfortably wider than a hand-sent
-        // 25 wpm keying envelope. The sidetone is a mix and not an edge, so
-        // it does not appear here.
-        case engine::Demod::Cw: return Passband{-250, 250};
+        // 1200 Hz about the carrier, which with the 700 Hz sidetone passes
+        // audio from 100 to 1300 Hz. Wide on purpose: the CW decoder finds
+        // every keyed tone in the audio and decodes each (core/decode/cw.h),
+        // and stations in a conversation are rarely on the same zero beat,
+        // so a narrow filter cut them off before the decoder could hear them.
+        // The owner widened it on 2026-09-23. An operator who wants the old
+        // 500 Hz for listening narrows it; the sidetone is a mix and not an
+        // edge, so it does not appear here.
+        //
+        // WHAT THIS USED TO BE: -250 to 250, "the narrowest filter a general
+        // coverage receiver ships". At that width a tone more than 250 Hz off
+        // zero beat never reached the decoder; docs/sensitivity.md has the
+        // measurement.
+        case engine::Demod::Cw: return Passband{-600, 600};
 
         // P25 Phase 1 FDMA occupies a 12.5 kHz channel. TIA-102.BAAA-A
         // clause 9.3 puts the transmit filter's stopband at 2880 Hz of

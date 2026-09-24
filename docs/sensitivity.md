@@ -296,8 +296,9 @@ a receiver first, and on the air the tone lands wherever the tuning put it.
 `bench cw-engine` measures that: a keyed carrier in a 96 kS/s file at 14 MHz,
 read by receivers tuned so the tone lands at 300 to 1200 Hz, and the `cw`
 adapter of `core/rpc/decoders.h` on each receiver's audio, exactly as a
-client's decode pane is fed. Four receivers: `cw` at its default +/-250 Hz
-filter and 700 Hz pitch, tuned off the carrier by the pitch less 700;
+client's decode pane is fed. Four receivers: `cw` at its then default
++/-250 Hz filter and 700 Hz pitch (widened to +/-600 Hz the same day, on
+these figures, so a default `cw` receiver now reads what `cw-wide` does), tuned off the carrier by the pitch less 700;
 `cw-wide`, the same with its filter pulled out to -500..+600 Hz; and `usb`
 and `lsb` at their default 300 to 2700 Hz, tuned the pitch below or above the
 carrier. Four transmissions of 40 random letters and figures a cell, at 12,
