@@ -102,10 +102,12 @@
 #include <variant>
 #include <vector>
 
+#include "core/decode/ais.h"
 #include "core/decode/aprs.h"
 #include "core/decode/ax25.h"
 #include "core/decode/cw.h"
 #include "core/decode/dmr.h"
+#include "core/decode/dsc.h"
 #include "core/decode/dstar.h"
 #include "core/decode/m17.h"
 #include "core/decode/navtex.h"
@@ -2044,6 +2046,536 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// AIS
+// ---------------------------------------------------------------------------
+//
+// Reads an nfm receiver's audio, core/decode/ais.h: the discriminator's
+// output, which the nfm kernel hands out with no de-emphasis and whose 8 kHz
+// either side holds the 9600 bit/s GMSK. One message per AIS message whose
+// FCS checked. The receiver is tuned to one channel, 161.975 or 162.025 MHz;
+// a station hearing both runs two.
+//
+// kind is "position_report" for Messages 1 to 3, "base_station" for 4,
+// "utc_response" for 11, "static_voyage" for 5, "class_b_position" for 18,
+// "class_b_extended" for 19, "aid_to_navigation" for 21, "static_data" for
+// 24, and "other" for any other message, or one shorter than its table,
+// which carries the first three fields and its octets and nothing parsed.
+//
+// Every message, ITU-R M.1371-5 Annex 8 and Annex 2 clause 3.3.7:
+//   message_id           int
+//   repeat               int
+//   mmsi                 int
+//   octets               bytes  the data portion as received, FCS removed
+//   began_sample         int    receiver-stream index of the first data bit
+// Where the message's table has them, and only when not "not available":
+//   latitude, longitude  real   degrees, north and east positive
+//   position_accuracy    flag
+//   raim                 flag
+//   sog_knots            real
+//   cog_degrees          real
+//   heading              int    degrees true
+//   navigational_status  int    Table 48, 0 to 15
+//   rate_of_turn         int    ROTAIS as sent, -128 to 127
+//   timestamp            int    UTC second of the report, 60 to 63 its
+//                               unavailable cases
+//   special_manoeuvre    int
+//   communication_state  int    the 19 bits, raw
+//   utc                  text   Message 4 and 11, "YYYY-MM-DDTHH:MM:SSZ" as
+//                               sent, fields out of range included
+//   epfd                 int    type of position fixing device
+//   name, callsign       text   trailing "@" and spaces removed
+//   destination          text
+//   ship_type            int
+//   to_bow, to_stern, to_port, to_starboard  int  metres, Figure 41
+//   ais_version          int
+//   imo_number           int
+//   eta                  text   Message 5, "MM-DD HH:MM" as sent
+//   draught_m            real
+//   dte_not_available    flag
+//   carrier_sense, display, dsc, whole_band, message_22  flag  Message 18
+//   assigned_mode        flag
+//   aton_type            int
+//   off_position         flag
+//   aton_status          int
+//   virtual_aton         flag
+//   part_number          int    Message 24
+//   vendor               text   Message 24B, Table 79A's manufacturer
+//   unit_model, unit_serial  int
+class AisChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "ais";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::AisConfig config;
+        config.rate = build.rate;
+        auto built = decode::AisDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the ais decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new AisChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        messages_.clear();
+        decoder_.process(chunk.samples, messages_);
+        for (const decode::AisMessage& m : messages_) {
+            out.push_back(describe(m, chunk));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    AisChunkDecoder(dsp::SampleRate rate, decode::AisDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] static std::string_view kind_of(const decode::AisMessage& m) {
+        if (!m.parsed) {
+            return "other";
+        }
+        switch (m.message_id) {
+            case 1:
+            case 2:
+            case 3: return "position_report";
+            case 4: return "base_station";
+            case 11: return "utc_response";
+            case 5: return "static_voyage";
+            case 18: return "class_b_position";
+            case 19: return "class_b_extended";
+            case 21: return "aid_to_navigation";
+            case 24: return "static_data";
+            default: return "other";
+        }
+    }
+
+    // Table 48's navigational status, shortened.
+    [[nodiscard]] static std::string_view status_text(std::uint8_t status) {
+        switch (status) {
+            case 0: return "under way using engine";
+            case 1: return "at anchor";
+            case 2: return "not under command";
+            case 3: return "restricted manoeuvrability";
+            case 4: return "constrained by draught";
+            case 5: return "moored";
+            case 6: return "aground";
+            case 7: return "engaged in fishing";
+            case 8: return "under way sailing";
+            case 11: return "towing astern";
+            case 12: return "pushing ahead or towing alongside";
+            case 14: return "AIS-SART, MOB or EPIRB active";
+            default: return {};
+        }
+    }
+
+    [[nodiscard]] DecodedMessage describe(const decode::AisMessage& m,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const std::string_view kind = kind_of(m);
+        DecodedMessage message = stamped(kName, std::string(kind), chunk);
+        message.fields.push_back(integer_field("message_id", m.message_id));
+        message.fields.push_back(integer_field("repeat", m.repeat));
+        message.fields.push_back(integer_field("mmsi", m.mmsi));
+        message.fields.push_back(bytes_field("octets", m.octets));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(base_.at(m.first_sample))));
+
+        std::string line = std::format("MMSI {} message {}", m.mmsi, m.message_id);
+        if (kind == "other") {
+            message.text = line + std::format(", {} octets not parsed", m.octets.size());
+            return message;
+        }
+        if (m.name) {
+            message.fields.push_back(text_field("name", *m.name));
+        }
+        if (m.callsign) {
+            message.fields.push_back(text_field("callsign", *m.callsign));
+        }
+        if (m.name && !m.name->empty()) {
+            line += std::format(" {}", *m.name);
+        }
+        if (m.position) {
+            message.fields.push_back(real_field("latitude", m.position->latitude));
+            message.fields.push_back(real_field("longitude", m.position->longitude));
+            line += std::format(" {:.4f}{} {:.4f}{}", std::abs(m.position->latitude),
+                                m.position->latitude >= 0.0 ? 'N' : 'S',
+                                std::abs(m.position->longitude),
+                                m.position->longitude >= 0.0 ? 'E' : 'W');
+        }
+        if (m.position || m.utc) {
+            message.fields.push_back(flag_field("position_accuracy", m.position_accuracy));
+            message.fields.push_back(flag_field("raim", m.raim));
+        }
+        if (m.sog_tenths) {
+            const double knots = *m.sog_tenths / 10.0;
+            message.fields.push_back(real_field("sog_knots", knots));
+            line += std::format(" {:.1f} kn", knots);
+        }
+        if (m.cog_tenths) {
+            const double degrees = *m.cog_tenths / 10.0;
+            message.fields.push_back(real_field("cog_degrees", degrees));
+            line += std::format(" COG {:.1f}", degrees);
+        }
+        if (m.heading) {
+            message.fields.push_back(integer_field("heading", *m.heading));
+            line += std::format(" HDG {}", *m.heading);
+        }
+        if (m.navigational_status) {
+            message.fields.push_back(integer_field("navigational_status", *m.navigational_status));
+            const std::string_view status = status_text(*m.navigational_status);
+            if (!status.empty()) {
+                line += std::format(", {}", status);
+            }
+        }
+        if (m.rate_of_turn) {
+            message.fields.push_back(integer_field("rate_of_turn", *m.rate_of_turn));
+        }
+        if (m.timestamp) {
+            message.fields.push_back(integer_field("timestamp", *m.timestamp));
+        }
+        if (m.special_manoeuvre) {
+            message.fields.push_back(integer_field("special_manoeuvre", *m.special_manoeuvre));
+        }
+        if (m.communication_state) {
+            message.fields.push_back(integer_field("communication_state", *m.communication_state));
+        }
+        if (m.utc) {
+            const std::string utc = std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", m.utc->year,
+                                                m.utc->month, m.utc->day, m.utc->hour,
+                                                m.utc->minute, m.utc->second);
+            message.fields.push_back(text_field("utc", utc));
+            line += std::format(" {}", utc);
+        }
+        if (m.epfd) {
+            message.fields.push_back(integer_field("epfd", *m.epfd));
+        }
+        if (m.ship_type) {
+            message.fields.push_back(integer_field("ship_type", *m.ship_type));
+        }
+        if (m.dimensions) {
+            message.fields.push_back(integer_field("to_bow", m.dimensions->to_bow));
+            message.fields.push_back(integer_field("to_stern", m.dimensions->to_stern));
+            message.fields.push_back(integer_field("to_port", m.dimensions->to_port));
+            message.fields.push_back(integer_field("to_starboard", m.dimensions->to_starboard));
+        }
+        if (m.ais_version) {
+            message.fields.push_back(integer_field("ais_version", *m.ais_version));
+        }
+        if (m.imo_number) {
+            message.fields.push_back(integer_field("imo_number", *m.imo_number));
+        }
+        if (m.eta) {
+            message.fields.push_back(text_field(
+                "eta", std::format("{:02}-{:02} {:02}:{:02}", m.eta->month, m.eta->day,
+                                   m.eta->hour, m.eta->minute)));
+        }
+        if (m.draught_tenths) {
+            message.fields.push_back(real_field("draught_m", *m.draught_tenths / 10.0));
+        }
+        if (m.destination) {
+            message.fields.push_back(text_field("destination", *m.destination));
+            if (!m.destination->empty()) {
+                line += std::format(" to {}", *m.destination);
+            }
+        }
+        if (m.callsign && !m.callsign->empty()) {
+            line += std::format(" ({})", *m.callsign);
+        }
+        if (m.dte_not_available) {
+            message.fields.push_back(flag_field("dte_not_available", *m.dte_not_available));
+        }
+        if (m.class_b) {
+            message.fields.push_back(flag_field("carrier_sense", m.class_b->carrier_sense));
+            message.fields.push_back(flag_field("display", m.class_b->display));
+            message.fields.push_back(flag_field("dsc", m.class_b->dsc));
+            message.fields.push_back(flag_field("whole_band", m.class_b->whole_band));
+            message.fields.push_back(flag_field("message_22", m.class_b->message_22));
+        }
+        if (m.assigned_mode) {
+            message.fields.push_back(flag_field("assigned_mode", *m.assigned_mode));
+        }
+        if (m.aton_type) {
+            message.fields.push_back(integer_field("aton_type", *m.aton_type));
+        }
+        if (m.off_position) {
+            message.fields.push_back(flag_field("off_position", *m.off_position));
+        }
+        if (m.aton_status) {
+            message.fields.push_back(integer_field("aton_status", *m.aton_status));
+        }
+        if (m.virtual_aton) {
+            message.fields.push_back(flag_field("virtual_aton", *m.virtual_aton));
+            if (*m.virtual_aton) {
+                line += ", virtual";
+            }
+        }
+        if (m.part_number) {
+            message.fields.push_back(integer_field("part_number", *m.part_number));
+        }
+        if (m.vendor) {
+            message.fields.push_back(text_field("vendor", *m.vendor));
+        }
+        if (m.unit_model) {
+            message.fields.push_back(integer_field("unit_model", *m.unit_model));
+        }
+        if (m.unit_serial) {
+            message.fields.push_back(integer_field("unit_serial", *m.unit_serial));
+        }
+        message.text = std::move(line);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::AisDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::AisMessage> messages_;
+};
+
+// ---------------------------------------------------------------------------
+// DSC
+// ---------------------------------------------------------------------------
+//
+// Reads an nfm receiver's audio on VHF channel 70, core/decode/dsc.h: the
+// 1300 and 2100 Hz tones of ITU-R M.493-15 Annex 1 clause 1.3.2. One message
+// per call whose error-check character agreed.
+//
+// A DISTRESS ALERT IS REPORTED AND NOTHING ELSE. Nothing on this seam
+// acknowledges, relays or sounds an alarm, and a decoded alert is not a
+// substitute for a GMDSS watch.
+//
+// kind is "distress_alert" for format specifier 112; for a call of category
+// distress, "distress_acknowledgement" when its telecommand is 110 and
+// "distress_relay" when it is 112; otherwise "all_ships", "individual",
+// "group", "geographic_area" or "automatic" by format specifier, clause 4.1.
+//
+// Every message:
+//   format               int    clause 4.1's symbol
+//   self_id              int    the caller's maritime identity, clause 7.1
+//   eos                  int    117, 122 or 127, clause 9
+//   symbols              bytes  the information characters, both format
+//                               specifiers to the end of sequence
+//   ecc                  int    the error-check character, which agreed
+//   from_rx              int    characters taken from their RX copy
+//   disagreements        int    characters whose copies disagreed and which
+//                               the error-check character settled
+//   began_sample         int    receiver-stream index of the phasing's start
+// Where the format has them:
+//   address              int    the called identity, clause 5.2
+//   area                 text   a geographic area's ten digits, clause 5.3
+//   category             int    100, 108, 110 or 112, clause 6
+//   telecommand1, telecommand2  int  Table A1-3
+//   distress_id          int    the station in distress, clause 8.2.1
+//   nature_of_distress   int    100 to 112, clause 8.1.1
+//   latitude, longitude  real   clause 8.1.2, degrees; absent when sent as
+//                               ten nines
+//   utc                  text   clause 8.1.3, "HH:MM"; absent for 8888
+//   subsequent_communications  int  clause 8.1.4
+//   channel              int    a VHF working channel, Table A1-5
+//   frequency_hz         int    an MF or HF frequency, Table A1-5
+//   message_symbols      bytes  Message 2 and 3 as sent, for what is not
+//                               a channel or a frequency
+class DscChunkDecoder final : public ChunkDecoder {
+public:
+    static constexpr std::string_view kName = "dsc";
+
+    [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
+        decode::DscConfig config;
+        config.rate = build.rate;
+        auto built = decode::DscDecoder::create(config);
+        if (!built) {
+            return std::unexpected(with_context(built.error(), "building the dsc decoder"));
+        }
+        return std::unique_ptr<ChunkDecoder>(new DscChunkDecoder(build.rate, std::move(*built)));
+    }
+
+    [[nodiscard]] Status consume(const DecoderChunk& chunk,
+                                 std::vector<DecodedMessage>& out) override {
+        if (auto shape = decoders_detail::require_audio(kName, chunk, rate_); !shape) {
+            return shape;
+        }
+        base_.observe(chunk);
+        calls_.clear();
+        decoder_.process(chunk.samples, calls_);
+        for (const decode::DscCall& c : calls_) {
+            out.push_back(describe(c, chunk));
+        }
+        return {};
+    }
+
+    void reset() override {
+        decoder_.reset();
+        base_.reset();
+    }
+
+private:
+    DscChunkDecoder(dsp::SampleRate rate, decode::DscDecoder decoder)
+        : rate_(rate), decoder_(std::move(decoder)) {}
+
+    [[nodiscard]] static std::string_view kind_of(const decode::DscCall& c) {
+        if (c.format == decode::kDscFormatDistress) {
+            return "distress_alert";
+        }
+        if (c.category == decode::kDscCategoryDistress) {
+            if (c.telecommand1 == decode::kDscTelecommandDistressAcknowledgement) {
+                return "distress_acknowledgement";
+            }
+            return "distress_relay";
+        }
+        switch (c.format) {
+            case decode::kDscFormatAllShips: return "all_ships";
+            case decode::kDscFormatIndividual: return "individual";
+            case decode::kDscFormatGroup: return "group";
+            case decode::kDscFormatGeographicArea: return "geographic_area";
+            case decode::kDscFormatAutomatic: return "automatic";
+            default: return "individual";
+        }
+    }
+
+    // Table A1-3, the nature of distress column and clause 8.1.1.
+    [[nodiscard]] static std::string_view nature_text(std::uint8_t nature) {
+        switch (nature) {
+            case 100: return "fire, explosion";
+            case 101: return "flooding";
+            case 102: return "collision";
+            case 103: return "grounding";
+            case 104: return "listing, in danger of capsizing";
+            case 105: return "sinking";
+            case 106: return "disabled and adrift";
+            case 107: return "undesignated distress";
+            case 108: return "abandoning ship";
+            case 109: return "piracy or armed robbery attack";
+            case 110: return "man overboard";
+            case 112: return "EPIRB emission";
+            default: return {};
+        }
+    }
+
+    // Table A1-3, the category column.
+    [[nodiscard]] static std::string_view category_text(std::uint8_t category) {
+        switch (category) {
+            case decode::kDscCategoryRoutine: return "routine";
+            case decode::kDscCategorySafety: return "safety";
+            case decode::kDscCategoryUrgency: return "urgency";
+            case decode::kDscCategoryDistress: return "distress";
+            default: return {};
+        }
+    }
+
+    [[nodiscard]] DecodedMessage describe(const decode::DscCall& c,
+                                          const DecoderChunk& chunk) const {
+        using namespace decoders_detail;
+        const std::string_view kind = kind_of(c);
+        DecodedMessage message = stamped(kName, std::string(kind), chunk);
+        message.fields.push_back(integer_field("format", c.format));
+        message.fields.push_back(integer_field("self_id", static_cast<std::int64_t>(c.self_id)));
+        message.fields.push_back(integer_field("eos", c.eos));
+        message.fields.push_back(bytes_field("symbols", c.symbols));
+        message.fields.push_back(integer_field("ecc", c.ecc));
+        message.fields.push_back(integer_field("from_rx", c.from_rx));
+        message.fields.push_back(integer_field("disagreements", c.disagreements));
+        message.fields.push_back(
+            integer_field("began_sample", static_cast<std::int64_t>(base_.at(c.first_sample))));
+
+        std::string line;
+        if (kind == "distress_alert") {
+            line = std::format("DISTRESS from {:09}", c.self_id);
+        } else {
+            std::string what(kind);
+            std::ranges::replace(what, '_', ' ');
+            line = std::format("{} from {:09}", what, c.self_id);
+        }
+        if (c.address) {
+            message.fields.push_back(integer_field("address", static_cast<std::int64_t>(*c.address)));
+            line += std::format(" to {:09}", *c.address);
+        }
+        if (c.area_digits) {
+            message.fields.push_back(text_field("area", *c.area_digits));
+            line += std::format(" to area {}", *c.area_digits);
+        }
+        if (c.category) {
+            message.fields.push_back(integer_field("category", *c.category));
+            const std::string_view category = category_text(*c.category);
+            if (!category.empty()) {
+                line += std::format(", {}", category);
+            }
+        }
+        if (c.telecommand1) {
+            message.fields.push_back(integer_field("telecommand1", *c.telecommand1));
+        }
+        if (c.telecommand2) {
+            message.fields.push_back(integer_field("telecommand2", *c.telecommand2));
+        }
+        if (c.distress_id) {
+            message.fields.push_back(
+                integer_field("distress_id", static_cast<std::int64_t>(*c.distress_id)));
+            line += std::format(", in distress {:09}", *c.distress_id);
+        }
+        if (c.nature_of_distress) {
+            message.fields.push_back(integer_field("nature_of_distress", *c.nature_of_distress));
+            const std::string_view nature = nature_text(*c.nature_of_distress);
+            line += nature.empty() ? std::format(", nature {}", *c.nature_of_distress)
+                                   : std::format(", {}", nature);
+        }
+        if (c.distress_position) {
+            message.fields.push_back(real_field("latitude", c.distress_position->latitude));
+            message.fields.push_back(real_field("longitude", c.distress_position->longitude));
+            line += std::format(" {:.4f}{} {:.4f}{}", std::abs(c.distress_position->latitude),
+                                c.distress_position->latitude >= 0.0 ? 'N' : 'S',
+                                std::abs(c.distress_position->longitude),
+                                c.distress_position->longitude >= 0.0 ? 'E' : 'W');
+        }
+        if (c.utc_hhmm) {
+            const std::string utc = std::format("{:02}:{:02}", *c.utc_hhmm / 100, *c.utc_hhmm % 100);
+            message.fields.push_back(text_field("utc", utc));
+            line += std::format(" at {} UTC", utc);
+        }
+        if (c.subsequent_communications) {
+            message.fields.push_back(
+                integer_field("subsequent_communications", *c.subsequent_communications));
+        }
+        for (const decode::DscFrequency& f : c.frequencies) {
+            switch (f.kind) {
+                case decode::DscFrequency::Kind::VhfChannel:
+                    message.fields.push_back(
+                        integer_field("channel", static_cast<std::int64_t>(f.value)));
+                    line += std::format(", channel {}", f.value);
+                    break;
+                case decode::DscFrequency::Kind::Frequency:
+                    message.fields.push_back(
+                        integer_field("frequency_hz", static_cast<std::int64_t>(f.value)));
+                    line += std::format(", {:.1f} kHz", static_cast<double>(f.value) / 1000.0);
+                    break;
+                case decode::DscFrequency::Kind::HfChannel:
+                case decode::DscFrequency::Kind::Other: break;
+            }
+        }
+        if (!c.message_symbols.empty()) {
+            message.fields.push_back(bytes_field("message_symbols", c.message_symbols));
+        }
+        if (c.eos == decode::kDscEosAcknowledgeRq) {
+            line += ", acknowledgement requested";
+        } else if (c.eos == decode::kDscEosAcknowledgeBq) {
+            line += ", acknowledgement";
+        }
+        message.text = std::move(line);
+        return message;
+    }
+
+    dsp::SampleRate rate_;
+    decode::DscDecoder decoder_;
+    decoders_detail::StreamBase base_;
+    std::vector<decode::DscCall> calls_;
+};
+
+// ---------------------------------------------------------------------------
 // SITOR-B
 // ---------------------------------------------------------------------------
 //
@@ -3030,6 +3562,17 @@ private:
          "baseband of a p25p1 receiver, 48000 S/s in a 12.5 kHz channel, or a raw tap up to "
          "192000 S/s",
          &M17ChunkDecoder::make, kM17Modes},
+        {AisChunkDecoder::kName, DecoderInput::RealAudio,
+         "AIS, ITU-R M.1371-5, 9600 bit/s GMSK on 161.975 or 162.025 MHz: every message whose "
+         "FCS checks, with Messages 1 to 5, 11, 18, 19, 21 and 24 parsed: MMSI, position, speed "
+         "and course, heading, name, call sign, destination. Reads an nfm receiver's audio",
+         &AisChunkDecoder::make, kFmModes},
+        {DscChunkDecoder::kName, DecoderInput::RealAudio,
+         "DSC on VHF channel 70, ITU-R M.493-15, 1200 baud on 1300 and 2100 Hz tones: distress "
+         "alerts, relays and acknowledgements, all ships, individual and group calls with their "
+         "identities, category, nature of distress, position and working channel. Reads an nfm "
+         "receiver's audio",
+         &DscChunkDecoder::make, kFmModes},
     };
     return kRegistry;
 }

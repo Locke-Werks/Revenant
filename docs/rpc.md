@@ -811,11 +811,13 @@ what that bought.
 
 `Session::decoders` lists what the engine can attach and
 `Session::subscribeDecoded(vrx, decoder, receiver)` attaches one to a receiver
-and streams what it recovers as `DecodedMessage`s. Fourteen decoders report
-through it as of 2026-09-23, each one adapter and one registry row in
+and streams what it recovers as `DecodedMessage`s. Sixteen decoders report
+through it by the end of 2026-09-23, each one adapter and one registry row in
 `core/rpc/decoders.h`, with the keys it emits listed above its adapter.
 WHAT THE SENTENCE BEFORE THAT USED TO SAY: "Thirteen decoders report through
-it as of 2026-09-22"; `dmr` is the fourteenth.
+it as of 2026-09-22"; `dmr` is the fourteenth. And after that: "Fourteen
+decoders report through it as of 2026-09-23"; `ais` and `dsc` are the
+fifteenth and sixteenth, the same day.
 
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
@@ -831,6 +833,8 @@ it as of 2026-09-22"; `dmr` is the fourteenth.
 | `cw` | Lines of Morse text with the dots and dashes, character and overall speed | Audio of a `cw` receiver at its default 700 Hz pitch, or a `usb` or `lsb` one with the tone at 700 Hz |
 | `ax25` | Every AX.25 frame whose FCS checked, with its APRS position, Mic-E, status or message parsed when it is APRS | Audio of an `nfm` receiver |
 | `pocsag` | Pages at 512, 1200 and 2400 bit/s at once: address, function, numeric or alphanumeric message | Audio of an `nfm` receiver |
+| `ais` | Every AIS message whose FCS checked, with Messages 1 to 5, 11, 18, 19, 21 and 24 parsed: MMSI, position, speed and course, heading, status, name, call sign, destination, dimensions | Audio of an `nfm` receiver on 161.975 or 162.025 MHz, at least 28800 S/s |
+| `dsc` | Each VHF DSC call whose error-check character agreed: format, category, both identities, telecommands, nature of distress, position and time, working channel | Audio of an `nfm` receiver on channel 70, 156.525 MHz |
 
 WHAT THIS PARAGRAPH USED TO SAY: that RTTY, APRS, POCSAG, PSK31, CW and M17
 would each reach the wire "as one adapter and one registry row in
@@ -986,6 +990,17 @@ degrades:
 | `ax25` | 16 | two of four frames; none at 14, all four at 20. Noise ahead of the discriminator, which has a threshold, unlike the library test's noise on the audio |
 | `pocsag` | 8 | four of four pages, one with an uncorrectable codeword; all intact at 10 |
 | `m17` | 15.6 | the link setup, stream end and end of transmission; 15.6 dB is `test_m17.cpp`'s 10 dB in the 9 kHz channel |
+| `ais` | 22 | three of three messages, a Class A position report, its static and voyage data and a Class B report |
+| `dsc` | 16 | three of three calls, a distress alert, an individual call on channel 72 and an all ships safety call |
+
+AIS and DSC joined the table on 2026-09-23, in the same file's last two cases,
+each a transmitter from `core/dsp/synth` put on the carrier as the radio sends
+it: AIS as GMSK bursts, DSC as its tones phase modulated at index 2.0. At
+30 dB every field the case checks crossed: the position report's MMSI,
+latitude, longitude, speed and heading, the static report's name, call sign,
+destination and dimensions, the Class B report's MMSI; the distress alert's
+nature, position and time, the individual call's address, working channel and
+acknowledgement request, and the safety call's category and channel.
 
 Two properties of the libraries, found through the receiver and not fixed
 here because `core/decode` is not this seam's to change. POCSAG at 6 and 4 dB

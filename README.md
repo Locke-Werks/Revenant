@@ -141,11 +141,11 @@ runs both trees. The counts move with nearly every commit, so they are dated
 rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
 engine tree and 334 in `ui/`.
 
-Fourteen decoders run on a live receiver, in the engine, from
+Sixteen decoders run on a live receiver, in the engine, from
 `revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
 P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband, and RTTY, SITOR-B,
-NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, and POCSAG on receiver
-audio. RDS runs beside them on every wfm receiver that asks, and now reports
+NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, POCSAG, AIS and VHF DSC on
+receiver audio. RDS runs beside them on every wfm receiver that asks, and now reports
 programme type names, TMC and emergency warning groups as well as the text.
 Each is written from its specification and checked by a round trip through a
 transmitter written from the same clauses; `docs/modes.md` says where each one
@@ -157,7 +157,8 @@ and through an encrypted one, and the client plays it in the receiver's mix.
 D-STAR, TETRA and DMR voice is not decoded. WHAT THIS PARAGRAPH USED TO SAY:
 "P25's IMBE voice decodes to audio in `core/decode` and is not served", and
 "Thirteen decoders run on a live receiver"; DMR's framing decoder made
-fourteen on 2026-09-23.
+fourteen on 2026-09-23. And then "Fourteen decoders run on a live receiver";
+AIS and VHF DSC made sixteen the same day.
 
 The client has had its first design pass. The main window is the span, a
 frequency ruler between the spectrum and the waterfall, and a top bar with a

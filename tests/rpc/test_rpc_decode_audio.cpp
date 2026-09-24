@@ -55,13 +55,17 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/decode/ais.h"
 #include "core/decode/ax25.h"
 #include "core/decode/cw.h"
+#include "core/decode/dsc.h"
 #include "core/decode/m17.h"
 #include "core/decode/pocsag.h"
 #include "core/decode/psk31.h"
+#include "core/dsp/synth/ais_mod.h"
 #include "core/dsp/synth/channel.h"
 #include "core/dsp/synth/cw_mod.h"
+#include "core/dsp/synth/dsc_mod.h"
 #include "core/dsp/synth/fsk_mod.h"
 #include "core/dsp/synth/m17_mod.h"
 #include "core/dsp/synth/modulators.h"
@@ -955,7 +959,7 @@ TEST_CASE("the audio decoders are listed with the input they read", "[gpu][rpc][
         }
     }
     CHECK(audio == std::set<std::string>{"rtty", "ax25", "pocsag", "sitor_b", "navtex", "psk31",
-                                         "psk63", "qpsk31", "cw"});
+                                         "psk63", "qpsk31", "cw", "ais", "dsc"});
 }
 
 TEST_CASE("an audio decoder on the wrong receiver is refused naming the mode it needs",
@@ -1780,3 +1784,214 @@ TEST_CASE("the audio decoder captures for revenant-cli", "[.][write-captures]") 
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// AIS and DSC
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A Class A position report, its static and voyage data, and a Class B
+// position report, from core/dsp/synth/ais_mod.h.
+std::vector<decode::AisMessage> ais_messages() {
+    std::vector<decode::AisMessage> all;
+    decode::AisMessage a;
+    a.message_id = 1;
+    a.mmsi = 366123456;
+    a.navigational_status = 0;
+    a.sog_tenths = 125;
+    a.position = decode::AisPosition{-122.4194, 37.7749};
+    a.cog_tenths = 2705;
+    a.heading = 271;
+    a.timestamp = 17;
+    all.push_back(a);
+    decode::AisMessage b;
+    b.message_id = 5;
+    b.mmsi = 366123456;
+    b.callsign = "WDC1234";
+    b.name = "REVENANT TEST";
+    b.ship_type = 52;
+    b.dimensions = decode::AisDimensions{20, 10, 4, 4};
+    b.destination = "OAKLAND";
+    all.push_back(b);
+    decode::AisMessage c;
+    c.message_id = 18;
+    c.mmsi = 338000001;
+    c.sog_tenths = 42;
+    c.position = decode::AisPosition{-122.35, 37.81};
+    c.cog_tenths = 900;
+    c.class_b = decode::AisMessage::ClassBFlags{true, false, true, true, false};
+    all.push_back(c);
+    return all;
+}
+
+// The GMSK bursts on the carrier, with a short gap between them so the
+// transmission's mean power, which add_noise references, is close to a
+// burst's.
+[[nodiscard]] Expected<Capture> ais_capture(double snr_2500_db) {
+    siggen::AisModConfig mod;
+    mod.rate = kFileRate;
+    mod.lead_bits = 16;
+    mod.gap_bits = 16;
+    mod.tail_bits = 16;
+    auto rf = siggen::ais_render(mod, ais_messages());
+    if (!rf) {
+        return std::unexpected(rf.error());
+    }
+    std::vector<dsp::Complex32> signal = on_the_carrier(*rf);
+    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"ais_nfm", std::move(signal), rpc::Demod::Nfm, kVhfCentre};
+}
+
+// A distress alert, a routine individual call on channel 72 and an all ships
+// safety call on channel 16, from core/dsp/synth/dsc_mod.h.
+std::vector<decode::DscCall> dsc_calls() {
+    std::vector<decode::DscCall> all;
+    decode::DscCall alert;
+    alert.format = decode::kDscFormatDistress;
+    alert.self_id = 366123456;
+    alert.nature_of_distress = 101;
+    alert.distress_position = decode::DscPosition{37.0 + 48.0 / 60.0, -(122.0 + 25.0 / 60.0)};
+    alert.utc_hhmm = 1745;
+    alert.subsequent_communications = 100;
+    all.push_back(alert);
+    decode::DscCall individual;
+    individual.format = decode::kDscFormatIndividual;
+    individual.address = 211456780;
+    individual.category = decode::kDscCategoryRoutine;
+    individual.self_id = 211987650;
+    individual.telecommand1 = 100;
+    individual.telecommand2 = decode::kDscNoInformation;
+    individual.frequencies = {decode::DscFrequency{decode::DscFrequency::Kind::VhfChannel, 72, {}}};
+    individual.eos = decode::kDscEosAcknowledgeRq;
+    all.push_back(individual);
+    decode::DscCall safety;
+    safety.format = decode::kDscFormatAllShips;
+    safety.category = decode::kDscCategorySafety;
+    safety.self_id = 3669991;
+    safety.telecommand1 = 100;
+    safety.telecommand2 = decode::kDscNoInformation;
+    safety.frequencies = {decode::DscFrequency{decode::DscFrequency::Kind::VhfChannel, 16, {}}};
+    all.push_back(safety);
+    return all;
+}
+
+// M.493-15 Annex 1 clause 1.3.2's phase modulation at index 2.0, one call
+// after another.
+[[nodiscard]] Expected<Capture> dsc_capture(double snr_2500_db) {
+    std::vector<std::vector<std::uint8_t>> bits;
+    for (const decode::DscCall& call : dsc_calls()) {
+        auto information = siggen::dsc_encode(call);
+        if (!information) {
+            return std::unexpected(information.error());
+        }
+        bits.push_back(siggen::dsc_bits(*information));
+    }
+    siggen::DscModConfig mod;
+    mod.rate = kFileRate;
+    auto rf = siggen::dsc_render_baseband(mod, bits);
+    if (!rf) {
+        return std::unexpected(rf.error());
+    }
+    std::vector<dsp::Complex32> signal = on_the_carrier(*rf);
+    if (auto noisy = add_noise(signal, snr_2500_db); !noisy) {
+        return std::unexpected(noisy.error());
+    }
+    return Capture{"dsc_nfm", std::move(signal), rpc::Demod::Nfm, kVhfCentre};
+}
+
+}  // namespace
+
+TEST_CASE("AIS messages cross the wire from an nfm receiver", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = ais_capture(kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, "ais");
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    check_common(run, "ais");
+    REQUIRE(run.messages.size() == 3);
+
+    const rpc::DecodedMessage& a = run.messages[0];
+    CHECK(a.kind == "position_report");
+    CHECK(integer_of(a, "mmsi") == 366123456);
+    CHECK(std::abs(real_of(a, "latitude") - 37.7749) < 1e-5);
+    CHECK(std::abs(real_of(a, "longitude") - -122.4194) < 1e-5);
+    CHECK(std::abs(real_of(a, "sog_knots") - 12.5) < 1e-9);
+    CHECK(integer_of(a, "heading") == 271);
+
+    const rpc::DecodedMessage& b = run.messages[1];
+    CHECK(b.kind == "static_voyage");
+    CHECK(text_of(b, "name") == "REVENANT TEST");
+    CHECK(text_of(b, "callsign") == "WDC1234");
+    CHECK(text_of(b, "destination") == "OAKLAND");
+    CHECK(integer_of(b, "to_bow") == 20);
+
+    const rpc::DecodedMessage& c = run.messages[2];
+    CHECK(c.kind == "class_b_position");
+    CHECK(integer_of(c, "mmsi") == 338000001);
+    WARN(std::format("ais at {} dB/2500 Hz: {} of 3 messages; {}", kHighSnrDb,
+                     run.messages.size(), a.text));
+
+    // A lower point, measured rather than asserted beyond what arrived being
+    // what was sent: the FCS lets nothing else through.
+    constexpr double kLowSnrDb = 22.0;
+    auto noisy = ais_capture(kLowSnrDb);
+    REQUIRE(noisy.has_value());
+    const Run low = run_capture(*noisy, "ais");
+    check_common(low, "ais");
+    for (const rpc::DecodedMessage& message : low.messages) {
+        const std::int64_t mmsi = integer_of(message, "mmsi");
+        CHECK((mmsi == 366123456 || mmsi == 338000001));
+    }
+    WARN(std::format("ais at {} dB/2500 Hz: {} of 3 messages", kLowSnrDb, low.messages.size()));
+    CHECK(low.messages.size() <= 3);
+}
+
+TEST_CASE("DSC calls cross the wire from an nfm receiver", "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = dsc_capture(kHighSnrDb);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, "dsc");
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    check_common(run, "dsc");
+    REQUIRE(run.messages.size() == 3);
+
+    const rpc::DecodedMessage& alert = run.messages[0];
+    CHECK(alert.kind == "distress_alert");
+    CHECK(integer_of(alert, "self_id") == 366123456);
+    CHECK(integer_of(alert, "nature_of_distress") == 101);
+    CHECK(std::abs(real_of(alert, "latitude") - (37.0 + 48.0 / 60.0)) < 1e-9);
+    CHECK(std::abs(real_of(alert, "longitude") - -(122.0 + 25.0 / 60.0)) < 1e-9);
+    CHECK(text_of(alert, "utc") == "17:45");
+
+    const rpc::DecodedMessage& individual = run.messages[1];
+    CHECK(individual.kind == "individual");
+    CHECK(integer_of(individual, "address") == 211456780);
+    CHECK(integer_of(individual, "channel") == 72);
+    CHECK(integer_of(individual, "eos") == decode::kDscEosAcknowledgeRq);
+
+    const rpc::DecodedMessage& safety = run.messages[2];
+    CHECK(safety.kind == "all_ships");
+    CHECK(integer_of(safety, "category") == decode::kDscCategorySafety);
+    CHECK(integer_of(safety, "channel") == 16);
+    WARN(std::format("dsc at {} dB/2500 Hz: {} of 3 calls; {}", kHighSnrDb, run.messages.size(),
+                     alert.text));
+
+    constexpr double kLowSnrDb = 16.0;
+    auto noisy = dsc_capture(kLowSnrDb);
+    REQUIRE(noisy.has_value());
+    const Run low = run_capture(*noisy, "dsc");
+    check_common(low, "dsc");
+    for (const rpc::DecodedMessage& message : low.messages) {
+        const std::int64_t self = integer_of(message, "self_id");
+        CHECK((self == 366123456 || self == 211987650 || self == 3669991));
+    }
+    WARN(std::format("dsc at {} dB/2500 Hz: {} of 3 calls", kLowSnrDb, low.messages.size()));
+    CHECK(low.messages.size() <= 3);
+}
