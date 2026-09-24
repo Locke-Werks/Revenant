@@ -748,7 +748,23 @@ TEST_CASE("a P25 header crosses the wire as a decoded message", "[gpu][rpc][deco
         }
         return clear && secure;
     };
-    const auto seen = wait_for(*log, has_both);
+    // Waits for everything the server sent, not just the first sight of both
+    // talkgroups. The decoder runs on a decode lane, a hand-off behind the
+    // engine, and on a loaded machine the last messages were still crossing
+    // when both talkgroups had been seen: the log came up short of the
+    // server's messages_sent and the header count one or two under six. The
+    // server's count settling over half a second is the lane having drained.
+    std::uint64_t sent = 0;
+    for (int stable = 0, tries = 0; stable < 5 && tries < 300; ++tries) {
+        auto now = harness.client().decoded_stats(*vrx, "");
+        REQUIRE(now.has_value());
+        stable = now->messages_sent == sent ? stable + 1 : 0;
+        sent = now->messages_sent;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const auto seen = wait_for(*log, [&](const std::vector<rpc::DecodedMessage>& got) {
+        return has_both(got) && got.size() >= sent;
+    });
     std::string arrived;
     for (const rpc::DecodedMessage& message : seen) {
         arrived += std::format("\n  #{} [{}, {}) {}", message.sequence, message.start_sample,
