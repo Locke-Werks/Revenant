@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <format>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -140,8 +141,8 @@ constexpr dsp::Hertz kCwToneHz = 720;
 ModeSubject cw() {
     ModeSubject mode;
     mode.mode = "cw";
-    mode.subject = "cw 20 WPM standard spacing at 48000 S/s, tone 20 Hz off a 700 Hz centre; character error rate "
-                   "against SNR in 2500 Hz";
+    mode.subject = "cw 20 WPM standard spacing at 48000 S/s, tone at 720 Hz found by CwBand's search; character "
+                   "error rate against SNR in 2500 Hz";
     mode.unit = "character";
     mode.axis = "SNR in 2500 Hz";
     mode.default_payload_bytes = 60;
@@ -168,11 +169,20 @@ ModeSubject cw() {
         }
         return audio_as_baseband(*audio);
     };
+    // Scored through CwBand, which searches the audio for the tone, because
+    // that is what core/rpc/decoders.h serves a client. Every stream it
+    // prints is scored, in the order the streams started, so a stream
+    // started on noise costs its characters.
+    //
+    // WHAT THIS SUBJECT USED TO SCORE: decode::Cw built at its 700 Hz
+    // default, the decoder the adapter served until "Decode every keyed tone
+    // in a receiver's audio, wherever it is". docs/sensitivity.md has both
+    // curves.
     mode.score = [](dsp::ConstComplexSpan samples, std::span<const std::uint8_t> payload) {
         const std::string sent = cw_text(payload);
-        decode::CwConfig config;
+        decode::CwBandConfig config;
         config.rate = kAudioRate;
-        auto decoder = decode::Cw::create(config);
+        auto decoder = decode::CwBand::create(config);
         if (samples.empty() || !decoder) {
             return score_text(sent, "");
         }
@@ -182,9 +192,23 @@ ModeSubject cw() {
             return score_text(sent, "");
         }
         decoder->flush(characters);
-        std::string got;
+        std::map<std::uint32_t, std::string> streams;
         for (const decode::CwCharacter& character : characters) {
-            got += character.recognised ? character.text : std::string("#");
+            std::string& text = streams[character.stream];
+            if (text.empty() && character.text == " ") {
+                continue;
+            }
+            text += character.recognised ? character.text : std::string("#");
+        }
+        std::string got;
+        for (auto& [id, text] : streams) {
+            while (!text.empty() && text.back() == ' ') {
+                text.pop_back();
+            }
+            if (!got.empty() && !text.empty()) {
+                got.push_back(' ');
+            }
+            got += text;
         }
         return score_text(sent, got);
     };

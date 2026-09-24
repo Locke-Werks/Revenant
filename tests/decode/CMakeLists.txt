@@ -129,6 +129,7 @@ add_executable(revenant_decode_tests
     test_aprs.cpp
     test_ax25.cpp
     test_cw.cpp
+    test_cw_band.cpp
     test_dmr.cpp
     test_dmr_blocking.cpp
     test_dsc.cpp
@@ -155,6 +156,9 @@ add_executable(revenant_decode_tests
 
 target_link_libraries(revenant_decode_tests PRIVATE
     revenant_core
+    # tools/siggen/speech.h, for the CW case that holds speech on a sideband
+    # receiver to a few characters.
+    revenant_siggen_scenes
     Catch2::Catch2WithMain
 )
 target_include_directories(revenant_decode_tests PRIVATE

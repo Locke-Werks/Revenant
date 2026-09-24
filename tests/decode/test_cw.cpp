@@ -334,6 +334,63 @@ TEST_CASE("the timing decoder reads a run of dashes as dashes", "[decode][cw]") 
     }
 }
 
+TEST_CASE("the timing decoder keeps word spaces across the pauses between overs",
+          "[decode][cw]") {
+    // A contest station calls, pauses for an answer, and calls again. The
+    // pauses joined the letter and word clusters, the cut between them landed
+    // between the word spaces and the pauses, and every word space read as a
+    // letter space: on the KF4FIC 20 m 1603 UT recording, 129 "TEST"s from
+    // one station and none of them a word. The pauses here are that
+    // station's, 3.5 and 4.5 s, at its 20 WPM.
+    const std::string call = "CQ TEST DE W7E W7E TEST";
+    siggen::CwModConfig mod;
+    mod.wpm = 20.0;
+    auto one = siggen::cw_key_runs(mod, call);
+    REQUIRE(one.has_value());
+    // The call's own key runs, without the keyer's lead-in and tail.
+    std::vector<siggen::CwKeyRun> body = *one;
+    while (!body.empty() && !body.front().key_down) {
+        body.erase(body.begin());
+    }
+    while (!body.empty() && !body.back().key_down) {
+        body.pop_back();
+    }
+    std::vector<siggen::CwKeyRun> runs = {{false, 0.5}};
+    for (const double pause : {3.5, 4.5, 3.5}) {
+        runs.insert(runs.end(), body.begin(), body.end());
+        runs.push_back(siggen::CwKeyRun{false, pause});
+    }
+    runs.insert(runs.end(), body.begin(), body.end());
+    runs.push_back(siggen::CwKeyRun{false, 1.0});
+    decode::MorseTiming timing;
+    const std::string got = decode_runs(runs, timing);
+    const std::string want = call + " " + call + " " + call + " " + call;
+    INFO("decoded '" << got << "'");
+    CHECK(got == want);
+}
+
+TEST_CASE("the timing decoder forgets clicks that never made a unit", "[decode][cw]") {
+    // Three marks of 16 to 20 ms, a station 170 Hz away keying into this
+    // stream through its edges, then two seconds before the stream's own
+    // station starts at 25 WPM. The unit used to lock on the clicks, at the
+    // 50 WPM floor, and the station's first dots read as dashes: "K9BGL" as
+    // "EE E O T# B G L".
+    const std::string text = "K9BGL DE W7E R TU 5NN CN88";
+    std::vector<siggen::CwKeyRun> runs = {
+        {false, 0.45}, {true, 0.016}, {false, 0.078}, {true, 0.016},
+        {false, 0.126}, {true, 0.020}, {false, 1.98}};
+    siggen::CwModConfig mod;
+    mod.wpm = 25.0;
+    auto station = siggen::cw_key_runs(mod, text);
+    REQUIRE(station.has_value());
+    auto first_mark = std::ranges::find_if(*station, [](const auto& run) { return run.key_down; });
+    runs.insert(runs.end(), first_mark, station->end());
+    decode::MorseTiming timing;
+    const std::string got = decode_runs(runs, timing);
+    INFO("decoded '" << got << "'");
+    CHECK(got == text);
+}
+
 // ---------------------------------------------------------------------------
 // The audio decoder against the keyer
 // ---------------------------------------------------------------------------
@@ -478,6 +535,12 @@ TEST_CASE("CW character error rate against noise, measured", "[decode][cw]") {
     // -10 dB and by 2.0 at 35 and -8 dB as a standard deviation over 40, so
     // the speed bounds here are loose where the noise is and the next case
     // holds the average. The pooled reading fails the two noisy bounds.
+    //
+    // Since "Decode every keyed tone in a receiver's audio, wherever it is"
+    // put a low-pass around the tone ahead of the boxcar and tracks the
+    // tone's frequency from the boxcar's own sum, it prints CER 0.043 for
+    // 20 WPM at -10 dB, read at 18.63 WPM, and 0.022 for 35 at -8 dB, read at
+    // 35.57.
     const Point points[] = {
         {20.0, 10.0, 0.0, 0.3},
         {20.0, -10.0, 0.20, 1.5},

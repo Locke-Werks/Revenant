@@ -830,11 +830,17 @@ fifteenth and sixteenth, the same day.
 | `sitor_b` | Lines of text, each character from whichever of its two copies arrived | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
 | `navtex` | Each message with its B1 to B4 letters, serial and whether the preamble was clean | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
 | `psk31`, `psk63`, `qpsk31` | Lines of Varicode text, with the measured tone offset | Audio of a `usb` or `lsb` receiver, tone at 1000 Hz; QPSK31 takes its sideband from the receiver |
-| `cw` | Lines of Morse text with the dots and dashes, character and overall speed | Audio of a `cw` receiver at its default 700 Hz pitch, or a `usb` or `lsb` one with the tone at 700 Hz |
+| `cw` | Lines of Morse text with the dots and dashes, character and overall speed, one stream per keyed tone with its `pitch_hz` and `stream` | Audio of a `cw`, `usb` or `lsb` receiver, any keyed tone from 200 to 2800 Hz |
 | `ax25` | Every AX.25 frame whose FCS checked, with its APRS position, Mic-E, status or message parsed when it is APRS | Audio of an `nfm` receiver |
 | `pocsag` | Pages at 512, 1200 and 2400 bit/s at once: address, function, numeric or alphanumeric message | Audio of an `nfm` receiver |
 | `ais` | Every AIS message whose FCS checked, with Messages 1 to 5, 11, 18, 19, 21 and 24 parsed: MMSI, position, speed and course, heading, status, name, call sign, destination, dimensions | Audio of an `nfm` receiver on 161.975 or 162.025 MHz, at least 28800 S/s |
 | `dsc` | Each VHF DSC call whose error-check character agreed: format, category, both identities, telecommands, nature of distress, position and time, working channel | Audio of an `nfm` receiver on channel 70, 156.525 MHz |
+
+WHAT THE `cw` ROW USED TO SAY it needed: "Audio of a `cw` receiver at its
+default 700 Hz pitch, or a `usb` or `lsb` one with the tone at 700 Hz". Since
+"Decode every keyed tone in a receiver's audio, wherever it is" the decoder
+searches the audio for keyed tones and reads each as a stream; measured through
+the engine, docs/sensitivity.md has the grid.
 
 WHAT THIS PARAGRAPH USED TO SAY: that RTTY, APRS, POCSAG, PSK31, CW and M17
 would each reach the wire "as one adapter and one registry row in

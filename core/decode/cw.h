@@ -35,7 +35,14 @@
 // spaces together, and marks are dots or dashes on either side of two units.
 // Letter and word spaces are told apart from the spaces' own clusters, so a
 // Farnsworth sender whose letter space is twenty units still reads as
-// letters. Every constant that is a choice rather than a clause says so.
+// letters, and a pause between two overs is left out of them. Every constant
+// that is a choice rather than a clause says so.
+//
+// Cw reads one tone near a pitch it is told, follows it as it drifts, and
+// filters around it before the envelope so a neighbour a hundred hertz away
+// does not key it. CwBand, at the end of this file, is what a receiver's
+// audio is read with: it finds every keyed tone in the passband, wherever
+// the tuning left it, and runs a Cw on each.
 //
 // CLEAN ROOM
 //
@@ -50,9 +57,11 @@
 #pragma once
 
 #include <array>
+#include <complex>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -189,6 +198,12 @@ struct CwCharacter {
 
     // The character speed at the moment it was decoded.
     double wpm = 0.0;
+
+    // The audio frequency of the tone it was read from, in hertz, and which
+    // of CwBand's streams read it. Cw fills the pitch it is tracking and
+    // stream 0; MorseTiming, which hears no tone, leaves both at zero.
+    double pitch_hz = 0.0;
+    std::uint32_t stream = 0;
 };
 
 class MorseTiming {
@@ -227,6 +242,15 @@ class MorseTiming {
     // inverse. Equal to wpm() for standard spacing and below it for
     // Farnsworth.
     [[nodiscard]] double overall_wpm() const;
+
+    // How much the last kFitMarks marks look like clause 2.1's: split into
+    // two clusters, zero unless the longer is two to five times the shorter,
+    // and otherwise the fraction of marks near their own cluster's mean. And
+    // how many marks that is over. Morse keyed by a machine or a hand scores
+    // near one; the on and off of speech's syllables, read as marks, does
+    // not. CwBand ends a stream on it.
+    [[nodiscard]] double fit() const;
+    [[nodiscard]] std::size_t fitted_marks() const { return fits_.size(); }
 
     void reset();
 
@@ -278,6 +302,9 @@ class MorseTiming {
     bool character_ended_ = true;
     bool word_ended_ = true;
     bool any_text_ = false;
+
+    // The last kFitMarks marks' lengths, for fit().
+    std::deque<double> fits_;
 };
 
 // ---------------------------------------------------------------------------
@@ -303,6 +330,25 @@ struct CwConfig {
     // is decoded. NOT A SPECIFIED VALUE; two seconds holds several elements
     // at five words per minute.
     double acquisition_seconds = 2.0;
+
+    // Whether the tone is searched for within capture_hz of centre_hz before
+    // anything is decoded. CwBand turns it off: it starts a decoder on a tone
+    // it has already found, at the pitch it found it, and the search above
+    // would cost the two seconds again.
+    bool acquire = true;
+
+    // Whether the frequency follows the tone after acquisition, a little
+    // after every mark, by up to capture_hz from centre_hz either way. A
+    // transmitter or receiver that drifts a few hertz a minute otherwise
+    // walks out of the envelope filter, which integrates coherently: at 12
+    // WPM its 80 ms boxcar loses a third of a tone 5 Hz away.
+    bool track = true;
+
+    // The tone's amplitude as the caller already measured it, in the units
+    // the envelope reads, or zero for none. It seeds the mark level, so the
+    // first marks are judged against the tone and not against whatever keyed
+    // first; CwBand passes what its search saw.
+    double expected_level = 0.0;
 };
 
 class Cw {
@@ -312,10 +358,16 @@ class Cw {
     [[nodiscard]] Status process(ConstRealSpan audio, std::vector<CwCharacter>& out);
 
     // Emits the character in progress, for the end of a capture.
-    void flush(std::vector<CwCharacter>& out) { timing_.flush(out); }
+    void flush(std::vector<CwCharacter>& out);
 
     [[nodiscard]] bool acquired() const { return acquired_; }
     [[nodiscard]] double frequency_offset_hz() const { return offset_hz_; }
+
+    // The tone's audio frequency, centre_hz plus the offset.
+    [[nodiscard]] double pitch_hz() const {
+        return static_cast<double>(config_.centre_hz) + offset_hz_;
+    }
+
     [[nodiscard]] double wpm() const { return timing_.wpm(); }
     [[nodiscard]] double overall_wpm() const { return timing_.overall_wpm(); }
     [[nodiscard]] const MorseTiming& timing() const { return timing_; }
@@ -325,12 +377,18 @@ class Cw {
     // threshold, so a caller can show it as a signal meter.
     [[nodiscard]] double level_deviations() const;
 
+    // Seconds of audio since a mark last cleared the squelch's open bar, or
+    // since the decoder acquired when none has. Zero before acquisition.
+    [[nodiscard]] double seconds_since_mark() const;
+
     void reset();
 
    private:
     Cw() = default;
 
     void run(std::span<const Complex32> baseband, std::vector<CwCharacter>& out);
+    void label(std::vector<CwCharacter>& out, std::size_t from) const;
+    void seed_level();
     void set_boxcar(std::size_t length);
     [[nodiscard]] double mark_level() const;
     [[nodiscard]] double noise_sigma() const;
@@ -366,6 +424,194 @@ class Cw {
     SampleIndex raw_since_ = 0;
     bool key_ = false;
     SampleIndex key_since_ = 0;
+
+    // The mixer's phase, advanced sample by sample so that a change of
+    // offset_hz_ turns the phasor from where it is rather than jumping it.
+    double phase_ = 0.0;
+
+    // A low-pass on the corrected samples, around the tone rather than
+    // around centre_hz, so a neighbour a hundred hertz away is gone before
+    // the boxcar. cw.cpp's kNeighbourSlackHz says why.
+    std::vector<float> narrow_taps_;
+    std::deque<Complex32> narrow_history_;
+
+    // The tracker: the boxcar's sum over the mark in progress, each against
+    // the one before, summed. Its angle is how far the tone turned per
+    // sample, which is how far the offset is off.
+    std::complex<double> turn_{0.0, 0.0};
+    std::complex<double> previous_sum_{0.0, 0.0};
+    SampleIndex acquired_at_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+// Every keyed tone in a receiver's audio
+// ---------------------------------------------------------------------------
+//
+// A receiver in a CW segment hears more than one station, none of them where
+// the operator's sidetone is: on usb or lsb the pitch is wherever the dial
+// left each carrier, and on cw it is the sidetone plus however far off zero
+// beat the click was. CwBand searches the audio for tones that are KEYED,
+// starts a Cw on each one it finds at the pitch it found it, and labels every
+// character with the pitch and a stream number.
+//
+// WHAT COUNTS AS KEYED
+//
+// A short-time spectrum of the audio, a frame every 8 ms with bins about
+// 31 Hz wide at 48000 S/s. In each bin the noise is read from the lower fifth
+// of the bin's power over the last kSearchWindowSeconds, scaled to a mean as
+// for exponentially distributed power, and taken no lower than its
+// neighbours', so a receiver filter that shapes the noise across the band
+// does not matter. A bin is keyed when its mean power stands clear of that
+// noise, when it went up and down in several runs of two frames or more, and
+// when it was up for no more than most of the window. A steady carrier is up
+// all the time; noise goes up in single frames and its mean does not stand
+// clear. Two things that do key are then set aside: the splatter a strong
+// station's edges throw into the bins beside it, which is only ever up while
+// that station is, and speech, whose harmonics come up many at once across
+// the band. None of these is a specified value; each constant in cw.cpp says
+// what it was set from.
+//
+// STREAMS
+//
+// A keyed bin that is a local maximum and not within kStreamSpacingHz of a
+// stream already running starts a Cw there, fed the last
+// kSearchReplaySeconds of audio first, so the characters the search spent
+// its window finding are decoded rather than lost. At most max_streams run
+// at once; beyond that the strongest candidates win.
+//
+// A stream prints nothing until its marks show it is Morse: two clusters of
+// mark lengths two to five times apart, as clause 2.1's dot and dash are
+// three, and most marks near one of them (MorseTiming::fit). It then prints
+// what it held and carries on. A stream ends, and hands over the character
+// in progress, when its tone has keyed nothing for kStreamIdleSeconds; it is
+// ended without printing more when its marks stop looking like Morse, or,
+// before it has printed, when most of its characters are codes the table
+// does not hold. A stream ended for either keeps its pitch from starting
+// again for kStreamMuteSeconds.
+//
+// Streams are judged, started and ended only at whole multiples of
+// kPieceSeconds of audio, so the output does not depend on how the caller
+// blocked it.
+//
+// THE PITCH A STREAM IS LABELLED WITH is the Cw's own, which starts where the
+// search's peak was, a parabola through three bins, and is then tracked, so
+// the label moves with the tone.
+//
+// NOT HANDLED
+//
+// Two tones closer than about two bins, 50 Hz, are one peak to the search and
+// one stream, which reads whichever is stronger. A stream's low-pass stops
+// about 90 Hz from its tone, so a much stronger station nearer than that
+// still keys it. Four or more stations keying at the same moment in one
+// receiver's audio look like speech to the search and are not started.
+
+struct CwBandConfig {
+    SampleRate rate = 48000;
+
+    // The audio frequencies searched for keyed tones. The upper edge is held
+    // below the audio rate's Nyquist frequency. NOT SPECIFIED VALUES: usb's
+    // default filter passes 300 to 2700 Hz, and a tone at the edge of a
+    // filter is still a tone.
+    double low_hz = 200.0;
+    double high_hz = 2800.0;
+
+    // Streams decoded at once. NOT A SPECIFIED VALUE: a 2.4 kHz sideband
+    // filter parked in a busy CW segment holds half a dozen stations.
+    std::size_t max_streams = 6;
+
+    MorseTimingConfig timing{};
+};
+
+class CwBand {
+   public:
+    [[nodiscard]] static Expected<CwBand> create(const CwBandConfig& config);
+
+    [[nodiscard]] Status process(ConstRealSpan audio, std::vector<CwCharacter>& out);
+
+    // Ends every stream, handing over the characters in progress.
+    void flush(std::vector<CwCharacter>& out);
+
+    void reset();
+
+    struct StreamInfo {
+        std::uint32_t id = 0;
+        double pitch_hz = 0.0;
+        double wpm = 0.0;
+        double overall_wpm = 0.0;
+        double level_deviations = 0.0;
+    };
+
+    // The streams running now, oldest first.
+    [[nodiscard]] std::vector<StreamInfo> streams() const;
+
+    // Streams started since create() or reset(), including ended ones.
+    [[nodiscard]] std::uint32_t streams_started() const { return next_id_ - 1; }
+
+   private:
+    CwBand() = default;
+
+    struct Stream {
+        std::uint32_t id = 0;
+        SampleIndex origin = 0;  // CwBand's audio index of the Cw's sample 0
+        std::deque<bool> recent;  // recognised, for the last few characters
+        std::unique_ptr<Cw> decoder;
+
+        // Characters held until the stream's marks show it is Morse, and
+        // whether they have.
+        std::vector<CwCharacter> waiting;
+        bool confirmed = false;
+    };
+
+    struct Muted {
+        double pitch_hz = 0.0;
+        SampleIndex until = 0;
+    };
+
+    void step(ConstRealSpan audio, std::vector<CwCharacter>& out);
+    void search(std::span<const Complex32> baseband);
+    void evaluate(std::vector<CwCharacter>& out);
+    [[nodiscard]] Status start_stream(double pitch_hz, double level, std::vector<CwCharacter>& out);
+    void run_stream(Stream& stream, ConstRealSpan audio, std::vector<CwCharacter>& out);
+    void deliver(Stream& stream, std::vector<CwCharacter>& fresh, std::vector<CwCharacter>& out);
+    void finish(Stream& stream, std::vector<CwCharacter>& out);
+    void end_streams(std::vector<CwCharacter>& out);
+
+    CwBandConfig config_{};
+    ToneFrontEnd front_{};
+
+    // The short-time spectrum: bin k of an fft_size_ transform of the search
+    // front end's output, bins first_bin_ to last_bin_ inclusive.
+    std::size_t fft_size_ = 0;
+    std::size_t hop_ = 0;
+    std::size_t first_bin_ = 0;
+    std::size_t last_bin_ = 0;
+    std::vector<float> window_;
+    std::vector<Complex32> twiddles_;
+    std::vector<Complex32> pending_;  // search-rate samples not yet framed
+    double bin_hz_ = 0.0;
+    double centre_hz_ = 0.0;
+
+    // Per bin, the last window_frames_ frame powers, a ring.
+    std::size_t window_frames_ = 0;
+    std::size_t evaluate_every_ = 0;
+    std::vector<float> power_;
+    std::size_t frames_ = 0;
+
+    // Raw audio kept for a new stream's replay, starting at history_start_.
+    std::vector<float> history_;
+    SampleIndex history_start_ = 0;
+    SampleIndex audio_index_ = 0;
+
+    // Streams are judged, started and ended only at whole multiples of
+    // piece_ audio samples from the start of the stream, so what comes out
+    // does not depend on how the caller blocked the audio.
+    std::size_t piece_ = 1;
+    bool evaluation_due_ = false;
+    std::vector<Complex32> baseband_;
+
+    std::vector<Stream> streams_;
+    std::vector<Muted> muted_;
+    std::uint32_t next_id_ = 1;
 };
 
 }  // namespace revenant::decode

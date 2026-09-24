@@ -1983,3 +1983,13 @@ commit: "Publish the detector's noise floor and draw the span's marker from it"
 instead: DetectionList.noiseFloorDbfs @6 carries the median of the detector's
     per-bin floor, and the span's floor marker draws it, falling back to its
     own estimate only while the engine states none. ui/models/span_markers.h.
+
+phrase: or a `usb` or `lsb` one with the tone at 700 Hz
+phrase: cw reads a cw one, or usb or lsb with
+phrase: the tone at 700 Hz in the audio
+phrase: give or take the 100 Hz its acquisition captures
+retired: 2026-09-23
+commit: "Decode every keyed tone in a receiver's audio, wherever it is"
+instead: The cw decoder searches 200 to 2800 Hz of a cw, usb or lsb
+    receiver's audio for keyed tones and decodes each as a stream labelled
+    with its pitch, decode::CwBand in core/decode/cw.h.

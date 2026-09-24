@@ -92,6 +92,7 @@
 #include <cstdint>
 #include <format>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -3070,19 +3071,27 @@ private:
 // CW
 // ---------------------------------------------------------------------------
 //
-// Reads a cw receiver's audio, or a usb or lsb receiver's, core/decode/cw.h,
-// with the tone at 700 Hz, CwConfig's centre, give or take the 100 Hz its
-// acquisition captures. A cw receiver puts the carrier at its cw_pitch, whose
-// default is 700, so a cw receiver left at its default pitch and tuned to the
-// signal is the case this was written for. A pitch set elsewhere moves the
-// tone out of the capture range and nothing decodes; the pitch is not in
-// DecoderBuild, because it is the one parameter a retune can change without
-// rebuilding the decoder, and a decoder that followed it would have to be told
-// about retunes, which this seam does not do.
+// Reads a cw receiver's audio, or a usb or lsb receiver's, through
+// core/decode/cw.h's CwBand: every keyed tone from 200 to 2800 Hz of audio,
+// wherever the tuning put it, each decoded as a stream of its own. A cw
+// receiver's tone sits at its cw_pitch plus however far off zero beat the
+// receiver was tuned, and a sideband receiver parked in a CW segment hears
+// several stations at several pitches; both are what this reads. The pitch
+// is not in DecoderBuild and does not need to be: the search finds the tone
+// where it is, and a retune that moves it is found again.
 //
-// One message per line: M.1677-1 has no line end, so a line ends at
-// kMaxLineCharacters or when the key has been up for five word spaces at the
-// speed being read, 2.1 s at 20 WPM. kind is "line".
+// WHAT THIS PARAGRAPH USED TO SAY: "with the tone at 700 Hz, CwConfig's
+// centre, give or take the 100 Hz its acquisition captures ... A pitch set
+// elsewhere moves the tone out of the capture range and nothing decodes".
+// Measured through the engine on 2026-09-23, a tone at 500 or 900 Hz printed
+// nothing at 0 to 10 dB in 2500 Hz on any of cw, usb and lsb;
+// docs/sensitivity.md has the grid before and after.
+//
+// One message per line, and a line belongs to one stream: M.1677-1 has no
+// line end, so a line ends at kMaxLineCharacters, when its stream's key has
+// been up for five word spaces at the speed being read, 2.1 s at 20 WPM, or
+// when its stream ends. Lines from two streams interleave in the order they
+// end. kind is "line".
 //
 // Every message:
 //   text                 text   the line; a service signal is its clause
@@ -3096,7 +3105,14 @@ private:
 //   wpm                  real   character speed, PARIS, when the line ended
 //   overall_wpm          real   the speed the letter spaces imply; lower than
 //                               wpm under Farnsworth spacing
-//   frequency_offset_hz  real   the tone's measured offset from 700 Hz
+//   pitch_hz             real   the tone's audio frequency, where the stream
+//                               was tracking it when the line ended
+//   stream               int    which stream, numbered from 1 in the order
+//                               the search found them; a tone that stops and
+//                               comes back later is a new stream
+//   frequency_offset_hz  real   pitch_hz less 700, the sidetone a cw
+//                               receiver defaults to, which is what this
+//                               field meant before pitch_hz existed
 //   level_deviations     real   cw.h's signal meter
 //   ended                text   length, idle or stream_end, the line flush
 //                               handed over with the character being keyed
@@ -3106,9 +3122,9 @@ public:
     static constexpr std::string_view kName = "cw";
 
     [[nodiscard]] static Expected<std::unique_ptr<ChunkDecoder>> make(const DecoderBuild& build) {
-        decode::CwConfig config;
+        decode::CwBandConfig config;
         config.rate = build.rate;
-        auto built = decode::Cw::create(config);
+        auto built = decode::CwBand::create(config);
         if (!built) {
             return std::unexpected(with_context(built.error(), "building the cw decoder"));
         }
@@ -3127,116 +3143,173 @@ public:
             return processed;
         }
         take(chunk, out);
-        if (line_.quiet_at(chunk.start + chunk.frames(), idle_samples())) {
-            emit(chunk, decoders_detail::LineEnd::Idle, out);
+        refresh();
+        const std::uint64_t chunk_end = chunk.start + chunk.frames();
+        for (auto it = lines_.begin(); it != lines_.end();) {
+            if (it->second.line.quiet_at(chunk_end, idle_samples(it->second))) {
+                emit(chunk, it->first, it->second, decoders_detail::LineEnd::Idle, out);
+            }
+            if (it->second.line.characters == 0 && !running(it->first)) {
+                it = lines_.erase(it);
+            } else {
+                ++it;
+            }
         }
         return {};
     }
 
-    // The character being keyed, which cw.h's flush ends on the gap it has
-    // seen so far, then the line with it in.
+    // The characters being keyed, which cw.h's flush ends on the gap it has
+    // seen so far, then every line with them in.
     void flush(std::vector<DecodedMessage>& out) override {
         const DecoderChunk at_end = end_.at_end();
         characters_.clear();
         decoder_.flush(characters_);
         take(at_end, out);
-        emit(at_end, decoders_detail::LineEnd::StreamEnd, out);
+        refresh();
+        for (auto& [stream, state] : lines_) {
+            emit(at_end, stream, state, decoders_detail::LineEnd::StreamEnd, out);
+        }
+        lines_.clear();
     }
 
     void reset() override {
         decoder_.reset();
         base_.reset();
-        clear_line();
+        lines_.clear();
     }
 
 private:
-    CwChunkDecoder(const decode::CwConfig& config, decode::Cw decoder)
+    // One stream's line in progress, and what the stream last said about
+    // itself, kept so a line that ends after its stream has gone still
+    // carries it.
+    struct StreamLine {
+        decoders_detail::TextLine line;
+        std::string code;
+        std::size_t unrecognised = 0;
+        double wpm = 0.0;
+        double overall_wpm = 0.0;
+        double pitch_hz = 0.0;
+        double level_deviations = 0.0;
+    };
+
+    CwChunkDecoder(const decode::CwBandConfig& config, decode::CwBand decoder)
         : config_(config), decoder_(std::move(decoder)) {}
 
-    // characters_ into the line, ending it where a gap or its length says.
+    [[nodiscard]] bool running(std::uint32_t stream) const {
+        return std::ranges::any_of(decoder_.streams(), [stream](const decode::CwBand::StreamInfo& s) {
+            return s.id == stream;
+        });
+    }
+
+    // What each running stream says about itself now.
+    void refresh() {
+        for (const decode::CwBand::StreamInfo& info : decoder_.streams()) {
+            auto found = lines_.find(info.id);
+            if (found == lines_.end()) {
+                continue;
+            }
+            StreamLine& state = found->second;
+            state.pitch_hz = info.pitch_hz;
+            state.wpm = info.wpm;
+            state.overall_wpm = info.overall_wpm;
+            state.level_deviations = info.level_deviations;
+        }
+    }
+
+    // characters_ into each stream's line, ending it where a gap or its
+    // length says.
     void take(const DecoderChunk& chunk, std::vector<DecodedMessage>& out) {
         using decoders_detail::LineEnd;
         for (const decode::CwCharacter& c : characters_) {
+            StreamLine& state = lines_[c.stream];
+            state.pitch_hz = c.pitch_hz;
+            if (c.wpm > 0.0) {
+                state.wpm = c.wpm;
+            }
             const std::uint64_t at = base_.at(c.first_sample);
-            if (line_.characters > 0 && at > line_.last_sample + idle_samples()) {
-                emit(chunk, LineEnd::Idle, out);
+            if (state.line.characters > 0 && at > state.line.last_sample + idle_samples(state)) {
+                emit(chunk, c.stream, state, LineEnd::Idle, out);
             }
             if (c.text == " ") {
                 // A word space opens nothing, so a line never starts with one.
-                if (line_.characters > 0) {
-                    line_.add_text(" ", at);
-                    code_ += " /";
+                if (state.line.characters > 0) {
+                    state.line.add_text(" ", at);
+                    state.code += " /";
                 }
                 continue;
             }
             if (c.recognised) {
-                line_.add_text(c.text, at);
+                state.line.add_text(c.text, at);
             } else {
-                line_.add(char32_t{0xFFFD}, at);
-                ++unrecognised_;
+                state.line.add(char32_t{0xFFFD}, at);
+                ++state.unrecognised;
             }
-            code_ += (code_.empty() ? "" : " ") + c.code;
-            if (line_.characters >= decoders_detail::kMaxLineCharacters) {
-                emit(chunk, LineEnd::Length, out);
+            state.code += (state.code.empty() ? "" : " ") + c.code;
+            if (state.line.characters >= decoders_detail::kMaxLineCharacters) {
+                emit(chunk, c.stream, state, LineEnd::Length, out);
             }
         }
     }
 
-    // Five word spaces of seven units each at the unit being read, or at 20
-    // WPM's before the decoder has locked. Measured from the start of the
-    // line's last character, so it includes that character's own length.
-    [[nodiscard]] std::uint64_t idle_samples() const {
-        const double unit = decoder_.timing().locked()
-                                ? decoder_.timing().unit_seconds()
-                                : decode::kParisUnitSecondsTimesWpm / 20.0;
+    // Five word spaces of seven units each at the stream's speed, or at 20
+    // WPM's before it has one. Measured from the start of the line's last
+    // character, so it includes that character's own length.
+    [[nodiscard]] std::uint64_t idle_samples(const StreamLine& state) const {
+        const double unit = state.wpm > 0.0 ? decode::kParisUnitSecondsTimesWpm / state.wpm
+                                            : decode::kParisUnitSecondsTimesWpm / 20.0;
         return static_cast<std::uint64_t>(5.0 * decode::kMorseWordSpaceDots * unit *
                                           static_cast<double>(config_.rate));
     }
 
-    void clear_line() {
-        line_.clear();
-        code_.clear();
-        unrecognised_ = 0;
-    }
-
-    void emit(const DecoderChunk& chunk, decoders_detail::LineEnd why,
-              std::vector<DecodedMessage>& out) {
-        if (!line_.visible) {
-            clear_line();
+    void emit(const DecoderChunk& chunk, std::uint32_t stream, StreamLine& state,
+              decoders_detail::LineEnd why, std::vector<DecodedMessage>& out) {
+        if (!state.line.visible) {
+            clear(state);
             return;
         }
         // A trailing word space is the gap before the line ended, not text.
-        while (!line_.text.empty() && line_.text.back() == ' ') {
-            line_.text.pop_back();
+        while (!state.line.text.empty() && state.line.text.back() == ' ') {
+            state.line.text.pop_back();
         }
         using namespace decoders_detail;
         DecodedMessage message = stamped(kName, "line", chunk);
-        message.fields.push_back(text_field("text", line_.text));
+        message.fields.push_back(text_field("text", state.line.text));
         message.fields.push_back(
-            integer_field("characters", static_cast<std::int64_t>(line_.characters)));
+            integer_field("characters", static_cast<std::int64_t>(state.line.characters)));
         message.fields.push_back(
-            integer_field("unrecognised", static_cast<std::int64_t>(unrecognised_)));
-        message.fields.push_back(text_field("code", code_));
-        message.fields.push_back(real_field("wpm", decoder_.wpm()));
-        message.fields.push_back(real_field("overall_wpm", decoder_.overall_wpm()));
-        message.fields.push_back(real_field("frequency_offset_hz", decoder_.frequency_offset_hz()));
-        message.fields.push_back(real_field("level_deviations", decoder_.level_deviations()));
+            integer_field("unrecognised", static_cast<std::int64_t>(state.unrecognised)));
+        message.fields.push_back(text_field("code", state.code));
+        message.fields.push_back(real_field("wpm", state.wpm));
+        message.fields.push_back(real_field("overall_wpm", state.overall_wpm));
+        message.fields.push_back(real_field("pitch_hz", state.pitch_hz));
+        message.fields.push_back(integer_field("stream", static_cast<std::int64_t>(stream)));
+        message.fields.push_back(
+            real_field("frequency_offset_hz", state.pitch_hz - kSidetoneHz));
+        message.fields.push_back(real_field("level_deviations", state.level_deviations));
         message.fields.push_back(text_field("ended", std::string(line_end_name(why))));
         message.fields.push_back(
-            integer_field("began_sample", static_cast<std::int64_t>(line_.first_sample)));
-        message.text = line_.text;
+            integer_field("began_sample", static_cast<std::int64_t>(state.line.first_sample)));
+        message.text = state.line.text;
         out.push_back(std::move(message));
-        clear_line();
+        clear(state);
     }
 
-    decode::CwConfig config_;
-    decode::Cw decoder_;
+    static void clear(StreamLine& state) {
+        state.line.clear();
+        state.code.clear();
+        state.unrecognised = 0;
+    }
+
+    // VrxParams::cw_pitch's default, which frequency_offset_hz is measured
+    // from.
+    static constexpr double kSidetoneHz = 700.0;
+
+    decode::CwBandConfig config_;
+    decode::CwBand decoder_;
     decoders_detail::StreamBase base_;
     decoders_detail::StreamEnd end_;
     std::vector<decode::CwCharacter> characters_;
-    decoders_detail::TextLine line_;
-    std::string code_;
-    std::size_t unrecognised_ = 0;
+    std::map<std::uint32_t, StreamLine> lines_;
 };
 
 // ---------------------------------------------------------------------------
@@ -3552,9 +3625,9 @@ private:
          "the sideband is taken from the receiver",
          &PskChunkDecoder<decode::Psk31Mode::Qpsk31>::make, kSidebandModes},
         {CwChunkDecoder::kName, DecoderInput::RealAudio,
-         "CW, ITU-R M.1677-1 International Morse code: lines of text with the character and "
-         "overall speed in PARIS words per minute, the tone at 700 Hz in the audio. Reads a cw "
-         "receiver at its default pitch, or a usb or lsb receiver's audio",
+         "CW, ITU-R M.1677-1 International Morse code: every keyed tone from 200 to 2800 Hz in "
+         "the audio, each a stream of lines with its pitch and its character and overall speed "
+         "in PARIS words per minute. Reads a cw, usb or lsb receiver's audio",
          &CwChunkDecoder::make, kCwModes},
         {M17ChunkDecoder::kName, DecoderInput::ComplexBaseband,
          "M17, Protocol Specification Part I 2.0.4: each link setup frame's callsigns, type and "
