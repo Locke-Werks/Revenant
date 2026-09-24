@@ -1866,3 +1866,9 @@ commit: "Record the Forge v0.4.1 pin in the release readiness list"
 instead: Both the package and release jobs pin Forge v0.4.1, checked against
     installer.toml by forging, installing and uninstalling with it.
     docs/packaging.md, "The Forge pin, moved to v0.4.1".
+
+phrase: That the four open points above are the full list
+retired: 2026-09-23
+commit: "Stop counting the open points in clean-room.md"
+instead: The list above it holds three, the third now an accepted risk, and
+    the sentence names no count so it cannot drift again.

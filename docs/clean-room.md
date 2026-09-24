@@ -772,7 +772,7 @@ on the relink question:
 1. That the Apache-2.0 finding is right, and therefore that the "or later" in
    librtlsdr's grant is what makes the current engine link line lawful and not
    only what keeps Qt reachable.
-2. That the four open points above are the full list, since the purpose of
+2. That the open points above are the full list, since the purpose of
    doing this was to find what is not satisfied rather than to confirm what is.
 
 ## Disclosure log
