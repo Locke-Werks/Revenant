@@ -1250,10 +1250,23 @@ within a few characters. Envelope detection runs through a boxcar sized to the
 estimated dot, against a noise floor tracked as a Rayleigh lower quartile, with
 a squelch that needs 5.5 noise deviations to open and 2 to stay open.
 
-Swept by `bench sweep --mode cw` at 20 WPM, 256 transmissions of 60 random
-letters and figures a point, signal to noise in 2500 Hz of audio: a character
-error rate of 0.01 at -6.2 dB, 0.055 at -8 dB and 0.28 at -10 dB, and between
-0 and 0.0010 from -5 to +3 dB ([sensitivity.md](sensitivity.md)). Measured
+A receiver's audio is read by `decode::CwBand`, which searches 200 to
+2800 Hz of it for keyed tones, starts a decoder on each at the pitch it found,
+and labels every character with the pitch and a stream number; each stream
+follows its tone as it drifts and prints nothing until its marks fall into
+dots and dashes. Through the engine, a tone anywhere from 300 to 1200 Hz on a
+usb or lsb receiver, or a cw one whose filter passes it, reads with no
+character wrong from 12 to 40 WPM and 0 to 20 dB in 2500 Hz
+([sensitivity.md](sensitivity.md), "CW through the engine, at any pitch").
+
+Swept by `bench sweep --mode cw` at 20 WPM through the search, 256
+transmissions of 60 random letters and figures a point, signal to noise in
+2500 Hz of audio: a character error rate of 0.01 at -6.6 dB, 0.040 at -8 dB
+and 0.28 at -10 dB.
+
+WHAT THE SWEEP'S FIGURES USED TO SAY, for the decoder that looked for its tone
+within 100 Hz of 700: "a character error rate of 0.01 at -6.2 dB, 0.055 at -8
+dB and 0.28 at -10 dB, and between 0 and 0.0010 from -5 to +3 dB". Measured
 over the test's fixed 186 characters on 2026-09-22: no errors down to -6 dB at
 12 and 20 WPM; a character error rate of 0.086 at -10 dB for 20 WPM, 0.10 for
 12 WPM, and 0.075 at -8 dB for 35 WPM. It decodes nothing from a minute of

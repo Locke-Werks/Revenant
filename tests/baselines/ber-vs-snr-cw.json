@@ -1,5 +1,5 @@
 {
-  "commit": "5d60382",
+  "commit": "5e7480a",
   "config": {
     "base_seed": 20260918,
     "min_bit_errors": 0,
@@ -13,82 +13,82 @@
   "mode": "cw",
   "points": [
     {
-      "ber": 9.527071102414e-01,
-      "bit_errors": 14605,
+      "ber": 9.623613829093e-01,
+      "bit_errors": 14753,
       "bits_total": 15330,
       "decoded_count": 0,
       "snr_db": -13.000000,
       "trials": 256
     },
     {
-      "ber": 8.919271683091e-01,
-      "bit_errors": 13667,
+      "ber": 8.734582000914e-01,
+      "bit_errors": 13384,
       "bits_total": 15323,
       "decoded_count": 0,
       "snr_db": -12.000000,
       "trials": 256
     },
     {
-      "ber": 6.125179480486e-01,
-      "bit_errors": 9385,
+      "ber": 5.914371491972e-01,
+      "bit_errors": 9062,
       "bits_total": 15322,
       "decoded_count": 0,
       "snr_db": -11.000000,
       "trials": 256
     },
     {
-      "ber": 2.846239154544e-01,
-      "bit_errors": 4363,
+      "ber": 2.755561354296e-01,
+      "bit_errors": 4224,
       "bits_total": 15329,
-      "decoded_count": 2,
+      "decoded_count": 4,
       "snr_db": -10.000000,
       "trials": 256
     },
     {
-      "ber": 1.406576200418e-01,
-      "bit_errors": 2156,
+      "ber": 1.112343423800e-01,
+      "bit_errors": 1705,
       "bits_total": 15328,
-      "decoded_count": 24,
+      "decoded_count": 50,
       "snr_db": -9.000000,
       "trials": 256
     },
     {
-      "ber": 5.543222773570e-02,
-      "bit_errors": 849,
+      "ber": 3.976234003656e-02,
+      "bit_errors": 609,
       "bits_total": 15316,
-      "decoded_count": 96,
+      "decoded_count": 157,
       "snr_db": -8.000000,
       "trials": 256
     },
     {
-      "ber": 2.381263048017e-02,
-      "bit_errors": 365,
+      "ber": 1.272181628392e-02,
+      "bit_errors": 195,
       "bits_total": 15328,
-      "decoded_count": 175,
+      "decoded_count": 212,
       "snr_db": -7.000000,
       "trials": 256
     },
     {
-      "ber": 7.705870828708e-03,
-      "bit_errors": 118,
+      "ber": 7.052830927970e-03,
+      "bit_errors": 108,
       "bits_total": 15313,
-      "decoded_count": 222,
+      "decoded_count": 240,
       "snr_db": -6.000000,
       "trials": 256
     },
     {
-      "ber": 1.955926457165e-04,
-      "bit_errors": 3,
+      "ber": 6.519754857217e-05,
+      "bit_errors": 1,
       "bits_total": 15338,
-      "decoded_count": 253,
+      "decoded_count": 255,
       "snr_db": -5.000000,
       "trials": 256
     },
     {
-      "ber": 1.044181948705e-03,
-      "bit_errors": 16,
+      "ber": 1.174704692293e-03,
+      "bit_errors": 18,
       "bits_total": 15323,
-      "decoded_count": 254,
+      "decoded_count": 252,
       "snr_db": -4.000000,
       "trials": 256
     },
@@ -101,54 +101,54 @@
       "trials": 256
     },
     {
-      "ber": 1.043500945673e-03,
-      "bit_errors": 16,
+      "ber": 1.956564273136e-04,
+      "bit_errors": 3,
       "bits_total": 15333,
-      "decoded_count": 253,
+      "decoded_count": 255,
       "snr_db": -2.000000,
       "trials": 256
     },
     {
-      "ber": 2.610284521013e-04,
-      "bit_errors": 4,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 15324,
-      "decoded_count": 255,
+      "decoded_count": 256,
       "snr_db": -1.000000,
       "trials": 256
     },
     {
-      "ber": 1.304971943103e-04,
-      "bit_errors": 2,
+      "ber": 1.826960720345e-03,
+      "bit_errors": 28,
       "bits_total": 15326,
-      "decoded_count": 254,
+      "decoded_count": 255,
       "snr_db": 0.000000,
       "trials": 256
     },
     {
-      "ber": 6.524008350731e-05,
-      "bit_errors": 1,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 15328,
-      "decoded_count": 255,
+      "decoded_count": 256,
       "snr_db": 1.000000,
       "trials": 256
     },
     {
-      "ber": 6.526563111865e-05,
-      "bit_errors": 1,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 15322,
-      "decoded_count": 255,
+      "decoded_count": 256,
       "snr_db": 2.000000,
       "trials": 256
     },
     {
-      "ber": 6.526989099928e-05,
-      "bit_errors": 1,
+      "ber": 0.000000000000e+00,
+      "bit_errors": 0,
       "bits_total": 15321,
-      "decoded_count": 255,
+      "decoded_count": 256,
       "snr_db": 3.000000,
       "trials": 256
     }
   ],
   "schema": 1,
-  "subject": "cw 20 WPM standard spacing at 48000 S/s, tone 20 Hz off a 700 Hz centre; character error rate against SNR in 2500 Hz"
+  "subject": "cw 20 WPM standard spacing at 48000 S/s, tone at 720 Hz found by CwBand's search; character error rate against SNR in 2500 Hz"
 }

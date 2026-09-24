@@ -30,9 +30,14 @@ Sensitivity is the crossing of the stated error rate, interpolated linearly in
 log10 of the rate against dB between the grid points either side.
 
 The channel is white noise and nothing else: no fading, no multipath, no
-impulse noise, no transmitter clock error. The PSK and CW tones sit a few
-hertz off the receiver's centre, as the tests put them, and that is the only
-impairment besides the noise. A real HF or VHF channel will cost more than
+impulse noise, no transmitter clock error. The PSK tones sit a few hertz off
+the receiver's centre, as the tests put them, and the CW tone at 720 Hz, which
+the CW decoder searches the audio for; that is the only impairment besides the
+noise.
+
+WHAT THE SENTENCE ABOVE USED TO SAY: "The PSK and CW tones sit a few hertz off
+the receiver's centre". The CW decoder has no centre since "Decode every keyed
+tone in a receiver's audio, wherever it is". A real HF or VHF channel will cost more than
 these figures show, by an amount nobody has measured here yet.
 
 ## The table
@@ -44,7 +49,9 @@ baseband modes, the RF signal's. RDS keeps the Eb/N0 axis its subject was
 written on. Measured on 2026-09-23 on the RTX 4090 workstation's CPU, commit
 "Read a decoder curve at its own mode's error rate in compare". CW was
 measured again the same day at "Hold the start of a CW transmission until its
-spacing shows two clusters". SITOR-B, NAVTEX, AX.25, the three POCSAG rates,
+spacing shows two clusters", and again at "Decode every keyed tone in a
+receiver's audio, wherever it is", which scores it through the search a client
+is now served. SITOR-B, NAVTEX, AX.25, the three POCSAG rates,
 PSK31, PSK63, QPSK31 and D-STAR were swept again the same day at commit "Limit
 FM discriminator clicks before POCSAG's level discriminator", after the fixes
 the section below records, and their baselines replaced; of those, SITOR-B's,
@@ -54,7 +61,9 @@ VHF DSC at commit "Serve AIS and DSC as decoded messages over the wire".
 
 WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
 512 bit/s, 9.5 dB at 1200 and 12.0 dB at 2400, SITOR-B -1.1 dB and D-STAR
-17.3 dB.
+17.3 dB. And the CW row said -6.2 dB, scored through `decode::Cw` looking for
+its tone within 100 Hz of 700; "CW through the engine, at any pitch" below
+has why that changed.
 
 | Mode | Unit counted | Error rate | SNR convention | Sensitivity | Command |
 | --- | --- | --- | --- | --- | --- |
@@ -68,7 +77,7 @@ WHAT FIVE ROWS OF THE TABLE USED TO SAY, before those fixes: POCSAG 7.3 dB at
 | PSK31 | character | 0.01 | 2500 Hz | -8.8 dB | `bench sweep --mode psk31 --seed 20260918` |
 | PSK63 | character | 0.01 | 2500 Hz | -5.8 dB | `bench sweep --mode psk63 --seed 20260918` |
 | QPSK31 | character | 0.01 | 2500 Hz | -9.5 dB | `bench sweep --mode qpsk31 --seed 20260918` |
-| CW, 20 WPM | character | 0.01 | 2500 Hz | -6.2 dB | `bench sweep --mode cw --seed 20260918` |
+| CW, 20 WPM | character | 0.01 | 2500 Hz | -6.6 dB | `bench sweep --mode cw --seed 20260918` |
 | M17 stream mode | frame | 0.01 | 2500 Hz | 17.0 dB | `bench sweep --mode m17 --seed 20260918` |
 | P25 Phase 1, C4FM | bit | 0.01 | 2500 Hz | 17.9 dB | `bench sweep --mode p25p1 --seed 20260918` |
 | D-STAR, GMSK | bit | 0.01 | 2500 Hz | 17.2 dB | `bench sweep --mode dstar --seed 20260918` |
@@ -160,11 +169,12 @@ end's start-up out of CW's first noise estimate"); a first word of one
 character lost the space after it, because that space was judged alone
 ("Hold the start of a CW transmission until its spacing shows two clusters");
 and a run of T, M and O pulled the unit estimate onto a dash ("Keep the CW unit
-until a dash confirms a new one"). The curve now falls to 0.0077 at -6 dB and
-stays between 0 and 0.0010 from -5 to +3 dB, and 256 transmissions a point at
-+4, +7 and +10 dB gave 0.00013, 0.00013 and 0.00091, so it is read at 0.01
+until a dash confirms a new one"). The curve then fell to 0.0077 at -6 dB and
+stayed between 0 and 0.0010 from -5 to +3 dB, and 256 transmissions a point at
++4, +7 and +10 dB gave 0.00013, 0.00013 and 0.00091, so it was read at 0.01
 again: -6.2 dB, where the first baseline crossed at -5.2 inside its floor. At
-0.05 the crossing moved from -7.7 to -7.9 dB.
+0.05 the crossing moved from -7.7 to -7.9 dB. "CW's curve since the search",
+below, is the curve now.
 
 What is left at high SNR is the first cause, less often: the first noise
 estimate comes from a quarter of a second of noise, about a dozen boxcar
@@ -269,6 +279,203 @@ against the test's 0.0033 over 300 characters, AX.25 0.036 at 10 dB against
 and
 M17's crossing at 17.0 dB, which is 11.4 dB in 9 kHz against the test's 0.01
 at 12 dB in 9 kHz.
+
+**CW's curve since the search.** `bench sweep --mode cw` now scores what a
+client is served, `decode::CwBand`, which has to find the tone before it
+decodes it. It crosses 0.01 at -6.6 dB against -6.2 before, and reads 0.28 at
+-10 dB, 0.040 at -8 and 0.013 at -7, against 0.28, 0.055 and 0.024. From -5 to
++3 dB it lost 50 characters in 2304 transmissions, against 44; 28 of them are
+one transmission at 0 dB whose first six characters, "U860P", printed as "KT
+TTTI 6 0 P", and `bench compare` against the old baseline calls that point
+worse. The start of a transmission is still where the errors are.
+
+## CW through the engine, at any pitch
+
+The sweep above hands the decoder audio. What an operator hears goes through
+a receiver first, and on the air the tone lands wherever the tuning put it.
+`bench cw-engine` measures that: a keyed carrier in a 96 kS/s file at 14 MHz,
+read by receivers tuned so the tone lands at 300 to 1200 Hz, and the `cw`
+adapter of `core/rpc/decoders.h` on each receiver's audio, exactly as a
+client's decode pane is fed. Four receivers: `cw` at its default +/-250 Hz
+filter and 700 Hz pitch, tuned off the carrier by the pitch less 700;
+`cw-wide`, the same with its filter pulled out to -500..+600 Hz; and `usb`
+and `lsb` at their default 300 to 2700 Hz, tuned the pitch below or above the
+carrier. Four transmissions of 40 random letters and figures a cell, at 12,
+20, 30 and 40 WPM, noise in 2500 Hz at the radio frequency over the whole
+file. Each table below pools the four speeds; the JSON has every cell.
+
+    bench cw-engine --pitch 300,500,600,700,800,900,1200 --out cw-engine.json
+
+Before is commit "Measure CW through the engine at any pitch", the decoder
+that looked for its tone within 100 Hz of 700; after is "Decode every keyed
+tone in a receiver's audio, wherever it is". Character error rate, before /
+after, measured on 2026-09-23 on the RTX 4090 workstation, 80 files and 28
+receivers in 180 s before and 83 s after.
+
+`cw`, before / after:
+
+| tone | 0 dB | 5 dB | 10 dB | 15 dB | 20 dB |
+| --- | --- | --- | --- | --- | --- |
+| 300 Hz | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+| 500 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.940 / 0 | 0.895 / 0 |
+| 600 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0.008 / 0 | 0.005 / 0 |
+| 700 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0.008 / 0 | 0.005 / 0 |
+| 800 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0.005 / 0 |
+| 900 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.915 / 0 | 0.904 / 0 |
+| 1200 Hz | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 |
+
+`cw-wide`, before / after:
+
+| tone | 0 dB | 5 dB | 10 dB | 15 dB | 20 dB |
+| --- | --- | --- | --- | --- | --- |
+| 300 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 |
+| 500 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.904 / 0 | 0.901 / 0 |
+| 600 Hz | 0 / 0 | 0.003 / 0 | 0 / 0 | 0.008 / 0 | 0 / 0 |
+| 700 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| 800 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| 900 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.868 / 0 | 0.906 / 0 |
+| 1200 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 |
+
+`usb`, before / after:
+
+| tone | 0 dB | 5 dB | 10 dB | 15 dB | 20 dB |
+| --- | --- | --- | --- | --- | --- |
+| 300 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 |
+| 500 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.939 / 0 | 0.915 / 0 |
+| 600 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0.008 / 0 | 0.005 / 0 |
+| 700 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| 800 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| 900 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.910 / 0 | 0.909 / 0 |
+| 1200 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 |
+
+`lsb`, before / after:
+
+| tone | 0 dB | 5 dB | 10 dB | 15 dB | 20 dB |
+| --- | --- | --- | --- | --- | --- |
+| 300 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 |
+| 500 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.920 / 0 | 0.918 / 0 |
+| 600 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| 700 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| 800 Hz | 0 / 0 | 0 / 0 | 0 / 0 | 0.008 / 0 | 0.005 / 0 |
+| 900 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 0.936 / 0 | 0.911 / 0 |
+| 1200 Hz | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 | 1.000 / 0 |
+
+What the before tables settle, suspect by suspect:
+
+- **The decoder looked only near 700 Hz.** Confirmed: inside 600 to 800 Hz
+  every receiver read at most 0.031 of a cell wrong, and outside it at least
+  0.606, all of it below 15 dB.
+- **CW mode's narrow filter against its pitch translation.** Ruled out as a
+  cause of errors: at 600, 700 and 800 Hz the `cw` receiver read the same as
+  `usb` and `lsb`. What the `cw` receiver's default filter does is pass only
+  450 to 950 Hz of tone, so a station more than 250 Hz off zero beat is not in
+  its audio at all, which is the 300 and 1200 Hz rows after. The `cw-wide`
+  rows show the decoder reads them once the filter passes them.
+- **A threshold that did not follow the level.** Not seen from 0 to 20 dB, nor
+  on the recording below, whose audio was 1.2e-3 RMS on the -10950 Hz station.
+- **Timing that did not lock on machine keying.** It locked on every speed
+  here. On the air it lost the word spaces, which is the recording below.
+
+Characters printed on a pitch other than the one the tone landed on, after:
+38 in the `cw` rows, 29 in `cw-wide`, 25 in `lsb` and none in `usb`, over 80
+files each, all at 20 dB or at 0 dB and 800 Hz. None before, because nothing
+looked there.
+
+**A hand sender, speech and two stations**, from `tests/decode/test_cw_band.cpp`
+on 2026-09-23. At 18 WPM and +10 dB, with every element and space stretched at
+random by a standard deviation of 5, 10, 15 and 20 per cent of its length, the
+error rate was 0, 0.018, 0.054 and 0.161 over four transmissions of 56
+characters: a hand sender degrades into wrong characters, not into streams
+that print for ever. A minute of speech on a usb receiver at +20 dB printed no
+characters; the search's first version printed 747. Two stations keying at
+once 160 Hz apart, and a conversation of two stations 170 Hz apart taking
+turns, each read every character at its own pitch.
+
+**The cost.** The 62-minute recording below with eleven `cw` decoders ran at
+11.7 times realtime on the RTX 4090 workstation, against 34.1 before. Each
+decoder runs the search and up to six streams, each stream a low-pass at the
+audio rate and a boxcar at 500 S/s.
+
+### On the air: KF4FIC, 20 m, 1603 UT
+
+There is no text to score against, so the text is shown.
+`docs/recordings.md` has the file and why `center=` is an assumption; the
+offsets are measured. Eleven receivers over the whole 62 minutes, placed on
+the persistent narrow tracks `revenant-cli --detect` listed, with the
+command both before and after:
+
+    revenant-cli "file:///C:/Users/vexam/projects/SDR Recordings/KF4FIC_wideband_14000_14350kHz_20170821_1603UT.wav?center=14175000"
+      --vrx +2500:cw --vrx +2650:cw --vrx +6950:cw --vrx +5500:cw --vrx -10950:cw
+      --vrx +4500:cw --vrx +1000:usb --vrx +4000:usb --vrx +6400:usb
+      --vrx -11600:usb --vrx +3300:lsb --decode cw
+
+The +2650 cw receiver sits 130 Hz off the station at +2519.6, the tone at
+570 Hz; the others sit on a station's carrier or, for usb and lsb, a kilohertz
+or so from several. Counts over the hour, before / after, of the characters
+printed, of codes the table does not hold, and of five words standing as
+words, with a space or a line's end either side:
+
+| receiver | characters | U+FFFD | "CQ" | "TEST" | "DE" | "5NN" | "TU" |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| +2500 cw | 2089 / 3297 | 32 / 52 | 1 / 18 | 0 / 10 | 0 / 14 | 0 / 7 | 2 / 55 |
+| +2650 cw | 2929 / 3002 | 340 / 48 | 0 / 17 | 0 / 11 | 3 / 13 | 0 / 5 | 0 / 54 |
+| +6950 cw | 2911 / 4949 | 38 / 88 | 2 / 12 | 0 / 0 | 1 / 6 | 2 / 7 | 3 / 28 |
+| +5500 cw | 3395 / 4266 | 30 / 36 | 0 / 72 | 2 / 39 | 0 / 0 | 1 / 2 | 0 / 1 |
+| -10950 cw | 4735 / 5207 | 33 / 19 | 0 / 0 | 0 / 131 | 0 / 137 | 0 / 0 | 0 / 0 |
+| +4500 cw | 3070 / 3240 | 71 / 58 | 0 / 5 | 0 / 2 | 0 / 4 | 0 / 3 | 1 / 40 |
+| +1000 usb | 3789 / 14029 | 64 / 200 | 1 / 187 | 0 / 126 | 0 / 66 | 0 / 84 | 0 / 156 |
+| +4000 usb | 1095 / 12562 | 6 / 178 | 0 / 99 | 0 / 85 | 0 / 12 | 0 / 14 | 0 / 59 |
+| +6400 usb | 3153 / 14783 | 85 / 255 | 0 / 95 | 0 / 40 | 0 / 47 | 0 / 52 | 0 / 85 |
+| -11600 usb | 4689 / 10008 | 33 / 100 | 0 / 9 | 0 / 136 | 0 / 142 | 0 / 12 | 0 / 15 |
+| +3300 lsb | 2111 / 4212 | 33 / 60 | 1 / 31 | 0 / 11 | 0 / 15 | 0 / 10 | 2 / 55 |
+
+Before, the words were there and the spaces were not: the -10950 cw receiver
+printed "TEST" 129 times and never as a word, "TESTDEW7EW7E ECLIPSE CN88SE".
+The station keys at 20 WPM with letter spaces of 175 to 188 ms, word spaces of
+360 to 369 ms and pauses of 3.5 and 4.5 s between calls, measured off the
+receiver's recorded audio. With nine letter spaces, two word spaces and one
+3.5 s pause among the twelve long spaces the timing decoder clusters, its
+arithmetic puts the cut between letter and word spaces at 1.85 s, midway
+between the pause and the rest, and every word space falls under it. After,
+the same lines:
+
+    before   27.97s  vrx 5  TESTDEW7EW7E ECLIPSE CN88SE
+    after    27.97s  vrx 5  TEST DE W7E W7E ECLIPSE CN88SE
+
+The receiver 130 Hz off zero beat, before and after, the same stretch:
+
+    before   19.09s  vrx 2  TOKE�BEII�HI
+             32.06s  vrx 2  WQ��TE5TOTKN2ZDI O K�S�Z J
+    after    19.09s  vrx 2  TU K9BGL SE
+             32.75s  vrx 2  RQ CQ TEST DE K9BM I K9BG K
+             85.31s  vrx 2  CQ CQ TEST DE KN GL KE GBGL K
+
+And one usb receiver hearing several stations at once, from
+`bench cw-file` over the first four minutes, which prints the stream and
+pitch revenant-cli does not:
+
+     14.33s  vrx  1  stream   1   1519.6 Hz  23.6 WPM  8CM
+     19.11s  vrx  1  stream   5   1519.8 Hz  24.9 WPM  TU K9BGL SE
+     32.76s  vrx  1  stream   5   1519.8 Hz  24.3 WPM  RQ CQ TEST DE K9BM I K9BG K
+     33.44s  vrx  1  stream   2    732.3 Hz  23.1 WPM  KA4WJ 5NN DM12F� UA4WJ
+     45.73s  vrx  1  stream   3    266.0 Hz  29.7 WPM  CQ TEST A T3B
+     83.28s  vrx  1  stream  13    732.0 Hz  23.4 WPM  EST D E W6RDF W6 NDF K
+     98.30s  vrx  1  stream   3    266.4 Hz  30.6 WPM  NOT B 5NN FN20EI
+    103.76s  vrx  1  stream  14   1519.6 Hz  25.5 WPM  K6BHH 5 9 EM58CM
+
+    bench cw-file "file:///...1603UT.wav?center=14175000" 1000:usb 2650:cw 6400:usb --seconds 240
+
+This is a contest: calls, "TEST", "5NN" and a grid square. The printed text
+is not clean. "K9BGL" comes out as "K9BM I K9BG" and "KN GL KE GBGL". The
+usb receivers printed 10008 to 14783 characters in the hour through a
+2.4 kHz filter, the cw receivers 3002 to 5207 through 500 Hz; how many of the
+extra are stations and how many are noise the table does not say.
+
+**Not done.** Two tones within about 50 Hz are one stream. A station much
+stronger than one within about 90 Hz of it keys that one's stream. Four or
+more stations keying at once in one receiver's audio read to the search as
+speech and are not started. A transmission's first characters are still where
+the synthetic errors are, and the one bad trial at 0 dB is one of them.
 
 ## The nightly
 
