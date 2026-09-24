@@ -38,7 +38,9 @@ TEST_CASE("a label that may not drive, or is unknown, sets nothing", "[label-tun
     CHECK_FALSE(label_tune(DetectionLabel{}, 12'000.0).drives);
     CHECK_FALSE(label_tune(labelled(LabelKind::Protocol, "P25", false), 8'100.0).drives);
     CHECK_FALSE(label_tune(labelled(LabelKind::Protocol, "WHATEVER"), 8'100.0).drives);
-    CHECK_FALSE(label_tune(labelled(LabelKind::AnalogModulation, "USB"), 2'700.0).drives);
+    // An analogue name the table does not carry. This read "USB" until
+    // label_tune.h's analogue table gained USB and LSB rows.
+    CHECK_FALSE(label_tune(labelled(LabelKind::AnalogModulation, "DSB"), 2'700.0).drives);
 }
 
 // REJECTS: protocols mapped to the width rule's guess, which is what put a
