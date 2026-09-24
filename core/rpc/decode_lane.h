@@ -163,6 +163,11 @@ public:
         job->samples.assign(chunk.samples.begin(), chunk.samples.end());
         job->chunk = chunk;
         job->chunk.samples = std::span<const float>(job->samples);
+
+        // The levelled copy is not taken: nothing on a lane is a listener,
+        // and the span points into the completion thread's buffer, which
+        // the next dispatch overwrites. See AudioChunk::heard.
+        job->chunk.heard = {};
         job->posted_ns = engine::load_clock_ns();
 
         // Cannot fail: the queue holds as many as there are jobs.

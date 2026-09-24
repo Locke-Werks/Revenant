@@ -3824,6 +3824,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         std::unique_ptr<engine::AudioBackend> primary_backend;
         std::unique_ptr<engine::AudioBackend> secondary_backend;
         engine::VrxId secondary{};
+        const bool primary_is_file = file_backend != nullptr;
 
         if (file_backend != nullptr) {
             primary_backend = std::move(file_backend);
@@ -3879,7 +3880,22 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
         // Nothing detaches. These live for the run and the engine goes with
         // the process; detaching on the way out would be the same file
         // operations in reverse for no reader.
-        if (auto wired = eng.attach_audio_sink(receiver.id, std::move(*primary_sink));
+        //
+        // A LOUDSPEAKER IS HANDED THE LISTENER'S COPY AND A FILE IS NOT. The
+        // primary is the loudspeaker when nothing is being recorded, and
+        // then it plays AudioChunk::heard, the receiver AGC's output; a
+        // recording keeps the receiver's own samples, so the file holds what
+        // the demodulator made and not a gain somebody chose for their ears.
+        engine::AudioSink wired_primary = std::move(*primary_sink);
+        if (!primary_is_file) {
+            wired_primary = [played = std::move(wired_primary)](
+                                const engine::AudioChunk& chunk) -> Status {
+                engine::AudioChunk heard = chunk;
+                heard.samples = chunk.heard;
+                return played(heard);
+            };
+        }
+        if (auto wired = eng.attach_audio_sink(receiver.id, std::move(wired_primary));
             !wired) {
             return std::unexpected(with_context(
                 wired.error(), std::format("wiring receiver {}", i + 1)));
@@ -3895,7 +3911,9 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
             // The monitor is registered with the egress under an id of its
             // own, so the chunk it is handed has to carry that id. The
             // samples are not copied: the span is borrowed and publish()
-            // does its own copy into the ring.
+            // does its own copy into the ring. It is a loudspeaker, so it
+            // plays the listener's copy while the recording beside it keeps
+            // the receiver's own samples.
             const engine::VrxId monitor_id = receiver.monitor;
             engine::AudioSink monitored = std::move(*monitor_sink);
             if (auto wired = eng.attach_audio_sink(
@@ -3903,6 +3921,7 @@ void print_placement(std::size_t number, const engine::VrxStatus& status,
                     [monitored, monitor_id](const engine::AudioChunk& chunk) -> Status {
                         engine::AudioChunk copy = chunk;
                         copy.vrx = monitor_id;
+                        copy.samples = chunk.heard;
                         return monitored(copy);
                     });
                 !wired) {

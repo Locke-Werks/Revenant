@@ -102,9 +102,17 @@ struct WasapiOptions {
     double max_backlog_ms = 250.0;
 
     // Applied on this thread, to this receiver only, as a plain multiply. Not
-    // an AGC and not in the DSP path: the demodulators put a fully modulated
-    // signal at exactly full scale by convention, and a monitor that wants it
-    // quieter should not be changing what the recording contains.
+    // an AGC and not in the DSP path, and a monitor that wants it quieter
+    // should not be changing what the recording contains. What it multiplies
+    // is the listener's copy tools/cli hands a loudspeaker,
+    // AudioChunk::heard: the receiver AGC's -12 dBFS peak for am, usb, lsb,
+    // dsb and cw, and the same peak for fully deviated nfm and wfm through
+    // their fixed gain. core/engine/listener_level.h.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY: "the demodulators put a fully
+    // modulated signal at exactly full scale by convention". They do, for a
+    // unit-amplitude input, and a loudspeaker was handed that directly, so an
+    // SSB station at -60 dBFS reached it 60 dB down.
     float gain = 1.0F;
 
     // When the default endpoint changes, which is what unplugging a headset

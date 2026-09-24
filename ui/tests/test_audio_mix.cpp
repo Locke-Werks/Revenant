@@ -22,7 +22,6 @@ using revenant::rpc::AudioChunk;
 using revenant::ui::AudioMix;
 using revenant::ui::AudioRing;
 using revenant::ui::FrameSource;
-using revenant::ui::LevelAgc;
 using revenant::ui::MixControl;
 using revenant::ui::MixPull;
 using revenant::ui::MixSlot;
@@ -331,14 +330,19 @@ TEST_CASE("the sum of loud receivers is limited", "[audio][mix]")
     }));
 }
 
-TEST_CASE("an amplitude-detected receiver is brought up to a listening level", "[audio][mix]")
+TEST_CASE("a receiver is mixed at the level the engine sent it", "[audio][mix]")
 {
-    // REJECTS: mixing an am, ssb or cw receiver's audio at the level it
-    // arrives, which is what the mix did. Those demodulators hand out audio
-    // in the input's own units, measured at peaks of 3e-7 to 2e-6 through the
-    // engine's own harness, and the owner heard nothing from any of them.
+    // REJECTS: a second AGC here. The engine levels what a subscription
+    // carries, core/engine/listener_level.h, and a switch in the receiver
+    // panel turns that off to hold the gain; a mix that levelled again would
+    // undo the hold and pump what the engine had already set.
+    //
+    // WHAT THIS CASE USED TO ASSERT: that an am, ssb or cw receiver's 1e-3
+    // tone came out within a fifth of LevelAgc::kTarget, the mix's own AGC,
+    // which existed because the engine applied none. It is the level it came
+    // in at now, whatever the mode.
     Rack rack;
-    rack.slots[0] = MixSlot{.heard = true, .level = true};
+    rack.slots[0] = MixSlot{.heard = true};
     rack.rings[0].write(chunk_of(
         0, signal(0, 2 * kDevice, [](std::uint64_t n) { return sine_at(700.0, kDevice, n, 1e-3); }),
         kDevice));
@@ -349,11 +353,9 @@ TEST_CASE("an amplitude-detected receiver is brought up to a listening level", "
     static_cast<void>(rack.pull(mix, 0, out, kDevice));
     const double level = amplitude_of(out, 1, 0, 700.0, kDevice);
     INFO("700 Hz at " << level << " from 1e-3 in");
-    CHECK(level > 0.8 * LevelAgc::kTarget);
-    CHECK(level < 1.2 * LevelAgc::kTarget);
+    CHECK(std::abs(level - 1e-3) < 1e-5);
 
-    // And a discriminator's receiver, which is level-independent already, is
-    // left as it came.
+    // And a constant is left exactly as it came.
     Rack plain;
     plain.slots[0].heard = true;
     plain.rings[0].write(chunk_of(0, std::vector<float>(480, 0.01F), kDevice));

@@ -1,6 +1,7 @@
-// EngineLink's side of the noise controls: each setter builds the next
-// request through models/noise_controls.h and sends it as a retune in place.
-// The rules are all in that header; this file is plumbing.
+// EngineLink's side of the noise controls and the AGC switch: each setter
+// builds the next request and sends it as a retune in place. The noise rules
+// are all in models/noise_controls.h and the AGC's in the engine; this file
+// is plumbing.
 
 #include "models/engine_link.h"
 
@@ -149,6 +150,28 @@ QString EngineLink::noiseSummary() const
 double EngineLink::notchAudioHz() const
 {
     return ui::notch_audio_hz(wanted_.demod, wanted_.notch_hz, wanted_.cw_pitch);
+}
+
+void EngineLink::setAgcEnabled(bool on)
+{
+    if (wanted_.agc_enabled == on) {
+        return;
+    }
+    wanted_.agc_enabled = on;
+
+    // Tuning, never shape, on the same terms as the noise controls: a retune
+    // in place, and with no receiver in the pane the setting waits in the
+    // request for the one that opens next.
+    if (receiverId() == 0) {
+        emit receiverChanged();
+        return;
+    }
+    post_receiver_request(false);
+}
+
+bool EngineLink::agcOffered() const
+{
+    return mode_takes_agc(demod_name(wanted_.demod).toStdString());
 }
 
 void EngineLink::toggleNoiseStage(const QString& stage)

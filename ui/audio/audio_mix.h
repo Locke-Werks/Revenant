@@ -1,6 +1,13 @@
 // The rack's mix, at the sound card's rate: every heard receiver resampled
-// to it, placed on one timeline by its sample index, levelled where its mode
-// needs it, scaled by its strip, summed and limited.
+// to it, placed on one timeline by its sample index, scaled by its strip,
+// summed and limited.
+//
+// WHAT THE FIRST SENTENCE USED TO SAY: "levelled where its mode needs it".
+// The mix ran its own AGC, LevelAgc, on am, usb, lsb, dsb and cw, because the
+// engine applied none and those five arrived at the input's level. The engine
+// levels what a subscription carries now, core/engine/listener_level.h, so
+// every stream arrives here at a listening level and the mix does not touch
+// it.
 //
 // Qt-free, so ui/tests drives it against AudioRings with no sound card. It is
 // run on the sink's pull thread, by RingSource in audio/audio_player.cpp, and
@@ -67,10 +74,6 @@ struct MixSlot {
 
     // The strip's gain, as an amplitude.
     float gain = 1.0F;
-
-    // The receiver's mode hands out audio at the level the signal came in at:
-    // am, usb, lsb, dsb, cw. See LevelAgc.
-    bool level = false;
 
     // The receiver is wfm. A wfm stream at or above kMultiplexRateHz is the
     // multiplex rather than programme audio, and is filtered to 15 kHz and
@@ -173,14 +176,12 @@ private:
     struct Stream {
         RingFormat format;
         bool multiplex = false;
-        bool level = false;
 
         // At the device's rate with nothing asked of the filter, so it is
         // copied while the trim is exactly zero and read through the kernel
         // otherwise. See copying().
         bool copyable = false;
         Resampler resampler;
-        LevelAgc agc;
         Deemphasis deemphasis;
 
         // Where the next output frame reads, as an absolute index into the
@@ -199,7 +200,7 @@ private:
     };
 
     // Rebuilds the stream's state when its format or treatment changed.
-    void prepare(Stream& stream, RingFormat format, bool multiplex, bool level);
+    void prepare(Stream& stream, RingFormat format, bool multiplex);
 
     // Reads `count` output frames of the stream into stream.rendered, at
     // `ratio` times its nominal step. Answers the lead's source.

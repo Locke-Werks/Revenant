@@ -1,4 +1,6 @@
-// LevelAgc, Deemphasis and SoftLimiter, each on its own.
+// Deemphasis and SoftLimiter, each on its own. LevelAgc had three cases here
+// and went with it; the receiver AGC that replaced it is held by
+// tests/engine/test_listener_level.cpp.
 //
 // Each case names the wrong implementation it rejects.
 
@@ -13,7 +15,6 @@
 #include "audio/mix_stages.h"
 
 using revenant::ui::Deemphasis;
-using revenant::ui::LevelAgc;
 using revenant::ui::SoftLimiter;
 
 namespace {
@@ -40,61 +41,6 @@ constexpr std::uint32_t kRate = 48'000;
 }
 
 }  // namespace
-
-TEST_CASE("the AGC brings a -60 dBFS tone and a full-scale one to the same level",
-          "[audio][mix][agc]")
-{
-    // REJECTS: no AGC at all, which is what the mix had. An AM or SSB
-    // receiver's audio comes out at the level the signal came in at, and a
-    // -60 dBFS signal played at -60 dBFS is silence to a listener.
-    for (const double amplitude : {1e-3, 1.0}) {
-        LevelAgc agc;
-        agc.configure(kRate);
-        auto samples = tone(1'000.0, kRate * 2, amplitude);
-        agc.process(samples.data(), samples.size(), 1);
-        const double settled = peak_of(samples, kRate);
-        INFO("input peak " << amplitude << ", output peak over the second second " << settled);
-        CHECK(settled > 0.8 * LevelAgc::kTarget);
-        CHECK(settled < 1.2 * LevelAgc::kTarget);
-    }
-}
-
-TEST_CASE("the AGC never applies more than its ceiling", "[audio][mix][agc]")
-{
-    // REJECTS: a gain of target over envelope with nothing under the
-    // envelope, which divides by zero on silence and hands the card infinity.
-    LevelAgc agc;
-    agc.configure(kRate);
-    std::vector<float> silence(kRate, 0.0F);
-    agc.process(silence.data(), silence.size(), 1);
-    CHECK(std::ranges::all_of(silence, [](float v) { return v == 0.0F; }));
-    CHECK(agc.gain() <= std::pow(10.0, LevelAgc::kMaxGainDb / 20.0) * (1.0 + 1e-9));
-
-    // A -100 dBFS tone comes up by the ceiling and no further.
-    auto faint = tone(1'000.0, kRate, 1e-5);
-    agc.process(faint.data(), faint.size(), 1);
-    const double lifted = peak_of(faint, kRate / 2);
-    INFO("-100 dBFS came out at peak " << lifted);
-    CHECK(lifted < 1e-5 * std::pow(10.0, LevelAgc::kMaxGainDb / 20.0) * 1.01);
-}
-
-TEST_CASE("the AGC takes one gain for both channels of a frame", "[audio][mix][agc]")
-{
-    // REJECTS: a gain per channel, which pulls a stereo image to the centre
-    // by levelling the quiet side up to the loud one.
-    LevelAgc agc;
-    agc.configure(kRate);
-    std::vector<float> stereo(2 * kRate);
-    const auto loud = tone(1'000.0, kRate, 0.01);
-    for (std::size_t n = 0; n < loud.size(); ++n) {
-        stereo[2 * n] = loud[n];
-        stereo[2 * n + 1] = 0.5F * loud[n];
-    }
-    agc.process(stereo.data(), kRate, 2);
-    for (std::size_t n = kRate / 2; n < kRate; ++n) {
-        CHECK(std::abs(stereo[2 * n + 1] - 0.5F * stereo[2 * n]) <= 1e-6F);
-    }
-}
 
 TEST_CASE("de-emphasis passes DC and is 75 us down at 10 kHz", "[audio][mix][deemphasis]")
 {

@@ -123,6 +123,7 @@
 #include "core/dsp/spectrum_levels_reference.h"
 #include "core/dsp/spectrum_reference.h"
 #include "core/dsp/vrx_reference.h"
+#include "core/engine/listener_level.h"
 #include "core/engine/load_clock.h"
 #include "core/engine/record_util.h"
 #include "core/engine/signal_meter.h"
@@ -665,6 +666,21 @@ struct Graph::Impl {
         std::vector<float> scratch;
         dsp::SampleIndex audio_index = 0;
 
+        // What a person hears: `scratch` through the receiver AGC or the FM
+        // gain, which AudioChunk::heard points into. Sized with scratch at
+        // add_vrx, and empty for a mode that hands out no audio, whose
+        // chunks carry the samples themselves there. Completion thread only,
+        // like scratch; core/engine/listener_level.h has the stage.
+        std::vector<float> heard;
+        ListenerAgc listener;
+        std::uint64_t listener_restarts_seen = 0;
+
+        // Retunes that moved this receiver further than its passband's
+        // width, which is what restarts the AGC. Recording thread only,
+        // moved in apply_control and snapshotted onto every frame; the
+        // completion thread compares the snapshot with the count above.
+        std::uint64_t listener_restarts = 0;
+
         // What this receiver's passband display is up to: how many rows it
         // has drawn, where the last one was, and where its colour map has
         // got to.
@@ -766,6 +782,13 @@ struct Graph::Impl {
         // applied while this frame is in flight must not restamp samples
         // the old tuning produced.
         std::uint64_t tuning_epoch = 0;
+
+        // The listener's stage as it stood when this frame was recorded, on
+        // the same terms: an AGC switched off lands at a block boundary and
+        // the frames already in flight keep the setting they were made with.
+        Levelling levelling = Levelling::None;
+        AgcSettings agc{};
+        std::uint64_t listener_restarts = 0;
 
         // The passband this frame recorded for this receiver, if any. The
         // view is held by value in the snapshot so that a detach landing
@@ -1211,6 +1234,20 @@ struct Graph::Impl {
             case ControlOp::Kind::Retune:
                 for (auto& slot : active) {
                     if (slot->id == op.id) {
+                        // A move further than the receiver's own passband is
+                        // a different signal, and the AGC starts again from
+                        // its level rather than from the last one's. A nudge
+                        // inside it is the same signal and keeps the
+                        // envelope; core/engine/listener_level.h says why.
+                        // Asked of the new placement's grant, which is the
+                        // filter the receiver is about to run.
+                        const dsp::Hertz moved = op.params.center - slot->recording_params.center;
+                        const dsp::Hertz width =
+                            op.placement.granted_high - op.placement.granted_low;
+                        if (moved > width || -moved > width) {
+                            ++slot->listener_restarts;
+                        }
+
                         slot->recording_params = op.params;
 
                         // BEFORE the stage is asked, and moved whatever it
@@ -1814,11 +1851,42 @@ struct Graph::Impl {
                 std::fill(audio.begin(), audio.end(), 0.0F);
             }
 
+            // What a person hears, after the gate and from the same frames,
+            // into a buffer of its own so that `audio` reaches every other
+            // consumer exactly as the stage wrote it. Run whether or not a
+            // listener is attached, so the envelope is warm when one arrives;
+            // it is a multiply, a compare and a divide per frame.
+            // core/engine/listener_level.h has what each mode gets and why.
+            //
+            // complex_iq wins over the mode: a probe hands out complex
+            // baseband whatever demodulator it names, and a pair of floats
+            // that is one complex sample is not audio to level.
+            std::span<const float> heard(audio.data(), audio.size());
+            const Levelling levelling =
+                entry.output.complex_iq ? Levelling::None : entry.levelling;
+            if (levelling != Levelling::None && floats <= slot.heard.size()) {
+                const std::span<float> out(slot.heard.data(), floats);
+                if (levelling == Levelling::Agc) {
+                    if (entry.listener_restarts != slot.listener_restarts_seen) {
+                        slot.listener.restart();
+                        slot.listener_restarts_seen = entry.listener_restarts;
+                    }
+                    slot.listener.process(audio, out, entry.output.channels, entry.output.rate,
+                                          open, entry.agc);
+                } else {
+                    for (std::size_t i = 0; i < floats; ++i) {
+                        out[i] = audio[i] * kFmHeardGain;
+                    }
+                }
+                heard = out;
+            }
+
             AudioChunk chunk;
             chunk.vrx = slot.id;
             chunk.start = slot.audio_index;
             chunk.rate = entry.output.rate;
             chunk.samples = std::span<const float>(audio.data(), audio.size());
+            chunk.heard = heard;
             chunk.channels = entry.output.channels;
             chunk.squelch_open = open;
             chunk.tuning_epoch = entry.tuning_epoch;
@@ -3260,6 +3328,13 @@ Expected<VrxId> Graph::add_vrx(VrxId id, const VrxParams& params, const VrxPlace
     }
     slot->scratch.assign(slot->audio_bytes / sizeof(float), 0.0F);
 
+    // The listener's copy, for a mode that levels one. A probe is a complex
+    // tap whatever its demodulator says and hands its samples out as they
+    // are, so it takes none.
+    if (role == VrxRole::Receiver && levelling_for(params.demod) != Levelling::None) {
+        slot->heard.assign(slot->scratch.size(), 0.0F);
+    }
+
     // The receiver's passband colour map, built here rather than when a sink
     // is attached, so that it survives one being swapped for another. No
     // pins: nothing in VrxParams sets them, and PassbandFrame carries the
@@ -4112,6 +4187,9 @@ Status Graph::on_block(const source::SourceBlock& block) {
             entry.output = *recorded;
             entry.squelch_dbfs = slot->recording_params.squelch_dbfs;
             entry.tuning_epoch = slot->recording_epoch;
+            entry.levelling = levelling_for(slot->recording_params.demod);
+            entry.agc = agc_settings_of(slot->recording_params);
+            entry.listener_restarts = slot->listener_restarts;
 
             // Snapshotted the same way the audio sink is, so detaching never
             // races a delivery already under way. The transform itself is

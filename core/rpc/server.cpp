@@ -4437,8 +4437,13 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
         return {};
     }
 
+    // THE LISTENER'S COPY, AND THE ONLY READER OF IT IN THIS FILE. A
+    // subscription is somebody listening, so it is sent what the receiver
+    // AGC made of the chunk; every decoder route, the RDS route and the
+    // voice route below read `samples`, the receiver's output as the
+    // demodulator made it. AudioChunk::heard says why there are two.
     if (!route.p25_voice) {
-        queue_audio(route, chunk.samples, chunk.start, static_cast<std::uint32_t>(chunk.rate),
+        queue_audio(route, chunk.heard, chunk.start, static_cast<std::uint32_t>(chunk.rate),
                     static_cast<std::uint16_t>(chunk.channels), chunk.squelch_open);
         return {};
     }

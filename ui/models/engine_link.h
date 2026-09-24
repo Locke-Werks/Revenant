@@ -1107,6 +1107,14 @@ class EngineLink : public QObject {
     // nothing is.
     Q_PROPERTY(QString noiseSummary READ noiseSummary NOTIFY receiverChanged)
 
+    // The receiver AGC on the pane's receiver: VrxParams::agc_enabled, sent
+    // as a retune in place like the noise controls. The engine runs it on
+    // am, usb, lsb, dsb and cw, which agcOffered says, and off holds the gain
+    // it had; core/engine/listener_level.h. It is the receiver's own setting,
+    // so it rides the receiver's retunes and its place in the rack.
+    Q_PROPERTY(bool agcEnabled READ agcEnabled WRITE setAgcEnabled NOTIFY receiverChanged)
+    Q_PROPERTY(bool agcOffered READ agcOffered NOTIFY receiverChanged)
+
     // The audio frequency the notch sits on, which is what the operator
     // hears it as: the same as notchHz on USB and its magnitude elsewhere.
     Q_PROPERTY(double notchAudioHz READ notchAudioHz NOTIFY receiverChanged)
@@ -2150,6 +2158,13 @@ public:
     [[nodiscard]] QString noiseSummary() const;
     [[nodiscard]] double notchAudioHz() const;
 
+    // The AGC switch. Sent as a retune in place, and kept in the request on
+    // every mode so a switch made on nfm is still what the receiver has
+    // after a change to usb.
+    [[nodiscard]] bool agcEnabled() const { return wanted_.agc_enabled; }
+    void setAgcEnabled(bool on);
+    [[nodiscard]] bool agcOffered() const;
+
     // A key's toggle: "nb", "notch", "auto_notch" or "nr". Does nothing on a
     // mode that does not offer the stage, which the key table greys out.
     Q_INVOKABLE void toggleNoiseStage(const QString& stage);
@@ -2338,13 +2353,6 @@ public:
     // The strip gain for a slot, as an amplitude.
     [[nodiscard]] float mixGain(std::size_t slot) const {
         return mix_gain_[slot].load(std::memory_order_relaxed);
-    }
-
-    // Which slots hold a receiver whose mode hands out audio at the level
-    // its signal came in at, as bits: mode_needs_level in
-    // models/mode_choice.h. AudioMix levels those.
-    [[nodiscard]] std::uint32_t mixLevelMask() const {
-        return mix_level_mask_.load(std::memory_order_acquire);
     }
 
     // Which slots hold a wfm receiver, as bits. AudioMix plays one at the
@@ -4075,7 +4083,6 @@ private:
     std::atomic<std::uint32_t> mix_mask_{0};
     std::atomic<std::uint32_t> mix_granted_millis_{0};
     std::array<std::atomic<float>, kMaxReceivers> mix_gain_{};
-    std::atomic<std::uint32_t> mix_level_mask_{0};
     std::atomic<std::uint32_t> mix_wfm_mask_{0};
 
     // Supervisor thread only: the pane receiver's subscription, derived from

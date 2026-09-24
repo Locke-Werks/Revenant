@@ -51,6 +51,7 @@
 #include "core/dsp/noise_reference.h"
 #include "core/dsp/pfb.h"
 #include "core/dsp/vrx_reference.h"
+#include "core/engine/listener_level.h"
 
 namespace revenant::engine {
 namespace {
@@ -255,6 +256,13 @@ Expected<VrxPlacement> place(const dsp::GridParams& grid, dsp::SampleRate rate,
     // where nobody hears it; see dsp::validate_noise_request.
     if (const Status noise = dsp::validate_noise_request(params); !noise) {
         return std::unexpected(with_context(noise.error(), "place"));
+    }
+
+    // The AGC's time constants, on the same terms and for the same reason:
+    // the stage that reads them runs on the completion thread, where a
+    // figure it could not use would have nobody to refuse.
+    if (const Status agc = validate_agc_request(params); !agc) {
+        return std::unexpected(with_context(agc.error(), "place"));
     }
 
     // The passband the request resolves to, before anything is known about

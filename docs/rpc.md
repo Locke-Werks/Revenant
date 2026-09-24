@@ -497,6 +497,108 @@ of the receiver's analog audio. The next section but one has how it is served.
 WHAT THE PARAGRAPH ABOVE USED TO SAY, in its first sentence: "The three
 digital voice modes are refused too, in their own words."
 
+### What a subscription hears is levelled, and nothing a decoder reads is
+
+Since 2026-09-23 the engine applies the receiver AGC `VrxParams` has always
+declared, and applies it to what a person hears and nothing else.
+`core/engine/listener_level.h` is the stage. `core/engine/graph.cpp` runs it
+once per receiver per dispatch on the completion thread, after the squelch
+gate, into a buffer of its own, and hands out both on every chunk:
+`AudioChunk::samples` is the receiver's output as the demodulator made it and
+`AudioChunk::heard` is the same frames levelled. `subscribeAudio` sends
+`heard`, and so does `revenant-cli`'s loudspeaker. Every decoder lane, the RDS
+route, the P25 voice route, a recording and the probe pool read `samples`.
+
+Per mode:
+
+- **am, usb, lsb, dsb, cw: the AGC.** A peak follower with the receiver's own
+  attack and decay, holding the peak at -12 dBFS with at most 70 dB of gain.
+  An envelope detector and a product detector hand out audio at the input's
+  level, so without it a -60 dBFS station is -60 dBFS of audio.
+- **nfm, wfm: a fixed gain of 0.25.** A discriminator's level is set by the
+  deviation and not by the input, which the table below measures, so an AGC
+  there would only ride the programme's loudness and pump the noise between
+  transmissions. 0.25 puts full deviation, which the demodulator scales to
+  +/-1, at the AGC's own -12 dBFS.
+- **raw and the digital voice taps: nothing.** `heard` is `samples`.
+
+**Off holds the gain.** `VrxParams` has no manual gain and no single fixed
+gain suits a -30 and a -80 dBFS station on one band, so `agcEnabled` false
+stops the AGC tracking and keeps the gain it last had; on again starts it from
+the level of the next block, fading to it over 5 ms. A receiver that starts
+with it off takes the gain its first block with a signal calls for. It is
+tuning, not shape: `setVrxParams` changes it on a running receiver. While it
+is on, an attack outside 0.1 to 1000 ms or a decay outside 1 to 60000 ms is
+refused by name.
+
+**A retune further than the receiver's passband restarts it**, priming the
+envelope from the new station's first attack time, so a station 30 dB weaker
+than the last is heard at the level from its first block rather than after a
+decay. A nudge inside the passband keeps the envelope. A closed squelch passes
+zeros and freezes the envelope, so the first syllable after the gate is not
+70 dB up.
+
+**Measured**, `tests/engine/test_engine_agc.cpp` through the engine on the RTX
+4090: a cf32 file source at 1.152 MS/s rendered in the case, 16 channels (4
+for wfm), 48 kS/s audio, a 1 kHz tone on each mode (AM at 80%, CW a bare
+carrier pitched to 700 Hz, FM at the full deviation of the receiver's own
+filter), peak over 1.0 to 1.5 s of audio.
+
+| mode | heard, from -30 and -60 dBFS | receiver's own output |
+| --- | --- | --- |
+| am | -11.62, -11.62 dBFS | -31.94, -61.94 dBFS |
+| usb | -11.61, -11.61 | -30.64, -60.64 |
+| lsb | -11.61, -11.61 | -31.36, -61.36 |
+| dsb | -11.62, -11.62 | -34.33, -64.33 |
+| cw | -11.61, -11.61 | -30.00, -60.00 |
+| nfm | -12.08, -12.08 | -0.04, -0.04 |
+| wfm | -12.92, -12.92 | -0.87, -0.87 |
+
+The AGC modes settle 0.43 dB above the -12.04 dBFS target on a tone, because
+the attack acts only near the crests and the follower settles a little under
+them; `tests/engine/test_listener_level.cpp` gets the same -11.61 dBFS from a
+sine with no engine at all. wfm's 0.87 dB under full scale is the 75 us
+de-emphasis at 1 kHz. Over the wire, `tests/rpc/test_rpc_agc.cpp` streams
+am, usb, lsb, dsb and cw from -20 and -50 dBFS at -11.61 to -11.62 dBFS on
+every stream.
+
+DSB is the mode that can fall short. Its product detector takes the real part
+of a carrier nothing recovers, so its output is the tone times the cosine of
+where the receiver's oscillator sits against the carrier, and in the wire
+case's first layout the weak DSB emitter came out under -82 dBFS, which is
+where the 70 dB ceiling stops, and arrived at -12.14 dBFS.
+
+Timing, one USB tone stepped up 20 dB and down again, heard level per
+millisecond:
+
+| constants | after the rise | after the fall |
+| --- | --- | --- |
+| 10 ms attack, 500 ms decay | 18.3 dB over, within 1 dB in 53 ms | 20.0 dB under, back to 14 dB under in 381 ms |
+| 40 ms attack, 2000 ms decay | 19.7 dB over, within 1 dB in 207 ms | 19.9 dB under, back to 14 dB under in 1513 ms |
+
+On a signal of constant magnitude the envelope moves 1 - 1/e of a step in
+exactly the attack or the decay, to a part in a million; on a tone a rise
+takes about five attack times for the reason above.
+
+On a running receiver, switched off at 0.681 s and on at 1.676 s of audio
+across a 20 dB rise at 1.0 s: -11.61 dBFS before, +8.39 dBFS held through the
+rise, -11.62 dBFS once back on, with an untouched receiver on the same signal
+at -11.59 dBFS through it. Retuned 20 kHz from a -30 dBFS station to a -60 dBFS
+one: -11.61 dBFS before, -11.90 dBFS over 5 to 25 ms after, never above -11.62
+dBFS in the first 200 ms, while the receiver's own output fell 30.17 dB.
+
+**The decoders' input does not move.** Four receivers on one USB signal, with
+the AGC at the defaults, at four times both constants, off, and at the
+defaults again, hand out `samples` identical to the bit, and the switch case's
+toggled receiver matches an untouched one to the bit as well.
+
+WHAT THE CLIENT DID UNTIL THIS. The engine applied the AGC nowhere, and
+`ui/audio/mix_stages.h` carried `LevelAgc`, a stopgap in the client's mix with
+the same target and ceiling, because am, usb, lsb, dsb and cw arrived at
+3e-7 to 2e-6 peak through `tests/rpc`'s harness and the owner heard nothing
+from them. It was removed with this change: a second AGC in the mix would
+re-level what the engine set and undo the hold when the AGC is off.
+
 ### RDS is served, per receiver, off the audio fan-out
 
 This section used to be headed "RDS is still declared, allocated, refused" and

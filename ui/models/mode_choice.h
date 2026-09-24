@@ -143,17 +143,19 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
            name == "dsb" || name == "cw" || name == "p25p1";
 }
 
-// Whether a receiver in this mode hands out audio at the level its signal
-// came in at, so the mix has to level it before anybody can hear it.
+// Whether a receiver in this mode runs the engine's receiver AGC, which is
+// what its AGC switch in ReceiverDetail.qml acts on.
 //
-// An envelope detector and the four product detectors produce audio in the
-// input's own units, and the engine applies no AGC: measured on 2026-09-23,
-// the am, usb, lsb, dsb and cw receivers in tests/rpc's harness peaked at
-// 3e-7 to 2e-6 on signals 30 to 40 dB over a -100 dBFS floor, where nfm and
-// wfm peaked at 10.0 and 4.6. A discriminator is level-independent and the
-// vocoder writes full scale, so neither needs it. audio/mix_stages.h's
-// LevelAgc is what does the levelling.
-[[nodiscard]] constexpr bool mode_needs_level(std::string_view name)
+// An envelope detector and the four product detectors hand out audio at the
+// level the signal came in at, so the engine levels what it sends of those
+// five; core/engine/listener_level.h. nfm and wfm take a fixed gain there
+// instead, because a discriminator's level is set by the deviation, and the
+// complex taps take nothing, so the switch does nothing on any of them.
+//
+// WHAT THIS USED TO SAY, as mode_needs_level over the same five modes: that
+// the mix had to level them itself with LevelAgc because "the engine applies
+// no AGC". The engine applies it now and the mix does not.
+[[nodiscard]] constexpr bool mode_takes_agc(std::string_view name)
 {
     return name == "am" || name == "usb" || name == "lsb" || name == "dsb" || name == "cw";
 }

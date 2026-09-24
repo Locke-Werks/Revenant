@@ -22,11 +22,14 @@
 // pane with handles in it invites a gesture that cannot do
 // anything.
 //
-// WHAT IS NOT HERE. The brief for this panel asks for squelch by default and
-// AGC behind the expansion. Neither is a parameter the engine offers on a
-// receiver today, rpc::VrxParams has no field for either, so there is no
-// control to draw; the expansion says so rather than offering one that could
-// only refuse.
+// The brief for this panel asks for squelch by default and AGC behind the
+// expansion. The AGC switch is behind the expansion, bound to agcEnabled.
+// Squelch has no control here yet, and the expansion says so.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "Neither is a parameter the engine offers
+// on a receiver today, rpc::VrxParams has no field for either". It had both,
+// squelch_dbfs and the three agc fields, and the AGC ones did nothing until
+// the engine applied them to what a person hears.
 
 import QtQuick
 import QtQuick.Controls
@@ -325,13 +328,43 @@ ColumnLayout {
             font.pixelSize: Theme.sizeSmall
         }
 
+        // The receiver AGC, on by default. The engine runs it on the five
+        // amplitude-detected modes and levels only what is heard; off holds
+        // the gain it had. On nfm and wfm the box is grey, because a
+        // discriminator plays at a fixed level and there is nothing for it
+        // to switch.
         Label {
-            text: "squelch, AGC"
+            text: "AGC"
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+        }
+        RowLayout {
+            spacing: 8
+            RCheckBox {
+                text: "on"
+                enabled: engineLink.agcOffered
+                checked: engineLink.agcEnabled
+                onToggled: engineLink.agcEnabled = checked
+            }
+            Label {
+                text: engineLink.agcOffered
+                      ? (engineLink.agcEnabled
+                         ? "holds what you hear at -12 dBFS; decoders are not affected"
+                         : "off: the gain is held where it was")
+                      : "no AGC on " + UiRules.modeLabel(engineLink.receiverDemod)
+                        + ": it plays at a fixed level"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+            }
+        }
+
+        Label {
+            text: "squelch"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }
         Label {
-            text: "not parameters the engine offers on a receiver yet"
+            text: "no control here yet"
             color: Theme.inkDim
             font.pixelSize: Theme.sizeSmall
         }

@@ -1,9 +1,13 @@
-// The three per-sample stages AudioMix runs besides the resampler: a level
-// AGC for the receivers whose audio comes out at the level the signal came in
-// at, a de-emphasis for a wfm multiplex played as programme audio, and the
-// soft limiter on the sum.
+// The two per-sample stages AudioMix runs besides the resampler: a
+// de-emphasis for a wfm multiplex played as programme audio, and the soft
+// limiter on the sum.
 //
 // Qt-free and header-only, so ui/tests holds each one on its own.
+//
+// WHAT THE FIRST SENTENCE USED TO SAY: "The three per-sample stages", the
+// first of them "a level AGC for the receivers whose audio comes out at the
+// level the signal came in at". That was LevelAgc, a stopgap for an engine
+// that applied no AGC, and it is gone; see the note where it was.
 
 #pragma once
 
@@ -14,76 +18,23 @@
 
 namespace revenant::ui {
 
-// Brings amplitude-detected audio to a listening level.
+// WHERE LevelAgc WAS, and why it went. It brought am, usb, lsb, dsb and cw
+// to a -12 dBFS peak here in the mix, with VrxParams' 10 ms attack and
+// 500 ms decay and at most 70 dB of gain, because those five arrived from
+// the engine at the level the signal came in at: 3e-7 to 2e-6 peak through
+// tests/rpc's harness on 2026-09-23, which the owner heard as nothing.
 //
-// WHY THE CLIENT HAS ONE. AM, SSB and CW produced no audio the owner could
-// hear, and the cause is not the wire: measured 2026-09-23 through
-// tests/rpc/test_rpc_audio.cpp's harness, every one of those modes streams
-// 48000 S/s mono chunks with the gate open, and their peaks read 8.7e-7 for
-// am, 2.8e-7 for usb, 1.7e-6 for lsb, 1.2e-6 for dsb and 1.1e-6 for cw
-// against 9.97 for nfm and 4.61 for wfm, on the fixture's emitters 30 to 40
-// dB over a -100 dBFS floor. An envelope detector and a product detector hand
-// out audio in the input's own units, core/dsp/vrx_reference.cpp's
-// vrx_demod_gain is unity for all five, and the receiver AGC VrxParams
-// declares, agc_enabled with a 10 ms attack and a 500 ms decay, is applied
-// nowhere in core/engine. A discriminator is level-independent, which is why
-// nfm and wfm were heard and nothing else was.
+// The engine applies the receiver AGC to what a subscription carries now,
+// core/engine/listener_level.h, with the same target, the same ceiling and
+// the receiver's own time constants, and holds the gain when the receiver
+// panel switches it off. A second AGC here would re-level what the engine
+// had set and undo that hold, so the mix takes every stream at the level it
+// arrives and the limiter below is the only thing between the sum and the
+// card.
 //
-// Here rather than in the engine because what it changes is only what a
-// person hears: the decoders on the same receiver, a recording and the RDS
-// route all read the receiver's output as the engine made it, and an AGC in
-// front of a CW or RTTY decoder pumps the noise up between elements. The
-// attack and decay are VrxParams' own defaults.
-//
-// A peak follower with a fast attack and a slow decay, and a gain that
-// brings the peak to kTarget, never above kMaxGainDb. A channel with nothing
-// on it comes up to the ceiling's worth of noise, as on any radio with an
-// AGC.
-class LevelAgc {
-public:
-    // The peak level the AGC holds audio at: -12 dBFS, leaving the rest for
-    // several receivers summed under the limiter.
-    static constexpr double kTarget = 0.25;
-
-    // The most gain it applies. 70 dB brings a -82 dBFS peak to kTarget.
-    static constexpr double kMaxGainDb = 70.0;
-
-    void configure(std::uint32_t rate, double attack_ms = 10.0, double decay_ms = 500.0)
-    {
-        const double fs = static_cast<double>(std::max<std::uint32_t>(rate, 1));
-        attack_ = 1.0 - std::exp(-1000.0 / (attack_ms * fs));
-        decay_ = 1.0 - std::exp(-1000.0 / (decay_ms * fs));
-        floor_ = kTarget / std::pow(10.0, kMaxGainDb / 20.0);
-        envelope_ = 0.0;
-    }
-
-    // In place, `frames` interleaved frames of `channels`, one gain for all
-    // the channels of a frame.
-    void process(float* samples, std::size_t frames, int channels)
-    {
-        const auto width = static_cast<std::size_t>(std::max(channels, 1));
-        for (std::size_t i = 0; i < frames; ++i) {
-            float* frame = samples + i * width;
-            double peak = 0.0;
-            for (std::size_t c = 0; c < width; ++c) {
-                peak = std::max(peak, std::abs(static_cast<double>(frame[c])));
-            }
-            envelope_ += (peak - envelope_) * (peak > envelope_ ? attack_ : decay_);
-            const double gain = kTarget / std::max(envelope_, floor_);
-            for (std::size_t c = 0; c < width; ++c) {
-                frame[c] = static_cast<float>(static_cast<double>(frame[c]) * gain);
-            }
-        }
-    }
-
-    [[nodiscard]] double gain() const { return kTarget / std::max(envelope_, floor_); }
-
-private:
-    double attack_ = 1.0;
-    double decay_ = 1.0;
-    double floor_ = 1.0;
-    double envelope_ = 0.0;
-};
+// WHAT ITS NOTE USED TO SAY about the engine: that "the receiver AGC
+// VrxParams declares, agc_enabled with a 10 ms attack and a 500 ms decay, is
+// applied nowhere in core/engine".
 
 // A one-pole de-emphasis, for a wfm receiver whose output is the multiplex.
 //

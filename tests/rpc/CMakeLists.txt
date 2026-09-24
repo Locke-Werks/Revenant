@@ -30,6 +30,7 @@ if(TARGET revenant_rpc_server)
         ../reference/gpu_fixture.cpp
         rpc_fixture.cpp
         test_decode_lane.cpp
+        test_rpc_agc.cpp
         test_rpc_audio.cpp
         test_rpc_auth.cpp
         test_rpc_calibration.cpp

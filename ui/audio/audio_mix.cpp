@@ -51,14 +51,13 @@ AudioMix::AudioMix(std::uint32_t out_rate, int out_channels)
     limiter_.configure(out_rate_);
 }
 
-void AudioMix::prepare(Stream& stream, RingFormat format, bool multiplex, bool level)
+void AudioMix::prepare(Stream& stream, RingFormat format, bool multiplex)
 {
-    if (stream.format == format && stream.multiplex == multiplex && stream.level == level) {
+    if (stream.format == format && stream.multiplex == multiplex) {
         return;
     }
     stream.format = format;
     stream.multiplex = multiplex;
-    stream.level = level;
     stream.copyable = false;
     if (multiplex) {
         // Pass the programme band and be 80 dB down at the pilot, which
@@ -74,7 +73,6 @@ void AudioMix::prepare(Stream& stream, RingFormat format, bool multiplex, bool l
         stream.resampler.configure(format.sample_rate, out_rate_, 0.0, 0.0,
                                    EqualRates::interpolate);
     }
-    stream.agc.configure(out_rate_);
     stream.deemphasis.configure(out_rate_);
     stream.placed = false;
     stream.history.clear();
@@ -226,7 +224,7 @@ MixPull AudioMix::pull(std::span<AudioRing* const> rings, const MixControl& cont
         }
         const RingFormat format = snaps[i].format;
         const bool multiplex = control.strips[i].wfm && format.sample_rate >= kMultiplexRateHz;
-        prepare(streams_[i], format, multiplex, control.strips[i].level);
+        prepare(streams_[i], format, multiplex);
     }
     if (control.lead >= 0 && static_cast<std::size_t>(control.lead) < used &&
         usable[static_cast<std::size_t>(control.lead)]) {
@@ -338,9 +336,6 @@ MixPull AudioMix::pull(std::span<AudioRing* const> rings, const MixControl& cont
 
     auto mix_in = [&](Stream& stream, const MixSlot& slot) {
         const int channels = stream.format.channel_count;
-        if (stream.level) {
-            stream.agc.process(stream.rendered.data(), count, channels);
-        }
         if (stream.multiplex) {
             stream.deemphasis.process(stream.rendered.data(), count, channels);
         }

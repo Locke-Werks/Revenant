@@ -607,6 +607,19 @@ struct VrxParams {
     // AudioChunk::squelch_open, which is on every chunk for that reason.
     double squelch_dbfs = -200.0;
 
+    // The receiver AGC, which levels what a PERSON HEARS and nothing else.
+    // It runs on am, usb, lsb, dsb and cw, whose detectors hand out audio at
+    // the input's level; nfm and wfm take a fixed gain instead, and raw and
+    // the digital voice taps nothing. AudioChunk::heard carries its output
+    // and AudioChunk::samples stays the demodulator's, so a decoder, the RDS
+    // route and a recording read the same bits with it on or off.
+    // core/engine/listener_level.h has the stage, the per-mode rule and the
+    // measured figures.
+    //
+    // Tuning, not shape: switching it or moving either time constant is a
+    // push to the running receiver and never a remove and an add. Off holds
+    // the gain the AGC last had. engine::place refuses an attack outside 0.1
+    // to 1000 ms or a decay outside 1 to 60000 ms while it is on.
     double agc_attack_ms = 10.0;
     double agc_decay_ms = 500.0;
     bool agc_enabled = true;

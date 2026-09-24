@@ -93,13 +93,11 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
     // What the rack says about each slot this pull. Read once, here, so a
     // strip moved mid-pull changes the next pull and not half of this one.
     const std::uint32_t mask = link_.mixMask();
-    const std::uint32_t level = link_.mixLevelMask();
     const std::uint32_t wfm = link_.mixWfmMask();
     for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
         const std::uint32_t bit = 1U << slot;
         slots_[slot] = MixSlot{.heard = (mask & bit) != 0,
                                .gain = link_.mixGain(slot),
-                               .level = (level & bit) != 0,
                                .wfm = (wfm & bit) != 0};
     }
     const MixControl control{link_.mixLeadSlot(), slots_};

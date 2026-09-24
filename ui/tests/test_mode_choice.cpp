@@ -24,7 +24,7 @@ using revenant::ui::kModeChoices;
 using revenant::ui::mode_is_digital;
 using revenant::ui::mode_label;
 using revenant::ui::mode_makes_audio;
-using revenant::ui::mode_needs_level;
+using revenant::ui::mode_takes_agc;
 using revenant::ui::mode_names;
 
 namespace {
@@ -133,19 +133,18 @@ TEST_CASE("the analogue demodulators and P25 make audio", "[modes]")
     }
 }
 
-// Rejects leaving am, ssb and cw at the level their signal came in at, which
-// is what the owner heard as no audio at all, and rejects levelling a
-// discriminator's or a vocoder's output, which already arrives at a
-// listening level whatever the signal.
-TEST_CASE("the amplitude-detected modes are the ones levelled", "[modes]")
+// Rejects an AGC switch that is live on a mode the engine runs no AGC on,
+// where toggling it would change nothing an operator hears, and one that is
+// dead on the five modes whose audio the AGC levels.
+TEST_CASE("the AGC switch is offered on the amplitude-detected modes", "[modes]")
 {
     for (const std::string_view name : {"am", "usb", "lsb", "dsb", "cw"}) {
         INFO(name);
-        CHECK(mode_needs_level(name));
+        CHECK(mode_takes_agc(name));
     }
     for (const std::string_view name : {"nfm", "wfm", "p25p1", "raw", "dstar", "tetra", "dmr", ""}) {
         INFO(name);
-        CHECK_FALSE(mode_needs_level(name));
+        CHECK_FALSE(mode_takes_agc(name));
     }
 }
 

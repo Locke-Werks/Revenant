@@ -830,6 +830,27 @@ struct AudioChunk {
     std::span<const float> samples;
     std::uint32_t channels = 1;
 
+    // The same frames as a person should hear them: through the receiver
+    // AGC for am, usb, lsb, dsb and cw, through a fixed gain for nfm and
+    // wfm, and the samples above themselves for raw and the digital voice
+    // taps. core/engine/listener_level.h has the stage and what it does per
+    // mode. Same length, same channels, same start.
+    //
+    // TWO SPANS BECAUSE THE RECEIVER'S OUTPUT HAS TWO KINDS OF READER. A
+    // loudspeaker wants a level; a decoder, the RDS route and a recording
+    // want the output as the demodulator made it, and an AGC in front of
+    // them pumps the noise between a CW decoder's elements and writes its
+    // gain into a file. So `samples` is unchanged by the AGC, bit for bit
+    // whatever agc_enabled says, and this is the one a listener reads:
+    // core/rpc/server.cpp's subscribeAudio and tools/cli's loudspeaker.
+    // tests/engine/test_engine_agc.cpp holds both halves.
+    //
+    // Set by core/engine/graph.cpp on every chunk it delivers, and valid for
+    // the duration of the call like `samples`. Empty on a chunk anything
+    // else built, and on the copy a decode lane takes, which carries the
+    // receiver's output only.
+    std::span<const float> heard;
+
     // The squelch gate at the moment these frames were produced.
     //
     // False means the samples above are ZEROS THE GRAPH WROTE, not a quiet

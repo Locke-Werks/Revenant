@@ -871,6 +871,16 @@ struct VrxParams {
     demod @2 :Demod;
     audioRate @3 :UInt32;
     squelchDbfs @4 :Float64;
+
+    # The receiver AGC, which levels the audio subscribeAudio sends and
+    # nothing a decoder reads. It runs on am, usb, lsb, dsb and cw; nfm and
+    # wfm take a fixed gain and the complex taps nothing. Tuning and not
+    # shape, so setVrxParams changes it on a running receiver. Off holds the
+    # gain it last had. While on, an attack outside 0.1 to 1000 ms or a decay
+    # outside 1 to 60000 ms is refused by name. No defaults here, so a client
+    # that never sets these sends the AGC off with zeros, which is accepted
+    # and holds the gain the first block calls for; core/rpc/types.h
+    # defaults to on, 10 ms and 500 ms, as the engine does.
     agcAttackMs @5 :Float64;
     agcDecayMs @6 :Float64;
     agcEnabled @7 :Bool;
@@ -1590,6 +1600,16 @@ struct AudioChunk {
     # demodulator puts a fully modulated signal at exactly full scale by
     # convention and a settling AGC overshoots that, so samples above 1.0 are
     # ordinary and are what a 16-bit path would clip.
+    #
+    # THE LISTENER'S LEVEL, NOT THE DEMODULATOR'S. A subscription is somebody
+    # listening, so these are engine::AudioChunk::heard: am, usb, lsb, dsb and
+    # cw through the receiver AGC, held at a -12 dBFS peak with at most 70 dB
+    # of gain, and nfm and wfm through a fixed gain of 0.25 that puts full
+    # deviation at the same peak. A P25 receiver's are its vocoder's, which
+    # sets its own level. The decoders and the RDS route read the receiver's
+    # output from before the AGC and are unaffected by it. VrxParams::
+    # agcEnabled off holds the gain rather than removing it, and docs/rpc.md
+    # carries the measured levels.
     samples @0 :List(Float32);
 
     # IN THE STREAM AND NOT ASSUMED BY THE CLIENT, which costs six bytes a

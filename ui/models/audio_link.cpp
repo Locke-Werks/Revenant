@@ -238,7 +238,6 @@ void EngineLink::forget_audio()
 void EngineLink::publish_mix()
 {
     std::uint32_t mask = 0;
-    std::uint32_t level = 0;
     std::uint32_t wfm = 0;
     int pane_slot = -1;
     for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
@@ -246,10 +245,6 @@ void EngineLink::publish_mix()
             continue;
         }
         mask |= 1U << slot;
-        const std::string mode = demod_name(live_audio_[slot].demod).toStdString();
-        if (mode_needs_level(mode)) {
-            level |= 1U << slot;
-        }
         if (live_audio_[slot].demod == rpc::Demod::Wfm) {
             wfm |= 1U << slot;
         }
@@ -289,9 +284,12 @@ void EngineLink::publish_mix()
     mix_granted_millis_.store(
         lead < 0 ? 0U : live_audio_[static_cast<std::size_t>(lead)].granted,
         std::memory_order_release);
-    // The two mode masks before the mask that admits a slot, so the pull
-    // thread never sees a slot heard with a stale treatment.
-    mix_level_mask_.store(level, std::memory_order_release);
+    // The mode mask before the mask that admits a slot, so the pull thread
+    // never sees a slot heard with a stale treatment.
+    //
+    // WHAT THIS USED TO SAY: "The two mode masks". The other was the level
+    // mask, which told the mix's own AGC which slots to level; the engine
+    // levels what it sends now, so it went with that AGC.
     mix_wfm_mask_.store(wfm, std::memory_order_release);
     mix_mask_.store(mask, std::memory_order_release);
     mix_lead_slot_.store(lead, std::memory_order_release);

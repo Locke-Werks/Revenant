@@ -170,7 +170,11 @@ audio, once.
 
 All three stages are indifferent to level: the blanker compares a ratio, the
 predictor is normalized by its own input, and the subtraction's gain is a
-ratio of powers. That matters here because the engine has no AGC yet.
+ratio of powers. The receiver AGC comes after all three and only on the copy a
+person hears, `docs/rpc.md`, so none of them sees a level the AGC chose.
+
+WHAT THE LAST SENTENCE USED TO SAY: "That matters here because the engine has
+no AGC yet."
 
 ## Measured
 

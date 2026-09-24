@@ -461,9 +461,10 @@ endif()
 #
 # It covers AudioMix and what it is built from: the resampler's accuracy and
 # stopband, the alignment of receivers whose indices share no origin, the
-# level AGC for the amplitude-detected modes, the multiplex's de-emphasis and
-# the soft limiter on the sum, and the drift trim that holds the lead ring's
-# fill against an engine clock off the card's, over ten simulated minutes.
+# multiplex's de-emphasis and the soft limiter on the sum, and the drift trim
+# that holds the lead ring's fill against an engine clock off the card's, over
+# ten simulated minutes. The mix levels nothing: the engine sends every stream
+# at a listening level, core/engine/listener_level.h.
 #
 # It covers plan_history_resize, which is the waterfall's ring arithmetic
 # across a height change: which wrapped index a kept row comes from, how

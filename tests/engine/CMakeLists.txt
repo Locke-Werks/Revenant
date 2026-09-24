@@ -127,6 +127,16 @@ revenant_apply_warnings(revenant_lock_holder)
 # synthetic SSB voice under impulses, a whistle and white noise, measured with
 # each stage off and on.
 
+# test_listener_level.cpp needs no GPU. It is the receiver AGC's arithmetic,
+# core/engine/listener_level.h: the time constants against a signal of
+# constant magnitude, the block edge, the gate, the switch and a retune.
+#
+# test_engine_agc.cpp is the same stage through a real engine, on a file
+# source rendered in the case: every mode from inputs 30 dB apart, the timing
+# on demodulated audio, the decoders' input bit for bit, and the switch and a
+# retune on a running receiver. It is where the levels in docs/rpc.md come
+# from.
+
 add_executable(revenant_engine_tests
     ../support/no_modal_dialogs.cpp
     ../reference/gpu_fixture.cpp
@@ -138,6 +148,7 @@ add_executable(revenant_engine_tests
     test_channel_ring.cpp
     test_device_lock.cpp
     test_engine.cpp
+    test_engine_agc.cpp
     test_engine_dv.cpp
     test_engine_noise.cpp
     test_engine_pacing.cpp
@@ -147,6 +158,7 @@ add_executable(revenant_engine_tests
     test_engine_spectrum.cpp
     test_pacing_window.cpp
     test_front_end_correction.cpp
+    test_listener_level.cpp
     test_ring.cpp
     test_rtlsdr_source.cpp
     test_signal_meter.cpp

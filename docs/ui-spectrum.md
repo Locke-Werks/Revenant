@@ -310,12 +310,13 @@ with cases in `ui/tests/test_audio_mix.cpp`, `test_resampler.cpp` and
   9 ppm of the drift after three minutes, and no frame was starved, evicted,
   skipped or realigned after the lock; at the nominal rate the same engines
   ran the level 59 ms over or starved the lead.
-- Amplitude-detected receivers, am, usb, lsb, dsb and cw, are levelled by an
-  AGC with VrxParams' own 10 ms attack and 500 ms decay, holding the peak at
-  -12 dBFS with at most 70 dB of gain. Their demodulators hand out audio in
-  the input's units and the engine applies no AGC, so on 2026-09-23 those
-  five peaked at 3e-7 to 2e-6 through `tests/rpc`'s harness, where nfm and
-  wfm peaked at 10.0 and 4.6, and the owner heard nothing from any of them.
+- Every stream arrives at a listening level and the mix does not level it.
+  The engine applies the receiver AGC to what a subscription carries: am,
+  usb, lsb, dsb and cw held at a -12 dBFS peak with at most 70 dB of gain and
+  the receiver's own attack and decay, nfm and wfm through a fixed gain that
+  puts full deviation at the same peak. The receiver panel's AGC switch, behind
+  the filter expansion, turns it off, which holds the gain it had.
+  `docs/rpc.md` has the stage and the measured levels.
 - The sum goes through a soft limiter under -1 dBFS whose gain drops at once
   to what the loudest frame needs and recovers over 100 ms; below the
   threshold it multiplies by exactly one.
@@ -338,6 +339,15 @@ loud receivers can exceed full scale and the device clips." The first is what
 killed the audio when RDS raised the focused receiver to 171000 S/s, since the
 sink was opened at the focused receiver's format and the device refused it, and
 it also left every mono receiver out of the mix under a focused stereo one.
+
+WHAT THE LEVEL POINT USED TO SAY, until the engine applied the AGC:
+"Amplitude-detected receivers, am, usb, lsb, dsb and cw, are levelled by an
+AGC with VrxParams' own 10 ms attack and 500 ms decay", in the mix, because
+"their demodulators hand out audio in the input's units and the engine applies
+no AGC, so on 2026-09-23 those five peaked at 3e-7 to 2e-6 through `tests/rpc`'s
+harness, where nfm and wfm peaked at 10.0 and 4.6, and the owner heard nothing
+from any of them." That AGC was the client's LevelAgc and it is gone; the
+engine's is the one described above.
 
 WHAT THE FIRST POINT USED TO SAY, until the clock trim: "a 30 kHz one 93 dB
 down; equal rates are a copy." A receiver at the device's rate is read a few
