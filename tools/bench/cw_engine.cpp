@@ -296,6 +296,15 @@ Expected<CwEngineReport> run_cw_engine(const CwEngineConfig& config) {
                     std::hash<std::thread::id>{}(std::this_thread::get_id()));
     const std::string uri = std::format("file:///{}?rate={}&format=cf32&center={}",
                                         path.generic_string(), kFileRate, kCentreHz);
+    // The trial file goes on every way out, a refusal included: the first
+    // run of this left a 24 MB file behind when a receiver was refused.
+    struct RemoveOnExit {
+        const std::filesystem::path& path;
+        ~RemoveOnExit() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+    } remove_on_exit{path};
     const unsigned threads =
         config.threads != 0 ? config.threads : std::max(1U, std::thread::hardware_concurrency());
 
@@ -413,8 +422,6 @@ Expected<CwEngineReport> run_cw_engine(const CwEngineConfig& config) {
             }
         }
     }
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
     report.wall_seconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     return report;
