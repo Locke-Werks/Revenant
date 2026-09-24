@@ -1180,9 +1180,12 @@ its text exact: a message error rate of 0.01 at -2.6 dB in 2500 Hz, 0.031 at
 -3 dB, 0.28 at -4 dB and 0.86 at -5 dB, 3 of 2048 lost at -2 dB and none from
 -1 dB up. What they do not reach: SITOR-A, which is an ARQ conversation
 and not a broadcast; the selective B-mode, whose inverted traffic reads as
-mutilated; DSC, which reuses the discriminator and has not been written; and
-the meaning of NAVTEX's B1 and B2 letters, which is in the IMO NAVTEX Manual,
-not held, so they are reported as the letters sent.
+mutilated; DSC on MF and HF, which would reuse the discriminator and has not
+been written; and the meaning of NAVTEX's B1 and B2 letters, which is in the
+IMO NAVTEX Manual, not held, so they are reported as the letters sent. VHF
+DSC is done, on the tone discriminator and the bit clock of
+`core/decode/fsk.h`; see "AIS and VHF DSC" below. WHAT THE LIST USED TO SAY
+of DSC: "DSC, which reuses the discriminator and has not been written".
 
 **PSK31, PSK63 and QPSK31, receiver audio to text.** `core/decode/psk31.cpp`,
 with the alphabet in `core/decode/varicode.cpp` and the mixer and carrier

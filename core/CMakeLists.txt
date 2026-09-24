@@ -87,10 +87,12 @@ add_library(revenant_core STATIC
     characterise/periodicity.cpp
     characterise/tones.cpp
     characterise/transform.cpp
+    decode/ais.cpp
     decode/aprs.cpp
     decode/ax25.cpp
     decode/cw.cpp
     decode/dmr.cpp
+    decode/dsc.cpp
     decode/dmr_codes.cpp
     decode/dstar.cpp
     decode/dv_codes.cpp
@@ -129,9 +131,11 @@ add_library(revenant_core STATIC
     dsp/spectrum_levels_reference.cpp
     dsp/spectrum_reference.cpp
     dsp/vrx_reference.cpp
+    dsp/synth/ais_mod.cpp
     dsp/synth/channel.cpp
     dsp/synth/cw_mod.cpp
     dsp/synth/dmr_mod.cpp
+    dsp/synth/dsc_mod.cpp
     dsp/synth/dv_mod.cpp
     dsp/synth/fsk_mod.cpp
     dsp/synth/m17_mod.cpp
