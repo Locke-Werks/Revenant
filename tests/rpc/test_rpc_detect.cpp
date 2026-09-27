@@ -43,6 +43,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <capnp/message.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -64,7 +66,9 @@
 #include "core/dsp/types.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
+#include "core/detect/label.h"
 #include "core/rpc/client.h"
+#include "core/rpc/convert.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/server.h"
 #include "core/rpc/types.h"
@@ -795,6 +799,31 @@ TEST_CASE("the confidence bar belongs to the caller and filters the list",
     auto after = harness.client().detections(0.0, 0.0);
     REQUIRE(after.has_value());
     CHECK(after->detections.size() == unfiltered->detections.size());
+}
+
+// No device and no socket: the fault was in the conversion, so the conversion
+// is what is called. detect::TrackLabel::name is a default std::string_view for
+// an unlabelled track, whose data() is null, and write_detection handed that to
+// kj::StringPtr, which in a Debug build reads the byte at data() + size to
+// check for a terminator. That read address zero, and revenant-engine built
+// with the dev preset died with 0xC0000005 on the first detections poll that
+// returned an unlabelled track. Release builds compile the check out, which is
+// why only a Debug engine ever did, and why this case only means anything when
+// the suite is a Debug one.
+TEST_CASE("an unlabelled track crosses with an empty name rather than a null one",
+          "[rpc][detect][m2]") {
+    detect::Track track;
+    track.id = 7;
+    REQUIRE(detect::label_track(track).kind == detect::LabelKind::Unknown);
+    REQUIRE(detect::label_track(track).name.empty());
+
+    capnp::MallocMessageBuilder message;
+    auto out = message.initRoot<rpc::schema::Detection>();
+    rpc::write_detection(out, track);
+
+    CHECK(out.getId() == 7);
+    CHECK(out.getLabel().getKind() == rpc::schema::LabelKind::UNKNOWN);
+    CHECK(out.getLabel().getName().size() == 0);
 }
 
 TEST_CASE("a merged track crosses the wire carrying the id it was merged into",

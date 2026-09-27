@@ -49,6 +49,27 @@ void write_frequencies(capnp::List<std::int64_t>::Builder out,
     }
 }
 
+// A name held as a std::string_view over a string literal, as capnp text.
+//
+// AN EMPTY VIEW IS NOT AN EMPTY LITERAL, and this is the difference that
+// crashed the engine. capnp::Text::Reader(const char*, size_t) is
+// kj::StringPtr's constructor, which in a build with KJ_DEBUG defined, which
+// is every Debug build of this tree, reads value[size] to check the
+// terminator. A default-constructed std::string_view has a null data(), so
+// the check read address zero: detect::TrackLabel::name is exactly that for
+// every unlabelled track, and the dev engine died with 0xC0000005 on the
+// first detections poll that returned one. Release builds compile the check
+// out, which is why the shipped engine never did. Found through
+// revenant-engine --no-source, where the window's first open is also the
+// first time its poll finds tracks, and not caused by it.
+//
+// Only for views of literals. A non-empty view that is not followed by a NUL
+// still fails the same check, by throwing rather than by faulting, and the
+// fix for that is a std::string, as end_audio_for_vrx in server.cpp says.
+[[nodiscard]] capnp::Text::Reader literal_text(std::string_view name) {
+    return name.empty() ? capnp::Text::Reader("") : capnp::Text::Reader(name.data(), name.size());
+}
+
 }  // namespace
 
 schema::Demod to_schema(engine::Demod mode) {
@@ -624,7 +645,7 @@ void write_detection(schema::Detection::Builder out, const detect::Track& in) {
     const detect::TrackLabel label = detect::label_track(in);
     auto wire = out.initLabel();
     wire.setKind(static_cast<schema::LabelKind>(static_cast<std::uint16_t>(label.kind)));
-    wire.setName(capnp::Text::Reader(label.name.data(), label.name.size()));
+    wire.setName(literal_text(label.name));
     wire.setConfidence(label.confidence);
     wire.setMayDrive(label.may_drive);
     wire.setSymbolRateHz(label.symbol_rate_hz);
@@ -671,8 +692,8 @@ void write_rds_station(schema::RdsStation::Builder out, const decode::StationSta
         decode::pty_name(region, in.pty, decode::PtyWidth::kShort);
     const std::string_view long_name =
         decode::pty_name(region, in.pty, decode::PtyWidth::kLong);
-    out.setPtyShortName(capnp::Text::Reader(short_name.data(), short_name.size()));
-    out.setPtyLongName(capnp::Text::Reader(long_name.data(), long_name.size()));
+    out.setPtyShortName(literal_text(short_name));
+    out.setPtyLongName(literal_text(long_name));
 
     out.setTp(in.tp);
     out.setTpValid(in.tp_valid);
