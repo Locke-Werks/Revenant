@@ -305,8 +305,10 @@ not commit the generated file; `guards` fails the build if it appears.
 
 The `release` job first ran on the v0.1.0 tag, 2026-09-27, and signed
 `revenant-engine.exe`, `revenant-ui.exe` and the installer. "Release
-readiness", "Owed, not blocking", has what was checked. This paragraph used to
-read "Nothing has been signed yet. The `release` job has never run."
+readiness", "Owed, not blocking", has what was checked.
+
+This paragraph used to read "Nothing has been signed yet. The `release` job
+has never run."
 
 ## The corresponding sources
 
