@@ -2106,3 +2106,11 @@ commit: "Close M2 on the docked layout"
 instead: M2 closed on 2026-09-27 on the docked layout, 0.22% of refreshes over
     budget; the popped-out receiver window, 1.32%, is open.
     docs/ui-spectrum.md, "The regression of 2026-09-27, and where M2 closed".
+
+phrase: Until then the layout moves and there are no binaries
+phrase: Today the repository ships source and no binaries
+phrase: Nothing has been distributed, so nothing is in breach
+retired: 2026-09-27
+commit: "Set out the roadmap in the README for v0.1.0"
+instead: v0.1.0 is the first release, a signed installer with its sources on
+    the same release page. README.md, "Where it is going".

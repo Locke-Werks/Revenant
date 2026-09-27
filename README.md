@@ -273,7 +273,22 @@ the matrix now, so nothing about it is refereed, not only the spectrum.
 
 ### Where it is going
 
-**M2, done 2026-09-27.** The graphical client. It runs as its own process and
+| Milestone | What it delivers | State |
+| --- | --- | --- |
+| M0 | The device path: open the RTL-SDR, read its descriptors, find the bulk endpoint that carries IQ | Done |
+| M1 | The engine: the GPU channelizer, receivers, demodulators and the wideband detector, with fifty receivers on one 20 MHz grid faster than realtime | Done |
+| M2 | The graphical client, a separate process over Cap'n Proto, drawing the spectrum and waterfall at monitor refresh within its frame budget | Done, 2026-09-27 |
+| M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | This release |
+| M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists, and nothing of it is built | Next |
+| After M4 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
+
+What v0.1.0 does not do is the "What does not" paragraph under Status, and
+what each decoder does not do is `docs/modes.md`. One known shortfall is new
+in this release: with the receivers popped out into their own window, that
+window misses 1.32% of refreshes at full load, over the one in a hundred the
+budget allows. Docked in the main window, the default, they are within it.
+
+**M2 in detail.** The graphical client. It runs as its own process and
 reaches the engine over a Cap'n Proto service, because the engine is headless
 by design and because it has to be: the engine is built against the static C
 runtime and ships as one self-contained signed binary, and Qt is not.
@@ -325,15 +340,13 @@ frame time, at full load or at any load, so neither can be claimed. That
 measurement is what M2 lacks." `revenant-ui --frame-stats` and
 `scripts/frame-budget.ps1` measure it.
 
-**M3 is the first public release.** Until then the layout moves and there are
-no binaries. The repository is public because the licence made it the
-straightforward way to satisfy the source obligation, not because anything
-here is finished.
+WHAT THIS SECTION USED TO SAY about M3 and after: "M3 is the first public
+release. Until then the layout moves and there are no binaries." With v0.1.0
+there are binaries. And "M4 and beyond: the rolling capture and search over
+it, more than one radio at a time, and the modes `docs/modes.md` lists as not
+done", which the table now splits into M4 and what follows it.
 
-**M4 and beyond:** the rolling capture and search over it, more than one radio
-at a time, and the modes `docs/modes.md` lists as not done.
-
-This line used to read "M4 and beyond: the decoders, and search over stored
+An older version of that line read "M4 and beyond: the decoders, and search over stored
 captures." Thirteen decoders arrived during M2, so the line pointed a reader
 past work that had already landed.
 

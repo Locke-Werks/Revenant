@@ -660,10 +660,15 @@ third. docs/packaging.md has the detail.
 
 The relink obligation is not the open item. These are.
 
-1. **Nothing has been distributed, so nothing is in breach.** The distinction
-   the licence section above draws holds: these obligations attach to handing a
-   binary to somebody. Today the repository ships source and no binaries. The
-   deadline is the first release, not now.
+1. **The first release carries its sources, 2026-09-27.** These obligations
+   attach to handing a binary to somebody, and v0.1.0 is the first time
+   anything was handed over. The release page that carries the installer
+   carries the corresponding-source archive and the Qt and FFmpeg source
+   archives beside it, which is the 6d route decided below.
+
+   WHAT THIS ITEM USED TO SAY. "Nothing has been distributed, so nothing is in
+   breach. ... Today the repository ships source and no binaries. The deadline
+   is the first release, not now."
 2. **Settled 2026-09-27: the Qt and FFmpeg sources.** The client payload
    conveys Qt 6.8.3 and FFmpeg 7.1 as DLLs, and both LGPLs ask for their
    source to be offered with the object code. The owner decided on the route
