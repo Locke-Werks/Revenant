@@ -2114,3 +2114,11 @@ retired: 2026-09-27
 commit: "Set out the roadmap in the README for v0.1.0"
 instead: v0.1.0 is the first release, a signed installer with its sources on
     the same release page. README.md, "Where it is going".
+
+phrase: Nothing has been signed yet
+phrase: The release job has never run
+phrase: Nothing has signed with them from CI yet
+retired: 2026-09-27
+commit: "Record the first run of the release job"
+instead: The release job ran on the v0.1.0 tag and signed our two executables
+    and the installer. docs/packaging.md, "Owed, not blocking".

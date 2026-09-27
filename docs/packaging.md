@@ -303,7 +303,10 @@ answers across four other repositories once it was copied.
 signing through a script. The action builds its own metadata on the runner. Do
 not commit the generated file; `guards` fails the build if it appears.
 
-Nothing has been signed yet. The `release` job has never run.
+The `release` job first ran on the v0.1.0 tag, 2026-09-27, and signed
+`revenant-engine.exe`, `revenant-ui.exe` and the installer. "Release
+readiness", "Owed, not blocking", has what was checked. This paragraph used to
+read "Nothing has been signed yet. The `release` job has never run."
 
 ## The corresponding sources
 
@@ -615,8 +618,10 @@ pushed or published.
    `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` are organisation variables visible
    to all repositories. The three values were checked together the same day
    by a client-credentials token request for
-   `https://codesigning.azure.net/.default`, which returned 200. Nothing has
-   signed with them from CI yet; the first tag is the first time.
+   `https://codesigning.azure.net/.default`, which returned 200, and the
+   `release` job signed with them on the v0.1.0 tag. This item used to end
+   "Nothing has signed with them from CI yet; the first tag is the first
+   time."
 
    WHAT THIS ITEM USED TO SAY. "`AZURE_CLIENT_SECRET` is not set anywhere the
    `release` job can read it." `Locke-Werks/Revenant` had no `release`
@@ -658,9 +663,19 @@ pushed or published.
   WHAT THIS ITEM USED TO SAY. "The README has no install section and no
   release badge. Both are right while there is no release, and both are owed
   at the tag."
-- **The `release` job has never run.** The first tag is its first run. Every
-  step before signing has a counterpart in the `package` job that runs on
-  each push; the signing steps and `gh release create` do not.
+- **Done, 2026-09-27: the `release` job's first run, on the v0.1.0 tag at
+  `36e6b58`**, run 36345951513. Every step passed. The payload step signed
+  two files and the check after it passed, so the other 53 kept their
+  publishers' signatures. The published `Revenant-Setup.exe`, 28,796,152
+  bytes, downloaded back from the release page: signature `Valid`, signed by
+  Specter Point Intelligence, LLC and timestamped by Microsoft, version
+  0.1.0.0, and `--check-only` reports 200 payload files, 43 config keys,
+  `desktop_shortcut` unticked and all four preflight checks passing. The
+  release page carries the installer, the corresponding-source archive, the
+  five Qt and FFmpeg archives and `SOURCES-client.txt`.
+
+  WHAT THIS ITEM USED TO SAY. "The `release` job has never run. The first
+  tag is its first run."
 
 ### The Forge pin, moved to v0.4.1
 
