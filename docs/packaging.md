@@ -15,10 +15,11 @@ facts about this machine rather than about Qt.
 | `installer.toml` | The Forge config at the repository root. Product identity, install directory, preflights, the one option and the shortcuts |
 | `scripts/stage-payload.ps1` | Assembles the payload directory out of the two build trees, licence material included |
 | `scripts/generate_notices.py` | Writes each program's third-party notices from the tree that built it |
-| `scripts/corresponding_source.py` | Records which copyleft sources went into the engine, then fetches, checks and zips them |
+| `scripts/corresponding_source.py` | Records which copyleft sources went into the engine, then fetches, checks and zips them. Also fetches and checks the Qt and FFmpeg source archives, and fails a payload holding a DLL none of them covers |
+| `scripts/client-sources.json` | The Qt and FFmpeg source archives the release page mirrors, each pinned by URL, SHA256 and size, with the payload files it is the source of |
 | `licenses/` | The LGPL texts and the SPDX licence texts the notices need, with where each came from in `generate_notices.py` |
-| `package` job in `.github/workflows/ci.yml` | Unsigned installer and the corresponding-source archive on every build, as artifacts |
-| `release` job in the same file | Signed installer and the corresponding-source archive on a `v*` tag, published to the release together |
+| `package` job in `.github/workflows/ci.yml` | Unsigned installer and the corresponding-source archive on every build, as artifacts. Fetches and checks the Qt and FFmpeg archives too, and does not keep them |
+| `release` job in the same file | Signed installer, the corresponding-source archive and the Qt and FFmpeg source archives on a `v*` tag, published to the release together |
 
 ## Reproducing it locally
 
@@ -352,20 +353,126 @@ overlay among them. Built a third time in the release dry run at `b43d763`:
 the same commit. The growth since the second build is Revenant's own
 source archive.
 
+### Qt and FFmpeg, beside the archive
+
+The client payload conveys Qt 6.8.3 and FFmpeg 7.1 as DLLs, which is
+conveying their object code, and both licences ask for the source to be
+offered with it. The owner decided on 2026-09-27 to take the same route as
+for libusb and rtlsdr, from the same place: every release page carries the
+exact upstream source archives, unmodified, as separate assets beside the
+corresponding-source archive. For Qt that is GPL-3.0 section 6d, which
+LGPL-3.0 incorporates. For FFmpeg it is the second paragraph of LGPL-2.1
+section 4: offering the object code from a designated place and equivalent
+access to the source from the same place satisfies the requirement to
+distribute the source.
+
+They are separate assets rather than members of the zip for two reasons.
+They come to 112.5 MB against the zip's 4.7 MB, and an archive published
+under its upstream name can be checked by anybody against the hash its
+upstream publishes, which a copy inside a zip cannot.
+
+`scripts/client-sources.json` pins each archive by URL, SHA256 and size and
+lists the payload files it is the source of. `corresponding_source.py client`
+downloads each one, refuses any byte that does not match, and writes it
+unchanged beside `SOURCES-client.txt`, which says what each archive is, where
+it came from, how it was checked and which payload files it is the source
+of. `corresponding_source.py coverage` fails a staged payload that holds a
+DLL no pinned archive covers, or that no longer holds a DLL a pin names. The
+Visual C++ runtime is the one exception: Microsoft's terms ask for no source.
+
+| Release asset | Bytes | Source of |
+| --- | --- | --- |
+| `qtbase-everywhere-src-6.8.3.tar.xz` | 48,426,536 | `Qt6Core`, `Qt6Gui`, `Qt6Network`, `Qt6OpenGL`, `qwindows` and the `qgif`, `qico` and `qjpeg` image formats |
+| `qtdeclarative-everywhere-src-6.8.3.tar.xz` | 36,503,988 | The fourteen `Qt6Qml*`, `Qt6Quick*` and `Qt6LabsFolderListModel` libraries and the fourteen QML plugins, with the QML modules' other files |
+| `qtmultimedia-everywhere-src-6.8.3.tar.xz` | 9,705,340 | `Qt6Multimedia` and `ffmpegmediaplugin` |
+| `qtsvg-everywhere-src-6.8.3.tar.xz` | 2,009,072 | `Qt6Svg` and the `qsvg` image format |
+| `FFmpeg-n7.1.tar.gz` | 15,881,667 | `avcodec-61`, `avformat-61`, `avutil-59`, `swresample-5`, `swscale-8` |
+| `SOURCES-client.txt` | 4,359 | What each of the above is and how it was checked |
+
+**Which Qt modules.** Read from Qt's own SPDX documents under
+`C:/Qt/6.8.3/msvc2022_64/sbom`, whose `files` list names what each module
+installs. All 40 Qt DLLs in the payload are installed by one of these four:
+8 by qtbase, 28 by qtdeclarative, 2 by qtmultimedia, 2 by qtsvg. Nothing
+comes from another module. qtshadertools compiles Qt Quick's shaders at
+Qt's build time and ships nothing the payload carries.
+`coverage --qt` repeats this check against the SPDX documents every time the
+client half is staged, so a file filed under the wrong module fails the
+build rather than publishing the wrong source.
+
+**That these are the archives the Qt DLLs were built from.** Checked on
+2026-09-27:
+
+- Each archive's SHA256 equals the `.sha256` download.qt.io publishes beside
+  it, and its MD5 equals the line for it in the directory's `md5sums.txt`.
+- Each archive's `.tag` file names the commit it was cut from. For qtbase,
+  qtmultimedia and qtsvg that is the commit the module's `v6.8.3` tag points
+  to on code.qt.io, read with `git ls-remote`: `c07c2d5a`, `2bf11352` and
+  `c75099a7`. qtdeclarative's `.tag` holds `cd56f4a2`, which is not a commit.
+  It is the tree object of `2ec235a2`, the commit its `v6.8.3` tag points to,
+  so the content is the same.
+- The SPDX documents of qtbase, qtdeclarative and qtsvg record the commit
+  each module's binaries were built from, and it is the tag's commit in all
+  three. `coverage --qt` compares them with the pins on every stage.
+  qtmultimedia's document records the repository and version 6.8.3 and no
+  commit, so for that one module the match rests on the tag.
+
+**Which FFmpeg, and why that archive.** Qt builds its own FFmpeg for the
+binary packages and ships it in `bin/`. The evidence that it is FFmpeg n7.1
+built without patches:
+
+- qtmultimedia's SPDX document records its configure line, which includes
+  `-DFFMPEG_DIR=C:\FFmpeg-n7.1\build\msvc\installed`.
+- Qt's provisioning script for its build machines at the qt5 `v6.8.3` tag,
+  `coin/provisioning/common/windows/install-ffmpeg.ps1`, sets
+  `$version="n7.1"`, downloads
+  `https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.tar.gz`, checks it
+  against SHA1 `f008a93710a7577e3f85a90f4b632cc615164712`, and extracts it to
+  `C:\FFmpeg-n7.1`. The MSVC build then runs `configure` and `make install`
+  in `build/msvc` with nothing applied in between. The one thing the script
+  alters after a build is the Android libraries' dependency names, with
+  `patchelf` on the installed output. It touches no source.
+- The DLLs agree. `av_version_info` returns `7.1`, `avcodec` is 61.19.100,
+  and `avcodec_configuration` returns `--prefix=installed`, then the options
+  in the script's `ffmpeg_config_options.txt`, then exactly the flags the
+  script appends for MSVC: `--toolchain=msvc --enable-shared
+  --disable-static`. A build from a git checkout would report `n7.1`. `7.1`
+  is the `RELEASE` file inside the archive.
+- The archive downloaded on 2026-09-27 has SHA1 `f008a937...`, the value the
+  script pins.
+
+That archive is published, and not ffmpeg.org's `ffmpeg-7.1.tar.xz`, because
+it is byte for byte what the build downloaded, and Qt's own pinned SHA1 ties
+it to the build. ffmpeg.org's archive packages the same release differently,
+and no hash connects it to these DLLs.
+
+What is not certain: the binaries do not record which revision of the
+provisioning script prepared the machine that built them. The script at the
+`v6.8.3` tag agrees with everything the binaries do record: the path, the
+version and the configure line. A different revision would have had to
+produce the same three.
+
+**Measured on 2026-09-27.** `corresponding_source.py client` downloaded the
+five archives, 112,526,603 bytes, in 8 s. Every SHA256 matched the pin and
+FFmpeg's SHA1 matched Qt's, and each file was byte-identical to a separate
+manual download earlier the same day. `stage-payload.ps1 -EngineBuildDir
+build/dev` staged 199 files from the current tree and its coverage check
+passed: 45 DLLs covered, 40 Qt and 5 FFmpeg, 8 Visual C++ runtime DLLs
+exempt, every covered file found in its module's SPDX document, and the
+recorded commit matching the pin for the three modules that record one.
+`THIRD-PARTY-NOTICES-client.txt` now sends a reader to the release page for
+both, naming each archive and where it came from.
+
+In CI, the `ui` job's staging runs `coverage --qt` on the workstation where
+Qt is installed. The `package` job runs `client --stage dist/stage` on every
+build against both halves together and does not upload the result. The
+`release` job runs the same command and passes the five archives and
+`SOURCES-client.txt` to the same `gh release create` as the installer, after
+checking that there are exactly as many archives as are pinned.
+
 ## What the first release still owes
 
 The full list, with what the dry run of 2026-09-23 found, is the checklist
-under "Release readiness" below. These two were known before it.
-
-**The sources of Qt and FFmpeg.** The client payload conveys Qt 6.8.3 and
-FFmpeg 7.1 as DLLs, which is conveying their object code, and LGPL-3.0 and
-LGPL-2.1 each ask for the corresponding source to be offered with it. The
-notices say where each is published upstream, which is the weaker promise
-`docs/clean-room.md` describes, a promise about somebody else's hosting. The
-corresponding-source archive does not carry either: Qt's source is hundreds of
-megabytes per module and both are built by The Qt Company rather than here.
-Whether to carry them, or offer them from a mirror this project controls, is a
-decision nobody has made, and it comes due at the first tag.
+under "Release readiness" below. This one was known before it.
 
 **The first run of the `release` job.** It has never run, and the corresponding
 source step in it is the same command the `package` job runs on every build.
@@ -375,6 +482,21 @@ Shipping Qt beside the executable is the LGPL-3.0 section 4d(1) route and
 discharges the relink obligation without a relink package. Anything that stops
 a replaced `Qt6Core.dll` being picked up, a static Qt among them, gives that
 away and puts the obligation back.
+
+WHAT THIS SECTION'S FIRST ITEM USED TO SAY, from 2026-09-22 until the
+owner's decision of 2026-09-27, under "These two were known before it":
+"**The sources of Qt and FFmpeg.** The client payload conveys Qt 6.8.3 and
+FFmpeg 7.1 as DLLs, which is conveying their object code, and LGPL-3.0 and
+LGPL-2.1 each ask for the corresponding source to be offered with it. The
+notices say where each is published upstream, which is the weaker promise
+`docs/clean-room.md` describes, a promise about somebody else's hosting. The
+corresponding-source archive does not carry either: Qt's source is hundreds of
+megabytes per module and both are built by The Qt Company rather than here.
+Whether to carry them, or offer them from a mirror this project controls, is a
+decision nobody has made, and it comes due at the first tag." The release
+page now carries both, as "Qt and FFmpeg, beside the archive" above
+describes. The four modules come to 96.6 MB as `.tar.xz` rather than hundreds
+of megabytes each.
 
 WHAT THIS SECTION USED TO SAY. It was headed "What the container does not
 carry yet" and listed three things blocking the first release: a third-party
@@ -433,9 +555,22 @@ pushed or published.
 
 ### Blocks a first public release
 
-1. **The Qt and FFmpeg source offer.** The owner's decision.
-   `docs/clean-room.md`, open item 2, and "What the first release still owes"
-   above.
+1. **Done, 2026-09-27: the Qt and FFmpeg source offer.** The owner decided
+   to mirror the exact upstream source archives on the release page, beside
+   the corresponding-source archive. The `release` job now passes the four Qt
+   module archives, FFmpeg's n7.1 archive and `SOURCES-client.txt` to the same
+   `gh release create` as the installer, 112,526,603 bytes of archives, each
+   checked against the SHA256 pinned in `scripts/client-sources.json`. The
+   `package` job fetches and checks the same five on every build, and staging
+   fails on a payload DLL no pinned archive covers. Fetched for real on
+   2026-09-27: every hash matched, and the coverage check passed on a payload
+   staged from the current tree, 45 DLLs covered and every one found in its
+   Qt module's SPDX document. "Qt and FFmpeg, beside the archive" above has
+   the evidence that these are the archives the DLLs were built from.
+
+   WHAT THIS ITEM USED TO SAY. "**The Qt and FFmpeg source offer.** The
+   owner's decision. `docs/clean-room.md`, open item 2, and "What the first
+   release still owes" above."
 2. **The M2 physical-monitor frame run.** The owner's run, on a real display.
    Nothing offscreen stands in for it.
 3. **Done, 2026-09-27: `revenant-ui.exe` carries the icon and a version

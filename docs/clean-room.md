@@ -664,12 +664,31 @@ The relink obligation is not the open item. These are.
    the licence section above draws holds: these obligations attach to handing a
    binary to somebody. Today the repository ships source and no binaries. The
    deadline is the first release, not now.
-2. **The Qt and FFmpeg sources.** The client payload conveys Qt 6.8.3 and
-   FFmpeg 7.1 as DLLs, and both LGPLs ask for their source to be offered with
-   the object code. The corresponding-source archive does not carry either,
-   and the notices point at where each is published upstream, which is the
-   weaker promise the section below describes. Undecided, and due at the first
-   tag.
+2. **Settled 2026-09-27: the Qt and FFmpeg sources.** The client payload
+   conveys Qt 6.8.3 and FFmpeg 7.1 as DLLs, and both LGPLs ask for their
+   source to be offered with the object code. The owner decided on the route
+   already taken for libusb and rtlsdr, from the same designated place: every
+   release page carries the exact upstream source archives, unmodified, as
+   separate assets beside the corresponding-source archive. That is The Qt
+   Company's archives of qtbase, qtdeclarative, qtmultimedia and qtsvg from
+   download.qt.io, and the archive of FFmpeg's `n7.1` tag that Qt's own build
+   downloaded and built without patches, 112,526,603 bytes together. For Qt
+   the clause is GPL-3.0 section 6d, which LGPL-3.0 incorporates. For FFmpeg
+   it is the second paragraph of LGPL-2.1 section 4, which accepts equivalent
+   access to the source from the same place as the object code.
+   `scripts/client-sources.json` pins each archive by SHA256 with the payload
+   files it is the source of, and staging fails on a DLL that no pin covers.
+   The notices now send a reader to the release page for both.
+   docs/packaging.md, "Qt and FFmpeg, beside the archive", has the evidence
+   that these are the archives the DLLs were built from, and the one thing
+   about FFmpeg's provenance the binaries do not record.
+
+   WHAT THIS ITEM USED TO SAY. "**The Qt and FFmpeg sources.** The client
+   payload conveys Qt 6.8.3 and FFmpeg 7.1 as DLLs, and both LGPLs ask for
+   their source to be offered with the object code. The corresponding-source
+   archive does not carry either, and the notices point at where each is
+   published upstream, which is the weaker promise the section below
+   describes. Undecided, and due at the first tag."
 3. **`tuner_fc2580.c` has no licence notice.** Found 2026-09-23 while reading
    the notices at `797f814`, and present at v2.0.2 as well. Its header says it
    was taken from a Terratec kernel driver and names no licence, so the file's
@@ -724,6 +743,10 @@ offer entirely. The dependency sources are the piece that needs a build step:
 tags and the vcpkg registry commit in the notices file and relying on those
 remaining reachable, which is a weaker promise made about somebody else's
 hosting.
+
+The same holds for the libraries the client loads rather than links. Since
+2026-09-27 a release carries Qt's and FFmpeg's source archives as well, as
+separate assets on the same page; open item 2 above has the decision.
 
 **In the shipped artefact.** The notices file is a payload member beside the
 binary, not a link. `installer.toml` is the Forge configuration and

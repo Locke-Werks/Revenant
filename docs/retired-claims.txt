@@ -2054,3 +2054,15 @@ commit: "Widen the cw receiver's default filter to 600 Hz each side"
 instead: The cw default is -600 to +600 Hz, 100 to 1300 Hz of audio at the
     700 Hz sidetone, so the CW decoder hears stations off zero beat.
     core/dsp/vrx_reference.cpp, default_passband.
+
+phrase: Whether to carry them, or offer them from a mirror this project controls, is a decision nobody has made
+phrase: the notices point at where each is published upstream, which is the weaker promise
+phrase: notices say where each is published upstream, which is the weaker promise
+phrase: keeps that on the list of what the first release owes
+phrase: docs/packaging.md keeps it on the list of what the first release still owes
+retired: 2026-09-27
+commit: "Mirror the Qt and FFmpeg source archives on the release page"
+instead: The release page carries the Qt module and FFmpeg source archives,
+    unmodified, beside the corresponding-source zip, each pinned by SHA256 in
+    scripts/client-sources.json, and the client notices send readers there.
+    docs/packaging.md, "Qt and FFmpeg, beside the archive".
