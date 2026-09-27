@@ -907,6 +907,11 @@ jobs:
           }
           $found.GetEnumerator() | ForEach-Object { "$($_.Key) = $($_.Value)" }
 
+      # Our two executables and nothing else. The other 53 binaries in the
+      # payload, Qt, FFmpeg and the Visual C++ runtime, arrive signed by The
+      # Qt Company and by Microsoft, and signtool without /as replaces a
+      # signature rather than adding one, so signing the folder would have
+      # shipped them under our name instead of their publishers'.
       - name: Sign the payload
         uses: azure/trusted-signing-action@v0
         with:
@@ -916,9 +921,11 @@ jobs:
           endpoint: ${{ steps.signing.outputs.endpoint }}
           trusted-signing-account-name: ${{ steps.signing.outputs.account }}
           certificate-profile-name: ${{ steps.signing.outputs.profile }}
-          files-folder: dist/stage
-          files-folder-filter: exe,dll
-          files-folder-recurse: true
+          # |- and not |: the action turns each newline into a comma, and a
+          # trailing one would hand it an empty path.
+          files: |-
+            ${{ github.workspace }}/dist/stage/revenant-engine.exe
+            ${{ github.workspace }}/dist/stage/revenant-ui.exe
           file-digest: SHA256
           # Certificates last three days. Without a timestamp the signature
           # stops validating inside the week. Not optional.
@@ -926,17 +933,30 @@ jobs:
           timestamp-digest: SHA256
 
       # The action exiting zero is not the same as the files being signed. A
-      # wrong filter or a folder it never reached looks identical from the
-      # outside, and the failure surfaces on somebody else's machine.
-      - name: Every payload binary is signed
+      # wrong path or a file it never reached looks identical from the
+      # outside, and the failure surfaces on somebody else's machine. So every
+      # binary has to be valid, our two have to be signed by us, and nothing
+      # else may be: the last is what catches the step being widened back to
+      # the whole folder.
+      - name: Every payload binary is signed, and only ours by us
         shell: pwsh
         run: |
-          $bad = @()
+          $ours = 'revenant-engine.exe', 'revenant-ui.exe'
+          $bad = @($ours | Where-Object { -not (Test-Path "dist/stage/$_") } |
+                   ForEach-Object { "${_}: not at the top of the payload" })
           Get-ChildItem dist/stage -Recurse -Include *.exe, *.dll | ForEach-Object {
             $sig = Get-AuthenticodeSignature $_.FullName
-            if ($sig.Status -ne 'Valid') { $bad += "$($_.Name): $($sig.Status)" }
+            $signer = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '' }
+            $byUs = $signer -match 'Specter Point'
+            if ($sig.Status -ne 'Valid') {
+              $bad += "$($_.Name): $($sig.Status)"
+            } elseif ($ours -contains $_.Name -and -not $byUs) {
+              $bad += "$($_.Name): signed by $signer, not by us"
+            } elseif ($ours -notcontains $_.Name -and $byUs) {
+              $bad += "$($_.Name): re-signed by us over its publisher"
+            }
           }
-          if ($bad.Count -gt 0) { throw "unsigned payload members:`n" + ($bad -join "`n") }
+          if ($bad.Count -gt 0) { throw "payload signatures are wrong:`n" + ($bad -join "`n") }
 
       - name: Fetch Forge
         shell: pwsh

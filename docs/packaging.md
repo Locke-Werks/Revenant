@@ -459,16 +459,22 @@ pushed or published.
    variables visible to all repositories, so those two resolve. The job's
    first signing step would fail. Creating the environment and the secret is
    the owner's.
-5. **The `release` job would re-sign 53 binaries that are not ours.** Its
-   payload signing step takes every `.exe` and `.dll` under `dist/stage`.
-   Measured on the staged payload: 45 are already signed by The Qt Company Oy
-   (Qt and the five FFmpeg libraries), 8 by Microsoft (the Visual C++
-   runtime), and only `revenant-engine.exe` and `revenant-ui.exe` are
-   unsigned. `signtool sign` without `/as` replaces a signature rather than
-   adding one, so as written the shipped VC runtime and Qt DLLs would carry
-   Specter Point's signature instead of their publishers'. Whether that is
-   wanted is a signing decision and was not changed here; narrowing the step
-   to the two executables is the change if it is not.
+5. **Done, 2026-09-27: the `release` job signs our two executables and
+   nothing else.** The owner decided the Qt, FFmpeg and Visual C++ runtime
+   binaries keep their publishers' signatures. The signing step names
+   `revenant-engine.exe` and `revenant-ui.exe` through the action's `files`
+   input, and the check after it now fails on any binary that is not
+   `Valid`, on either of ours not signed by Specter Point, and on anything
+   else that is, which is what would catch the step being widened back to the
+   folder. Run on a payload staged from `f8bfd8b`: of 55 binaries, 45 signed
+   by The Qt Company Oy, 8 by Microsoft, all `Valid`, and the only two
+   failures were our two, `NotSigned`, as they are before the step.
+
+   WHAT THIS ITEM USED TO SAY. "The `release` job would re-sign 53 binaries
+   that are not ours. Its payload signing step takes every `.exe` and `.dll`
+   under `dist/stage`." `signtool sign` without `/as` replaces a signature
+   rather than adding one, so the shipped VC runtime and Qt DLLs would have
+   carried Specter Point's signature instead of their publishers'.
 
 ### Owed, not blocking
 
