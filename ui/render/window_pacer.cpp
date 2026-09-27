@@ -103,6 +103,15 @@ bool WindowPacer::eventFilter(QObject* watched, QEvent* event)
         if (in_follower_) {
             return false;
         }
+        // Late for the main window's last frame, but early enough in the
+        // refresh to be composed with it: drawn now rather than held a whole
+        // refresh for the next one. See the header.
+        if (follower_missed_lead_ &&
+            steady_ns() - lead_handed_ns_ <
+                static_cast<std::int64_t>(std::llround(0.5 * periodMs() * 1.0e6))) {
+            drawFollower();
+            return true;
+        }
         follower_held_ = true;
         if (!follower_fallback_.isActive()) {
             follower_fallback_.start(static_cast<int>(std::lround(1.5 * periodMs())));
@@ -121,8 +130,11 @@ void WindowPacer::drawLead(QEvent* event)
     in_lead_ = true;
     QCoreApplication::sendEvent(lead_, event);
     in_lead_ = false;
+    lead_handed_ns_ = steady_ns();
     if (followerWaiting()) {
         drawFollower();
+    } else {
+        follower_missed_lead_ = follower_ != nullptr && follower_->isVisible();
     }
 }
 
@@ -146,6 +158,7 @@ bool WindowPacer::followerWaiting() const
 void WindowPacer::drawFollower()
 {
     follower_held_ = false;
+    follower_missed_lead_ = false;
     follower_fallback_.stop();
     in_follower_ = true;
     QEvent request(QEvent::UpdateRequest);

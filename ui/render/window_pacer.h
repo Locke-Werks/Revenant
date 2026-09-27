@@ -14,7 +14,7 @@
 // windows kept on top: 16.9% of the main window's frames missed a refresh,
 // and over them the render thread had waited 14.9 ms to be asked.
 //
-// WHAT IT DOES, THREE THINGS.
+// WHAT IT DOES, FOUR THINGS.
 //
 // The receiver window gets a swap interval of 0, for which Qt makes its swap
 // chain without the waitable object and presents without waiting, so its
@@ -34,6 +34,20 @@
 // client's latest-wins slot replaced 41% of them with no hold and 7.8% with
 // one of 4 ms, over 60 s runs each.
 //
+// A receiver window request that arrives within half a refresh of a main-window
+// frame it was not drawn with is drawn at once rather than held for the next
+// one. Handing a main-window frame over holds the GUI thread through that
+// window's vsync wait, 3.1 ms on average and up to 12 ms, and the engine
+// frames that arrive meanwhile are taken only after it returns, so the
+// receiver window had often not asked yet when the pacer looked, and asked a
+// moment later to be held a whole refresh. Measured on 2026-09-27, 60 s at
+// full load: 321 of 7663 main-window frames went by with nothing asked, the
+// receiver window missed 4.5% of refreshes, and with this it missed 0.94%, and
+// 1.32% over 300 s. A window of three quarters of a refresh did no better,
+// 1.09%: a frame drawn that late misses the composition anyway. Delivering the
+// GUI thread's queued meta-calls before looking did not help either, 1.02%,
+// so the engine frames the receiver window is waiting for are not among them.
+//
 // When the main window is not drawing, because nothing on it changed or it is
 // minimised, a held receiver request is let through after one and a half
 // refresh periods instead, so the receiver window never waits on a window
@@ -46,10 +60,9 @@
 //
 // SINCE 2026-09-23 THE RECEIVERS START DOCKED IN THE MAIN WINDOW and the
 // receiver window is shown only while they are popped out. The pacer stays
-// installed either way. A hidden follower asks for no frames, so the first two
-// of the three things above, which are the receiver window's, do nothing while
-// it is hidden, and the third, the main window's hold, is worth keeping on its
-// own: with the receiver window
+// installed either way. A hidden follower asks for no frames, so the things
+// above that are the receiver window's do nothing while it is hidden, and the
+// main window's hold is worth keeping on its own: with the receiver window
 // closed it cut the engine frames the client replaced from 42.4% to 12.8%.
 // ui/main.cpp says the same where it installs this.
 
@@ -114,6 +127,12 @@ private:
     // A window asked for a frame and has not been drawn since.
     bool lead_held_ = false;
     bool follower_held_ = false;
+
+    // When the last main-window frame was handed over, and whether the
+    // follower had asked for nothing by then. A late request inside half a
+    // refresh of that is drawn at once.
+    std::int64_t lead_handed_ns_ = 0;
+    bool follower_missed_lead_ = false;
 };
 
 }  // namespace revenant::ui
