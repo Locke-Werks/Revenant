@@ -842,6 +842,22 @@ private:
     std::uint64_t last_frame_start_ = 0;
     double last_span_low_hz_ = 0.0;
     bool have_last_frame_ = false;
+
+    // What an engine frame changes for QML, held and sent at most once a
+    // refresh. Frames arrive at about 258 a second at full load, and emitting
+    // per frame had QML re-evaluate the plates and readouts, allocating a map
+    // per plate each time, more than twice a refresh for nothing it could
+    // show. Measured on 2026-09-27: 153 of 16643 takes spent over 1 ms in
+    // endsChanged and 62 in markersChanged, up to 4.8 ms, on the GUI thread
+    // the receiver window's frames wait on, and the receiver window missed
+    // 5.3% of refreshes against 1.4% for the client of 2026-09-23. The
+    // getters are current at every frame; only the notification is paced.
+    enum NotifyBits : unsigned { NotifyEnds = 1U, NotifyMarkers = 2U, NotifyScale = 4U };
+    void notifyQml(unsigned bits);
+    void flushNotifications();
+    unsigned pending_notify_ = 0;
+    QTimer notify_timer_;
+    QElapsedTimer notify_clock_;
 };
 
 }  // namespace revenant::ui

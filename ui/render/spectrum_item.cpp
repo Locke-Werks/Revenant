@@ -20,6 +20,7 @@
 #include <QPen>
 #include <QQuickWindow>
 #include <QRectF>
+#include <QScreen>
 #include <QSGFlatColorMaterial>
 #include <QSGGeometry>
 #include <QSGRectangleNode>
@@ -1102,6 +1103,39 @@ SpectrumItem::SpectrumItem(QQuickItem* parent) : QQuickItem(parent)
 
     labels_ = new OverlayLabelItem(this);
     labels_->setVisible(false);
+
+    notify_timer_.setSingleShot(true);
+    notify_timer_.setTimerType(Qt::PreciseTimer);
+    connect(&notify_timer_, &QTimer::timeout, this, &SpectrumItem::flushNotifications);
+}
+
+void SpectrumItem::notifyQml(unsigned bits)
+{
+    pending_notify_ |= bits;
+    if (notify_timer_.isActive()) {
+        return;
+    }
+    // One refresh of the screen the item is on, 60 Hz before it has one.
+    const QScreen* screen = window() != nullptr ? window()->screen() : nullptr;
+    const double hz = screen != nullptr && screen->refreshRate() > 1.0 ? screen->refreshRate() : 60.0;
+    const auto period_ms = static_cast<qint64>(1000.0 / hz);
+    const qint64 since = notify_clock_.isValid() ? notify_clock_.elapsed() : period_ms;
+    notify_timer_.start(static_cast<int>(std::max<qint64>(0, period_ms - since)));
+}
+
+void SpectrumItem::flushNotifications()
+{
+    const unsigned bits = std::exchange(pending_notify_, 0U);
+    notify_clock_.start();
+    if ((bits & NotifyEnds) != 0U) {
+        emit endsChanged();
+    }
+    if ((bits & NotifyScale) != 0U) {
+        emit scaleChanged();
+    }
+    if ((bits & NotifyMarkers) != 0U) {
+        emit markersChanged();
+    }
 }
 
 void SpectrumItem::setLink(EngineLink* link)
@@ -1348,7 +1382,7 @@ void SpectrumItem::takeFrame()
     takeMarkers(frame);
     rebuildScale();
 
-    emit endsChanged();
+    notifyQml(NotifyEnds);
     update();
 }
 
@@ -1400,7 +1434,7 @@ void SpectrumItem::takeMarkers(const rpc::SpectrumFrame& frame)
         peak_fraction_ = (peak_.bin + 0.5) / static_cast<double>(peak_.bins);
         peak_hz_ = link_->frequencyAtFraction(peak_fraction_);
     }
-    emit markersChanged();
+    notifyQml(NotifyMarkers);
 }
 
 void SpectrumItem::rebuildScale()
@@ -1432,7 +1466,7 @@ void SpectrumItem::rebuildScale()
         }
     }
     if (changed) {
-        emit scaleChanged();
+        notifyQml(NotifyScale);
     }
 }
 
