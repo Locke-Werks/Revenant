@@ -1947,10 +1947,20 @@ about what it misses alone.
 
 ### What is still open
 
-- the same on a physical monitor on the 4090. None is part of the desktop:
-  `display_info` lists only the virtual display, and Windows reports a
-  Hisense connected over HDMI but not in the desktop, which would take a
-  display topology change on the owner's streamed session to use;
+- an idle rerun of the full load. The owner's run on 2026-09-27, 300 s on the
+  same virtual display, met the budget in the main window, 339 of 36081 over,
+  0.94%, p99 12.383 ms, and missed it in the receiver window, 1588 of 34838,
+  4.56%, p99 17.019 ms. The client replaced 13102 of 90815 engine frames in
+  its latest-wins slot, 14.4% against 4.0% above, and the engine dropped
+  1039. The machine was not idle during the run, so this is a regression only
+  if an idle rerun repeats it.
+
+  WHAT THIS ITEM USED TO SAY. "the same on a physical monitor on the 4090."
+  The owner decided on 2026-09-27 that the virtual display is the one the
+  budget is measured on: the only other display is a television on HDMI,
+  which runs at 60 Hz and would halve the test, and the virtual display is
+  composed by DWM at a real 120 Hz. `docs/packaging.md`, blocker 2, has the
+  reasoning;
 - the engine frames the client still replaces, 7 to 9%, which are waterfall
   rows lost while the GUI thread waits in the hand-over. Holding the main
   window longer cut them further (1.4% at 6 ms, over 30 s) at the cost of more

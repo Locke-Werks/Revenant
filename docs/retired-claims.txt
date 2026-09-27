@@ -2066,3 +2066,32 @@ instead: The release page carries the Qt module and FFmpeg source archives,
     unmodified, beside the corresponding-source zip, each pinned by SHA256 in
     scripts/client-sources.json, and the client notices send readers there.
     docs/packaging.md, "Qt and FFmpeg, beside the archive".
+
+phrase: revenant-ui.exe has no icon and no version resource
+retired: 2026-09-27
+commit: "Give revenant-ui.exe the icon and a version resource"
+instead: revenant-ui.exe carries assets/revenant.ico as RT_GROUP_ICON 1 and
+    VERSIONINFO from cmake/RevenantVersion.cmake, through the same
+    cmake/EmbedVersion.cmake the engine's binaries use.
+
+phrase: The release job would re-sign 53 binaries that are not ours
+phrase: payload signing step takes every .exe and .dll under dist/stage
+retired: 2026-09-27
+commit: "Sign only our two executables in the release job"
+instead: The release job signs revenant-engine.exe and revenant-ui.exe only,
+    and fails if any other payload binary carries our signature.
+
+phrase: AZURE_CLIENT_SECRET is not set anywhere the release job can read it
+retired: 2026-09-27
+commit: "Record the release secret and the frame run on the virtual display"
+instead: The release environment holds AZURE_CLIENT_SECRET; the tenant and
+    client ids are organisation variables. docs/packaging.md, blocker 4.
+
+phrase: a physical monitor is still to measure
+phrase: The M2 physical-monitor frame run
+phrase: the same on a physical monitor on the 4090
+retired: 2026-09-27
+commit: "Record the release secret and the frame run on the virtual display"
+instead: The owner decided the streamed virtual display, composed by DWM at
+    120 Hz, is the display M2's frame budget is held on. docs/packaging.md,
+    blocker 2.

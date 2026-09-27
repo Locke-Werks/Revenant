@@ -571,8 +571,25 @@ pushed or published.
    WHAT THIS ITEM USED TO SAY. "**The Qt and FFmpeg source offer.** The
    owner's decision. `docs/clean-room.md`, open item 2, and "What the first
    release still owes" above."
-2. **The M2 physical-monitor frame run.** The owner's run, on a real display.
-   Nothing offscreen stands in for it.
+2. **The M2 frame run on a composed display, both windows within budget.**
+   The owner decided on 2026-09-27 that the streamed virtual display counts:
+   there is no physical monitor here other than a television, which would
+   run at 60 Hz and halve the test. The virtual display is composed by DWM
+   and paced by a real 120 Hz vsync on the RTX 4090, with the stream's
+   encoder on the same GPU, so a pass there is not easier than a pass on a
+   panel. What still does not stand in for it is an offscreen run, which
+   nothing paces.
+
+   Not yet met. The owner's run on 2026-09-27, 300 s, `-Visible -OnTop`, full
+   load, engine at 1.001x realtime: the main window missed 339 of 36081
+   refreshes, 0.94% (p95 9.10 ms, p99 12.38 ms against the 12.5 ms line), and
+   the receiver window 1588 of 34838, 4.56% (p95 11.43 ms, p99 17.02 ms),
+   against 0.43% and 0.65% on 2026-09-23. The engine dropped 1039 frames. The
+   machine was not idle during it, so whether this is a regression is open
+   until an idle rerun says.
+
+   WHAT THIS ITEM USED TO SAY. "**The M2 physical-monitor frame run.** The
+   owner's run, on a real display. Nothing offscreen stands in for it."
 3. **Done, 2026-09-27: `revenant-ui.exe` carries the icon and a version
    resource.** `cmake/EmbedVersion.cmake` finds the icon and the template from
    its own directory, so `ui/CMakeLists.txt` can call
@@ -587,13 +604,19 @@ pushed or published.
    resource. Measured: no `RT_GROUP_ICON` and an empty VERSIONINFO."
    `EmbedVersion` resolved both files through `CMAKE_SOURCE_DIR`, which in the
    client's own CMake project is `ui/`, and `main.cpp` set no window icon.
-4. **`AZURE_CLIENT_SECRET` is not set anywhere the `release` job can read
-   it.** Checked 2026-09-23 through the API: `Locke-Werks/Revenant` has no
-   `release` environment (404), no repository secrets, and the organisation
-   lists no secrets. `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` are organisation
-   variables visible to all repositories, so those two resolve. The job's
-   first signing step would fail. Creating the environment and the secret is
-   the owner's.
+4. **Done, 2026-09-27: the `release` environment holds
+   `AZURE_CLIENT_SECRET`.** Created through the API with the owner's
+   agreement, and `gh secret list --env release` lists the secret.
+   `AZURE_TENANT_ID` and `AZURE_CLIENT_ID` are organisation variables visible
+   to all repositories. The three values were checked together the same day
+   by a client-credentials token request for
+   `https://codesigning.azure.net/.default`, which returned 200. Nothing has
+   signed with them from CI yet; the first tag is the first time.
+
+   WHAT THIS ITEM USED TO SAY. "`AZURE_CLIENT_SECRET` is not set anywhere the
+   `release` job can read it." `Locke-Werks/Revenant` had no `release`
+   environment (404), no repository secrets, and the organisation listed
+   none, so the job's first signing step would have failed.
 5. **Done, 2026-09-27: the `release` job signs our two executables and
    nothing else.** The owner decided the Qt, FFmpeg and Visual C++ runtime
    binaries keep their publishers' signatures. The signing step names
