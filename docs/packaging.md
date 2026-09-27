@@ -571,28 +571,30 @@ pushed or published.
    WHAT THIS ITEM USED TO SAY. "**The Qt and FFmpeg source offer.** The
    owner's decision. `docs/clean-room.md`, open item 2, and "What the first
    release still owes" above."
-2. **The M2 frame run on a composed display, both windows within budget.**
+2. **Done, 2026-09-27: M2 closed on the docked layout.** At full load on the
+   virtual display the receivers docked in the main window, the default since
+   2026-09-23, missed 16 of 7314 refreshes, 0.22%, and the main window with
+   them popped out 0.35% over 300 s. The popped-out receiver window missed
+   1.32% and the owner closed M2 on the docked layout with that recorded as
+   open. `docs/ui-spectrum.md`, "The regression of 2026-09-27, and where M2
+   closed", has the runs and the two fixes that brought it down from 5.42%.
+
+   WHAT THIS ITEM USED TO SAY. It was headed "The M2 frame run on a composed
+   display, both windows within budget" and said "Not yet met", with the
+   owner's run of 2026-09-27 that had CI testing on the same GPU under it.
+   Before that it read "**The M2 physical-monitor frame run.** The owner's
+   run, on a real display. Nothing offscreen stands in for it."
+
    The owner decided on 2026-09-27 that the streamed virtual display counts:
    there is no physical monitor here other than a television, which would
    run at 60 Hz and halve the test. The virtual display is composed by DWM
    and paced by a real 120 Hz vsync on the RTX 4090, with the stream's
    encoder on the same GPU, so a pass there is not easier than a pass on a
    panel. What still does not stand in for it is an offscreen run, which
-   nothing paces.
-
-   Not yet met. The owner's run on 2026-09-27, 300 s, `-Visible -OnTop`, full
-   load, engine at 1.001x realtime: the main window missed 339 of 36081
-   refreshes, 0.94% (p95 9.10 ms, p99 12.38 ms against the 12.5 ms line), and
-   the receiver window 1588 of 34838, 4.56% (p95 11.43 ms, p99 17.02 ms),
-   against 0.43% and 0.65% on 2026-09-23. The engine dropped 1039 frames. CI
-   was running on this machine for the whole of it, the `ui` job until
-   17:26 UTC and then `build-and-test` on the same RTX 4090, because
-   `scripts/frame-budget.ps1` only refused an in-progress run and a run with
-   one job waiting for a runner reads as queued. The script now refuses
-   both. Whether this is a regression is open until an idle rerun says.
-
-   WHAT THIS ITEM USED TO SAY. "**The M2 physical-monitor frame run.** The
-   owner's run, on a real display. Nothing offscreen stands in for it."
+   nothing paces. The first run that day had CI running on this machine for
+   the whole of it, because `scripts/frame-budget.ps1` only refused an
+   in-progress run and a run with one job waiting for a runner reads as
+   queued. The script now refuses both.
 3. **Done, 2026-09-27: `revenant-ui.exe` carries the icon and a version
    resource.** `cmake/EmbedVersion.cmake` finds the icon and the template from
    its own directory, so `ui/CMakeLists.txt` can call

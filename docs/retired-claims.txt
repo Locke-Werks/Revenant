@@ -2095,3 +2095,14 @@ commit: "Record the release secret and the frame run on the virtual display"
 instead: The owner decided the streamed virtual display, composed by DWM at
     120 Hz, is the display M2's frame budget is held on. docs/packaging.md,
     blocker 2.
+
+phrase: M1 is done and M2 is under way
+phrase: M2, in progress. The graphical client
+phrase: so M2 waits on an idle rerun
+phrase: Whether this is a regression is open until an idle rerun says
+phrase: this is a regression only if an idle rerun repeats it
+retired: 2026-09-27
+commit: "Close M2 on the docked layout"
+instead: M2 closed on 2026-09-27 on the docked layout, 0.22% of refreshes over
+    budget; the popped-out receiver window, 1.32%, is open.
+    docs/ui-spectrum.md, "The regression of 2026-09-27, and where M2 closed".

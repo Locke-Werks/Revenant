@@ -1945,23 +1945,67 @@ With both windows open at full target load the main window misses a refresh
 on 0.43% of frames over five minutes, under the one-in-a-hundred line and
 about what it misses alone.
 
+### The regression of 2026-09-27, and where M2 closed
+
+The same command four days later, on an idle machine and the same virtual
+display, 300 s: the main window 334 of 36103 over budget, 0.93%, and the
+receiver window 1873 of 34574, 5.42%, p99 17.055 ms. The receiver window's
+late frames had waited in `request`, 16.0 ms on average, which is a whole
+refresh in which it was never asked for a frame; its own work stayed under a
+millisecond. The client of `b9719e7`, the commit that measured the table
+above, built and run a minute apart against the same engine, missed 1.43%
+over 60 s against the current client's 5.28%, so the cause was in the client.
+
+Two causes, each measured by timing it in a scratch build.
+
+- **The spectrum's readouts.** Since `d8c79e0` and `90b9016` the span's
+  floor and peak markers, the level scale and the plates were notified to QML
+  on every engine frame, about 258 a second, and the plates' bindings
+  allocated a map each time. Taking a spectrum frame went from p99 0.084 ms
+  to 3.595 ms, and in 60 s 153 takes spent over 1 ms in `endsChanged` and 62
+  in `markersChanged`, up to 4.8 ms, on the GUI thread. `551ecf9` sends them
+  once a refresh; the take's p99 came back to 0.193 ms and the main window's
+  p99 interval from 11.8 to 9.2 ms.
+- **The receiver window asking too late.** Handing a main-window frame over
+  holds the GUI thread through its vsync wait, 3.1 ms on average and up to
+  12 ms, and engine frames that arrive meanwhile are taken after it returns.
+  In 60 s, 321 of 7663 main-window frames went by with the receiver window
+  not yet asking, against 317 missed refreshes, and its request then waited
+  a whole refresh for the next one. `91b5c9f` draws a request that arrives
+  within half a refresh at once. `ui/render/window_pacer.h` has what else
+  was tried.
+
+With both, 300 s at full load, engine at 1.001x realtime:
+
+| Window | Frames | Mean interval | p50 | p95 | p99 | Max | Over budget |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| main | 36090 | 8.340 ms | 8.341 | 9.063 | 9.656 | 24.956 | 128 of 36089, 0.35% |
+| receivers | 35759 | 8.417 ms | 8.425 | 9.923 | 15.187 | 23.081 | 473 of 35758, 1.32% |
+
+And 60 s with the receivers docked, `-NoReceiverWindow`, which since
+2026-09-23 is the default layout and draws the fine-tuning display and its
+waterfall in the main window: 16 of 7314 over, 0.22%, p99 10.386 ms.
+
+The owner closed M2 on the docked layout on 2026-09-27. The popped-out
+receiver window is an option and is not within budget, which is the first
+item below.
+
 ### What is still open
 
-- an idle rerun of the full load. The owner's run on 2026-09-27, 300 s on the
-  same virtual display, met the budget in the main window, 339 of 36081 over,
-  0.94%, p99 12.383 ms, and missed it in the receiver window, 1588 of 34838,
-  4.56%, p99 17.019 ms. The client replaced 13102 of 90815 engine frames in
-  its latest-wins slot, 14.4% against 4.0% above, and the engine dropped
-  1039. A CI run was testing on the same GPU under it the whole time, which
-  the script's guard missed because the run read as queued, so this is a
-  regression only if an idle rerun repeats it.
+- the popped-out receiver window, 1.32% over 300 s against 0.65% on
+  2026-09-23. Every late frame is still a refresh in which it was not asked,
+  and the lead is the main window's `begin`, where its render thread waits
+  for the display while the GUI thread is held: p50 2.997 ms now against
+  0.009 ms in the table above. Why that moved is not known;
 
-  WHAT THIS ITEM USED TO SAY. "the same on a physical monitor on the 4090."
-  The owner decided on 2026-09-27 that the virtual display is the one the
-  budget is measured on: the only other display is a television on HDMI,
-  which runs at 60 Hz and would halve the test, and the virtual display is
-  composed by DWM at a real 120 Hz. `docs/packaging.md`, blocker 2, has the
-  reasoning;
+  WHAT THIS ITEM USED TO SAY. "an idle rerun of the full load", after the
+  owner's run of 2026-09-27 missed 4.56% in the receiver window with a CI
+  run testing on the same GPU under it. The idle rerun is the section above.
+  Before that it said "the same on a physical monitor on the 4090." The
+  owner decided on 2026-09-27 that the virtual display is the one the budget
+  is measured on: the only other display is a television on HDMI, which runs
+  at 60 Hz and would halve the test, and the virtual display is composed by
+  DWM at a real 120 Hz;
 - the engine frames the client still replaces, 7 to 9%, which are waterfall
   rows lost while the GUI thread waits in the hand-over. Holding the main
   window longer cut them further (1.4% at 6 ms, over 30 s) at the cost of more

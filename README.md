@@ -64,8 +64,9 @@ has been measured is below, with the numbers rather than the adjectives.
 
 ## Status
 
-M1 is done and M2 is under way. There are two things to run: a command line,
-and a Qt client that reaches a running engine over a socket.
+M1 and M2 are done, and M3, the first public release, is next. There are two
+things to run: a command line, and a Qt client that reaches a running engine
+over a socket.
 
 ```
 revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
@@ -271,7 +272,7 @@ the matrix now, so nothing about it is refereed, not only the spectrum.
 
 ### Where it is going
 
-**M2, in progress.** The graphical client. It runs as its own process and
+**M2, done 2026-09-27.** The graphical client. It runs as its own process and
 reaches the engine over a Cap'n Proto service, because the engine is headless
 by design and because it has to be: the engine is built against the static C
 runtime and ships as one self-contained signed binary, and Qt is not.
@@ -292,10 +293,21 @@ windows kept in front the main window missed 0.4% and 1.0% of refreshes in two
 300 s run on an idle machine then gave 154 of 36106 main-window frames over
 budget, 0.43%, and 233 of 36045 in the receiver window, 0.65%, with the engine
 at 1.000x realtime: under one in a hundred. The display is the streamed
-virtual one, which is the display M2 is measured on. A run on 2026-09-27
-missed 4.56% in the receiver window with a CI run testing on the same GPU
-under it, so M2 waits on an idle rerun. `docs/ui-spectrum.md`, "Frame budget", has the numbers, the
-command and what is still open.
+virtual one, which is the display M2 is measured on.
+
+The receivers have docked in the main window by default since 2026-09-23, and
+M2 closed on that layout on 2026-09-27: 16 of 7314 frames over budget, 0.22%,
+at full load with the engine at 0.999x realtime, and the main window with the
+receivers popped out 128 of 36089, 0.35%, over 300 s. The popped-out receiver
+window is not within budget: 473 of 35758, 1.32%, against 0.65% on
+2026-09-23. It had regressed to 5.42% and two fixes brought it back that far;
+what is left is open, and `docs/ui-spectrum.md`, "Frame budget", has the
+numbers, the command and what is still open.
+
+WHAT THIS PARAGRAPH USED TO SAY. It ended "A run on 2026-09-27 missed 4.56% in
+the receiver window with a CI run testing on the same GPU under it, so M2
+waits on an idle rerun." The idle rerun missed 5.42%, a real regression, and
+M2 closed on the docked layout instead, by the owner's decision.
 
 WHAT THIS PARAGRAPH USED TO SAY. It ended "The display is the streamed virtual
 one, and a physical monitor is still to measure". The owner decided on
