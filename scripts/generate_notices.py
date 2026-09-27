@@ -38,6 +38,11 @@ licenses/spdx/. A Qt upgrade that brings a new licence stops the stage there,
 where the message names the identifier, rather than shipping a notice that
 says "MIT" with no MIT text anywhere in the install.
 
+It fails when the client is built against a Qt, or loads an FFmpeg, whose
+version is not the one scripts/client-sources.json pins the sources of. The
+client notices send a reader to the release page for those sources, and that
+is only true of the archives pinned there.
+
 It refuses to write under core/, tools/ or ui/. The guards job in ci.yml fails
 the build on any SPDX identifier other than this project's own in those three
 directories, and a notices file is a list of exactly those.
@@ -93,9 +98,12 @@ EXTRA_NOTICES = {
     "pthreads": ("3.0.0", "licenses/notices/pthreads4w-3.0.0-NOTICE.txt"),
 }
 
-# The Qt modules the client payload carries a library or plugin from. See
-# scripts/stage-payload.ps1 for the measured keep-list these follow from.
-QT_MODULES = ("qtbase", "qtdeclarative", "qtmultimedia", "qtsvg")
+# The source archives of the Qt modules and the FFmpeg release the client
+# payload conveys, with the payload files each one covers. The Qt modules whose
+# attributions the notices carry are read from it rather than listed twice, so
+# a module added to the payload with its source is attributed as well, and one
+# added without its source fails corresponding_source.py coverage.
+CLIENT_SOURCES = REPO / "scripts" / "client-sources.json"
 
 # Qt attribution components whose code is in no library or plugin the payload
 # carries. Anything not listed is included, because naming a component that is
@@ -223,6 +231,23 @@ def read_port(vcpkg: Path, name: str) -> Port:
         upstream=upstream,
         copyright_text=text,
     )
+
+
+def load_client_sources(path: Path = CLIENT_SOURCES) -> dict:
+    pins = json.loads(path.read_text(encoding="utf-8"))
+    archives = pins.get("archives", [])
+    ffmpeg = [a for a in archives if "ffmpeg_version" in a]
+    if not any("qt_module" in a for a in archives) or len(ffmpeg) != 1:
+        raise NoticeError(f"{path} should pin the Qt modules and exactly one FFmpeg archive")
+    return pins
+
+
+def qt_modules(pins: dict) -> list[str]:
+    return [a["qt_module"] for a in pins["archives"] if "qt_module" in a]
+
+
+def ffmpeg_pin(pins: dict) -> dict:
+    return next(a for a in pins["archives"] if "ffmpeg_version" in a)
 
 
 def in_program(name: str) -> bool:
@@ -410,7 +435,20 @@ def licence_text(identifier: str, extracted: dict[str, str]) -> str:
     return path.read_text(encoding="utf-8").strip("\n")
 
 
-def render_client(vcpkg: Path, qt: Path, deploy: Path, version: str, ffmpeg=measure_ffmpeg) -> str:
+def render_client(
+    vcpkg: Path, qt: Path, deploy: Path, version: str, ffmpeg=measure_ffmpeg, pins: dict | None = None
+) -> str:
+    pins = pins if pins is not None else load_client_sources()
+    release = f"{RELEASES}/tag/v{version}"
+    # The notices promise that the archives on the release page are the source
+    # of these binaries. A Qt upgrade that leaves the pins behind would make
+    # that promise about a different Qt, so it stops here.
+    qt_version = qt.parent.name
+    if qt_version != pins["qt_version"]:
+        raise NoticeError(
+            f"the client is built against Qt {qt_version} and {CLIENT_SOURCES.name} pins the "
+            f"sources of Qt {pins['qt_version']}. Pin the new version's archives."
+        )
     names = installed_ports(vcpkg)
     ports = [read_port(vcpkg, n) for n in names if in_program(n)]
     left_out = [n for n in names if not in_program(n)]
@@ -437,15 +475,17 @@ def render_client(vcpkg: Path, qt: Path, deploy: Path, version: str, ffmpeg=meas
         )
 
     # Qt itself.
-    sboms = {m: load_qt_sbom(qt, m) for m in QT_MODULES}
+    sboms = {m: load_qt_sbom(qt, m) for m in qt_modules(pins)}
     parts.append(heading("Qt"))
     module_lines = []
     for module, sbom in sboms.items():
         top = next((p for p in sbom["packages"] if p.get("SPDXID") == f"SPDXRef-Package-{module}"), None)
         if top is None:
             raise NoticeError(f"the {module} SPDX document has no SPDXRef-Package-{module}")
-        module_lines.append(f"{module}: {top.get('downloadLocation', 'NOASSERTION')}")
-    qt_version = qt.parent.name
+        module_lines.append(f"  {module}: {top.get('downloadLocation', 'NOASSERTION')}")
+    archive_lines = [
+        f"  {a['name']}\n    from {a['url']}" for a in pins["archives"] if "qt_module" in a
+    ]
     parts.append(
         wrap(
             f"The Qt libraries and plugins beside revenant-ui.exe are Qt {qt_version}, from the "
@@ -456,7 +496,16 @@ def render_client(vcpkg: Path, qt: Path, deploy: Path, version: str, ffmpeg=meas
             f"version put in their place is what revenant-ui.exe will load. Copyright (C) The Qt "
             f"Company Ltd. and other contributors."
         )
-        + "\n\nSource, as each module's SPDX document records it:\n"
+        + "\n\n"
+        + wrap(
+            f"The source of each module is The Qt Company's own archive of it, mirrored "
+            f"unmodified on the release this program came from, {release}, beside "
+            f"SOURCES-client.txt, which says what each archive is, how it was checked and which "
+            f"files here it is the source of:"
+        )
+        + "\n\n"
+        + "\n".join(archive_lines)
+        + "\n\nThe origin of each module's build, as its SPDX document records it:\n\n"
         + "\n".join(module_lines)
     )
 
@@ -500,14 +549,24 @@ def render_client(vcpkg: Path, qt: Path, deploy: Path, version: str, ffmpeg=meas
 
     # FFmpeg, measured rather than assumed.
     ff_version, ff_licence, ff_configuration = ffmpeg(deploy)
+    ff_pin = ffmpeg_pin(pins)
+    if ff_version != ff_pin["ffmpeg_version"]:
+        raise NoticeError(
+            f"the FFmpeg libraries report version {ff_version} and {CLIENT_SOURCES.name} pins the "
+            f"source of {ff_pin['ffmpeg_version']}. Find the release this Qt built them from and "
+            f"pin its archive."
+        )
     parts.append(heading("FFmpeg"))
     parts.append(
         wrap(
             f"{', '.join(dll for dll, _ in FFMPEG)} are FFmpeg {ff_version}, loaded by Qt "
             f"Multimedia's FFmpeg backend. The libraries report their licence as \"{ff_licence}\"; "
             f"its text is licenses/LGPL-2.1.txt beside this file. Copyright (C) 2000-2024 FFmpeg "
-            f"Project and its contributors. FFmpeg's source is published at "
-            f"https://ffmpeg.org/download.html, and this build reports its configuration as:"
+            f"Project and its contributors. The source they were built from, {ff_pin['name']}, "
+            f"is mirrored unmodified on the release this program came from, {release}, beside "
+            f"SOURCES-client.txt. It is {ff_pin['url']}, the archive The Qt Company's build of "
+            f"these libraries downloaded, and FFmpeg publishes every release at "
+            f"https://ffmpeg.org/download.html. This build reports its configuration as:"
         )
         + f"\n\n  {ff_configuration}"
     )
@@ -593,6 +652,39 @@ def self_test() -> int:
         expect("a test-only port is named and not reproduced", "catch2: installed for the build" in text
                and "catch2 licence text" not in text)
         expect("a vcpkg helper is named and not reproduced", "vcpkg-cmake: installed for the build" in text)
+
+        # The client notices, against the real pins, a Qt prefix holding only
+        # an SPDX document per pinned module, and FFmpeg answering as a stub,
+        # since the real libraries only load on Windows.
+        pins = load_client_sources()
+        qt = Path(scratch) / "Qt" / pins["qt_version"] / "msvc2022_64"
+        (qt / "sbom").mkdir(parents=True)
+        for module in qt_modules(pins):
+            sbom = {"packages": [{"SPDXID": f"SPDXRef-Package-{module}", "downloadLocation": f"git://example.invalid/{module}"}]}
+            (qt / "sbom" / f"{module}-{pins['qt_version']}.spdx.json").write_text(json.dumps(sbom), encoding="utf-8")
+        deploy = Path(scratch) / "deploy"
+        deploy.mkdir()
+        pinned = ffmpeg_pin(pins)["ffmpeg_version"]
+
+        def ffmpeg_as(version: str):
+            return lambda _deploy: (version, "LGPL version 2.1 or later", "--enable-shared")
+
+        text = render_client(triplet, qt, deploy, "9.9.9", ffmpeg=ffmpeg_as(pinned))
+        flat = " ".join(text.split())
+        expect("the Qt sources are offered from the release", "qtbase-everywhere-src-" in text
+               and "mirrored unmodified on the release this program came from, "
+               f"{RELEASES}/tag/v9.9.9" in flat)
+        expect("the FFmpeg source is offered from the release", ffmpeg_pin(pins)["name"] in flat)
+        try:
+            render_client(triplet, qt, deploy, "9.9.9", ffmpeg=ffmpeg_as(pinned + ".1"))
+            expect("an FFmpeg other than the pinned one is refused", False)
+        except NoticeError:
+            expect("an FFmpeg other than the pinned one is refused", True)
+        try:
+            render_client(triplet, qt, deploy, "9.9.9", ffmpeg=ffmpeg_as(pinned), pins={**pins, "qt_version": "0.0.0"})
+            expect("a Qt other than the pinned one is refused", False)
+        except NoticeError:
+            expect("a Qt other than the pinned one is refused", True)
 
         (triplet / "share" / "libfoo" / "copyright").unlink()
         try:

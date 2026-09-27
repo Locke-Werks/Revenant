@@ -763,6 +763,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The Qt and FFmpeg source archives the release job mirrors beside the
+      # installer, fetched and checked against the SHA256 each one is pinned
+      # to in scripts/client-sources.json, so a moved URL or a changed byte
+      # turns up on a push rather than on the tag. --stage runs the coverage
+      # check first, against both halves together: a DLL in the payload that
+      # no pinned archive is the source of fails here, before 112 MB is
+      # fetched. Deliberately not uploaded. It is other projects' source,
+      # unchanged, and the release job fetches and checks it again.
+      - name: Fetch and check the Qt and FFmpeg sources
+        shell: pwsh
+        run: |
+          python scripts/corresponding_source.py client --stage dist/stage --out dist/client-source
+          if ($LASTEXITCODE -ne 0) { throw "corresponding_source.py client exited $LASTEXITCODE" }
+
       # --dev, because the payload arriving here was never signed. Without it
       # lwforge refuses the unsigned stub, and with an unsigned payload the
       # honest label is the one the stub prints.
@@ -1037,10 +1051,6 @@ jobs:
       # byte for byte against the hashes the engine's build recorded, and it
       # is published in the same act as the installer. The package job builds
       # the same archive on every run, so this is not its first outing.
-      #
-      # It does not carry the Qt or FFmpeg sources, whose DLLs the installer
-      # also conveys. docs/packaging.md keeps that on the list of what the
-      # first release owes.
       - name: Assemble the corresponding source
         shell: pwsh
         env:
@@ -1050,6 +1060,19 @@ jobs:
             --manifest dist/source-manifest/sources.json --out dist/source --ref "${{ github.sha }}"
           if ($LASTEXITCODE -ne 0) { throw "corresponding_source.py bundle exited $LASTEXITCODE" }
 
+      # The installer also conveys Qt and FFmpeg as DLLs, and the owner
+      # decided on 2026-09-27 that their sources go on the release page too:
+      # the exact upstream archives, unmodified, as separate assets beside the
+      # archive above, with SOURCES-client.txt saying what each is. Each one is
+      # checked against its pinned SHA256, and --stage fails first if the
+      # signed payload carries a DLL none of them covers. The package job does
+      # the same on every run.
+      - name: Fetch and check the Qt and FFmpeg sources
+        shell: pwsh
+        run: |
+          python scripts/corresponding_source.py client --stage dist/stage --out dist/client-source
+          if ($LASTEXITCODE -ne 0) { throw "corresponding_source.py client exited $LASTEXITCODE" }
+
       - name: Publish
         shell: pwsh
         env:
@@ -1057,6 +1080,14 @@ jobs:
         run: |
           $source = Get-ChildItem dist/source -Filter '*-corresponding-source.zip' | Select-Object -First 1
           if (-not $source) { throw "no corresponding-source archive to publish beside the installer" }
-          gh release create "${{ github.ref_name }}" dist/Revenant-Setup.exe $source.FullName `
+          # Every pinned archive and SOURCES-client.txt, and nothing short of
+          # that: a release missing one of them offers a binary without its
+          # source, which is the thing this step exists to prevent.
+          $pinned = (Get-Content scripts/client-sources.json -Raw | ConvertFrom-Json).archives.Count
+          $client = @(Get-ChildItem dist/client-source -File | ForEach-Object FullName)
+          if ($client.Count -ne $pinned + 1 -or -not (Test-Path dist/client-source/SOURCES-client.txt)) {
+            throw "dist/client-source holds $($client.Count) files; expected $pinned archives and SOURCES-client.txt"
+          }
+          gh release create "${{ github.ref_name }}" dist/Revenant-Setup.exe $source.FullName @client `
             --repo "${{ github.repository }}" `
             --title "Revenant ${{ github.ref_name }}"

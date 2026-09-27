@@ -43,6 +43,11 @@
     licenses/LGPL-3.0.txt for Qt and licenses/LGPL-2.1.txt for FFmpeg.
     scripts/generate_notices.py writes the notices and says what it refuses.
 
+    The client half then has to show that every DLL in it has its source
+    pinned in scripts/client-sources.json, the archives the release page
+    mirrors beside the installer. scripts/corresponding_source.py coverage
+    fails the stage on one that does not.
+
     This paragraph used to say the script does not produce a third-party
     notices file because there was not one yet. That was true until
     2026-09-22.
@@ -87,8 +92,8 @@ $clientVcpkg = Join-Path (Split-Path -Parent $deployDir) "vcpkg_installed/x64-wi
 $uiPresets = Get-Content -Raw (Join-Path $root "ui/CMakePresets.json") | ConvertFrom-Json
 $qtPrefix = ($uiPresets.configurePresets | Where-Object name -eq "base").cacheVariables.CMAKE_PREFIX_PATH
 
-function Invoke-Notices {
-    param([string[]]$Arguments)
+function Invoke-LicenceScript {
+    param([string[]]$Arguments, [string]$Script = "generate_notices.py")
     # py first: the launcher is what a python.org install puts on PATH, and a
     # bare python can be the Microsoft Store stub that opens a window instead.
     $python = Get-Command py -ErrorAction SilentlyContinue
@@ -98,12 +103,12 @@ function Invoke-Notices {
         $prefix = @()
     }
     if (-not $python) {
-        throw "no Python 3 on PATH, and scripts/generate_notices.py writes the notices " +
-              "every payload carries. Install Python 3 rather than staging without them."
+        throw "no Python 3 on PATH, and scripts/$Script checks the licence material " +
+              "every payload carries. Install Python 3 rather than staging without it."
     }
-    & $python.Source @prefix (Join-Path $root "scripts/generate_notices.py") @Arguments
+    & $python.Source @prefix (Join-Path $root "scripts/$Script") @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "scripts/generate_notices.py exited $LASTEXITCODE; its message above names what is missing."
+        throw "scripts/$Script exited $LASTEXITCODE; its message above names what is missing."
     }
 }
 
@@ -303,8 +308,8 @@ if ($Only -in @("both", "engine")) {
     }
     Copy-Item -LiteralPath $license -Destination (Join-Path $outDir "LICENSE.txt") -Force
 
-    Invoke-Notices @("engine", "--vcpkg", $engineVcpkg,
-                     "--out", (Join-Path $outDir "THIRD-PARTY-NOTICES-engine.txt"))
+    Invoke-LicenceScript @("engine", "--vcpkg", $engineVcpkg,
+                           "--out", (Join-Path $outDir "THIRD-PARTY-NOTICES-engine.txt"))
     Copy-Licence "LGPL-2.1.txt"
 }
 
@@ -322,11 +327,20 @@ if ($Only -in @("both", "client")) {
         Copy-Tree -From $module -RelativeTo $deployDir -Into $outDir
     }
 
-    Invoke-Notices @("client", "--vcpkg", $clientVcpkg, "--qt", $qtPrefix,
-                     "--deploy", $deployDir,
-                     "--out", (Join-Path $outDir "THIRD-PARTY-NOTICES-client.txt"))
+    Invoke-LicenceScript @("client", "--vcpkg", $clientVcpkg, "--qt", $qtPrefix,
+                           "--deploy", $deployDir,
+                           "--out", (Join-Path $outDir "THIRD-PARTY-NOTICES-client.txt"))
     Copy-Licence "LGPL-3.0.txt"
     Copy-Licence "LGPL-2.1.txt"
+
+    # Every Qt and FFmpeg DLL just copied has to have its source pinned in
+    # scripts/client-sources.json, because the release page offers exactly
+    # those archives and nothing else. A library added to the lists above
+    # without its module's source stops the stage here. This is the one place
+    # the Qt prefix is at hand, so it is also where each pinned file is checked
+    # against the SPDX document of the module it is filed under.
+    Invoke-LicenceScript -Script "corresponding_source.py" -Arguments @(
+        "coverage", "--stage", $outDir, "--qt", $qtPrefix)
 }
 
 # A PDB in a payload is a file the customer cannot use and the container has
