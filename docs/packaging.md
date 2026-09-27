@@ -547,7 +547,7 @@ pushed or published.
 | Icon file | `assets/revenant.ico`: 16, 24, 32, 48, 64, 128 and 256 px, all 32 bpp, PNG-compressed entries; Pillow reads all seven as RGBA |
 | Icon in the engine | One `RT_GROUP_ICON`, id 1, its seven images byte-identical to `assets/revenant.ico`; VERSIONINFO 0.1.0.0, Locke Werks |
 | Icon in the installer | The same seven images, stamped by `lwforge` from `product.icon` |
-| Icon in the README | The header block points at `assets/revenant.ico`. No release badge, which is right until there is a release |
+| Icon in the README | The header block points at `assets/revenant.ico`. The release badge was added with the install section on 2026-09-27, in the commit the first tag is made on; this row used to say "No release badge, which is right until there is a release" |
 | Uninstall | Install directory, Add/Remove Programs key and Start Menu shortcut gone. `PendingFileRenameOperations` 60 entries before and after. One file left, `%TEMP%\lwu847B.tmp.exe`, 489,872 bytes: the stub's copy that finishes the removal, which cannot schedule its own deletion without administrator rights. Forge documents it. An elevated machine-scope uninstall queues it for deletion at the next restart instead. Deleted by hand |
 | `FORGE_VERSION` | v0.4.1 in both jobs, moved from v0.4.0 after the second run below. `installer.toml` uses `[[options]]` and `when`, which need v0.3.0, and no hooks, so no key it carries is one either pin would drop |
 | Hooks as the user | None declared, so there is nothing to mark `as = "user"`. Nothing in the install writes into a user profile: the RPC token is made by the engine on first run |
@@ -650,10 +650,14 @@ pushed or published.
 - **`restart_manager` offers nothing.** Corrected above and in
   `installer.toml`. Forge's `docs/config-schema.md` still describes the key as
   giving the user an option; that file is Forge's to correct.
-- **The README has no install section and no release badge.** Both are right
-  while there is no release, and both are owed at the tag: the badge per the
-  header rule, and a short section naming `Revenant-Setup.exe`, the
-  corresponding-source archive beside it, `/S` and `/O:desktop_shortcut=`.
+- **Done, 2026-09-27, in the commit the first tag is made on: the README's
+  install section and release badge.** The section names `Revenant-Setup.exe`,
+  `/S`, `/O:desktop_shortcut=on`, how to start the engine, and the source
+  archives on the release page.
+
+  WHAT THIS ITEM USED TO SAY. "The README has no install section and no
+  release badge. Both are right while there is no release, and both are owed
+  at the tag."
 - **The `release` job has never run.** The first tag is its first run. Every
   step before signing has a counterpart in the `package` job that runs on
   each push; the signing steps and `gh release create` do not.

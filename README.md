@@ -6,6 +6,7 @@
 
 **Samples land in GPU memory once, and the whole radio runs there.**
 
+[![release](https://img.shields.io/github/v/release/Locke-Werks/Revenant?style=flat-square&color=d6262a)](https://github.com/Locke-Werks/Revenant/releases)
 [![license](https://img.shields.io/badge/license-GPLv3-d6262a?style=flat-square)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-Windows%2011-d6262a?style=flat-square)](#requirements)
 
@@ -363,6 +364,26 @@ macOS and Linux are not targets yet. The engine is written to the Vulkan API
 and does not use Windows-specific graphics, but nobody has built or run it
 elsewhere, and claiming a platform nobody has tested is how a project acquires
 bug reports it cannot answer.
+
+## Install
+
+`Revenant-Setup.exe` from the
+[release page](https://github.com/Locke-Werks/Revenant/releases). It installs
+for all users into `Program Files\Revenant`, so it asks for administrator
+rights, and adds a Start Menu entry for the client. Unattended, `/S`, with
+`/O:desktop_shortcut=on` for a desktop shortcut, which is off by default.
+
+The Start Menu entry opens the client, which connects to an engine on port
+17690. Start the engine first, with a source:
+
+```
+"C:\Program Files\Revenant\revenant-engine.exe" "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"
+```
+
+The same release page carries the source for everything the installer
+ships: `Revenant-<version>-corresponding-source.zip` for Revenant, libusb and
+librtlsdr, and the Qt and FFmpeg source archives with `SOURCES-client.txt`
+saying what each one is.
 
 ## Build
 
