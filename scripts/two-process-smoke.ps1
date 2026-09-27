@@ -17,6 +17,16 @@
     the engine whatever happened. The engine is given --duration as well, so
     an engine this script loses track of still exits on its own.
 
+    With -NoSource the engine is started with --no-source in place of the
+    URI, which is how a client that starts the engine itself runs it, and the
+    client opens the same URI over the session, closes it, and opens it again.
+    --duration then counts the source a client has open, so an engine left
+    with nothing open does not exit on its own; the finally block below is
+    what stops it.
+
+.PARAMETER NoSource
+    Start the engine with --no-source and have the client open the source.
+
 .PARAMETER Engine
     revenant-engine.exe from the root tree.
 
@@ -31,7 +41,8 @@ param(
     [Parameter(Mandatory)] [string]$Engine,
     [Parameter(Mandatory)] [string]$Client,
     [Parameter(Mandatory)] [string]$Work,
-    [int]$StartupSeconds = 120
+    [int]$StartupSeconds = 120,
+    [switch]$NoSource
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,8 +62,12 @@ Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
 
 # A synthetic scene rather than a radio, so the test needs a GPU and nothing
 # else. --gpu -1 honours REVENANT_GPU_INDEX, which is how CI aims every binary.
-$engineArgs = @(
-    '"synthetic:wideband?rate=2400032&emitters=4&seed=4242"',
+$uri = "synthetic:wideband?rate=2400032&emitters=4&seed=4242"
+# @() around each, because an if that yields one element yields a string, and
+# a string plus an array is a longer string rather than a longer array.
+$sourceArgs = @(if ($NoSource) { "--no-source" } else { "`"$uri`"" })
+$clientArgs = @(if ($NoSource) { "--open", $uri })
+$engineArgs = $sourceArgs + @(
     "--gpu", "-1",
     "--block-samples", "16384",
     "--port", "0",
@@ -84,7 +99,7 @@ try {
     }
     "engine pid $($process.Id) listening on port $port"
 
-    & $Client --port $port --token-file $token
+    & $Client --port $port --token-file $token @clientArgs
     $clientExit = $LASTEXITCODE
     "client exited $clientExit"
 

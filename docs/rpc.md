@@ -2104,6 +2104,36 @@ that plays to its end stays open, ended, and the engine waits for the client
 to close it or open another, so the window that opened it can go back to the
 radio without restarting the engine.
 
+**The engine can start with no source at all.** `revenant-engine --no-source`
+binds its port, prints the same startup lines ending in `listening on`, and
+serves a session with nothing open until a client calls `openSource`. That is
+the state `closeSource` leaves, so a client polls through it the same way:
+`sourceDescriptor` answers `open = false`, `EngineInfo` has a `sourceRate`, a
+grid and a `sourceEpoch` of zero, and `subscribeSpectrum` is refused until a
+source is open. With no command-line source there is nothing whose end can
+stop the process, so it serves across every `closeSource`, every `openSource`
+and every client recording that plays out, and ends on Ctrl-C or `--duration`,
+which counts whichever source is open. It is a flag rather than what an empty
+command line means, because somebody who types `revenant-engine` alone has
+usually forgotten the URI; that is still refused, and the refusal names
+`--no-source` beside `--list`. Passing both a URI and `--no-source` is refused
+as well.
+
+A client connecting to one of these reads `sourceEpoch` 0 and then, after its
+own `openSource`, 1. That first move is a new stream like any other and has to
+be treated as one: resubscribe the spectrum, rebuild the axis. A client that
+keeps "not seen yet" as an epoch of 0 of its own will take 0 to 1 as the
+epoch it connected on and never subscribe, because before `--no-source`
+`revenant-engine` had always opened a source before it listened and so never
+reported 0 to anybody.
+
+A fresh `Engine` reports an empty grid now too. Until `--no-source`, an engine
+nobody had opened a source on was never served, and `EngineInfo::grid` on one
+held `dsp::GridParams`' canonical M=64 D=32 rather than the zeros
+`Engine::close_source` writes. `Engine::create` zeroes it the same way, so a
+client cannot tell an engine that has never had a source from one whose source
+was closed, which is the point: the answer to both is "open one".
+
 ### What a source change costs, which is more than a retune
 
 Closing a source is not a bigger retune. A retune keeps the stream and moves one
@@ -2278,7 +2308,8 @@ paragraphs below say what replaced each.
 
 What exists: `tools/engined` builds `revenant-engine`, which links
 `revenant_rpc_server`, binds a port, prints it, and serves a real engine until
-`--duration` expires. The port defaults to 17690, which is `revenant-ui`'s
+`--duration` expires, with the source its command line names or, under
+`--no-source`, with none until a client opens one. The port defaults to 17690, which is `revenant-ui`'s
 default, so the two meet with neither being told a port; `--port 0` binds a
 free one for a second engine on the machine. `ServerOptions::port` in the
 library stays at zero, which is what the suite needs.
@@ -2314,8 +2345,12 @@ project of its own that compiles `core/rpc/client.cpp` `/MD`, the way `ui/`
 does, into a client that logs in, lists sources, takes spectrum frames and a
 receiver's audio, and tears down; `scripts/two-process-smoke.ps1` starts the
 `/MT` `revenant-engine` with `--port 0`, reads the port it prints and runs that
-client against it. CI's `two-process` job runs it against the engine binary
-that ships, and CI's `ui` job configures and builds `ui/` with warnings as
+client against it. `two_process_no_source` runs the same pair with the engine
+started `--no-source`: the client checks nothing is open, opens the synthetic
+scene over the session, takes spectrum and audio, closes it, sees nothing open
+again, opens it a second time and takes spectrum and detections, and the
+script checks the engine process is still running afterwards. CI's `two-process` job runs both
+against the engine binary that ships, and CI's `ui` job configures and builds `ui/` with warnings as
 errors, so a change to `core/rpc/client.cpp` or to the schema that breaks the
 `/MD` build stops the line. `package` and `release` wait for both.
 

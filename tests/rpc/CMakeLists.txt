@@ -289,6 +289,19 @@ if(TARGET revenant-engine)
         "--detector-cpu budgets the detector, which reads the spectrum stage that --no-spectrum"
         "${engined_uri}" --no-spectrum --detector-cpu 0.3)
 
+    # --no-source and the URI are exclusive, and a command line with neither
+    # still names both ways out. Both are refused before the token is read, so
+    # like the budget refusals these touch no profile and no device. Serving
+    # with no source is tests/twoprocess's two_process_no_source, because what
+    # it has to show is a client opening a source over the session, and an
+    # entry here cannot connect one.
+    revenant_engined_refuses(no_source_beside_a_uri
+        "--no-source and the source URI 'synthetic:wideband\\?rate=2400032&emitters=4&seed=4242&samples=4800064' were both given"
+        "${engined_uri}" --no-source)
+    revenant_engined_refuses(neither_a_uri_nor_no_source
+        "no source URI\\. Run --list to see what is available, or pass --no-source"
+        --port 0)
+
     add_test(
         NAME engined_lists_the_budget_defaults
         COMMAND revenant-engine --help

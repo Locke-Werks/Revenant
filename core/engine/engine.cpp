@@ -156,6 +156,17 @@ public:
         context_ = std::move(*context);
         info_.device = context_.info();
 
+        // An engine that has never had a source reports the same grid as one
+        // whose source was closed, for the reason close_source gives: the
+        // GridParams default is the design's M=64 D=32, not empty, and a client
+        // reading grid.channels on an engine nothing has opened would take it
+        // for a measurement. revenant-engine --no-source serves an engine in
+        // exactly this state until a client calls openSource, so the two
+        // states have to be indistinguishable to a client polling through them.
+        info_.grid.channels = 0;
+        info_.grid.decimation = 0;
+        info_.grid.taps_per_branch = 0;
+
         SchedulerConfig scheduler_config;
         auto scheduler = Scheduler::create(context_, scheduler_config);
         if (!scheduler) {

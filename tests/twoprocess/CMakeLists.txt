@@ -87,3 +87,31 @@ set_tests_properties(two_process_smoke PROPERTIES
     TIMEOUT 300
     PASS_REGULAR_EXPRESSION "two-process smoke: ok"
 )
+
+# The engine started with --no-source, the way a client that starts it has to
+# run it, and the source opened, closed and opened again over the session. The
+# pass regex needs the no-source line from before the open and the one from
+# after the second close as well as the ok, so a run that somehow found a
+# source already open cannot pass on the ok alone. A work directory of its own,
+# so the two entries never share a token file or an engine log.
+#
+# The fail regex is the script's own words for an engine that went away while
+# or after the client ran. The client prints its ok before the script looks,
+# and a pass regex stops CTest reading the exit code, so without it an engine
+# that exited once its client-opened source closed, which is the defect this
+# entry exists for, would pass.
+add_test(
+    NAME two_process_no_source
+    COMMAND "${REVENANT_PWSH}" -NoProfile -ExecutionPolicy Bypass
+            -File "${REVENANT_SOURCE_DIR}/scripts/two-process-smoke.ps1"
+            -Engine "${REVENANT_ENGINE}"
+            -Client "$<TARGET_FILE:rpc_smoke_client>"
+            -Work "${CMAKE_CURRENT_BINARY_DIR}/smoke-no-source"
+            -NoSource
+)
+set_tests_properties(two_process_no_source PROPERTIES
+    LABELS "twoprocess"
+    TIMEOUT 300
+    PASS_REGULAR_EXPRESSION "no source open at connect, epoch 0.*detections after reopening.*no source open after the second close_source.*two-process smoke: ok"
+    FAIL_REGULAR_EXPRESSION "revenant-engine exited"
+)

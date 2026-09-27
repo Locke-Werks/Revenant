@@ -7,7 +7,10 @@
 // several. Receivers are not configured here at all: a client adds them over
 // the session, and this program never learns what they were for.
 //
-// Five things in here are decisions rather than transcription.
+// Six things in here are decisions rather than transcription.
+//
+// WHAT THIS LINE USED TO SAY: "Five things in here are decisions rather than
+// transcription." The sixth is --no-source, below.
 //
 // THE TOKEN IS RESOLVED BEFORE THE ENGINE IS BUILT, AND NEVER PRINTED
 //
@@ -47,6 +50,31 @@
 // installs that sink. Doing it the other way round works, since the server
 // retries the install at subscribeSpectrum, but it means the first client to
 // subscribe pays for a failure that was avoidable here.
+//
+// Under --no-source there is nothing to open first, and that is the retry's
+// case rather than a new one: Server::create's install is refused and
+// discarded, and the server installs the sink itself when a client's
+// openSource succeeds, so a client never sees the window.
+//
+// --no-source SERVES AN ENGINE WITH NOTHING OPEN, AND A BARE COMMAND LINE IS
+// STILL REFUSED
+//
+// A client that starts this program itself, which is what revenant-ui's Start
+// Menu entry needs because nothing else starts it, has no URI to pass: the
+// operator picks a radio in the client afterwards, and the picker calls
+// Session.openSource. So the engine has to be able to bind and serve before
+// anybody has named a source. The state it serves is the one
+// Engine::close_source leaves, which a client already polls through between
+// two sources: sourceDescriptor answers open = false, EngineInfo has a source
+// rate, a grid and an epoch of zero, and subscribeSpectrum is refused until a
+// source is open.
+//
+// A flag rather than "no URI means no source". Somebody typing
+// revenant-engine at a prompt has almost always forgotten the URI, and an
+// engine that silently came up serving nothing would read to them as a radio
+// that does not work. The refusal names --no-source as well as --list, and
+// naming both is refused too, because one of the two is a mistake and this
+// program cannot tell which.
 //
 // TEARDOWN ORDER IS server.h's, SPELLED OUT RATHER THAN DERIVED
 //
@@ -224,6 +252,11 @@ constexpr std::uint16_t kDefaultPort = 17690;
 struct Options {
     std::string uri;
 
+    // Serve with no source open and wait for a client's openSource. See the
+    // note at the top of the file for why an empty uri alone does not mean
+    // this.
+    bool no_source = false;
+
     std::string bind = "127.0.0.1";
 
     // revenant-ui's default, so the two meet without either being told a
@@ -320,12 +353,18 @@ void print_usage()
         "revenant-engine: serve one engine over Cap'n Proto\n"
         "\n"
         "Usage: revenant-engine <source-uri> [options]\n"
+        "       revenant-engine --no-source [options]\n"
         "\n"
         "Receivers are not configured here. A client adds, retunes and removes\n"
         "them over the session, and subscribes to the full-span spectrum; see\n"
         "core/rpc/revenant.capnp for what the session offers.\n"
         "\n"
         "Serving:\n"
+        "  --no-source         Serve with no source open, in place of a URI. A client\n"
+        "                      opens one with Session.openSource, which is what\n"
+        "                      revenant-ui's source picker calls, and can close it\n"
+        "                      and open another. Serves until Ctrl-C, including\n"
+        "                      after a recording a client opened has played out.\n"
         "  --bind <address>    Interface to listen on, default 127.0.0.1. A client has\n"
         "                      to present the token below, but this wire is plaintext,\n"
         "                      so a token crossing a network is readable and replayable\n"
@@ -421,7 +460,8 @@ void print_usage()
         "Run:\n"
         "  --duration <sec>    Stop after this many seconds of source time. Accepts a\n"
         "                      fraction. Omitted serves until the source ends or\n"
-        "                      Ctrl-C.\n"
+        "                      Ctrl-C. With --no-source it counts whichever source a\n"
+        "                      client has open, from that source's first sample.\n"
         "  --status-ms <n>     Status interval, default 2000. One line per interval\n"
         "                      rather than a line redrawn in place, because this\n"
         "                      program's stdout is usually a log.\n"
@@ -434,7 +474,8 @@ void print_usage()
         "Examples:\n"
         "  revenant-engine \"synthetic:wideband?rate=2400000&emitters=8&seed=4242\" \\\n"
         "      --pace 1\n"
-        "  revenant-engine \"rtlsdr://0?freq=162.550M&rate=2400000\" --port 47000\n",
+        "  revenant-engine \"rtlsdr://0?freq=162.550M&rate=2400000\" --port 47000\n"
+        "  revenant-engine --no-source\n",
         kDefaultPort, rpc::ServerOptions{}.detector_cpu_budget,
         engine::EngineConfig{}.probe_cpu_budget, rpc::ServerOptions{}.decode_lanes,
         kMaxDecodeLanes);
@@ -479,6 +520,10 @@ void print_usage()
         }
         if (arg == "--quiet") {
             options.quiet = true;
+            continue;
+        }
+        if (arg == "--no-source") {
+            options.no_source = true;
             continue;
         }
         if (arg == "--no-spectrum") {
@@ -867,6 +912,18 @@ void print_engine_block(const engine::Engine& eng)
 
     std::println("");
     std::println("device      {}", info.device.describe());
+
+    // --no-source. Every line below describes a source, and on an engine with
+    // none each one would print a zero that reads as a measurement: a grid of
+    // M=0, a ring of 0 samples, and "spectrum none. subscribeSpectrum will be
+    // refused", which is false the moment a client opens something. None of
+    // it is printed again when a client does, because the session reports all
+    // of it and this block is the command line's.
+    if (!eng.has_source()) {
+        std::println("source      none. A client opens one with Session.openSource");
+        return;
+    }
+
     std::println("source      {}", caps.uri);
     std::println("            {}, {} S/s", caps.display_name, info.source_rate);
     if (info.source_center != 0) {
@@ -1056,9 +1113,13 @@ void print_engine_block(const engine::Engine& eng)
     engine::Engine& eng = **created;
 
     // Before the server, per the note at the top: the spectrum stage is built
-    // when the source is opened, and Server::create installs the sink.
-    if (auto opened = eng.open_source(options.uri); !opened) {
-        return std::unexpected(with_context(opened.error(), "opening the source"));
+    // when the source is opened, and Server::create installs the sink. Not at
+    // all under --no-source, which main() has already checked came without a
+    // URI.
+    if (!options.no_source) {
+        if (auto opened = eng.open_source(options.uri); !opened) {
+            return std::unexpected(with_context(opened.error(), "opening the source"));
+        }
     }
 
     print_engine_block(eng);
@@ -1090,7 +1151,11 @@ void print_engine_block(const engine::Engine& eng)
     //
     // The pace in force and not --pace, because a file whose URI says pace=
     // runs at that whatever --pace was.
-    if (eng.source_capabilities().flow == source::FlowControl::Demand &&
+    //
+    // Only with a source open. SourceCapabilities defaults to Demand, so an
+    // engine started with --no-source would otherwise be warned about a
+    // source that does not exist, under an empty name.
+    if (eng.has_source() && eng.source_capabilities().flow == source::FlowControl::Demand &&
         eng.source_pacing().paced_by == 0.0) {
         std::println(stderr,
                      "warning: '{}' is a demand source running unthrottled, so it is asked to "
@@ -1279,9 +1344,14 @@ void print_engine_block(const engine::Engine& eng)
     // dongle in the client.
     //
     //   The source the COMMAND LINE opened ran out, or --duration was reached,
-    //   or Ctrl-C. Exit, which is what every script and every test that drives
-    //   this program expects: each of them names its source on the command
-    //   line.
+    //   or Ctrl-C. Exit, which is what every script and every test that names
+    //   a source on the command line expects. Under --no-source there is no
+    //   such source and this case cannot arise; see below.
+    //
+    //   WHAT THIS CASE USED TO SAY, until --no-source: "which is what every
+    //   script and every test that drives this program expects: each of them
+    //   names its source on the command line." tests/twoprocess's
+    //   two_process_no_source starts this program with no source at all.
     //
     //   A source a CLIENT opened ran out, which is a recording played to its
     //   end from the picker. Keep serving, with the ended source still open,
@@ -1313,8 +1383,18 @@ void print_engine_block(const engine::Engine& eng)
     // the source went between the has_source() below and the call, the engine
     // refuses with "before a source is open" and this loop finds has_source
     // false and goes back to waiting, which is the answer either way.
+    //
+    // UNDER --no-source THERE IS NO COMMAND-LINE SOURCE, so the first case
+    // cannot happen and every source that ends is a client's. The epoch is
+    // empty rather than zero for that reason. Zero would give the same answer
+    // today, because the first open makes the epoch one, but only by way of a
+    // numbering detail in EngineInfo, and "no command-line source" is what is
+    // actually meant. The program then waits here from the start, which is the
+    // state a client's closeSource leaves it in, and ends only on Ctrl-C or
+    // --duration.
     constexpr auto kSourceWaitPoll = std::chrono::milliseconds(20);
-    const std::uint64_t command_line_epoch = eng.info().source_epoch;
+    const std::optional<std::uint64_t> command_line_epoch =
+        options.no_source ? std::nullopt : std::optional(eng.info().source_epoch);
     Status ran;
     for (;;) {
         if (g_stop_requested.load(std::memory_order_acquire)) {
@@ -1434,9 +1514,21 @@ int main(int argc, char** argv)
         return 0;
     }
 
-    if (options->uri.empty()) {
+    // Both refused as usage, for the reason at the top of the file: either
+    // one could be the mistake, and guessing would start an engine that does
+    // something other than what was typed.
+    if (options->no_source && !options->uri.empty()) {
         std::println(stderr,
-                     "revenant-engine: no source URI. Run --list to see what is available.");
+                     "revenant-engine: --no-source and the source URI '{}' were both given. "
+                     "Pass the URI to open that source at startup, or --no-source to serve "
+                     "with none open and let a client choose one.",
+                     options->uri);
+        return 2;
+    }
+    if (options->uri.empty() && !options->no_source) {
+        std::println(stderr,
+                     "revenant-engine: no source URI. Run --list to see what is available, or "
+                     "pass --no-source to serve with none open and let a client choose one.");
         return 2;
     }
     if (options->spectrum_floor_db.has_value() && options->spectrum_ceiling_db.has_value() &&

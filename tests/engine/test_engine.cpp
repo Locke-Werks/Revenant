@@ -972,6 +972,12 @@ TEST_CASE("a source closes and another opens on the same engine", "[gpu][engine]
     CHECK_FALSE(eng.has_source());
     CHECK(eng.info().source_epoch == 0);
 
+    // And the grid is empty rather than GridParams' canonical 64 channels,
+    // so an engine that has never had a source reads the same as one whose
+    // source was closed. revenant-engine --no-source serves this state.
+    CHECK(eng.info().grid.channels == 0);
+    CHECK(eng.info().source_rate == 0);
+
     // Closing an engine with nothing open is a success and not a refusal. A
     // client that closes before every open should not have to know which
     // state it was in to read the answer.
