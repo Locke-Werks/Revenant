@@ -1952,8 +1952,9 @@ about what it misses alone.
   0.94%, p99 12.383 ms, and missed it in the receiver window, 1588 of 34838,
   4.56%, p99 17.019 ms. The client replaced 13102 of 90815 engine frames in
   its latest-wins slot, 14.4% against 4.0% above, and the engine dropped
-  1039. The machine was not idle during the run, so this is a regression only
-  if an idle rerun repeats it.
+  1039. A CI run was testing on the same GPU under it the whole time, which
+  the script's guard missed because the run read as queued, so this is a
+  regression only if an idle rerun repeats it.
 
   WHAT THIS ITEM USED TO SAY. "the same on a physical monitor on the 4090."
   The owner decided on 2026-09-27 that the virtual display is the one the

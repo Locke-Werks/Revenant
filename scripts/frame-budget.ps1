@@ -89,9 +89,15 @@ foreach ($path in $Engine, $Client) {
     }
 }
 
-$running = gh run list --repo Locke-Werks/Revenant --status in_progress --limit 1 --json databaseId | ConvertFrom-Json
+# Queued as well as in progress. A run stays "queued" while any one of its jobs
+# waits for a runner, even with other jobs already building and testing on this
+# machine's GPU, and on 2026-09-27 a 300 s measurement passed this check with
+# the ui and build-and-test jobs running under it the whole time.
+$running = @('in_progress', 'queued') | ForEach-Object {
+    gh run list --repo Locke-Werks/Revenant --status $_ --limit 1 --json databaseId | ConvertFrom-Json
+} | Select-Object -First 1
 if ($running) {
-    throw "a CI run is in progress (run $($running[0].databaseId)); try again when it has finished"
+    throw "a CI run is queued or in progress (run $($running.databaseId)); try again when it has finished"
 }
 
 New-Item -ItemType Directory -Force -Path $Work | Out-Null

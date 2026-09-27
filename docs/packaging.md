@@ -584,9 +584,12 @@ pushed or published.
    load, engine at 1.001x realtime: the main window missed 339 of 36081
    refreshes, 0.94% (p95 9.10 ms, p99 12.38 ms against the 12.5 ms line), and
    the receiver window 1588 of 34838, 4.56% (p95 11.43 ms, p99 17.02 ms),
-   against 0.43% and 0.65% on 2026-09-23. The engine dropped 1039 frames. The
-   machine was not idle during it, so whether this is a regression is open
-   until an idle rerun says.
+   against 0.43% and 0.65% on 2026-09-23. The engine dropped 1039 frames. CI
+   was running on this machine for the whole of it, the `ui` job until
+   17:26 UTC and then `build-and-test` on the same RTX 4090, because
+   `scripts/frame-budget.ps1` only refused an in-progress run and a run with
+   one job waiting for a runner reads as queued. The script now refuses
+   both. Whether this is a regression is open until an idle rerun says.
 
    WHAT THIS ITEM USED TO SAY. "**The M2 physical-monitor frame run.** The
    owner's run, on a real display. Nothing offscreen stands in for it."

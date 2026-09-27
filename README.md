@@ -292,9 +292,9 @@ windows kept in front the main window missed 0.4% and 1.0% of refreshes in two
 300 s run on an idle machine then gave 154 of 36106 main-window frames over
 budget, 0.43%, and 233 of 36045 in the receiver window, 0.65%, with the engine
 at 1.000x realtime: under one in a hundred. The display is the streamed
-virtual one, which is the display M2 is measured on. A run on 2026-09-27 on a
-machine that was not idle missed 4.56% in the receiver window, so M2 waits on
-an idle rerun. `docs/ui-spectrum.md`, "Frame budget", has the numbers, the
+virtual one, which is the display M2 is measured on. A run on 2026-09-27
+missed 4.56% in the receiver window with a CI run testing on the same GPU
+under it, so M2 waits on an idle rerun. `docs/ui-spectrum.md`, "Frame budget", has the numbers, the
 command and what is still open.
 
 WHAT THIS PARAGRAPH USED TO SAY. It ended "The display is the streamed virtual
