@@ -120,6 +120,7 @@
 
 #include <QFont>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QImage>
 #include <QQuickWindow>
 #include <QObject>
@@ -368,6 +369,26 @@ int main(int argc, char* argv[])
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName(QStringLiteral("Revenant"));
     QGuiApplication::setOrganizationName(QStringLiteral("Locke Werks"));
+
+    // Every window's title bar, taskbar button and Alt-Tab entry. The file is
+    // assets/revenant.ico, the one the executable's own icon resource holds,
+    // compiled into the Qt resources by ui/CMakeLists.txt. An icon with no
+    // sizes means the qico plugin did not load. Said on stderr rather than
+    // through qWarning, which a GUI-subsystem binary sends to the debugger,
+    // and a smoke run fails on it, because a payload that dropped qico.dll
+    // otherwise ships a generic icon without a word.
+    bool icon_loaded = false;
+    {
+        const QIcon icon(QStringLiteral(":/revenant.ico"));
+        icon_loaded = !icon.availableSizes().isEmpty();
+        if (icon_loaded) {
+            QGuiApplication::setWindowIcon(icon);
+        } else {
+            std::fputs("revenant-ui: the application icon did not load; "
+                       "is imageformats/qico.dll beside the executable?\n",
+                       stderr);
+        }
+    }
 
     // Basic rather than the platform style. The platform styles refuse to be
     // customised at all, and every colour here is tied to the colour map the
@@ -838,6 +859,10 @@ int main(int argc, char* argv[])
         }
         if (qml_warnings > 0) {
             std::fprintf(stderr, "smoke: %d QML warning(s)\n", qml_warnings);
+            return 1;
+        }
+        if (!icon_loaded) {
+            std::fputs("smoke: the application icon did not load\n", stderr);
             return 1;
         }
         std::fputs("smoke: loaded and ran without a QML warning\n", stderr);

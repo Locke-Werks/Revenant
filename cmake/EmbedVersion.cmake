@@ -7,6 +7,13 @@
 # properties. Both are part of building the program rather than a release-time
 # afterthought: a version resource added at release is a version resource that
 # disagrees with the build it came from.
+#
+# The icon and the template are found from this file's own directory, not from
+# CMAKE_SOURCE_DIR. ui/ is a CMake project of its own, where CMAKE_SOURCE_DIR is
+# ui/ and holds neither, and revenant-ui.exe went without an icon or a version
+# because of it.
+
+get_filename_component(REVENANT_EMBED_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
 function(revenant_embed_version target)
     if(NOT WIN32)
@@ -25,7 +32,7 @@ function(revenant_embed_version target)
     # The resource compiler treats a backslash in a string as an escape, so the
     # icon path is handed over with forward slashes rather than composed by
     # hand at each call site.
-    file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/assets/revenant.ico" REVENANT_ICON_PATH)
+    file(TO_CMAKE_PATH "${REVENANT_EMBED_ROOT}/assets/revenant.ico" REVENANT_ICON_PATH)
 
     if(NOT EXISTS "${REVENANT_ICON_PATH}")
         message(FATAL_ERROR
@@ -37,7 +44,7 @@ function(revenant_embed_version target)
     set(REVENANT_RC_ORIGINAL_FILENAME "${ARG_FILENAME}")
 
     set(generated "${CMAKE_CURRENT_BINARY_DIR}/${target}_version.rc")
-    configure_file("${CMAKE_SOURCE_DIR}/res/revenant.rc.in" "${generated}" @ONLY)
+    configure_file("${REVENANT_EMBED_ROOT}/res/revenant.rc.in" "${generated}" @ONLY)
 
     target_sources(${target} PRIVATE "${generated}")
 endfunction()

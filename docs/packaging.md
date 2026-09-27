@@ -438,16 +438,20 @@ pushed or published.
    above.
 2. **The M2 physical-monitor frame run.** The owner's run, on a real display.
    Nothing offscreen stands in for it.
-3. **`revenant-ui.exe` has no icon and no version resource.** Measured: no
-   `RT_GROUP_ICON` and an empty VERSIONINFO. It is the program the Start Menu
-   shortcut opens, so the shortcut, the taskbar and Alt-Tab show the generic
-   executable icon. `ui/CMakeLists.txt` never calls `revenant_embed_version`,
-   and cannot as `cmake/EmbedVersion.cmake` stands: that function finds
-   `assets/revenant.ico` and `res/revenant.rc.in` through `CMAKE_SOURCE_DIR`,
-   which in the client's own CMake project is `ui/`, and the client includes
-   neither `RevenantVersion` nor `EmbedVersion` nor enables RC. `main.cpp`
-   sets no window icon either. The fix is in `cmake/` and `ui/`, which belong
-   to other lanes.
+3. **Done, 2026-09-27: `revenant-ui.exe` carries the icon and a version
+   resource.** `cmake/EmbedVersion.cmake` finds the icon and the template from
+   its own directory, so `ui/CMakeLists.txt` can call
+   `revenant_embed_version`. Measured on the `vs` build: one `RT_GROUP_ICON`,
+   id 1, its seven images byte-identical to `assets/revenant.ico`, and
+   VERSIONINFO 0.1.0.0, Locke Werks, "Revenant client". The windows take the
+   same file from the Qt resources through `qico.dll`, and a smoke run now
+   fails if that icon does not load, checked by running one with `qico.dll`
+   moved aside.
+
+   WHAT THIS ITEM USED TO SAY. "`revenant-ui.exe` has no icon and no version
+   resource. Measured: no `RT_GROUP_ICON` and an empty VERSIONINFO."
+   `EmbedVersion` resolved both files through `CMAKE_SOURCE_DIR`, which in the
+   client's own CMake project is `ui/`, and `main.cpp` set no window icon.
 4. **`AZURE_CLIENT_SECRET` is not set anywhere the `release` job can read
    it.** Checked 2026-09-23 through the API: `Locke-Werks/Revenant` has no
    `release` environment (404), no repository secrets, and the organisation

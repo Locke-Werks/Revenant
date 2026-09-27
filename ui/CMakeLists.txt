@@ -60,6 +60,16 @@ option(REVENANT_WERROR "Treat warnings as errors" OFF)
 list(APPEND CMAKE_MODULE_PATH "${REVENANT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
 
+# The icon and VERSIONINFO, from the same version file and the same template
+# as the engine's binaries. revenant-ui.exe is what the Start Menu shortcut
+# opens, so without these the shortcut, the taskbar and Alt-Tab showed the
+# generic executable icon.
+include(RevenantVersion)
+include(EmbedVersion)
+if(WIN32)
+    enable_language(RC)
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -376,6 +386,19 @@ set_target_properties(revenant_ui PROPERTIES
     MACOSX_BUNDLE ON
     OUTPUT_NAME revenant-ui
 )
+
+revenant_embed_version(revenant_ui
+    DESCRIPTION "Revenant client"
+    FILENAME revenant-ui.exe)
+
+# The same icon for the windows themselves. The resource above is what Explorer
+# and the shortcut read; a Qt window takes its icon from QGuiApplication, which
+# reads it from here through the qico plugin the payload already carries.
+set_source_files_properties("${REVENANT_SOURCE_DIR}/assets/revenant.ico"
+    PROPERTIES QT_RESOURCE_ALIAS revenant.ico)
+qt_add_resources(revenant_ui "app_icon"
+    PREFIX "/"
+    FILES "${REVENANT_SOURCE_DIR}/assets/revenant.ico")
 
 # ---------------------------------------------------------------------------
 # Qt laid down beside the binary, so running it is one command
