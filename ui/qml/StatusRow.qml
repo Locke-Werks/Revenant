@@ -29,8 +29,11 @@ GridLayout {
         Layout.minimumWidth: 0
         text: engineLink.connected
               ? engineLink.deviceName + "  (" + engineLink.deviceVendor + ")"
-              : "waiting for an engine at " + engineLink.endpoint
-        color: engineLink.connected ? Theme.ink : Theme.inkWarn
+              : engineLink.engineStartText.length > 0
+                ? engineLink.engineStartText
+                : "waiting for an engine at " + engineLink.endpoint
+        color: engineLink.connected ? Theme.ink
+               : engineLink.engineStartFailed ? Theme.inkBad : Theme.inkWarn
         font.pixelSize: Theme.sizeTitle
         font.bold: true
         elide: Text.ElideRight

@@ -44,6 +44,11 @@ enum class StatusLevel : std::uint8_t {
 
 struct StatusInputs {
     bool connected = false;
+
+    // This window started the engine and is waiting for it to come up. See
+    // EngineLink::engineStarting.
+    bool engine_starting = false;
+
     bool engine_running = false;
     bool source_open = false;
     bool source_behind = false;
@@ -91,7 +96,7 @@ struct StatusCondition {
     bool chip = true;
 };
 
-[[nodiscard]] inline std::array<StatusCondition, 9> status_conditions(const StatusInputs& in)
+[[nodiscard]] inline std::array<StatusCondition, 10> status_conditions(const StatusInputs& in)
 {
     // In order of what the operator most needs to know first. The first true
     // one names the pill; the level is the worst of them all, which is the
@@ -99,11 +104,20 @@ struct StatusCondition {
     // engine's own absence is about an engine that is there, except the three
     // refusals and the let-go receiver, which the strip showed whatever the
     // connection was doing and still show.
+    //
+    // AN ENGINE THIS WINDOW IS STARTING IS NOT "NO ENGINE". It is a warning
+    // and not a fault, because nothing is wrong yet: the person opened the
+    // window and the window is bringing the engine up, which takes seconds.
+    // Placed with the warnings so the list stays sorted by level; it cannot
+    // meet any of the faults above it, all of which need a connection it has
+    // not got. Once the engine is up it is gone, and if the engine exits
+    // instead it is "no engine" again, with the engine's reason behind it.
     return {{
-        {!in.connected, StatusLevel::Bad, "no engine"},
+        {!in.connected && !in.engine_starting, StatusLevel::Bad, "no engine"},
         {in.connected && in.front_end_fault, StatusLevel::Bad, "front end overloaded"},
         {in.connected && in.source_behind, StatusLevel::Bad, "source behind"},
         {in.connected && in.detection_fault, StatusLevel::Bad, "detector refused"},
+        {!in.connected && in.engine_starting, StatusLevel::Warn, "engine starting"},
         {in.connected && !in.engine_running, StatusLevel::Warn, "engine stopped", false},
         {in.connected && !in.source_open, StatusLevel::Warn, "no source open", false},
         {in.source_fault, StatusLevel::Warn, "radio refused"},

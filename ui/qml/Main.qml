@@ -56,7 +56,9 @@ ApplicationWindow {
     color: Theme.background
     title: engineLink.connected
            ? "Revenant  ·  " + engineLink.endpoint
-           : "Revenant  ·  waiting for " + engineLink.endpoint
+           : engineLink.engineStarting
+             ? "Revenant  ·  starting the engine"
+             : "Revenant  ·  waiting for " + engineLink.endpoint
 
     // Closing this window ends the session even with the receiver window
     // still open: it is the one with the radio on it, and a receiver window

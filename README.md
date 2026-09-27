@@ -278,7 +278,7 @@ the matrix now, so nothing about it is refereed, not only the spectrum.
 | M0 | The device path: open the RTL-SDR, read its descriptors, find the bulk endpoint that carries IQ | Done |
 | M1 | The engine: the GPU channelizer, receivers, demodulators and the wideband detector, with fifty receivers on one 20 MHz grid faster than realtime | Done |
 | M2 | The graphical client, a separate process over Cap'n Proto, drawing the spectrum and waterfall at monitor refresh within its frame budget | Done, 2026-09-27 |
-| M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | This release |
+| M3 | The first public release, v0.1.0: a signed installer, with the corresponding sources on the same release page | Done, 2026-09-27. v0.1.1 has the client start the engine |
 | M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists, and nothing of it is built | Next |
 | After M4 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
 
@@ -386,12 +386,20 @@ for all users into `Program Files\Revenant`, so it asks for administrator
 rights, and adds a Start Menu entry for the client. Unattended, `/S`, with
 `/O:desktop_shortcut=on` for a desktop shortcut, which is off by default.
 
-The Start Menu entry opens the client, which connects to an engine on port
-17690. Start the engine first, with a source:
+The Start Menu entry opens the client, and the client starts the engine
+beside it when none is answering on port 17690. Pick your radio in the
+client's radio panel, which opens by itself the first time; after that the
+client reopens the last radio you used. An engine the client started stops
+when the client does. One you started yourself, a headless recorder for
+instance, is left alone:
 
 ```
 "C:\Program Files\Revenant\revenant-engine.exe" "rtlsdr://0?freq=98.1M&rate=2400000&gain=20"
 ```
+
+WHAT THIS PARAGRAPH USED TO SAY, in v0.1.0: "The Start Menu entry opens the
+client, which connects to an engine on port 17690. Start the engine first,
+with a source". v0.1.1 starts it.
 
 The same release page carries the source for everything the installer
 ships: `Revenant-<version>-corresponding-source.zip` for Revenant, libusb and

@@ -60,6 +60,17 @@ ColumnLayout {
                 if (sourceRow.chosen >= engineLink.sources.length)
                     sourceRow.chosen = -1
             }
+
+            // The window started an engine and has no radio to open on it,
+            // so the list is opened and asked for, as the "change radio"
+            // button would: the panel alone would show a "no source open" line
+            // and a button, and the person would still have to find the list.
+            function onSourcePickerWanted() {
+                if (!sourceRow.open) {
+                    sourceRow.open = true
+                    engineLink.refreshSources()
+                }
+            }
         }
 
         // The chosen row, or null when there is not one.

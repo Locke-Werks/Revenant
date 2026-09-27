@@ -2122,3 +2122,22 @@ retired: 2026-09-27
 commit: "Record the first run of the release job"
 instead: The release job ran on the v0.1.0 tag and signed our two executables
     and the installer. docs/packaging.md, "Owed, not blocking".
+
+phrase: each of them names its source on the command line
+retired: 2026-09-27
+commit: "Let revenant-engine start with no source open"
+instead: revenant-engine --no-source serves with nothing open until a client
+    calls openSource, and tests/twoprocess's two_process_no_source runs it that
+    way. docs/rpc.md, "The engine can start with no source at all".
+
+phrase: which note_source_epoch already reads as nothing seen
+retired: 2026-09-27
+commit: "Subscribe after the first open on an engine that started empty"
+instead: note_source_epoch treats any change of epoch as a new stream, zero
+    included; attempt_connect seeds the epoch a connection opens on.
+
+phrase: Start the engine first, with a source
+retired: 2026-09-27
+commit: "Start the engine from the client and reopen the last radio"
+instead: The client starts revenant-engine --no-source beside it when nothing
+    answers on its port, and reopens the last radio. README.md, "Install".

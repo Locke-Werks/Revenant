@@ -48,6 +48,7 @@ Rectangle {
 
     readonly property var status: UiRules.status({
         "connected": engineLink.connected,
+        "engineStarting": engineLink.engineStarting,
         "engineRunning": engineLink.engineRunning,
         "sourceOpen": engineLink.sourceOpen,
         "sourceBehind": engineLink.sourceBehind,
@@ -69,9 +70,16 @@ Rectangle {
     function noticeDetail(label) {
         switch (label) {
         case "no engine":
+            // An engine this window started and lost says why in its own
+            // words, which outrank the connection's: "waiting for an engine"
+            // under an engine that exited with a reason is the wrong news.
+            if (engineLink.engineStartText.length > 0)
+                return engineLink.engineStartText
             return engineLink.errorText.length > 0
                    ? engineLink.errorText
                    : "waiting for an engine at " + engineLink.endpoint
+        case "engine starting":
+            return engineLink.engineStartText
         case "front end overloaded":
             return engineLink.frontEndText
         case "source behind":
@@ -92,7 +100,29 @@ Rectangle {
     // mean the picture is not the radio's. The same inks the strip used.
     function noticeInk(label) {
         return label === "tune refused" || label === "receiver let go"
+               || label === "engine starting"
                ? Theme.inkWarn : Theme.inkBad
+    }
+
+    // An engine this window started has no source and nothing remembered to
+    // open on it, or the radio remembered was refused: the radio panel opens
+    // so the person picks one. SourcePicker.qml opens its device list on the
+    // same signal. See EngineLink::consider_last_source.
+    Connections {
+        target: engineLink
+        function onSourcePickerWanted() {
+            if (!radioPanel.opened)
+                radioPanel.open()
+        }
+
+        // And closed when the engine goes. Everything in the picker is hidden
+        // without a connection, so a panel left open drew an empty frame over
+        // the span, which was seen on the staged payload with the engine
+        // killed under a panel this window had opened by itself.
+        function onConnectionChanged() {
+            if (!engineLink.connected && radioPanel.opened)
+                radioPanel.close()
+        }
     }
 
     implicitHeight: 52
@@ -119,11 +149,20 @@ Rectangle {
         }
 
         // While there is no engine the tuning controls are hidden, and the
-        // bar says what it is waiting for in their place.
+        // bar says what it is waiting for in their place: an engine this
+        // window is starting, the reason one it started has gone, or any
+        // engine at the address. Elided, because the reason is the engine's
+        // own sentence and has no length limit; the pill carries it whole on
+        // hover.
         Label {
             visible: !engineLink.connected
-            text: "waiting for an engine at " + engineLink.endpoint
-            color: Theme.inkWarn
+            Layout.minimumWidth: 0
+            Layout.fillWidth: true
+            text: engineLink.engineStartText.length > 0
+                  ? engineLink.engineStartText
+                  : "waiting for an engine at " + engineLink.endpoint
+            elide: Text.ElideRight
+            color: engineLink.engineStartFailed ? Theme.inkBad : Theme.inkWarn
             font.pixelSize: Theme.sizeTitle
             font.bold: true
         }

@@ -191,6 +191,7 @@ public:
         };
         StatusInputs in;
         in.connected = flag("connected");
+        in.engine_starting = flag("engineStarting");
         in.engine_running = flag("engineRunning");
         in.source_open = flag("sourceOpen");
         in.source_behind = flag("sourceBehind");

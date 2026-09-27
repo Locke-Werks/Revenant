@@ -182,8 +182,12 @@ qt_add_executable(revenant_ui
     models/decoded_model.cpp
     models/decoded_model.h
     models/detector_settings.h
+    models/engine_launcher.cpp
+    models/engine_launcher.h
     models/engine_link.cpp
     models/engine_link.h
+    models/engine_start.h
+    models/engine_start_link.cpp
     models/frequency_manager.cpp
     models/frequency_manager.h
     models/json_lite.h
@@ -374,6 +378,11 @@ target_link_libraries(revenant_ui
         shell32
         ole32
         advapi32
+
+        # models/engine_launcher.cpp's probe of the engine's port, which is a
+        # plain Winsock connect made before Qt or Cap'n Proto has a loop to
+        # make one on. kj links it too, which is not a reason to lean on that.
+        ws2_32
 )
 
 revenant_apply_warnings(revenant_ui)
@@ -580,6 +589,13 @@ endif()
 # show one file and open another, which looks correct until the frequencies
 # are read.
 #
+# It covers when the window starts an engine of its own and when it does not
+# (models/engine_start.h): the address it would be reachable at, an engine
+# beside the executable, a port that already answers, the sentence for an
+# engine that exited, and when the radio used last is reopened. It starts no
+# engine: the Job object and the process are models/engine_launcher.cpp and
+# are verified by running a staged payload, not here.
+#
 # It covers NOTHING with a window or a sound card in it. AudioPlayer opens a
 # QAudioSink against WASAPI, and a test binary on a build agent has no output
 # device, so the device picker, the format refusal and the unplug path are
@@ -643,6 +659,7 @@ if(REVENANT_UI_TESTS)
             tests/test_composite_probe.cpp
             tests/test_decoded_log.cpp
             tests/test_detector_settings.cpp
+            tests/test_engine_start.cpp
             tests/test_frame_stats.cpp
             tests/test_front_end_note.cpp
             tests/test_history_resize.cpp

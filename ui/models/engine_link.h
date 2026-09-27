@@ -501,6 +501,30 @@ class EngineLink : public QObject {
     Q_PROPERTY(QString endpoint READ endpoint CONSTANT)
     Q_PROPERTY(QString errorText READ errorText NOTIFY connectionChanged)
 
+    // THE ENGINE THIS WINDOW STARTED, when it started one. main() does the
+    // starting (models/engine_launcher.h) and tells this object; this object
+    // says what the window shows while there is no connection.
+    //
+    // engineStarting is true from the start until the first connection, for as
+    // long as the process is alive. It is the window saying "starting" rather
+    // than "waiting for an engine", because the person did not start anything
+    // and the first start takes seconds while the engine brings the GPU up.
+    //
+    // engineStartFailed is true once that process has gone, or never started,
+    // and engineStartText is then the reason: the engine's own last word on
+    // stderr or its exit code. Nothing restarts it. An engine that exits at
+    // startup exits the same way the second time, and a crash loop behind a
+    // window saying "starting" is the state this replaces with a sentence.
+    // The supervisor still tries the port once a second, so an engine started
+    // by hand after reading that sentence is picked up.
+    //
+    // All three are empty or false when this window started nothing, which is
+    // every run with an engine already up, every remote address and every
+    // development build; the window then reads as it always did.
+    Q_PROPERTY(bool engineStarting READ engineStarting NOTIFY engineStartChanged)
+    Q_PROPERTY(bool engineStartFailed READ engineStartFailed NOTIFY engineStartChanged)
+    Q_PROPERTY(QString engineStartText READ engineStartText NOTIFY engineStartChanged)
+
     // Whether the engine is driving its graph, which is a different question
     // from whether this link can reach it, and the only one of the two that
     // says whether frames are coming. An engine answers RPC calls from the
@@ -1595,6 +1619,27 @@ public:
     // supervisor, and a QTimer started on any other thread never fires.
     void start(const QString& address, std::uint16_t port, std::uint32_t every_nth);
 
+    // This window started the engine it is about to connect to, as process
+    // `pid`. Call before start(), so the first thing the window says is that
+    // it is starting one. Arms the reopen of the radio used last; see
+    // consider_last_source in engine_start_link.cpp for why that is armed
+    // here and nowhere else.
+    void setEngineStarted(std::uint32_t pid);
+
+    // The engine this window started has gone, or never started, and why.
+    // Called by main() from its watch on the launcher; any number of times,
+    // and only the first has an effect.
+    void setEngineStartFailed(const QString& sentence);
+
+    // Whether the radio used last is read from and written to QSettings.
+    // main() turns it off for a smoke run, which writes no settings and opens
+    // nothing the operator chose, on the rule setRememberDetector follows.
+    void setRememberLastSource(bool remember);
+
+    [[nodiscard]] bool engineStarting() const;
+    [[nodiscard]] bool engineStartFailed() const;
+    [[nodiscard]] QString engineStartText() const;
+
     [[nodiscard]] bool connected() const { return connected_; }
     [[nodiscard]] bool engineRunning() const { return engine_running_; }
     [[nodiscard]] QString endpoint() const { return endpoint_; }
@@ -2632,6 +2677,18 @@ signals:
     // engine may be on another frequency, and a row drawn under the old span
     // would put a signal where it never was.
     void connectionChanged();
+
+    // engineStarting, engineStartFailed or engineStartText moved. Its own
+    // signal and not connectionChanged, which the render items read as a new
+    // engine and clear their history on.
+    void engineStartChanged();
+
+    // The person has a radio to pick: this window started an engine, it has
+    // no source, and there is no radio remembered to open on it or the one
+    // remembered was refused. The top bar opens the radio panel on it and the
+    // picker lists the devices. Only ever for an engine this window started,
+    // for the reason consider_last_source gives.
+    void sourcePickerWanted();
 
     // A new frame is in frame(). Emitted on the Qt thread, so an item may
     // connect to it directly and repaint from the slot.
@@ -3795,11 +3852,64 @@ private:
     QString handover_source_fault_;           // guarded by source_mutex_
     bool handover_sources_busy_ = false;      // guarded by source_mutex_
 
+    // What an open this window asked for came back as, for the radio used
+    // last: the URI and whether the engine took it. Set whenever
+    // apply_source_request took an open, including one abandoned because the
+    // close before it failed, which is an open that did not happen.
+    bool handover_has_open_answer_ = false;  // guarded by source_mutex_
+    QString handover_open_uri_;              // guarded by source_mutex_
+    bool handover_open_ok_ = false;          // guarded by source_mutex_
+
     // Qt thread only: what the properties above hand out.
     QVariantList sources_;
     std::vector<rpc::SourceDescriptor> source_rows_;
     QString source_fault_;
     bool sources_busy_ = false;
+
+    // ---- the engine this window started, and the radio used last ----------
+    //
+    // Qt thread only, all of it. engine_start_link.cpp.
+
+    enum class EngineStart : std::uint8_t {
+        // This window started nothing.
+        None,
+        // Started, alive, and not yet reached.
+        Starting,
+        // Reached at least once. What the window says after that is what it
+        // says for any engine, until the process goes.
+        Reached,
+        // Gone, or never started; engine_start_text_ says why.
+        Failed,
+    };
+    EngineStart engine_start_ = EngineStart::None;
+    std::uint32_t engine_pid_ = 0;
+    QString engine_start_text_;
+
+    // Past kEngineStartPatience with the engine alive and not reached. The
+    // text then carries errorText as well, so a start that is stuck on
+    // something this window can see, a refused token for one, says what.
+    bool engine_start_slow_ = false;
+    QTimer engine_start_patience_;
+
+    // Qt thread. On connectionChanged: the first connection to an engine this
+    // window started decides whether to reopen the radio used last.
+    void consider_last_source();
+
+    // Qt thread, from adopt_sources. Remembers an open that worked, and shows
+    // the picker for a reopen that did not.
+    void note_open_answer(const QString& uri, bool ok);
+
+    bool remember_last_source_ = true;
+    bool last_source_considered_ = false;
+
+    // Any openSource on this window before the first connection landed, which
+    // is what --open-recording does. Read by consider_last_source so a request
+    // the operator made on the command line is not replaced by a remembered one.
+    bool open_asked_ = false;
+
+    // The URI consider_last_source asked to reopen, until the engine answers
+    // for it. Empty otherwise.
+    QString reopening_uri_;
 
     // Supervisor thread only. The epoch this window last drew against. Zero
     // until the first EngineInfo arrives, which is why the first sighting is

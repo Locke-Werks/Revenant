@@ -687,6 +687,10 @@ void EngineLink::openSource(const QString& uri)
     }
     supervisor_wake_.notify_all();
 
+    // Whoever asked, the picker, --open-recording or the reopen itself. See
+    // consider_last_source for what reads it.
+    open_asked_ = true;
+
     source_fault_.clear();
     emit sourcesChanged();
 
@@ -807,6 +811,11 @@ void EngineLink::apply_source_request()
     bool have_sources = false;
     std::vector<rpc::SourceDescriptor> listed;
 
+    // Taken before the close can abandon the open below, so an open that
+    // never reached the engine is still answered, as one that did not work.
+    const bool open_asked = opening;
+    bool open_ok = false;
+
     if (listing) {
         auto answer = client_->list_sources();
         if (answer) {
@@ -839,6 +848,8 @@ void EngineLink::apply_source_request()
             have_fault = true;
             fault = QString::fromStdString(opened.error().message);
         } else {
+            open_ok = true;
+
             // The range answer belongs to the source that was just closed. Ask
             // again now rather than waiting for the next connection, or the
             // frequency box keeps the previous radio's stops and refuses
@@ -857,6 +868,11 @@ void EngineLink::apply_source_request()
         }
         handover_has_source_fault_ = true;
         handover_source_fault_ = have_fault ? fault : QString();
+        if (open_asked) {
+            handover_has_open_answer_ = true;
+            handover_open_uri_ = uri;
+            handover_open_ok_ = open_ok;
+        }
     }
 
     QMetaObject::invokeMethod(
@@ -869,13 +885,17 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
         return;
     }
 
-    const bool first = seen_source_epoch_ == 0;
+    // ANY CHANGE IS A NEW STREAM, ZERO INCLUDED. attempt_connect records the
+    // epoch a connection opens on, so there is no first sighting left to
+    // excuse here. This used to return without subscribing whenever the epoch
+    // held was zero, reading zero as "not seen yet", and zero is a real epoch:
+    // an engine started with --no-source is at zero when the window connects,
+    // so its first open, zero to one, was taken for the connection's own epoch
+    // and the window never subscribed to the spectrum. Measured 2026-09-27: the
+    // engine reported frames 0 sent with the window attached. The same branch
+    // swallowed the retry below, which rewinds to zero on a failed
+    // re-subscribe precisely so the next pass comes back through here.
     seen_source_epoch_ = info.source_epoch;
-    if (first) {
-        // The epoch this connection opened on. Nothing changed under this
-        // window; it is only seeing the number for the first time.
-        return;
-    }
 
     // A NEW STREAM ON A CONNECTION THAT NEVER DROPPED, WHICH IS A STATE THIS
     // WINDOW COULD NOT BE IN BEFORE closeSource EXISTED
@@ -1030,8 +1050,17 @@ void EngineLink::note_source_epoch(const rpc::EngineInfo& info)
 void EngineLink::adopt_sources()
 {
     bool moved = false;
+    bool open_answered = false;
+    QString open_uri;
+    bool open_ok = false;
     {
         const std::lock_guard<std::mutex> lock(source_mutex_);
+        if (handover_has_open_answer_) {
+            handover_has_open_answer_ = false;
+            open_answered = true;
+            open_uri = std::exchange(handover_open_uri_, QString());
+            open_ok = handover_open_ok_;
+        }
         if (handover_has_sources_) {
             handover_has_sources_ = false;
             source_rows_ = std::move(handover_sources_);
@@ -1059,6 +1088,12 @@ void EngineLink::adopt_sources()
 
     if (moved) {
         emit sourcesChanged();
+    }
+
+    // After sourcesChanged, so a picker opened for a refused reopen opens on a
+    // panel that already carries the engine's refusal.
+    if (open_answered) {
+        note_open_answer(open_uri, open_ok);
     }
 }
 

@@ -106,12 +106,33 @@
 // the wire is plaintext, so a token crossing a routable interface is
 // readable and replayable by anything on the path. Off loopback still means
 // a tunnel. core/rpc/server.h carries the full record.
+//
+// STARTING THE ENGINE
+//
+// When the address is 127.0.0.1 or localhost, revenant-engine.exe is beside
+// this executable, and nothing answers on the port, the window starts
+// `revenant-engine --no-source --port <port>` itself, with no console, inside
+// a Job object that ends it when the window ends, crash included. An engine
+// that is already answering is used and never touched. That is the installed
+// layout, where the Start Menu opens this window and nothing else would start
+// an engine; a development build of ui/ has no engine beside it and behaves
+// as it did before. models/engine_start.h has the rules and their reasons and
+// models/engine_launcher.h the Job object. On its first connection to an
+// engine it started, the window reopens the radio used last, or opens the
+// radio panel when there is none; see EngineLink::consider_last_source.
+//
+// A smoke run starts one on the same terms. CI's smoke run and
+// scripts/frame-budget.ps1 are unaffected: CI runs the client out of ui/'s
+// own build tree with no engine beside it, and the frame budget starts its
+// engine first and passes its port, which then answers.
 
 #include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -137,7 +158,9 @@
 #include <QWindow>
 
 #include "audio/audio_player.h"
+#include "models/engine_launcher.h"
 #include "models/engine_link.h"
+#include "models/engine_start.h"
 #include "models/frequency_entry.h"
 #include "models/frequency_manager.h"
 #include "models/receiver_placement_store.h"
@@ -601,6 +624,57 @@ int main(int argc, char* argv[])
         out.setValue(settings::kEnginePort, static_cast<unsigned>(port));
     }
 
+    // THE ENGINE, STARTED HERE WHEN NOTHING ELSE WILL. See STARTING THE ENGINE
+    // at the top of this file and models/engine_start.h for the rules.
+    //
+    // DECLARED BEFORE THE LINK ON PURPOSE, so it is destroyed AFTER it. The
+    // link's destructor drops its receivers and ends its subscription on the
+    // way out, which is a conversation with the engine, and the launcher's
+    // destructor is what ends the engine.
+    //
+    // The facts are gathered cheapest first and the probe last, because the
+    // probe is a TCP connect with a wait on it and every development run has
+    // no engine beside it to start.
+    revenant::ui::EngineLauncher engine_launcher;
+    const std::filesystem::path engine_exe =
+        std::filesystem::path(QCoreApplication::applicationDirPath().toStdWString()) /
+        L"revenant-engine.exe";
+    revenant::ui::EngineLaunchFacts launch_facts;
+    launch_facts.launchable_address = revenant::ui::is_launchable_address(address.toStdString());
+    if (launch_facts.launchable_address) {
+        std::error_code ignored;
+        launch_facts.engine_beside = std::filesystem::is_regular_file(engine_exe, ignored);
+    }
+    if (launch_facts.launchable_address && launch_facts.engine_beside) {
+        launch_facts.port_answers = revenant::ui::loopback_port_answers(port);
+    }
+    const bool engine_wanted =
+        revenant::ui::plan_engine_launch(launch_facts) == revenant::ui::EngineLaunch::Start;
+    std::string engine_refusal;
+    if (engine_wanted) {
+        // The token file the window reads, handed to the engine when it is
+        // not the default, so the two agree on one. engine_link.cpp's
+        // resolve_token reads REVENANT_RPC_TOKEN_FILE; the engine reads only
+        // its flag. REVENANT_RPC_TOKEN, a token in the environment, has no
+        // flag to pass it on with, and a window holding one is talking to an
+        // engine started with that token on purpose, which is not this one.
+        std::filesystem::path token_file;
+        if (const char* named = std::getenv("REVENANT_RPC_TOKEN_FILE"); named != nullptr) {
+            token_file = QString::fromLocal8Bit(named).toStdWString();
+        }
+        engine_refusal = engine_launcher.start(engine_exe, port, token_file);
+        if (engine_refusal.empty()) {
+            // Through QString rather than path::string(), which converts to
+            // the ANSI code page and throws on a name it cannot hold.
+            std::fprintf(stderr, "revenant-ui: started %s --no-source --pace 1 --port %u as process %u\n",
+                         QString::fromStdWString(engine_exe.wstring()).toLocal8Bit().constData(),
+                         static_cast<unsigned>(port),
+                         static_cast<unsigned>(engine_launcher.pid()));
+        } else {
+            std::fprintf(stderr, "revenant-ui: %s\n", engine_refusal.c_str());
+        }
+    }
+
     // Constructed here rather than by QML so the address from argv reaches
     // it, and parented to nothing so its destructor runs before the Qt
     // event loop is gone: it stops the supervisor, ends the subscription and
@@ -610,9 +684,21 @@ int main(int argc, char* argv[])
 
     // A smoke run draws the detector at its defaults and remembers nothing it
     // is set to, so it neither writes the operator's settings nor sends their
-    // threshold to CI's engine.
+    // threshold to CI's engine. It reopens no remembered radio either and
+    // remembers none it opens, for the same reason.
     if (smoke) {
         link.setRememberDetector(false);
+        link.setRememberLastSource(false);
+    }
+
+    // Before start(), so the first thing the window says is the truth about
+    // the engine it started rather than a pass of "waiting for an engine".
+    if (engine_wanted) {
+        if (engine_refusal.empty()) {
+            link.setEngineStarted(engine_launcher.pid());
+        } else {
+            link.setEngineStartFailed(QString::fromStdString(engine_refusal));
+        }
     }
 
     // A refused connection is not a startup failure and never was. The
@@ -621,6 +707,31 @@ int main(int argc, char* argv[])
     // waiting for. Starting the engine second is a supported order, and so
     // is stopping and restarting it under a running window.
     link.start(address, port, every_nth);
+
+    // Whether the engine this window started is still there. Polled rather
+    // than called back, because the launcher's reader thread would otherwise
+    // be posting into a link it does not own the lifetime of; the timer is a
+    // local declared after the link, so it is gone before the link is. A
+    // quarter of a second is well inside how long a person takes to read the
+    // sentence it produces, and a poll is a lock and a load.
+    QTimer engine_watch;
+    if (engine_wanted && engine_refusal.empty()) {
+        engine_watch.setInterval(250);
+        QObject::connect(&engine_watch, &QTimer::timeout, &link,
+                         [&engine_launcher, &link, &engine_watch] {
+                             const auto exit = engine_launcher.exited();
+                             if (!exit.has_value()) {
+                                 return;
+                             }
+                             engine_watch.stop();
+                             const std::string sentence =
+                                 revenant::ui::engine_exit_sentence(exit->code, exit->tail);
+                             std::fprintf(stderr, "revenant-ui: %s\n", sentence.c_str());
+                             link.setEngineStartFailed(QString::fromStdString(sentence));
+                         });
+        engine_watch.start();
+    }
+
     if (!startup.empty()) {
         for (std::size_t i = 1; i < startup.size(); ++i) {
             link.addStartupReceiver(startup[i].first, startup[i].second);

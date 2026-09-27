@@ -131,6 +131,22 @@ inline constexpr QLatin1StringView kBookmarks{"bookmarks/list"};
 inline constexpr QLatin1StringView kEngineAddress{"engine/address"};
 inline constexpr QLatin1StringView kEnginePort{"engine/port"};
 
+// The radio used last: the URI of the last source this window opened
+// successfully that was not a recording. Reopened on the first connection to an
+// engine this window started, when that engine has no source; see
+// consider_last_source in ui/models/engine_start_link.cpp.
+//
+// THIS IS THE ONE PLACE THE WINDOW ACTS ON ITS OWN AT LAUNCH, AND THE
+// PARAGRAPH AT THE TOP OF THIS FILE IS STILL RIGHT ABOUT WHY THAT IS RARE. A
+// radio's URI carries its centre, so reopening one does tune the front end to
+// last night's frequency, which is the claim that paragraph refuses to make
+// for a receiver. The owner decided on 2026-09-27 that the radio comes back:
+// without it an installed copy opens on an engine with nothing to show, which
+// is a worse first minute than a span that is where it was left. What still
+// holds is the receiver, its mode and its passband, which are not restored,
+// and an engine somebody else started, whose source is never touched.
+inline constexpr QLatin1StringView kLastSource{"engine/lastSource"};
+
 // The last ten recordings opened from the picker, newest first, as one JSON
 // array for the reason kBookmarks is one. Each entry is the path and the
 // centre, rate and format boxes as they were typed, so a recording that

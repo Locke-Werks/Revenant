@@ -656,7 +656,13 @@ bool EngineLink::attempt_connect()
     // sighting and treated it as nothing having changed: the subscription made
     // below belonged to the closed source, and the window drew nothing for the
     // recording. Taken whole, zero included: zero is an engine that has never
-    // had a source, which note_source_epoch already reads as nothing seen.
+    // had a source, and note_source_epoch treats any change from it, the first
+    // open on a --no-source engine among them, as a new stream.
+    //
+    // WHAT THIS PARAGRAPH USED TO SAY. It ended "zero is an engine that has
+    // never had a source, which note_source_epoch already reads as nothing
+    // seen." That reading was the bug that kept a window on a --no-source
+    // engine from subscribing after the first open.
     seen_source_epoch_ = info->source_epoch;
 
     // THE OPERATOR'S THRESHOLD, AGAIN. A connection is also what a restarted
