@@ -159,6 +159,7 @@
 #include "models/aft.h"
 #include "models/auto_filter.h"
 #include "models/bookmarks.h"
+#include "models/calibration.h"
 #include "models/composite_probe.h"
 #include "models/decoded_model.h"
 #include "models/detector_settings.h"
@@ -718,6 +719,8 @@ class EngineLink : public QObject {
     // The engine's refusal of the last change, or a PPM box that could not
     // be read. Empty when the last one took.
     Q_PROPERTY(QString calibrationFault READ calibrationFault NOTIFY calibrationChanged)
+    Q_PROPERTY(QString knownCarrierText READ knownCarrierText NOTIFY knownCarrierChanged)
+    Q_PROPERTY(bool knownCarrierReady READ knownCarrierReady NOTIFY knownCarrierChanged)
 
     // What was asked for and what the source took. A device with a tuning
     // step rounds, and the two differ by up to that step. Both zero until
@@ -1879,14 +1882,20 @@ public:
     Q_INVOKABLE void setCalibrationDcRemoval(bool on);
     Q_INVOKABLE void setCalibrationIqCorrection(bool on);
 
-    // A known carrier's true frequency against the detection nearest it: what
-    // the measurement would set, as a line. Bound beside detectionCount so it
-    // follows each detection pass. models/calibration.h, measure_against_carrier.
-    [[nodiscard]] Q_INVOKABLE QString measureCarrierText(const QString& known) const;
+    // A known carrier's true frequency, as typed. Each detection pass after it
+    // adds a reading of the detection nearest it, over a rolling window, and
+    // knownCarrierText says how far along that is and then the median and its
+    // spread. models/calibration.h, CarrierAverage, has why one pass is not a
+    // measurement.
+    Q_INVOKABLE void setKnownCarrier(const QString& known);
+    [[nodiscard]] QString knownCarrierText() const {
+        return QString::fromStdString(carrier_verdict_.text);
+    }
+    [[nodiscard]] bool knownCarrierReady() const { return carrier_verdict_.ready; }
 
-    // Sets the correction that measurement implies. Nothing is sent when no
-    // detection qualifies; the line above says why.
-    Q_INVOKABLE void applyMeasuredCarrier(const QString& known);
+    // Sets the median correction once the window is full. Nothing is sent
+    // before then.
+    Q_INVOKABLE void applyKnownCarrier();
 
     // Asks the device for the gain a slider at this fraction means.
     //
@@ -2801,6 +2810,9 @@ signals:
     // The calibration the engine holds, its measurement, or the last refusal
     // moved.
     void calibrationChanged();
+
+    // The known-carrier measurement took a reading or started again.
+    void knownCarrierChanged();
 
     // The device list, the refresh's busy flag, or the last open or close
     // refusal moved.
@@ -3774,6 +3786,15 @@ private:
     // Qt thread only.
     rpc::Calibration calibration_{};
     QString calibration_fault_;
+
+    // Qt thread only. The known carrier's readings and what they come to;
+    // carrier_clock_ times them. See setKnownCarrier.
+    CarrierAverage carrier_average_{};
+    CarrierVerdict carrier_verdict_{};
+    QElapsedTimer carrier_clock_;
+
+    // Qt thread. One reading from the latest detection pass, and the verdict.
+    void sample_known_carrier(bool new_pass);
 
     // TWO HANDOVERS AND NOT ONE, BECAUSE THEY ARE WRITTEN BY DIFFERENT
     // EVENTS AND CARRY DIFFERENT FIELDS. The range answer arrives once per

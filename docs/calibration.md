@@ -82,6 +82,19 @@ frequency and never less than 5 kHz. The result replaces the correction in
 force rather than adding to it, and is exact wherever the carrier sits in the
 span, because the uncorrected label is recovered from the device's own centre.
 
+It takes one reading per detection pass for ten seconds and offers the median,
+with the spread of the middle 80% of the readings beside it; "use" is offered
+only once the window is full, and the window rolls. WHAT THIS USED TO DO: set
+whatever the detection pass on screen said. Against NOAA weather radio at
+162.475 MHz on 2026-09-28 that pass wandered from +50 to +340 Hz two seconds
+apart, so "use" set anything from -0.31 to -2.09 ppm by the moment it was
+pressed. The median of the same carrier held between -0.31 and -0.48 ppm over
+repeated windows, spread about 0.3 to 0.8 ppm. The 20 Hz figure below is for a
+steady carrier; one with a voice on it is why the window exists.
+
+Keep the carrier away from the centre of the span: at the exact centre it sits
+on the DC offset, which is a carrier of its own at 0 Hz unless "remove DC" is on.
+
 A detection's centre is placed to a fraction of a bin, 36.6 Hz on the shipped
 RTL-SDR geometry, so a measurement is good to about 20 Hz over the carrier:
 0.12 ppm at 162.55 MHz. A narrowband carrier is the better reference: NOAA

@@ -5,6 +5,7 @@
 // moves values between the Qt thread and the supervisor the way
 // source_link.cpp does for the gain, and adds nothing of its own.
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -71,34 +72,55 @@ void EngineLink::setCalibrationIqCorrection(bool on) {
     post_calibration(settings);
 }
 
-QString EngineLink::measureCarrierText(const QString& known) const {
+void EngineLink::setKnownCarrier(const QString& known) {
     const auto parsed = parse_frequency(known.toStdString());
-    if (!parsed) {
-        return known.trimmed().isEmpty()
-                   ? QString{}
-                   : QStringLiteral("'%1' is not a frequency").arg(known.trimmed());
+    const std::int64_t hz = parsed ? parsed->hertz : 0;
+    if (!carrier_clock_.isValid()) {
+        carrier_clock_.start();
     }
-    const CarrierMeasurement measured =
-        measure_against_carrier(parsed->hertz, detections(), info_.source_center,
-                                calibration_.settings.correction_ppb);
-    return QString::fromStdString(measured.text);
+    retarget(carrier_average_, hz, info_.source_center, calibration_.settings.correction_ppb);
+    sample_known_carrier(false);
+    if (!parsed && !known.trimmed().isEmpty()) {
+        carrier_verdict_ = CarrierVerdict{};
+        carrier_verdict_.text = QStringLiteral("'%1' is not a frequency")
+                                    .arg(known.trimmed())
+                                    .toStdString();
+        emit knownCarrierChanged();
+    }
 }
 
-void EngineLink::applyMeasuredCarrier(const QString& known) {
-    const auto parsed = parse_frequency(known.toStdString());
-    if (!parsed) {
+// Called with new_pass on each detection pass the engine decided afresh, which
+// is what adds a reading; without it only the line is refreshed, so typing a
+// frequency does not count the pass already on screen twice.
+void EngineLink::sample_known_carrier(bool new_pass) {
+    if (carrier_average_.known_hz <= 0) {
+        if (!carrier_verdict_.text.empty() || carrier_verdict_.ready) {
+            carrier_verdict_ = CarrierVerdict{};
+            emit knownCarrierChanged();
+        }
         return;
     }
-    const CarrierMeasurement measured =
-        measure_against_carrier(parsed->hertz, detections(), info_.source_center,
+    // A retune or a correction just set starts the window again: readings
+    // under the old ones are not the same measurement.
+    retarget(carrier_average_, carrier_average_.known_hz, info_.source_center,
+             calibration_.settings.correction_ppb);
+    const CarrierMeasurement latest =
+        measure_against_carrier(carrier_average_.known_hz, detections(), info_.source_center,
                                 calibration_.settings.correction_ppb);
-    if (!measured.found) {
-        calibration_fault_ = QString::fromStdString(measured.text);
-        emit calibrationChanged();
+    const double now = static_cast<double>(carrier_clock_.elapsed()) / 1000.0;
+    if (new_pass) {
+        add_reading(carrier_average_, latest, now);
+    }
+    carrier_verdict_ = judge(carrier_average_, latest, now);
+    emit knownCarrierChanged();
+}
+
+void EngineLink::applyKnownCarrier() {
+    if (!carrier_verdict_.ready) {
         return;
     }
     rpc::CalibrationSettings settings = calibration_.settings;
-    settings.correction_ppb = measured.ppb;
+    settings.correction_ppb = carrier_verdict_.ppb;
     post_calibration(settings);
 }
 

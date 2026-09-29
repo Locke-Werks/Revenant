@@ -140,3 +140,63 @@ TEST_CASE("the carrier is the nearest detection within two hundred ppm and never
     CHECK(revenant::ui::carrier_search_hz(5'000'000) == 5'000);
     CHECK(revenant::ui::carrier_search_hz(162'550'000) == 32'510);
 }
+
+// Rejects "use" setting one pass, which on a carrier with a voice on it set
+// anything from -0.31 to -2.09 ppm depending on the moment (NOAA, 162.475 MHz,
+// 2026-09-28), and a mean, which the few passes a burst of modulation throws
+// far off drag with them.
+TEST_CASE("a known carrier is the median of a full window of readings", "[calibration]") {
+    using revenant::ui::CarrierAverage;
+    using revenant::ui::CarrierMeasurement;
+    using revenant::ui::kCarrierWindowS;
+
+    const auto reading = [](std::int64_t ppb) {
+        CarrierMeasurement m;
+        m.found = true;
+        m.ppb = ppb;
+        m.detection_hz = kCarrierHz;
+        m.text = "one pass";
+        return m;
+    };
+
+    CarrierAverage average;
+    CHECK(revenant::ui::retarget(average, kCarrierHz, kDeviceHz, 0));
+    CHECK_FALSE(revenant::ui::retarget(average, kCarrierHz, kDeviceHz, 0));
+
+    // Four passes a second. Most sit within 100 ppb of the error; one in five
+    // is thrown 1.5 ppm off, all the same way.
+    double t = 0.0;
+    for (int i = 0; i < 20; ++i, t += 0.25) {
+        revenant::ui::add_reading(average, reading(kErrorPpb + (i % 5 == 0 ? 1'500 : (i % 3) * 50)), t);
+    }
+    auto early = revenant::ui::judge(average, reading(0), t);
+    INFO(early.text);
+    CHECK_FALSE(early.ready);
+    CHECK(early.text.find("measuring") != std::string::npos);
+
+    for (int i = 20; i < 44; ++i, t += 0.25) {
+        revenant::ui::add_reading(average, reading(kErrorPpb + (i % 5 == 0 ? 1'500 : (i % 3) * 50)), t);
+    }
+    const auto verdict = revenant::ui::judge(average, reading(0), t);
+    INFO(verdict.text);
+    REQUIRE(verdict.ready);
+    CHECK(std::llabs(verdict.ppb - kErrorPpb) <= 50);
+    CHECK(verdict.text.find("median of") != std::string::npos);
+
+    // The window rolls: nothing older than it, from the newest reading, is kept.
+    CHECK(average.readings.back().at_s - average.readings.front().at_s <= kCarrierWindowS);
+
+    // A pass that did not find the carrier adds nothing.
+    const auto before = average.readings.size();
+    CarrierMeasurement missed;
+    missed.text = "no detection";
+    revenant::ui::add_reading(average, missed, t);
+    CHECK(average.readings.size() <= before);
+
+    // A new correction, a retune or another carrier starts again.
+    CHECK(revenant::ui::retarget(average, kCarrierHz, kDeviceHz, kErrorPpb));
+    CHECK(average.readings.empty());
+    const auto fresh = revenant::ui::judge(average, missed, t);
+    CHECK_FALSE(fresh.ready);
+    CHECK(fresh.text == "no detection");
+}

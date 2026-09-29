@@ -14,8 +14,10 @@
 
 #pragma once
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
@@ -24,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 #include "core/rpc/types.h"
 #include "core/source/frequency_correction.h"
@@ -200,7 +203,9 @@ struct CarrierMeasurement {
 // finer. A wideband FM station's centre is the middle of its occupied band,
 // which is its carrier only while the programme is symmetric, so a narrowband
 // carrier such as NOAA weather radio or a GSM or DVB pilot is the better
-// reference.
+// reference. THAT IS ONE PASS OF A STEADY CARRIER. One with a voice on it
+// wanders by hundreds of hertz from pass to pass, so the panel does not set
+// what a single pass says; see CarrierAverage below.
 [[nodiscard]] inline CarrierMeasurement measure_against_carrier(
     std::int64_t known_hz, std::span<const rpc::Detection> detections,
     std::int64_t source_center_hz, std::int64_t current_ppb) {
@@ -249,6 +254,135 @@ struct CarrierMeasurement {
     out.text = std::format("detection at {:.6f} MHz, {:+} Hz from it: {}",
                            static_cast<double>(nearest->center_hz) / 1e6, out.offset_hz,
                            format_ppm(ppb));
+    return out;
+}
+
+// A KNOWN CARRIER MEASURED OVER TIME, NOT AT ONE INSTANT.
+//
+// measure_against_carrier reads one detection pass, and the panel used to set
+// whatever that pass said. A carrier with anything on it does not hold still:
+// measured 2026-09-28 against NOAA weather radio at 162.475 MHz on the owner's
+// dongle, the detection's centre wandered from +50 to +340 Hz between passes
+// two seconds apart, so "use" set anything from -0.31 to -2.09 ppm depending on
+// when it was pressed, against a crystal error of about one ppm. The note on
+// measure_against_carrier promised 20 Hz, which holds for a carrier with no
+// modulation and was never measured on one with a voice on it.
+//
+// So the panel collects one reading per detection pass for kCarrierWindowS
+// and offers the MEDIAN, with the spread of the middle of the readings beside
+// it, and "use" waits until the window is full. The median rather than the
+// mean because the wander is not symmetric: most passes sit near the carrier
+// and a few are pulled far off by a burst of modulation, and a mean follows
+// those. The window rolls, so a reading taken now describes the last ten
+// seconds and not the moment the box was filled in.
+inline constexpr double kCarrierWindowS = 10.0;
+
+// Fewer readings than this in a full window is a carrier the detector only
+// found now and then, and a median of a handful is still an instant.
+inline constexpr std::size_t kCarrierMinReadings = 12;
+
+// Above this the answer is offered with a warning that a steadier carrier
+// would measure finer. Half a ppm is 81 Hz at 162 MHz.
+inline constexpr std::int64_t kCarrierSpreadWarnPpb = 500;
+
+struct CarrierReading {
+    double at_s = 0.0;
+    std::int64_t ppb = 0;
+    std::int64_t detection_hz = 0;
+};
+
+struct CarrierAverage {
+    // What the readings are of. A change to any of these starts again, since
+    // readings of another carrier, another tuning or under another correction
+    // are not the same measurement.
+    std::int64_t known_hz = 0;
+    std::int64_t source_center_hz = 0;
+    std::int64_t current_ppb = 0;
+
+    std::vector<CarrierReading> readings;
+};
+
+struct CarrierVerdict {
+    // True once the window is full and "use" may set `ppb`.
+    bool ready = false;
+    std::int64_t ppb = 0;
+
+    // Half the width of the middle 80% of the readings, in ppb.
+    std::int64_t spread_ppb = 0;
+
+    std::string text;
+};
+
+// Starts again when what is being measured has changed. Returns true when it
+// did, so the caller can say the panel's line changed.
+inline bool retarget(CarrierAverage& average, std::int64_t known_hz, std::int64_t source_center_hz,
+                     std::int64_t current_ppb) {
+    if (average.known_hz == known_hz && average.source_center_hz == source_center_hz &&
+        average.current_ppb == current_ppb) {
+        return false;
+    }
+    average = CarrierAverage{known_hz, source_center_hz, current_ppb, {}};
+    return true;
+}
+
+// One detection pass's reading, kept when it found the carrier; readings
+// older than the window are dropped.
+inline void add_reading(CarrierAverage& average, const CarrierMeasurement& measured, double now_s) {
+    if (average.known_hz <= 0) {
+        return;
+    }
+    if (measured.found) {
+        average.readings.push_back({now_s, measured.ppb, measured.detection_hz});
+    }
+    std::erase_if(average.readings, [now_s](const CarrierReading& reading) {
+        return now_s - reading.at_s > kCarrierWindowS;
+    });
+}
+
+// What the panel says and whether "use" is offered. `latest` is this pass's
+// single reading, shown while there is nothing to average yet so a carrier the
+// detector cannot find says so at once.
+[[nodiscard]] inline CarrierVerdict judge(const CarrierAverage& average,
+                                          const CarrierMeasurement& latest, double now_s) {
+    CarrierVerdict out;
+    if (average.known_hz <= 0 || average.readings.empty()) {
+        out.text = latest.text;
+        return out;
+    }
+
+    const double span = now_s - average.readings.front().at_s;
+    const std::size_t n = average.readings.size();
+    std::vector<std::int64_t> sorted;
+    sorted.reserve(n);
+    for (const CarrierReading& reading : average.readings) {
+        sorted.push_back(reading.ppb);
+    }
+    std::ranges::sort(sorted);
+    const std::int64_t median =
+        n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+    const std::int64_t low = sorted[n / 10];
+    const std::int64_t high = sorted[n - 1 - n / 10];
+    out.spread_ppb = (high - low) / 2;
+    out.ppb = median;
+
+    // A little short of the full window, because readings arrive on detection
+    // passes and the oldest one kept can be up to a pass younger than it.
+    if (span < kCarrierWindowS * 0.9 || n < kCarrierMinReadings) {
+        out.text = std::format("measuring the carrier at {:.6f} MHz: {:.0f} of {:.0f} s, {} readings",
+                               static_cast<double>(average.known_hz) / 1e6,
+                               span < 0.0 ? 0.0 : span, kCarrierWindowS, n);
+        return out;
+    }
+
+    out.ready = true;
+    // format_ppm writes the sign, which a spread does not have.
+    const std::string spread =
+        out.spread_ppb == 0 ? format_ppm(0) : format_ppm(out.spread_ppb).substr(1);
+    out.text = std::format("median of {} readings over {:.0f} s: {}, spread ±{}", n,
+                           kCarrierWindowS, format_ppm(median), spread);
+    if (out.spread_ppb > kCarrierSpreadWarnPpb) {
+        out.text += ". A carrier with less on it would measure finer";
+    }
     return out;
 }
 

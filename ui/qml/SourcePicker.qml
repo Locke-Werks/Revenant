@@ -314,21 +314,23 @@ ColumnLayout {
                 font.pixelSize: Theme.sizeBody
                 placeholderText: "162.55M"
                 selectByMouse: true
+                onTextChanged: engineLink.setKnownCarrier(text)
             }
 
+            // Offered once the window of readings is full, and not before: a
+            // single pass of a carrier with anything on it is not a
+            // measurement. models/calibration.h, CarrierAverage.
             RButton {
                 text: "use"
                 font.pixelSize: Theme.sizeBody
-                enabled: knownField.text.length > 0
-                onClicked: engineLink.applyMeasuredCarrier(knownField.text)
+                enabled: engineLink.knownCarrierReady
+                onClicked: engineLink.applyKnownCarrier()
             }
 
             Label {
                 Layout.minimumWidth: 0
                 Layout.fillWidth: true
-                // detectionCount is read so this follows each detection pass.
-                text: engineLink.detectionCount >= 0
-                      ? engineLink.measureCarrierText(knownField.text) : ""
+                text: knownField.text.length > 0 ? engineLink.knownCarrierText : ""
                 color: Theme.inkDim
                 font.pixelSize: Theme.sizeSmall
                 elide: Text.ElideRight

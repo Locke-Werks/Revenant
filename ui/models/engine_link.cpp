@@ -1042,6 +1042,11 @@ void EngineLink::adopt_detections()
     if (decided || resized || retuned) {
         emit detectionsChanged();
     }
+    // One reading per pass the engine decided, and only then: a repeat of the
+    // same pass is the same reading.
+    if (decided) {
+        sample_known_carrier(true);
+    }
 }
 
 void EngineLink::note_detection_fault(QString fault)
