@@ -423,6 +423,10 @@ struct PromiseValue<kj::Promise<T>> {
         one.min_db = stage.getMinDb();
         one.max_db = stage.getMaxDb();
         one.has_auto = stage.getHasAuto();
+        if (stage.getInForceKnown()) {
+            one.in_force_db = stage.getInForceDb();
+        }
+        one.in_force_auto = stage.getInForceAuto();
         one.steps_db.reserve(stage.getStepsDb().size());
         for (const double step : stage.getStepsDb()) {
             one.steps_db.push_back(step);

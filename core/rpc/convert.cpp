@@ -421,6 +421,9 @@ void write_source_descriptor(schema::SourceDescriptor::Builder out,
         one.setMinDb(stage.min_db);
         one.setMaxDb(stage.max_db);
         one.setHasAuto(stage.has_auto);
+        one.setInForceKnown(stage.in_force_db.has_value());
+        one.setInForceDb(stage.in_force_db.value_or(0.0));
+        one.setInForceAuto(stage.in_force_auto);
 
         auto steps = one.initStepsDb(static_cast<std::uint32_t>(stage.steps_db.size()));
         for (std::uint32_t step = 0; step < steps.size(); ++step) {

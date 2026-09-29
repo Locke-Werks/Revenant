@@ -1111,7 +1111,8 @@ Expected<std::vector<SourceDescriptor>> enumerate_sources()
                 }
                 for (const RtlSdrDevice& device : *attached) {
                     SourceDescriptor descriptor;
-                    descriptor.uri = std::format("rtlsdr://{}", device.index);
+                    // is_listing_of spells it the same way; keep them together.
+                    descriptor.uri = std::format("{}://{}", backend.scheme, device.index);
                     descriptor.display_name =
                         std::format("{} at index {}", device.name, device.index);
                     descriptor.backend = std::string(backend.scheme);
@@ -1165,6 +1166,30 @@ Expected<std::vector<SourceCapabilities>> describe_sources()
         out.push_back(std::move(stub));
     }
     return out;
+}
+
+bool is_listing_of(const SourceCapabilities& listed, const SourceCapabilities& open)
+{
+    if (!open.device_index || listed.backend != open.backend) {
+        return false;
+    }
+    // The same spelling enumerate_sources gives a probed device, so the two
+    // cannot disagree about what a row is called.
+    for (const Backend& backend : kBackends) {
+        if (backend.listing == Listing::Probed && backend.scheme == open.backend) {
+            return listed.uri == std::format("{}://{}", backend.scheme, *open.device_index);
+        }
+    }
+    return false;
+}
+
+SourceCapabilities listing_of_open(const SourceCapabilities& listed,
+                                   const SourceCapabilities& open)
+{
+    SourceCapabilities row = open;
+    row.uri = listed.uri;
+    row.unavailable.clear();
+    return row;
 }
 
 Expected<std::unique_ptr<Source>> open_source(std::string_view uri)

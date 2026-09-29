@@ -52,6 +52,28 @@ struct SourceDescriptor {
 // because some backends must briefly open a device to answer.
 [[nodiscard]] Expected<std::vector<SourceCapabilities>> describe_sources();
 
+// Whether `listed`, one row of describe_sources(), is the device `open` was
+// opened from.
+//
+// WHY A LISTING NEEDS TO ASK. Describing a dongle means opening it, and a
+// process shares its own device lock, so a listing taken by the engine that is
+// streaming from the dongle reaches rtlsdr_open and is refused by its own
+// stream. The row then read "could not open the RTL-SDR ... almost always held
+// by another program" about the radio that had just opened, in the panel that
+// opened it. Measured 2026-09-28 on v0.1.1, first run, the first device ever
+// opened. A caller holding the open source's description answers the row from
+// that instead; see listSources in core/rpc/server.cpp.
+//
+// By backend and enumeration index, since that is how the listing names a
+// device. False for any backend whose listing has no index.
+[[nodiscard]] bool is_listing_of(const SourceCapabilities& listed, const SourceCapabilities& open);
+
+// The row a listing shows for the device this process has open: `open`'s
+// description, under `listed`'s URI so the row reads and reopens like every
+// other one, and marked as open rather than unavailable.
+[[nodiscard]] SourceCapabilities listing_of_open(const SourceCapabilities& listed,
+                                                 const SourceCapabilities& open);
+
 // Opens a source from a URI.
 //
 // A URI rather than a struct because it is one text field over RPC, one

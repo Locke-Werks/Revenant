@@ -493,6 +493,17 @@ struct GainStage {
     # when it was the default. README.md has that measurement. A client that
     # offers this offers it as a choice, not as the sensible setting.
     hasAuto @4 :Bool;
+
+    # What the stage is on now, for the source that is open: the step the
+    # device took at open or at the last setSourceGain, and inForceAuto while
+    # its own AGC has it. inForceKnown is false for a row listSources
+    # described without opening, for a stage nobody has set, and from an
+    # engine older than these fields, which a client reads as "unset" the way
+    # it always did. Added because the gain applied at open crossed nowhere,
+    # and a client showed "unset" over a dongle opened at 20 dB.
+    inForceDb @5 :Float64;
+    inForceKnown @6 :Bool;
+    inForceAuto @7 :Bool;
 }
 
 enum FlowControl {

@@ -24,6 +24,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -230,6 +231,13 @@ struct GainStage {
     // sensible setting: see the schema's note and README.md's measurement of
     // what the RTL-SDR's own AGC did to the detector's track list.
     bool has_auto = false;
+
+    // What the stage is on now, for the source that is open, as the engine
+    // last had it from the device. Nothing when the engine does not know, which
+    // includes every row listSources described without opening and every
+    // engine older than the field. See the schema's note.
+    std::optional<double> in_force_db;
+    bool in_force_auto = false;
 };
 
 // Who sets the pace, which decides how realtime_factor is read.

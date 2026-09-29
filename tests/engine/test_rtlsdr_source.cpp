@@ -27,6 +27,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -283,6 +284,42 @@ TEST_CASE("every enumerated source has a usable uri and a name", "[source][rtlsd
     CHECK(has_rtlsdr);
 }
 
+TEST_CASE("a listing row is matched to the open device by backend and index",
+          "[source][rtlsdr]") {
+    source::SourceCapabilities open;
+    open.uri = "rtlsdr://0?rate=2400000&freq=98100000&gain=20";
+    open.backend = "rtlsdr";
+    open.display_name = "Generic RTL2832U OEM (R820T tuner) at index 0";
+    open.device_index = 0;
+    open.gain_stages.push_back(source::GainStage{"tuner", 0.0, 49.6, {0.0, 19.7, 49.6}, true});
+
+    source::SourceCapabilities row;
+    row.uri = "rtlsdr://0";
+    row.backend = "rtlsdr";
+    row.display_name = "Generic RTL2832U OEM at index 0";
+    row.unavailable = "could not open the RTL-SDR at index 0";
+
+    CHECK(source::is_listing_of(row, open));
+
+    // The row keeps its own URI, so it reads and reopens like every other
+    // one, and takes everything else from the open device.
+    const source::SourceCapabilities answered = source::listing_of_open(row, open);
+    CHECK(answered.available());
+    CHECK(answered.uri == "rtlsdr://0");
+    CHECK(answered.display_name == open.display_name);
+    CHECK(answered.gain_stages.size() == 1);
+
+    source::SourceCapabilities other = row;
+    other.uri = "rtlsdr://1";
+    CHECK_FALSE(source::is_listing_of(other, open));
+
+    // A source with no index, a file or a synthetic scene, matches nothing.
+    source::SourceCapabilities file = open;
+    file.backend = "file";
+    file.device_index.reset();
+    CHECK_FALSE(source::is_listing_of(row, file));
+}
+
 // ---------------------------------------------------------------------------
 // The device
 // ---------------------------------------------------------------------------
@@ -403,6 +440,58 @@ TEST_CASE("a manual gain snaps to a step the tuner has", "[source][rtlsdr][devic
     REQUIRE_FALSE(missing.has_value());
     INFO(missing.error().message);
     CHECK(missing.error().message.find("lna") != std::string::npos);
+}
+
+// Rejects an open that applies a gain and reports none, which is what put
+// "unset" and a handle at 0 dB in the client's gain row over a dongle opened at
+// the backend's 20, and one that reports the request rather than the step.
+TEST_CASE("an opened dongle reports the gain it is on", "[source][rtlsdr][device][dongle]") {
+    const source::DeviceLock radio_lock = test::hold_the_dongle();
+
+    const auto tuner_of = [](const source::SourceCapabilities& caps) {
+        const auto found = std::find_if(caps.gain_stages.begin(), caps.gain_stages.end(),
+                                        [](const auto& stage) { return stage.name == "tuner"; });
+        return found == caps.gain_stages.end() ? nullptr : &*found;
+    };
+
+    {
+        // No gain= at all, which is what the radio panel sends for an empty
+        // box: the backend's default still has to be reported.
+        auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M");
+        if (!opened) {
+            SKIP("the dongle could not be opened: " + opened.error().message);
+        }
+        const source::GainStage* tuner = tuner_of((*opened)->capabilities());
+        if (tuner == nullptr || tuner->steps_db.empty()) {
+            SKIP("this dongle reports no tuner gain table");
+        }
+        REQUIRE(tuner->in_force_db.has_value());
+        CHECK_FALSE(tuner->in_force_auto);
+        const double on = *tuner->in_force_db;
+        INFO("opened on " << on << " dB");
+        CHECK(std::any_of(tuner->steps_db.begin(), tuner->steps_db.end(),
+                          [on](double step) { return std::abs(step - on) < 0.05; }));
+    }
+    {
+        auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=20");
+        REQUIRE(opened.has_value());
+        const source::GainStage* tuner = tuner_of((*opened)->capabilities());
+        REQUIRE(tuner != nullptr);
+        REQUIRE(tuner->in_force_db.has_value());
+        // 20 is between two R820T steps; the step it took is what is reported.
+        const double on = *tuner->in_force_db;
+        CHECK(std::any_of(tuner->steps_db.begin(), tuner->steps_db.end(),
+                          [on](double step) { return std::abs(step - on) < 0.05; }));
+        CHECK(std::abs(on - 20.0) < 1.5);
+    }
+    {
+        auto opened = source::open_source("rtlsdr://0?rate=2400000&freq=100M&gain=auto");
+        REQUIRE(opened.has_value());
+        const source::GainStage* tuner = tuner_of((*opened)->capabilities());
+        REQUIRE(tuner != nullptr);
+        CHECK(tuner->in_force_auto);
+        CHECK_FALSE(tuner->in_force_db.has_value());
+    }
 }
 
 TEST_CASE("a streaming dongle takes a gain change and the automatic mode",
@@ -1269,6 +1358,22 @@ TEST_CASE("a dongle already held is refused by name and its holder keeps streami
     auto described = source::describe_rtlsdr_source(config);
     REQUIRE_FALSE(described.has_value());
     CHECK(described.error().message.find("rtlsdr_open returned") != std::string::npos);
+
+    // Which is why a listing taken in this process answers the holder's row
+    // from the holder, the way Session.listSources does, rather than showing
+    // that refusal about the radio it has open.
+    auto listing = source::describe_sources();
+    REQUIRE(listing.has_value());
+    const auto row = std::find_if(listing->begin(), listing->end(), [](const auto& entry) {
+        return entry.uri == "rtlsdr://0";
+    });
+    REQUIRE(row != listing->end());
+    CHECK_FALSE(row->available());
+    REQUIRE(source::is_listing_of(*row, radio.capabilities()));
+    const source::SourceCapabilities answered = source::listing_of_open(*row, radio.capabilities());
+    CHECK(answered.available());
+    CHECK(answered.uri == "rtlsdr://0");
+    CHECK_FALSE(answered.gain_stages.empty());
 
     // THE HOLDER IS UNTOUCHED: still streaming, still tunable, stops cleanly.
     const std::uint64_t before = [&collected] {

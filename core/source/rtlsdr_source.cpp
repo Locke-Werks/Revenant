@@ -553,6 +553,7 @@ struct OpenedDevice {
     caps.backend = "rtlsdr";
     caps.display_name =
         std::format("{} ({} tuner) at index {}", device_name, tuner_name(tuner), index);
+    caps.device_index = index;
 
     caps.tune_ranges = tune_ranges_for(tuner, config.direct);
 
@@ -1822,6 +1823,9 @@ void RtlSdrSource::note_stream_error(Error error)
 struct Applied {
     dsp::SampleRate rate = 0;
     dsp::Hertz center = 0;
+
+    // The step the tuner was set to, or nothing when its AGC has it.
+    std::optional<double> gain_db;
 };
 
 [[nodiscard]] Expected<Applied> configure(rtlsdr_dev_t* device, const RtlSdrSourceConfig& config,
@@ -1962,6 +1966,7 @@ struct Applied {
                     rc);
     }
 
+    std::optional<double> gain_set;
     if (config.gain_auto) {
         if (const int rc = rtlsdr_set_tuner_gain_mode(device, 0); rc != 0) {
             return fail(std::format("the device refused automatic tuner gain: "
@@ -1988,9 +1993,11 @@ struct Applied {
                                     static_cast<double>(landed) / 10.0, rc_text(rc)),
                         rc);
         }
+        gain_set = static_cast<double>(landed) / 10.0;
     }
 
     Applied applied;
+    applied.gain_db = gain_set;
 
     const std::uint32_t achieved_rate = rtlsdr_get_sample_rate(device);
     if (achieved_rate == 0) {
@@ -2092,6 +2099,15 @@ Expected<std::unique_ptr<Source>> open_rtlsdr_source(const RtlSdrSourceConfig& c
     auto applied = configure(device, config, gain_steps, caps.tune_ranges);
     if (!applied) {
         return std::unexpected(with_context(applied.error(), caps.display_name));
+    }
+
+    // What the tuner is on, including the backend's default when the URI said
+    // nothing, so a client can show the gain it opened at. GainStage::in_force_db.
+    for (GainStage& stage : caps.gain_stages) {
+        if (stage.name == kTunerStage) {
+            stage.in_force_db = applied->gain_db;
+            stage.in_force_auto = config.gain_auto;
+        }
     }
 
     auto source = std::make_unique<RtlSdrSource>();

@@ -1971,7 +1971,26 @@ public:
         // continuation runs on the loop thread, which is the only thread
         // allowed to touch this context. See the note at the top of the file
         // for why the enumeration itself is not allowed to run on it.
-        return owner_.list_sources().then([context](SourceListing&& described) mutable {
+        // The server and not this session: the server outlives every listing,
+        // since stop() rejects the queued ones before it goes.
+        auto& owner = owner_;
+        return owner_.list_sources().then([&owner, context](SourceListing&& described) mutable {
+            // THE ROW FOR THE DEVICE THIS ENGINE HAS OPEN comes from what the
+            // open already learned, as sourceInfo does, and not from the probe.
+            // The probe runs in this process, shares its device lock, and is
+            // refused at rtlsdr_open by this engine's own stream, which read as
+            // "held by another program" about the radio that had just opened.
+            // Here on the loop thread because the open source is the loop's:
+            // openSource and closeSource change it on this thread.
+            if (owner.engine().has_source()) {
+                const source::SourceCapabilities& open = owner.engine().source_capabilities();
+                for (source::SourceCapabilities& row : described) {
+                    if (!row.available() && source::is_listing_of(row, open)) {
+                        row = source::listing_of_open(row, open);
+                    }
+                }
+            }
+
             // A backend that could not be opened reports itself in
             // `unavailable` rather than failing the listing, and that has to
             // survive to the wire: a dongle held by another process must not

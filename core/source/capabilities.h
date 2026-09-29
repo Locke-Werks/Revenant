@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -99,6 +100,19 @@ struct GainStage {
     std::vector<double> steps_db;
 
     bool has_auto = false;
+
+    // What the stage is on now, for a source that is open: the step the
+    // device took at open or at the last change, or its own AGC. Nothing for a
+    // device that was only described, and for a stage nobody has set.
+    //
+    // WHY IT IS HERE. The gain was applied at open and reported nowhere, so a
+    // client's gain control read "unset" with its handle at 0 dB over a dongle
+    // opened at the backend's 20. Measured 2026-09-28 on v0.1.1, the first open
+    // of a fresh install. The engine keeps it current across setSourceGain, so
+    // a client that connects later reads the gain in force and not the one at
+    // open.
+    std::optional<double> in_force_db;
+    bool in_force_auto = false;
 };
 
 // How well a source can place sample zero on the wall clock, and how well it
@@ -254,6 +268,14 @@ struct SourceCapabilities {
     // enumeration order and two dongles swap places across a replug. See
     // core/source/calibration.h for why it is still not a unique key.
     std::string serial;
+
+    // The enumeration index the device was opened or described at, for a
+    // backend whose listing names devices by index. Empty for a file and a
+    // synthetic scene. An index is not an identity across a replug, which is
+    // why the serial above keys calibration; this is only what lets a listing
+    // recognise the row for a device this process already has open, see
+    // source::is_listing_of in registry.h.
+    std::optional<std::uint32_t> device_index;
 
     // True when the device itself was told a frequency correction when it was
     // opened, which an rtlsdr URI with ppm= does through librtlsdr. The

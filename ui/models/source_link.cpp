@@ -1316,6 +1316,21 @@ void EngineLink::adopt_gain_stage()
         gain_fault_.clear();
     }
 
+    // WHAT THE ENGINE SAYS THE STAGE IS ON, which is the device's own answer
+    // at open or at the last change, so it is a reading and not a request.
+    // Without it the row read "unset" with the handle at 0 dB over a dongle
+    // opened at 20, because the gain applied at open crossed nowhere. An older
+    // engine reports neither field, and the row says "unset" as it did.
+    if (gain_stage_.in_force_auto) {
+        gain_auto_ = true;
+        gain_known_ = false;
+    } else if (gain_stage_.in_force_db.has_value()) {
+        gain_auto_ = false;
+        gain_db_ = *gain_stage_.in_force_db;
+        gain_known_ = true;
+        gain_fault_.clear();
+    }
+
     emit sourceGainChanged();
 }
 

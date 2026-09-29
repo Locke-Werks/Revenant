@@ -962,6 +962,12 @@ public:
         if (!landed) {
             return std::unexpected(with_context(landed.error(), "Engine::set_source_gain"));
         }
+        // Kept current for source_capabilities(), so a client that connects
+        // later reads the gain in force and not the one at open.
+        if (source::GainStage* held = held_stage(stage)) {
+            held->in_force_db = *landed;
+            held->in_force_auto = false;
+        }
         return *landed;
     }
 
@@ -974,7 +980,23 @@ public:
         if (!applied) {
             return std::unexpected(with_context(applied.error(), "Engine::set_source_gain_auto"));
         }
+        // Either way the number is no longer known: the AGC is choosing, or
+        // manual mode was taken back at a gain nobody has set yet.
+        if (source::GainStage* held = held_stage(stage)) {
+            held->in_force_db.reset();
+            held->in_force_auto = on;
+        }
         return {};
+    }
+
+    // The open source's stage by name in capabilities_, or nothing.
+    [[nodiscard]] source::GainStage* held_stage(std::string_view stage) {
+        for (source::GainStage& one : capabilities_.gain_stages) {
+            if (one.name == stage) {
+                return &one;
+            }
+        }
+        return nullptr;
     }
 
     [[nodiscard]] Expected<CalibrationState> calibration() const override {

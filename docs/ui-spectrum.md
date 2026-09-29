@@ -36,8 +36,14 @@ which are notes that wait in the drawer.
 **The control row.** Under the top bar, always there and on one line: the
 front end's gain and the detector's three settings. The gain slider is
 labelled with the stage's own name, sits on the tuner's steps with a tick at
-each, and reads the step the tuner took, "unset" until one is set from here,
-or "auto" while the device's AGC has it; for a source with no stage it is
+each, and reads the step the tuner took, including the one it opened at,
+which the engine reports on the open source's gain stage (`inForceDb`,
+`inForceAuto`) and keeps current across `setSourceGain`, "auto" while the
+device's AGC has it, and "unset" only when the engine does not know. WHAT THIS
+SENTENCE USED TO SAY: "reads the step the tuner took, "unset" until one is set
+from here". On 2026-09-28 that put "unset" and a handle at 0 dB over a dongle
+the radio panel had just opened at the backend's 20, because the gain applied
+at open crossed nowhere; for a source with no stage it is
 disabled and says why, "recording", "synthetic" or "no radio", with the
 sentence on hover (`gain_absence` in `ui/models/gain_control.h`). Then the
 detector: "detect" is the engine's detection threshold in dB of SNR in
