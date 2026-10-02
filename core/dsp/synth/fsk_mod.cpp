@@ -188,8 +188,26 @@ std::vector<std::uint8_t> hdlc_bits(std::span<const std::vector<std::uint8_t>> f
     return bits;
 }
 
+std::vector<std::uint8_t> nrzi_levels(std::span<const std::uint8_t> bits) {
+    std::vector<std::uint8_t> levels;
+    levels.reserve(bits.size());
+    bool mark = true;
+    for (const std::uint8_t bit : bits) {
+        if (bit == 0U) {
+            mark = !mark;
+        }
+        levels.push_back(mark ? 1U : 0U);
+    }
+    return levels;
+}
+
 Expected<std::vector<float>> afsk_render_bits(const Ax25ModConfig& config,
                                               std::span<const std::uint8_t> bits) {
+    return afsk_render_levels(config, nrzi_levels(bits));
+}
+
+Expected<std::vector<float>> afsk_render_levels(const Ax25ModConfig& config,
+                                                std::span<const std::uint8_t> levels) {
     if (config.rate <= 0 || !(config.baud > 0.0)) {
         return fail("AFSK needs a positive sample rate and baud");
     }
@@ -199,13 +217,9 @@ Expected<std::vector<float>> afsk_render_bits(const Ax25ModConfig& config,
     }
 
     std::vector<Segment> segments;
-    segments.reserve(bits.size());
-    bool mark = true;
-    for (const std::uint8_t bit : bits) {
-        if (bit == 0U) {
-            mark = !mark;
-        }
-        segments.push_back({mark, 1.0});
+    segments.reserve(levels.size());
+    for (const std::uint8_t level : levels) {
+        segments.push_back({level != 0U, 1.0});
     }
     return render_segments(segments, config.rate, config.baud * (1.0 + config.baud_error),
                            static_cast<double>(config.mark_hz),
@@ -312,6 +326,66 @@ Expected<std::vector<float>> fx25_render(const Ax25ModConfig& config,
         return std::unexpected(bits.error());
     }
     return afsk_render_bits(config, *bits);
+}
+
+// ---------------------------------------------------------------------------
+// IL2P
+// ---------------------------------------------------------------------------
+
+Expected<std::vector<std::uint8_t>> il2p_packet(std::span<const std::uint8_t> frame,
+                                                bool trailing_crc) {
+    auto codec = decode::Il2pCodec::create();
+    if (!codec) {
+        return std::unexpected(codec.error());
+    }
+    return codec->encode(frame, trailing_crc);
+}
+
+Expected<std::vector<std::uint8_t>> il2p_levels(std::span<const std::vector<std::uint8_t>> frames,
+                                                const Il2pChoice& choice) {
+    auto codec = decode::Il2pCodec::create();
+    if (!codec) {
+        return std::unexpected(codec.error());
+    }
+    std::vector<std::uint8_t> bits;
+    // "Interface to Physical Layer": "Recommended preamble is a sequence of
+    // alternating bits."
+    const auto alternate = [&bits](std::size_t count) {
+        for (std::size_t i = 0; i < count; ++i) {
+            bits.push_back(static_cast<std::uint8_t>((i + 1) & 1U));
+        }
+    };
+    const auto msb_first = [&bits](std::uint32_t value, std::size_t width) {
+        for (std::size_t b = width; b-- > 0;) {
+            bits.push_back(static_cast<std::uint8_t>((value >> b) & 1U));
+        }
+    };
+    alternate(choice.preamble_bits);
+    for (const auto& frame : frames) {
+        auto packet = codec->encode(frame, choice.trailing_crc);
+        if (!packet) {
+            return std::unexpected(packet.error());
+        }
+        msb_first(decode::kIl2pSyncWord, decode::kIl2pSyncBits);
+        for (const std::uint8_t octet : *packet) {
+            msb_first(octet, 8);
+        }
+    }
+    alternate(choice.postamble_bits);
+    return bits;
+}
+
+Expected<std::vector<float>> il2p_render(const Ax25ModConfig& config,
+                                         std::span<const std::vector<std::uint8_t>> frames,
+                                         const Il2pChoice& choice) {
+    auto levels = il2p_levels(frames, choice);
+    if (!levels) {
+        return std::unexpected(levels.error());
+    }
+    // "FM Audio Frequency Shift Keying Symbol Map": "A '1' bit is sent as a
+    // Bell 202 "mark" tone (1200 Hz), while a '0' bit is sent as a Bell 202
+    // "space" tone (2200 Hz). Differential encoding is not used."
+    return afsk_render_levels(config, *levels);
 }
 
 // ---------------------------------------------------------------------------

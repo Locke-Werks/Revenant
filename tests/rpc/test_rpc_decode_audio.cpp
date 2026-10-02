@@ -377,14 +377,22 @@ constexpr std::string_view kMessageInfo = ":WU2Z     :Testing{003";
 constexpr std::string_view kPlainInfo = "hello from revenant";
 
 // With fx25 set, the same four frames each inside an FX.25 codeblock of the
-// shortest 16-check code that holds it.
-[[nodiscard]] Expected<Capture> ax25_capture(double snr_2500_db, bool fx25 = false) {
+// shortest 16-check code that holds it. With il2p set, each as an IL2P packet
+// with its trailing CRC; the three APRS frames then go without their path and
+// as commands, the destination's C bit set, so that every one fits an IL2P
+// Type 1 header.
+[[nodiscard]] Expected<Capture> ax25_capture(double snr_2500_db, bool fx25 = false,
+                                             bool il2p = false) {
     std::vector<std::vector<std::uint8_t>> frames;
     for (const std::string_view info : {kPositionInfo, kStatusInfo, kMessageInfo}) {
         siggen::Ax25FrameSpec spec;
         spec.destination = address("APRS", 0);
         spec.source = address("N0CALL", 9);
         spec.repeaters = {address("WIDE1", 1)};
+        if (il2p) {
+            spec.destination.command_or_repeated = true;
+            spec.repeaters.clear();
+        }
         spec.information = bytes(info);
         auto one = octets(spec);
         if (!one) {
@@ -394,6 +402,7 @@ constexpr std::string_view kPlainInfo = "hello from revenant";
     }
     siggen::Ax25FrameSpec plain;
     plain.destination = address("N0CALL", 1);
+    plain.destination.command_or_repeated = il2p;
     plain.source = address("N0CALL", 2);
     plain.control = 0x00;  // Figure 4.1a: an I frame, N(S) and N(R) zero
     plain.information = bytes(kPlainInfo);
@@ -407,8 +416,9 @@ constexpr std::string_view kPlainInfo = "hello from revenant";
     mod.rate = kFileRate;
     mod.amplitude = 1.0;
     mod.flags_between = 16;
-    auto audio = fx25 ? siggen::fx25_render(mod, frames, siggen::Fx25Choice{})
-                      : siggen::ax25_render(mod, frames);
+    auto audio = il2p   ? siggen::il2p_render(mod, frames, siggen::Il2pChoice{})
+                 : fx25 ? siggen::fx25_render(mod, frames, siggen::Fx25Choice{})
+                        : siggen::ax25_render(mod, frames);
     if (!audio) {
         return std::unexpected(audio.error());
     }
@@ -419,8 +429,8 @@ constexpr std::string_view kPlainInfo = "hello from revenant";
     if (auto noisy = add_noise(*signal, snr_2500_db); !noisy) {
         return std::unexpected(noisy.error());
     }
-    return Capture{fx25 ? "ax25_fx25_nfm" : "ax25_nfm", std::move(*signal), rpc::Demod::Nfm,
-                   kVhfCentre};
+    return Capture{il2p ? "ax25_il2p_nfm" : fx25 ? "ax25_fx25_nfm" : "ax25_nfm",
+                   std::move(*signal), rpc::Demod::Nfm, kVhfCentre};
 }
 
 constexpr std::uint32_t kAlphaRic = 1'234'567;
@@ -1293,6 +1303,32 @@ TEST_CASE("FX.25 frames cross the wire through the ax25 decoder, marked and once
     }
     // The four frames, each once: the copy plain AX.25 also finds inside
     // the codeblock is replaced rather than repeated.
+    CHECK(kinds == std::set<std::string>{"aprs_position", "aprs_status", "aprs_message", "frame"});
+    CHECK(run.messages.size() == 4);
+}
+
+TEST_CASE("IL2P packets cross the wire through the ax25 decoder as AX.25 frames",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = ax25_capture(kHighSnrDb, false, true);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, "ax25");
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    check_common(run, "ax25");
+
+    std::set<std::string> kinds;
+    for (const rpc::DecodedMessage& message : run.messages) {
+        kinds.insert(message.kind);
+        CHECK(flag_of(message, "il2p"));
+        CHECK_FALSE(flag_of(message, "fx25"));
+        // No path and the C bits of a command: every frame translates.
+        CHECK(integer_of(message, "il2p_header_type") == 1);
+        CHECK(integer_of(message, "il2p_corrected") >= 0);
+        CHECK(flag_of(message, "il2p_crc"));
+    }
+    // APRS on top parses as it does from plain AX.25.
     CHECK(kinds == std::set<std::string>{"aprs_position", "aprs_status", "aprs_message", "frame"});
     CHECK(run.messages.size() == 4);
 }

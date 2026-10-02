@@ -55,6 +55,7 @@
 
 #include "core/decode/fsk.h"
 #include "core/decode/fx25.h"
+#include "core/decode/il2p.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
@@ -188,6 +189,16 @@ struct Ax25Frame {
     bool fx25 = false;
     std::uint8_t fx25_tag = 0;
     std::size_t fx25_corrected = 0;
+
+    // Set when the frame came out of an IL2P packet, core/decode/il2p.h,
+    // rebuilt from its header and payload rather than received with an FCS:
+    // the header type, 0 transparent or 1 translated, the symbols the
+    // Reed-Solomon code corrected in header and payload together, and
+    // whether the optional trailing CRC was present and matched.
+    bool il2p = false;
+    std::uint8_t il2p_header_type = 0;
+    std::size_t il2p_corrected = 0;
+    bool il2p_crc = false;
 };
 
 // Parses address through information, FCS already checked and removed.
@@ -258,6 +269,12 @@ struct Ax25Stats {
     // ones the Reed-Solomon decoder refused.
     std::uint64_t fx25_blocks = 0;
     std::uint64_t fx25_uncorrectable = 0;
+    // IL2P sync words whose header decoded; of the packets behind them, the
+    // ones a payload block or a disagreeing trailing CRC refused, and the
+    // ones that decoded but did not make an AX.25 frame ax25_parse accepts.
+    std::uint64_t il2p_packets = 0;
+    std::uint64_t il2p_uncorrectable = 0;
+    std::uint64_t il2p_untranslatable = 0;
 };
 
 class Ax25Decoder {
@@ -273,6 +290,12 @@ public:
     // codeblock ends, so that the same frame recovered from the codeblock
     // replaces it rather than following it as a duplicate; frames therefore
     // come out up to one codeblock later than their closing flag.
+    //
+    // IL2P packets are decoded alongside as well, from the tone levels
+    // before NRZI, since IL2P sends a one as mark and uses no differential
+    // encoding. Each packet that decodes and rebuilds an AX.25 frame comes
+    // out as that frame with the il2p fields set, 32 bits after the packet
+    // ends while the receiver looks for the optional trailing CRC.
     void process(ConstRealSpan audio, std::vector<Ax25Frame>& out);
 
     [[nodiscard]] const Ax25Stats& stats() const { return stats_; }
@@ -286,6 +309,8 @@ private:
     BitClock clock_{};
     HdlcDeframer deframer_{};
     Fx25Receiver fx25_ = *Fx25Receiver::create();
+    Il2pReceiver il2p_ = *Il2pReceiver::create();
+    std::vector<Il2pPacket> packets_;
     std::vector<float> soft_;
     std::vector<SoftBit> bits_;
     std::vector<HdlcFrame> frames_;
@@ -299,6 +324,7 @@ private:
     // counted in stats_ when `count` is set.
     [[nodiscard]] std::optional<Ax25Frame> check(const HdlcFrame& f, bool count);
     void finish_block(const Fx25Block& block, std::vector<Ax25Frame>& out);
+    void finish_packet(const Il2pPacket& packet, std::vector<Ax25Frame>& out);
 };
 
 }  // namespace revenant::decode

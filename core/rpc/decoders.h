@@ -1864,7 +1864,10 @@ private:
 // Reads an nfm receiver's audio: 1200 baud Bell 202 AFSK, core/decode/ax25.h.
 // One message per frame whose FCS checked, whether it arrived as plain AX.25
 // or inside an FX.25 Reed-Solomon codeblock, core/decode/fx25.h; a frame sent
-// FX.25 is reported once, with the fx25 fields below set. When the frame is UI and
+// FX.25 is reported once, with the fx25 fields below set. A frame sent as
+// IL2P, core/decode/il2p.h, has no FCS on the air: it is reported when its
+// Reed-Solomon blocks decoded and it rebuilt into an AX.25 frame, with the
+// il2p fields below set. When the frame is UI and
 // core/decode/aprs.h parses its information field, the message carries the
 // APRS fields as well and its kind names what the packet is:
 //   "aprs_position"  chapters 8 and 9, a position report
@@ -1896,6 +1899,12 @@ private:
 //                               Reed-Solomon decoder accepted
 //   fx25_tag             int    FX.25 only: the Table 1 tag index, 1 to 11
 //   fx25_corrected       int    FX.25 only: octets the code corrected
+//   il2p                 flag   the frame came out of an IL2P packet
+//   il2p_header_type     int    IL2P only: 0 transparent, 1 translated
+//   il2p_corrected       int    IL2P only: octets the code corrected in the
+//                               header and payload blocks together
+//   il2p_crc             flag   IL2P only: the optional trailing CRC was
+//                               present and matched the rebuilt frame
 //
 // An APRS position or Mic-E adds, APRS101 chapters 6 to 10:
 //   latitude, longitude  real   degrees, north and east positive
@@ -2112,6 +2121,13 @@ private:
             message.fields.push_back(integer_field("fx25_tag", frame.fx25_tag));
             message.fields.push_back(integer_field(
                 "fx25_corrected", static_cast<std::int64_t>(frame.fx25_corrected)));
+        }
+        message.fields.push_back(flag_field("il2p", frame.il2p));
+        if (frame.il2p) {
+            message.fields.push_back(integer_field("il2p_header_type", frame.il2p_header_type));
+            message.fields.push_back(integer_field(
+                "il2p_corrected", static_cast<std::int64_t>(frame.il2p_corrected)));
+            message.fields.push_back(flag_field("il2p_crc", frame.il2p_crc));
         }
 
         // The header an operator reads it by, TNC2 style: SOURCE>DEST,PATH.

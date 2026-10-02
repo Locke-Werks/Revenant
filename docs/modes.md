@@ -206,7 +206,7 @@ FDL for the text; the repository's LICENSE file is what said GPL-2.0.
 | AX.25 packet | 1200 baud Bell 202 AFSK, 9600 baud G3RUH scrambled FSK, 300 baud HF FSK; HDLC with bit stuffing and the X.25 FCS | AX.25 v2.2, TAPR/ARRL July 1998, free. The two modems have no standards document and are cited to Bell 202 and to Miller's 1988 article. 1200 baud done, see below | Medium |
 | APRS | AX.25 UI frames; position, weather, telemetry, object, status, message, Mic-E and base-91 compressed formats | APRS Protocol Reference 1.0.1, free at aprs.org, plus the WB2OSZ consolidated 1.2. Position, status, message and Mic-E done, see below | Medium |
 | FX.25 | AX.25 with a 64-bit correlation tag selecting one of several Reed-Solomon configurations | "FX.25: Forward Error Correction Extension to AX.25 Link Protocol For Amateur Packet Radio", Stensat Group, Version 0.01 DRAFT, document version 0.01.06, 1 September 2006, TAPR DCC 2006, free. Read on 2026-10-02 from the Internet Archive's capture of stensat.org/docs/FX-25_01_06.pdf, which no longer answers. It does not state the Reed-Solomon field or first root. 1200 baud done, see below | Small |
-| IL2P | Reed-Solomon header and payload blocks replacing HDLC on the same physical layers | IL2P Specification Draft v0.6, 16 March 2024, KK4HEJ, free | Small |
+| IL2P | Reed-Solomon header and payload blocks replacing HDLC on the same physical layers | "IL2P Specification Draft v0.6, 16 March 2024", Nino Carrillo KK4HEJ, free. Read on 2026-10-02 from https://tarpn.net/t/il2p/il2p-specification_draft_v0-6.pdf. Its three example packets fix what the prose leaves open. 1200 baud AFSK done, see below | Small |
 | PACTOR-I | 2-FSK, 100 or 200 baud, 200 Hz shift, 1.25 s ARQ cycle, 0x55 sync header, ITU-T CRC | ARRL PACTOR technical characteristics page, free, which prints the complete Huffman table, packet structure, status byte and ARQ timing | Medium |
 | ARDOP | 200, 500, 1000 and 2000 Hz sessions, 50/100/167 baud, 4FSK narrow and OFDM wide, two-tone leader at 1450 and 1550 Hz | ARDOP Specification, Winlink Development Team, free, and released to the public domain by its author | Large |
 | WINMOR | OFDM in 500 or 1600 Hz, DPSK and 4FSK | ARRL WINMOR technical characteristics page and the author's TNC specification, free. Winlink retired the mode in 2020 | Small |
@@ -1071,6 +1071,7 @@ use and DSC can.
 | RTTY | `core/decode/rtty.cpp` | ITU-T S.1 (03/93) clauses 3, 4.1 to 4.5 and Tables 1 and 2 for ITA2; ITU-T S.3 (11/88) clauses 1.3 and 1.4 and Table 1 for the 7.5-unit character | Characters with the sample index of their start element, letters and figures case tracked, a decision margin per character, and counts of framing errors and false starts |
 | AX.25 over 1200 baud AFSK | `core/decode/ax25.cpp` | AX.25 v2.2 (TAPR, July 1998) clauses 3, 3.1, 3.4, 3.6 to 3.10, 3.12 and 4.2.1; the modem from Finnegan and Benson, "Clarifying the Amateur Bell 202 Modem", TAPR DCC 2014, sections 2 and 3.2 | Frames whose FCS checks, with destination, source and up to eight repeaters, the control field and its frame kind, the PID and the information field, and the sample indices of the first and last bit; counts of candidates, FCS failures and malformed frames |
 | FX.25 around AX.25 over 1200 baud AFSK | `core/decode/fx25.cpp` and `core/decode/reed_solomon.cpp`, run by `core/decode/ax25.cpp` | Stensat Group FX.25 document version 0.01.06 (1 September 2006), sections "Protocol Summary", "Physical Layer Considerations", "Correlation Tag Details", "AX.25 Packet Requirements", "Pad Requirements" and "FEC Algorithms" with Table 1 | The same frames as AX.25, once each, marked as having arrived in an FX.25 codeblock with the Table 1 tag index and the octets the Reed-Solomon code corrected; counts of tags found and codeblocks refused |
+| IL2P carrying AX.25 over 1200 baud AFSK | `core/decode/il2p.cpp` and `core/decode/reed_solomon.cpp`, run by `core/decode/ax25.cpp` | IL2P Specification Draft v0.6 (16 March 2024), sections "Interface to Physical Layer", "Reed Solomon Forward Error Correction", "Data Scrambling" with the transmit and receive LFSR figures, "Packet Structure", "Sync Word", "IL2P Header Types", "IL2P Type 1 Header" with its field map, PID mapping and control subfield maps, "Payload Block Size Computations", the receive procedure, "Optional Trailing CRC with Hamming Encoding" and "Example Encoded Packets" | The same AX.25 frames as plain AX.25, rebuilt from Type 1 or Type 0 packets, marked as IL2P with the header type, the octets the Reed-Solomon codes corrected and whether a trailing CRC matched; counts of headers decoded, packets refused and packets that did not rebuild |
 | APRS | `core/decode/aprs.cpp` | APRS Protocol Reference 1.0.1 (29 August 2000) chapters 5, 6, 7, 8, 9, 10, 14 and 16 | Position reports uncompressed and compressed with timestamp, ambiguity, symbol, course, speed, altitude and range; status with timestamp or Maidenhead locator; messages, acknowledgements and rejections with their numbers; Mic-E position, message type, course, speed, telemetry, status text and altitude |
 | POCSAG | `core/decode/pocsag.cpp` | ITU-R M.584-2 Annex 1 clauses 1.1 to 1.4, 2.1, 2.2 and 2.5.1 with Tables 1 to 3; ITU-R M.539-3 clause 4.3 for the rates and polarity | Pages with the 21-bit identity, function bits, numeric or alphanumeric text per the function bits and the raw message bits for the two function values M.584 gives no format, the sample index of the address codeword, the bits BCH corrected and the codewords it could not, and whether the sync arrived inverted |
 | SITOR-B | `core/decode/sitor_b.cpp` | ITU-R M.625-4 clauses 1.1 to 1.3, 4.2 to 4.4, 4.6.4, 4.6.5 and 4.6.7 with Tables 1 and 2; M.476-5 Annex 1 agrees | Characters with the sample index of the DX copy, letters and figures case, whether the RX copy was used, whether both copies were lost, and the phasing each came from; counts of phasings, copies lost and ends of transmission |
@@ -1126,6 +1127,35 @@ refused. A tag is accepted with up to 8 of its 64 bits wrong, an engineering
 choice fx25.h argues from Table 1's distances. What it does not reach:
 Multi-Frame Blocks decode tag by tag but are not tested, and AX.25
 segmentation, which the document leaves to the AX.25 layer, is not done.
+
+IL2P is checked in `tests/decode/test_il2p.cpp`. The document's three example
+packets, an S frame, a UI frame and an I frame with nine payload octets, decode
+to the AX.25 frames printed beside them and encode back to the same octets,
+trailing CRC included. They settled the readings the prose leaves open: the
+Reed-Solomon generator starts at alpha^0 over x^8 + x^4 + x^3 + x^2 + 1, the
+receive scrambler has no delay of its own, bit 7 of the header figure is each
+octet's most significant bit, and the CRC is the AX.25 FCS value, high nibble
+first. Three things the document does not settle are engineering choices in
+`core/decode/il2p.h`: the P/F bit of a translated S frame sits at bit 6, as in
+the I and U maps; PID 0x2, "AX.25 Layer 3", is never sent and rebuilds as 0x20;
+and because the trailing CRC is optional by agreement, a receiver holds each
+packet for 32 bits, reports it with the CRC verified when the trailer matches,
+refuses it when the trailer is four exact Hamming codewords naming another CRC,
+and otherwise reports it on the Reed-Solomon decode alone. Translation to and
+from Type 1 is checked octet for octet for I frames, S frames and every U-frame
+opcode, and the frames Type 1 cannot carry go Type 0. Round trips through the
+Bell 202 transmitter, which sends IL2P with no NRZI as the symbol map says,
+cover both header types, a 600-octet payload in three blocks, and both with and
+without the trailer. One to eight payload octets hit,
+plus one header octet, are corrected with the count reported where plain AX.25
+loses the frame to one bit; nine payload octets or two header octets are
+refused. A sync word with one bit wrong is found and one with two is not. A
+stream of plain AX.25, FX.25, two back-to-back IL2P packets and plain AX.25
+again decodes all five in order. What it does not reach: no on-air IL2P
+recording has been checked; a transmitter still using the Baseline FEC level
+that v0.6 removed sends shorter payload parity and is refused; the 9600 baud
+GFSK and the BPSK and QPSK symbol maps are not implemented; and a Type 0 packet
+whose payload is not an AX.25 frame is counted and not reported.
 
 APRS is checked in `tests/decode/test_aprs.cpp` against 35 examples the
 reference prints in chapters 8, 9, 10, 14 and 16, including page 38's

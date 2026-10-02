@@ -281,6 +281,7 @@ void Ax25Decoder::reset() {
     clock_.reset();
     deframer_.reset();
     fx25_.reset();
+    il2p_.reset();
     held_.clear();
     previous_level_ = false;
     stats_ = {};
@@ -380,9 +381,13 @@ void Ax25Decoder::process(ConstRealSpan audio, std::vector<Ax25Frame>& out) {
 
         frames_.clear();
         blocks_.clear();
+        packets_.clear();
         deframer_.push(bit, sample, frames_);
         const bool was_collecting = fx25_.collecting();
         fx25_.push(bit, sample, blocks_);
+        // IL2P "FM Audio Frequency Shift Keying Symbol Map": a one is mark,
+        // and positive soft values are mark.
+        il2p_.push(level ? 1U : 0U, sample, packets_);
 
         for (const HdlcFrame& f : frames_) {
             if (auto frame = check(f, true)) {
@@ -396,6 +401,39 @@ void Ax25Decoder::process(ConstRealSpan audio, std::vector<Ax25Frame>& out) {
         for (const Fx25Block& block : blocks_) {
             finish_block(block, out);
         }
+        for (const Il2pPacket& packet : packets_) {
+            finish_packet(packet, out);
+        }
+    }
+}
+
+void Ax25Decoder::finish_packet(const Il2pPacket& packet, std::vector<Ax25Frame>& out) {
+    ++stats_.il2p_packets;
+    if (!packet.payload_ok || packet.crc == Il2pCrc::Mismatch) {
+        ++stats_.il2p_uncorrectable;
+        return;
+    }
+    if (packet.ax25.empty()) {
+        ++stats_.il2p_untranslatable;
+        return;
+    }
+    auto frame = ax25_parse(packet.ax25);
+    if (!frame) {
+        ++stats_.il2p_untranslatable;
+        return;
+    }
+    frame->first_sample = packet.first_sample;
+    frame->last_sample = packet.last_sample;
+    frame->il2p = true;
+    frame->il2p_header_type = packet.header.type;
+    frame->il2p_corrected = packet.header_corrected + packet.payload_corrected;
+    frame->il2p_crc = packet.crc == Il2pCrc::Verified;
+    // Held with the plain frames while an FX.25 codeblock is arriving, so
+    // the order of first samples survives.
+    if (fx25_.collecting()) {
+        held_.push_back(std::move(*frame));
+    } else {
+        out.push_back(std::move(*frame));
     }
 }
 

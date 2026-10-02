@@ -37,6 +37,7 @@
 
 #include "core/decode/ax25.h"
 #include "core/decode/fx25.h"
+#include "core/decode/il2p.h"
 #include "core/decode/pocsag.h"
 #include "core/decode/rtty.h"
 #include "core/decode/sitor_b.h"
@@ -143,6 +144,15 @@ struct Ax25FrameSpec {
 [[nodiscard]] Expected<std::vector<float>> afsk_render_bits(const Ax25ModConfig& config,
                                                             std::span<const std::uint8_t> bits);
 
+// NRZI alone: tone levels, one for mark, starting from mark, where each zero
+// in `bits` changes tone. afsk_render_bits is this then afsk_render_levels.
+[[nodiscard]] std::vector<std::uint8_t> nrzi_levels(std::span<const std::uint8_t> bits);
+
+// AFSK from tone levels with no line coding: one is mark, zero is space. For
+// IL2P, which uses no NRZI, and for a stream mixing it with AX.25.
+[[nodiscard]] Expected<std::vector<float>> afsk_render_levels(const Ax25ModConfig& config,
+                                                              std::span<const std::uint8_t> levels);
+
 // hdlc_bits then afsk_render_bits, for frames given as address through
 // information.
 [[nodiscard]] Expected<std::vector<float>> ax25_render(
@@ -185,6 +195,41 @@ struct Fx25Choice {
 [[nodiscard]] Expected<std::vector<float>> fx25_render(
     const Ax25ModConfig& config, std::span<const std::vector<std::uint8_t>> frames,
     const Fx25Choice& choice);
+
+// ---------------------------------------------------------------------------
+// IL2P carrying AX.25
+// ---------------------------------------------------------------------------
+
+struct Il2pChoice {
+    // "Optional Trailing CRC with Hamming Encoding", after every packet.
+    bool trailing_crc = true;
+
+    // "Preamble and Packet Termination": a preamble of alternating bits
+    // before the first packet and none between packets. Its length is left
+    // to the transmitter; this one matches the 32 flags Ax25ModConfig leads
+    // with, for the same reason. The postamble is not in the document at
+    // all: it is idle alternation after the last packet so a capture does
+    // not end inside it, and it is long enough to cover the 32 bits the
+    // receiver waits for a trailer.
+    std::size_t preamble_bits = 256;
+    std::size_t postamble_bits = 64;
+};
+
+// One frame, given as address through information, as the octets after its
+// sync word, by decode::Il2pCodec::encode from the same document.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> il2p_packet(std::span<const std::uint8_t> frame,
+                                                              bool trailing_crc);
+
+// The line bits, which with no NRZI are also the tone levels: the preamble,
+// then for each frame the sync word and its packet, most significant bit
+// first ("Packet Structure"), back to back, then the postamble.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> il2p_levels(
+    std::span<const std::vector<std::uint8_t>> frames, const Il2pChoice& choice);
+
+// il2p_levels then afsk_render_levels.
+[[nodiscard]] Expected<std::vector<float>> il2p_render(
+    const Ax25ModConfig& config, std::span<const std::vector<std::uint8_t>> frames,
+    const Il2pChoice& choice);
 
 // ---------------------------------------------------------------------------
 // POCSAG
