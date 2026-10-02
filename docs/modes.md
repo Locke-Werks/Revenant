@@ -466,7 +466,7 @@ assignment and mode changes all travel outside the encrypted or vocoded part.
 
 | Mode | What comes out without the payload | Why the payload stops |
 | --- | --- | --- |
-| P25 Phase 2 | ISCH synchronisation, slot and superframe structure, source and group addressing in the MAC, and the associated Phase 1 control channel | Almost the whole payload is AMBE+2, so unlike Phase 1 there is nothing left after the vocoder |
+| P25 Phase 2 | ISCH synchronisation, slot and superframe structure, source and group addressing in the MAC, and the associated Phase 1 control channel. The framing documents are free: TIA-102.BBAB (TDMA physical layer), TIA-102.BBAC and its addendum BBAC-1 (MAC layer), and TSB-102.BBAA (overview) are in archive.org/details/TIA-102_Series_Documents, the collection core/decode/p25p1.h cites | Almost the whole payload is AMBE+2, so unlike Phase 1 there is nothing left after the vocoder. A vocoder plugin could take the voice the way D-STAR and DMR's does, core/rpc/plugin_voice.h, once this framing is decoded |
 | Tetrapol | Network and talkgroup metadata, call setup, framing | RPCELP is described at some level in the PAS and the completeness of that description is unconfirmed |
 | ARIB STD-T98 (Japanese DCR) | 6.25 kHz 4FSK framing, mostly a parameter set once NXDN and dPMR exist | AMBE+2, and whether the ARIB document is obtainable is unconfirmed |
 | PACTOR-II | Mode, two-tone 200 Hz DPSK signature, 1.25 s cycle, speed level, plus the PACTOR-I FSK link setup | Published descriptions stop short of the puncture patterns, the interleaver map and the Pseudo-Markov Compression tables |
