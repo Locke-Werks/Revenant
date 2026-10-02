@@ -205,7 +205,7 @@ FDL for the text; the repository's LICENSE file is what said GPL-2.0.
 | Throb and ThrobX | Multi-tone OOK at 1, 2 or 4 symbols/s over 9 or 11 tones | fldigi mode documentation only | Small |
 | AX.25 packet | 1200 baud Bell 202 AFSK, 9600 baud G3RUH scrambled FSK, 300 baud HF FSK; HDLC with bit stuffing and the X.25 FCS | AX.25 v2.2, TAPR/ARRL July 1998, free. The two modems have no standards document and are cited to Bell 202 and to Miller's 1988 article. 1200 baud done, see below | Medium |
 | APRS | AX.25 UI frames; position, weather, telemetry, object, status, message, Mic-E and base-91 compressed formats | APRS Protocol Reference 1.0.1, free at aprs.org, plus the WB2OSZ consolidated 1.2. Position, status, message and Mic-E done, see below | Medium |
-| FX.25 | AX.25 with a 64-bit correlation tag selecting one of several Reed-Solomon configurations | Stensat Group, TAPR DCC 2006, free | Small |
+| FX.25 | AX.25 with a 64-bit correlation tag selecting one of several Reed-Solomon configurations | "FX.25: Forward Error Correction Extension to AX.25 Link Protocol For Amateur Packet Radio", Stensat Group, Version 0.01 DRAFT, document version 0.01.06, 1 September 2006, TAPR DCC 2006, free. Read on 2026-10-02 from the Internet Archive's capture of stensat.org/docs/FX-25_01_06.pdf, which no longer answers. It does not state the Reed-Solomon field or first root. 1200 baud done, see below | Small |
 | IL2P | Reed-Solomon header and payload blocks replacing HDLC on the same physical layers | IL2P Specification Draft v0.6, 16 March 2024, KK4HEJ, free | Small |
 | PACTOR-I | 2-FSK, 100 or 200 baud, 200 Hz shift, 1.25 s ARQ cycle, 0x55 sync header, ITU-T CRC | ARRL PACTOR technical characteristics page, free, which prints the complete Huffman table, packet structure, status byte and ARQ timing | Medium |
 | ARDOP | 200, 500, 1000 and 2000 Hz sessions, 50/100/167 baud, 4FSK narrow and OFDM wide, two-tone leader at 1450 and 1550 Hz | ARDOP Specification, Winlink Development Team, free, and released to the public domain by its author | Large |
@@ -1070,6 +1070,7 @@ use and DSC can.
 | --- | --- | --- | --- |
 | RTTY | `core/decode/rtty.cpp` | ITU-T S.1 (03/93) clauses 3, 4.1 to 4.5 and Tables 1 and 2 for ITA2; ITU-T S.3 (11/88) clauses 1.3 and 1.4 and Table 1 for the 7.5-unit character | Characters with the sample index of their start element, letters and figures case tracked, a decision margin per character, and counts of framing errors and false starts |
 | AX.25 over 1200 baud AFSK | `core/decode/ax25.cpp` | AX.25 v2.2 (TAPR, July 1998) clauses 3, 3.1, 3.4, 3.6 to 3.10, 3.12 and 4.2.1; the modem from Finnegan and Benson, "Clarifying the Amateur Bell 202 Modem", TAPR DCC 2014, sections 2 and 3.2 | Frames whose FCS checks, with destination, source and up to eight repeaters, the control field and its frame kind, the PID and the information field, and the sample indices of the first and last bit; counts of candidates, FCS failures and malformed frames |
+| FX.25 around AX.25 over 1200 baud AFSK | `core/decode/fx25.cpp` and `core/decode/reed_solomon.cpp`, run by `core/decode/ax25.cpp` | Stensat Group FX.25 document version 0.01.06 (1 September 2006), sections "Protocol Summary", "Physical Layer Considerations", "Correlation Tag Details", "AX.25 Packet Requirements", "Pad Requirements" and "FEC Algorithms" with Table 1 | The same frames as AX.25, once each, marked as having arrived in an FX.25 codeblock with the Table 1 tag index and the octets the Reed-Solomon code corrected; counts of tags found and codeblocks refused |
 | APRS | `core/decode/aprs.cpp` | APRS Protocol Reference 1.0.1 (29 August 2000) chapters 5, 6, 7, 8, 9, 10, 14 and 16 | Position reports uncompressed and compressed with timestamp, ambiguity, symbol, course, speed, altitude and range; status with timestamp or Maidenhead locator; messages, acknowledgements and rejections with their numbers; Mic-E position, message type, course, speed, telemetry, status text and altitude |
 | POCSAG | `core/decode/pocsag.cpp` | ITU-R M.584-2 Annex 1 clauses 1.1 to 1.4, 2.1, 2.2 and 2.5.1 with Tables 1 to 3; ITU-R M.539-3 clause 4.3 for the rates and polarity | Pages with the 21-bit identity, function bits, numeric or alphanumeric text per the function bits and the raw message bits for the two function values M.584 gives no format, the sample index of the address codeword, the bits BCH corrected and the codewords it could not, and whether the sync arrived inverted |
 | SITOR-B | `core/decode/sitor_b.cpp` | ITU-R M.625-4 clauses 1.1 to 1.3, 4.2 to 4.4, 4.6.4, 4.6.5 and 4.6.7 with Tables 1 and 2; M.476-5 Annex 1 agrees | Characters with the sample index of the DX copy, letters and figures case, whether the RX copy was used, whether both copies were lost, and the phasing each came from; counts of phasings, copies lost and ends of transmission |
@@ -1107,6 +1108,24 @@ follows the text. What it does not reach: connected-mode procedure, which has
 nothing to decode; modulo 128 control fields, which a receiver joining partway
 cannot tell from modulo 8; 9600 baud G3RUH and 300 baud HF packet; and FCS-based
 bit repair, so one wrong bit loses a frame.
+
+FX.25 is checked in `tests/decode/test_fx25.cpp`. The Stensat document prints
+no worked codeblock, and it does not state the Reed-Solomon field polynomial,
+the generator's first consecutive root or which end of the codeblock is the
+high-order coefficient. `core/decode/fx25.h` sets x^8 + x^4 + x^3 + x^2 + 1,
+alpha^1 and information first, as engineering choices, and no on-air FX.25
+recording has been checked against them: a station whose code differs has its
+codeblocks refused, and its frame still decodes as plain AX.25 when it arrives
+clean. The tests check Table 1's tags against the byte order the document
+prints for Tag_01, that every Table 1 code corrects up to half its check octets
+exactly and refuses words with more, and round trips through the Bell 202
+transmitter under all eleven codes, each frame reported once. A frame with one
+to eight of its octets hit by bit errors, which the plain deframer loses, comes
+back through RS(144,128) with the count of octets corrected, and nine are
+refused. A tag is accepted with up to 8 of its 64 bits wrong, an engineering
+choice fx25.h argues from Table 1's distances. What it does not reach:
+Multi-Frame Blocks decode tag by tag but are not tested, and AX.25
+segmentation, which the document leaves to the AX.25 layer, is not done.
 
 APRS is checked in `tests/decode/test_aprs.cpp` against 35 examples the
 reference prints in chapters 8, 9, 10, 14 and 16, including page 38's

@@ -102,6 +102,7 @@ add_library(revenant_core STATIC
     decode/dv_codes.cpp
     decode/dv_phy.cpp
     decode/fsk.cpp
+    decode/fx25.cpp
     decode/imbe.cpp
     decode/navtex.cpp
     decode/m17.cpp
@@ -110,6 +111,7 @@ add_library(revenant_core STATIC
     decode/pocsag.cpp
     decode/psk31.cpp
     decode/rds_bits.cpp
+    decode/reed_solomon.cpp
     decode/rds_groups.cpp
     decode/rtty.cpp
     decode/sitor_b.cpp

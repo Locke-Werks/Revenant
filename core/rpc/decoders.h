@@ -1862,7 +1862,9 @@ private:
 // ---------------------------------------------------------------------------
 //
 // Reads an nfm receiver's audio: 1200 baud Bell 202 AFSK, core/decode/ax25.h.
-// One message per frame whose FCS checked. When the frame is UI and
+// One message per frame whose FCS checked, whether it arrived as plain AX.25
+// or inside an FX.25 Reed-Solomon codeblock, core/decode/fx25.h; a frame sent
+// FX.25 is reported once, with the fx25 fields below set. When the frame is UI and
 // core/decode/aprs.h parses its information field, the message carries the
 // APRS fields as well and its kind names what the packet is:
 //   "aprs_position"  chapters 8 and 9, a position report
@@ -1890,6 +1892,10 @@ private:
 //   fcs_failures         int    cumulative, candidate frames whose FCS failed
 //   began_sample         int    receiver-stream index of the first bit after
 //                               the opening flag
+//   fx25                 flag   the frame came out of an FX.25 codeblock the
+//                               Reed-Solomon decoder accepted
+//   fx25_tag             int    FX.25 only: the Table 1 tag index, 1 to 11
+//   fx25_corrected       int    FX.25 only: octets the code corrected
 //
 // An APRS position or Mic-E adds, APRS101 chapters 6 to 10:
 //   latitude, longitude  real   degrees, north and east positive
@@ -2101,6 +2107,12 @@ private:
             "fcs_failures", static_cast<std::int64_t>(decoder_.stats().fcs_failures)));
         message.fields.push_back(
             integer_field("began_sample", static_cast<std::int64_t>(base_.at(frame.first_sample))));
+        message.fields.push_back(flag_field("fx25", frame.fx25));
+        if (frame.fx25) {
+            message.fields.push_back(integer_field("fx25_tag", frame.fx25_tag));
+            message.fields.push_back(integer_field(
+                "fx25_corrected", static_cast<std::int64_t>(frame.fx25_corrected)));
+        }
 
         // The header an operator reads it by, TNC2 style: SOURCE>DEST,PATH.
         const std::string header =

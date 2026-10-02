@@ -280,14 +280,93 @@ void Ax25Decoder::reset() {
     discriminator_.reset();
     clock_.reset();
     deframer_.reset();
+    fx25_.reset();
+    held_.clear();
     previous_level_ = false;
     stats_ = {};
+}
+
+std::optional<Ax25Frame> Ax25Decoder::check(const HdlcFrame& f, bool count) {
+    if (count) {
+        ++stats_.candidates;
+    }
+    const std::size_t n = f.octets.size();
+    const auto content = std::span<const std::uint8_t>(f.octets).first(n - 2);
+    const auto received = static_cast<std::uint16_t>(
+        f.octets[n - 2] | (static_cast<unsigned>(f.octets[n - 1]) << 8U));
+    if (ax25_fcs(content) != received) {
+        if (count) {
+            ++stats_.fcs_failures;
+        }
+        return std::nullopt;
+    }
+    auto frame = ax25_parse(content);
+    if (!frame) {
+        if (count) {
+            ++stats_.malformed;
+        }
+        return std::nullopt;
+    }
+    frame->first_sample = f.first_sample;
+    frame->last_sample = f.last_sample;
+    return std::move(*frame);
+}
+
+void Ax25Decoder::finish_block(const Fx25Block& block, std::vector<Ax25Frame>& out) {
+    ++stats_.fx25_blocks;
+    std::vector<Ax25Frame> recovered;
+    if (block.corrected) {
+        // FX.25 "AX.25 Packet Requirements" and "Pad Requirements": the
+        // information octets are the AX.25 packet as it goes to air, flags,
+        // bit stuffing and all, then 0x7E padding, so the ordinary deframer
+        // reads them as it would read the air.
+        HdlcDeframer deframer;
+        std::vector<HdlcFrame> frames;
+        for (std::size_t i = 0; i < 8 * block.information.size(); ++i) {
+            const auto bit = static_cast<std::uint8_t>((block.information[i / 8] >> (i % 8)) & 1U);
+            deframer.push(bit, block.samples[i], frames);
+        }
+        for (const HdlcFrame& f : frames) {
+            if (auto frame = check(f, false)) {
+                frame->fx25 = true;
+                frame->fx25_tag = block.mode->index;
+                frame->fx25_corrected = *block.corrected;
+                recovered.push_back(std::move(*frame));
+            }
+        }
+    } else {
+        ++stats_.fx25_uncorrectable;
+    }
+
+    // A held frame the codeblock also carried is the same frame; the
+    // codeblock's copy replaces it so it reports the FEC.
+    std::vector<bool> used(recovered.size(), false);
+    for (Ax25Frame& h : held_) {
+        for (std::size_t i = 0; i < recovered.size(); ++i) {
+            if (!used[i] && recovered[i].octets == h.octets) {
+                h = recovered[i];
+                used[i] = true;
+                break;
+            }
+        }
+    }
+    for (std::size_t i = 0; i < recovered.size(); ++i) {
+        if (!used[i]) {
+            held_.push_back(std::move(recovered[i]));
+        }
+    }
+    std::stable_sort(held_.begin(), held_.end(), [](const Ax25Frame& a, const Ax25Frame& b) {
+        return a.first_sample < b.first_sample;
+    });
+    for (Ax25Frame& f : held_) {
+        out.push_back(std::move(f));
+    }
+    held_.clear();
 }
 
 void Ax25Decoder::process(ConstRealSpan audio, std::vector<Ax25Frame>& out) {
     soft_.clear();
     bits_.clear();
-    frames_.clear();
     discriminator_.process(audio, soft_);
     clock_.process(soft_, bits_);
 
@@ -298,27 +377,25 @@ void Ax25Decoder::process(ConstRealSpan audio, std::vector<Ax25Frame>& out) {
         const std::uint8_t bit = (level == previous_level_) ? 1U : 0U;
         previous_level_ = level;
         const SampleIndex sample = b.position > delay ? b.position - delay : 0;
-        deframer_.push(bit, sample, frames_);
-    }
 
-    for (const HdlcFrame& f : frames_) {
-        ++stats_.candidates;
-        const std::size_t n = f.octets.size();
-        const auto content = std::span<const std::uint8_t>(f.octets).first(n - 2);
-        const auto received = static_cast<std::uint16_t>(
-            f.octets[n - 2] | (static_cast<unsigned>(f.octets[n - 1]) << 8U));
-        if (ax25_fcs(content) != received) {
-            ++stats_.fcs_failures;
-            continue;
+        frames_.clear();
+        blocks_.clear();
+        deframer_.push(bit, sample, frames_);
+        const bool was_collecting = fx25_.collecting();
+        fx25_.push(bit, sample, blocks_);
+
+        for (const HdlcFrame& f : frames_) {
+            if (auto frame = check(f, true)) {
+                if (was_collecting || fx25_.collecting()) {
+                    held_.push_back(std::move(*frame));
+                } else {
+                    out.push_back(std::move(*frame));
+                }
+            }
         }
-        auto frame = ax25_parse(content);
-        if (!frame) {
-            ++stats_.malformed;
-            continue;
+        for (const Fx25Block& block : blocks_) {
+            finish_block(block, out);
         }
-        frame->first_sample = f.first_sample;
-        frame->last_sample = f.last_sample;
-        out.push_back(std::move(*frame));
     }
 }
 

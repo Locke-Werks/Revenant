@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "core/decode/fsk.h"
+#include "core/decode/fx25.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
@@ -177,6 +178,16 @@ struct Ax25Frame {
     // bits, less the discriminator's delay.
     SampleIndex first_sample = 0;
     SampleIndex last_sample = 0;
+
+    // Set when the frame came out of an FX.25 codeblock, core/decode/fx25.h,
+    // whose Reed-Solomon decode was accepted, with the Table 1 index of the
+    // tag that announced it and the octets the code corrected. A frame sent
+    // inside FX.25 that arrived with no errors is still marked, since the
+    // codeblock decoded; one the codeblock could not correct but whose FCS
+    // checked anyway arrives unmarked, through the ordinary deframer.
+    bool fx25 = false;
+    std::uint8_t fx25_tag = 0;
+    std::size_t fx25_corrected = 0;
 };
 
 // Parses address through information, FCS already checked and removed.
@@ -243,6 +254,10 @@ struct Ax25Stats {
     std::uint64_t fcs_failures = 0;
     // FCS good but the address field did not parse.
     std::uint64_t malformed = 0;
+    // FX.25 correlation tags found, and of the codeblocks behind them the
+    // ones the Reed-Solomon decoder refused.
+    std::uint64_t fx25_blocks = 0;
+    std::uint64_t fx25_uncorrectable = 0;
 };
 
 class Ax25Decoder {
@@ -252,6 +267,12 @@ public:
     // Consumes audio and appends every frame whose closing flag has arrived
     // and whose FCS checks. State carries across calls, so any blocking of
     // the audio gives the same frames.
+    //
+    // FX.25 codeblocks are decoded alongside. A frame the ordinary deframer
+    // finishes while a codeblock is still arriving is held until the
+    // codeblock ends, so that the same frame recovered from the codeblock
+    // replaces it rather than following it as a duplicate; frames therefore
+    // come out up to one codeblock later than their closing flag.
     void process(ConstRealSpan audio, std::vector<Ax25Frame>& out);
 
     [[nodiscard]] const Ax25Stats& stats() const { return stats_; }
@@ -264,11 +285,20 @@ private:
     ToneDiscriminator discriminator_{};
     BitClock clock_{};
     HdlcDeframer deframer_{};
+    Fx25Receiver fx25_ = *Fx25Receiver::create();
     std::vector<float> soft_;
     std::vector<SoftBit> bits_;
     std::vector<HdlcFrame> frames_;
+    std::vector<Fx25Block> blocks_;
+    // Frames finished while an FX.25 codeblock was arriving.
+    std::vector<Ax25Frame> held_;
     bool previous_level_ = false;
     Ax25Stats stats_{};
+
+    // FCS check and parse of one deframed frame; nothing when either fails,
+    // counted in stats_ when `count` is set.
+    [[nodiscard]] std::optional<Ax25Frame> check(const HdlcFrame& f, bool count);
+    void finish_block(const Fx25Block& block, std::vector<Ax25Frame>& out);
 };
 
 }  // namespace revenant::decode

@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "core/decode/ax25.h"
+#include "core/decode/fx25.h"
 #include "core/decode/pocsag.h"
 #include "core/decode/rtty.h"
 #include "core/decode/sitor_b.h"
@@ -146,6 +147,44 @@ struct Ax25FrameSpec {
 // information.
 [[nodiscard]] Expected<std::vector<float>> ax25_render(
     const Ax25ModConfig& config, std::span<const std::vector<std::uint8_t>> frames);
+
+// ---------------------------------------------------------------------------
+// FX.25 around AX.25
+// ---------------------------------------------------------------------------
+
+// Which Table 1 code carries a frame. With tag zero, the shortest code with
+// check_symbols check octets whose information octets hold the packet, which
+// is what a transmitter choosing by "the characteristics of the transmission
+// channel" ("FEC Algorithms") would do once it had chosen the strength.
+struct Fx25Choice {
+    std::uint8_t tag = 0;
+    std::size_t check_symbols = 16;
+};
+
+// One frame, given as address through information, as its FEC Codeblock in
+// the order of "Physical Layer Considerations": the FCS appended, the frame
+// bit stuffed between one opening and one closing flag ("AX.25 Packet
+// Requirements"), the last octet filled out with the high-order bits of
+// 0x7E and whole 0x7E octets after it ("Pad Requirements"), then the
+// Reed-Solomon check octets. Returns the codeblock's octets and sets `mode`
+// to the Table 1 row used. Fails when no code with that many check symbols
+// is long enough, or `tag` names no code.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> fx25_codeblock(std::span<const std::uint8_t> frame,
+                                                                 const Fx25Choice& choice,
+                                                                 const decode::Fx25Mode*& mode);
+
+// The bits on the air before NRZI for FX.25 frames: leading flags as the
+// Preamble, then for each frame its correlation tag and codeblock, with
+// flags_between flags between frames and trailing flags as the Postamble.
+// Every octet least significant bit first.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> fx25_bits(
+    std::span<const std::vector<std::uint8_t>> frames, const Fx25Choice& choice,
+    const Ax25ModConfig& config);
+
+// fx25_bits then afsk_render_bits.
+[[nodiscard]] Expected<std::vector<float>> fx25_render(
+    const Ax25ModConfig& config, std::span<const std::vector<std::uint8_t>> frames,
+    const Fx25Choice& choice);
 
 // ---------------------------------------------------------------------------
 // POCSAG

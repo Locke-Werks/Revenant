@@ -376,7 +376,9 @@ constexpr std::string_view kStatusInfo = ">Net Control Center";
 constexpr std::string_view kMessageInfo = ":WU2Z     :Testing{003";
 constexpr std::string_view kPlainInfo = "hello from revenant";
 
-[[nodiscard]] Expected<Capture> ax25_capture(double snr_2500_db) {
+// With fx25 set, the same four frames each inside an FX.25 codeblock of the
+// shortest 16-check code that holds it.
+[[nodiscard]] Expected<Capture> ax25_capture(double snr_2500_db, bool fx25 = false) {
     std::vector<std::vector<std::uint8_t>> frames;
     for (const std::string_view info : {kPositionInfo, kStatusInfo, kMessageInfo}) {
         siggen::Ax25FrameSpec spec;
@@ -405,7 +407,8 @@ constexpr std::string_view kPlainInfo = "hello from revenant";
     mod.rate = kFileRate;
     mod.amplitude = 1.0;
     mod.flags_between = 16;
-    auto audio = siggen::ax25_render(mod, frames);
+    auto audio = fx25 ? siggen::fx25_render(mod, frames, siggen::Fx25Choice{})
+                      : siggen::ax25_render(mod, frames);
     if (!audio) {
         return std::unexpected(audio.error());
     }
@@ -416,7 +419,8 @@ constexpr std::string_view kPlainInfo = "hello from revenant";
     if (auto noisy = add_noise(*signal, snr_2500_db); !noisy) {
         return std::unexpected(noisy.error());
     }
-    return Capture{"ax25_nfm", std::move(*signal), rpc::Demod::Nfm, kVhfCentre};
+    return Capture{fx25 ? "ax25_fx25_nfm" : "ax25_nfm", std::move(*signal), rpc::Demod::Nfm,
+                   kVhfCentre};
 }
 
 constexpr std::uint32_t kAlphaRic = 1'234'567;
@@ -1205,6 +1209,7 @@ TEST_CASE("AX.25 frames and their APRS fields cross the wire from an nfm receive
     std::set<std::string> kinds;
     for (const rpc::DecodedMessage& message : run.messages) {
         kinds.insert(message.kind);
+        CHECK_FALSE(flag_of(message, "fx25"));
         if (message.kind == "frame") {
             CHECK(text_of(message, "source") == "N0CALL-2");
             CHECK(text_of(message, "destination") == "N0CALL-1");
@@ -1264,6 +1269,32 @@ TEST_CASE("AX.25 frames and their APRS fields cross the wire from an nfm receive
     WARN(std::format("ax25 at {} dB/2500 Hz: {} of 4 frames, {} FCS failures before the last",
                      kLowSnrDb, low.messages.size(), fcs_failures));
     CHECK(low.messages.size() <= 4);
+}
+
+TEST_CASE("FX.25 frames cross the wire through the ax25 decoder, marked and once each",
+          "[gpu][rpc][decode]") {
+    REVENANT_NEEDS_GPU();
+
+    auto capture = ax25_capture(kHighSnrDb, true);
+    INFO(test::message_of(capture));
+    REQUIRE(capture.has_value());
+    const Run run = run_capture(*capture, "ax25", true);
+    INFO(std::format("{} messages arrived:{}", run.messages.size(), arrived(run)));
+    check_common(run, "ax25");
+
+    std::set<std::string> kinds;
+    for (const rpc::DecodedMessage& message : run.messages) {
+        kinds.insert(message.kind);
+        CHECK(flag_of(message, "fx25"));
+        // Each frame is 40 to 50 octets on the air, so the 16-check code
+        // that holds it is RS(80,64), Tag_03 of Table 1.
+        CHECK(integer_of(message, "fx25_tag") == 3);
+        CHECK(integer_of(message, "fx25_corrected") >= 0);
+    }
+    // The four frames, each once: the copy plain AX.25 also finds inside
+    // the codeblock is replaced rather than repeated.
+    CHECK(kinds == std::set<std::string>{"aprs_position", "aprs_status", "aprs_message", "frame"});
+    CHECK(run.messages.size() == 4);
 }
 
 TEST_CASE("POCSAG pages at two rates cross the wire from an nfm receiver",

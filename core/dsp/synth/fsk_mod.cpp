@@ -135,6 +135,40 @@ Expected<std::vector<std::uint8_t>> ax25_frame_octets(const Ax25FrameSpec& frame
     return out;
 }
 
+namespace {
+
+// One frame's octets with its FCS appended, least significant bit first and
+// bit stuffed, AX.25 2.2 clauses 3.6 to 3.8.
+void append_stuffed_frame(std::vector<std::uint8_t>& bits, std::vector<std::uint8_t> octets) {
+    // Clause 3.8 by way of Finnegan and Benson section 3.2: the FCS
+    // register holds the check bit-reversed, so low octet first, each
+    // least significant bit first, sends bit 15 first.
+    const std::uint16_t fcs = decode::ax25_fcs(octets);
+    octets.push_back(static_cast<std::uint8_t>(fcs & 0xFFU));
+    octets.push_back(static_cast<std::uint8_t>(fcs >> 8U));
+
+    int ones = 0;
+    for (const std::uint8_t octet : octets) {
+        for (unsigned b = 0; b < 8; ++b) {
+            const auto bit = static_cast<std::uint8_t>((octet >> b) & 1U);
+            bits.push_back(bit);
+            ones = bit != 0U ? ones + 1 : 0;
+            if (ones == decode::kAx25StuffAfterOnes) {
+                bits.push_back(0);
+                ones = 0;
+            }
+        }
+    }
+}
+
+void append_octet(std::vector<std::uint8_t>& bits, std::uint8_t octet) {
+    for (unsigned b = 0; b < 8; ++b) {
+        bits.push_back(static_cast<std::uint8_t>((octet >> b) & 1U));
+    }
+}
+
+}  // namespace
+
 std::vector<std::uint8_t> hdlc_bits(std::span<const std::vector<std::uint8_t>> frames,
                                     const Ax25ModConfig& config) {
     std::vector<std::uint8_t> bits;
@@ -148,26 +182,7 @@ std::vector<std::uint8_t> hdlc_bits(std::span<const std::vector<std::uint8_t>> f
 
     flags(config.leading_flags);
     for (std::size_t i = 0; i < frames.size(); ++i) {
-        std::vector<std::uint8_t> octets = frames[i];
-        // Clause 3.8 by way of Finnegan and Benson section 3.2: the FCS
-        // register holds the check bit-reversed, so low octet first, each
-        // least significant bit first, sends bit 15 first.
-        const std::uint16_t fcs = decode::ax25_fcs(octets);
-        octets.push_back(static_cast<std::uint8_t>(fcs & 0xFFU));
-        octets.push_back(static_cast<std::uint8_t>(fcs >> 8U));
-
-        int ones = 0;
-        for (const std::uint8_t octet : octets) {
-            for (unsigned b = 0; b < 8; ++b) {
-                const auto bit = static_cast<std::uint8_t>((octet >> b) & 1U);
-                bits.push_back(bit);
-                ones = bit != 0U ? ones + 1 : 0;
-                if (ones == decode::kAx25StuffAfterOnes) {
-                    bits.push_back(0);
-                    ones = 0;
-                }
-            }
-        }
+        append_stuffed_frame(bits, frames[i]);
         flags(i + 1 == frames.size() ? config.trailing_flags : config.flags_between);
     }
     return bits;
@@ -202,6 +217,101 @@ Expected<std::vector<float>> ax25_render(const Ax25ModConfig& config,
                                          std::span<const std::vector<std::uint8_t>> frames) {
     const std::vector<std::uint8_t> bits = hdlc_bits(frames, config);
     return afsk_render_bits(config, bits);
+}
+
+// ---------------------------------------------------------------------------
+// FX.25
+// ---------------------------------------------------------------------------
+
+Expected<std::vector<std::uint8_t>> fx25_codeblock(std::span<const std::uint8_t> frame,
+                                                   const Fx25Choice& choice,
+                                                   const decode::Fx25Mode*& mode) {
+    // "AX.25 Packet Requirements": at least one flag each side.
+    std::vector<std::uint8_t> bits;
+    append_octet(bits, decode::kAx25Flag);
+    append_stuffed_frame(bits, std::vector<std::uint8_t>(frame.begin(), frame.end()));
+    append_octet(bits, decode::kAx25Flag);
+    const std::size_t packet_octets = (bits.size() + 7) / 8;
+
+    mode = nullptr;
+    if (choice.tag != 0) {
+        mode = decode::fx25_mode(choice.tag);
+        if (mode == nullptr) {
+            return fail("an FX.25 tag that Table 1 assigns no code");
+        }
+        if (mode->k < packet_octets) {
+            return fail("the AX.25 packet is longer than the FX.25 code's information octets");
+        }
+    } else {
+        for (const decode::Fx25Mode& m : decode::kFx25Modes) {
+            if (m.check() == choice.check_symbols && m.k >= packet_octets &&
+                (mode == nullptr || m.k < mode->k)) {
+                mode = &m;
+            }
+        }
+        if (mode == nullptr) {
+            return fail("no FX.25 code with that many check octets holds the AX.25 packet");
+        }
+    }
+
+    // "Pad Requirements": the fraction of a 0x7E octet that finishes the
+    // last packet octet takes 0x7E's high-order bits, "truncate the LSb
+    // portions", and whole 0x7E octets follow to k.
+    std::vector<std::uint8_t> word(mode->n, 0);
+    for (std::size_t i = 0; i < 8 * mode->k; ++i) {
+        const auto bit = i < bits.size()
+                             ? bits[i]
+                             : static_cast<std::uint8_t>((decode::kAx25Flag >> (i % 8)) & 1U);
+        word[i / 8] = static_cast<std::uint8_t>(word[i / 8] | (bit << (i % 8)));
+    }
+
+    auto codec = decode::Rs8Codec::create(decode::fx25_rs_params(mode->check()));
+    if (!codec) {
+        return std::unexpected(with_context(codec.error(), "FX.25"));
+    }
+    // "Protocol Summary": the check symbols at the end of the codeblock.
+    codec->encode(std::span<const std::uint8_t>(word).first(mode->k),
+                  std::span<std::uint8_t>(word).subspan(mode->k));
+    return word;
+}
+
+Expected<std::vector<std::uint8_t>> fx25_bits(std::span<const std::vector<std::uint8_t>> frames,
+                                              const Fx25Choice& choice,
+                                              const Ax25ModConfig& config) {
+    std::vector<std::uint8_t> bits;
+    const auto flags = [&bits](std::size_t count) {
+        for (std::size_t f = 0; f < count; ++f) {
+            append_octet(bits, decode::kAx25Flag);
+        }
+    };
+    // "Preamble Details" and "Postamble Requirements": runs of 0x7E.
+    flags(config.leading_flags);
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const decode::Fx25Mode* mode = nullptr;
+        auto word = fx25_codeblock(frames[i], choice, mode);
+        if (!word) {
+            return std::unexpected(word.error());
+        }
+        // "Correlation Tag Details": bit 0 of the 64-bit value first.
+        for (std::size_t b = 0; b < decode::kFx25TagBits; ++b) {
+            bits.push_back(static_cast<std::uint8_t>((mode->tag >> b) & 1U));
+        }
+        for (const std::uint8_t octet : *word) {
+            append_octet(bits, octet);
+        }
+        flags(i + 1 == frames.size() ? config.trailing_flags : config.flags_between);
+    }
+    return bits;
+}
+
+Expected<std::vector<float>> fx25_render(const Ax25ModConfig& config,
+                                         std::span<const std::vector<std::uint8_t>> frames,
+                                         const Fx25Choice& choice) {
+    auto bits = fx25_bits(frames, choice, config);
+    if (!bits) {
+        return std::unexpected(bits.error());
+    }
+    return afsk_render_bits(config, *bits);
 }
 
 // ---------------------------------------------------------------------------
