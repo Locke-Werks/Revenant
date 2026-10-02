@@ -1203,6 +1203,14 @@ class EngineLink : public QObject {
     Q_PROPERTY(int rackCount READ rackCount NOTIFY rackChanged)
     Q_PROPERTY(bool rackFull READ rackFull NOTIFY rackChanged)
 
+    // Automatic P25 receivers: while on, every P25 detection on a frequency no
+    // receiver covers gets a held p25p1 receiver of its own, and none is ever
+    // taken away for it. models/p25_spawn.h has the rule. Not remembered across
+    // a restart, for the reason models/settings.h gives for not restoring a
+    // receiver: a window that opened receivers on its own at launch would be
+    // acting on a band nobody has looked at yet.
+    Q_PROPERTY(bool autoP25 READ autoP25 WRITE setAutoP25 NOTIFY autoP25Changed)
+
     // The focused receiver's key and colour slot, zero and zero with none.
     Q_PROPERTY(qulonglong focusedKey READ focusedKey NOTIFY rackChanged)
     Q_PROPERTY(int focusedSlot READ focusedSlot NOTIFY rackChanged)
@@ -2445,6 +2453,17 @@ public:
     // removeReceiver, which then focuses the one that took its place.
     Q_INVOKABLE void removeRackReceiver(qulonglong key);
 
+    // The operator's remove, from a strip, the detail panel or the command:
+    // removeRackReceiver, or removeReceiver for key zero, the focused one.
+    // Kept apart from those two because the engine's own removals go through
+    // them as well, and only this one means "not that frequency": while
+    // autoP25 is on, the frequency is not spawned on again until the switch
+    // is turned on afresh.
+    Q_INVOKABLE void dismissReceiver(qulonglong key);
+
+    [[nodiscard]] bool autoP25() const { return auto_p25_; }
+    void setAutoP25(bool on);
+
     // Another receiver for main()'s --receiver after the first, placed as a
     // held receiver once the first connection with a source can reach it.
     void addStartupReceiver(double absolute_hz, const QString& mode);
@@ -2787,6 +2806,7 @@ signals:
     // or the focused one moved. Also emitted beside receiverChanged and
     // receiverStatusChanged, because the focused strip reads the pane.
     void rackChanged();
+    void autoP25Changed();
 
     // A click on the span focused, retuned, opened or added a receiver, so
     // the receiver window comes forward. Emitted by spanClick and
@@ -3567,6 +3587,11 @@ private:
     // Qt thread.
     void adopt_held_reports();
 
+    // Opens a receiver on every P25 detection models/p25_spawn.h says needs
+    // one, when autoP25 is on. Qt thread, after each detection list lands and
+    // when the switch goes on. rack_link.cpp.
+    void spawn_p25_receivers();
+
     // Qt thread. Moves the pane onto the held receiver under key, parking
     // the pane's own first. The one path every focus change takes.
     void focus_entry(std::uint64_t key);
@@ -3616,6 +3641,13 @@ private:
     std::vector<std::pair<std::uint64_t, HeldView>> held_views_;
     std::uint64_t pane_key_ = 0;
     QString rack_note_;
+
+    // autoP25, the frequencies the operator removed a receiver from while it
+    // was on, and the frequencies already reported as having no room, so the
+    // rack note says each once rather than on every detection pass.
+    bool auto_p25_ = false;
+    std::vector<double> auto_p25_dismissed_hz_;
+    std::vector<double> auto_p25_noted_hz_;
 
     [[nodiscard]] HeldView* held_view(std::uint64_t key);
     [[nodiscard]] const HeldView* held_view(std::uint64_t key) const;

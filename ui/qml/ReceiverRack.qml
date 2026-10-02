@@ -54,6 +54,25 @@ ColumnLayout {
 
         Item { Layout.fillWidth: true }
 
+        // Automatic P25 receivers: one on every P25 signal the detector
+        // verifies, kept for the session. models/p25_spawn.h has the rule.
+        RButton {
+            flat: true
+            checkable: true
+            checked: engineLink.autoP25
+            text: "auto P25"
+            ink: Theme.inkDim
+            enabled: engineLink.sourceOpen
+            onClicked: engineLink.autoP25 = !engineLink.autoP25
+
+            Tip {
+                visible: parent.hovered
+                text: engineLink.autoP25
+                      ? "opening a receiver on every P25 signal found; a receiver you remove stays removed"
+                      : "open a receiver on every P25 signal the detector finds, and keep it"
+            }
+        }
+
         // The key table's "put a new receiver on the span centre", for a
         // mouse. The span's double click is the other way to add one.
         RButton {

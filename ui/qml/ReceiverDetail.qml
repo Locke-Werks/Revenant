@@ -176,7 +176,7 @@ ColumnLayout {
             flat: true
             text: "remove"
             ink: Theme.inkDim
-            onClicked: engineLink.removeReceiver()
+            onClicked: engineLink.dismissReceiver(0)
         }
     }
 

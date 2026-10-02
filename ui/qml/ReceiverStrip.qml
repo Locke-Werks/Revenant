@@ -122,7 +122,7 @@ Rectangle {
                 flat: true
                 text: "×"
                 ink: Theme.inkDim
-                onClicked: engineLink.removeRackReceiver(strip.entry.key)
+                onClicked: engineLink.dismissReceiver(strip.entry.key)
 
                 Tip {
                     visible: parent.hovered
@@ -168,7 +168,7 @@ Rectangle {
                 text: "remove"
                 ink: Theme.inkDim
                 font.pixelSize: Theme.sizeSmall
-                onClicked: engineLink.removeRackReceiver(strip.entry.key)
+                onClicked: engineLink.dismissReceiver(strip.entry.key)
             }
 
             Readout {

@@ -88,7 +88,7 @@ Item {
             commands.focusReceivers()
             commands.receiverPanel.dial.edit()
         },
-        "receiver.remove": () => engineLink.removeReceiver(),
+        "receiver.remove": () => engineLink.dismissReceiver(0),
         "receiver.aft": () => {
             engineLink.aftEnabled = !engineLink.aftEnabled
         },

@@ -1046,6 +1046,7 @@ void EngineLink::adopt_detections()
     // same pass is the same reading.
     if (decided) {
         sample_known_carrier(true);
+        spawn_p25_receivers();
     }
 }
 

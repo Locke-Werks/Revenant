@@ -33,6 +33,7 @@
 #include <QString>
 #include <QVariantMap>
 
+#include "models/p25_spawn.h"
 #include "models/receiver_palette.h"
 #include "models/window_raise.h"
 
@@ -588,6 +589,104 @@ void EngineLink::removeRackReceiver(qulonglong key)
 
     post_audio_wants();
     emit rackChanged();
+}
+
+void EngineLink::dismissReceiver(qulonglong key)
+{
+    const std::uint64_t which = key == 0 ? pane_key_ : key;
+    if (which == 0) {
+        return;
+    }
+
+    // Recorded only while the switch is on. With it off nothing would spawn
+    // there anyway, and turning it on clears the list, because on means all of
+    // them.
+    if (auto_p25_) {
+        double hz = 0.0;
+        if (which == pane_key_) {
+            hz = static_cast<double>(receiver_absolute_hz_);
+        } else if (const HeldView* view = held_view(which); view != nullptr) {
+            hz = static_cast<double>(view->absolute_hz);
+        }
+        if (hz != 0.0) {
+            auto_p25_dismissed_hz_.push_back(hz);
+        }
+    }
+
+    if (which == pane_key_) {
+        removeReceiver();
+    } else {
+        removeRackReceiver(which);
+    }
+}
+
+void EngineLink::setAutoP25(bool on)
+{
+    if (auto_p25_ == on) {
+        return;
+    }
+    auto_p25_ = on;
+    auto_p25_dismissed_hz_.clear();
+    auto_p25_noted_hz_.clear();
+    emit autoP25Changed();
+
+    // At once rather than at the next detection pass, so the switch answers
+    // with the P25 already on the span.
+    spawn_p25_receivers();
+}
+
+void EngineLink::spawn_p25_receivers()
+{
+    if (!auto_p25_ || !connected_ || !sourceOpen()) {
+        return;
+    }
+
+    // Every receiver's centre, the pane's from the record its tune kept and the
+    // held ones' from their views, which exist from the moment one is asked for.
+    // So a receiver spawned last pass and not yet answered by the engine still
+    // covers its frequency, and a pass cannot open it twice.
+    std::vector<double> covered = auto_p25_dismissed_hz_;
+    for (const RackEntry& entry : rack_.entries()) {
+        if (entry.key == pane_key_) {
+            if (receiver_absolute_hz_ != 0) {
+                covered.push_back(static_cast<double>(receiver_absolute_hz_));
+            }
+        } else if (const HeldView* view = held_view(entry.key); view != nullptr) {
+            covered.push_back(static_cast<double>(view->absolute_hz));
+        }
+    }
+
+    const std::size_t room = kMaxReceivers - std::min(rack_.size(), kMaxReceivers);
+    const P25SpawnPlan plan = plan_p25_spawns(shown_.detections, covered, room);
+
+    // Held, never focused: the pane stays on whatever the operator is looking
+    // at. The params are the startup receivers' (place_startup_receiver): the
+    // mode and the mode's own filter, which for p25p1 is the 12.5 kHz channel.
+    for (const P25Spawn& spawn : plan.open) {
+        const auto key = rack_.add();
+        if (!key) {
+            break;
+        }
+        rpc::VrxParams params;
+        params.demod = rpc::Demod::P25p1;
+        add_held_receiver(*key, spawn.centre_hz, params);
+    }
+
+    for (const double hz : plan.no_room_hz) {
+        const bool noted =
+            std::any_of(auto_p25_noted_hz_.begin(), auto_p25_noted_hz_.end(),
+                        [hz](double seen) { return std::abs(seen - hz) <= kP25SpawnToleranceHz; });
+        if (!noted) {
+            auto_p25_noted_hz_.push_back(hz);
+            set_rack_note(QStringLiteral("auto P25: no receiver for %1 MHz, the rack is full")
+                              .arg(hz / 1e6, 0, 'f', 4));
+        }
+    }
+
+    if (!plan.open.empty()) {
+        post_audio_wants();
+        emit rackChanged();
+    }
 }
 
 void EngineLink::post_audio_wants()
