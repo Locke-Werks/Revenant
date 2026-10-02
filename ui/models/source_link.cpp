@@ -539,6 +539,29 @@ void EngineLink::adopt_source_tuning()
         }
     }
 
+    // THE PANE'S RECEIVER STAYED WHERE IT WAS, SO ITS OFFSET MOVED. The engine
+    // re-pins every receiver it keeps to the absolute frequency it was on, by
+    // taking the move off its baseband offset; Engine::set_source_center has
+    // the argument. wanted_.center is this window's copy of that offset and
+    // nothing else rebases it, so left alone it describes the old centre:
+    // receiverCenterHz added the new centre to it and read high or low by
+    // exactly the retune, which put the span marker and the rack card that far
+    // from the signal the receiver was still hearing, pushed the pane's filter
+    // rules off its axis so it drew none, and would have been sent back to the
+    // engine as the receiver's centre by the next width or mode change.
+    // Reported by the owner on 2026-10-02 after a 303 kHz retune.
+    //
+    // Rebuilt from receiver_absolute_hz_, the record kept for exactly this,
+    // rather than by subtracting the move, because the old centre is already
+    // gone: info_ was replaced above. No request is sent, because the engine
+    // made this change itself. After the removals, so a receiver the retune
+    // took is not rebased first.
+    if (geometry_moved && receiver_id_ != 0) {
+        wanted_.center = receiver_absolute_hz_ - info_.source_center;
+        emit receiverChanged();
+        note_receiver_bookmarked();
+    }
+
     // A bookmark waiting on this retune, placed now that source_center holds the
     // centre the radio actually landed on. THIS IS THE ONLY MOMENT IT IS RIGHT:
     // recallBookmark could not do it, because tuneSourceHz had not been answered
