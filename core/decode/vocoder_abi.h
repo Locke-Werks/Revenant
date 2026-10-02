@@ -198,7 +198,20 @@ typedef struct rv_vocoder_desc {
 
     /* NUL-terminated ASCII, for the operator and the log. Something a person
      * can match against what they plugged in: "imbe-tia102", "codec2-3200",
-     * "acme-dongle-fw2.1". */
+     * "acme-dongle-fw2.1".
+     *
+     * The name also routes. A digital voice mode whose voice Revenant does not
+     * decode itself hands its voice to the first offer whose name is that
+     * mode's name, or starts with it followed by '-', ':', '_' or '.', and
+     * whose bit_count is the unit that mode's framing carries:
+     *
+     *   "dstar"  72 bits, one D-STAR voice frame (JARL standard 4.1.2 b)
+     *   "dmr"    216 bits, the vocoder socket bits of one DMR voice burst
+     *            (ETSI TS 102 361-1), VS(215) first
+     *
+     * So "dmr-acme" serves DMR. pcm_frames and sample_rate are the plugin's
+     * own. With no offer for a mode, that mode plays silence. Adding a routed
+     * mode adds a row here and does not change the ABI. */
     char name[RV_VOCODER_NAME_CAPACITY];
 } rv_vocoder_desc;
 

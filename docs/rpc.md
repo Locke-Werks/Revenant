@@ -497,7 +497,10 @@ as two-channel PCM renders as noise at the wrong speed, at tens of times the
 rate this design was costed at. An I/Q subscription is a separate method that
 does not exist.
 
-D-STAR and TETRA are refused too, in their own words. The three digital voice
+TETRA is refused too, in its own words. D-STAR and DMR are served through a
+vocoder plugin since 2026-10-02, and are silence with none loaded; see "D-STAR
+and DMR voice through a plugin" below. WHAT THIS PARAGRAPH USED TO SAY: "D-STAR
+and TETRA are refused too, in their own words." The three digital voice
 modes left the raw tap for the fine stage on 2026-09-22 and hand out complex
 baseband mixed to DC at the rate their decoder was built for, 48000 S/s for
 P25 and D-STAR and 72000 for TETRA, which `VrxStatus::demodRate` states. Until
@@ -1043,8 +1046,28 @@ holds it and answers the three questions:
 - The time between calls, and an encrypted call, are silence at the full 8000
   S/s with `squelchOpen` false, which is how a closed squelch already crosses.
   `P25Voice` hands nothing out for an encrypted call, so nothing of one plays.
-- The refusal became the subscription. D-STAR and TETRA are still refused,
-  saying there is no AMBE or ACELP codec in the engine.
+- The refusal became the subscription. TETRA is still refused, saying there is
+  no ACELP codec in the engine. WHAT THIS USED TO SAY: "D-STAR and TETRA are
+  still refused, saying there is no AMBE or ACELP codec in the engine." D-STAR
+  and DMR are served through a plugin since 2026-10-02, below.
+
+### D-STAR and DMR voice through a plugin
+
+Since 2026-10-02 `subscribeAudio` on a dstar or dmr receiver serves its voice
+through a vocoder plugin, `core/rpc/plugin_voice.h`, on the same terms as P25:
+mono, silent between calls, `sampleIndex` counted at the chunk's own rate.
+
+- The plugin is the first loaded offer whose name serves the mode, by the
+  convention `core/decode/vocoder_abi.h` states beside `rv_vocoder_desc::name`,
+  and whose `bit_count` is the mode's unit: 72 bits per D-STAR voice frame, 216
+  vocoder socket bits per DMR voice burst. The rate is the plugin's.
+- With no such plugin, or one that refuses to open, the subscription is silence
+  at 8000 S/s with `squelchOpen` false, and nothing says why. That is the owner's
+  call: a missing plugin is not a fault in the radio.
+- DMR follows one slot's call at a time, released by a terminator or a second
+  without voice, and a call marked private by a PI header or the Service Options
+  Privacy bit is silence and never reaches the plugin.
+- `Session.vocoderPlugins` reports what the engine loaded.
 
 `P25Voice` hands a call over an LDU at a time, 1440 samples every 180 ms of
 air, detected at the end of whichever engine block holds the LDU's last

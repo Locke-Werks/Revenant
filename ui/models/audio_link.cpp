@@ -249,10 +249,14 @@ void EngineLink::publish_mix()
         if (live_audio_[slot].demod == rpc::Demod::Wfm) {
             wfm |= std::uint64_t{1} << slot;
         }
-        // P25 alone, because it is the one digital mode whose subscription
-        // carries voice. D-STAR, TETRA and DMR have no vocoder in this tree and
-        // the engine refuses their audio, so none of them reaches a slot.
-        if (live_audio_[slot].demod == rpc::Demod::P25p1) {
+        // Every mode whose subscription carries decoded voice: P25 through the
+        // engine's IMBE, D-STAR and DMR through a vocoder plugin since
+        // 2026-10-02 (core/rpc/plugin_voice.h). TETRA's audio is refused, so it
+        // never reaches a slot. WHAT THIS USED TO SAY: "P25 alone, because it is
+        // the one digital mode whose subscription carries voice."
+        const rpc::Demod demod = live_audio_[slot].demod;
+        if (demod == rpc::Demod::P25p1 || demod == rpc::Demod::Dstar ||
+            demod == rpc::Demod::Dmr) {
             voice |= std::uint64_t{1} << slot;
         }
         if (live_audio_[slot].vrx == live_receiver_id_) {

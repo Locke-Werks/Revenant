@@ -618,6 +618,41 @@ Expected<std::unique_ptr<Vocoder>> VocoderPluginSet::open(const VocoderFrame& wa
         available));
 }
 
+bool vocoder_name_serves(std::string_view name, std::string_view mode) noexcept
+{
+    if (mode.empty() || !name.starts_with(mode)) {
+        return false;
+    }
+    if (name.size() == mode.size()) {
+        return true;
+    }
+    const char next = name[mode.size()];
+    return next == '-' || next == ':' || next == '_' || next == '.';
+}
+
+std::optional<Expected<std::unique_ptr<Vocoder>>> VocoderPluginSet::open_for_mode(
+    std::string_view mode, std::uint32_t bit_count) const
+{
+    for (const std::shared_ptr<VocoderPluginModule>& module : modules_) {
+        for (const rv_vocoder_desc& desc : module->descriptors) {
+            if (desc.bit_count != bit_count || !vocoder_name_serves(terminated_name(desc), mode)) {
+                continue;
+            }
+            rv_vocoder* const handle = module->create(&desc);
+            if (handle == nullptr) {
+                return Expected<std::unique_ptr<Vocoder>>(std::unexpected(Error{std::format(
+                    "{} offers {} for {} and refused to open it. A plugin that enumerates a "
+                    "vocoder and then declines usually has no hardware attached, or has it open "
+                    "already in another handle or another process",
+                    module->path.filename().string(), terminated_name(desc), mode)}));
+            }
+            return Expected<std::unique_ptr<Vocoder>>(
+                std::unique_ptr<Vocoder>(new PluginVocoder(module, desc, handle)));
+        }
+    }
+    return std::nullopt;
+}
+
 std::filesystem::path default_vocoder_plugin_directory()
 {
 #ifdef _WIN32

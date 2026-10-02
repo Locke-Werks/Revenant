@@ -3029,7 +3029,11 @@ interface Session {
     # separate method that does not exist yet, and putting it behind this name
     # is the only thing that would make it look like one.
     #
-    # D-STAR and TETRA are refused as well, in words of their own. Since
+    # TETRA is refused as well, in words of its own. D-STAR and DMR are served
+    # through a vocoder plugin since 2026-10-02, and are silence with none
+    # loaded; docs/rpc.md, "D-STAR and DMR voice through a plugin". WHAT THIS
+    # USED TO SAY: "D-STAR and TETRA are refused as well, in words of their
+    # own." Since
     # 2026-09-22 the digital voice modes are not raw taps: they go through the
     # fine stage and come out as complex baseband mixed to DC at their
     # decoder's rate, which VrxStatus::demodRate states, and subscribeDecoded

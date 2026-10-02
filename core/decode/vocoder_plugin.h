@@ -176,6 +176,22 @@ public:
     // a plugin that would satisfy it.
     [[nodiscard]] Expected<std::unique_ptr<Vocoder>> open(const VocoderFrame& want) const;
 
+    // Open the vocoder a digital voice mode's audio goes through: the first
+    // offer, in scan order, whose name serves `mode` (vocoder_name_serves) and
+    // which takes `bit_count` bits, the unit that mode's framing hands over.
+    //
+    // By name and bit count, and not by the whole frame, because the host
+    // knows only its own framing. Samples out and the rate are the plugin's,
+    // and asserting them here would put a vocoder's constants in a file that
+    // has no document for them. The name is what tells two codecs of one
+    // bit count apart.
+    //
+    // nullopt when nothing serves the mode, which is the ordinary case and
+    // not a fault: the mode plays silence. An error when an offer matched and
+    // the plugin refused to open it.
+    [[nodiscard]] std::optional<Expected<std::unique_ptr<Vocoder>>> open_for_mode(
+        std::string_view mode, std::uint32_t bit_count) const;
+
 private:
     friend VocoderPluginSet scan_vocoder_plugins(const VocoderPluginScanOptions& options);
 
@@ -185,6 +201,13 @@ private:
     std::vector<std::shared_ptr<VocoderPluginModule>> modules_;
     std::size_t offer_count_ = 0;
 };
+
+// Whether a plugin's offer named `name` is for `mode`, a demodulator name such
+// as "dmr" or "dstar": the name is the mode, or starts with it followed by
+// '-', ':', '_' or '.', so "dmr", "dmr-acme" and "dstar:fw2" serve their modes
+// and "dmrx" does not serve "dmr". The convention a plugin follows to be
+// routed; core/decode/vocoder_abi.h states it beside rv_vocoder_desc::name.
+[[nodiscard]] bool vocoder_name_serves(std::string_view name, std::string_view mode) noexcept;
 
 // Scan the directory and load what passes. Cannot fail: everything that could
 // go wrong is a reported condition, because none of it stops the mode above

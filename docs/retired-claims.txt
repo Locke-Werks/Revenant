@@ -2141,3 +2141,12 @@ retired: 2026-09-27
 commit: "Start the engine from the client and reopen the last radio"
 instead: The client starts revenant-engine --no-source beside it when nothing
     answers on its port, and reopens the last radio. README.md, "Install".
+
+phrase: D-STAR and TETRA have no voice codec in this tree
+phrase: D-STAR and TETRA are still refused
+phrase: D-STAR and TETRA are refused as well
+phrase: D-STAR and TETRA are refused too
+retired: 2026-10-02
+commit: "Route D-STAR and DMR voice to a vocoder plugin"
+instead: subscribeAudio serves dstar and dmr voice through a vocoder plugin,
+    silence with none loaded; only TETRA is refused. core/rpc/plugin_voice.h.

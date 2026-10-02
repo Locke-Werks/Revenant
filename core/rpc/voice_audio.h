@@ -5,7 +5,10 @@
 // takes the place of the receiver's analog audio. A P25 receiver plays IMBE
 // voice at 8000 S/s, is silent between calls, and plays nothing for an
 // encrypted call, so a listener never hears discriminator noise. D-STAR and
-// TETRA have no voice codec in this tree, so their audio stays refused.
+// DMR voice goes through a vocoder plugin since 2026-10-02,
+// core/rpc/plugin_voice.h; TETRA's audio stays refused. WHAT THIS USED TO SAY:
+// "D-STAR and TETRA have no voice codec in this tree, so their audio stays
+// refused."
 //
 // This is the smallest change docs/rpc.md named for it, answered question by
 // question:

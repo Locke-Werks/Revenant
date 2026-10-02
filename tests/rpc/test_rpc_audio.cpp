@@ -86,6 +86,7 @@
 #include "core/engine/engine.h"
 #include "core/error.h"
 #include "core/rpc/client.h"
+#include "core/rpc/plugin_voice.h"
 #include "core/rpc/types.h"
 #include "tests/reference/gpu_fixture.h"
 #include "tests/reference/reference_diff.h"
@@ -416,7 +417,11 @@ TEST_CASE("subscribeAudio refuses a digital voice receiver with no codec and nam
     // WHAT THIS CASE USED TO RUN ON: a p25p1 receiver. P25 voice is served
     // since 2026-09-23, tests/rpc/test_rpc_voice.cpp has it, and the two modes
     // with no voice codec in this tree are what is refused now.
-    const rpc::Demod mode = GENERATE(rpc::Demod::Dstar, rpc::Demod::Tetra);
+    //
+    // And then on dstar as well as tetra, until 2026-10-02, when D-STAR and
+    // DMR voice went to a vocoder plugin; the case below holds what a dstar
+    // or dmr receiver is served instead. TETRA alone is refused now.
+    const rpc::Demod mode = rpc::Demod::Tetra;
 
     Harness harness;
     bring_up(harness, HarnessOptions{});
@@ -437,12 +442,53 @@ TEST_CASE("subscribeAudio refuses a digital voice receiver with no codec and nam
     REQUIRE_FALSE(refused.has_value());
     INFO(refused.error().message);
     CHECK(refused.error().message.find("raw tap") == std::string::npos);
-    CHECK(refused.error().message.find(mode == rpc::Demod::Dstar ? "dstar" : "tetra") !=
-          std::string::npos);
+    CHECK(refused.error().message.find("tetra") != std::string::npos);
     CHECK(refused.error().message.find("voice codec") != std::string::npos);
     CHECK(refused.error().message.find("subscribeDecoded") != std::string::npos);
     CHECK(refused.error().message.find(std::format("{} S/s", status->demod_rate)) !=
           std::string::npos);
+}
+
+TEST_CASE("a dstar or dmr receiver with no vocoder plugin is served silence, not refused",
+          "[gpu][rpc][audio][vocoder]") {
+    REVENANT_NEEDS_GPU();
+
+    // The owner's call, 2026-10-02: D-STAR and DMR voice goes through a vocoder
+    // plugin, and with none loaded the receiver plays silence and says nothing.
+    // Rejects keeping the refusal, which a client would show as a fault, and
+    // rejects a subscription that opens and then never sends, which a client
+    // cannot tell from a dead engine. core/rpc/plugin_voice.h.
+    const rpc::Demod mode = GENERATE(rpc::Demod::Dstar, rpc::Demod::Dmr);
+
+    Harness harness;
+    bring_up_running(harness, streaming_options());
+
+    rpc::VrxParams params = nfm_receiver();
+    params.demod = mode;
+    params.bandwidth = 0;
+    auto vrx = harness.client().add_vrx(params);
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto log = std::make_shared<AudioLog>();
+    auto granted = harness.client().subscribe_audio(*vrx, 0, into(log), ending(log));
+    INFO(test::message_of(granted));
+    REQUIRE(granted.has_value());
+
+    const std::size_t seen = wait_for_chunks(*log, 10, 4000);
+    INFO("chunks received: " << seen);
+    REQUIRE(seen >= 10);
+
+    for (const ChunkRecord& chunk : log->chunks()) {
+        CHECK(chunk.channels == 1);
+        CHECK(chunk.rate == rpc::kPluginVoiceSilentRateHz);
+        CHECK(chunk.peak == 0.0F);
+        CHECK_FALSE(chunk.squelch_open);
+    }
+    CHECK(check_contiguous(log->chunks()) == 0);
+
+    harness.client().unsubscribe_audio(*vrx);
+    CHECK_FALSE(log->ended());
 }
 
 // --- the stream itself, plus the depth clamp --------------------------------

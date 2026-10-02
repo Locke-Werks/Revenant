@@ -333,6 +333,7 @@
 #include "core/rpc/decode_lane.h"
 #include "core/rpc/decoders.h"
 #include "core/rpc/listen.h"
+#include "core/rpc/plugin_voice.h"
 #include "core/rpc/voice_audio.h"
 #include "core/source/capabilities.h"
 #include "core/source/registry.h"
@@ -705,10 +706,18 @@ struct AudioRoute {
     // chunk. See core/rpc/voice_audio.h.
     bool p25_voice = false;
 
+    // A dstar or dmr receiver's route carries its voice through a vocoder
+    // plugin, on the same terms as p25_voice. core/rpc/plugin_voice.h.
+    std::optional<PluginVoiceMode> plugin_voice;
+
+    // Either kind of voice route.
+    [[nodiscard]] bool carries_voice() const { return p25_voice || plugin_voice.has_value(); }
+
     // Everything below is the voice route's, under `lock`. The stream is
     // built on the first chunk at that chunk's rate, on DecodeRoute's
     // argument that the rate a complex path delivers is the chunk's.
     std::unique_ptr<P25AudioStream> voice;
+    std::unique_ptr<PluginVoiceStream> plugin_stream;
     VoiceChunk voice_out;
 
     // The retune fence, on exactly RdsRoute::epoch_target's terms. A chunk
@@ -2284,19 +2293,29 @@ public:
         // place of its analog audio. The route in add_audio runs P25Phase1
         // and P25Voice in the sink and queues 8000 S/s mono chunks, silent
         // between calls and through an encrypted one. core/rpc/voice_audio.h
-        // has the index and the timing. D-STAR and TETRA have no voice codec
-        // in this tree, so theirs are still refused, saying so.
+        // has the index and the timing.
+        //
+        // D-STAR AND DMR ARE SERVED THROUGH A VOCODER PLUGIN. Owner decision,
+        // 2026-10-02: their voice goes to a loaded plugin that serves the
+        // mode, and with none the subscription is silence rather than a
+        // refusal. core/rpc/plugin_voice.h. TETRA has no codec here and no
+        // route to one, so it is still refused, saying so.
+        //
+        // WHAT THIS USED TO SAY, until then: "D-STAR and TETRA have no voice
+        // codec in this tree, so theirs are still refused, saying so."
         const engine::Demod mode = status->params.demod;
-        if (mode == engine::Demod::Dstar || mode == engine::Demod::Tetra) {
+        const bool voice_mode = mode == engine::Demod::P25p1 || mode == engine::Demod::Dstar ||
+                                mode == engine::Demod::Dmr;
+        if (mode == engine::Demod::Tetra) {
             return to_exception(Error{std::format(
                 "receiver {} is {}, which hands out complex baseband at {} S/s for a decoder. "
                 "Its voice is not served, because this engine has no {} voice codec, so there "
                 "is nothing on it to listen to. subscribeDecoded reads the stream: the {} "
                 "decoder is attached to that receiver by passing an empty decoder name",
                 id->value, engine::demod_name(mode), status->demod_rate,
-                mode == engine::Demod::Dstar ? "AMBE" : "ACELP", engine::demod_name(mode))});
+                "ACELP", engine::demod_name(mode))});
         }
-        if (!engine::produces_audio(mode) && mode != engine::Demod::P25p1) {
+        if (!engine::produces_audio(mode) && !voice_mode) {
             if (mode == engine::Demod::Raw) {
                 return to_exception(Error{std::format(
                     "receiver {} is a raw tap, so there is no audio on it to subscribe to. The "
@@ -4532,7 +4551,7 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
     // AGC made of the chunk; every decoder route, the RDS route and the
     // voice route below read `samples`, the receiver's output as the
     // demodulator made it. AudioChunk::heard says why there are two.
-    if (!route.p25_voice) {
+    if (!route.carries_voice()) {
         queue_audio(route, chunk.heard, chunk.start, static_cast<std::uint32_t>(chunk.rate),
                     static_cast<std::uint16_t>(chunk.channels), chunk.squelch_open);
         return {};
@@ -4554,6 +4573,39 @@ Status ServerImpl::on_audio_chunk(AudioRoute& route, const engine::AudioChunk& c
         .rate = chunk.rate,
         .start = chunk.start,
     };
+    if (route.plugin_voice) {
+        // Built on the first chunk at its rate, with the plugin that serves
+        // the mode if one is loaded. None, or one that refused to open, is the
+        // silent stream the owner asked for: no fault and no ended().
+        if (route.plugin_stream == nullptr) {
+            const PluginVoiceMode mode = *route.plugin_voice;
+            std::unique_ptr<decode::Vocoder> vocoder;
+            if (const decode::VocoderPluginSet* set = vocoders(); set != nullptr) {
+                if (auto opened = set->open_for_mode(plugin_voice_mode_name(mode),
+                                                     plugin_voice_unit_bits(mode));
+                    opened && *opened) {
+                    vocoder = std::move(**opened);
+                }
+            }
+            auto made = PluginVoiceStream::create(mode, chunk.rate, std::move(vocoder));
+            if (!made) {
+                route.fault = made.error().message;
+                wake_loop();
+                return {};
+            }
+            route.plugin_stream = std::make_unique<PluginVoiceStream>(std::move(*made));
+        }
+        if (auto made = route.plugin_stream->process(in, route.discarding(), route.voice_out);
+            !made) {
+            route.fault = made.error().message;
+            wake_loop();
+            return {};
+        }
+        queue_audio(route, route.voice_out.samples, route.voice_out.start,
+                    route.plugin_stream->out_rate(), 1, route.voice_out.voiced);
+        return {};
+    }
+
     if (route.voice == nullptr) {
         auto made = P25AudioStream::create(chunk.rate);
         if (!made) {
@@ -4680,13 +4732,16 @@ void ServerImpl::reset_audio_for_vrx(engine::VrxId vrx, std::uint64_t epoch_targ
     }
     AudioRoute& route = *found->second;
     const std::scoped_lock held(route.lock);
-    if (!route.p25_voice) {
+    if (!route.carries_voice()) {
         // A receiver's own audio has no state here to clear: the engine
         // retunes the stage and the chunks say where they came from.
         return;
     }
     if (route.voice != nullptr) {
         route.voice->reset();
+    }
+    if (route.plugin_stream != nullptr) {
+        route.plugin_stream->reset();
     }
 
     // Never lowered, on reset_rds_for_vrx's argument.
@@ -4857,6 +4912,11 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxS
         // receiver's demodulator in place. The fence starts where the
         // receiver is, on start_rds's argument.
         route->p25_voice = status.params.demod == engine::Demod::P25p1;
+        if (status.params.demod == engine::Demod::Dstar) {
+            route->plugin_voice = PluginVoiceMode::Dstar;
+        } else if (status.params.demod == engine::Demod::Dmr) {
+            route->plugin_voice = PluginVoiceMode::Dmr;
+        }
         route->epoch_target = status.tuning_epoch;
 
         // attach rather than set, which is the whole point of the seam in
@@ -4866,7 +4926,7 @@ Status ServerImpl::add_audio(std::shared_ptr<AudioNode> node, const engine::VrxS
         // own audio is a copy into a queue and stays on the completion
         // thread, where it costs less than the hand-off would.
         engine::AudioSink sink;
-        if (route->p25_voice) {
+        if (route->carries_voice()) {
             route->lane = pick_lane();
             sink = lane_sink(route->lane, std::make_shared<const LaneWork>(
                 [route, load = load_](const engine::AudioChunk& chunk) {
