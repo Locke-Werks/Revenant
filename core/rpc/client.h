@@ -470,6 +470,13 @@ public:
     // fails the rate condition. A caller points a DEDICATED receiver at the
     // station: demod wfm, audio_rate 171000, the station's centre.
     //
+    // OR NONE, ON WFM, SINCE 2026-10-02. A WFM receiver below the composite
+    // rate is served too: the server opens a companion at 171000 on the same
+    // tuning, reads the RDS from that, keeps it in step with the receiver's
+    // retunes and removes it with the receiver, and vrx_ids never lists it.
+    // The receiver keeps its own rate and its stereo. A dedicated receiver at
+    // 171000 still works and costs nothing extra.
+    //
     // subscribe_audio and this pair were the three unserved surfaces. All
     // three are served now, and this paragraph used to say that the branch
     // serving RDS would change the return type and break every caller. It

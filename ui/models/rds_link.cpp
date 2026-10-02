@@ -220,6 +220,17 @@ bool EngineLink::ensure_composite_receiver()
         live = requested_params_;
     }
 
+    // A WFM RECEIVER IS NOT RAISED, since 2026-10-02 (GitHub issue #1). The
+    // server reads a WFM receiver's RDS from a companion at the composite rate
+    // on the same tuning, ServerImpl::open_rds in core/rpc/server.cpp, so the
+    // operator's receiver keeps its rate and its stereo and the station is
+    // simply asked for. Everything below is now for the receivers the server
+    // still reads directly, an NFM receiver turned to a broadcast station
+    // among them.
+    if (live.demod == rpc::Demod::Wfm) {
+        return true;
+    }
+
     if (carries_composite(live)) {
         // The rebuild has already happened, or is in flight and the request
         // already carries the rate. Either way there is nothing to ask and the

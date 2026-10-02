@@ -639,6 +639,18 @@ re-level what the engine set and undo the hold when the AGC is off.
 
 ### RDS is served, per receiver, off the audio fan-out
 
+**A WFM receiver below the composite rate gets a companion**, since 2026-10-02
+(GitHub issue #1). Raising a stereo receiver to 171000 S/s to reach the 57 kHz
+subcarrier made it mono, so `ServerImpl::open_rds` leaves the receiver alone and
+opens a second one at 171000 on the same tuning, with its squelch open and the
+noise blanker, notches and noise reduction off, and decodes that. The
+companion follows the receiver's retunes, its epoch is the one the decoder
+fences on, it is removed with the receiver's route, and `vrxIds` does not list
+it. A refusal the companion meets, a filter too narrow for the composite among
+them, is reported as being on behalf of the receiver the client asked about.
+Everything below still describes the decoder; where it says the receiver's
+audio, read the companion's for a WFM receiver below 171000.
+
 This section used to be headed "RDS is still declared, allocated, refused" and
 said that `Session::rdsStation` and `Session::setRdsRegion` remained unwired
 because nothing in `core/engine` fed the decoder a composite. Both are served

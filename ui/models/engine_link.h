@@ -1307,6 +1307,13 @@ class EngineLink : public QObject {
     // it on every receiver would build a composite decoder behind every
     // receiver an operator ever tuned.
     //
+    // NOT ON WFM, SINCE 2026-10-02. GitHub issue #1: raising a stereo WFM
+    // receiver to the composite rate made it mono. The server now reads a WFM
+    // receiver's RDS from a companion at 171000 on the same tuning
+    // (ServerImpl::open_rds), so this window raises nothing for WFM and the
+    // station stays stereo. The paragraphs below describe the raise, which is
+    // left for the receivers the server reads directly.
+    //
     // IT RAISES THE RECEIVER'S AUDIO RATE, AFTER ASKING THE ENGINE WHETHER
     // IT CAN. core/rpc/client.h names four conditions a receiver must clear
     // and the binding one is that the audio rate has to carry 57 kHz, which
@@ -1362,13 +1369,19 @@ class EngineLink : public QObject {
     // the probe behind it, and a pane that redrew this on every filter edge
     // would be reading a receiver property to learn an RDS one.
     //
-    // It exists so the window can say what the audio has become. An operator
-    // listening to a stereo station and turning RDS on hears it go mono, and
-    // nothing else on screen would account for that. See
-    // models/composite_probe.h for why the rate is the receiver's rather than
-    // a second receiver's. WHAT THIS USED TO SAY: that the operator "hears
-    // the composite" and "the sound is wrong", which was true until the mix
-    // played the multiplex's programme band on 2026-09-23.
+    // It exists so the window can say what the audio has become, on a
+    // receiver this window did raise: a WFM receiver no longer is, since
+    // 2026-10-02, so a stereo station stays stereo with RDS on and this reads
+    // false for it.
+    //
+    // WHAT THIS USED TO SAY: "An operator listening to a stereo station and
+    // turning RDS on hears it go mono, and nothing else on screen would
+    // account for that. See models/composite_probe.h for why the rate is the
+    // receiver's rather than a second receiver's." composite_probe.h never
+    // argued that, and a second receiver is what the server now uses. Before
+    // that it said the operator "hears the composite" and "the sound is
+    // wrong", which was true until the mix played the multiplex's programme
+    // band on 2026-09-23.
     Q_PROPERTY(bool rdsCompositeReceiver READ rdsCompositeReceiver NOTIFY rdsChanged)
 
     // "rds" or "rbds", which is a SETTING and never an inference. The PI

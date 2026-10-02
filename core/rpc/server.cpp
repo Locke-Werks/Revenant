@@ -304,6 +304,7 @@
 #include <future>
 #include <limits>
 #include <map>
+#include <set>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -817,6 +818,15 @@ struct RdsRoute {
     // again, so reading them there needs no lock.
     const engine::VrxId vrx;
     const std::uint32_t composite_rate;
+
+    // Whether `vrx` is a companion this server made, rather than the
+    // receiver the station is asked for. A WFM receiver playing stereo runs
+    // below the composite rate, so its RDS comes from a second receiver on
+    // the same tuning at the composite rate, opened by open_rds and removed
+    // with the route. The route is keyed in rds_routes_ by the listener's
+    // receiver either way. Set before the route is shared and never written
+    // again.
+    bool companion = false;
 
     // Loop thread only: the token that detaches the sink again, and the
     // decode lane the decode runs on.
@@ -1362,8 +1372,26 @@ public:
     // entry points above reach it and both have already asked the engine
     // for the receiver's status, which this needs and must not ask twice:
     // the receiver could be removed between the two calls.
+    // The route for a listener's receiver: start_rds on the receiver itself
+    // when it carries a composite, and otherwise on a companion it opens.
+    // GitHub issue #1: raising a stereo WFM receiver to the composite rate
+    // made it mono, so the composite is fetched from beside it instead.
+    [[nodiscard]] Expected<std::shared_ptr<RdsRoute>> open_rds(const engine::VrxStatus& listener,
+                                                               decode::Region region);
+
+    // Moves a listener's companion with it on a retune. Loop thread.
+    void retune_rds_companion(engine::VrxId listener, const engine::VrxParams& params);
+
+    // Whether a receiver is a companion, which no client listing shows.
+    [[nodiscard]] bool is_rds_companion(engine::VrxId vrx) const {
+        return rds_companions_.contains(vrx.value);
+    }
+
+    // `key` is the listener's receiver the route is filed under, which is
+    // status.id unless the route reads a companion.
     [[nodiscard]] Expected<std::shared_ptr<RdsRoute>> start_rds(
-        const engine::VrxStatus& status, decode::Region region);
+        const engine::VrxStatus& status, decode::Region region,
+        std::optional<engine::VrxId> key = std::nullopt);
 
     // Event loop thread, all of them. The receiver lifetime rule.
     //
@@ -1721,6 +1749,9 @@ private:
     // are monotonic and never reused, so a stale entry can only be reached
     // by a caller naming an id it removed itself.
     std::map<std::uint32_t, std::shared_ptr<RdsRoute>> rds_routes_;
+
+    // The receivers open_rds made, by id. Loop thread.
+    std::set<std::uint32_t> rds_companions_;
 
     // Loop thread only. Who created each receiver this server added, and the
     // counter the numbers come from. Counted from one so that zero can mean
@@ -2100,6 +2131,7 @@ public:
         if (!status) {
             return to_exception(status.error());
         }
+        owner_.retune_rds_companion(*id, *params);
         owner_.reset_rds_for_vrx(*id, status->tuning_epoch);
 
         // Every event decoder on the receiver too, on the same fence and for
@@ -2134,7 +2166,15 @@ public:
     }
 
     kj::Promise<void> vrxIds(VrxIdsContext context) override {
-        const auto ids = owner_.engine().vrx_ids();
+        // Not the RDS companions open_rds makes: no client created them, none
+        // can usefully act on one, and a client that reconciles the list
+        // against its own would take one for a receiver it lost track of.
+        std::vector<engine::VrxId> ids;
+        for (const engine::VrxId id : owner_.engine().vrx_ids()) {
+            if (!owner_.is_rds_companion(id)) {
+                ids.push_back(id);
+            }
+        }
         auto out = context.getResults().initIds(static_cast<unsigned>(ids.size()));
         for (unsigned i = 0; i < out.size(); ++i) {
             out.set(i, ids[i].value);
@@ -3479,7 +3519,7 @@ Expected<RdsSnapshot> ServerImpl::rds_station(engine::VrxId vrx) {
         // there is deliberately none: core/decode/rds_groups.h has the
         // argument, and a server that guessed would be making a setting
         // look like a measurement.
-        auto built = start_rds(*status, decode::Region::kRds);
+        auto built = open_rds(*status, decode::Region::kRds);
         if (!built) {
             return std::unexpected(built.error());
         }
@@ -3558,7 +3598,7 @@ Status ServerImpl::set_rds_region(engine::VrxId vrx, decode::Region region) {
         // Built at the region asked for rather than built at the default and
         // then reset, so the client presetting a region pays nothing and
         // learns about an unsuitable receiver now.
-        auto built = start_rds(*status, region);
+        auto built = open_rds(*status, region);
         if (!built) {
             return std::unexpected(built.error());
         }
@@ -3607,7 +3647,8 @@ Status ServerImpl::set_rds_region(engine::VrxId vrx, decode::Region region) {
 }
 
 Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatus& status,
-                                                          decode::Region region) {
+                                                          decode::Region region,
+                                                          std::optional<engine::VrxId> key) {
     if (auto suitable = rds_receiver_is_suitable(status); !suitable) {
         return std::unexpected(suitable.error());
     }
@@ -3665,8 +3706,91 @@ Expected<std::shared_ptr<RdsRoute>> ServerImpl::start_rds(const engine::VrxStatu
     }
     route->sink = *attached;
 
-    rds_routes_.emplace(status.id.value, route);
+    rds_routes_.emplace(key.value_or(status.id).value, route);
     return route;
+}
+
+Expected<std::shared_ptr<RdsRoute>> ServerImpl::open_rds(const engine::VrxStatus& listener,
+                                                         decode::Region region) {
+    // A WFM receiver below the rate a filtered composite needs is a listener
+    // hearing programme audio, stereo by default. Everything else goes to
+    // start_rds as it is, which refuses what cannot carry a composite in its
+    // own words, as it always has.
+    const bool below = listener.params.audio_rate < kFilteredCompositeRateHz;
+    if (listener.params.demod != engine::Demod::Wfm || !below) {
+        return start_rds(listener, region);
+    }
+
+    // THE COMPANION: the listener's tuning at the composite rate, with nothing
+    // on it that is for an ear. Squelch open, because a decoder behind a gate
+    // the operator set for listening would lose sync every time it closed;
+    // and the noise blanker, the notches and noise reduction off, because each
+    // reshapes the band the 57 kHz subcarrier is in. Stereo off, which
+    // engine::resolve_stereo does at this rate anyway, said here so the
+    // intent does not rest on a threshold in another file.
+    engine::VrxParams params = listener.params;
+    params.audio_rate = static_cast<dsp::SampleRate>(decode::RdsBitsConfig{}.rate);
+    params.stereo = false;
+    params.squelch_dbfs = -200.0;
+    params.nb_enabled = false;
+    params.notch_enabled = false;
+    params.auto_notch_enabled = false;
+    params.nr_enabled = false;
+
+    auto added = engine_.add_vrx(params);
+    if (!added) {
+        return std::unexpected(with_context(
+            added.error(),
+            std::format("opening a {} S/s companion beside receiver {} to decode its RDS "
+                        "without taking its stereo",
+                        params.audio_rate, listener.id.value)));
+    }
+    auto status = engine_.vrx_status(*added);
+    if (!status) {
+        static_cast<void>(engine_.remove_vrx(*added));
+        return std::unexpected(status.error());
+    }
+    auto route = start_rds(*status, region, listener.id);
+    if (!route) {
+        static_cast<void>(engine_.remove_vrx(*added));
+        return std::unexpected(with_context(
+            route.error(),
+            std::format("receiver {} is WFM at {} S/s, so its RDS is read from a companion "
+                        "at {} S/s on the same tuning, and the companion was refused",
+                        listener.id.value, listener.params.audio_rate, params.audio_rate)));
+    }
+    (*route)->companion = true;
+    rds_companions_.insert(added->value);
+    return route;
+}
+
+void ServerImpl::retune_rds_companion(engine::VrxId listener, const engine::VrxParams& params) {
+    auto found = rds_routes_.find(listener.value);
+    if (found == rds_routes_.end() || !found->second->companion) {
+        return;
+    }
+    const engine::VrxId companion = found->second->vrx;
+    auto current = engine_.vrx_status(companion);
+    if (!current) {
+        // Gone already; the next poll ends the route and reopens it.
+        end_rds_for_vrx(listener);
+        return;
+    }
+
+    // The listener's tuning and filter, the companion's own rate and the
+    // switches open_rds turned off. A listener that left WFM was rebuilt under
+    // a new id and is not here, so the demodulator cannot have changed.
+    engine::VrxParams moved = current->params;
+    moved.center = params.center;
+    moved.bandwidth = params.bandwidth;
+    moved.passband_low = params.passband_low;
+    moved.passband_high = params.passband_high;
+    if (auto applied = engine_.set_vrx_params(companion, moved); !applied) {
+        // Refused where the listener was not, a passband the composite rate
+        // cannot carry among them. The route ends rather than decoding the
+        // old tuning; the next rdsStation poll says why in start_rds's words.
+        end_rds_for_vrx(listener);
+    }
 }
 
 void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
@@ -3703,7 +3827,14 @@ void ServerImpl::end_rds_for_vrx(engine::VrxId vrx) {
     // a receiver the graph no longer knows, which is the ordinary teardown
     // order and the usual way this function is reached, and a token already
     // detached, which stop() would have done.
-    static_cast<void>(engine_.detach_audio_sink(vrx, route->sink));
+    static_cast<void>(engine_.detach_audio_sink(route->vrx, route->sink));
+
+    // A companion goes with its route: nothing else holds it, and no client
+    // can see it to remove it. Discarded for the detach's reason above.
+    if (route->companion) {
+        rds_companions_.erase(route->vrx.value);
+        static_cast<void>(engine_.remove_vrx(route->vrx));
+    }
 
     // Taken and released, which is what waits for a sink call that was
     // already inside the decoder when the detach was queued. The detach is
@@ -3837,6 +3968,18 @@ void ServerImpl::reset_rds_for_vrx(engine::VrxId vrx, std::uint64_t epoch_target
     auto found = rds_routes_.find(vrx.value);
     if (found == rds_routes_.end()) {
         return;
+    }
+
+    // A companion's chunks carry the companion's epoch, so that is the one to
+    // fence on. retune_rds_companion has already queued its retune, and a
+    // source retune moved both.
+    if (found->second->companion) {
+        auto feed = engine_.vrx_status(found->second->vrx);
+        if (!feed) {
+            end_rds_for_vrx(vrx);
+            return;
+        }
+        epoch_target = feed->tuning_epoch;
     }
 
     const std::shared_ptr<RdsRoute>& route = found->second;

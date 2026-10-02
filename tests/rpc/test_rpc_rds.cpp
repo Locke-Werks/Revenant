@@ -1264,82 +1264,43 @@ TEST_CASE("an unsuitable receiver is refused in terms of the condition it failed
         CHECK(refused.error().message.find("am") != std::string::npos);
     }
 
-    // 3. The engine's default audio rate, which this server CAN name.
+    // 3 and 4. A WFM receiver at the engine's default rate, and one at 48000,
+    //    are served, through a companion.
     //
-    //    WHAT THIS CASE USED TO ASSERT, and the refusal it pinned is now
-    //    false. It expected "default audio rate" and a sentence saying the
-    //    rate "is not a number this server can read", on the grounds that
-    //    VrxParams::audioRate is a verbatim echo reading zero and EngineInfo
-    //    does not carry the default. Both halves of that are true and the
-    //    conclusion was not: VrxStatus::resolved_audio_rate is the rate the
-    //    receiver actually runs at, it is on the status this guard already
-    //    holds, and vrx.h says of it that everything asking a question OF the
-    //    audio rate asks it there. Only this guard was left asking the echo,
-    //    so it refused every receiver created the ordinary way while claiming
-    //    the number was unknowable.
-    //
-    //    It still refuses, because the default resolves to 48000 and 48000
-    //    cannot carry a 57 kHz subcarrier. What it must do now is name the
-    //    rate and the bound, so an operator has something to act on.
-    {
-        auto defaulted = harness.client().add_vrx(
-            rpc::VrxParams{.center = 0, .bandwidth = 200'000, .demod = rpc::Demod::Wfm});
-        INFO(test::message_of(defaulted));
-        REQUIRE(defaulted.has_value());
-
-        // The resolved rate reaches a client, which is the half that lets a
-        // window tell an operator what their receiver is running at instead of
-        // reading the echo and seeing zero.
-        auto status = harness.client().vrx_status(*defaulted);
-        REQUIRE(status.has_value());
-        INFO("echo " << status->params.audio_rate << ", resolved "
-                     << status->resolved_audio_rate);
-        CHECK(status->params.audio_rate == 0);
-        CHECK(status->resolved_audio_rate > 0);
-
-        auto refused = harness.client().rds_station(*defaulted);
-        REQUIRE_FALSE(refused.has_value());
-        INFO(refused.error().message);
-
-        // The rate it is actually running at, by name, and the advice that
-        // survived from the old wording.
-        CHECK(refused.error().message.find(std::to_string(status->resolved_audio_rate)) !=
-              std::string::npos);
-        CHECK(refused.error().message.find("171000") != std::string::npos);
-        CHECK(refused.error().message.find("not a number this server can read") ==
-              std::string::npos);
-    }
-
-    // 4. The listening receiver. WFM at 48 kHz is what an operator has open
-    //    to hear the station, and it is the one shape somebody will try
-    //    first. Its demodulation rate is a multiple of 48000, so it
-    //    decimates, so the bound is the receiver's 148438 rather than the
-    //    decoder's 125000 and the refusal has to say which.
-    {
+    //    WHAT THESE TWO CASES USED TO ASSERT: refusals. The default rate was
+    //    refused naming the 48000 it resolves to and the 171000 to ask for,
+    //    and the listening receiver at 48000 naming the 148438 bound, the
+    //    stopband and the decoder's own 125000. Both were true of a server
+    //    that read RDS only off the receiver it was asked about. Since
+    //    2026-10-02 (GitHub issue #1) a WFM receiver below the composite rate
+    //    has its RDS read from a companion at 171000 on the same tuning, so
+    //    the operator's receiver keeps its stereo; ServerImpl::open_rds.
+    for (const std::uint32_t rate : {0U, 48'000U}) {
+        INFO("audio rate " << rate);
         auto listening = harness.client().add_vrx(rpc::VrxParams{.center = 0,
                                                                  .bandwidth = 200'000,
                                                                  .demod = rpc::Demod::Wfm,
-                                                                 .audio_rate = 48'000});
+                                                                 .audio_rate = rate});
         INFO(test::message_of(listening));
         REQUIRE(listening.has_value());
 
-        auto refused = harness.client().rds_station(*listening);
-        REQUIRE_FALSE(refused.has_value());
-        INFO(refused.error().message);
-        CHECK(refused.error().message.find("148438") != std::string::npos);
-        CHECK(refused.error().message.find("stopband") != std::string::npos);
-
-        // The decoder's own lower bound is named beside it, because a reader
-        // who has just come from core/decode/rds_bits.h and its 125000 needs
-        // to be told why this one is higher rather than left to find the
-        // disagreement.
-        CHECK(refused.error().message.find("125000") != std::string::npos);
+        auto served = harness.client().rds_station(*listening);
+        INFO(test::message_of(served));
+        REQUIRE(served.has_value());
+        CHECK(served->vrx == *listening);
+        CHECK(served->composite_rate == kCompositeRate);
     }
 
-    // 5. Under the decoder's own bound with the decimation resolved to one,
-    //    where the planner designs no audio filter at all and 125000 is the
-    //    true bound. A narrow passband is what forces the demodulation rate
-    //    down onto the audio rate.
+    // 5. A WFM receiver whose filter cannot hold the composite. Its
+    //    companion inherits the filter, so it is refused on the fourth
+    //    condition, and the sentence says the refusal is the companion's on
+    //    behalf of this receiver rather than naming an id the client never
+    //    made.
+    //
+    //    WHAT THIS CASE USED TO ASSERT: a refusal under the decoder's own
+    //    125000 bound "with the decimation resolved to one", which was the
+    //    receiver's own rate being checked. The companion runs at 171000, so
+    //    the rate is no longer what refuses it.
     {
         auto slow = harness.client().add_vrx(rpc::VrxParams{.center = 0,
                                                             .bandwidth = 60'000,
@@ -1348,18 +1309,12 @@ TEST_CASE("an unsuitable receiver is refused in terms of the condition it failed
         INFO(test::message_of(slow));
         REQUIRE(slow.has_value());
 
-        auto status = harness.client().vrx_status(*slow);
-        INFO(test::message_of(status));
-        REQUIRE(status.has_value());
-        INFO(std::format("demod rate {}", status->demod_rate));
-        REQUIRE(status->demod_rate == 120'000);  // decimation one, no audio filter
-
         auto refused = harness.client().rds_station(*slow);
         REQUIRE_FALSE(refused.has_value());
         INFO(refused.error().message);
-        CHECK(refused.error().message.find("125000") != std::string::npos);
-        CHECK(refused.error().message.find("decimation resolved to one") !=
-              std::string::npos);
+        CHECK(refused.error().message.find("59375") != std::string::npos);
+        CHECK(refused.error().message.find("companion") != std::string::npos);
+        CHECK(refused.error().message.find(std::to_string(*slow)) != std::string::npos);
     }
 
     // 6. The right demodulator at the right rate with a passband too narrow
@@ -1383,15 +1338,77 @@ TEST_CASE("an unsuitable receiver is refused in terms of the condition it failed
         CHECK(refused.error().message.find("outside the filter") != std::string::npos);
     }
 
-    // And nothing above left a decoder or a sink behind. Six refusals on
-    // five receivers, and the receivers are all still there: a refusal that
-    // had torn something down on the way out would be worse than no surface
-    // at all, which is the assertion test_rpc_unwired.cpp used to make and
-    // this one inherits.
+    // And nothing above tore a receiver down. Five receivers made, all still
+    // listed: a refusal that removed something on the way out would be worse
+    // than no surface at all, which is the assertion test_rpc_unwired.cpp
+    // used to make and this one inherits.
+    //
+    // The engine holds two more, the companions serving cases 3 and 4, and
+    // the client is shown neither. Case 5's companion was refused and is gone.
     auto ids = harness.client().vrx_ids();
     INFO(test::message_of(ids));
     REQUIRE(ids.has_value());
     CHECK(ids->size() == 5);
+    CHECK(harness.engine().vrx_ids().size() == 7);
+}
+
+TEST_CASE("a stereo WFM receiver decodes RDS through a companion and stays stereo",
+          "[gpu][rpc][rds]") {
+    REVENANT_NEEDS_GPU();
+
+    // GitHub issue #1. RDS used to need the receiver itself raised to the
+    // 171000 S/s composite, which is above the rate stereo is decoded at, so
+    // turning RDS on made a stereo station mono. The server now reads the
+    // composite from a companion on the same tuning; ServerImpl::open_rds.
+    StationFile file("companion");
+    const auto written = file.write(station_spec(true), 0.0);
+    INFO(test::message_of(written));
+    REQUIRE(written.has_value());
+
+    Harness harness;
+    bring_up(harness, rds_options(file.uri()));
+
+    // Stereo is the engine's default for WFM below the composite rate, and
+    // the wire carries no switch for it.
+    rpc::VrxParams listening = rds_receiver();
+    listening.audio_rate = 48'000;
+    auto vrx = harness.client().add_vrx(listening);
+    INFO(test::message_of(vrx));
+    REQUIRE(vrx.has_value());
+
+    auto first = harness.client().rds_station(*vrx);
+    INFO(test::message_of(first));
+    REQUIRE(first.has_value());
+    CHECK(first->composite_rate == kCompositeRate);
+
+    // The companion is the engine's and not the client's.
+    auto ids = harness.client().vrx_ids();
+    REQUIRE(ids.has_value());
+    CHECK(ids->size() == 1);
+    CHECK(harness.engine().vrx_ids().size() == 2);
+
+    run_to_completion(harness, file.samples(), 120'000);
+
+    auto station = harness.client().rds_station(*vrx);
+    INFO(test::message_of(station));
+    REQUIRE(station.has_value());
+    CHECK(station->health.lock == rpc::RdsLock::Locked);
+    CHECK(station->pi_valid);
+    CHECK(station->pi == kStationPi);
+    CHECK(station->pty == kStationPty);
+
+    // And the listener is what the operator asked for: 48000, decoding
+    // stereo, read off the engine because the wire states stereo only as a
+    // chunk's channel count.
+    auto status = harness.engine().vrx_status(engine::VrxId{static_cast<std::uint32_t>(*vrx)});
+    INFO(test::message_of(status));
+    REQUIRE(status.has_value());
+    CHECK(status->effective_audio_rate() == 48'000);
+    CHECK(status->decoding_stereo());
+
+    // Removing the listener takes the companion with it.
+    REQUIRE(harness.client().remove_vrx(*vrx).has_value());
+    CHECK(harness.engine().vrx_ids().empty());
 }
 
 TEST_CASE("removing a receiver takes its decoder with it, engine stopped",
