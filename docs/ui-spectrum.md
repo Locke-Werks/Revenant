@@ -282,8 +282,8 @@ are bound.
 
 ## The receiver rack
 
-The receivers' left column is a rack of up to eight receivers, one
-strip each: its label, its frequency in a fixed-width readout, its mode, a
+The receivers' left column is a rack of up to 64 receivers, the most the
+engine carries audio for, scrolled when they do not fit, one strip each: its label, its frequency in a fixed-width readout, its mode, a
 live level meter, a gain, mute, solo and remove. One receiver is FOCUSED, and
 it is the one the rest of the receivers' panel is about: the dial, the mode,
 the filter, the passband display, decoding and RDS all follow it. The others
@@ -292,6 +292,11 @@ shows its frequency, mode and level, but nothing retunes it until it is
 focused again. `ui/models/receiver_rack.h` holds the rules with cases in
 `ui/tests/test_receiver_rack.cpp`, and `ui/models/rack_link.cpp` is the wire
 half.
+
+WHAT THIS PARAGRAPH USED TO SAY, before 2026-10-02: "a rack of up to eight
+receivers", eight because the palette is eight colours. The owner lifted the
+limit for the automatic P25 receivers; above eight the colours repeat and the
+strip's number tells two of a colour apart.
 
 **What a click does.** On the spectrum, the waterfall or the ruler:
 

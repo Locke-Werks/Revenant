@@ -233,7 +233,7 @@ Rectangle {
             checked: receiverPlacement.shown
             text: "receivers"
             ink: Theme.inkDim
-            tint: Theme.receiverColours[engineLink.focusedSlot]
+            tint: Theme.receiverColour(engineLink.focusedSlot)
             onClicked: receiverPlacement.shown = !receiverPlacement.shown
 
             Tip {

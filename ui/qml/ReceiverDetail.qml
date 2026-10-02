@@ -43,7 +43,7 @@ import Revenant
 ColumnLayout {
     id: detail
 
-    readonly property color tint: Theme.receiverColours[engineLink.focusedSlot]
+    readonly property color tint: Theme.receiverColour(engineLink.focusedSlot)
     property bool expanded: false
 
     // Too narrow for the mode selector and the filter's controls on one row,

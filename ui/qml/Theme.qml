@@ -77,6 +77,13 @@ QtObject {
     // replaced them.
     readonly property var receiverColours: UiRules.receiverColours()
 
+    // A slot's colour, wrapping past the palette the way receiver_colour does
+    // in models/receiver_palette.h. Indexed directly, a slot from the ninth on
+    // is undefined, and a tint of undefined draws as nothing.
+    function receiverColour(slot) {
+        return receiverColours[slot % receiverColours.length]
+    }
+
     // One sans for the interface and one monospace for every number an
     // operator reads as a number. Both ship with Windows 11, so nothing is
     // bundled and the installer does not change. The detection plates on the

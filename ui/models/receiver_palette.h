@@ -124,8 +124,9 @@ inline constexpr std::array<Rgb8, 3> kThemeMeaningColours{{
     return out;
 }
 
-// The colour for a rack slot. A slot past the table wraps rather than
-// failing, though the rack never hands one out; see models/receiver_rack.h.
+// The colour for a rack slot. A slot past the table wraps, so the ninth
+// receiver wears the first one's colour; the rack has handed those out since it
+// went to kMaxReceivers of 64, models/receiver_rack.h.
 [[nodiscard]] constexpr Rgb8 receiver_colour(std::size_t slot)
 {
     return kReceiverPalette[slot % kReceiverPaletteSize];

@@ -237,16 +237,16 @@ void EngineLink::forget_audio()
 
 void EngineLink::publish_mix()
 {
-    std::uint32_t mask = 0;
-    std::uint32_t wfm = 0;
+    std::uint64_t mask = 0;
+    std::uint64_t wfm = 0;
     int pane_slot = -1;
     for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
         if (live_audio_[slot].vrx == 0) {
             continue;
         }
-        mask |= 1U << slot;
+        mask |= std::uint64_t{1} << slot;
         if (live_audio_[slot].demod == rpc::Demod::Wfm) {
-            wfm |= 1U << slot;
+            wfm |= std::uint64_t{1} << slot;
         }
         if (live_audio_[slot].vrx == live_receiver_id_) {
             pane_slot = static_cast<int>(slot);
@@ -274,7 +274,7 @@ void EngineLink::publish_mix()
     }
     if (lead < 0 && mask != 0) {
         for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
-            if ((mask & (1U << slot)) != 0) {
+            if ((mask & (std::uint64_t{1} << slot)) != 0) {
                 lead = static_cast<int>(slot);
                 break;
             }

@@ -27,10 +27,11 @@ using revenant::ui::ReceiverRack;
 using revenant::ui::SpanClick;
 using revenant::ui::SpanClickInput;
 
-// Rejects a rack that lets a ninth receiver share a colour, or that hands the
-// same slot to two receivers. The slot is the colour and the audio ring, so a
-// shared one is two receivers drawn alike and mixed from one buffer.
-TEST_CASE("the rack holds eight, each on a slot of its own")
+// Rejects a rack that hands the same slot to two receivers, or that takes one
+// past kMaxReceivers. The slot is the audio ring, so a shared one is two
+// receivers mixed from one buffer; colours repeat above the palette's eight,
+// which receiver_colour allows and the strip's number disambiguates.
+TEST_CASE("the rack holds kMaxReceivers, each on a slot of its own")
 {
     ReceiverRack rack;
     std::set<std::size_t> slots;

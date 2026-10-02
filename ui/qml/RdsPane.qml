@@ -61,7 +61,7 @@ ColumnLayout {
 
     // The decoder belongs to the focused receiver, so its switch and its
     // chips wear that receiver's colour, as the detail and decode sections do.
-    readonly property color tint: Theme.receiverColours[engineLink.focusedSlot]
+    readonly property color tint: Theme.receiverColour(engineLink.focusedSlot)
 
     RowLayout {
         Layout.fillWidth: true

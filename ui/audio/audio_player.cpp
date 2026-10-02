@@ -92,10 +92,10 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
 
     // What the rack says about each slot this pull. Read once, here, so a
     // strip moved mid-pull changes the next pull and not half of this one.
-    const std::uint32_t mask = link_.mixMask();
-    const std::uint32_t wfm = link_.mixWfmMask();
+    const std::uint64_t mask = link_.mixMask();
+    const std::uint64_t wfm = link_.mixWfmMask();
     for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
-        const std::uint32_t bit = 1U << slot;
+        const std::uint64_t bit = std::uint64_t{1} << slot;
         slots_[slot] = MixSlot{.heard = (mask & bit) != 0,
                                .gain = link_.mixGain(slot),
                                .wfm = (wfm & bit) != 0};
@@ -700,9 +700,9 @@ void AudioPlayer::tick()
     // is read from its oldest frame and is never the one that skips. One
     // snapshot per ring, for the reason AudioRing::Snapshot gives.
     std::array<SkippedFrames, kMaxReceivers> skipped{};
-    const std::uint32_t heard = link_.mixMask();
+    const std::uint64_t heard = link_.mixMask();
     for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
-        if ((heard & (1U << slot)) != 0) {
+        if ((heard & (std::uint64_t{1} << slot)) != 0) {
             const AudioRing::Snapshot one = link_.audioRingAt(slot).snapshot();
             skipped[slot] = SkippedFrames{one.counts.frames_skipped, one.format.sample_rate};
         }

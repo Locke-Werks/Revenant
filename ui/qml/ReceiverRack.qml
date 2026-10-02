@@ -47,7 +47,7 @@ ColumnLayout {
 
         Label {
             visible: engineLink.rackCount > 0
-            text: engineLink.rackCount + " of 8"
+            text: String(engineLink.rackCount)
             color: Theme.inkOff
             font.pixelSize: Theme.sizeSmall
         }
@@ -65,7 +65,7 @@ ColumnLayout {
 
             Tip {
                 visible: parent.hovered
-                text: (engineLink.rackFull ? "the rack holds eight"
+                text: (engineLink.rackFull ? "the rack holds 64"
                                            : "a new receiver on the span centre")
                       + "  " + KeyMap.keysText("receiver.add")
             }

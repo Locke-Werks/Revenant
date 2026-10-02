@@ -2464,7 +2464,7 @@ public:
     [[nodiscard]] int mixLeadSlot() const { return mix_lead_slot_.load(std::memory_order_acquire); }
 
     // Which slots hold a live subscription, as bits.
-    [[nodiscard]] std::uint32_t mixMask() const { return mix_mask_.load(std::memory_order_acquire); }
+    [[nodiscard]] std::uint64_t mixMask() const { return mix_mask_.load(std::memory_order_acquire); }
 
     // The strip gain for a slot, as an amplitude.
     [[nodiscard]] float mixGain(std::size_t slot) const {
@@ -2473,7 +2473,7 @@ public:
 
     // Which slots hold a wfm receiver, as bits. AudioMix plays one at the
     // multiplex rate as programme audio.
-    [[nodiscard]] std::uint32_t mixWfmMask() const {
+    [[nodiscard]] std::uint64_t mixWfmMask() const {
         return mix_wfm_mask_.load(std::memory_order_acquire);
     }
 
@@ -4284,10 +4284,10 @@ private:
     // What the player reads on its own threads. Written by the supervisor,
     // except the gains, which are the Qt thread's.
     std::atomic<int> mix_lead_slot_{-1};
-    std::atomic<std::uint32_t> mix_mask_{0};
+    std::atomic<std::uint64_t> mix_mask_{0};
     std::atomic<std::uint32_t> mix_granted_millis_{0};
     std::array<std::atomic<float>, kMaxReceivers> mix_gain_{};
-    std::atomic<std::uint32_t> mix_wfm_mask_{0};
+    std::atomic<std::uint64_t> mix_wfm_mask_{0};
 
     // Supervisor thread only: the pane receiver's subscription, derived from
     // live_audio_ on every pass, which is what the audio section describes.

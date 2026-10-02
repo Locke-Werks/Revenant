@@ -237,7 +237,7 @@ void EngineLink::place_startup_receiver()
         }
         const auto key = rack_.add();
         if (!key) {
-            std::fputs("--receiver: the rack holds eight receivers, and the rest were not "
+            std::fputs("--receiver: the rack holds 64 receivers, and the rest were not "
                        "opened\n",
                        stderr);
             break;

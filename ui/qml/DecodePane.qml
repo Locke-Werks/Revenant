@@ -68,7 +68,7 @@ ColumnLayout {
                 checkable: true
                 checked: engineLink.decodeWanted
                 text: "decode"
-                tint: Theme.receiverColours[engineLink.focusedSlot]
+                tint: Theme.receiverColour(engineLink.focusedSlot)
                 ink: Theme.inkDim
                 font.bold: true
                 onClicked: engineLink.decodeWanted = !engineLink.decodeWanted
@@ -289,7 +289,7 @@ ColumnLayout {
                     Text {
                         Layout.preferredWidth: decoderWidth.advanceWidth
                         text: entry.decoder
-                        color: Theme.receiverColours[engineLink.focusedSlot]
+                        color: Theme.receiverColour(engineLink.focusedSlot)
                         font.family: Theme.monoFont
                         font.pixelSize: Theme.sizeSmall
                         elide: Text.ElideRight

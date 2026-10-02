@@ -87,7 +87,7 @@ ColumnLayout {
                 checkable: true
                 checked: engineLink.audioWanted
                 text: "listen"
-                tint: Theme.receiverColours[engineLink.focusedSlot]
+                tint: Theme.receiverColour(engineLink.focusedSlot)
                 ink: Theme.inkDim
                 font.bold: true
                 onClicked: engineLink.audioWanted = !engineLink.audioWanted

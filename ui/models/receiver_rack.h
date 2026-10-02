@@ -36,10 +36,19 @@
 
 namespace revenant::ui {
 
-// Eight, because the palette is eight colours that stay apart for every
-// vision models/receiver_palette.h tests, and a ninth receiver would have to
-// share one.
-inline constexpr std::size_t kMaxReceivers = 8;
+// Sixty-four, the most the engine carries audio for: kMaxAudioReceivers in
+// core/engine/audio_egress.h, a fixed table for the same reason the slot
+// arrays here are fixed, a reader on another thread that must not chase a
+// reallocation. The owner asked on 2026-10-02 for the limit to go, so that the
+// automatic P25 receivers can open one per channel heard; this is as far as it
+// goes without a growable lock-free audio path.
+//
+// WHAT THIS USED TO SAY: "Eight, because the palette is eight colours that
+// stay apart for every vision models/receiver_palette.h tests, and a ninth
+// receiver would have to share one." A ninth does share one now: the colour is
+// the slot modulo the palette, receiver_colour in models/receiver_palette.h,
+// and the strip's RX number is what tells two of a colour apart.
+inline constexpr std::size_t kMaxReceivers = 64;
 
 struct RackEntry {
     std::uint64_t key = 0;
@@ -434,7 +443,8 @@ inline constexpr const char* kSpanClickHintShort =
 
 // Said in place of an Add when the rack is full.
 inline constexpr const char* kRackFullText =
-    "The rack holds eight receivers, one per colour. Remove one to add another.";
+    "The rack holds 64 receivers, the most the engine carries audio for. Remove one to add "
+    "another.";
 
 // Said where the strips would be when there are none, and the reason the rack
 // comes up that way.
