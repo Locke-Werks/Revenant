@@ -121,6 +121,7 @@
 #include <vector>
 
 #include "core/dsp/types.h"
+#include "core/decode/vocoder_plugin.h"
 #include "core/engine/engine.h"
 #include "core/error.h"
 #include "core/rpc/server.h"
@@ -138,6 +139,7 @@ using revenant::with_context;
 namespace dsp = revenant::dsp;
 namespace engine = revenant::engine;
 namespace rpc = revenant::rpc;
+namespace decode = revenant::decode;
 namespace source = revenant::source;
 
 using dsp::Hertz;
@@ -1168,7 +1170,15 @@ void print_engine_block(const engine::Engine& eng)
                      eng.source_capabilities().uri);
     }
 
+    // The vocoder plugins, scanned once at startup and reported by
+    // Session.vocoderPlugins. Declared before the server so it is destroyed
+    // after it: the set owns every loaded module, and a module's code is
+    // unmapped when the set goes. Scanning cannot fail; whatever it found or
+    // refused is in the set and printed below.
+    const decode::VocoderPluginSet vocoders = decode::scan_vocoder_plugins({});
+
     rpc::ServerOptions server_options;
+    server_options.vocoders = &vocoders;
     server_options.bind_address = options.bind;
     server_options.port = options.port;
     server_options.token.assign(token->second.begin(), token->second.end());
@@ -1195,6 +1205,11 @@ void print_engine_block(const engine::Engine& eng)
     std::println("");
     std::println("token file      {}", token->first);
     std::println("calibration     {}", config.calibration_path);
+    std::println("vocoders        {}", vocoders.status_line());
+    // The loader's sentence per file, which names the file itself.
+    for (const decode::VocoderPluginReport& report : vocoders.reports()) {
+        std::println("                {}", report.detail);
+    }
 
     // What the three knobs settled on, defaults included, so a log says what
     // a run was held to without anyone reconstructing it from the command

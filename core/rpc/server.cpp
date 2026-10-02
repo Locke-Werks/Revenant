@@ -1133,6 +1133,9 @@ public:
 
     [[nodiscard]] engine::Engine& engine() { return engine_; }
 
+    // ServerOptions::vocoders, null when the host did not scan.
+    [[nodiscard]] const decode::VocoderPluginSet* vocoders() const { return vocoders_; }
+
     // Engine completion thread.
     [[nodiscard]] Status on_frame(const engine::SpectrumFrame& frame);
 
@@ -1441,6 +1444,7 @@ private:
     }
 
     engine::Engine& engine_;
+    const decode::VocoderPluginSet* vocoders_ = nullptr;
     std::shared_ptr<SinkGate> gate_;
 
     std::thread loop_;
@@ -2603,6 +2607,11 @@ public:
         return kj::READY_NOW;
     }
 
+    kj::Promise<void> vocoderPlugins(VocoderPluginsContext context) override {
+        write_vocoder_plugins(context.getResults().initPlugins(), owner_.vocoders());
+        return kj::READY_NOW;
+    }
+
     kj::Promise<void> subscribeDecoded(SubscribeDecodedContext context) override {
         auto request = context.getParams();
         if (!request.hasReceiver()) {
@@ -2795,6 +2804,8 @@ private:
 };
 
 Status ServerImpl::start(const ServerOptions& options) {
+    vocoders_ = options.vocoders;
+
     // Before the loop, so nothing the loop does can find a route with no lane
     // to post to.
     if (auto lanes = start_lanes(options); !lanes) {

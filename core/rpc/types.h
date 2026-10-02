@@ -1401,6 +1401,32 @@ struct DecoderInfo {
     std::vector<std::string> modes;
 };
 
+// The vocoder plugins the engine found at startup. The schema's VocoderPlugins
+// says what each field means; core/decode/vocoder_plugin.h is the loader.
+struct VocoderOfferInfo {
+    std::string name;
+    std::string kind;
+    std::uint32_t bit_count = 0;
+    std::uint32_t pcm_frames = 0;
+    std::uint32_t sample_rate = 0;
+};
+
+struct VocoderPluginFile {
+    std::string file;
+    bool loaded = false;
+    std::string refusal;
+    std::string detail;
+    std::vector<VocoderOfferInfo> offers;
+};
+
+struct VocoderPlugins {
+    bool scanned = false;
+    std::string directory;
+    bool directory_present = false;
+    std::string status;
+    std::vector<VocoderPluginFile> files;
+};
+
 // One decoded-message subscription's running totals.
 struct DecodedStats {
     std::uint64_t messages_sent = 0;

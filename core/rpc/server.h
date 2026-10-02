@@ -154,6 +154,10 @@
 #include "core/error.h"
 #include "core/rpc/token.h"
 
+namespace revenant::decode {
+class VocoderPluginSet;
+}
+
 namespace revenant::rpc {
 
 struct ServerOptions {
@@ -208,6 +212,13 @@ struct ServerOptions {
     // route pinned to one. Two, so one receiver's decoder that has fallen
     // behind does not hold up every other receiver's.
     std::uint32_t decode_lanes = 2;
+
+    // The vocoder plugins the engine process scanned at startup, which
+    // Session.vocoderPlugins reports. Not owned, and under the same rule as
+    // the engine: it must outlive the server, because a loaded plugin's code
+    // is unmapped when the set goes. Null is a host that did not scan, which
+    // the call reports as unscanned rather than as an empty folder.
+    const decode::VocoderPluginSet* vocoders = nullptr;
 };
 
 // Where this server's own work runs and how long it takes, cumulative from

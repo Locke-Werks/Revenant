@@ -184,6 +184,10 @@ struct HarnessOptions {
     // shape refusal, which the imitation cannot produce as the engine does.
     // Ignored when `retunable` is set.
     bool movable_centre = false;
+
+    // ServerOptions::vocoders, passed through. The case owns the set and keeps
+    // it alive past the harness.
+    const decode::VocoderPluginSet* vocoders = nullptr;
 };
 
 // A ring request the engine satisfies in full, so nothing is clamped.

@@ -264,6 +264,7 @@ void EngineLink::supervise()
             // longer exists until the next pass.
             apply_audio_request();
             apply_decode_request();
+            poll_vocoder_plugins();
             poll_receiver_status();
             poll_held_status();
             poll_detections();
@@ -386,6 +387,7 @@ void EngineLink::supervise()
 
             apply_audio_request();
             apply_decode_request();
+            poll_vocoder_plugins();
             poll_receiver_status();
             poll_held_status();
 

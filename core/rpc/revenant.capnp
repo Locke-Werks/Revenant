@@ -3471,4 +3471,70 @@ interface Session {
     # today is everything but a file. Nothing moves but the pace: no receiver,
     # no subscription and not sourceEpoch.
     setSourcePace @27 (pace :Float64) -> (paced :Float64);
+
+    # The vocoder plugins this engine process found at startup: the
+    # "vocoders" folder beside revenant-engine, every .dll in it, and what
+    # each one loaded as or why it was refused. core/decode/vocoder_plugin.h
+    # has the loader and core/decode/vocoder_abi.h the contract a plugin
+    # implements.
+    #
+    # Answered from the scan taken when the engine started; a plugin dropped
+    # into the folder later is reported after the engine restarts. Added on
+    # 2026-10-02. A client talking to an older engine gets the method
+    # refused as unimplemented and should say the engine does not report
+    # vocoders, never that there are none.
+    vocoderPlugins @28 () -> (plugins :VocoderPlugins);
+}
+
+# What one loaded plugin can decode, as it declared itself through
+# revenant_vocoder_describe. Every number is the plugin's own.
+struct VocoderOfferInfo {
+    # The plugin's name for it, "acme-dongle-fw2.1" and the like.
+    name @0 :Text;
+
+    # The family, by the names core/decode/vocoder.h gives them: "imbe",
+    # "codec2" or "external". Text rather than an enum so a family added
+    # later reaches an older client as a word rather than as a number it
+    # cannot name.
+    kind @1 :Text;
+
+    # Bits in per frame, one per byte; samples out per frame; output rate in
+    # whole hertz.
+    bitCount @2 :UInt32;
+    pcmFrames @3 :UInt32;
+    sampleRate @4 :UInt32;
+}
+
+# One .dll the scan looked at, loaded or not, because a file that was looked
+# at and refused is the report an operator needs.
+struct VocoderPluginFile {
+    # The file's name, without the folder.
+    file @0 :Text;
+    loaded @1 :Bool;
+
+    # Why it did not load, by core/decode/vocoder_plugin.h's
+    # plugin_refusal_name: "load-failed", "missing-entry-point",
+    # "abi-version-mismatch", "descriptor-rejected", "offers-nothing" or
+    # "not-supported-on-this-platform". "none" when it loaded.
+    refusal @2 :Text;
+
+    # The loader's sentence for this file, set whether it loaded or not.
+    detail @3 :Text;
+
+    offers @4 :List(VocoderOfferInfo);
+}
+
+struct VocoderPlugins {
+    # False when this engine process never scanned, which is a different
+    # answer from a scan that found nothing.
+    scanned @0 :Bool;
+
+    # The folder scanned, and whether it exists.
+    directory @1 :Text;
+    directoryPresent @2 :Bool;
+
+    # The loader's one line for an operator. Never empty when scanned.
+    status @3 :Text;
+
+    files @4 :List(VocoderPluginFile);
 }

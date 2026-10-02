@@ -1581,6 +1581,16 @@ class EngineLink : public QObject {
     // The operator asked for decoding on the pane's receiver. A switch and not
     // a state: it stays on across a receiver change and a reconnect, and not
     // across a restart, on AFT's terms.
+    // The vocoder plugins the engine loaded from its vocoders folder at
+    // startup, read once per connection; core/decode/vocoder_plugin.h is the
+    // loader. vocoderStatus is one line, the loader's own or why there is none
+    // to show, and empty while disconnected. vocoderFiles is one map per .dll
+    // the engine looked at: file, loaded, refusal, detail, and offers, a list
+    // of one line per codec it declared. vocoderCount is the codecs loaded.
+    Q_PROPERTY(QString vocoderStatus READ vocoderStatus NOTIFY vocodersChanged)
+    Q_PROPERTY(QVariantList vocoderFiles READ vocoderFiles NOTIFY vocodersChanged)
+    Q_PROPERTY(int vocoderCount READ vocoderCount NOTIFY vocodersChanged)
+
     Q_PROPERTY(bool decodeWanted READ decodeWanted WRITE setDecodeWanted NOTIFY decodeChanged)
 
     // What the menu shows, which is the operator's pick when this receiver
@@ -2682,6 +2692,10 @@ public:
     // The decode surface. Implemented in ui/models/decoded_link.cpp.
     // ------------------------------------------------------------------
 
+    [[nodiscard]] QString vocoderStatus() const;
+    [[nodiscard]] QVariantList vocoderFiles() const;
+    [[nodiscard]] int vocoderCount() const;
+
     [[nodiscard]] bool decodeWanted() const { return decode_wanted_.load(); }
     void setDecodeWanted(bool wanted);
 
@@ -2864,6 +2878,7 @@ signals:
     // refusal moved. Not emitted for a line arriving; the log model has its
     // own rows for that.
     void decodeChanged();
+    void vocodersChanged();
 
     // The open source's description or the delivered count moved.
     void openedSourceChanged();
@@ -4390,6 +4405,13 @@ private:
     // here, for the reason apply_audio_request gives.
     void apply_decode_request();
 
+    // Supervisor thread: asks the engine for its vocoder plugins once per
+    // connection and hands the answer to adopt_vocoders. decoded_link.cpp.
+    void poll_vocoder_plugins();
+
+    // Qt thread: takes that answer and notifies vocodersChanged.
+    void adopt_vocoders();
+
     // Supervisor thread. Cancels every decoder subscription this client
     // holds, before its receiver is removed, so the engine's ended() keeps
     // meaning a removal somebody else made. drop_receiver calls it beside
@@ -4462,6 +4484,17 @@ private:
     // asked this connection, and what this client holds on which receiver.
     std::vector<rpc::DecoderInfo> work_decoder_infos_;
     bool decoder_infos_asked_ = false;
+
+    // The vocoder report: asked once per connection on the supervisor thread,
+    // handed over under decoded_mutex_, held on the Qt thread. The fault is
+    // the engine's refusal, which an engine older than the call answers with.
+    bool vocoders_asked_ = false;                       // supervisor thread
+    rpc::VocoderPlugins handover_vocoders_;             // guarded by decoded_mutex_
+    QString handover_vocoder_fault_;                    // guarded by decoded_mutex_
+    bool has_vocoder_handover_ = false;                 // guarded by decoded_mutex_
+    rpc::VocoderPlugins vocoders_;                      // Qt thread
+    QString vocoder_fault_;                             // Qt thread
+    bool vocoders_known_ = false;                       // Qt thread
     QString decoder_infos_fault_;
     rpc::Demod live_receiver_demod_ = rpc::Demod::Nfm;
     qulonglong live_decoded_vrx_ = 0;

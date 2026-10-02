@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <filesystem>
 #include <format>
 #include <string>
 #include <string_view>
@@ -925,6 +926,50 @@ void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
         case DecoderInput::RealAudio:
             out.setInput(schema::DecoderInput::REAL_AUDIO);
             return;
+    }
+}
+
+namespace {
+
+// UTF-8, because the wire's Text is, and path::string() narrows through the
+// active code page and throws on a name it cannot represent.
+[[nodiscard]] std::string path_text(const std::filesystem::path& path) {
+    const std::u8string u8 = path.u8string();
+    return std::string(u8.begin(), u8.end());
+}
+
+}  // namespace
+
+void write_vocoder_plugins(schema::VocoderPlugins::Builder out,
+                           const decode::VocoderPluginSet* set) {
+    if (set == nullptr) {
+        out.setScanned(false);
+        return;
+    }
+    out.setScanned(true);
+    out.setDirectory(path_text(set->directory()));
+    out.setDirectoryPresent(set->directory_present());
+    out.setStatus(set->status_line());
+
+    const auto reports = set->reports();
+    auto files = out.initFiles(static_cast<unsigned>(reports.size()));
+    for (unsigned i = 0; i < files.size(); ++i) {
+        const decode::VocoderPluginReport& report = reports[i];
+        auto file = files[i];
+        file.setFile(path_text(report.path.filename()));
+        file.setLoaded(report.loaded);
+        file.setRefusal(std::string(decode::plugin_refusal_name(report.refusal)));
+        file.setDetail(report.detail);
+
+        auto offers = file.initOffers(static_cast<unsigned>(report.offers.size()));
+        for (unsigned j = 0; j < offers.size(); ++j) {
+            const decode::VocoderOffer& offer = report.offers[j];
+            offers[j].setName(offer.name);
+            offers[j].setKind(std::string(decode::vocoder_kind_name(offer.frame.kind)));
+            offers[j].setBitCount(offer.frame.bit_count);
+            offers[j].setPcmFrames(offer.frame.pcm_frames);
+            offers[j].setSampleRate(offer.frame.sample_rate);
+        }
     }
 }
 

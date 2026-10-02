@@ -368,6 +368,109 @@ ColumnLayout {
         }
     }
 
+    // The vocoder plugins the engine loaded from the vocoders folder beside
+    // it when it started, and every file there it refused, with the reason.
+    // One line until opened, like calibration. Shown whether or not a radio is
+    // open, because the plugins belong to the engine and not to the source.
+    // core/decode/vocoder_plugin.h is the loader.
+    ColumnLayout {
+        id: vocoders
+
+        property bool expanded: false
+
+        Layout.fillWidth: true
+        spacing: 4
+        visible: engineLink.connected && engineLink.vocoderStatus.length > 0
+
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+
+            RButton {
+                flat: true
+                ink: Theme.inkDim
+                text: (vocoders.expanded ? "▾ " : "▸ ") + "vocoders"
+                onClicked: vocoders.expanded = !vocoders.expanded
+            }
+
+            Label {
+                Layout.minimumWidth: 0
+                Layout.fillWidth: true
+                text: engineLink.vocoderCount > 0
+                      ? engineLink.vocoderCount + " loaded  ·  " + engineLink.vocoderStatus
+                      : engineLink.vocoderStatus
+                color: engineLink.vocoderCount > 0 ? Theme.ink : Theme.inkDim
+                font.pixelSize: Theme.sizeSmall
+                elide: Text.ElideRight
+            }
+        }
+
+        // The whole line, wrapped, once opened: it names the folder.
+        Label {
+            Layout.fillWidth: true
+            Layout.minimumWidth: 0
+            visible: vocoders.expanded
+            text: engineLink.vocoderStatus
+            color: Theme.inkDim
+            font.pixelSize: Theme.sizeSmall
+            wrapMode: Text.WrapAnywhere
+        }
+
+        Repeater {
+            model: vocoders.expanded ? engineLink.vocoderFiles : []
+
+            ColumnLayout {
+                id: vocoderFile
+
+                required property var modelData
+
+                Layout.fillWidth: true
+                spacing: 2
+
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: vocoderFile.modelData.file + "  ·  "
+                          + (vocoderFile.modelData.loaded ? "loaded"
+                                                          : vocoderFile.modelData.refusal)
+                    color: vocoderFile.modelData.loaded ? Theme.ink : Theme.inkWarn
+                    font.pixelSize: Theme.sizeSmall
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+
+                Repeater {
+                    model: vocoderFile.modelData.offers
+
+                    Label {
+                        required property string modelData
+
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        leftPadding: 12
+                        text: modelData
+                        color: Theme.ink
+                        font.family: Theme.monoFont
+                        font.pixelSize: Theme.sizeSmall
+                        elide: Text.ElideRight
+                    }
+                }
+
+                // The loader's sentence, which says what to do about a refusal.
+                Label {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    visible: !vocoderFile.modelData.loaded
+                    leftPadding: 12
+                    text: vocoderFile.modelData.detail
+                    color: Theme.inkDim
+                    font.pixelSize: Theme.sizeSmall
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
+    }
+
     // What the last open or close said when it refused. Its own row rather
     // than beside the button, because a registry refusal names the backends
     // it does know and that sentence is longer than a status strip.

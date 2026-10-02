@@ -136,6 +136,106 @@ void EngineLink::update_decode_choices()
     emit decodeChanged();
 }
 
+// ---------------------------------------------------------------------------
+// Vocoder plugins
+// ---------------------------------------------------------------------------
+
+void EngineLink::poll_vocoder_plugins()
+{
+    // Once per connection. The engine scans at startup and not again, so a
+    // second ask would only read the same answer; a plugin added to the
+    // folder is reported after the engine restarts, which reconnects.
+    if (client_ == nullptr || vocoders_asked_) {
+        return;
+    }
+    vocoders_asked_ = true;
+
+    auto listed = client_->vocoder_plugins();
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        if (listed) {
+            handover_vocoders_ = std::move(*listed);
+            handover_vocoder_fault_.clear();
+        } else {
+            handover_vocoders_ = {};
+            handover_vocoder_fault_ = QString::fromStdString(listed.error().message);
+        }
+        has_vocoder_handover_ = true;
+    }
+    QMetaObject::invokeMethod(this, [this] { adopt_vocoders(); }, Qt::QueuedConnection);
+}
+
+void EngineLink::adopt_vocoders()
+{
+    {
+        const std::lock_guard<std::mutex> lock(decoded_mutex_);
+        if (!has_vocoder_handover_) {
+            return;
+        }
+        has_vocoder_handover_ = false;
+        vocoders_ = std::move(handover_vocoders_);
+        handover_vocoders_ = {};
+        vocoder_fault_ = handover_vocoder_fault_;
+    }
+    vocoders_known_ = true;
+    emit vocodersChanged();
+}
+
+QString EngineLink::vocoderStatus() const
+{
+    if (!connected_ || !vocoders_known_) {
+        return {};
+    }
+    // An engine older than the call refuses it, and that is "not reported",
+    // never "none": the operator's plugin may well be loaded there.
+    if (!vocoder_fault_.isEmpty()) {
+        return QStringLiteral("this engine does not report vocoder plugins: %1").arg(vocoder_fault_);
+    }
+    if (!vocoders_.scanned) {
+        return QStringLiteral("this engine did not scan for vocoder plugins");
+    }
+    return QString::fromStdString(vocoders_.status);
+}
+
+QVariantList EngineLink::vocoderFiles() const
+{
+    QVariantList out;
+    if (!connected_ || !vocoders_known_) {
+        return out;
+    }
+    for (const rpc::VocoderPluginFile& file : vocoders_.files) {
+        QStringList offers;
+        for (const rpc::VocoderOfferInfo& offer : file.offers) {
+            offers.append(QStringLiteral("%1: %2, %3 bits in, %4 samples out at %5 Hz")
+                              .arg(QString::fromStdString(offer.name),
+                                   QString::fromStdString(offer.kind))
+                              .arg(offer.bit_count)
+                              .arg(offer.pcm_frames)
+                              .arg(offer.sample_rate));
+        }
+        out.append(QVariantMap{
+            {QStringLiteral("file"), QString::fromStdString(file.file)},
+            {QStringLiteral("loaded"), file.loaded},
+            {QStringLiteral("refusal"), QString::fromStdString(file.refusal)},
+            {QStringLiteral("detail"), QString::fromStdString(file.detail)},
+            {QStringLiteral("offers"), offers},
+        });
+    }
+    return out;
+}
+
+int EngineLink::vocoderCount() const
+{
+    if (!connected_ || !vocoders_known_) {
+        return 0;
+    }
+    int count = 0;
+    for (const rpc::VocoderPluginFile& file : vocoders_.files) {
+        count += static_cast<int>(file.offers.size());
+    }
+    return count;
+}
+
 void EngineLink::adopt_decode()
 {
     {
@@ -327,6 +427,7 @@ void EngineLink::forget_decoded()
     decode_tried_choice_.clear();
     decoder_infos_asked_ = false;
     decoder_infos_fault_.clear();
+    vocoders_asked_ = false;
     {
         const std::lock_guard<std::mutex> lock(decoded_mutex_);
         pending_decoded_ended_.clear();

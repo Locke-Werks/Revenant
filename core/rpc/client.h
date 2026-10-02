@@ -522,6 +522,11 @@ public:
     // The decoders the engine can attach, and what each one reads.
     [[nodiscard]] virtual Expected<std::vector<DecoderInfo>> decoders() = 0;
 
+    // The vocoder plugins the engine found when it started. An engine older
+    // than the call refuses it as unimplemented, which a caller reports as
+    // "not reported" rather than as no plugins.
+    [[nodiscard]] virtual Expected<VocoderPlugins> vocoder_plugins() = 0;
+
     // Attaches a decoder to a receiver and streams what it recovers, one
     // DecodedMessage per event, until the subscription or the receiver ends.
     //

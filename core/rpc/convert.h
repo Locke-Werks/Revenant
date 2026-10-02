@@ -28,6 +28,7 @@
 
 #include "core/decode/rds_bits.h"
 #include "core/decode/rds_groups.h"
+#include "core/decode/vocoder_plugin.h"
 #include "core/detect/detector.h"
 #include "core/detect/front_end.h"
 #include "core/detect/label.h"
@@ -291,6 +292,10 @@ void write_decoded_message(schema::DecodedMessage::Builder out, const DecodedMes
 void write_decoder_info(schema::DecoderInfo::Builder out, std::string_view name,
                         DecoderInput input, std::string_view description,
                         std::span<const std::string_view> modes);
+
+// The scan the engine process took at startup, or `scanned` false for null.
+void write_vocoder_plugins(schema::VocoderPlugins::Builder out,
+                           const decode::VocoderPluginSet* set);
 
 // There is deliberately no read_spectrum_geometry here.
 //

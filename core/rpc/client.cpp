@@ -1219,6 +1219,7 @@ public:
     [[nodiscard]] Status set_rds_region(std::uint64_t vrx, RdsRegion region) override;
 
     [[nodiscard]] Expected<std::vector<DecoderInfo>> decoders() override;
+    [[nodiscard]] Expected<VocoderPlugins> vocoder_plugins() override;
     [[nodiscard]] Expected<std::string> subscribe_decoded(std::uint64_t vrx,
                                                           std::string_view decoder,
                                                           DecodedCallback on_message,
@@ -2206,6 +2207,33 @@ Expected<std::vector<DecoderInfo>> ClientImpl::decoders() {
                     info.modes.push_back(read_text(mode));
                 }
                 out.push_back(std::move(info));
+            }
+            return out;
+        });
+    });
+}
+
+Expected<VocoderPlugins> ClientImpl::vocoder_plugins() {
+    return on_loop("vocoderPlugins", [](LoopState& state) {
+        return state.session.vocoderPluginsRequest().send().then([](auto&& response) {
+            const auto in = response.getPlugins();
+            VocoderPlugins out;
+            out.scanned = in.getScanned();
+            out.directory = read_text(in.getDirectory());
+            out.directory_present = in.getDirectoryPresent();
+            out.status = read_text(in.getStatus());
+            for (const auto row : in.getFiles()) {
+                VocoderPluginFile file;
+                file.file = read_text(row.getFile());
+                file.loaded = row.getLoaded();
+                file.refusal = read_text(row.getRefusal());
+                file.detail = read_text(row.getDetail());
+                for (const auto offer : row.getOffers()) {
+                    file.offers.push_back(VocoderOfferInfo{
+                        read_text(offer.getName()), read_text(offer.getKind()),
+                        offer.getBitCount(), offer.getPcmFrames(), offer.getSampleRate()});
+                }
+                out.files.push_back(std::move(file));
             }
             return out;
         });
