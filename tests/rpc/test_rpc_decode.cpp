@@ -569,6 +569,65 @@ TEST_CASE("a complex decoder at the raw tap cap costs a fraction of a core", "[r
 // channel resolved to a frequency through the update heard before it, the
 // unannounced one left as a channel number, and the manufacturer's block
 // still on the wire by number.
+TEST_CASE("an LDU1 carries the talkgroup to a receiver that missed the header", "[rpc][decode]") {
+    // Rejects an adapter that publishes the talkgroup only from a Header Data
+    // Unit: a receiver that joins mid-call never sees one, and P25p1 has
+    // decoded the Link Control word that repeats it every LDU1 all along.
+    // The expected values are p25_parse_link_control's reading of the same
+    // octets, so this holds the adapter to the parser and the parser is held
+    // to Figure 5-6 in tests/decode/test_p25p1.cpp.
+    constexpr dsp::SampleRate kRate = 48'000;
+    siggen::P25VoiceMessage call;
+    call.network_access_code = 0x293;
+    // LCF $00 group voice, standard MFID, options $00, then the talkgroup and
+    // the source, TIA-102.BAAA-A Figure 5-6.
+    call.link_control = {0x00, 0x00, 0x00, 0x00, 0x0F, 0xA0, 0x12, 0x34, 0xAB};
+    call.voice.resize(2 * 9);
+    for (std::size_t f = 0; f < call.voice.size(); ++f) {
+        for (std::size_t b = 0; b < call.voice[f].size(); ++b) {
+            call.voice[f][b] = static_cast<std::uint8_t>((f + b) & 1U);
+        }
+    }
+    const decode::P25LinkControl expected = decode::p25_parse_link_control(call.link_control);
+    REQUIRE(expected.talkgroup_id.has_value());
+    REQUIRE(expected.source_id.has_value());
+
+    auto dibits = siggen::p25_voice_message_dibits(call);
+    INFO(test::message_of(dibits));
+    REQUIRE(dibits.has_value());
+    siggen::P25ModConfig mod;
+    mod.rate = kRate;
+    auto signal = siggen::p25_render_dibits(mod, *dibits);
+    INFO(test::message_of(signal));
+    REQUIRE(signal.has_value());
+    signal->insert(signal->end(), static_cast<std::size_t>(kRate / 10), dsp::Complex32{});
+
+    auto decoder = rpc::P25p1Decoder::make(rpc::DecoderBuild{.rate = kRate, .mode = "p25p1"});
+    REQUIRE(decoder.has_value());
+    std::vector<float> interleaved;
+    for (const dsp::Complex32& sample : *signal) {
+        interleaved.push_back(sample.real());
+        interleaved.push_back(sample.imag());
+    }
+    std::vector<rpc::DecodedMessage> messages;
+    const rpc::DecoderChunk chunk{
+        .samples = interleaved, .channels = 2, .rate = kRate, .start = 0};
+    REQUIRE((*decoder)->consume(chunk, messages).has_value());
+
+    std::size_t with_talkgroup = 0;
+    for (const rpc::DecodedMessage& message : messages) {
+        INFO(message.text);
+        for (const rpc::DecodedField& field : message.fields) {
+            if (field.key == "talkgroup") {
+                ++with_talkgroup;
+                CHECK(message.text.find(std::format("TG {}", *expected.talkgroup_id)) !=
+                      std::string::npos);
+            }
+        }
+    }
+    CHECK(with_talkgroup >= 1);
+}
+
 TEST_CASE("P25 trunking blocks come out of the p25p1 adapter as messages", "[rpc][decode]") {
     constexpr dsp::SampleRate kRate = 48'000;
     using Fields = std::array<std::uint8_t, 10>;

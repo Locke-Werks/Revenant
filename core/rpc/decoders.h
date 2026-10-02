@@ -684,9 +684,23 @@ enum class LineEnd : std::uint8_t { LineEnd, Length, Idle, NewTransmission, Stre
 //   message_indicator    bytes  the 72-bit MI, most significant first
 //   golay_worst_correction int  worst correction across the 36 Golay words
 //
-// The Link Control word in LDU1 is not decoded by core/decode/p25p1.h, so a
-// receiver joining mid-call sees the NAC and the DUIDs and no talkgroup until
-// the next header. p25p1.h has why.
+// An LDU1 whose Link Control word decoded adds, from P25LinkControl
+// (TIA-102.BAAA-A clause 5.5, Figure 5-6):
+//   lc_format            int    LCF
+//   manufacturer_id      int    MFID
+//   encrypted            flag   LCF $80 or $83, encrypted Link Control
+//   emergency            flag   formats $00 and $03, standard MFID
+//   talkgroup            int    format $00, standard MFID
+//   source               int    formats $00 and $03, standard MFID
+//   destination          int    format $03, standard MFID
+// so a receiver joining mid-call has the talkgroup at its first LDU1 rather
+// than at the next header. An LDU2 whose encryption sync decoded adds
+// algorithm_id, key_id and encrypted the way the header does.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "The Link Control word in LDU1 is not
+// decoded by core/decode/p25p1.h, so a receiver joining mid-call sees the NAC
+// and the DUIDs and no talkgroup until the next header." p25p1.h had decoded
+// it for some time; this adapter did not publish it until 2026-10-02.
 //
 // A Trunking Signaling Data Unit, DUID 7, is the exception to one message per
 // data unit: it comes out as one message per Trunking Signaling Block, kind
@@ -787,6 +801,40 @@ public:
                                             header.talkgroup_id, header.algorithm_id,
                                             header.key_id,
                                             header.encrypted ? "encrypted" : "clear");
+            }
+            if (frame.link_control.has_value()) {
+                const decode::P25LinkControl& lc = *frame.link_control;
+                message.fields.push_back(integer_field("lc_format", lc.format));
+                message.fields.push_back(integer_field("manufacturer_id", lc.manufacturer_id));
+                message.fields.push_back(flag_field("encrypted", lc.encrypted));
+                message.fields.push_back(flag_field("emergency", lc.emergency));
+                message.text += std::format(" LCF 0x{:02X}", lc.format);
+                if (lc.talkgroup_id) {
+                    message.fields.push_back(integer_field("talkgroup", *lc.talkgroup_id));
+                    message.text += std::format(" TG {}", *lc.talkgroup_id);
+                }
+                if (lc.destination_id) {
+                    message.fields.push_back(integer_field("destination", *lc.destination_id));
+                    message.text += std::format(" to {}", *lc.destination_id);
+                }
+                if (lc.source_id) {
+                    message.fields.push_back(integer_field("source", *lc.source_id));
+                    message.text += std::format(" from {}", *lc.source_id);
+                }
+                if (lc.encrypted) {
+                    message.text += " encrypted LC";
+                }
+                if (lc.emergency) {
+                    message.text += " EMERGENCY";
+                }
+            }
+            if (frame.encryption_sync.has_value()) {
+                const decode::P25EncryptionSync& es = *frame.encryption_sync;
+                message.fields.push_back(integer_field("algorithm_id", es.algorithm_id));
+                message.fields.push_back(integer_field("key_id", es.key_id));
+                message.fields.push_back(flag_field("encrypted", es.encrypted));
+                message.text += std::format(" ALGID 0x{:02X} KID 0x{:04X} {}", es.algorithm_id,
+                                            es.key_id, es.encrypted ? "encrypted" : "clear");
             }
             out.push_back(std::move(message));
         }
