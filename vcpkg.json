@@ -1,7 +1,7 @@
 {
     "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
     "name": "revenant",
-    "version-semver": "0.1.3",
+    "version-semver": "0.1.4",
     "description": "A GPU-resident software defined radio application",
     "supports": "windows | linux | osx",
     "dependencies": [
