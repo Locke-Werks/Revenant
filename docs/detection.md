@@ -2916,6 +2916,15 @@ reason below, and USB, since "USB and LSB on the wire" below, by its side.
 WHAT THE FIRST SENTENCE USED TO SAY at its end: "carry its own label and no
 other, USB none", which was the rule for USB until the side reached the label.
 
+RTTY on sixteen channels held to its protocol only while its one long dwell
+verified. Where a dwell's five seconds fall follows the wall clock and the
+probe pool's load, and traced under a parallel build 2 of 42 runs had that
+dwell come back unverified at 15.0 and 23.2 s, which left RTTY at 2FSK for the
+rest of the scene; three CI runs in a row failed that way after heavier
+decoders went into the AX.25 and P25 rows (GitHub issue #2). Tier two now
+gives a narrow track up to `detect::kIdentifyDwells` long dwells, each only
+while the one before verified nothing, behind every first dwell.
+
 **RTTY's protocol on the default grid** is out of reach, and was before. Its
 detection is 1318 Hz wide, and the RTTY and CW rows in
 `core/identify/identify.cpp` and the long dwell (`engine::kProbeIdentifyNarrowHz`)

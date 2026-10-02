@@ -192,21 +192,24 @@ std::vector<std::uint64_t> TierTwo::pick(
 }
 
 std::vector<std::uint64_t> TierTwo::pick_identify(
-    std::span<const Track> tracks, const std::unordered_set<std::uint64_t>& tried,
+    std::span<const Track> tracks, const std::unordered_map<std::uint64_t, std::uint32_t>& dwells,
     std::span<const std::uint64_t> in_flight, std::span<const std::uint64_t> already,
     std::size_t free) {
-    std::vector<std::pair<dsp::SampleIndex, std::uint64_t>> eligible;
+    // (dwells so far, birth, id): first dwells before retries, oldest first.
+    std::vector<std::tuple<std::uint32_t, dsp::SampleIndex, std::uint64_t>> eligible;
     const auto listed = [](std::span<const std::uint64_t> ids, std::uint64_t id) {
         return std::find(ids.begin(), ids.end(), id) != ids.end();
     };
     for (const Track& track : tracks) {
+        const auto given = dwells.find(track.id);
+        const std::uint32_t count = given == dwells.end() ? 0 : given->second;
         if (track.state != TrackState::Live || track.probes == 0 ||
             track.protocol != identify::Protocol::None ||
-            track.bandwidth > engine::kProbeIdentifyNarrowHz || tried.contains(track.id) ||
+            track.bandwidth > engine::kProbeIdentifyNarrowHz || count >= kIdentifyDwells ||
             listed(in_flight, track.id) || listed(already, track.id)) {
             continue;
         }
-        eligible.emplace_back(track.first_seen, track.id);
+        eligible.emplace_back(count, track.first_seen, track.id);
     }
     std::sort(eligible.begin(), eligible.end());
     std::vector<std::uint64_t> out;
@@ -214,7 +217,7 @@ std::vector<std::uint64_t> TierTwo::pick_identify(
         if (out.size() >= free) {
             break;
         }
-        out.push_back(entry.second);
+        out.push_back(std::get<2>(entry));
     }
     return out;
 }
@@ -475,9 +478,7 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
     };
     std::erase_if(group_attempts_, group_gone);
     std::erase_if(group_findings_, group_gone);
-    std::erase_if(group_identify_tried_, [&](std::uint64_t id) {
-        return std::find(live_groups.begin(), live_groups.end(), id) == live_groups.end();
-    });
+    std::erase_if(group_identify_dwells_, group_gone);
 
     const engine::ProbeStats pool = engine.probe_stats();
     if (pool.size == 0 || in_flight_.size() >= pool.size) {
@@ -558,11 +559,9 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
     }
 
     // What the pool has left after the classification schedule goes to the
-    // identification one: a narrow track's one long dwell. See pick_identify.
-    std::erase_if(identify_tried_, [&](std::uint64_t id) {
-        return std::none_of(tracks.begin(), tracks.end(),
-                            [id](const Track& track) { return track.id == id; });
-    });
+    // identification one: a narrow track's long dwells, up to
+    // kIdentifyDwells. See pick_identify.
+    std::erase_if(identify_dwells_, gone);
     std::vector<std::uint64_t> identifying;
     std::vector<const LineGroup*> identifying_groups;
     if (units.size() < free) {
@@ -583,22 +582,24 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             }
         }
         identifying =
-            pick_identify(narrow, identify_tried_, in_flight_, chosen, free - units.size());
+            pick_identify(narrow, identify_dwells_, in_flight_, chosen, free - units.size());
 
-        // A narrow emitter gets the same long dwell once its first emitter
+        // A narrow emitter gets the same long dwells once its first emitter
         // probe has answered and named no protocol: RTTY's two tones read as
-        // two lines are one such emitter.
+        // two lines are one such emitter. First dwells before retries here as
+        // well, and otherwise in the grouper's order.
+        std::vector<std::pair<std::uint32_t, const LineGroup*>> owed;
         if (grouper_.has_value()) {
             for (const LineGroup& group : grouper_->groups()) {
-                if (units.size() + identifying.size() + identifying_groups.size() >= free) {
-                    break;
-                }
                 if (!is_emitter(group) ||
                     (!group_findings_.contains(group.id) && !group_attempts_.contains(group.id))) {
                     continue;
                 }
+                const auto given = group_identify_dwells_.find(group.id);
+                const std::uint32_t count =
+                    given == group_identify_dwells_.end() ? 0 : given->second;
                 if (group.high_edge - group.low_edge > engine::kProbeIdentifyNarrowHz ||
-                    group_identify_tried_.contains(group.id) || listed(chosen, group.anchor)) {
+                    count >= kIdentifyDwells || listed(chosen, group.anchor)) {
                     continue;
                 }
                 const auto anchor = std::find_if(tracks.begin(), tracks.end(), [&](const Track& t) {
@@ -614,8 +615,16 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
                     })) {
                     continue;
                 }
-                identifying_groups.push_back(&group);
+                owed.emplace_back(count, &group);
             }
+        }
+        std::stable_sort(owed.begin(), owed.end(),
+                         [](const auto& a, const auto& b) { return a.first < b.first; });
+        for (const auto& entry : owed) {
+            if (units.size() + identifying.size() + identifying_groups.size() >= free) {
+                break;
+            }
+            identifying_groups.push_back(entry.second);
         }
     }
     if (units.empty() && identifying.empty() && identifying_groups.empty()) {
@@ -694,14 +703,18 @@ Status TierTwo::step(Detector& detector, engine::Engine& engine) {
             return sent;
         }
         attempts_[id] = now;
-        identify_tried_.insert(id);
+        if (identify_dwells_[id]++ > 0) {
+            ++stats_.identify_retried;
+        }
         ++stats_.identify_submitted;
     }
     for (const LineGroup* group : identifying_groups) {
         if (auto sent = submit_group(*group, true); !sent) {
             return sent;
         }
-        group_identify_tried_.insert(group->id);
+        if (group_identify_dwells_[group->id]++ > 0) {
+            ++stats_.identify_retried;
+        }
         ++stats_.identify_submitted;
     }
     return {};

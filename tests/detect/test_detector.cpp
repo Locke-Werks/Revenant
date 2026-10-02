@@ -2393,8 +2393,10 @@ TEST_CASE("tier two probes the oldest unclassified live track first", "[detect][
 }
 
 // REJECTS: an identification schedule that spends the long dwell on a wide
-// track, on one never probed, on one already identified, or twice on one.
-TEST_CASE("tier two gives each narrow probed track one long dwell, oldest first",
+// track, on one never probed, on one already identified, or on one that has
+// had detect::kIdentifyDwells. WHAT THIS USED TO SAY at its end: "or twice on
+// one", until an unverified dwell was given retries for GitHub issue #2.
+TEST_CASE("tier two gives each narrow probed track a long dwell, oldest first",
           "[detect][tier-two]") {
     const auto track = [](std::uint64_t id, dsp::SampleIndex born, dsp::Hertz width,
                           std::uint32_t probes, identify::Protocol protocol) {
@@ -2415,12 +2417,69 @@ TEST_CASE("tier two gives each narrow probed track one long dwell, oldest first"
         track(5, 100, 60, 1, identify::Protocol::Psk31),       // already identified
         track(6, 50, 700, 2, identify::Protocol::None),
     };
-    const std::unordered_set<std::uint64_t> tried = {6};
+    const std::unordered_map<std::uint64_t, std::uint32_t> spent = {{6, detect::kIdentifyDwells}};
     const std::uint64_t already[] = {1};
-    const auto chosen = detect::TierTwo::pick_identify(tracks, tried, {}, already, 8);
+    const auto chosen = detect::TierTwo::pick_identify(tracks, spent, {}, already, 8);
     CHECK(chosen == std::vector<std::uint64_t>{2});
 
     const auto all = detect::TierTwo::pick_identify(tracks, {}, {}, {}, 8);
     CHECK(all == std::vector<std::uint64_t>{6, 2, 1});
     CHECK(detect::TierTwo::pick_identify(tracks, {}, {}, {}, 1) == std::vector<std::uint64_t>{6});
+}
+
+// REJECTS: a long dwell that came back unverified settling a narrow track's
+// label for good, which is GitHub issue #2's RTTY reading 2FSK; and the
+// opposite failure, a track that verified, or one that has had its bound,
+// being dwelt on again.
+TEST_CASE("tier two retries an unverified long dwell up to the bound and never a verified one",
+          "[detect][tier-two]") {
+    const auto track = [](std::uint64_t id, dsp::SampleIndex born, identify::Protocol protocol) {
+        detect::Track out;
+        out.id = id;
+        out.state = detect::TrackState::Live;
+        out.first_seen = born;
+        out.bandwidth = 600;
+        out.probes = 2;
+        out.protocol = protocol;
+        return out;
+    };
+    // 1 and 2 have had a dwell that verified nothing, 3 has had none, 4
+    // verified RTTY on its first.
+    const std::vector<detect::Track> tracks = {
+        track(1, 100, identify::Protocol::None),
+        track(2, 200, identify::Protocol::None),
+        track(3, 300, identify::Protocol::None),
+        track(4, 50, identify::Protocol::Rtty),
+    };
+
+    SECTION("a retry goes behind every first dwell, oldest first among retries") {
+        const std::unordered_map<std::uint64_t, std::uint32_t> dwells = {{1, 1}, {2, 1}, {4, 1}};
+        CHECK(detect::TierTwo::pick_identify(tracks, dwells, {}, {}, 8) ==
+              std::vector<std::uint64_t>{3, 1, 2});
+        CHECK(detect::TierTwo::pick_identify(tracks, dwells, {}, {}, 1) ==
+              std::vector<std::uint64_t>{3});
+    }
+    SECTION("each unverified track is retried until it has had the bound, then never again") {
+        for (std::uint32_t given = 1; given < detect::kIdentifyDwells; ++given) {
+            const std::unordered_map<std::uint64_t, std::uint32_t> dwells = {{1, given},
+                                                                             {3, 1}};
+            const auto chosen = detect::TierTwo::pick_identify(tracks, dwells, {}, {}, 8);
+            CHECK(std::find(chosen.begin(), chosen.end(), 1) != chosen.end());
+        }
+        const std::unordered_map<std::uint64_t, std::uint32_t> spent = {
+            {1, detect::kIdentifyDwells}, {2, detect::kIdentifyDwells},
+            {3, detect::kIdentifyDwells}};
+        CHECK(detect::TierTwo::pick_identify(tracks, spent, {}, {}, 8).empty());
+    }
+    SECTION("a track that verified is not dwelt on again, however few it has had") {
+        const std::unordered_map<std::uint64_t, std::uint32_t> dwells = {{4, 1}};
+        const auto chosen = detect::TierTwo::pick_identify(tracks, dwells, {}, {}, 8);
+        CHECK(std::find(chosen.begin(), chosen.end(), 4) == chosen.end());
+    }
+    SECTION("a retry waits for the dwell still collecting") {
+        const std::unordered_map<std::uint64_t, std::uint32_t> dwells = {{1, 1}};
+        const std::uint64_t in_flight[] = {1};
+        const auto chosen = detect::TierTwo::pick_identify(tracks, dwells, in_flight, {}, 8);
+        CHECK(std::find(chosen.begin(), chosen.end(), 1) == chosen.end());
+    }
 }

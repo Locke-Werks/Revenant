@@ -118,8 +118,11 @@ inline constexpr double kProbeDwellSeconds = 2.0;
 // characteriser still reads only the first kProbeDwellSeconds of it:
 // docs/detection.md measured that the extract's length changes the
 // characteriser's answer, and every figure it records was taken at two
-// seconds. detect::TierTwo asks for it once per narrow track, after that
-// track's first probe and behind every track not yet probed at all.
+// seconds. detect::TierTwo asks for it after a narrow track's first probe and
+// behind every track not yet probed at all, and again, up to
+// detect::kIdentifyDwells in all, while it comes back with no protocol.
+// WHAT THIS SENTENCE USED TO SAY: "detect::TierTwo asks for it once per narrow
+// track", until GitHub issue #2.
 //
 // WHAT THIS USED TO BE: every detection no wider than the bar collected the
 // longer dwell on every probe. It held the pool on narrow tracks and cost

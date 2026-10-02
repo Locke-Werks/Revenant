@@ -250,17 +250,23 @@ struct Record {
 // REJECTS: a change to the characteriser, the identifier or tier two that
 // moves any emitter of the labelled scene off its label, which is what the
 // keyed carrier's did unnoticed.
-// [!mayfail] SINCE 2026-10-02, AND ONLY UNTIL GITHUB ISSUE #2 IS FIXED.
 //
-// This case runs and reports every wrong label as before; [!mayfail] only
-// stops a failure from failing the run. It went in to let a release out, after
-// the case failed three runs in a row on RTTY seed 3, 16 channels, reading
-// 2FSK. The cause is in identification, not in this test: RTTY's long dwell
-// comes back unverified for some placements of its 5 s window, and the
-// placement follows the wall clock and the probe pool's load, so heavier
-// decoders in core/identify's rows shifted it onto a bad one more often.
-// Issue #2 has the traces. Take the tag off when RTTY verifies whatever window
-// the dwell captures.
+// WHAT THIS USED TO SAY, with the case tagged [!mayfail] from 8e1e10a: "This
+// case runs and reports every wrong label as before; [!mayfail] only stops a
+// failure from failing the run. It went in to let a release out, after the
+// case failed three runs in a row on RTTY seed 3, 16 channels, reading 2FSK.
+// The cause is in identification, not in this test: RTTY's long dwell comes
+// back unverified for some placements of its 5 s window, and the placement
+// follows the wall clock and the probe pool's load". Tier two now gives an
+// unverified dwell up to detect::kIdentifyDwells in all, so one bad placement
+// no longer settles RTTY's label: RTTY on 16 channels ended RTTY in 15 of 15
+// seed runs under load on 2026-10-02.
+//
+// [!mayfail] IS STILL ON, FOR A DIFFERENT CAUSE. One run in five under load
+// failed on D-STAR, seed 2, the CLI's own grid, read as M17. core/identify's
+// M17 row sometimes verifies on a D-STAR signal (a LinkSetup counted as 2
+// against a bar of 2), and the first row to verify wins, so no retry follows.
+// Take the tag off when that row stops verifying on D-STAR; GitHub issue #2.
 TEST_CASE("each emitter of the labelled scene ends with its own label",
           "[gpu][detect][labelled][!mayfail]") {
     REVENANT_NEEDS_GPU();

@@ -73,6 +73,29 @@
 
 namespace revenant::detect {
 
+// THE MOST LONG IDENTIFICATION DWELLS ONE TRACK OR EMITTER IS GIVEN: the first
+// and two more, each only while the one before came back with no protocol.
+//
+// WHY MORE THAN ONE. Where a dwell's five seconds fall in the signal is set by
+// when the probe pool places it, which is the wall clock and the pool's load,
+// and some placements do not verify framing a later one does. Traced under a
+// parallel build, 2 of 42 runs of tools/siggen/labelled.h's RTTY on 16
+// channels had their one dwell come back unverified at 15.0 and 23.2 s of
+// stream, while runs that verified had their dwell placed within a tenth of a
+// second of the first; with one dwell that answer was final and the track
+// read 2FSK for the rest of the scene. GitHub issue #2 has the traces.
+//
+// WHY TWO MORE AND NOT MORE THAN THAT. THIS FILE'S CHOICE, not a measured bar.
+// Every dwell is five seconds of a probe receiver, and a narrow track that
+// carries no protocol at all, a carrier or keyed CW nobody can frame, comes
+// back unverified every time, so the bound is what such a track costs the
+// pool: fifteen seconds of one receiver over its life instead of five. At the
+// one-in-twenty an unlucky placement was seen at, three independent ones all
+// failing is about one in eight thousand. Retries also go behind every first
+// dwell, and the whole identification schedule behind the classification
+// one, so they spend only what coverage leaves.
+inline constexpr std::uint32_t kIdentifyDwells = 3;
+
 struct TierTwoConfig {
     // Needed to turn sample indices into seconds; DetectorConfig::source_rate.
     dsp::SampleRate source_rate = 0;
@@ -171,6 +194,11 @@ struct TierTwoStats {
     std::uint64_t identify_submitted = 0;
     std::uint64_t emitter_submitted = 0;
 
+    // Of identify_submitted, the dwells after a track's or an emitter's first,
+    // each one asked because the dwell before it came back with no protocol.
+    // See kIdentifyDwells.
+    std::uint64_t identify_retried = 0;
+
     // An emitter's answer recorded on one of its lines other than the one the
     // probe was tagged with, either when it came back or when the line joined
     // later.
@@ -240,15 +268,26 @@ public:
 
     // THE IDENTIFICATION SCHEDULE, which runs on what the one above leaves.
     // A narrow track, no wider than engine::kProbeIdentifyNarrowHz, that has
-    // had its first probe and has no protocol yet gets one probe of
-    // engine::kProbeIdentifyDwellSeconds, once, oldest first, because the
-    // narrow modes frame too slowly for two seconds; core/engine/probe.h has
-    // the measurement. After every track not yet probed at all, so a pool on
-    // a busy band spends itself on coverage first. `tried` holds the tracks
-    // already given theirs and `already` the ids the classification schedule
-    // just picked.
+    // had its first probe and has no protocol yet gets a probe of
+    // engine::kProbeIdentifyDwellSeconds, because the narrow modes frame too
+    // slowly for two seconds; core/engine/probe.h has the measurement. After
+    // every track not yet probed at all, so a pool on a busy band spends
+    // itself on coverage first.
+    //
+    // Up to kIdentifyDwells of them, each while the one before came back with
+    // no protocol: every track's first dwell goes before any track's second,
+    // and oldest first within each. A track that verified has a protocol and
+    // is never eligible again. `dwells` counts the long dwells each track has
+    // been given and `already` holds the ids the classification schedule just
+    // picked.
+    //
+    // WHAT THIS USED TO SAY: "gets one probe of
+    // engine::kProbeIdentifyDwellSeconds, once, oldest first", until a dwell
+    // that came back unverified was found to settle RTTY at 2FSK for good;
+    // GitHub issue #2, and kIdentifyDwells says why more than one.
     [[nodiscard]] static std::vector<std::uint64_t> pick_identify(
-        std::span<const Track> tracks, const std::unordered_set<std::uint64_t>& tried,
+        std::span<const Track> tracks,
+        const std::unordered_map<std::uint64_t, std::uint32_t>& dwells,
         std::span<const std::uint64_t> in_flight, std::span<const std::uint64_t> already,
         std::size_t free);
 
@@ -290,7 +329,7 @@ private:
     std::vector<std::uint64_t> in_flight_;
     std::unordered_map<std::uint64_t, dsp::SampleIndex> attempts_;
     std::unordered_map<std::uint64_t, engine::ProbeStatus> statuses_;
-    std::unordered_set<std::uint64_t> identify_tried_;
+    std::unordered_map<std::uint64_t, std::uint32_t> identify_dwells_;
     std::vector<engine::ProbeOutcome> outcomes_;
 
     // The emitters. A probe of a group is tagged with its anchor's id and
@@ -303,7 +342,7 @@ private:
     std::unordered_map<std::uint64_t, GroupProbe> group_probes_;
     std::unordered_map<std::uint64_t, dsp::SampleIndex> group_attempts_;
     std::unordered_map<std::uint64_t, ProbeFinding> group_findings_;
-    std::unordered_set<std::uint64_t> group_identify_tried_;
+    std::unordered_map<std::uint64_t, std::uint32_t> group_identify_dwells_;
 
     // The emitter answer each line carries, so one that leaves and rejoins,
     // or turns up in a group with a new id after a pause, keeps it.
