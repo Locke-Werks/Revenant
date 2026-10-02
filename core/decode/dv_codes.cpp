@@ -6,6 +6,8 @@
 #include <format>
 #include <limits>
 
+#include "core/decode/p25p1.h"
+
 namespace revenant::decode {
 namespace {
 
@@ -464,6 +466,143 @@ LsdDecode p25_lsd_decode(std::uint16_t word) {
     }
     out.distance = best;
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// P25 Phase 1: the rate 1/2 trellis code
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Table 7-3's levels read through Table 9-1, as the dibit each one is.
+std::uint8_t trellis_level_dibit(std::int8_t level) {
+    return kP25SymbolToDibit[static_cast<std::size_t>((level + 3) / 2)];
+}
+
+// The two dibits a constellation point is sent as, Dibit 0 then Dibit 1,
+// packed as a nibble with Dibit 0 high, which is the form the Viterbi
+// metric compares against.
+std::uint8_t trellis_point_nibble(std::uint8_t point) {
+    const std::uint8_t first = trellis_level_dibit(kP25TrellisConstellation[point][0]);
+    const std::uint8_t second = trellis_level_dibit(kP25TrellisConstellation[point][1]);
+    return static_cast<std::uint8_t>((first << 2U) | second);
+}
+
+}  // namespace
+
+std::array<std::uint8_t, kP25TrellisBlockDibits> p25_data_interleave_map() {
+    std::array<std::uint8_t, kP25TrellisBlockDibits> map{};
+    std::size_t out = 0;
+    // Four groups of encoder dibits, by index mod 8: {0,1}, {2,3}, {4,5},
+    // {6,7}, each taken in order. Table 7-4's first column is 26 rows because
+    // 96 and 97 are 0 and 1 mod 8 and the other residues stop at 95.
+    for (std::size_t phase = 0; phase < 8; phase += 2) {
+        for (std::size_t base = 0; base < kP25TrellisBlockDibits; base += 8) {
+            for (std::size_t offset = 0; offset < 2; ++offset) {
+                const std::size_t input = base + phase + offset;
+                if (input < kP25TrellisBlockDibits) {
+                    map[out++] = static_cast<std::uint8_t>(input);
+                }
+            }
+        }
+    }
+    return map;
+}
+
+std::array<std::uint8_t, kP25TrellisBlockDibits> p25_trellis12_encode(
+    std::span<const std::uint8_t, kP25TrellisOctets> octets) {
+    // Clause 7: the octets serialised left to right and cut into dibits, most
+    // significant first, then the %00 flush.
+    std::array<std::uint8_t, kP25TrellisInputDibits> input{};
+    for (std::size_t i = 0; i + 1 < kP25TrellisInputDibits; ++i) {
+        input[i] = static_cast<std::uint8_t>((octets[i / 4] >> (6U - 2U * (i % 4))) & 0x3U);
+    }
+
+    std::array<std::uint8_t, kP25TrellisBlockDibits> coded{};
+    std::uint8_t state = 0;
+    for (std::size_t i = 0; i < kP25TrellisInputDibits; ++i) {
+        const std::uint8_t point = kP25Trellis12Transitions[state][input[i]];
+        coded[2 * i] = trellis_level_dibit(kP25TrellisConstellation[point][0]);
+        coded[2 * i + 1] = trellis_level_dibit(kP25TrellisConstellation[point][1]);
+        state = input[i];
+    }
+
+    const auto map = p25_data_interleave_map();
+    std::array<std::uint8_t, kP25TrellisBlockDibits> sent{};
+    for (std::size_t o = 0; o < kP25TrellisBlockDibits; ++o) {
+        sent[o] = coded[map[o]];
+    }
+    return sent;
+}
+
+P25TrellisDecode p25_trellis12_decode(std::span<const std::uint8_t, kP25TrellisBlockDibits> dibits) {
+    const auto map = p25_data_interleave_map();
+    std::array<std::uint8_t, kP25TrellisBlockDibits> coded{};
+    for (std::size_t o = 0; o < kP25TrellisBlockDibits; ++o) {
+        coded[map[o]] = static_cast<std::uint8_t>(dibits[o] & 0x3U);
+    }
+
+    std::array<std::array<std::uint8_t, 4>, 4> expected{};
+    for (std::size_t s = 0; s < 4; ++s) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            expected[s][i] = trellis_point_nibble(kP25Trellis12Transitions[s][i]);
+        }
+    }
+
+    // The state after each step is the input that produced it, so the
+    // survivor at step t into state s only has to remember which state it
+    // came from.
+    constexpr std::uint32_t kUnreached = std::numeric_limits<std::uint32_t>::max() / 2;
+    std::array<std::uint32_t, 4> metric{0, kUnreached, kUnreached, kUnreached};
+    std::array<std::array<std::uint8_t, 4>, kP25TrellisInputDibits> from{};
+    for (std::size_t t = 0; t < kP25TrellisInputDibits; ++t) {
+        const auto received = static_cast<std::uint8_t>((coded[2 * t] << 2U) | coded[2 * t + 1]);
+        std::array<std::uint32_t, 4> next{kUnreached, kUnreached, kUnreached, kUnreached};
+        for (std::uint8_t s = 0; s < 4; ++s) {
+            if (metric[s] >= kUnreached) {
+                continue;
+            }
+            for (std::uint8_t i = 0; i < 4; ++i) {
+                const auto cost = metric[s] + static_cast<std::uint32_t>(std::popcount(
+                                                  static_cast<unsigned>(received ^ expected[s][i])));
+                if (cost < next[i]) {
+                    next[i] = cost;
+                    from[t][i] = s;
+                }
+            }
+        }
+        metric = next;
+    }
+
+    P25TrellisDecode out;
+    out.corrected_bits = metric[0];
+    // Trace back from state 0. The input at step t is the state after it.
+    std::array<std::uint8_t, kP25TrellisInputDibits> input{};
+    std::uint8_t state = 0;
+    for (std::size_t t = kP25TrellisInputDibits; t-- > 0;) {
+        input[t] = state;
+        state = from[t][state];
+    }
+    for (std::size_t i = 0; i + 1 < kP25TrellisInputDibits; ++i) {
+        out.octets[i / 4] = static_cast<std::uint8_t>(out.octets[i / 4] |
+                                                      (input[i] << (6U - 2U * (i % 4))));
+    }
+    return out;
+}
+
+std::uint16_t p25_header_crc(std::span<const std::uint8_t> octets) {
+    std::uint32_t reg = 0;
+    for (const std::uint8_t octet : octets) {
+        for (int bit = 7; bit >= 0; --bit) {
+            const std::uint32_t in = (octet >> static_cast<unsigned>(bit)) & 1U;
+            const std::uint32_t top = (reg >> 15U) & 1U;
+            reg = (reg << 1U) & 0xFFFFU;
+            if ((in ^ top) != 0U) {
+                reg ^= 0x1021U;
+            }
+        }
+    }
+    return static_cast<std::uint16_t>(reg ^ 0xFFFFU);
 }
 
 // ---------------------------------------------------------------------------

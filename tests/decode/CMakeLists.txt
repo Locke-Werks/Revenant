@@ -34,6 +34,12 @@
 # vocoder. Its frames are built by imbe_test_frames.h, which test_imbe.cpp
 # shares, so both suites agree on what a frame is.
 #
+# test_p25_tsbk.cpp is the trunking control channel on top of that: Table 7-4
+# and the clause 6.2 CRC against the document, each parsed TIA-102.AABC-B
+# message against values built from its figure, and TSDUs of one to three
+# blocks through C4FM, clean, with bit errors for the trellis code, and split
+# across calls.
+#
 # test_p25p1_blocking.cpp decodes one P25 capture whole and in eight other
 # blockings, down to one sample a call, and requires every data unit to come
 # out identical, which is the property the engine's block-at-a-time feed needs.
@@ -139,6 +145,7 @@ add_executable(revenant_decode_tests
     test_navtex.cpp
     test_m17.cpp
     test_m17_noise.cpp
+    test_p25_tsbk.cpp
     test_p25p1.cpp
     test_p25p1_blocking.cpp
     test_p25p1_voice.cpp

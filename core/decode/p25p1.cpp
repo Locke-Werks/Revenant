@@ -246,6 +246,7 @@ std::string_view p25_duid_name(std::uint8_t duid) {
         case P25Duid::LogicalLinkDataUnit2: return "ldu2";
         case P25Duid::PacketDataUnit: return "pdu";
         case P25Duid::TerminatorWithLinkControl: return "tdulc";
+        case P25Duid::TrunkingSignalingDataUnit: return "tsdu";
     }
     // Table 8-4: "The remaining 10 values not given in Table 8-4 are reserved
     // for use in trunking or other systems."
@@ -259,6 +260,7 @@ std::size_t p25_data_unit_symbols(std::uint8_t duid) {
         case P25Duid::LogicalLinkDataUnit1:
         case P25Duid::LogicalLinkDataUnit2: return kP25LduSymbols;
         case P25Duid::TerminatorWithLinkControl: return kP25TerminatorWithLcSymbols;
+        case P25Duid::TrunkingSignalingDataUnit: return p25_tsdu_symbols(1);
 
         // Clause 6 sizes a packet data unit from its own header, so there is
         // no constant for it and stepping past it needs the header decoded.
@@ -411,6 +413,51 @@ Expected<P25Phase1::Outcome> P25Phase1::decode_at(std::size_t offset, bool inver
         return std::unexpected(with_context(nid.error(), "decoding the P25 Network Identifier"));
     }
 
+    const auto fill_common = [&](P25Frame& frame) {
+        frame.nid.network_access_code = nid->nac;
+        frame.nid.duid = nid->duid;
+        frame.nid.corrected_bits = nid->corrected_bits;
+        frame.first_symbol = trimmed_ + offset;
+        frame.sync_score = score;
+        frame.inverted = inverted;
+        frame.carrier_offset_hz = levels.level * kP25DeviationPerSymbolUnitHz;
+        frame.deviation_ratio = std::abs(levels.gain);
+    };
+
+    // TIA-102.AABB-B clause 5: a TSDU is one to three TSBKs, and how many is
+    // known only by reading them, so it is taken a block at a time. Each
+    // pass reads the data unit as if it ended after the blocks so far, which
+    // costs re-slicing the head of it on a long one; three blocks is the
+    // most there can be.
+    if (static_cast<P25Duid>(nid->duid) == P25Duid::TrunkingSignalingDataUnit) {
+        std::vector<P25Tsbk> blocks;
+        std::size_t take = 0;
+        for (std::size_t count = 1; count <= kP25MaxTsbksPerTsdu; ++count) {
+            take = p25_tsdu_symbols(count);
+            if (offset + take > symbols_.size()) {
+                wait_until = trimmed_ + offset + take;
+                return Outcome::NeedMore;
+            }
+            const std::vector<std::uint8_t> dibits = read_dibits(take);
+            // Figure 5-2: the blocks follow the NID back to back, 98 dibits
+            // each, once the status symbols are out.
+            const std::size_t first = kP25FrameSyncSymbols + kP25NidSymbols +
+                                      (count - 1) * kP25TsbkDibits;
+            blocks.push_back(p25_decode_tsbk(
+                std::span<const std::uint8_t, kP25TsbkDibits>(dibits.data() + first,
+                                                              kP25TsbkDibits)));
+            if (!blocks.back().crc_ok || blocks.back().last_block) {
+                break;
+            }
+        }
+        out = P25Frame{};
+        fill_common(out);
+        out.dibits = read_dibits(take);
+        out.tsbks = std::move(blocks);
+        out.unit_symbols = take;
+        return Outcome::Complete;
+    }
+
     // Hold a data unit until all of it is in, so its payload is decoded once
     // and whole rather than reported short and then stepped over.
     const std::size_t unit = p25_data_unit_symbols(nid->duid);
@@ -425,14 +472,8 @@ Expected<P25Phase1::Outcome> P25Phase1::decode_at(std::size_t offset, bool inver
 
     out = P25Frame{};
     out.dibits = read_dibits(take);
-    out.nid.network_access_code = nid->nac;
-    out.nid.duid = nid->duid;
-    out.nid.corrected_bits = nid->corrected_bits;
-    out.first_symbol = trimmed_ + offset;
-    out.sync_score = score;
-    out.inverted = inverted;
-    out.carrier_offset_hz = levels.level * kP25DeviationPerSymbolUnitHz;
-    out.deviation_ratio = std::abs(levels.gain);
+    fill_common(out);
+    out.unit_symbols = unit;
 
     const auto type = static_cast<P25Duid>(nid->duid);
     if (type == P25Duid::LogicalLinkDataUnit1 || type == P25Duid::LogicalLinkDataUnit2) {
@@ -578,7 +619,7 @@ Status P25Phase1::process(ConstComplexSpan samples, std::vector<P25Frame>& out) 
         // Step past the whole data unit rather than past the sync word, so a
         // sync pattern appearing inside a payload cannot start a second
         // overlapping frame.
-        const std::size_t length = p25_data_unit_symbols(frame.nid.duid);
+        const std::size_t length = frame.unit_symbols;
         out.push_back(std::move(frame));
         position += (length != 0) ? length : kP25FrameSyncSymbols;
     }

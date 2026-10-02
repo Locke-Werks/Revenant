@@ -788,7 +788,7 @@ all.
 
 | Mode | File | Document | What comes out |
 | --- | --- | --- | --- |
-| P25 Phase 1 | `core/decode/p25p1.cpp` | TIA-102.BAAA-A clauses 5, 8 and 9 and the clause 10.2 to 10.4 annexes, with reserved values from TIA-102.BAAC | Frame sync, the Network Access Code and Data Unit ID through the (63,16,23) BCH code; from a header data unit the talkgroup, the manufacturer, the key and algorithm identifiers and the message indicator; from LDU1 the Link Control word, and from LDU2 the encryption sync; the low speed data; and the nine IMBE voice frames of every LDU, which `P25Voice` turns into 8 kHz PCM. See the P25 voice paragraph below |
+| P25 Phase 1 | `core/decode/p25p1.cpp`, `core/decode/p25_tsbk.cpp` | TIA-102.BAAA-A clauses 5, 6.2, 7, 8 and 9 and the clause 10.2 to 10.4 annexes, with reserved values from TIA-102.BAAC; the control channel from TIA-102.AABB-B clauses 4 and 5 and TIA-102.AABC-B clauses 2, 4.2 and 6.2 | Frame sync, the Network Access Code and Data Unit ID through the (63,16,23) BCH code; from a header data unit the talkgroup, the manufacturer, the key and algorithm identifiers and the message indicator; from LDU1 the Link Control word, and from LDU2 the encryption sync; the low speed data; the nine IMBE voice frames of every LDU, which `P25Voice` turns into 8 kHz PCM; and on a trunking control channel every Trunking Signaling Block of every TSDU through the rate 1/2 trellis code and its CRC, with the group voice grants, the identifier updates and the RFSS, network and adjacent status broadcasts parsed. See the P25 voice and control channel paragraphs below |
 | D-STAR DV | `core/decode/dstar.cpp` | JARL Ver 7.0 clauses 4.1.1, 4.1.2, Ap1 and Ap2 | Bit and frame sync, the radio header through the rate 1/2 convolutional code and the 24 bit interleave, with all five callsigns and the flag byte, and the voice and data frames with the resynchronisation signals marked |
 | TETRA V+D | `core/decode/tetra.cpp` | EN 300 392-2 V3.8.1 clauses 5, 8.2, 8.3.1.2, 9.4.4 and 21.4.4.2 | Burst sync from the synchronisation training sequence, and the SYNC PDU off the broadcast synchronisation channel: colour code, system code, timeslot, frame and multiframe number, and the country and network codes |
 
@@ -879,6 +879,28 @@ sample for sample; at 8 and 5 dB every LDU frames and every Link Control and
 encryption sync word decodes, with a raw voice channel bit error rate of
 0.00019 and 0.0116 and no frame repeated or muted; at 3 dB one LDU of four
 frames, and the frame sync search is the limit there rather than any code.
+
+**P25 Phase 1 trunking control channel.** A control channel sends Trunking
+Signaling Data Units, DUID $7 (TIA-102.AABB-B clause 4.2): a frame sync and
+NID, then one to three 12-octet Trunking Signaling Blocks, each through the
+CAI's rate 1/2 trellis code and the Table 7-4 interleave (TIA-102.BAAA-A
+clause 7), null padded to the end of a 70-bit micro-slot. `P25Phase1` reads a
+TSDU a block at a time, following each block's LB flag, and checks each
+block's CRC, the clause 6.2 header CRC. `core/decode/p25_tsbk.cpp` parses the
+TIA-102.AABC-B messages that describe a site and its calls: the group voice
+channel grant, the grant update and the explicit grant update, the identifier
+update in both its layouts and as IDEN_UP_VU, and the RFSS, network and
+adjacent status broadcasts. The identifier update is what turns a channel
+number into a frequency, and the `p25p1` decoder remembers the last one heard
+for each identifier so the grants that follow come out with
+`channel_frequency_hz`. Every other block comes out too, by opcode and by its
+AABC-B alias, and a protected block (AABB-B clause 5.2) or one under a
+manufacturer's MFID is reported as such with nothing past the MFID read. The
+decoder is hard decision; the code's free distance is five bits, so any two
+bit errors in a block are corrected, which `tests/decode/test_p25_tsbk.cpp`
+checks with the rest. Multiple block trunking packets (DUID $C, AABB-B clause
+6) are not decoded. Nothing here decrypts; a grant whose service options say
+the call is protected is reported as an encrypted call.
 
 **P25 Phase 1 decodes the same however its input is blocked.** Until
 2026-09-22 it did not. `P25Phase1::process` restarted its discriminator

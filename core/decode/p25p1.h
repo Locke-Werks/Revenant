@@ -11,6 +11,10 @@
 // the Header Data Unit and the two Logical Link Data Units. Reserved field
 // values are ANSI/TIA-102.BAAC, "Common Air Interface Reserved Values".
 //
+// The trunking control channel's data unit, the TSDU and its Trunking
+// Signaling Blocks, is TIA-102.AABB-B and TIA-102.AABC-B on top of clauses 6.2
+// and 7 of this one; core/decode/p25_tsbk.h names what was read of each.
+//
 // Both documents were read from the public archive at
 // archive.org/details/TIA-102_Series_Documents, items
 // "TIA-102-BAAA-A_Project_25_FDMA_CAI.pdf" and
@@ -63,6 +67,7 @@
 
 #include "core/decode/dv_phy.h"
 #include "core/decode/imbe.h"
+#include "core/decode/p25_tsbk.h"
 #include "core/dsp/types.h"
 #include "core/error.h"
 
@@ -116,11 +121,13 @@ inline constexpr std::size_t kP25StatusSymbolInterval = 36;
 inline constexpr std::size_t kP25FirstStatusSymbol = 35;
 
 // Table 8-4, the six Data Unit Identifier values this document defines. The
-// other ten are reserved for trunking.
+// other ten are reserved for trunking, and TIA-102.AABB-B clause 4.2 takes
+// one of them: "$7 indicating the single block format (TSBK)".
 enum class P25Duid : std::uint8_t {
     HeaderDataUnit = 0x0,
     TerminatorWithoutLinkControl = 0x3,
     LogicalLinkDataUnit1 = 0x5,
+    TrunkingSignalingDataUnit = 0x7,
     LogicalLinkDataUnit2 = 0xA,
     PacketDataUnit = 0xC,
     TerminatorWithLinkControl = 0xF,
@@ -153,6 +160,10 @@ inline constexpr std::size_t kP25SimpleTerminatorNullSymbols =
 
 // Total symbols in a data unit of this type, including its status symbols, or
 // zero where this document does not define the type.
+//
+// A TSDU's length depends on how many blocks it carries, which only its
+// blocks' LB flags say, so this gives the one-block length, the shortest;
+// p25_tsdu_symbols in core/decode/p25_tsbk.h gives the rest.
 //
 // Used to step past a decoded data unit rather than past its sync word alone,
 // so a sync pattern appearing inside a payload cannot start a second
@@ -370,6 +381,20 @@ struct P25Frame {
     // Clause 5.6, the two low speed data octets of an LDU, each present when
     // its (16,8,5) code word was within the two errors the code corrects.
     std::array<std::optional<std::uint8_t>, kP25LduLsdOctets> low_speed_data{};
+
+    // The Trunking Signaling Blocks of a TSDU, in the order sent, one to
+    // three of them (TIA-102.AABB-B clause 5). Each carries its own CRC
+    // result. The decoder reads on to the next block while the last one read
+    // passed its CRC with LB clear, and stops at a block that failed it,
+    // because a failed block's LB flag is not data either: an engineering
+    // choice that loses a TSDU's later blocks behind a bad one rather than
+    // reading a following data unit's sync word as a TSBK.
+    std::vector<P25Tsbk> tsbks;
+
+    // Symbols this data unit occupied on the air, status symbols and padding
+    // included, which is how far the decoder stepped past it. Zero for a
+    // packet data unit, which sizes itself from a header not decoded here.
+    std::size_t unit_symbols = 0;
 
     // The recovered symbol at which this frame's sync word starts, counted
     // from the first symbol of the stream since create() or reset(), however

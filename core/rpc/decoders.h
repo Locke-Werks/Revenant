@@ -687,6 +687,35 @@ enum class LineEnd : std::uint8_t { LineEnd, Length, Idle, NewTransmission, Stre
 // The Link Control word in LDU1 is not decoded by core/decode/p25p1.h, so a
 // receiver joining mid-call sees the NAC and the DUIDs and no talkgroup until
 // the next header. p25p1.h has why.
+//
+// A Trunking Signaling Data Unit, DUID 7, is the exception to one message per
+// data unit: it comes out as one message per Trunking Signaling Block, kind
+// "tsbk", because a TSDU is up to three unrelated control channel messages
+// that share a sync word (TIA-102.AABB-B clause 5). Each carries the common
+// fields above for its TSDU, and from core/decode/p25_tsbk.h:
+//   block                int    0, 1 or 2, the block's place in its TSDU
+//   blocks               int    TSBKs in the TSDU
+//   last_block           flag   octet 0's LB
+//   protected            flag   octet 0's P; the opcode and arguments are
+//                               then encrypted and nothing past the MFID is
+//                               read (AABB-B clause 5.2)
+//   opcode               int    octet 0 bits 5-0
+//   manufacturer_id      int    octet 1
+//   crc_ok               flag   TIA-102.BAAA-A clause 6.2 over octets 0-9
+//   trellis_corrected_bits int  bits the rate 1/2 trellis decoder changed
+//   octets               bytes  all twelve, CRC included
+//   alias                text   TIA-102.AABC-B's name for the outbound
+//                               opcode, when the MFID is standard and the
+//                               block is in clear and the tables name it
+// and, for the opcodes core/decode/p25_tsbk.h parses, their fields under the
+// names AABC-B gives them: channel, the raw 16 bits, and channel_frequency_hz
+// once an identifier update for the channel's identifier has been heard on
+// this receiver (AABC-B clause 2.3.9.2),
+// group, source, service_options, emergency, encrypted_call, wacn, system,
+// rfss, site, lra and so on. A block that fails its CRC, is protected, has a
+// manufacturer's MFID or has an opcode not parsed still comes out, with the
+// opcode by number and no message fields, so nothing the channel sent is
+// dropped silently.
 class P25p1Decoder final : public ChunkDecoder {
 public:
     static constexpr std::string_view kName = "p25p1";
@@ -721,6 +750,13 @@ public:
 
         for (const decode::P25Frame& frame : frames_) {
             using namespace decoders_detail;
+            if (frame.nid.duid ==
+                static_cast<std::uint8_t>(decode::P25Duid::TrunkingSignalingDataUnit)) {
+                for (std::size_t b = 0; b < frame.tsbks.size(); ++b) {
+                    out.push_back(tsbk_message(chunk, frame, b));
+                }
+                continue;
+            }
             DecodedMessage message =
                 stamped(kName, std::string(decode::p25_duid_name(frame.nid.duid)), chunk);
             message.fields.push_back(integer_field("nac", frame.nid.network_access_code));
@@ -757,16 +793,189 @@ public:
         return {};
     }
 
-    void reset() override { decoder_.reset(); }
+    void reset() override {
+        decoder_.reset();
+        identifiers_ = {};
+    }
 
 private:
     P25p1Decoder(dsp::SampleRate rate, decode::P25Phase1 decoder)
         : rate_(rate), decoder_(std::move(decoder)) {}
 
+    // A channel as "id-number", and its frequency when this receiver has
+    // heard the identifier update that resolves it (AABC-B clause 2.3.9.2).
+    void add_channel(DecodedMessage& message, std::string_view key,
+                     const decode::P25Channel& channel) const {
+        using namespace decoders_detail;
+        message.fields.push_back(integer_field(std::string(key), channel.raw()));
+        message.text += std::format(" {} {}-{}", key, channel.identifier, channel.number);
+        const auto& iden = identifiers_[channel.identifier];
+        if (!iden) {
+            return;
+        }
+        if (const auto hz = decode::p25_channel_frequency_hz(*iden, channel); hz) {
+            message.fields.push_back(integer_field(std::string(key) + "_frequency_hz",
+                                                   static_cast<std::int64_t>(*hz)));
+            message.text += std::format(" ({:.6f} MHz)", static_cast<double>(*hz) / 1e6);
+        }
+    }
+
+    static void add_options(DecodedMessage& message, const decode::P25ServiceOptions& options) {
+        using namespace decoders_detail;
+        message.fields.push_back(integer_field("service_options", options.raw));
+        message.fields.push_back(flag_field("emergency", options.emergency()));
+        // Service Options bit 6, AABC-B clause 2.3.24: the call is set up
+        // protected. Reported, as docs/modes.md asks, and never acted on.
+        message.fields.push_back(flag_field("encrypted_call", options.protected_mode()));
+        if (options.emergency()) {
+            message.text += " EMERGENCY";
+        }
+        if (options.protected_mode()) {
+            message.text += " encrypted";
+        }
+    }
+
+    DecodedMessage tsbk_message(const DecoderChunk& chunk, const decode::P25Frame& frame,
+                                std::size_t index) {
+        using namespace decoders_detail;
+        const decode::P25Tsbk& tsbk = frame.tsbks[index];
+        DecodedMessage message = stamped(kName, "tsbk", chunk);
+        message.fields.push_back(integer_field("nac", frame.nid.network_access_code));
+        message.fields.push_back(integer_field("duid", frame.nid.duid));
+        message.fields.push_back(integer_field("nid_corrected_bits", frame.nid.corrected_bits));
+        message.fields.push_back(real_field("sync_score", frame.sync_score));
+        message.fields.push_back(flag_field("inverted", frame.inverted));
+        message.fields.push_back(real_field("carrier_offset_hz", frame.carrier_offset_hz));
+        message.fields.push_back(real_field("deviation_ratio", frame.deviation_ratio));
+        message.fields.push_back(integer_field("block", static_cast<std::int64_t>(index)));
+        message.fields.push_back(
+            integer_field("blocks", static_cast<std::int64_t>(frame.tsbks.size())));
+        message.fields.push_back(flag_field("last_block", tsbk.last_block));
+        message.fields.push_back(flag_field("protected", tsbk.protected_block));
+        message.fields.push_back(integer_field("opcode", tsbk.opcode));
+        message.fields.push_back(integer_field("manufacturer_id", tsbk.manufacturer_id));
+        message.fields.push_back(flag_field("crc_ok", tsbk.crc_ok));
+        message.fields.push_back(integer_field("trellis_corrected_bits", tsbk.corrected_bits));
+        message.fields.push_back(
+            bytes_field("octets", std::vector<std::uint8_t>(tsbk.octets.begin(),
+                                                            tsbk.octets.end())));
+
+        message.text = std::format("NAC 0x{:03X} TSBK", frame.nid.network_access_code);
+        if (!tsbk.crc_ok) {
+            message.text += " CRC failed";
+            return message;
+        }
+        if (tsbk.protected_block) {
+            message.text += std::format(" protected MFID 0x{:02X}", tsbk.manufacturer_id);
+            return message;
+        }
+        if (tsbk.manufacturer_id != decode::kP25TsbkMfidStandard) {
+            message.text += std::format(" MFID 0x{:02X} opcode 0x{:02X}", tsbk.manufacturer_id,
+                                        tsbk.opcode);
+            return message;
+        }
+        const std::string_view alias = decode::p25_osp_alias(tsbk.opcode);
+        if (!alias.empty()) {
+            message.fields.push_back(text_field("alias", std::string(alias)));
+            message.text += std::format(" {}", alias);
+        } else {
+            message.text += std::format(" opcode 0x{:02X}", tsbk.opcode);
+        }
+
+        const decode::P25TsbkMessage parsed = decode::p25_parse_tsbk(tsbk);
+        if (const auto* grant = std::get_if<decode::P25GroupVoiceGrant>(&parsed)) {
+            message.fields.push_back(integer_field("group", grant->group_address));
+            message.fields.push_back(integer_field("source", grant->source_address));
+            message.text +=
+                std::format(" TG {} source {}", grant->group_address, grant->source_address);
+            add_channel(message, "channel", grant->channel);
+            add_options(message, grant->options);
+        } else if (const auto* update = std::get_if<decode::P25GroupVoiceGrantUpdate>(&parsed)) {
+            message.fields.push_back(integer_field("group", update->group_address[0]));
+            message.text += std::format(" TG {}", update->group_address[0]);
+            add_channel(message, "channel", update->channel[0]);
+            message.fields.push_back(integer_field("group_2", update->group_address[1]));
+            message.text += std::format(", TG {}", update->group_address[1]);
+            add_channel(message, "channel_2", update->channel[1]);
+        } else if (const auto* exp =
+                       std::get_if<decode::P25GroupVoiceGrantUpdateExplicit>(&parsed)) {
+            message.fields.push_back(integer_field("group", exp->group_address));
+            message.text += std::format(" TG {}", exp->group_address);
+            add_channel(message, "channel", exp->transmit);
+            add_channel(message, "channel_receive", exp->receive);
+            add_options(message, exp->options);
+        } else if (const auto* iden = std::get_if<decode::P25IdentifierUpdate>(&parsed)) {
+            // Remembered so later grants on this identifier resolve to a
+            // frequency. AABC-B clause 2.3.19: up to 16 per control channel.
+            identifiers_[iden->identifier] = *iden;
+            message.fields.push_back(integer_field("identifier", iden->identifier));
+            message.fields.push_back(flag_field("vhf_uhf", iden->vhf_uhf));
+            message.fields.push_back(integer_field(
+                "base_frequency_hz", static_cast<std::int64_t>(iden->base_frequency_hz)));
+            message.fields.push_back(integer_field("channel_spacing_hz", iden->channel_spacing_hz));
+            message.text += std::format(" id {} base {:.6f} MHz spacing {:.3f} kHz",
+                                        iden->identifier,
+                                        static_cast<double>(iden->base_frequency_hz) / 1e6,
+                                        static_cast<double>(iden->channel_spacing_hz) / 1e3);
+            if (iden->bandwidth_hz) {
+                message.fields.push_back(integer_field("bandwidth_hz", *iden->bandwidth_hz));
+                message.text += std::format(" bw {:.3f} kHz",
+                                            static_cast<double>(*iden->bandwidth_hz) / 1e3);
+            }
+            if (iden->transmit_offset_hz) {
+                message.fields.push_back(
+                    integer_field("transmit_offset_hz", *iden->transmit_offset_hz));
+                message.text += std::format(" tx offset {:+.4f} MHz",
+                                            static_cast<double>(*iden->transmit_offset_hz) / 1e6);
+            }
+        } else if (const auto* rfss = std::get_if<decode::P25RfssStatus>(&parsed)) {
+            message.fields.push_back(integer_field("lra", rfss->lra));
+            message.fields.push_back(flag_field("network_active", rfss->network_active));
+            message.fields.push_back(integer_field("system", rfss->system_id));
+            message.fields.push_back(integer_field("rfss", rfss->rfss_id));
+            message.fields.push_back(integer_field("site", rfss->site_id));
+            message.fields.push_back(
+                integer_field("system_service_class", rfss->system_service_class));
+            message.text += std::format(" system 0x{:03X} RFSS {} site {}", rfss->system_id,
+                                        rfss->rfss_id, rfss->site_id);
+            add_channel(message, "channel", rfss->channel);
+        } else if (const auto* net = std::get_if<decode::P25NetworkStatus>(&parsed)) {
+            message.fields.push_back(integer_field("lra", net->lra));
+            message.fields.push_back(integer_field("wacn", net->wacn_id));
+            message.fields.push_back(integer_field("system", net->system_id));
+            message.fields.push_back(
+                integer_field("system_service_class", net->system_service_class));
+            message.text +=
+                std::format(" WACN 0x{:05X} system 0x{:03X}", net->wacn_id, net->system_id);
+            add_channel(message, "channel", net->channel);
+        } else if (const auto* adjacent = std::get_if<decode::P25AdjacentStatus>(&parsed)) {
+            message.fields.push_back(integer_field("lra", adjacent->lra));
+            message.fields.push_back(flag_field("conventional", adjacent->conventional));
+            message.fields.push_back(flag_field("failure", adjacent->failure));
+            message.fields.push_back(flag_field("valid", adjacent->valid));
+            message.fields.push_back(flag_field("network_active", adjacent->network_active));
+            message.fields.push_back(integer_field("system", adjacent->system_id));
+            message.fields.push_back(integer_field("rfss", adjacent->rfss_id));
+            message.fields.push_back(integer_field("site", adjacent->site_id));
+            message.fields.push_back(
+                integer_field("system_service_class", adjacent->system_service_class));
+            message.text += std::format(" system 0x{:03X} RFSS {} site {}", adjacent->system_id,
+                                        adjacent->rfss_id, adjacent->site_id);
+            add_channel(message, "channel", adjacent->channel);
+            if (adjacent->failure) {
+                message.text += " failed";
+            }
+        }
+        return message;
+    }
+
     dsp::SampleRate rate_;
     decode::P25Phase1 decoder_;
     std::vector<dsp::Complex32> iq_;
     std::vector<decode::P25Frame> frames_;
+
+    // The last identifier update heard for each of the 16 identifiers.
+    std::array<std::optional<decode::P25IdentifierUpdate>, 16> identifiers_{};
 };
 
 // ---------------------------------------------------------------------------

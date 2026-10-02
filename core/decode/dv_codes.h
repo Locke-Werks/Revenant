@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -268,6 +269,105 @@ struct LsdDecode {
 
 // Nearest of the 256 code words.
 [[nodiscard]] LsdDecode p25_lsd_decode(std::uint16_t word);
+
+// ---------------------------------------------------------------------------
+// P25 Phase 1: the rate 1/2 trellis code of the data blocks
+// ---------------------------------------------------------------------------
+
+// TIA-102.BAAA-A clause 7 and Table 7-1: a data block of 12 octets is
+// serialised most significant bit first, cut into 48 dibits, and a %00 dibit
+// is appended "to flush out the final state", so 49 dibits go into the
+// encoder and 49 constellation points, 98 dibits, come out: the (196,96)
+// code. TIA-102.AABB-B clause 4.4 puts every trunking control channel block,
+// the Trunking Signaling Block among them, through this same code.
+inline constexpr std::size_t kP25TrellisOctets = 12;
+inline constexpr std::size_t kP25TrellisInputDibits = kP25TrellisOctets * 4 + 1;
+inline constexpr std::size_t kP25TrellisBlockDibits = 2 * kP25TrellisInputDibits;
+
+// Clause 7.1 and Table 7-2, the rate 1/2 half: a four state machine whose
+// next state is the current input ("the special property of having the
+// current input as the next state"), starting in state 0. Indexed
+// [state][input], the table's rows and columns, giving the constellation
+// point sent.
+inline constexpr std::uint8_t kP25Trellis12Transitions[4][4] = {
+    {0, 15, 12, 3},
+    {4, 11, 8, 7},
+    {13, 2, 1, 14},
+    {9, 6, 5, 10},
+};
+
+// Table 7-3: each constellation point as the two symbol levels it is sent as,
+// Dibit 0 then Dibit 1. The table prints levels, not bits, so the bits are
+// Table 9-1's reading of those levels, the same one the rest of the CAI uses.
+//
+// Dibit 0 is taken as the first of the pair on the air. The clause numbers
+// them and does not say which goes first in so many words; 0 before 1 is the
+// order every other numbered pair in the document is sent in, and it is the
+// same at the transmitter in core/dsp/synth/dv_mod.cpp, so a round trip is
+// blind to it. Recorded here so the reading can be found if a capture ever
+// disagrees.
+inline constexpr std::int8_t kP25TrellisConstellation[16][2] = {
+    {+1, -1}, {-1, -1}, {+3, -3}, {-3, -3}, {-3, -1}, {+3, -1}, {-1, -3}, {+1, -3},
+    {-3, +3}, {+3, +3}, {-1, +1}, {+1, +1}, {+1, +3}, {-1, +3}, {+3, +1}, {-3, +1},
+};
+
+// Clause 7.2, Table 7-4: the 98 dibits of a block are re-ordered before
+// modulation. Returns, for each transmitted (output) index, the encoder output
+// (input) index that goes there.
+//
+// The table is printed as four column pairs and the archive copy's text layer
+// carries rows 0 to 5 and 18 to 25 of each. Every printed row follows one
+// rule: the first 26 output positions take encoder dibits 0, 1, 8, 9, 16, 17
+// and so on, the dibits whose index is 0 or 1 mod 8; the next 24 take those
+// at 2 or 3 mod 8, then 4 or 5, then 6 or 7. That is what this returns, and
+// tests/decode/test_p25_tsbk.cpp checks it against every row the table
+// prints.
+[[nodiscard]] std::array<std::uint8_t, kP25TrellisBlockDibits> p25_data_interleave_map();
+
+// Encodes 12 octets into the 98 dibits of a rate 1/2 block, trellis coded,
+// mapped through Table 7-3 and Table 9-1, and interleaved: transmission order,
+// one dibit per byte.
+[[nodiscard]] std::array<std::uint8_t, kP25TrellisBlockDibits> p25_trellis12_encode(
+    std::span<const std::uint8_t, kP25TrellisOctets> octets);
+
+struct P25TrellisDecode {
+    std::array<std::uint8_t, kP25TrellisOctets> octets{};
+
+    // Bits on which the received block disagreed with the path chosen: zero
+    // for a clean block, and the number of bit errors corrected when the
+    // decode is right. The code's own check is the CRC the block carries,
+    // which the caller applies; this is the measure of how hard the decoder
+    // had to work.
+    std::uint32_t corrected_bits = 0;
+};
+
+// Hard-decision Viterbi decode of 98 received dibits in transmission order:
+// deinterleave, then the four state trellis of Table 7-2 with the Hamming
+// distance between received and expected dibit pairs as the branch metric,
+// traced back from state 0 because the flush dibit leaves the encoder there.
+//
+// Hard decision is an engineering choice. P25Phase1 slices before anything
+// decodes, so soft values are not on hand at this layer; a soft metric would
+// buy something like 2 dB and is the obvious next step if a weak control
+// channel needs it.
+//
+// The code's free distance under this metric is five bits, which the clause
+// does not state and tests/decode/test_p25_tsbk.cpp measures from Tables 7-2
+// and 7-3: any two bit errors in a block are corrected wherever they fall,
+// and errors further apart than one error event are corrected separately.
+[[nodiscard]] P25TrellisDecode p25_trellis12_decode(
+    std::span<const std::uint8_t, kP25TrellisBlockDibits> dibits);
+
+// TIA-102.BAAA-A clause 6.2, the header block CRC, which TIA-102.AABB-B
+// clause 5.1 names for the TSBK: the first 10 octets as M(x) of degree 79,
+// MSB of octet 0 the x^79 term, and
+//
+//     F(x) = (x^16 M(x) mod G(x)) + I(x)
+//     G(x) = x^16 + x^12 + x^5 + 1,  I(x) = x^15 + x^14 + ... + x + 1
+//
+// so the CCITT remainder with every bit inverted. The result's x^15
+// coefficient is the most significant bit, which goes in octet 10.
+[[nodiscard]] std::uint16_t p25_header_crc(std::span<const std::uint8_t> octets);
 
 // ---------------------------------------------------------------------------
 // Convolutional codes

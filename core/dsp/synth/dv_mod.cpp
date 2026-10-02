@@ -412,6 +412,44 @@ Expected<std::vector<std::uint8_t>> p25_voice_message_dibits(const P25VoiceMessa
     return out;
 }
 
+Expected<std::vector<std::uint8_t>> p25_tsdu_dibits(const P25TsduMessage& message) {
+    if (message.blocks.empty() || message.blocks.size() > decode::kP25MaxTsbksPerTsdu) {
+        return fail(std::format(
+            "a TSDU carries one to {} TSBKs (TIA-102.AABB-B clause 5); got {}",
+            decode::kP25MaxTsbksPerTsdu, message.blocks.size()));
+    }
+
+    std::vector<std::uint8_t> information;
+    if (auto status = append_sync_and_nid(information, message.network_access_code,
+                                          decode::P25Duid::TrunkingSignalingDataUnit);
+        !status) {
+        return std::unexpected(status.error());
+    }
+
+    for (std::size_t b = 0; b < message.blocks.size(); ++b) {
+        std::array<std::uint8_t, 10> fields = message.blocks[b];
+        // AABB-B clause 5.1: "= 0 at least one more TSBK to follow in this
+        // packet, = 1 last TSBK in this packet".
+        const bool last = b + 1 == message.blocks.size();
+        fields[0] = static_cast<std::uint8_t>(last ? (fields[0] | 0x80U) : (fields[0] & 0x7FU));
+        const auto octets = decode::p25_tsbk_with_crc(fields);
+        const auto coded = decode::p25_trellis12_encode(octets);
+        information.insert(information.end(), coded.begin(), coded.end());
+    }
+
+    // AABB-B clause 5: "Null bits pad the packet to the end of a micro-slot"
+    // and "The null bits are always set to zero."
+    const std::size_t total = decode::p25_tsdu_symbols(message.blocks.size());
+    const std::size_t status_symbols = total / decode::kP25MicroSlotSymbols;
+    information.resize(total - status_symbols, static_cast<std::uint8_t>(0b00));
+
+    auto unit = place_status_symbols(information, total);
+    if (!unit) {
+        return std::unexpected(with_context(unit.error(), "laying out a P25 TSDU"));
+    }
+    return unit;
+}
+
 Expected<std::vector<Complex32>> p25_render_dibits(const P25ModConfig& config,
                                                    std::span<const std::uint8_t> dibits) {
     auto sps = samples_per_symbol(config.rate, decode::kP25SymbolRate);

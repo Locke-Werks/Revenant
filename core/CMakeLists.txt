@@ -36,6 +36,10 @@ find_package(rtlsdr CONFIG REQUIRED)
 # citing its clause. The three mode files then contain their standards and
 # little else, which is what makes them checkable against those standards.
 #
+# p25_tsbk.cpp is P25's trunking control channel above p25p1.cpp's framing:
+# the Trunking Signaling Blocks of TIA-102.AABB-B and the messages of
+# TIA-102.AABC-B that say what a site is and what calls it is carrying.
+#
 # D-STAR and TETRA stop at the bits. P25 goes through to audio: p25p1.cpp
 # cuts the IMBE frames out of each LDU and hands them to imbe.cpp. D-STAR's
 # voice is AMBE with no published algorithm, and TETRA's is ACELP and
@@ -101,6 +105,7 @@ add_library(revenant_core STATIC
     decode/imbe.cpp
     decode/navtex.cpp
     decode/m17.cpp
+    decode/p25_tsbk.cpp
     decode/p25p1.cpp
     decode/pocsag.cpp
     decode/psk31.cpp

@@ -559,6 +559,115 @@ TEST_CASE("a complex decoder at the raw tap cap costs a fraction of a core", "[r
     }
 }
 
+// The p25p1 adapter on a trunking control channel, fed directly from the
+// transmitter in core/dsp/synth/dv_mod.h with no engine in between: no GPU,
+// because what is under test is how core/rpc/decoders.h turns TSBKs into
+// messages, and the engine's path to the adapter is the header case's to
+// prove. An identifier update, then a group voice grant on a channel under
+// that identifier, then a grant update under an identifier never announced,
+// then a block from a manufacturer: one message per TSBK, the grant's
+// channel resolved to a frequency through the update heard before it, the
+// unannounced one left as a channel number, and the manufacturer's block
+// still on the wire by number.
+TEST_CASE("P25 trunking blocks come out of the p25p1 adapter as messages", "[rpc][decode]") {
+    constexpr dsp::SampleRate kRate = 48'000;
+    using Fields = std::array<std::uint8_t, 10>;
+    // TIA-102.AABC-B Figure 6.2.9-1: identifier 1, BW 100 (12.5 kHz),
+    // offset 180 below (45 MHz), spacing 50 (6.25 kHz), base 170201250 x 5 Hz
+    // = 851.00625 MHz, packed field by field from octet 2.
+    std::uint64_t iden_bits = 1;
+    iden_bits = (iden_bits << 9U) | 100U;
+    iden_bits = (iden_bits << 9U) | 180U;
+    iden_bits = (iden_bits << 10U) | 50U;
+    iden_bits = (iden_bits << 32U) | 170'201'250U;
+    Fields iden{0x3D, 0x00};
+    for (std::size_t i = 0; i < 8; ++i) {
+        iden[2 + i] = static_cast<std::uint8_t>(iden_bits >> (56U - 8U * i));
+    }
+    // Figure 4.2.1-1: options $00, channel 1-100, TG 4000, source $1234AB.
+    const Fields grant{0x00, 0x00, 0x00, 0x10, 0x64, 0x0F, 0xA0, 0x12, 0x34, 0xAB};
+    // Figure 4.2.2-1: channel 5-7 for TG 7, channel 5-8 for TG 8.
+    const Fields update{0x02, 0x00, 0x50, 0x07, 0x00, 0x07, 0x50, 0x08, 0x00, 0x08};
+    Fields vendor = grant;
+    vendor[1] = 0x90;
+
+    std::vector<std::uint8_t> stream;
+    for (const siggen::P25TsduMessage& message :
+         {siggen::P25TsduMessage{0x293, {iden, grant}},
+          siggen::P25TsduMessage{0x293, {update, vendor}},
+          siggen::P25TsduMessage{0x293, {grant}}}) {
+        auto dibits = siggen::p25_tsdu_dibits(message);
+        INFO(test::message_of(dibits));
+        REQUIRE(dibits.has_value());
+        stream.insert(stream.end(), dibits->begin(), dibits->end());
+    }
+    siggen::P25ModConfig mod;
+    mod.rate = kRate;
+    auto signal = siggen::p25_render_dibits(mod, stream);
+    INFO(test::message_of(signal));
+    REQUIRE(signal.has_value());
+
+    auto decoder = rpc::P25p1Decoder::make(rpc::DecoderBuild{.rate = kRate, .mode = "p25p1"});
+    INFO(test::message_of(decoder));
+    REQUIRE(decoder.has_value());
+    std::vector<float> interleaved;
+    for (const dsp::Complex32& sample : *signal) {
+        interleaved.push_back(sample.real());
+        interleaved.push_back(sample.imag());
+    }
+    std::vector<rpc::DecodedMessage> messages;
+    const rpc::DecoderChunk chunk{
+        .samples = interleaved, .channels = 2, .rate = kRate, .start = 0};
+    REQUIRE((*decoder)->consume(chunk, messages).has_value());
+
+    std::string arrived;
+    for (const rpc::DecodedMessage& message : messages) {
+        arrived += "\n  " + message.text;
+    }
+    INFO(std::format("{} messages:{}", messages.size(), arrived));
+    // The last TSDU is the tail the receive filter holds back; the first
+    // two carry four blocks.
+    REQUIRE(messages.size() >= 4);
+    for (const rpc::DecodedMessage& message : messages) {
+        CHECK(message.decoder == "p25p1");
+        CHECK(message.kind == "tsbk");
+        CHECK(integer_of(message, "nac") == 0x293);
+        CHECK(test::flag_of(message, "crc_ok"));
+    }
+
+    const rpc::DecodedMessage& first = messages[0];
+    CHECK(integer_of(first, "block") == 0);
+    CHECK(integer_of(first, "blocks") == 2);
+    CHECK_FALSE(test::flag_of(first, "last_block"));
+    CHECK(text_of(first, "alias") == "IDEN_UP");
+    CHECK(integer_of(first, "base_frequency_hz") == 851'006'250);
+    CHECK(integer_of(first, "channel_spacing_hz") == 6'250);
+    CHECK(integer_of(first, "transmit_offset_hz") == -45'000'000);
+
+    const rpc::DecodedMessage& granted = messages[1];
+    CHECK(test::flag_of(granted, "last_block"));
+    CHECK(text_of(granted, "alias") == "GRP_V_CH_GRANT");
+    CHECK(integer_of(granted, "group") == 4000);
+    CHECK(integer_of(granted, "source") == 0x1234AB);
+    CHECK(integer_of(granted, "channel") == 0x1064);
+    CHECK(integer_of(granted, "channel_frequency_hz") == 851'631'250);
+    CHECK_FALSE(test::flag_of(granted, "encrypted_call"));
+    CHECK(granted.text.find("TG 4000") != std::string::npos);
+    CHECK(granted.text.find("851.631250 MHz") != std::string::npos);
+
+    const rpc::DecodedMessage& updated = messages[2];
+    CHECK(text_of(updated, "alias") == "GRP_V_CH_GRANT_UPDT");
+    CHECK(integer_of(updated, "group") == 7);
+    CHECK(integer_of(updated, "group_2") == 8);
+    CHECK(updated.field("channel_frequency_hz") == nullptr);
+
+    const rpc::DecodedMessage& manufacturer = messages[3];
+    CHECK(integer_of(manufacturer, "manufacturer_id") == 0x90);
+    CHECK(integer_of(manufacturer, "opcode") == 0x00);
+    CHECK(manufacturer.field("alias") == nullptr);
+    CHECK(manufacturer.text.find("MFID 0x90") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // Refusals
 // ---------------------------------------------------------------------------

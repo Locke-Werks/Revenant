@@ -143,6 +143,25 @@ struct P25VoiceMessage {
 [[nodiscard]] Expected<std::vector<std::uint8_t>> p25_voice_message_dibits(
     const P25VoiceMessage& message);
 
+// One outbound Trunking Signaling Data Unit, TIA-102.AABB-B clause 5 and
+// Figure 5-2: the frame sync and a NID with DUID $7, one to three TSBKs, and
+// null dibits to the end of the last micro-slot.
+struct P25TsduMessage {
+    std::uint16_t network_access_code = 0x293;
+
+    // Octets 0 to 9 of each TSBK, as AABC-B lays out the message. The
+    // transmitter appends each block's TIA-102.BAAA-A clause 6.2 CRC and
+    // sets octet 0's LB bit itself, clear on every block but the last, which
+    // is what AABB-B clause 5.1 requires of it; the rest of octet 0 is the
+    // caller's.
+    std::vector<std::array<std::uint8_t, 10>> blocks;
+};
+
+// Every dibit of the TSDU in transmission order, status symbols included,
+// each block through the clause 7 rate 1/2 trellis code and Table 7-4
+// interleave.
+[[nodiscard]] Expected<std::vector<std::uint8_t>> p25_tsdu_dibits(const P25TsduMessage& message);
+
 // ---------------------------------------------------------------------------
 // D-STAR DV, GMSK
 // ---------------------------------------------------------------------------
