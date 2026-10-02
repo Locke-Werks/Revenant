@@ -111,6 +111,7 @@
 
 #include "audio/audio_mix.h"
 #include "audio/audio_ring.h"
+#include "audio/voice_gain.h"
 #include "models/engine_link.h"
 
 namespace revenant::ui {
@@ -170,6 +171,13 @@ public:
         return drift_trim_ppm_.load(std::memory_order_relaxed);
     }
 
+    // The digital voice level as an amplitude, applied on top of the strip
+    // gain to every slot in EngineLink::mixVoiceMask. Written by the Qt thread,
+    // read by the sink's on every pull. audio/voice_gain.h.
+    void set_voice_gain(float amplitude) {
+        voice_gain_.store(amplitude, std::memory_order_relaxed);
+    }
+
 protected:
     qint64 readData(char* data, qint64 maxlen) override;
 
@@ -197,6 +205,7 @@ private:
     std::atomic<std::uint64_t> limited_pulls_{0};
     std::atomic<std::uint64_t> alignments_{0};
     std::atomic<double> drift_trim_ppm_{0.0};
+    std::atomic<float> voice_gain_{1.0F};
 };
 
 class AudioPlayer : public QObject {
@@ -225,6 +234,13 @@ class AudioPlayer : public QObject {
     // draining at zero gain, so unmuting lands on live audio rather than
     // replaying whatever was buffered when it was muted.
     Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY volumeChanged)
+
+    // The digital voice boost, 0 to kVoiceGainMaxDb in whole decibels, applied
+    // to every heard receiver whose audio is decoded voice and to nothing else.
+    // audio/voice_gain.h has why it exists. voiceGainText is its readout.
+    Q_PROPERTY(double voiceGainDb READ voiceGainDb WRITE setVoiceGainDb NOTIFY voiceGainChanged)
+    Q_PROPERTY(double voiceGainMaxDb READ voiceGainMaxDb CONSTANT)
+    Q_PROPERTY(QString voiceGainText READ voiceGainText NOTIFY voiceGainChanged)
 
     // Whether a sink is open and running.
     Q_PROPERTY(bool playing READ playing NOTIFY statusChanged)
@@ -317,6 +333,13 @@ public:
     [[nodiscard]] bool muted() const { return muted_; }
     void setMuted(bool value);
 
+    [[nodiscard]] double voiceGainDb() const { return voice_gain_db_; }
+    void setVoiceGainDb(double db);
+    [[nodiscard]] double voiceGainMaxDb() const { return kVoiceGainMaxDb; }
+    [[nodiscard]] QString voiceGainText() const {
+        return QString::fromStdString(voice_gain_text(voice_gain_db_));
+    }
+
     [[nodiscard]] bool playing() const { return sink_ != nullptr; }
     [[nodiscard]] QString source() const;
     [[nodiscard]] bool squelchOpen() const;
@@ -345,6 +368,7 @@ signals:
     void devicesChanged();
     void deviceChanged();
     void volumeChanged();
+    void voiceGainChanged();
     void statusChanged();
 
 private:
@@ -461,6 +485,7 @@ private:
     QString note_;
     qreal volume_ = 0.7;
     bool muted_ = false;
+    double voice_gain_db_ = 0.0;
 
     int buffered_millis_ = 0;
     int ring_millis_ = 0;

@@ -206,6 +206,47 @@ ColumnLayout {
                 onCountChanged: currentIndex = audioPlayer.device
             }
 
+            // The digital voice level, apart from the volume because it answers
+            // a different question: not how loud the output is, but how loud a
+            // P25 call is against the analog receivers beside it, which the
+            // engine levels and decoded voice it does not. audio/voice_gain.h.
+            Label {
+                text: "DV"
+                color: Theme.inkDim
+                font.pixelSize: Theme.sizeBody
+            }
+
+            RSlider {
+                id: voiceSlider
+
+                Layout.preferredWidth: 90
+                from: 0
+                to: audioPlayer.voiceGainMaxDb
+
+                // Whole decibels, for the registry-write reason the volume
+                // slider's step gives.
+                stepSize: 1
+
+                // Seeded and resynced the way the volume slider is, for the
+                // same reasons.
+                Component.onCompleted: value = audioPlayer.voiceGainDb
+                onMoved: audioPlayer.voiceGainDb = value
+
+                Connections {
+                    target: audioPlayer
+                    function onVoiceGainChanged() {
+                        if (!voiceSlider.pressed)
+                            voiceSlider.value = audioPlayer.voiceGainDb
+                    }
+                }
+            }
+
+            Readout {
+                widest: "+30 dB"
+                text: audioPlayer.voiceGainText
+                color: Theme.ink
+            }
+
             Item {
                 visible: !pane.compact
                 Layout.fillWidth: true

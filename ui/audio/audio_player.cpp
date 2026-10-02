@@ -94,10 +94,17 @@ qint64 RingSource::readData(char* data, qint64 maxlen)
     // strip moved mid-pull changes the next pull and not half of this one.
     const std::uint64_t mask = link_.mixMask();
     const std::uint64_t wfm = link_.mixWfmMask();
+    const std::uint64_t voice = link_.mixVoiceMask();
+    const float voice_gain = voice_gain_.load(std::memory_order_relaxed);
     for (std::size_t slot = 0; slot < kMaxReceivers; ++slot) {
         const std::uint64_t bit = std::uint64_t{1} << slot;
+        // The voice level folds into the strip's gain rather than becoming a
+        // stage of its own: both are one multiply on the same stream before the
+        // sum, and the limiter after the sum is what keeps the boost off the
+        // card's ceiling.
+        const float gain = link_.mixGain(slot) * ((voice & bit) != 0 ? voice_gain : 1.0F);
         slots_[slot] = MixSlot{.heard = (mask & bit) != 0,
-                               .gain = link_.mixGain(slot),
+                               .gain = gain,
                                .wfm = (wfm & bit) != 0};
     }
     const MixControl control{link_.mixLeadSlot(), slots_};
@@ -175,6 +182,7 @@ AudioPlayer::AudioPlayer(EngineLink& link, QObject* parent) : QObject(parent), l
     volume_ = std::clamp(store.value(settings::kAudioVolume, volume_).toDouble(),
                          qreal{0.0}, qreal{1.0});
     muted_ = store.value(settings::kAudioMuted, false).toBool();
+    voice_gain_db_ = clamp_voice_gain_db(store.value(settings::kAudioVoiceGainDb, 0.0).toDouble());
 
     refresh_devices();
 
@@ -376,6 +384,24 @@ void AudioPlayer::setMuted(bool value)
     emit volumeChanged();
 }
 
+void AudioPlayer::setVoiceGainDb(double db)
+{
+    // Whole decibels, so the drop below is what bounds the registry writes the
+    // way the volume slider's step bounds them: a full-travel drag is at most
+    // thirty-one distinct values. The same reason setVolume writes on every
+    // move rather than on exit applies here.
+    const double clamped = clamp_voice_gain_db(db);
+    if (clamped == voice_gain_db_) {
+        return;
+    }
+    voice_gain_db_ = clamped;
+    if (pull_ != nullptr) {
+        pull_->set_voice_gain(voice_gain_amplitude(voice_gain_db_));
+    }
+    QSettings().setValue(settings::kAudioVoiceGainDb, voice_gain_db_);
+    emit voiceGainChanged();
+}
+
 qreal AudioPlayer::sink_gain() const
 {
     if (muted_) {
@@ -472,6 +498,9 @@ void AudioPlayer::open_sink()
             [this](QAudio::State state) { handle_sink_state(state); });
 
     pull_ = std::make_unique<RingSource>(link_, out_rate, out_channels, wanted.sampleFormat());
+    // Before the sink starts pulling, so the first frame of a reopened stream
+    // already carries the voice level rather than one pull at unity.
+    pull_->set_voice_gain(voice_gain_amplitude(voice_gain_db_));
     pull_->open(QIODevice::ReadOnly);
     sink_->start(pull_.get());
 

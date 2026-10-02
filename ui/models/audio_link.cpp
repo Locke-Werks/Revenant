@@ -239,6 +239,7 @@ void EngineLink::publish_mix()
 {
     std::uint64_t mask = 0;
     std::uint64_t wfm = 0;
+    std::uint64_t voice = 0;
     int pane_slot = -1;
     for (std::size_t slot = 0; slot < live_audio_.size(); ++slot) {
         if (live_audio_[slot].vrx == 0) {
@@ -247,6 +248,12 @@ void EngineLink::publish_mix()
         mask |= std::uint64_t{1} << slot;
         if (live_audio_[slot].demod == rpc::Demod::Wfm) {
             wfm |= std::uint64_t{1} << slot;
+        }
+        // P25 alone, because it is the one digital mode whose subscription
+        // carries voice. D-STAR, TETRA and DMR have no vocoder in this tree and
+        // the engine refuses their audio, so none of them reaches a slot.
+        if (live_audio_[slot].demod == rpc::Demod::P25p1) {
+            voice |= std::uint64_t{1} << slot;
         }
         if (live_audio_[slot].vrx == live_receiver_id_) {
             pane_slot = static_cast<int>(slot);
@@ -291,6 +298,7 @@ void EngineLink::publish_mix()
     // mask, which told the mix's own AGC which slots to level; the engine
     // levels what it sends now, so it went with that AGC.
     mix_wfm_mask_.store(wfm, std::memory_order_release);
+    mix_voice_mask_.store(voice, std::memory_order_release);
     mix_mask_.store(mask, std::memory_order_release);
     mix_lead_slot_.store(lead, std::memory_order_release);
 }

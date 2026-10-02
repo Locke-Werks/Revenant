@@ -2477,6 +2477,12 @@ public:
         return mix_wfm_mask_.load(std::memory_order_acquire);
     }
 
+    // Which slots hold a receiver whose audio is decoded voice, as bits. The
+    // mix scales them by the digital voice level; see audio/voice_gain.h.
+    [[nodiscard]] std::uint64_t mixVoiceMask() const {
+        return mix_voice_mask_.load(std::memory_order_acquire);
+    }
+
     // The lead subscription's grant, which sizes the sink.
     [[nodiscard]] std::uint32_t mixGrantedMillis() const {
         return mix_granted_millis_.load(std::memory_order_acquire);
@@ -4288,6 +4294,7 @@ private:
     std::atomic<std::uint32_t> mix_granted_millis_{0};
     std::array<std::atomic<float>, kMaxReceivers> mix_gain_{};
     std::atomic<std::uint64_t> mix_wfm_mask_{0};
+    std::atomic<std::uint64_t> mix_voice_mask_{0};
 
     // Supervisor thread only: the pane receiver's subscription, derived from
     // live_audio_ on every pass, which is what the audio section describes.

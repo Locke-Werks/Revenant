@@ -60,6 +60,9 @@ inline constexpr QLatin1StringView kAudioDeviceId{"audio/deviceId"};
 inline constexpr QLatin1StringView kAudioVolume{"audio/volume"};
 inline constexpr QLatin1StringView kAudioMuted{"audio/muted"};
 
+// The digital voice boost in whole decibels. See audio/voice_gain.h.
+inline constexpr QLatin1StringView kAudioVoiceGainDb{"audio/voiceGainDb"};
+
 // The listen switch. It is a switch and not a state: it survives a
 // retune, a mode change and a reconnect within a session, and this is the
 // same fact across a restart.
