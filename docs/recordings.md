@@ -478,8 +478,19 @@ have it.
 
 Not a corpus. `tests/corpus/README.md` describes what a corpus entry is: a
 SigMF sidecar, a checksum, a retrieval URL and a ground-truth record saying
-what a correct decoder should recover. These have a filename and nothing else,
-and nothing in `tools/bench` knows about them.
+what a correct decoder should recover. These have a filename and nothing else.
+`tools/bench` reads one only when told to: `bench cw-file` runs the cw decoder
+on any recording a URI names, and `bench cw-engine` renders its synthetic file
+at their 96 kS/s over the 16 channels the engine picks for them. Neither has a
+manifest or a score for these files. `docs/sensitivity.md`, "On the air:
+KF4FIC, 20 m, 1603 UT", is the CW read of one, with the text shown because
+there is none to score against, and `docs/detection.md`, "What identification
+finds on the HF corpus", is the six put through the probes.
+
+WHAT THE LAST SENTENCE OF THAT PARAGRAPH USED TO SAY: "These have a filename and
+nothing else, and nothing in `tools/bench` knows about them." True until
+"Measure CW through the engine at any pitch" on 2026-09-23 added `bench
+cw-file` and sized `bench cw-engine` on these recordings.
 
 Not a replay of anything this project has already done. The RDS decode in
 `docs/rds-first-decode.md` was broadcast FM at 98.1 MHz and its samples are

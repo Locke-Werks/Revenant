@@ -273,6 +273,24 @@ three placeholders, that there was no `ui/CMakeLists.txt`, and that the
 commands above were the shape of a build rather than one that runs. All three
 were true until the client was built and none is now.
 
+### Running the client from a build tree
+
+Since 2026-09-27 an installed client starts the engine itself: when nothing
+answers on 127.0.0.1 at its port and `revenant-engine.exe` sits in the client's
+own directory, it starts one with `--no-source`, ends it with the window, and
+reopens the last radio it opened. A build tree never meets the second
+condition, because `ui/` builds into its own directory and the engine into
+`build\<preset>\tools\engined`, so a development client waits for an engine
+exactly as it did before. Start one yourself, or stage the payload with
+`scripts/stage-payload.ps1`, which puts the two side by side.
+`ui/models/engine_start.h` has the rules.
+
+The engine loads vocoder plugins from a folder named `vocoders` beside
+`revenant-engine.exe` when it starts, which in a build tree is
+`build\<preset>\tools\engined\vocoders`, and prints what it loaded and what it
+refused. None is built or shipped here; `core/decode/vocoder_plugin.h` is the
+loader and `core/decode/vocoder_abi.h` the contract.
+
 ### Running the client's tests
 
 From inside `ui/`:
@@ -306,10 +324,15 @@ by file, what it does not.
 
 `tests/twoprocess` is a third CMake project, for the reason `ui/` is one: it
 builds `core/rpc/client.cpp` `/MD` into a small client, and one cache cannot
-hold both runtimes. Its one test starts `revenant-engine` from the root tree
-on a synthetic source, reads the port it prints, and runs the client against
-it in a separate process. From inside `tests/twoprocess`, with the root tree
-built:
+hold both runtimes. It has two tests. `two_process_smoke` starts
+`revenant-engine` from the root tree on a synthetic source, reads the port it
+prints, and runs the client against it in a separate process.
+`two_process_no_source`, since 2026-09-27, starts it with `--no-source`, the
+way the client starts one, and has the client open a synthetic scene, close it
+and open it again, failing if the engine exits along the way. WHAT THIS
+PARAGRAPH USED TO SAY: "Its one test starts `revenant-engine` from the root
+tree on a synthetic source". The second arrived with "Let revenant-engine start
+with no source open". From inside `tests/twoprocess`, with the root tree built:
 
 ```powershell
 cmake --preset vs -DREVENANT_ENGINE=..\..\build\ci\tools\engined\revenant-engine.exe
@@ -330,9 +353,15 @@ docs/packaging.md is the whole of it: what the installer carries, how to build
 one locally, and the order the release job signs in. This section is the two
 sentences somebody looking for a certificate needs.
 
-Nothing is signed yet. The `release` job in `.github/workflows/ci.yml` can sign
-and has never run; `package` produces an unsigned development installer on
-every build.
+The `release` job in `.github/workflows/ci.yml` signs, on a `v*` tag, and has
+signed every release from v0.1.0 on 2026-09-27 on: `revenant-engine.exe`,
+`revenant-ui.exe` and the installer. `package` produces an unsigned development
+installer on every build. Nothing built locally is signed unless somebody signs
+it.
+
+WHAT THIS PARAGRAPH USED TO SAY: "Nothing is signed yet. The `release` job in
+`.github/workflows/ci.yml` can sign and has never run". It first ran on the
+v0.1.0 tag.
 
 The scaffold is in place: `signing/signing.env` holds the endpoint, account and
 certificate profile, and `scripts/New-SigningMetadata.ps1` generates

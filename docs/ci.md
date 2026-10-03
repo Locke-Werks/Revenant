@@ -1,13 +1,23 @@
 # CI
 
 Two workflows. `ci.yml` runs on pushes to `main`, on version tags, and on every pull
-request; `nightly.yml` runs the long BER sweeps on a schedule.
+request; `nightly.yml` holds the long BER sweeps and has been disabled on GitHub since
+2026-10-02, so nothing runs them. "The nightly, disabled" below says why and how.
+
+WHAT THIS PARAGRAPH USED TO SAY: "`nightly.yml` runs the long BER sweeps on a
+schedule." True until the owner had the workflow disabled on 2026-10-02.
 
 Note what that leaves out: a push to a topic branch with no pull request open runs
 nothing. That is deliberate, because the GPU jobs occupy the workstation, but it means
 the first CI a branch sees is when the pull request is opened. Push early if you want
 the feedback earlier, or run `scripts/build.ps1 -Preset ci` locally, which is the same
 build the runner does.
+
+The maintainer works the same way from the other side. Since 2026-10-02 changes are
+committed locally and `main` is pushed only when a release is cut, together with the
+version bump, because every push to `main` is a full run of the GPU jobs on the
+workstation somebody is using. So a `ci` run on `main` is normally the one in front of
+a `v*` tag, and the tag's own run, which adds `release`, follows it.
 
 ## Why the GPU jobs are self-hosted
 
@@ -61,14 +71,22 @@ merging. A conformance result nobody can trust is worth less than one that is la
 
 | Job | Runner | What it does |
 | --- | --- | --- |
-| `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, checks the version parses, and checks every test target suppresses modal dialogs. Cheap, and it answers even when the workstation is off |
+| `guards` | `ubuntu-latest` | Greps for committed signing metadata, build timestamps, hardcoded credentials and vendored copyleft text, checks the version parses, runs `scripts/check_retired_claims.py`, checks every test target suppresses modal dialogs, and runs the self-tests of `generate_notices.py` and `corresponding_source.py`. Cheap, and it answers even when the workstation is off |
 | `build-and-test` | self-hosted | Configures and builds the `ci` preset, runs the full suite on the RTX 4090 |
 | `headless` | self-hosted | Configures the `headless` preset, which fails if anything under `core/` reaches for Qt |
 | `ui` | self-hosted | Configures, builds and tests `ui/`, the Qt client, as its own CMake project |
-| `two-process` | self-hosted | Builds `tests/twoprocess`, a small client compiled `/MD` from `core/rpc/client.cpp`, and runs it in its own process against the `/MT` `revenant-engine.exe` that `build-and-test` staged: login, source list, spectrum frames and a receiver's audio across the two runtimes |
+| `two-process` | self-hosted | Builds `tests/twoprocess`, a small client compiled `/MD` from `core/rpc/client.cpp`, and runs it in its own process against the `/MT` `revenant-engine.exe` that `build-and-test` staged: login, source list, spectrum frames and a receiver's audio across the two runtimes, and, as a second case since 2026-09-27, an engine started with `--no-source` that the client opens a source on, closes and opens again |
 | `package` | `windows-latest` | Forges an unsigned installer out of the two halves the jobs above upload, checks both carry their licence material, builds the corresponding-source archive, and keeps both as artifacts. Hosted, because forging needs no toolchain, and unreachable from a fork because the jobs it needs are |
-| `release` | `windows-latest` | On a `v*` tag only: checks the tag against the version, signs the payload, forges, signs the installer, and publishes it with the corresponding-source archive. Has never run. docs/packaging.md holds the order and why it is that order |
-| `sweep` (nightly) | self-hosted | Runs two BER sweeps, the reference BPSK detector against `tests/baselines/ber-vs-snr.json` and the RDS decoder against `tests/baselines/ber-vs-snr-rds.json`, failing on a regression in either |
+| `release` | `windows-latest` | On a `v*` tag only: checks the tag against the version, signs the payload, forges, signs the installer, and publishes it with the corresponding-source archive and the Qt and FFmpeg source archives. It has published every tag from v0.1.0 on 2026-09-27 to v0.1.6 on 2026-10-03. docs/packaging.md holds the order and why it is that order |
+| `sweep` (nightly) | self-hosted | Disabled since 2026-10-02. Sweeps the reference BPSK detector against `tests/baselines/ber-vs-snr.json`, the RDS decoder against `tests/baselines/ber-vs-snr-rds.json`, and eighteen more decoder modes, each against its `tests/baselines/ber-vs-snr-<mode>.json`, failing on a regression in any |
+
+WHAT TWO ROWS OF THIS TABLE USED TO SAY. The `release` row ended "Has never run." It
+first ran on the v0.1.0 tag, 2026-09-27, run 36345951513. The `sweep` row read "Runs
+two BER sweeps, the reference BPSK detector against `tests/baselines/ber-vs-snr.json`
+and the RDS decoder against `tests/baselines/ber-vs-snr-rds.json`, failing on a
+regression in either". "Sweep every decoder against its baseline in the nightly" added
+a third step on 2026-09-23, and the same day's DMR, AIS and DSC baselines brought it to
+the eighteen modes that step lists.
 
 `build-and-test` and the nightly sweep select their device with `REVENANT_GPU_INDEX`,
 which is the same mechanism a developer uses locally, and both pin it to 0, the RTX 4090.
@@ -76,10 +94,28 @@ The pin matters because the machine also carries the Radeon integrated graphics 
 Ryzen 9 7950X, which is not supported and not tested, and a driver update that reordered
 enumeration would otherwise point the suite at it. There is one runner, so the jobs
 execute in sequence rather than in parallel. That is fine at this scale and is the reason
-the long sweeps are nightly rather than per-commit.
+the long sweeps were put in a nightly rather than in the per-commit gate. WHAT THAT
+SENTENCE USED TO SAY at its end: "the reason the long sweeps are nightly rather than
+per-commit." Nothing runs them nightly since 2026-10-02.
 
 Until 2026-09-22 `build-and-test` was a matrix with one leg per device, the second on
 the integrated part. That leg is gone; "Coverage, stated honestly" below says why.
+
+### The nightly, disabled
+
+`nightly.yml` still carries its `schedule` trigger, `cron: '0 9 * * *'`, and its
+`workflow_dispatch`. What stops it is GitHub's per-workflow switch: the owner had it
+disabled on 2026-10-02 with `gh workflow disable`, and `gh workflow list --all` reports
+it `disabled_manually`. Nothing in the file says so, which is why this section does.
+
+The cron asks for 09:00 UTC, the small hours in US Central. GitHub started the twelve
+scheduled runs from 2026-09-21 to 2026-10-02 between 13:24 and 17:04 UTC instead, which
+is the owner's morning at the workstation, and each run held its CPU for 12 to 14
+minutes. A different cron hour does not fix that, because the delay is GitHub's. If the
+sweeps come back they want a trigger that cannot land while somebody is working: manual
+dispatch only, or a check that the box is idle. Ask the owner before re-enabling or
+dispatching it. Until then nothing compares a decoder's curve against its baseline
+unless somebody runs the commands `docs/sensitivity.md` gives.
 
 ### The modal-dialog guard, and the one target exempt from it
 
@@ -185,6 +221,22 @@ dongle skips in it did not test the backend.
 contention with a second process, the timeout, release on destruction, a holder
 that is killed, and a test double standing in for the device open.
 
+### One case may fail without failing the run, until issue #2
+
+"each emitter of the labelled scene ends with its own label", in
+`tests/detect/test_labelled_scene.cpp`, carries Catch2's `[!mayfail]` tag since
+2026-10-02. It still runs and still prints every wrong label, but a failure exits 0, so
+ctest lists the case as passed and `build-and-test` stays green. It went on after the
+case failed three runs in a row on RTTY, seed 3, 16 channels, which held up the release
+job behind it ("Let the labelled scene case fail without failing the run until #2").
+The RTTY cause was fixed the same day by giving an unverified identification dwell two
+more tries; the tag stays for a second one, the M17 row in `core/identify` sometimes
+verifying on a D-STAR signal. The comment above the case has both, and the tag comes off
+when GitHub issue #2 closes.
+
+A green run therefore says nothing about that case. Read its output in the ctest log
+rather than its status.
+
 ## The `ui` job, and why it is a job rather than a step
 
 `ui/` is a second CMake project. Qt 6.8.3 is built against the dynamic CRT and the
@@ -210,10 +262,16 @@ wall of errors out of a Qt header; a merge gate is the other case.
 Thin, and stating it exactly is the point of this section. A green run says three things
 and no more.
 
-The client compiles, with `REVENANT_WERROR=ON`, which also fires the eight `static_assert`
-declarations in `models/engine_link.h` that nothing else in CI reaches. `qt_add_qml_module`
+The client compiles, with `REVENANT_WERROR=ON`, which also fires the `static_assert`
+declarations in `models/engine_link.h` that nothing else in CI reaches, the confidence
+bar's fixed point. `qt_add_qml_module`
 runs `qmlcachegen` over every file under `qml/`, so a syntax error in any of them is a red build; nothing
 checks what the QML does.
+
+WHAT THE FIRST SENTENCE USED TO SAY: "fires the eight `static_assert` declarations in
+`models/engine_link.h`". Seven since 2026-09-23, when "Offer P25, D-STAR and TETRA in the
+receiver window's mode selector" moved the demodulator name table and its assertion to
+`models/mode_choice.h`, which `revenant_ui_tests` compiles anyway.
 
 `revenant_ui_tests` passes. It holds the pieces of the client that were lifted out of Qt
 types so they can be asserted without a window, and the source list in
@@ -245,14 +303,20 @@ true when written and stayed in place while twelve more files arrived beside the
 
 Everything below has no test of any kind. Compilation is the only thing standing over it.
 
-**`render/spectrum_scale.cpp` is the one that should not be on this list.** It includes
-`<cstddef>`, `<cstdint>`, `<span>`, `<algorithm>`, `<array>` and `<cmath>` and no Qt
-header at all, and it exports five pure functions: `reduce_peak`,
-`peak_reduction_headroom_db`, `map_ends`, `colour_at` and `colour_argb_at`. That is
-exactly the shape `ui/CMakeLists.txt` says a testable piece has, the same shape as
-`history_resize.h`, and it carries the max-of-K floor correction, which is arithmetic
-with a right answer that a wrong one would show as a display that reads as a solid wall.
-It needs a test file and one line in the target, nothing more.
+The scale arithmetic left this list on 2026-09-22. `render/spectrum_scale.cpp` became the
+header `render/spectrum_scale.h`, and `tests/test_spectrum_scale.cpp` covers
+`reduce_peak`, `peak_reduction_headroom_db`, `map_ends`, `resolve_ends`, `pin_level`,
+`colour_at` and `colour_argb_at`, the max-of-K floor correction among them.
+
+WHAT THIS LIST USED TO SAY first: "**`render/spectrum_scale.cpp` is the one that should
+not be on this list.** ... It needs a test file and one line in the target, nothing
+more." It got both in "Pin either end of the span colour map, and test the scale
+arithmetic", two days after this section was written, and the paragraph stayed.
+
+**`models/engine_launcher.cpp`**, since 2026-09-27. Starting `revenant-engine.exe` in a
+Job object that ends it with the window, and reading its stderr. It talks to Windows,
+which is why it is its own file; the decision whether to start one is
+`models/engine_start.h`, and `tests/test_engine_start.cpp` covers that.
 
 **`models/engine_link.cpp`, `models/receiver_link.cpp`, `models/audio_link.cpp`.** The
 RPC-facing state: connection lifecycle, reconnect, the detection and RDS surfaces, and
@@ -359,9 +423,13 @@ caught it.
 
 Nothing here costs GitHub minutes. `guards` runs on `ubuntu-latest`, which is free on a
 public repository, and every other job runs on hardware that is already paid for. What
-those jobs do cost is the workstation, which is why the nightly is scheduled rather than
-frequent and why the long sweeps are not in the pull-request gate: they take real time on
-a machine somebody is using.
+those jobs do cost is the workstation, which is why the long sweeps are not in the
+pull-request gate, why the nightly that held them is disabled, and why `main` is pushed
+only at a release: they take real time on a machine somebody is using.
+
+WHAT THE FIRST OF THOSE REASONS USED TO SAY: "which is why the nightly is scheduled
+rather than frequent". Scheduled turned out to mean mid-morning, and the nightly was
+disabled on 2026-10-02; "The nightly, disabled" above has the times.
 
 A scheduled workflow on a self-hosted runner only fires when the machine is on. That is
 accepted here, not a fault to chase.

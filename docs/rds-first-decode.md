@@ -27,6 +27,14 @@ The arithmetic is written out on `VrxParams::audioRate` in
 which a WFM receiver stops being an audio receiver and stops taking a
 de-emphasis curve by default.
 
+In this run the one receiver was set to 171000, and at that rate a WFM
+receiver decodes no stereo (`engine::resolve_stereo`). Since 2026-10-02 (GitHub issue #1) a client asking for
+RDS on a WFM receiver below that rate leaves the receiver alone: the server
+opens a companion at 171000 on the same tuning, `ServerImpl::open_rds` in
+`core/rpc/server.cpp`, and decodes that, so the listener keeps its stereo.
+`docs/rpc.md` has the companion's terms. The decoder and the rate it reads are
+the ones this run used.
+
 Gain is 20 and not `auto` because `auto` overloads the front end here. That
 was measured in the same session and is filed as task #54; with `auto` the
 detector reported three intermodulation products as tracks at confidence 1.00,

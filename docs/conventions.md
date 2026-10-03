@@ -242,10 +242,19 @@ construction rather than by a conversion step somebody has to trust.
 ## Reference implementations
 
 Every GPU kernel has a CPU twin, and the twin is the referee. The twins live in
-the engine beside the rest of the DSP, currently `core/dsp/complex_ops.cpp`;
-`tests/reference/` holds the harness that compares them, not the references
-themselves. They are part of the engine because a reference that lives in the
-test tree is a reference nobody ships, reviews or keeps current.
+the engine beside the rest of the DSP, under `core/dsp/`: `complex_ops.cpp` for
+the complex multiply, `convert.cpp` for the sample format conversions, and a
+`*_reference.cpp` for each stage, from `pfb_branch_reference.cpp` to
+`noise_reference.cpp` and `front_end_correction_reference.cpp`. `tests/reference/` holds the harness that
+compares them, not the references themselves. They are part of the engine
+because a reference that lives in the test tree is a reference nobody ships,
+reviews or keeps current.
+
+WHAT THE FIRST SENTENCE ABOUT WHERE THEY LIVE USED TO SAY: "The twins live in
+the engine beside the rest of the DSP, currently `core/dsp/complex_ops.cpp`".
+True of the first kernel; the channelizer's two twins went into files of their
+own on 2026-09-18, in "Add the polyphase channelizer: two kernels, two twins,
+bit-exact", and the stages after it did the same.
 
 A reference translation unit includes `core/dsp/reference_fp.h` first, before
 anything else, and its target calls `revenant_apply_reference_fp`. Both exist on

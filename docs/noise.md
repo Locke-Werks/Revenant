@@ -25,7 +25,7 @@ below comes from.
 
 | Mode | Blanker | Notch | Automatic notch | Noise reduction |
 | --- | --- | --- | --- | --- |
-| AM, USB, LSB, DSB | yes | yes | yes | yes |
+| AM, SAM, USB, LSB, DSB | yes | yes | yes | yes |
 | CW | yes | yes | refused | yes |
 | NFM, WFM | yes | no | no | yes |
 | raw, P25, D-STAR, TETRA, DMR | no | no | no | no |
@@ -36,7 +36,15 @@ and quietly ignored. The automatic notch is refused by name on CW because
 the steady tone it exists to remove is the signal a CW operator is copying.
 The manual notch needs a mode whose audio frequency follows from where a
 signal sits in the passband, which the FM modes do not have. The complex taps
-have no audio. A stereo WFM receiver runs the blanker and not the two audio
+hand out complex baseband rather than demodulated audio, so there is nothing
+for an audio stage to work on: the voice a P25, D-STAR or DMR receiver serves
+is synthesised from decoded bits, by the engine's IMBE vocoder for P25 and by
+a vocoder plugin for the other two. WHAT
+THAT SENTENCE USED TO SAY: "The complex taps have no audio." Already untrue of
+P25 when written, an hour after "Serve a P25 receiver's voice on
+subscribeAudio", and of D-STAR and DMR since "Route D-STAR and DMR voice to a
+vocoder plugin" on 2026-10-02. SAM, synchronous AM since 2026-09-23, is
+offered what AM is. A stereo WFM receiver runs the blanker and not the two audio
 stages, since a notch or a noise floor per channel would pull the stereo image
 around; it is declined at plan time rather than refused, because whether a
 receiver is decoding stereo is the station's pilot's decision.

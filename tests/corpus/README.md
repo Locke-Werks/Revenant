@@ -37,7 +37,15 @@ The harness in `tools/bench` reads these and skips, loudly, any entry whose
 data file is not present locally, so a developer without the corpus still gets
 a green synthetic run and an explicit list of what went untested.
 
-Arrives: M5, alongside extraction. Empty until then, on purpose.
+Arrives with extraction, which needs the rolling capture to extract from: the
+README's roadmap numbers that M4, and nothing of it is built. Empty until then,
+on purpose. Nothing in `tools/bench` reads a manifest yet, so the harness above
+is the design and not code.
+
+WHAT THIS LINE USED TO SAY: "Arrives: M5, alongside extraction." M5 was the
+time machine's number in the plan this directory was written from. The
+README's roadmap, set out for v0.1.0 on 2026-09-27, has no M5 and puts the
+rolling capture at M4.
 
 ## What exists ahead of this
 

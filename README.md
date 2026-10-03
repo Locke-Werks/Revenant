@@ -65,9 +65,15 @@ has been measured is below, with the numbers rather than the adjectives.
 
 ## Status
 
-M1 and M2 are done, and M3, the first public release, is next. There are two
-things to run: a command line, and a Qt client that reaches a running engine
-over a socket.
+M1, M2 and M3 are done: v0.1.0, the first public release, shipped on
+2026-09-27, and the release page has every one since. M4, the rolling
+capture, is next.
+There are two things to run: a command line, and a Qt client that reaches a
+running engine over a socket.
+
+WHAT THIS PARAGRAPH USED TO SAY: "M1 and M2 are done, and M3, the first public
+release, is next." v0.1.0 shipped on 2026-09-27 and the sentence went on
+pointing at it as future work through six more releases.
 
 ```
 revenant-cli "rtlsdr://0?freq=98.1M&rate=2400000&gain=20" \
@@ -126,7 +132,7 @@ a grid against the new one and serves the same session, and
 started again. The process does not restart, which is what it used to take.
 
 What exists: the Vulkan context and allocator, the shader build, the polyphase
-channelizer, seven demodulators and a raw complex tap, three digital voice
+channelizer, eight demodulators and a raw complex tap, four digital voice
 modes that hand their decoder filtered complex baseband, the per-receiver fine
 stage, audio egress to WAV and to the sound card, a synthetic wideband source,
 a file source that reads 8, 16, 24 and 32-bit IQ, the 24-bit WAV the HF
@@ -143,11 +149,21 @@ runs both trees. The counts move with nearly every commit, so they are dated
 rather than kept current: on 2026-09-23 `ctest -N` listed 841 tests in the
 engine tree and 334 in `ui/`.
 
+WHAT THIS PARAGRAPH USED TO SAY: "seven demodulators and a raw complex tap,
+three digital voice modes". Synchronous AM made eight demodulators and DMR made
+four digital voice modes, both on 2026-09-23 (`core/engine/vrx.h`, `Demod`).
+
 Sixteen decoders run on a live receiver, in the engine, from
 `revenant-cli --decode` and over the wire through `Session.subscribeDecoded`:
 P25 Phase 1, D-STAR, TETRA, DMR and M17 on complex baseband, and RTTY, SITOR-B,
 NAVTEX, PSK31, PSK63, QPSK31, CW, AX.25 with APRS, POCSAG, AIS and VHF DSC on
-receiver audio. RDS runs beside them on every wfm receiver that asks, and now reports
+receiver audio. P25 Phase 1 reads the trunking control channel as well as
+voice channels: a receiver on a control channel reports the site's grants,
+identifier updates and status broadcasts, with grant channels resolved to
+frequencies, and every voice LDU publishes its Link Control and encryption
+sync. AX.25 decodes FX.25 codeblocks and IL2P packets as well as plain HDLC
+frames. RDS runs beside them on every wfm receiver that asks, read from a
+companion receiver on the same tuning so the station stays stereo, and reports
 programme type names, TMC and emergency warning groups as well as the text.
 Each is written from its specification and checked by a round trip through a
 transmitter written from the same clauses; `docs/modes.md` says where each one
@@ -156,7 +172,16 @@ white noise, read off a committed curve, rather than a copy of that table
 here. A P25 receiver's audio is its IMBE voice, since 2026-09-23: the wire
 carries it at 8000 S/s through `Session.subscribeAudio`, silent between calls
 and through an encrypted one, and the client plays it in the receiver's mix.
-D-STAR, TETRA and DMR voice is not decoded. WHAT THIS PARAGRAPH USED TO SAY:
+D-STAR and DMR voice go to a vocoder plugin, since 2026-10-02: a D-STAR
+receiver hands each 72-bit voice frame and a DMR receiver each of a burst's
+three 72-bit vocoder frames to the first loaded plugin that serves the mode or
+its codec, and with no plugin loaded the audio is silence rather than a
+refusal. No plugin ships with Revenant; "AMBE, and why you will not find it
+here" below says why. TETRA voice is not decoded.
+
+WHAT THIS PARAGRAPH USED TO SAY: "D-STAR, TETRA and DMR voice is not decoded."
+The framing decoders for D-STAR and DMR now hand their voice to a vocoder
+plugin, so only TETRA's half of that sentence is still true. And before that:
 "P25's IMBE voice decodes to audio in `core/decode` and is not served", and
 "Thirteen decoders run on a live receiver"; DMR's framing decoder made
 fourteen on 2026-09-23. And then "Fourteen decoders run on a live receiver";
@@ -165,12 +190,22 @@ AIS and VHF DSC made sixteen the same day.
 The client has had its first design pass. The main window is the span, a
 frequency ruler between the spectrum and the waterfall, and a top bar with a
 per-digit frequency dial and a band menu backed by a cited band table. The
-receivers have a window of their own: a rack of up to eight receivers, each
-with a strip, a level, a gain, mute and solo, their audio mixed, and the
-focused one's dial, mode, fine-tuning display, AFT, auto filter, RDS and a
-decode log of what its decoders report. Every action has a key, one table
+receivers sit in a rack, docked in the main window by default and able to pop
+out into a window of their own: up to 64 receivers, each with a strip, a level,
+a gain, mute and solo, their audio mixed, and the focused one's dial, mode,
+fine-tuning display, AFT, auto filter, RDS and a decode log of what its
+decoders report. A DV slider beside the output lifts digital voice by up to
+30 dB ahead of the limiter, and an "auto P25" switch in the rack header opens a
+held receiver on every P25 signal the detector verifies on a frequency no
+receiver covers. The radio panel lists the vocoder plugins the engine loaded,
+what each serves and why any was refused. Every action has a key, one table
 decides them all, and a command palette on Ctrl+K lists every action and
 band. `docs/ui-spectrum.md` has each of those and what it measured.
+
+WHAT THIS PARAGRAPH USED TO SAY: "The receivers have a window of their own: a
+rack of up to eight receivers". The limit went to 64 on 2026-10-02, which is
+what the engine carries audio for, and the rack has docked in the main window
+by default since 2026-09-23.
 
 A receiver belongs to the session that made it, and goes when that session
 ends unless it was added with `keep`, which is what a headless recorder asks
@@ -184,11 +219,16 @@ What does not. Nothing stores the band: `core/capture` holds a placeholder and
 no code, so there is no rolling capture, and search over stored captures, the
 reason the design exists, has nothing to search yet. The engine runs one radio
 at a time. Nothing saves a set of receivers across a restart; that one is in
-`docs/rpc.md` with what it would take and what the gap costs meanwhile. P25
-voice does not reach the client, for the reason above. RDS2's three extra
+`docs/rpc.md` with what it would take and what the gap costs meanwhile. TETRA
+voice is not decoded, and D-STAR and DMR voice is silent without a vocoder
+plugin. RDS2's three extra
 subcarriers are not implemented, and RDS-TMC is recognised, counted and kept
 raw but not decoded into events and locations, because the field positions are
 in clauses of ISO 14819-1 nobody here has read; `docs/modes.md` has both.
+
+WHAT THIS PARAGRAPH USED TO SAY: "P25 voice does not reach the client, for the
+reason above." It has reached the client since 2026-09-23, as the paragraph on
+decoders says, and the sentence sat two paragraphs below its own correction.
 
 This paragraph used to read "What does not: a decoder on a live signal, other
 than RDS." and went on to say that nothing in the engine or the command line
@@ -282,11 +322,12 @@ the matrix now, so nothing about it is refereed, not only the spectrum.
 | M4 | Rolling capture of the band, and search over what it stored. This is the reason the design exists, and nothing of it is built | Next |
 | After M4 | More than one radio at a time, and the modes `docs/modes.md` lists as not done | Not ordered |
 
-What v0.1.0 does not do is the "What does not" paragraph under Status, and
-what each decoder does not do is `docs/modes.md`. One known shortfall is new
-in this release: with the receivers popped out into their own window, that
-window misses 1.32% of refreshes at full load, over the one in a hundred the
-budget allows. Docked in the main window, the default, they are within it.
+What a release does not do is the "What does not" paragraph under Status, and
+what each decoder does not do is `docs/modes.md`. One known shortfall arrived
+with v0.1.0 and was still open at v0.1.6: with the receivers popped out into
+their own window, that window misses 1.32% of refreshes at full load, over the
+one in a hundred the budget allows. Docked in the main window, the default,
+they are within it.
 
 **M2 in detail.** The graphical client. It runs as its own process and
 reaches the engine over a Cap'n Proto service, because the engine is headless
@@ -296,7 +337,7 @@ runtime and ships as one self-contained signed binary, and Qt is not.
 
 Measured against what M2 was set to deliver: the QML shell exists, and so do
 AM, FM and SSB demodulation and audio out. It asked for one receiver and the
-client holds eight. M2 asks for the spectrum and waterfall at monitor refresh
+client holds 64; it held eight when M2 closed. M2 asks for the spectrum and waterfall at monitor refresh
 and closes when the render pipeline holds its frame budget at full target
 load. That is now measured. On 2026-09-23 it was first not met: at 120 Hz with
 both windows open, 20.9% of the main window's frames missed a refresh (p95
@@ -507,6 +548,13 @@ the codec was published. Where it was not, Revenant will speak to a hardware
 vocoder if you own one, and will otherwise tell you precisely what it is
 hearing and decline to guess.
 
+The way in is a vocoder plugin: a DLL in a `vocoders` folder beside
+`revenant-engine.exe`, written against `core/decode/vocoder_abi.h`, which is
+plain C, names no codec and is the whole contract. The engine loads what it
+finds at startup and the client's radio panel says what loaded, what each
+plugin serves, and why any was refused. D-STAR and DMR voice reach a plugin
+today. None ships here, for the reasons above.
+
 The patents on this will expire and it will still not be implementable,
 because the problem was never the patents. My contempt for the arrangement
 will comfortably outlast them.
@@ -518,6 +566,10 @@ will comfortably outlast them.
 - [docs/clean-room.md](docs/clean-room.md), the licensing position
 - [docs/snr-convention.md](docs/snr-convention.md), how SNR is reported and why it
   matters that everyone means the same thing by it
+- [docs/calibration.md](docs/calibration.md), frequency correction, DC removal
+  and I/Q correction, where each runs and where it is kept
+- [docs/noise.md](docs/noise.md), the impulse blanker, notches and noise
+  reduction on each receiver
 - [docs/sensitivity.md](docs/sensitivity.md), each decoder's sensitivity in white
   noise, read off its committed curve, and what each figure does not cover
 - [docs/fft.md](docs/fft.md), why the FFT is written here rather than taken from
@@ -566,12 +618,19 @@ interface along with the licence question.
 Relicensing is not publishing, and the two happened at different times here.
 Copyleft obligations attach to distribution, so a repository whose binaries
 stay on their author's machines owes nothing to anyone; the duty to offer
-corresponding source begins when a binary is handed to someone else. This
-repository is public and its source is published, which discharges the
-source obligation in advance for anything built from it. No binary has been
-handed to anyone yet, so the release obligations in
-[docs/clean-room.md](docs/clean-room.md) are the ones still ahead rather
-than the ones outstanding.
+corresponding source begins when a binary is handed to someone else. Binaries
+have been handed out since v0.1.0 on 2026-09-27, and every release page
+carries the corresponding source beside the installer:
+`Revenant-<version>-corresponding-source.zip` for Revenant, libusb and
+librtlsdr, and the Qt and FFmpeg source archives the client is built from,
+listed in `SOURCES-client.txt`. The release obligations are in
+[docs/clean-room.md](docs/clean-room.md).
+
+WHAT THIS PARAGRAPH USED TO SAY: "No binary has been handed to anyone yet, so
+the release obligations in docs/clean-room.md are the ones still ahead rather
+than the ones outstanding." The release job published v0.1.0 with a signed
+installer on 2026-09-27, so the obligations are current ones, and the release
+page is where they are met.
 
 WHAT THIS PARAGRAPH USED TO SAY
 

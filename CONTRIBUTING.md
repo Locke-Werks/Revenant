@@ -28,8 +28,14 @@ that will get a contribution rejected on sight rather than reviewed.
 
 **Link libraries, do not vendor them.** A dependency goes in `vcpkg.json` with
 a version. Copying source files into this tree makes a fork nobody maintains
-and a provenance nobody can reconstruct, and CI fails on a copyleft licence
-grant appearing under `core/`, `tools/` or `ui/`.
+and a provenance nobody can reconstruct, and CI fails on a copyright line that
+is not Locke Werks, or an SPDX identifier that is not GPL-3.0-or-later,
+appearing under `core/`, `tools/` or `ui/`.
+
+WHAT THAT SENTENCE USED TO SAY: "CI fails on a copyleft licence grant appearing
+under `core/`, `tools/` or `ui/`." The guard stopped matching the grant twenty
+minutes after this file said it did, in "Guard on whose copyright a file
+carries, not on licence text"; `docs/clean-room.md`, "The CI guard", has why.
 
 **DSP and decoders stay clean-room.** Where a specification is published, work
 from the specification and cite it: document, revision, section or table, in a
@@ -75,6 +81,19 @@ All three must build and pass before a pull request. The `ci` preset carries
 `/WX`, so a warning that the `dev` preset tolerated is a failure there, and
 finding that out from CI rather than locally wastes a round trip.
 
+The client under `ui/` is a separate CMake project and none of the three
+builds it. If your change touches `ui/`, or the wire it talks over in
+`core/rpc/`, build it and run its tests too, from inside `ui/`:
+
+```
+cmake --preset vs -DREVENANT_WERROR=ON
+cmake --build --preset vs
+ctest --preset vs
+```
+
+That is what CI's `ui` job runs. docs/building.md has the prerequisites, Qt
+6.8.3 among them.
+
 If you have more than one supported Vulkan device, run the suite against each,
 by index:
 
@@ -95,7 +114,10 @@ worth stating rather than leaving to be assumed.
 
 Hardware tests skip when the hardware is absent, so a machine with no radio
 and no sound card still runs a green suite. A skip is not a pass: if you
-changed something a skipped test covers, find a way to run it.
+changed something a skipped test covers, find a way to run it. Nor is a case
+tagged `[!mayfail]`, which can fail inside a green run; one is tagged that way
+today, and docs/ci.md says which and why. If your change touches what it
+covers, read its output.
 
 The cases that open the RTL-SDR carry the ctest label `dongle`. To run
 everything else while you are using the radio:

@@ -506,9 +506,11 @@ baseband mixed to DC at the rate their decoder was built for, 48000 S/s for
 P25 and D-STAR and 72000 for TETRA, which `VrxStatus::demodRate` states. Until
 that change the refusal called every one of them "a raw tap" at "the coarse
 channel rate", which named the wrong path and the wrong rate for three of the
-four. It names the mode and the rate, says the engine has no AMBE or ACELP
-voice codec, and points at `subscribeDecoded`, which is what reads that
-stream.
+four. TETRA's refusal names the mode and the rate, says the engine has no
+ACELP voice codec, and points at `subscribeDecoded`, which is what reads that
+stream. WHAT THE SENTENCE BEFORE THIS ONE USED TO SAY: "It names the mode and
+the rate, says the engine has no AMBE or ACELP voice codec". The AMBE half went
+when D-STAR stopped being refused on 2026-10-02.
 
 **A P25 receiver's audio is its voice**, since 2026-09-23 and on the owner's
 decision that for a digital voice receiver the decoded voice takes the place
@@ -540,6 +542,15 @@ Per mode:
   transmissions. 0.25 puts full deviation, which the demodulator scales to
   +/-1, at the AGC's own -12 dBFS.
 - **raw and the digital voice taps: nothing.** `heard` is `samples`.
+
+Decoded voice is not levelled either: a `p25p1`, `dstar` or `dmr` receiver's
+audio is the vocoder's PCM at whatever level the synthesis lands, which the
+owner heard on 2026-10-02 as far below an `nfm` receiver's noise. The client
+makes that up, not the engine. Since "Add a level control for digital voice"
+the audio pane's DV control boosts every receiver of those three modes by 0 to
+30 dB, in whole decibels and remembered, ahead of the mix's limiter
+(`ui/audio/voice_gain.h`). It is one fixed gain rather than an AGC, because
+levelling voice would ride each talker and pump between syllables.
 
 **Off holds the gain.** `VrxParams` has no manual gain and no single fixed
 gain suits a -30 and a -80 dBFS station on one band, so `agcEnabled` false
@@ -836,7 +847,7 @@ fifteenth and sixteenth, the same day.
 
 | Name | What comes out | What it needs from its receiver |
 | --- | --- | --- |
-| `p25p1` | NAC and DUID of every data unit, with the carrier offset and deviation its sync word measured; the header's talkgroup, algorithm, key and encrypted flag | Complex baseband of a `p25p1` receiver, or a `raw` tap up to 192000 S/s |
+| `p25p1` | NAC and DUID of every data unit, with the carrier offset and deviation its sync word measured; the header's talkgroup, algorithm, key and encrypted flag; each LDU1's Link Control, with its talkgroup, source or destination, emergency and encrypted flags, and each LDU2's algorithm, key and encrypted flag; on a control channel one `tsbk` message per Trunking Signaling Block, grants carrying `channel_frequency_hz` once an identifier update for their channel has been heard | Complex baseband of a `p25p1` receiver, or a `raw` tap up to 192000 S/s |
 | `dstar` | The radio header's four callsigns, suffix and flags, then one message per superframe of voice frames | Complex baseband of a `dstar` receiver, or a `raw` tap up to 192000 S/s |
 | `tetra` | Synchronisation bursts: MCC, MNC, colour code, timeslot, frame numbers | Complex baseband of a `tetra` receiver, or a `raw` tap up to 192000 S/s |
 | `dmr` | Per timeslot: the voice LC header, embedded LC and terminator with talkgroup, source, service options and privacy; CSBKs, data and PI headers; Short LC from the CACH | Complex baseband of a `dmr` receiver, or a `raw` tap up to 192000 S/s |
@@ -846,10 +857,16 @@ fifteenth and sixteenth, the same day.
 | `navtex` | Each message with its B1 to B4 letters, serial and whether the preamble was clean | Audio of a `usb` or `lsb` receiver, tones about 1700 Hz |
 | `psk31`, `psk63`, `qpsk31` | Lines of Varicode text, with the measured tone offset | Audio of a `usb` or `lsb` receiver, tone at 1000 Hz; QPSK31 takes its sideband from the receiver |
 | `cw` | Lines of Morse text with the dots and dashes, character and overall speed, one stream per keyed tone with its `pitch_hz` and `stream` | Audio of a `cw`, `usb` or `lsb` receiver, any keyed tone from 200 to 2800 Hz |
-| `ax25` | Every AX.25 frame whose FCS checked, with its APRS position, Mic-E, status or message parsed when it is APRS | Audio of an `nfm` receiver |
+| `ax25` | Every AX.25 frame whose FCS checked, with its APRS position, Mic-E, status or message parsed when it is APRS; a frame that arrived in an FX.25 codeblock once, flagged `fx25` with its tag and the octets corrected, and one rebuilt from an IL2P packet flagged `il2p` with its header type, the octets corrected and whether a trailing CRC matched | Audio of an `nfm` receiver |
 | `pocsag` | Pages at 512, 1200 and 2400 bit/s at once: address, function, numeric or alphanumeric message | Audio of an `nfm` receiver |
 | `ais` | Every AIS message whose FCS checked, with Messages 1 to 5, 11, 18, 19, 21 and 24 parsed: MMSI, position, speed and course, heading, status, name, call sign, destination, dimensions | Audio of an `nfm` receiver on 161.975 or 162.025 MHz, at least 28800 S/s |
 | `dsc` | Each VHF DSC call whose error-check character agreed: format, category, both identities, telecommands, nature of distress, position and time, working channel | Audio of an `nfm` receiver on channel 70, 156.525 MHz |
+
+The `p25p1` row's Link Control and encryption sync from every LDU, and its
+`tsbk` messages, are since 2026-10-02, and so are the `ax25` row's FX.25 and
+IL2P frames; `core/rpc/decoders.h` lists their keys. A receiver that joins a P25
+call mid-transmission now has the talkgroup at its first whole LDU1 rather than
+at the next header.
 
 WHAT THE `cw` ROW USED TO SAY it needed: "Audio of a `cw` receiver at its
 default 700 Hz pitch, or a `usb` or `lsb` one with the tone at 700 Hz". Since
@@ -1084,7 +1101,15 @@ mono, silent between calls, `sampleIndex` counted at the chunk's own rate.
 - DMR follows one slot's call at a time, released by a terminator or a second
   without voice, and a call marked private by a PI header or the Service Options
   Privacy bit is silence and never reaches the plugin.
-- `Session.vocoderPlugins` reports what the engine loaded.
+- `Session.vocoderPlugins` reports what the engine loaded. `revenant-engine`
+  scans the `vocoders` folder beside it once at startup
+  (`core/decode/vocoder_plugin.h`), holds what loaded for the life of the
+  server, and prints a line per file under `vocoders` with the loader's
+  reason for any refusal. The call carries the same report, each offer with
+  the modes it would serve, which is empty for an offer nothing routes to;
+  the client shows it as the radio panel's vocoders section. An engine older
+  than the call refuses it as unimplemented, and the client says the engine
+  does not report plugins rather than that there are none.
 
 `P25Voice` hands a call over an LDU at a time, 1440 samples every 180 ms of
 air, detected at the end of whichever engine block holds the LDU's last
@@ -2351,7 +2376,18 @@ What exists: `tools/engined` builds `revenant-engine`, which links
 `--duration` expires, with the source its command line names or, under
 `--no-source`, with none until a client opens one. The port defaults to 17690, which is `revenant-ui`'s
 default, so the two meet with neither being told a port; `--port 0` binds a
-free one for a second engine on the machine. `ServerOptions::port` in the
+free one for a second engine on the machine.
+
+Since 2026-09-27 the client starts that engine itself when it has to. When
+nothing answers on 127.0.0.1 or localhost and `revenant-engine.exe` sits
+beside `revenant-ui.exe`, which is where the installer puts it, the window
+starts it `--no-source --pace 1` inside a Job object that ends it with the
+window, crash included, and then reopens the radio opened last or, on a first
+run or a refused reopen, shows the radio panel. An engine somebody started
+themselves is never touched: nothing is started while anything answers on the
+port, and no radio is reopened on an engine the window did not start.
+`ui/models/engine_start.h` has the rules and `ui/models/engine_launcher.cpp`
+the process. `ServerOptions::port` in the
 library stays at zero, which is what the suite needs.
 
 The bind is exclusive, and kj's own `listen()` is not. kj sets `SO_REUSEADDR`,

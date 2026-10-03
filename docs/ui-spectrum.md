@@ -33,6 +33,30 @@ with its sentence on hover. `ui/models/status_summary.h` decides which
 conditions are faults, which one the pill names and which are chips, and
 which are notes that wait in the drawer.
 
+**At launch.** Since 2026-09-27 the window starts an engine of its own when
+three things hold: the address it is pointed at is 127.0.0.1 or localhost,
+`revenant-engine.exe` is in the window's own directory, which is where the
+installer and the staged payload put it, and nothing answers on the port. It
+starts it with `--no-source`, inside a Job object that ends it with the
+window, a crash included, and while it comes up the top bar says the engine
+is starting; an engine it started that exits is reported in the engine's own
+words. On the first connection to that engine the window reopens the radio it
+last opened, `engine/lastSource` in `ui/models/settings.h`, a recording never
+counting. On a first run, or when the radio remembered is refused, the radio
+panel opens for the person to pick one. An engine somebody else started is
+never touched and its source is never changed. `ui/models/engine_start.h`
+has the rules with cases in `ui/tests/test_engine_start.cpp`, and
+`ui/models/engine_launcher.cpp` the part that talks to Windows. A development
+build of `ui/` has no engine beside it and waits for one as it always did.
+
+**The radio panel** lists the radios and recordings to open, the calibration
+section under them (`docs/calibration.md`), and since 2026-10-02 a vocoders
+section under that: the plugin files the engine found in the `vocoders`
+folder beside it, whether each loaded, what each offers and the modes it
+serves ("serves dmr", "serves no mode"), and the loader's reason for one it
+refused. `Session.vocoderPlugins` carries the report; an engine older than
+that call is reported as not reporting plugins.
+
 **The control row.** Under the top bar, always there and on one line: the
 front end's gain and the detector's three settings. The gain slider is
 labelled with the stage's own name, sits on the tuner's steps with a tick at
@@ -185,8 +209,10 @@ on 2026-09-23 when its sliders moved into the control row.
 WHAT THIS PARAGRAPH USED TO SAY: "Not bound, because the client cannot do
 them: next and previous receiver, and solo. The engine holds any number of
 receivers and this client holds one per window, so there is nothing to move
-to and nothing to solo against." The rack holds up to eight, and all three
-are bound.
+to and nothing to solo against." The rack holds up to 64 since 2026-10-02,
+and all three are bound. AND WHAT THAT LAST SENTENCE USED TO SAY: "The rack
+holds up to eight, and all three are bound." The limit went to 64 in "Raise the
+receiver limit from eight to 64".
 
 <!-- The key map. Generated from ui/models/key_actions.h and checked by ui/tests/test_key_actions.cpp: edit the table, not these lines. -->
 
@@ -326,6 +352,18 @@ double click on a full rack keeps the first click's retune and says the rack
 is full. The rule is said in one line under the strips and in the ruler's
 tooltip. Ctrl+N and the rack's "+ add" put a new receiver on the span centre.
 
+**Auto P25.** The owner's request of 2026-10-02: a switch in the rack's
+header, "auto P25", which while it is on gives every P25 detection on a
+frequency no receiver covers a held p25p1 receiver of its own, heard, at the
+mode's 12.5 kHz channel. A detection counts when the detector verified a P25
+frame sync on it, live or held, and a receiver of any mode within 6250 Hz of
+its centre covers it; two in one pass inside that distance get one receiver,
+the stronger's. The switch never removes a receiver. One the operator removes
+while it is on stays removed until the switch is turned on again, and the
+switch itself is not remembered across a restart. It stops opening receivers
+when the rack is full. `ui/models/p25_spawn.h` has the rules with cases in
+`ui/tests/test_p25_spawn.cpp`, and `ui/models/rack_link.cpp` opens them.
+
 **Mute and solo** are the client's, not the wire's: the engine has no such
 field, and a receiver nobody hears is simply not subscribed. With a solo in
 force only the soloed receiver is heard, muted or not, and one solo replaces
@@ -346,10 +384,16 @@ with cases in `ui/tests/test_audio_mix.cpp`, `test_resampler.cpp` and
   one is put on every output channel. From 171000 to 48000 a 20 kHz tone came
   through within 5.2e-5 of its value and a 30 kHz one 93 dB down. A receiver
   at the device's rate is copied while the clock trim below is exactly zero
-  and goes through the same kernel otherwise. A wfm receiver RDS has raised
-  to 171000 S/s hands out the multiplex, so it is filtered to 15 kHz, 85 dB
-  down at the pilot, and de-emphasised at 75 us: the station in mono, which
-  the RDS section's chip says.
+  and goes through the same kernel otherwise. A wfm receiver at 114000 S/s
+  or above hands out the multiplex, so it is filtered to 15 kHz, 85 dB down
+  at the pilot, and de-emphasised at 75 us: the station in mono. Turning RDS
+  on no longer puts a wfm receiver there. Since 2026-10-02 the engine reads
+  its RDS from a companion receiver at 171000 S/s on the same tuning, so the
+  receiver keeps its rate and its stereo; `docs/rpc.md` has the companion.
+  WHAT THIS POINT USED TO SAY: "A wfm receiver RDS has raised to 171000 S/s
+  hands out the multiplex ... the station in mono, which the RDS section's
+  chip says." True until "Read a WFM receiver's RDS from a companion so it
+  keeps its stereo", GitHub issue #1.
 - Receivers are aligned. The focused one leads and is read from its oldest
   frame and never past its newest, holding the whole mix when it runs out;
   every other receiver is read at the index that falls at the lead's instant.
@@ -392,7 +436,20 @@ receiver, and "realigned", the times a receiver was moved to the lead's
 instant since the output opened. `ui/models/audio_counters.h` has the wording.
 
 A P25 receiver's audio is its decoded voice at 8000 S/s, which the mix
-resamples like any other; `docs/rpc.md` has how the engine serves it.
+resamples like any other; `docs/rpc.md` has how the engine serves it. Since
+2026-10-02 a D-STAR or DMR receiver's is too, through a vocoder plugin the
+engine loaded, and silence with none; the audio section shows its listen
+switch on all three, and a TETRA or raw receiver still makes no audio.
+
+**The DV level.** Decoded voice is not levelled by the engine, and P25 played
+far below an nfm receiver's noise, which the strip gain cannot make up because
+it tops out at unity. A "DV" slider in the audio section, apart from the
+volume, since 2026-10-02, boosts every p25p1, dstar and dmr receiver by 0 to
+30 dB in whole decibels ahead of the soft limiter, and is remembered in
+`audio/voiceGainDb`.
+It is one fixed gain, not a second AGC, so it does not ride a talker between
+syllables. `ui/audio/voice_gain.h` has the rules with cases in
+`ui/tests/test_voice_gain.cpp`.
 
 WHAT THE THREE POINTS BEFORE THIS USED TO SAY, as the open decisions of the
 first mix: "A ring at another rate or channel count than the lead's, the
@@ -417,9 +474,14 @@ WHAT THE FIRST POINT USED TO SAY, until the clock trim: "a 30 kHz one 93 dB
 down; equal rates are a copy." A receiver at the device's rate is read a few
 ppm off its nominal step once the trim moves off zero, which a copy cannot do.
 
-**The colours** are `ui/models/receiver_palette.h`: eight, one per slot, the
-same on the strip, the marker on both displays, the ruler's band and the
-focused receiver's passband display. They are a search over an OKLCH grid,
+**The colours** are `ui/models/receiver_palette.h`: eight, taken by slot and
+wrapping past the eighth, so the ninth receiver wears the first one's colour
+and the strip's number tells the two apart. The same colour goes on the strip,
+the marker on both displays, the ruler's band and the focused receiver's
+passband display. WHAT THE FIRST SENTENCE USED TO SAY: "eight, one per slot".
+True while the rack held eight; the slots went to 64 on 2026-10-02.
+
+The eight are a search over an OKLCH grid,
 seeded with the azure the marker always had, and `ui/tests/test_receiver_palette.cpp`
 holds them to at least 10 in CIEDE2000 between any two, in normal vision and
 in protan, deutan and tritan vision simulated with the severity 1.0 matrices of
@@ -428,14 +490,24 @@ the detection magenta. The worst pair is 10.18, in tritan vision. The held
 receivers are drawn fainter and without edge rules, so the focused one is the
 one that stands out.
 
-**Nothing survives a restart.** Whether a session comes back as it was left is
-the owner's decision on session restore and has not been taken, so the rack
-comes up empty and its empty state says so. A reconnect within a session puts
-every receiver back.
+**The rack does not survive a restart.** The owner decided on 2026-09-27 that
+the radio comes back: an engine the window started reopens the last radio
+opened, "At launch" above. The receivers, their modes and their passbands are
+not restored, so the rack comes up empty and its empty state says so. A
+reconnect within a session puts every receiver back.
 
-`revenant-ui --receiver FREQ:MODE` may be given up to eight times; the first is
-focused and the rest are held, which is how the rack is photographed with
-`--grab-receivers` and the span's markers with `--grab-main`.
+WHAT THIS PARAGRAPH USED TO SAY: "**Nothing survives a restart.** Whether a
+session comes back as it was left is the owner's decision on session restore
+and has not been taken". The radio half of it was taken with "Start the engine
+from the client and reopen the last radio"; the receivers are still not
+restored.
+
+`revenant-ui --receiver FREQ:MODE` may be given as many times as the rack has
+slots, 64; the first is focused and the rest are held, which is how the rack
+is photographed with `--grab-receivers` and the span's markers with
+`--grab-main`. WHAT THIS SENTENCE USED TO SAY: "`revenant-ui --receiver
+FREQ:MODE` may be given up to eight times". Nothing in `main.cpp` counts them;
+the rack's limit is the limit, and it went to 64 on 2026-10-02.
 
 ## Frequency manager
 
@@ -566,9 +638,14 @@ default starts at 300 Hz; an imported width is kept as it was saved.
 | tetra | none | none | none | left out |
 
 Anything else is refused and listed with its reason, never guessed: DMR and
-DN (System Fusion) because the engine does not demodulate them, CWR because
-Revenant's cw has no reversed sideband, Auto because a memory needs a mode,
-and every other value by name.
+DN (System Fusion), CWR because Revenant's cw has no reversed sideband, Auto
+because a memory needs a mode, and every other value by name. DN is refused
+because the engine does not demodulate System Fusion. DMR is refused with the
+reason "DMR is not a mode the engine demodulates", which `map_chirp_mode` in
+`ui/models/memory_import.h` still gives and which has been false since the
+engine gained its dmr demodulator on 2026-09-23 ("Append a dmr demodulator
+that hands DMR its fine stage"). WHAT THE FIRST SENTENCE USED TO SAY: "DMR and
+DN (System Fusion) because the engine does not demodulate them".
 
 **Export** writes what is listed now, so a search or a tag filter is also an
 export selection: Revenant's JSON, with the scan lists trimmed to the memories
@@ -1139,6 +1216,16 @@ the new span. So this gesture does not have to recompute anything, and must not
 try: a client adjusting offsets on top of the engine's would move every
 receiver twice.
 
+What the window does have to do is follow the engine in its own copy, and
+until 2026-10-02 it did not. It kept the focused receiver's baseband offset
+from before the retune, so the span marker and the rack strip read off by the
+size of the retune, the passband display drew no filter because its edges
+fell outside its own axis, and the next width or mode change would have sent
+the stale offset back to the engine. The owner saw it after a 303 kHz retune.
+`EngineLink::adopt_source_tuning` in `ui/models/source_link.cpp` now rebuilds
+that copy from the receiver's absolute frequency once the granted centre
+arrives, and sends nothing, because the engine made the change itself.
+
 WHAT THESE TWO PARAGRAPHS USED TO SAY, and it is now false. They read that "the
 receivers should hold their absolute frequencies and have their offsets
 recomputed. Any that fall outside the new span have to be parked and said to be
@@ -1562,21 +1649,37 @@ and `ui/qml/DecodePane.qml` the layout.
 `DecoderInfo::modes` include the receiver's mode, in the engine's order, with
 auto first wherever it would attach anything. A decoder added to the engine
 appears without the client knowing its name. The section is absent where
-nothing reads the mode, which is am, dsb and wfm; wfm keeps its RDS section.
+nothing reads the mode, which is am, dsb and wfm, and sam since it arrived on
+2026-09-23; wfm keeps its RDS section.
 
 | Receiver | Offered |
 | --- | --- |
 | usb, lsb | auto, rtty, sitor_b, navtex, psk31, psk63, qpsk31, cw |
-| nfm | auto, ax25, pocsag |
+| nfm | auto, ax25, pocsag, ais, dsc |
 | cw | auto, cw |
-| raw | p25p1, dstar, tetra, m17 |
+| p25p1 | auto, p25p1, m17 |
+| dstar | auto, dstar |
+| tetra | auto, tetra |
+| dmr | auto, dmr |
+| raw | p25p1, dstar, tetra, dmr, m17 |
+
+Read off `core/rpc/decoders.h`'s registry on 2026-10-03. WHAT THE TABLE USED TO
+SAY, from 2026-09-23: an nfm row of "auto, ax25, pocsag" and a raw row of
+"p25p1, dstar, tetra, m17", with no row for the four digital voice modes. DMR
+reached the wire the same day, in "Serve DMR bursts over the wire as decoded
+messages", and AIS and DSC that night, in "Serve AIS and DSC as decoded
+messages over the wire". The window was never told: the menu is the engine's
+list, so it offered them as they arrived.
 
 **Auto is the window's and means what `revenant-cli --decode auto` means**:
 the decoder named after the mode where there is one, and otherwise every audio
 decoder that reads the mode. The wire has no auto. Its empty name is the first
 half alone and is refused on a usb or nfm receiver, so the window resolves auto
 to names and subscribes each. A raw tap gets no auto, as the CLI's does not:
-four decoders read one and nothing in the samples says which protocol is there.
+five decoders read one and nothing in the samples says which protocol is
+there. WHAT THAT SENTENCE USED TO SAY: "A raw tap gets no auto, as the CLI's
+does not: four decoders read one and nothing in the samples says which
+protocol is there." DMR is the fifth.
 Auto on a sideband receiver runs seven decoders at once, and a start-stop or
 PSK decoder listening to a signal that is not its own prints framing noise, so
 a decoder picked by name is the quieter log whenever the mode is known.
@@ -1630,9 +1733,10 @@ operator has already said, by choosing a demodulator. That is the cheap half
 of the problem and it needs no classifier.
 
 It does need something that does not exist yet, and the RTTY example is
-exactly where it shows. `Demod` has eleven modes, the eight demodulators
-`Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw` and the three digital voice taps
-`P25p1, Dstar, Tetra` appended after them; there is no RTTY in it, and
+exactly where it shows. `Demod` has thirteen modes, the eight demodulators
+`Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`, the four digital voice taps
+`P25p1, Dstar, Tetra, Dmr` appended after them, and `Sam` after those; there
+is no RTTY in it, and
 `VrxParams` carries no shift field, only `cw_pitch`. The RTTY decoder reads a
 usb or lsb receiver's audio, and the receiver itself still does not know it is
 carrying RTTY. So "the operator selected RTTY with a 170 Hz shift" is not a state
@@ -1644,7 +1748,11 @@ contract and its value is the demodulator kernel's specialization constant.
 
 WHAT THE FIRST SENTENCE OF THIS PARAGRAPH USED TO SAY: "`Demod` is `Raw, Am,
 Nfm, Wfm, Usb, Lsb, Dsb, Cw`;". That was the enumeration when it was written,
-and `P25p1`, `Dstar` and `Tetra` were appended to it since.
+and `P25p1`, `Dstar` and `Tetra` were appended to it since. AND WHAT IT SAID
+AFTER THAT: "`Demod` has eleven modes, the eight demodulators ... and the three
+digital voice taps `P25p1, Dstar, Tetra` appended after them". `Dmr` and `Sam`
+arrived on 2026-09-23, in "Append a dmr demodulator that hands DMR its fine
+stage" and "Recover the DSB carrier and add synchronous AM".
 
 Classification is for the unattended case: a scan, a wideband survey, a
 receiver parked on something the operator has not named. `core/detect/` holds
@@ -1717,9 +1825,9 @@ engine frame are thrown away as warm-up.
 ### Full target load
 
 The handoff's M1 exit load was fifty receivers on one 20 MS/s grid, which the
-engine runs at 3.28 times realtime (`docs/fft.md`). The client holds eight and
-draws one passband display, the focused receiver's, so the load on the client
-is:
+engine runs at 3.28 times realtime (`docs/fft.md`). The client held eight when
+this load was set, and draws one passband display, the focused receiver's, so
+the load on the client is:
 
 - a 20 MS/s grid, 64 channels, 65536 spectrum bins a frame and 65536-sample
   blocks, about 305 frames a second offered and every one asked for;
@@ -1727,6 +1835,11 @@ is:
   passband display and passband waterfall live in the receiver window;
 - the detector running and its tracks drawn on both span displays;
 - the main window maximised and the receiver window open.
+
+WHAT THE SENTENCE BEFORE THE LIST USED TO SAY: "The client holds eight and
+draws one passband display". It holds 64 since 2026-10-02. The load stays at
+eight receivers, which is what M2 was measured and closed on, and
+`scripts/frame-budget.ps1` still opens eight; no run at 64 is recorded here.
 
 The scene has two emitters. The synthetic source renders on one CPU thread and
 measured 1.42x realtime unthrottled with none, 1.08x with two, 0.96x with four,
@@ -1742,7 +1855,8 @@ One command runs it, from the repository root, with the engine built by
 .\scripts\frame-budget.ps1 -Seconds 60 -Visible
 ```
 
-It refuses to start while a CI run is in progress, binds the engine to an
+It refuses to start while a CI run is in progress or, since 2026-09-27, queued
+for a runner, binds the engine to an
 ephemeral loopback port with a token file of its own, runs the client as a
 smoke run (no sound card, no settings written) that exits on its own, and
 stops the engine. Without `-Visible` it runs offscreen. `-NoReceiverWindow`

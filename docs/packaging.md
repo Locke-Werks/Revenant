@@ -246,9 +246,24 @@ carries the reasoning for each of these inline; the summary:
   client. A desktop shortcut behind the one option, `desktop_shortcut`,
   defaulted off and answerable unattended with `/O:desktop_shortcut=off`.
 - **No service, no file associations, no hooks.** The reasons are in
-  `installer.toml`. The short form: the engine holds a GPU and a radio and
-  needs a person to start it, `.wav` belongs to whatever already plays audio,
-  and nothing in the install needs code to run.
+  `installer.toml`. The short form: the engine holds a GPU and a radio, so it
+  runs while somebody is using it rather than as a service, `.wav` belongs to
+  whatever already plays audio, and nothing in the install needs code to run.
+  Since v0.1.1 the client starts the engine beside it when nothing answers on
+  its port, with `--no-source`, ends it with the window, and reopens the last
+  radio; `ui/models/engine_start.h` has the rules. An engine somebody started
+  themselves is left alone. WHAT THIS ITEM USED TO SAY, in its second
+  sentence: "the engine holds a GPU and a radio and needs a person to start
+  it". True of v0.1.0, whose README said to start the engine first.
+- **No vocoder plugins.** The engine loads every DLL in a `vocoders` folder
+  beside `revenant-engine.exe` at startup, since v0.1.5, and the payload
+  carries neither a plugin nor the folder. An
+  installed engine looks in `{ProgramFiles}\Revenant\vocoders`, which a person
+  creates and fills, as an administrator because it is under Program Files.
+  The release job signs nothing that goes there, and the loader trusts that
+  folder as far as it trusts the executable beside it:
+  `core/decode/vocoder_plugin.h` says why nothing can do better. The radio
+  panel's vocoders section lists what the engine loaded and refused.
 - **Nothing per-user.** The RPC token the client hands `Authenticator.login`
   lives at `%LOCALAPPDATA%\Revenant\rpc-token` and is created by the engine on
   first run under the invoking user's own token. An elevated installer writing
@@ -479,8 +494,15 @@ checking that there are exactly as many archives as are pinned.
 The full list, with what the dry run of 2026-09-23 found, is the checklist
 under "Release readiness" below. This one was known before it.
 
-**The first run of the `release` job.** It has never run, and the corresponding
-source step in it is the same command the `package` job runs on every build.
+**Done, 2026-09-27: the first run of the `release` job**, on the v0.1.0 tag;
+"Owed, not blocking" below has the run. It has published every tag since, to
+v0.1.6, and each release page carries `Revenant-Setup.exe`,
+`Revenant-<version>-corresponding-source.zip`, the five Qt and FFmpeg archives
+and `SOURCES-client.txt`, checked on 2026-10-03 with `gh release view`.
+
+WHAT THIS ITEM USED TO SAY. "**The first run of the `release` job.** It has
+never run, and the corresponding source step in it is the same command the
+`package` job runs on every build."
 
 Keeping Qt as DLLs is the one thing here that could be lost by accident.
 Shipping Qt beside the executable is the LGPL-3.0 section 4d(1) route and

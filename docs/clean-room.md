@@ -238,10 +238,17 @@ that gets skipped when the change looks small.
 
 ## The CI guard
 
-`.github/workflows/ci.yml` fails the build on a copyleft licence grant found
-under `core/`, `tools/` or `ui/`. It scans those three directories and nothing
+`.github/workflows/ci.yml` fails the build on a copyright line that is not
+Locke Werks, or an SPDX identifier that is not GPL-3.0-or-later, found under
+`core/`, `tools/` or `ui/`. It scans those three directories and nothing
 else, so `docs/` is untouched and this document can discuss the licences it
 names.
+
+WHAT THE FIRST SENTENCE USED TO SAY: "fails the build on a copyleft licence
+grant found under `core/`, `tools/` or `ui/`." That was the first replacement
+below, and the guard stopped matching the grant on 2026-09-18 in "Guard on whose
+copyright a file carries, not on licence text", while this sentence kept saying
+it did.
 
 What it looks for changed with the licence, and it took two attempts.
 
@@ -708,6 +715,16 @@ The relink obligation is not the open item. These are.
    open one. Taking it out would cost nothing but FC2580 support, since the
    library is already built from `vcpkg-overlays/rtlsdr/` with patches of our
    own, and that is the way out if the reading is ever challenged.
+4. **The vocoder plugin interface's licence.** Since 2026-10-02
+   `revenant-engine` loads every DLL in a `vocoders` folder beside it at
+   startup and hands D-STAR's and DMR's voice to one, the way
+   `core/rpc/plugin_voice.h` describes. A release ships no plugin and the
+   installer creates no such folder: a plugin is something a person adds. The
+   contract is `core/decode/vocoder_abi.h`, which is part of Revenant and so
+   GPL-3.0-or-later, and whether that one header is offered under a separate
+   grant, so a plugin that is not GPL-3 can be built against it, is a decision
+   nobody has taken. The header says so and asks for the question before a
+   closed plugin built from it is shipped.
 
 WHAT THIS LIST USED TO SAY. Two of its items were "There is no notices file"
 and "There is no published Corresponding Source for the dependencies as

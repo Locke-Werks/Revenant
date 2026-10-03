@@ -2907,7 +2907,8 @@ note on a constant envelope are now 2-FSK ahead of every other branch
 (`CharacteriseConfig::tone_pair_fraction`, "THE SAME TWO BARS ON A CONSTANT
 ENVELOPE"), which is the right family and opens the RTTY row on every probe.
 
-`tests/detect/test_labelled_scene.cpp` holds it, in ctest: `siggen labelled`
+`tests/detect/test_labelled_scene.cpp` runs it in ctest, under `[!mayfail]`
+since 2026-10-02 for the reason two paragraphs down: `siggen labelled`
 at seeds 1, 2 and 3, 30 s each, run at twice realtime on sixteen channels
 and on the default grid, and every emitter's tracks at the last decision carry
 its own label and no other. All twelve held on all six runs, RTTY by its
@@ -2915,6 +2916,9 @@ protocol on sixteen channels and by its family on the default grid, for the
 reason below, and USB, since "USB and LSB on the wire" below, by its side.
 WHAT THE FIRST SENTENCE USED TO SAY at its end: "carry its own label and no
 other, USB none", which was the rule for USB until the side reached the label.
+And at its start: "`tests/detect/test_labelled_scene.cpp` holds it, in ctest",
+which it did until the tag, since when a wrong label is reported and does not
+fail the run.
 
 RTTY on sixteen channels held to its protocol only while its one long dwell
 verified. Where a dwell's five seconds fall follows the wall clock and the
@@ -2924,6 +2928,17 @@ rest of the scene; three CI runs in a row failed that way after heavier
 decoders went into the AX.25 and P25 rows (GitHub issue #2). Tier two now
 gives a narrow track up to `detect::kIdentifyDwells` long dwells, each only
 while the one before verified nothing, behind every first dwell.
+
+**The case runs in ctest and no longer fails it.** "Let the labelled scene
+case fail without failing the run until #2" tagged it `[!mayfail]` on
+2026-10-02 to let a release out: it still runs every emitter and reports every
+wrong label, and a failure no longer fails `ctest`. After the retried dwells
+RTTY on sixteen channels ended RTTY in 15 of 15 seed runs under load. The tag
+stays for a second cause: one run in five under load read D-STAR, seed 2, on
+the CLI's own grid, as M17, because `core/identify`'s M17 row sometimes
+verifies on a D-STAR signal, a link setup counted as 2 against a bar of 2, and
+the first row to verify wins, so no retry follows. It comes off when that row
+stops verifying on D-STAR; issue #2 is open.
 
 **RTTY's protocol on the default grid** is out of reach, and was before. Its
 detection is 1318 Hz wide, and the RTTY and CW rows in
@@ -3088,6 +3103,18 @@ receivers, and `Session::detections` publishes the track list with each
 track's label. `ui/render/spectrum_item.cpp` resolves a click against it and
 tunes a receiver.
 
+**One label tunes without a click.** Since 2026-10-02 the rack header's "auto
+P25" switch, while it is on, opens a held `p25p1` receiver, heard, on every
+live or held track labelled with the P25 protocol and allowed to drive a
+receiver, which means `core/identify` verified a P25 frame sync on it, at a
+frequency no receiver of any mode already covers within half a 12.5 kHz
+channel. Two such tracks inside that distance get one receiver, on the
+stronger. The switch never removes a receiver; one removed by hand stays
+removed until the switch is turned on again, and the switch is not remembered
+across a restart. `ui/models/p25_spawn.h` has the rule. The rack's limit went
+from eight receivers to 64 the same day, so that every P25 signal on the span
+can have one.
+
 WHAT THE HEADING AND THE LAST SENTENCE USED TO SAY. The heading was "What a
 click resolves against exists; what it cannot reach is the classifier", and
 the sentence first read "What there is still no route for is complex baseband
@@ -3113,11 +3140,16 @@ sizing argument above was written to constrain a stage that did not exist and
 reads differently once it does.
 
 `Demod` gaining the modes this document keeps using as examples. It currently
-holds `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw` and the three digital voice modes
-appended after them, `P25p1, Dstar, Tetra`: no RTTY, no FSK, no PSK. The
+holds `Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw`, the digital voice modes appended
+after them, `P25p1, Dstar, Tetra, Dmr`, and `Sam` last: no RTTY, no FSK, no
+PSK, which are decoded from a sideband or nfm receiver's audio instead. The
 enumeration is a frozen contract and its value is the demodulator kernel's
 specialization constant, so growing it is a deliberate change rather than an
 edit.
 
 WHAT THIS PARAGRAPH USED TO SAY: "It currently holds `Raw, Am, Nfm, Wfm, Usb,
 Lsb, Dsb, Cw`". The digital voice modes were appended after that was written.
+And then: "and the three digital voice modes appended after them, `P25p1,
+Dstar, Tetra`", which "Append a dmr demodulator that hands DMR its fine stage"
+and "Recover the DSB carrier and add synchronous AM" each made short by one on
+2026-09-23 (`core/engine/vrx.h`).

@@ -95,6 +95,16 @@ file with what was sent beside it, through the sweep's own generator, named by
 the sweep's seed, the point and the trial: `siggen help` has the options.
 RDS has `siggen rds --ebn0`.
 
+**Decoded and not swept.** What the decoders gained on 2026-10-02 has no curve
+here: FX.25 codeblocks and IL2P packets, which the AX.25 decoder reads beside
+plain AX.25, and the P25 trunking control channel's signalling blocks. The AX.25
+row still sweeps plain AX.25 frames only, so it says nothing about how much the
+Reed-Solomon codes buy. `tests/decode/test_fx25.cpp`, `test_il2p.cpp` and
+`test_p25_tsbk.cpp` check them by counted octet and bit errors rather than
+against white noise; `docs/modes.md` has what each corrects and refuses. D-STAR
+and DMR voice through a vocoder plugin has no curve either, since the codec is
+the plugin's and not in this tree.
+
 What each unit is:
 
 - **character**: edit distance between the text sent and the text decoded,
@@ -484,11 +494,24 @@ the synthetic errors are, and the one bad trial at 0 dB is one of them.
 with the same command and seed, after the BPSK reference and RDS. Making the
 baselines took 664 s for all fifteen on the RTX 4090 workstation's CPU, with
 other builds running on it; with RDS's 226 s the job's sweeps come to about 15
-minutes, so every mode runs every night. AIS and DSC, added later, take 0.7 s
+minutes, so one run covers every mode. AIS and DSC, added later, take 0.7 s
 and 4.2 s. The workflow states the rule for
 splitting them if that passes 30 minutes. A regression is a point whose error rate rose by more than half again plus
 three errors' worth of counting noise, or a crossing that moved more than
 0.2 dB to the right: `tools/bench/curve.h`.
+
+**The nightly does not run.** It was disabled on GitHub on 2026-10-02
+(`gh workflow list --all` reports it `disabled_manually`); the file still
+carries its schedule. GitHub started the 09:00 UTC runs between 13:20 and
+17:04 UTC, mid-morning at the workstation, and the sweep took about 23 cores
+of it while the owner was working there. The last scheduled run was on
+2026-10-02 and took 13 m 52 s. `docs/ci.md`, "The nightly, disabled", has the
+rest. Until it has a trigger that cannot land while the machine is in use, a
+curve is swept when somebody runs the command in the table, and nothing
+catches a regression between those runs.
+
+WHAT THE SENTENCE BEFORE AIS AND DSC USED TO SAY, at its end: "so every mode
+runs every night". True from 2026-09-23 until the workflow was disabled.
 
 A baseline is replaced by hand, from a curve somebody has read, with the
 command in the table and `--out tests/baselines/ber-vs-snr-NAME.json`.

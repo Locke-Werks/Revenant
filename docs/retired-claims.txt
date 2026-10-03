@@ -2171,3 +2171,195 @@ retired: 2026-10-02
 commit: "Hand DMR voice to a plugin one 72-bit vocoder frame at a time"
 instead: dstar and dmr receivers make audio, their voice through a vocoder plugin;
     raw and tetra hand out complex baseband. ui/models/mode_choice.h.
+
+
+phrase: nightly.yml runs the long BER sweeps on a schedule
+phrase: the reason the long sweeps are nightly rather than per-commit
+phrase: which is why the nightly is scheduled rather than frequent
+retired: 2026-10-02
+commit: "Bring the documentation up to the v0.1.6 tree". No commit disabled
+    the nightly; it was switched off on GitHub with gh workflow disable.
+instead: nightly.yml is disabled on GitHub (disabled_manually) and nothing runs
+    the sweeps. docs/ci.md, "The nightly, disabled".
+
+phrase: publishes it with the corresponding-source archive. Has never run
+phrase: The first run of the release job. It has never run
+phrase: The release job in .github/workflows/ci.yml can sign and has never run
+retired: 2026-09-27
+commit: "Record the first run of the release job"
+instead: The release job has published every tag from v0.1.0 to v0.1.6, signing
+    both executables and the installer. docs/packaging.md, "Owed, not blocking".
+
+phrase: Runs two BER sweeps, the reference BPSK detector against
+retired: 2026-09-23
+commit: "Sweep every decoder against its baseline in the nightly"
+instead: nightly.yml sweeps BPSK, RDS and eighteen decoder modes against
+    tests/baselines, and is disabled since 2026-10-02. docs/ci.md, "Jobs".
+
+phrase: render/spectrum_scale.cpp is the one that should not be on this list
+retired: 2026-09-22
+commit: "Pin either end of the span colour map, and test the scale arithmetic"
+instead: The scale arithmetic is render/spectrum_scale.h, covered by
+    ui/tests/test_spectrum_scale.cpp.
+
+phrase: fires the eight static_assert declarations in models/engine_link.h
+retired: 2026-09-23
+commit: "Offer P25, D-STAR and TETRA in the receiver window's mode selector"
+instead: models/engine_link.h holds seven static_asserts, the confidence bar's
+    fixed point; the demod name table's moved to models/mode_choice.h.
+
+phrase: Its one test starts revenant-engine from the root tree
+retired: 2026-09-27
+commit: "Let revenant-engine start with no source open"
+instead: tests/twoprocess registers two tests, two_process_smoke and
+    two_process_no_source. docs/building.md, "The two-process smoke test".
+
+phrase: CI fails on a copyleft licence grant appearing under
+phrase: fails the build on a copyleft licence grant found under
+retired: 2026-09-18
+commit: "Guard on whose copyright a file carries, not on licence text"
+instead: The guards job fails on a copyright line that is not Locke Werks, or an
+    SPDX identifier that is not GPL-3.0-or-later, under core/, tools/ or ui/.
+
+phrase: the engine holds a GPU and a radio and needs a person to start it
+retired: 2026-09-27
+commit: "Start the engine from the client and reopen the last radio"
+instead: The client starts revenant-engine --no-source beside it when nothing
+    answers on its port; there is still no service. docs/packaging.md.
+
+phrase: The rack holds up to eight, and all three are bound
+phrase: revenant-ui --receiver FREQ:MODE may be given up to eight times
+phrase: The client holds eight and draws one passband display
+retired: 2026-10-02
+commit: "Raise the receiver limit from eight to 64"
+instead: The rack holds up to 64 receivers, kMaxReceivers in
+    ui/models/receiver_rack.h; colours wrap past the palette's eight.
+
+phrase: the owner's decision on session restore and has not been taken
+retired: 2026-09-27
+commit: "Start the engine from the client and reopen the last radio"
+instead: An engine the window started reopens the last radio (engine/lastSource);
+    receivers are not restored. docs/ui-spectrum.md, "The receiver rack".
+
+phrase: A wfm receiver RDS has raised to 171000 S/s hands out the multiplex
+retired: 2026-10-02
+commit: "Read a WFM receiver's RDS from a companion so it keeps its stereo"
+instead: The engine reads a WFM receiver's RDS from a companion at 171000 S/s and
+    the receiver keeps its rate and stereo; only a wfm receiver opened at
+    114000 S/s or above plays the multiplex in mono.
+
+phrase: DMR and DN (System Fusion) because the engine does not demodulate them
+retired: 2026-09-23
+commit: "Append a dmr demodulator that hands DMR its fine stage"
+instead: The engine demodulates DMR. The CHIRP importer still refuses it, with a
+    reason in ui/models/memory_import.h that went stale the same day.
+
+phrase: A raw tap gets no auto, as the CLI's does not: four decoders read one
+retired: 2026-09-23
+commit: "Serve DMR bursts over the wire as decoded messages"
+instead: Five decoders read a raw tap: p25p1, dstar, tetra, dmr and m17.
+    core/rpc/decoders.h, decoder_registry.
+
+phrase: Demod has eleven modes, the eight demodulators
+retired: 2026-09-23
+commit: "Append a dmr demodulator that hands DMR its fine stage"
+instead: Demod has thirteen: Raw to Cw, the digital voice taps P25p1, Dstar,
+    Tetra and Dmr, then Sam. core/rpc/revenant.capnp.
+
+phrase: The complex taps have no audio
+retired: 2026-09-23
+commit: "Serve a P25 receiver's voice on subscribeAudio"
+instead: P25, and since 2026-10-02 D-STAR and DMR through a plugin, serve
+    decoded voice; the noise stages are still refused on every complex tap.
+
+phrase: The twins live in the engine beside the rest of the DSP, currently core/dsp/complex_ops.cpp
+retired: 2026-09-18
+commit: "Add the polyphase channelizer: two kernels, two twins, bit-exact"
+instead: Each kernel's twin is under core/dsp/: complex_ops.cpp, convert.cpp and
+    a *_reference.cpp per stage. docs/conventions.md, "Reference implementations".
+
+phrase: Arrives: M5, alongside extraction
+phrase: Arrives: M5, the time machine
+retired: 2026-09-27
+commit: "Set out the roadmap in the README for v0.1.0"
+instead: The README's roadmap has no M5; the rolling capture the corpus is cut
+    from is M4, and nothing of it is built. tests/corpus/README.md.
+
+phrase: These have a filename and nothing else, and nothing in tools/bench knows about them
+retired: 2026-09-23
+commit: "Measure CW through the engine at any pitch"
+instead: bench cw-file runs the cw decoder on any recording a URI names, and
+    bench cw-engine is sized on the KF4FIC recordings; neither has a manifest.
+
+phrase: D-STAR's voice is AMBE and has nowhere to go
+retired: 2026-10-02
+commit: "Route D-STAR and DMR voice to a vocoder plugin"
+instead: TETRA stops at the bits; D-STAR's 72-bit voice frames go to a loaded
+    vocoder plugin serving dstar or ambe, silence with none.
+    core/rpc/plugin_voice.h.
+
+phrase: The 216 vocoder bits of each voice burst are handed out and not rendered
+retired: 2026-10-02
+commit: "Route D-STAR and DMR voice to a vocoder plugin"
+instead: A DMR receiver's audio hands each burst's three 72-bit AMBE+2 frames to
+    a loaded plugin serving dmr or ambe2; nothing in the tree renders them.
+
+phrase: says the engine has no AMBE or ACELP voice codec
+retired: 2026-10-02
+commit: "Route D-STAR and DMR voice to a vocoder plugin"
+instead: Only TETRA's subscribeAudio is refused, naming the ACELP codec the
+    engine lacks; D-STAR and DMR go to a vocoder plugin.
+
+phrase: tests/detect/test_labelled_scene.cpp holds it, in ctest
+retired: 2026-10-02
+commit: "Let the labelled scene case fail without failing the run until #2"
+instead: The case runs in ctest tagged [!mayfail]: a wrong label is reported and
+    does not fail the run, until GitHub issue #2 (M17 verifying on D-STAR).
+
+phrase: and the three digital voice modes appended after them, P25p1, Dstar, Tetra
+retired: 2026-09-23
+commit: "Append a dmr demodulator that hands DMR its fine stage"
+instead: engine::Demod holds Raw, Am, Nfm, Wfm, Usb, Lsb, Dsb, Cw, P25p1, Dstar,
+    Tetra, Dmr and Sam. core/engine/vrx.h.
+
+phrase: M1 and M2 are done, and M3, the first public release, is next
+retired: 2026-09-27
+commit: "Set out the roadmap in the README for v0.1.0"
+instead: M3 is done. v0.1.0 shipped on 2026-09-27 and M4, the rolling capture, is
+    next; the README's milestone table carries the state.
+
+phrase: P25 voice does not reach the client, for the reason above
+retired: 2026-09-23
+commit: "Serve a P25 receiver's voice on subscribeAudio"
+instead: A P25 receiver's IMBE voice is served at 8000 S/s on subscribeAudio and
+    the client plays it in the receiver's mix.
+
+phrase: D-STAR, TETRA and DMR voice is not decoded
+retired: 2026-10-02
+commit: "Route D-STAR and DMR voice to a vocoder plugin"
+instead: D-STAR and DMR voice go to a loaded vocoder plugin, silence with none;
+    only TETRA voice is not decoded. core/rpc/plugin_voice.h.
+
+phrase: a rack of up to eight receivers
+phrase: It asked for one receiver and the client holds eight
+retired: 2026-10-02
+commit: "Raise the receiver limit from eight to 64"
+instead: The rack holds up to 64 receivers, which is kMaxAudioReceivers in
+    core/engine/audio_egress.h.
+
+phrase: No binary has been handed to anyone yet
+retired: 2026-09-27
+commit: "Set out the roadmap in the README for v0.1.0"
+instead: Binaries have shipped since v0.1.0, and every release page carries the
+    corresponding source beside the installer.
+
+phrase: seven demodulators and a raw complex tap
+retired: 2026-09-23
+commit: "Recover the DSB carrier and add synchronous AM"
+instead: Eight demodulators (am, nfm, wfm, usb, lsb, dsb, cw, sam) and a raw tap;
+    core/engine/vrx.h, Demod.
+
+phrase: three digital voice modes that hand their decoder
+retired: 2026-09-23
+commit: "Append a dmr demodulator that hands DMR its fine stage"
+instead: Four digital voice modes: p25p1, dstar, tetra and dmr. core/engine/vrx.h.

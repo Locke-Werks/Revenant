@@ -119,6 +119,14 @@ because repositories claiming bit-exact AMBE or P25 half-rate vocoders exist and
 would import both an untraceable derivation and a live patent question into a
 binary signed under a company name.
 
+What exists instead is a socket. Since 2026-10-02 `revenant-engine` loads
+vocoder plugins from the `vocoders` folder beside it at startup, under the plain
+C ABI in `core/decode/vocoder_abi.h`, and a D-STAR or DMR receiver's voice goes
+to the first loaded one that serves the mode or its codec
+(`core/rpc/plugin_voice.h`). The plugin is a device or a library somebody else
+owns; with none loaded the receiver is silent. Nothing in this tree implements
+AMBE or AMBE+2, so the table's "No" stands for software of this project's own.
+
 ## Included
 
 ### Land mobile, and the open alternatives to it
@@ -792,9 +800,16 @@ all.
 | D-STAR DV | `core/decode/dstar.cpp` | JARL Ver 7.0 clauses 4.1.1, 4.1.2, Ap1 and Ap2 | Bit and frame sync, the radio header through the rate 1/2 convolutional code and the 24 bit interleave, with all five callsigns and the flag byte, and the voice and data frames with the resynchronisation signals marked |
 | TETRA V+D | `core/decode/tetra.cpp` | EN 300 392-2 V3.8.1 clauses 5, 8.2, 8.3.1.2, 9.4.4 and 21.4.4.2 | Burst sync from the synchronisation training sequence, and the SYNC PDU off the broadcast synchronisation channel: colour code, system code, timeslot, frame and multiframe number, and the country and network codes |
 
-D-STAR and TETRA stop at the bits: D-STAR's voice is AMBE and has nowhere to
-go, and TETRA's is ACELP and is not implemented. P25 goes through to audio,
-and the paragraph below says how.
+TETRA stops at the bits: its voice is ACELP and is not implemented. D-STAR's
+voice is AMBE, which nothing here decodes; since 2026-10-02 each 72-bit voice
+frame goes to a loaded vocoder plugin that serves `dstar` or `ambe`, and with
+none the receiver is silent (`core/rpc/plugin_voice.h`, and the note under the
+voice table above). P25 goes through to audio, and the paragraph below says
+how.
+
+WHAT THE FIRST SENTENCE USED TO SAY: "D-STAR and TETRA stop at the bits:
+D-STAR's voice is AMBE and has nowhere to go". True until "Route D-STAR and
+DMR voice to a vocoder plugin" on 2026-10-02.
 
 `core/dsp/synth/dv_mod.cpp` is the transmitter for all three, written from the
 same clauses, and `tests/decode/test_p25p1.cpp`, `test_p25p1_voice.cpp`,
@@ -830,8 +845,18 @@ Each timeslot has its own state: the voice superframe, the embedded LC it is
 gathering, the level fit it slices with. The slot number comes from the CACH on
 a base station channel and from the sync on TDMA direct mode, and reads 0 on an
 MS transmission, whose sync names none. A PI header and the Privacy bit are
-reported and nothing is decrypted. The 216 vocoder bits of each voice burst are
-handed out and not rendered, since they are AMBE+2.
+reported and nothing is decrypted. The decoder hands out the 216 vocoder bits
+of each voice burst, which are three 72-bit AMBE+2 frames (TS 102 361-1
+clauses 4.2.2 and 6.1), and nothing in this tree renders them. Since
+2026-10-02 a DMR receiver's audio passes them, a frame at a time, to a loaded
+vocoder plugin that serves `dmr` or `ambe2`, following one slot's call at a
+time; a call a PI header or the Privacy bit marks private is silence and never
+reaches the plugin (`core/rpc/plugin_voice.h`).
+
+WHAT THE LAST SENTENCE USED TO SAY: "The 216 vocoder bits of each voice burst
+are handed out and not rendered, since they are AMBE+2." Until "Route D-STAR
+and DMR voice to a vocoder plugin" on 2026-10-02 nothing took them; now a
+loaded plugin renders them, though still nothing in this tree does.
 
 `core/dsp/synth/dmr_mod.cpp` is the transmitter, written from the same clauses,
 and `tests/decode/test_dmr.cpp` the round trips: every Annex B code against its
@@ -1526,6 +1551,13 @@ metadata-only table becomes a voice mode the moment a dongle is in the machine,
 and none of the decoder work changes, because the framing decoders are what feed
 it. That is the reason the framing is worth building before the dongle exists
 rather than after. Task #40 is the dongle and task #43 is the plugin ABI.
+
+The ABI is `core/decode/vocoder_abi.h`, since 2026-09-21, and two modes have
+gone through it, both from the included tables: since 2026-10-02 D-STAR's and
+DMR's voice reach a loaded plugin that serves them, `revenant-engine` prints
+what it loaded at startup, and `Session.vocoderPlugins` shows it in the
+client's radio panel. The AMBE rows of the metadata-only table have no framing
+decoder yet, so a plugin there would have nothing to be handed.
 
 **US8306071 expiring on 2027-02-19.** It ends the one risk the owner accepted
 to put DMR back in scope, and the paragraph under "What decides inclusion"

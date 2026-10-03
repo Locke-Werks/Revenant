@@ -803,3 +803,8 @@ on was confirmed in `librtlsdr.c` and `tuner_r82xx.c`; the same check at
 797f814 finds it in `rtl-sdr.h`, `librtlsdr.c`, `tuner_r82xx.c`,
 `tuner_e4k.c`, `tuner_fc0012.c` and `tuner_fc0013.c`, and not in
 `tuner_fc2580.c`.
+
+The owner settled it later the same day, in "Leave tuner_fc2580.c in the build
+as an accepted risk": the file stays, read under librtlsdr's `COPYING` like the
+rest of the library. `docs/clean-room.md`, "What is actually still open", item
+3, has the reasoning and the way out if the reading is ever challenged.
