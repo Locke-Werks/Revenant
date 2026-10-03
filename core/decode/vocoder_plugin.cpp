@@ -630,12 +630,32 @@ bool vocoder_name_serves(std::string_view name, std::string_view mode) noexcept
     return next == '-' || next == ':' || next == '_' || next == '.';
 }
 
+std::string_view vocoder_codec_for_mode(std::string_view mode) noexcept
+{
+    if (mode == "dmr") {
+        return "ambe2";
+    }
+    if (mode == "dstar") {
+        return "ambe";
+    }
+    return {};
+}
+
+bool vocoder_offer_serves(std::string_view name, std::string_view mode) noexcept
+{
+    if (vocoder_name_serves(name, mode)) {
+        return true;
+    }
+    const std::string_view codec = vocoder_codec_for_mode(mode);
+    return !codec.empty() && vocoder_name_serves(name, codec);
+}
+
 std::optional<Expected<std::unique_ptr<Vocoder>>> VocoderPluginSet::open_for_mode(
     std::string_view mode, std::uint32_t bit_count) const
 {
     for (const std::shared_ptr<VocoderPluginModule>& module : modules_) {
         for (const rv_vocoder_desc& desc : module->descriptors) {
-            if (desc.bit_count != bit_count || !vocoder_name_serves(terminated_name(desc), mode)) {
+            if (desc.bit_count != bit_count || !vocoder_offer_serves(terminated_name(desc), mode)) {
                 continue;
             }
             rv_vocoder* const handle = module->create(&desc);

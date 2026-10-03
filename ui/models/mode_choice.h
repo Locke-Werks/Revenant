@@ -133,13 +133,20 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 // Whether a receiver in this mode makes audio, which is whether the audio
 // section applies to it at all.
 //
-// engine::produces_audio's eight analogue modes, and p25p1. raw, dstar, tetra
-// and dmr hand out complex baseband, two floats a sample, for a decoder to
-// read, and the engine refuses an audio subscription on one. So the window
-// neither asks nor shows a section that could only say it was refused. A
-// p25p1 receiver's audio is its decoded IMBE voice, which subscribeAudio
-// serves since 2026-09-23 on the owner's decision that a digital voice
-// receiver plays its voice; core/rpc/voice_audio.h has it.
+// engine::produces_audio's eight analogue modes, and the three digital voice
+// modes whose voice the engine serves. A p25p1 receiver's audio is its decoded
+// IMBE voice, which subscribeAudio serves since 2026-09-23 on the owner's
+// decision that a digital voice receiver plays its voice; core/rpc/voice_audio.h
+// has it. A dstar or dmr receiver's is its voice through a vocoder plugin since
+// 2026-10-02, and silence with none loaded; core/rpc/plugin_voice.h. raw and
+// tetra hand out complex baseband, two floats a sample, for a decoder to read,
+// and the engine refuses an audio subscription on one, so the window neither
+// asks nor shows a section that could only say it was refused.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "raw, dstar, tetra and dmr hand out complex
+// baseband". The engine began serving dstar and dmr voice on 2026-10-02 and
+// this table was not changed with it, so the window never asked: the owner
+// found a DMR receiver with its decode log and no listen switch or DV level.
 //
 // WHAT THIS PARAGRAPH USED TO SAY: "Whether P25 voice should ever come out
 // of this section is an open decision, and it is the engine's refusal that
@@ -151,7 +158,8 @@ inline constexpr std::string_view kDigitalGroupLabel = "digital";
 [[nodiscard]] constexpr bool mode_makes_audio(std::string_view name)
 {
     return name == "am" || name == "sam" || name == "nfm" || name == "wfm" || name == "usb" ||
-           name == "lsb" || name == "dsb" || name == "cw" || name == "p25p1";
+           name == "lsb" || name == "dsb" || name == "cw" || name == "p25p1" || name == "dstar" ||
+           name == "dmr";
 }
 
 // Whether a receiver in this mode runs the engine's receiver AGC, which is

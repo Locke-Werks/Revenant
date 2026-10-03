@@ -2157,3 +2157,17 @@ retired: 2026-10-02
 commit: "Read a WFM receiver's RDS from a companion so it keeps its stereo"
 instead: The server reads a WFM receiver's RDS from a companion at 171000 on the
     same tuning (ServerImpl::open_rds); the listener's receiver stays stereo.
+
+phrase: the vocoder socket bits of one DMR voice burst
+phrase: 216 vocoder socket bits per DMR voice burst
+retired: 2026-10-02
+commit: "Hand DMR voice to a plugin one 72-bit vocoder frame at a time"
+instead: DMR hands a plugin each of a burst's three 72-bit vocoder frames (TS 102
+    361-1 clauses 4.2.2 and 6.1), and an offer named for the mode or its codec
+    (dmr, ambe2) serves it.
+
+phrase: raw, dstar, tetra and dmr hand out complex baseband
+retired: 2026-10-02
+commit: "Hand DMR voice to a plugin one 72-bit vocoder frame at a time"
+instead: dstar and dmr receivers make audio, their voice through a vocoder plugin;
+    raw and tetra hand out complex baseband. ui/models/mode_choice.h.

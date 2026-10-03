@@ -40,16 +40,17 @@ ColumnLayout {
     // on screen that explains why. Observed 2026-09-20 by clearing
     // a receiver while listening.
     //
-    // HIDDEN ON A RECEIVER THAT MAKES NO AUDIO: raw, D-STAR, TETRA and
-    // DMR hand out complex baseband for a decoder, and the engine refuses
-    // audio on them, so the section would only ever show the refusal.
-    // The link does not subscribe there either. The switch keeps its
-    // state underneath and is on screen again the moment the receiver
-    // is back in a mode that makes audio, before anything plays. A P25
-    // receiver shows it, and what plays is the decoded voice, silent
-    // between calls and through an encrypted one.
+    // HIDDEN ON A RECEIVER THAT MAKES NO AUDIO: raw and TETRA hand out
+    // complex baseband for a decoder, and the engine refuses audio on
+    // them, so the section would only ever show the refusal. The link
+    // does not subscribe there either. The switch keeps its state
+    // underneath and is on screen again the moment the receiver is back
+    // in a mode that makes audio, before anything plays. P25, D-STAR and
+    // DMR receivers show it, and what plays is the decoded voice, silent
+    // between calls and through an encrypted one; D-STAR and DMR through
+    // a vocoder plugin, and silent with none loaded.
     // WHAT THIS USED TO SAY: "raw, P25, D-STAR and TETRA hand out
-    // complex baseband".
+    // complex baseband", and later "raw, D-STAR, TETRA and DMR".
     visible: engineLink.receiverId > 0
              ? engineLink.audioOffered
              : (engineLink.audioWanted

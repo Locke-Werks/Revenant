@@ -177,7 +177,7 @@ public:
     [[nodiscard]] Expected<std::unique_ptr<Vocoder>> open(const VocoderFrame& want) const;
 
     // Open the vocoder a digital voice mode's audio goes through: the first
-    // offer, in scan order, whose name serves `mode` (vocoder_name_serves) and
+    // offer, in scan order, whose name serves `mode` (vocoder_offer_serves) and
     // which takes `bit_count` bits, the unit that mode's framing hands over.
     //
     // By name and bit count, and not by the whole frame, because the host
@@ -208,6 +208,22 @@ private:
 // and "dmrx" does not serve "dmr". The convention a plugin follows to be
 // routed; core/decode/vocoder_abi.h states it beside rv_vocoder_desc::name.
 [[nodiscard]] bool vocoder_name_serves(std::string_view name, std::string_view mode) noexcept;
+
+// The codec a routed mode's voice is in, by the name a plugin that implements
+// it would carry, or empty for a mode with none listed. docs/modes.md's
+// table of digital voice codecs is where the pairing is recorded: DMR's is
+// AMBE+2 and D-STAR's the older AMBE.
+//
+// WHY A CODEC NAME AT ALL, added 2026-10-02. A plugin wraps a vocoder, and the
+// owner's names theirs for the codec it implements, "ambe2-3600x2450-pre-fec",
+// not for a mode, so a rule that matched mode names only routed nothing to it
+// and DMR played silence. The separator rule keeps "ambe2-..." from serving
+// "ambe": an AMBE+2 plugin fed D-STAR's AMBE frames would make confident noise.
+[[nodiscard]] std::string_view vocoder_codec_for_mode(std::string_view mode) noexcept;
+
+// Whether an offer named `name` serves `mode`: by the mode's own name, or by
+// the name of the codec vocoder_codec_for_mode gives it.
+[[nodiscard]] bool vocoder_offer_serves(std::string_view name, std::string_view mode) noexcept;
 
 // Scan the directory and load what passes. Cannot fail: everything that could
 // go wrong is a reported condition, because none of it stops the mode above

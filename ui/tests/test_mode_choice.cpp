@@ -129,14 +129,18 @@ TEST_CASE("the digital segment names the digital mode in force", "[modes]")
 // with p25p1 among the modes that make none. That failed on the owner's
 // decision that a digital voice receiver plays its voice, which is the P25
 // half of this change.
-TEST_CASE("the analogue demodulators and P25 make audio", "[modes]")
+//
+// And then rejects hiding it on D-STAR and DMR, whose voice the engine serves
+// through a vocoder plugin since 2026-10-02. WHAT THIS CASE USED TO SAY: that
+// dstar and dmr make none, which left a DMR receiver with no listen switch.
+TEST_CASE("the analogue demodulators and the digital voice modes make audio", "[modes]")
 {
     for (const std::string_view name :
-         {"am", "sam", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1"}) {
+         {"am", "sam", "nfm", "wfm", "usb", "lsb", "dsb", "cw", "p25p1", "dstar", "dmr"}) {
         INFO(name);
         CHECK(mode_makes_audio(name));
     }
-    for (const std::string_view name : {"raw", "dstar", "tetra", "dmr", "nxdn", ""}) {
+    for (const std::string_view name : {"raw", "tetra", "nxdn", ""}) {
         INFO(name);
         CHECK_FALSE(mode_makes_audio(name));
     }

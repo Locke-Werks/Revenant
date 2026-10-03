@@ -144,6 +144,11 @@ TEST_CASE("a loaded plugin's offer and a refused plugin's reason both cross", "[
     CHECK(offer.pcm_frames == loaded.frame.pcm_frames);
     CHECK(offer.sample_rate == loaded.frame.sample_rate);
 
+    // The fixture is named for no mode or codec and declares no mode's frame,
+    // so nothing routes to it, and the report says so rather than leaving a
+    // client to guess why a mode is silent.
+    CHECK(offer.modes.empty());
+
     // Rejects a refusal that crosses as a bare false: the reason has to come
     // with it, by name and in the loader's words.
     CHECK_FALSE(old->loaded);

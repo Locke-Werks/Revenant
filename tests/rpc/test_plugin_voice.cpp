@@ -196,6 +196,20 @@ TEST_CASE("a plugin serves a mode by its name and nothing that only starts like 
     CHECK_FALSE(decode::vocoder_name_serves("dmr", ""));
 }
 
+TEST_CASE("a plugin named for its codec serves the modes that use that codec",
+          "[rpc][vocoder][voice]") {
+    // Rejects a rule that routes by mode name only, which sent the owner's
+    // "ambe2-3600x2450-pre-fec" nothing and left DMR silent; and rejects one
+    // that lets an AMBE+2 plugin take D-STAR's older AMBE, which would make
+    // noise that sounds like a bad signal.
+    CHECK(decode::vocoder_offer_serves("ambe2-3600x2450-pre-fec", "dmr"));
+    CHECK(decode::vocoder_offer_serves("dmr-acme", "dmr"));
+    CHECK_FALSE(decode::vocoder_offer_serves("ambe2-3600x2450-pre-fec", "dstar"));
+    CHECK(decode::vocoder_offer_serves("ambe-3600x2400", "dstar"));
+    CHECK_FALSE(decode::vocoder_offer_serves("ambe-3600x2400", "dmr"));
+    CHECK_FALSE(decode::vocoder_offer_serves("imbe-tia102", "dmr"));
+}
+
 TEST_CASE("D-STAR voice reaches the plugin frame for frame and plays", "[rpc][vocoder][voice]") {
     const auto voice = random_units<std::array<std::uint8_t, decode::kDStarVoiceBits>>(
         25, 0xD57A'7001ULL);
@@ -239,7 +253,8 @@ TEST_CASE("without a plugin a voice mode is silence, not a refusal", "[rpc][voco
           (iq.size() * rpc::kPluginVoiceSilentRateHz) / static_cast<std::size_t>(kRate));
 }
 
-TEST_CASE("DMR voice bursts reach the plugin whole, VS(215) first", "[rpc][vocoder][voice]") {
+TEST_CASE("DMR voice reaches the plugin as three 72-bit vocoder frames a burst, in order",
+          "[rpc][vocoder][voice]") {
     siggen::DmrVoiceCall call;
     call.colour_code = kColourCode;
     call.lc = group_lc(0x00);
@@ -250,19 +265,29 @@ TEST_CASE("DMR voice bursts reach the plugin whole, VS(215) first", "[rpc][vocod
     std::vector<std::vector<std::uint8_t>> seen;
     auto stream = PluginVoiceStream::create(
         PluginVoiceMode::Dmr, kRate,
-        std::make_unique<RecordingVocoder>(static_cast<std::uint32_t>(decode::kDmrVoiceBits), seen));
+        std::make_unique<RecordingVocoder>(static_cast<std::uint32_t>(rpc::kDmrVocoderFrameBits),
+                                           seen));
     REQUIRE(stream.has_value());
 
     const Played played = play(*stream, iq);
 
-    // Rejects splitting the vocoder socket into codec frames here, which would
-    // put an AMBE+2 constant in this tree, and rejects losing bursts.
-    REQUIRE(seen.size() == call.voice.size());
+    // TS 102 361-1 clauses 4.2.2 and 6.1: VF(1) from VS(215), then VF(2), then
+    // VF(3) ending at VS(0). Rejects handing over the whole burst, which no
+    // vocoder takes, frames out of order, and lost bursts.
+    //
+    // WHAT THIS CASE USED TO ASSERT: each burst's 216 bits whole, under the
+    // claim that dividing the socket into frames was the plugin's business.
+    REQUIRE(seen.size() == call.voice.size() * rpc::kDmrVocoderFrames);
     for (std::size_t i = 0; i < call.voice.size(); ++i) {
-        CHECK(std::equal(seen[i].begin(), seen[i].end(), call.voice[i].begin(),
-                         call.voice[i].end()));
+        for (std::size_t f = 0; f < rpc::kDmrVocoderFrames; ++f) {
+            const auto& got = seen[i * rpc::kDmrVocoderFrames + f];
+            const auto first = call.voice[i].begin() +
+                               static_cast<std::ptrdiff_t>(f * rpc::kDmrVocoderFrameBits);
+            CHECK(std::equal(got.begin(), got.end(), first,
+                             first + static_cast<std::ptrdiff_t>(rpc::kDmrVocoderFrameBits)));
+        }
     }
-    CHECK(played.voiced_samples == call.voice.size() * kPcmPerUnit);
+    CHECK(played.voiced_samples == seen.size() * kPcmPerUnit);
 }
 
 TEST_CASE("a private DMR call never reaches the plugin", "[rpc][vocoder][voice]") {
@@ -278,7 +303,8 @@ TEST_CASE("a private DMR call never reaches the plugin", "[rpc][vocoder][voice]"
     std::vector<std::vector<std::uint8_t>> seen;
     auto stream = PluginVoiceStream::create(
         PluginVoiceMode::Dmr, kRate,
-        std::make_unique<RecordingVocoder>(static_cast<std::uint32_t>(decode::kDmrVoiceBits), seen));
+        std::make_unique<RecordingVocoder>(static_cast<std::uint32_t>(rpc::kDmrVocoderFrameBits),
+                                           seen));
     REQUIRE(stream.has_value());
 
     const Played played = play(*stream, iq);
@@ -287,12 +313,12 @@ TEST_CASE("a private DMR call never reaches the plugin", "[rpc][vocoder][voice]"
 }
 
 TEST_CASE("a plugin that takes the wrong unit is refused by name", "[rpc][vocoder][voice]") {
-    // Rejects feeding 216-bit bursts to a 72-bit vocoder, which would make
-    // confident noise out of misaligned bits.
+    // Rejects feeding 72-bit vocoder frames to a plugin that declared another
+    // frame, which would make confident noise out of misaligned bits.
     std::vector<std::vector<std::uint8_t>> seen;
     auto stream = PluginVoiceStream::create(
         PluginVoiceMode::Dmr, kRate,
-        std::make_unique<RecordingVocoder>(static_cast<std::uint32_t>(decode::kDStarVoiceBits), seen));
+        std::make_unique<RecordingVocoder>(static_cast<std::uint32_t>(decode::kDmrVoiceBits), seen));
     REQUIRE_FALSE(stream.has_value());
-    CHECK(stream.error().message.find("216") != std::string::npos);
+    CHECK(stream.error().message.find("72") != std::string::npos);
 }

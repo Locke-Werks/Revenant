@@ -2229,9 +2229,13 @@ Expected<VocoderPlugins> ClientImpl::vocoder_plugins() {
                 file.refusal = read_text(row.getRefusal());
                 file.detail = read_text(row.getDetail());
                 for (const auto offer : row.getOffers()) {
-                    file.offers.push_back(VocoderOfferInfo{
-                        read_text(offer.getName()), read_text(offer.getKind()),
-                        offer.getBitCount(), offer.getPcmFrames(), offer.getSampleRate()});
+                    VocoderOfferInfo info{read_text(offer.getName()), read_text(offer.getKind()),
+                                          offer.getBitCount(), offer.getPcmFrames(),
+                                          offer.getSampleRate(), {}};
+                    for (const auto mode : offer.getModes()) {
+                        info.modes.push_back(read_text(mode));
+                    }
+                    file.offers.push_back(std::move(info));
                 }
                 out.files.push_back(std::move(file));
             }

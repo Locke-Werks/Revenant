@@ -1069,10 +1069,15 @@ Since 2026-10-02 `subscribeAudio` on a dstar or dmr receiver serves its voice
 through a vocoder plugin, `core/rpc/plugin_voice.h`, on the same terms as P25:
 mono, silent between calls, `sampleIndex` counted at the chunk's own rate.
 
-- The plugin is the first loaded offer whose name serves the mode, by the
-  convention `core/decode/vocoder_abi.h` states beside `rv_vocoder_desc::name`,
-  and whose `bit_count` is the mode's unit: 72 bits per D-STAR voice frame, 216
-  vocoder socket bits per DMR voice burst. The rate is the plugin's.
+- The plugin is the first loaded offer whose name serves the mode, by its own
+  name or its codec's (`dstar` or `ambe`, `dmr` or `ambe2`), by the convention
+  `core/decode/vocoder_abi.h` states beside `rv_vocoder_desc::name`, and whose
+  `bit_count` is one vocoder frame: 72 bits per D-STAR voice frame, and 72 bits
+  for each of the three vocoder frames of a DMR voice burst (TS 102 361-1
+  clauses 4.2.2 and 6.1). The rate is the plugin's. WHAT THIS USED TO SAY: "72
+  bits per D-STAR voice frame, 216 vocoder socket bits per DMR voice burst",
+  with only the mode's own name routing. Corrected on 2026-10-02, when an
+  AMBE+2 plugin named for its codec and taking 72 bits routed to nothing.
 - With no such plugin, or one that refuses to open, the subscription is silence
   at 8000 S/s with `squelchOpen` false, and nothing says why. That is the owner's
   call: a missing plugin is not a fault in the radio.

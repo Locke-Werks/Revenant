@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/dsp/vrx_reference.h"
+#include "core/rpc/plugin_voice.h"
 
 namespace revenant::rpc {
 namespace {
@@ -969,6 +970,20 @@ void write_vocoder_plugins(schema::VocoderPlugins::Builder out,
             offers[j].setBitCount(offer.frame.bit_count);
             offers[j].setPcmFrames(offer.frame.pcm_frames);
             offers[j].setSampleRate(offer.frame.sample_rate);
+
+            // By the rule open_for_mode applies, against the frame each routed
+            // mode hands over, so this list cannot disagree with what plays.
+            std::vector<std::string> serves;
+            for (const PluginVoiceMode mode : {PluginVoiceMode::Dstar, PluginVoiceMode::Dmr}) {
+                if (offer.frame.bit_count == plugin_voice_unit_bits(mode) &&
+                    decode::vocoder_offer_serves(offer.name, plugin_voice_mode_name(mode))) {
+                    serves.emplace_back(plugin_voice_mode_name(mode));
+                }
+            }
+            auto modes = offers[j].initModes(static_cast<unsigned>(serves.size()));
+            for (unsigned k = 0; k < modes.size(); ++k) {
+                modes.set(k, serves[k].c_str());
+            }
         }
     }
 }

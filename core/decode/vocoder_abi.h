@@ -201,17 +201,26 @@ typedef struct rv_vocoder_desc {
      * "acme-dongle-fw2.1".
      *
      * The name also routes. A digital voice mode whose voice Revenant does not
-     * decode itself hands its voice to the first offer whose name is that
-     * mode's name, or starts with it followed by '-', ':', '_' or '.', and
-     * whose bit_count is the unit that mode's framing carries:
+     * decode itself hands its voice, one vocoder frame at a time, to the first
+     * offer whose name is the mode's name or its codec's, alone or followed by
+     * '-', ':', '_' or '.', and whose bit_count is that mode's frame:
      *
-     *   "dstar"  72 bits, one D-STAR voice frame (JARL standard 4.1.2 b)
-     *   "dmr"    216 bits, the vocoder socket bits of one DMR voice burst
-     *            (ETSI TS 102 361-1), VS(215) first
+     *   mode     names            bit_count
+     *   D-STAR   "dstar", "ambe"  72, one voice frame (JARL standard 4.1.2 b)
+     *   DMR      "dmr", "ambe2"   72, one of the three vocoder frames of a
+     *                             voice burst, including FEC (ETSI TS 102
+     *                             361-1 V2.7.1 clauses 4.2.2 and 6.1)
      *
-     * So "dmr-acme" serves DMR. pcm_frames and sample_rate are the plugin's
-     * own. With no offer for a mode, that mode plays silence. Adding a routed
-     * mode adds a row here and does not change the ABI. */
+     * So "dmr-acme" and "ambe2-3600x2450-pre-fec" serve DMR, and "ambe2-..."
+     * does not serve D-STAR, whose codec is the older AMBE. pcm_frames and
+     * sample_rate are the plugin's own. With no offer for a mode, that mode
+     * plays silence. Adding a routed mode adds a row here and does not change
+     * the ABI.
+     *
+     * WHAT THIS USED TO SAY, until 2026-10-02: "dmr" took "216 bits, the
+     * vocoder socket bits of one DMR voice burst", and only the mode's own name
+     * routed. No vocoder takes a whole burst, and a plugin named for its codec
+     * matched nothing. */
     char name[RV_VOCODER_NAME_CAPACITY];
 } rv_vocoder_desc;
 

@@ -3507,6 +3507,15 @@ struct VocoderOfferInfo {
     bitCount @2 :UInt32;
     pcmFrames @3 :UInt32;
     sampleRate @4 :UInt32;
+
+    # The demodulator names whose voice this offer would decode, by the routing
+    # rule core/decode/vocoder_abi.h states beside rv_vocoder_desc::name: the
+    # name serves the mode or its codec, and bitCount is the mode's vocoder
+    # frame. Empty for an offer nothing routes to, which is the line that says
+    # why a mode is silent with a plugin loaded. Where two offers serve one
+    # mode, the first in scan order is used. Added on 2026-10-02; an older
+    # engine sends nothing here.
+    modes @5 :List(Text);
 }
 
 # One .dll the scan looked at, loaded or not, because a file that was looked

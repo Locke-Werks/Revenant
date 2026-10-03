@@ -206,12 +206,21 @@ QVariantList EngineLink::vocoderFiles() const
     for (const rpc::VocoderPluginFile& file : vocoders_.files) {
         QStringList offers;
         for (const rpc::VocoderOfferInfo& offer : file.offers) {
-            offers.append(QStringLiteral("%1: %2, %3 bits in, %4 samples out at %5 Hz")
+            // Which modes it would play, or that none would: the line that says
+            // why a mode is silent with a plugin loaded.
+            QStringList serves;
+            for (const std::string& mode : offer.modes) {
+                serves.append(QString::fromStdString(mode));
+            }
+            offers.append(QStringLiteral("%1: %2, %3 bits in, %4 samples out at %5 Hz, %6")
                               .arg(QString::fromStdString(offer.name),
                                    QString::fromStdString(offer.kind))
                               .arg(offer.bit_count)
                               .arg(offer.pcm_frames)
-                              .arg(offer.sample_rate));
+                              .arg(offer.sample_rate)
+                              .arg(serves.isEmpty()
+                                       ? QStringLiteral("serves no mode")
+                                       : QStringLiteral("serves ") + serves.join(QStringLiteral(", "))));
         }
         out.append(QVariantMap{
             {QStringLiteral("file"), QString::fromStdString(file.file)},

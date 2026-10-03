@@ -11,13 +11,22 @@
 //
 // WHAT IS HANDED TO THE PLUGIN, AND WHY THAT UNIT
 //
-// Each mode's own framing unit, not a vocoder frame. D-STAR hands over the 72
-// bits of one voice frame (JARL standard, clause 4.1.2 b) and DMR the 216
-// vocoder socket bits of one voice burst (TS 102 361-1), VS(215) first. Both
-// are where the mode's own document stops, so neither carries a constant from
-// a vocoder's specification. How a plugin divides a burst into its codec's
-// frames is the plugin's business. Which plugin serves a mode is the name
-// convention core/decode/vocoder_abi.h states beside rv_vocoder_desc::name.
+// One vocoder frame at a time, as each mode's own document divides them.
+// D-STAR hands over the 72 bits of one voice frame (JARL standard, clause
+// 4.1.2 b). DMR hands over the three 72-bit vocoder frames of each voice
+// burst one after another: ETSI TS 102 361-1 V2.7.1 clause 4.2.2 has a burst
+// carry "three 72-bit vocoder frames (including FEC)" for a vocoder with 20 ms
+// frames, and clause 6.1 puts the MSB of VF(1) at VS(215) and the LSB of the
+// last at VS(0), each frame contiguous, so they are the burst's thirds in the
+// order the decoder hands VS over. Neither number comes from a vocoder's
+// specification. Which plugin serves a mode is the name convention
+// core/decode/vocoder_abi.h states beside rv_vocoder_desc::name.
+//
+// WHAT THIS PARAGRAPH USED TO SAY: "DMR the 216 vocoder socket bits of one
+// voice burst (TS 102 361-1), VS(215) first" and "How a plugin divides a burst
+// into its codec's frames is the plugin's business." No vocoder takes a
+// burst: the owner's AMBE+2 plugin takes one 72-bit frame, so DMR routed to
+// nothing and played silence. Corrected on 2026-10-02.
 //
 // The output rate is the plugin's. With no plugin there is nothing to decode
 // and the stream is silence at kPluginVoiceSilentRateHz, an engineering choice
@@ -75,10 +84,17 @@ enum class PluginVoiceMode : std::uint8_t { Dstar, Dmr };
     return "invalid";
 }
 
+// TS 102 361-1 V2.7.1 clause 4.2.2: a voice burst carries three 72-bit
+// vocoder frames for a vocoder with 20 ms frames, which fills the 216 vocoder
+// socket bits exactly.
+inline constexpr std::size_t kDmrVocoderFrames = 3;
+inline constexpr std::size_t kDmrVocoderFrameBits = decode::kDmrVoiceBits / kDmrVocoderFrames;
+static_assert(kDmrVocoderFrameBits == 72);
+
 [[nodiscard]] constexpr std::uint32_t plugin_voice_unit_bits(PluginVoiceMode mode) noexcept {
     switch (mode) {
         case PluginVoiceMode::Dstar: return static_cast<std::uint32_t>(decode::kDStarVoiceBits);
-        case PluginVoiceMode::Dmr: return static_cast<std::uint32_t>(decode::kDmrVoiceBits);
+        case PluginVoiceMode::Dmr: return static_cast<std::uint32_t>(kDmrVocoderFrameBits);
     }
     return 0;
 }
@@ -320,7 +336,11 @@ private:
             if (slot != followed_slot_ || call.private_call) {
                 continue;
             }
-            decode_unit(burst.payload);
+            // VF(1), VF(2), VF(3), clause 6.1's order.
+            const std::span<const std::uint8_t> socket(burst.payload);
+            for (std::size_t frame = 0; frame < kDmrVocoderFrames; ++frame) {
+                decode_unit(socket.subspan(frame * kDmrVocoderFrameBits, kDmrVocoderFrameBits));
+            }
         }
         return {};
     }

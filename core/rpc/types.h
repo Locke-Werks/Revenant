@@ -1409,6 +1409,9 @@ struct VocoderOfferInfo {
     std::uint32_t bit_count = 0;
     std::uint32_t pcm_frames = 0;
     std::uint32_t sample_rate = 0;
+
+    // The modes this offer would decode the voice of. See the schema.
+    std::vector<std::string> modes;
 };
 
 struct VocoderPluginFile {
